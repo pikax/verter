@@ -8,7 +8,7 @@ export const DEFAULT_FILENAME = "anonymous.vue";
 
 const enum VariableName {
   Options = "ComponentOptions",
-  InternalComponent = "__VLS_internalComponent",
+  InternalComponent = "__COMP__",
 }
 
 type VueAPISetup =
@@ -30,12 +30,12 @@ export function generateScript(sfc: SFCParseResult) {
   // const match = filename !== DEFAULT_FILENAME ? filename.match(/([^/\\]+)\.\w+$/) : null;
 
   if (!script) {
-    return wrapWithDefineComponent("{ }");
+    const component = wrapWithDefineComponent("{ }");
+    return `type ${VariableName.InternalComponent} = typeof ${VariableName.Options};\n ${component};`;
   }
 
   const compiled = compileScript(sfc.descriptor, {
     id: "random-id",
-    defineModel: true,
   });
 
   compiled.scriptSetupAst;
@@ -49,11 +49,7 @@ export function generateScript(sfc: SFCParseResult) {
   const slots = resolveSlots(compiled);
   const emits = resolveEmits(compiled, models);
 
-  // if (typeof generic === 'string') {
   return wrapGeneric(content, generic, props, emits, slots);
-  // }
-
-  return wrapWithDefineComponent(content);
 }
 
 const possibleExports = [
@@ -79,7 +75,9 @@ function removeExportsAndDefineComponent(content: string) {
 }
 
 function wrapWithDefineComponent(content: string) {
-  return `defineComponent(${removeExportsAndDefineComponent(content)})`;
+  return `const ${
+    VariableName.Options
+  } = defineComponent(${removeExportsAndDefineComponent(content)})`;
 }
 
 function wrapGeneric(
@@ -89,9 +87,10 @@ function wrapGeneric(
   emits: string,
   slots: string = "{}"
 ) {
-  const component = `const ${
-    VariableName.Options
-  } = defineComponent(${removeExportsAndDefineComponent(content)})`;
+  const component = wrapWithDefineComponent(content);
+  // const component = `const ${
+  //   VariableName.Options
+  // } = defineComponent(${removeExportsAndDefineComponent(content)})`;
 
   const _props =
     [props, emits && `EmitsToProps<${emits}>`].filter(Boolean).join(" & ") ||
@@ -128,10 +127,7 @@ function resolveProps(scriptSetup: SFCScriptBlock, models: ResolvedModel[]) {
   }
 
   if (props.arguments?.[0]) {
-    return [
-      `ExtractPropTypes<typeof ${VariableName.Options}['props']>`,
-      modelProps,
-    ]
+    return [`typeof ${VariableName.Options}['props']`, modelProps]
       .filter(Boolean)
       .join(" & ");
   }
@@ -224,9 +220,9 @@ function* retrieveFunctionCall(
 
     // without assigning
     if (statement.type === "ExpressionStatement") {
-      // @ts-expect-error some error
       if (
         statement.expression.type === "CallExpression" &&
+        // @ts-expect-error some error
         statement.expression.callee.name === name
       ) {
         yield {

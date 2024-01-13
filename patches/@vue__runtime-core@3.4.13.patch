@@ -1,5 +1,5 @@
 diff --git a/dist/runtime-core.d.ts b/dist/runtime-core.d.ts
-index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca0197837cf6995 100644
+index c485727f4c8651e2fcb005650ce2983f2e520858..583b891438c9e195fc5cff7fe781496c562bcd3d 100644
 --- a/dist/runtime-core.d.ts
 +++ b/dist/runtime-core.d.ts
 @@ -1,7 +1,7 @@
@@ -285,7 +285,7 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
  
  export type SetupContext<E = EmitsOptions, S extends SlotsType = {}> = E extends any ? {
      attrs: Data;
-@@ -1152,15 +1173,229 @@ export declare function watchEffect(effect: WatchEffect, options?: WatchOptionsB
+@@ -1152,15 +1173,237 @@ export declare function watchEffect(effect: WatchEffect, options?: WatchOptionsB
  export declare function watchPostEffect(effect: WatchEffect, options?: DebuggerOptions): WatchStopHandle;
  export declare function watchSyncEffect(effect: WatchEffect, options?: DebuggerOptions): WatchStopHandle;
  type MultiWatchSources = (WatchSource<unknown> | object)[];
@@ -370,8 +370,8 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
 + * }
 + * ```
 + */
-+export type ObjectToComponentProps<T> = T extends Record<string, any> ? {
-+    [K in keyof T]-?: {
++export type ObjectToComponentProps<T> = T extends Readonly<Array<string>> ? T : T extends Record<string, any> ? {
++    [K in keyof T]-?: T[K] extends Prop<any> ? T[K] : {
 +        type: PropType<Exclude<T[K], undefined>>;
 +        required: undefined extends T[K] ? false : true;
 +    };
@@ -399,12 +399,16 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
 +/**
 + * Returns the emits as props
 + */
-+export type ComponentEmitsAsProps<T> = ExtractComponentEmitOptions<T> extends infer E ? E extends EmitsOptions ? EmitsToProps<E> : unknown : unknown;
++export type ComponentEmitsAsProps<T> = T extends {
++    new (): {
++        $emit: infer E extends EmitsOptions;
++    };
++} ? EmitsToProps<E> : ExtractComponentEmitOptions<T> extends infer E ? E extends EmitsOptions ? EmitsToProps<E> : unknown : unknown;
 +/**
 + * Returns runtime props definition for a component
 + *
 + *  @see Include emits {@linkcode ComponentEmitsAsProps}
-+ *  @see Get the render props {@linkcode ComponentExpectedProps}
++ *  @see Get the render props {@linkcode Compo/`nentExpectedProps}
 + *
 + * @example
 + * ```ts
@@ -433,7 +437,11 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
 +/**
 + * Generates the emit function type from the emits options
 + */
-+export type ComponentEmits<T> = ExtractComponentEmitOptions<T> extends infer E ? {} extends E ? () => void : E extends EmitFn ? E : EmitFn<E> : () => void;
++export type ComponentEmits<T> = T extends {
++    new (): {
++        $emit: infer E;
++    };
++} ? E : ExtractComponentEmitOptions<T> extends infer E ? {} extends E ? () => void : E extends EmitFn ? E : EmitFn<E> : () => void;
 +/**
 + * Generates the emit function type from the emits options
 + */
@@ -516,7 +524,7 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
  export interface AsyncComponentOptions<T = any> {
      loader: AsyncComponentLoader<T>;
      loadingComponent?: Component;
-@@ -1173,7 +1408,8 @@ export interface AsyncComponentOptions<T = any> {
+@@ -1173,7 +1416,8 @@ export interface AsyncComponentOptions<T = any> {
  /*! #__NO_SIDE_EFFECTS__ */
  export declare function defineAsyncComponent<T extends Component = {
      new (): ComponentPublicInstance;
@@ -526,7 +534,7 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
  
  /**
   * Vue `<script setup>` compiler macro for declaring component props. The
-@@ -1244,11 +1480,7 @@ type BooleanKey<T, K extends keyof T = keyof T> = K extends any ? [T[K]] extends
+@@ -1244,11 +1488,7 @@ type BooleanKey<T, K extends keyof T = keyof T> = K extends any ? [T[K]] extends
   */
  export declare function defineEmits<EE extends string = string>(emitOptions: EE[]): EmitFn<EE[]>;
  export declare function defineEmits<E extends EmitsOptions = EmitsOptions>(emitOptions: E): EmitFn<E>;
@@ -539,7 +547,7 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
  /**
   * Vue `<script setup>` compiler macro for declaring a component's exposed
   * instance properties when it is accessed by a parent component via template
-@@ -1281,10 +1513,6 @@ export type ModelRef<T, M extends string | number | symbol = string> = Ref<T> &
+@@ -1281,10 +1521,6 @@ export type ModelRef<T, M extends string | number | symbol = string> = Ref<T> &
      ModelRef<T, M>,
      Record<M, true | undefined>
  ];
@@ -550,7 +558,7 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
  /**
   * Vue `<script setup>` compiler macro for declaring a
   * two-way binding prop that can be consumed via `v-model` from the parent
-@@ -1320,18 +1548,18 @@ type DefineModelOptions<T = any> = {
+@@ -1320,18 +1556,18 @@ type DefineModelOptions<T = any> = {
   */
  export declare function defineModel<T, M extends string | number | symbol = string>(options: {
      required: true;
@@ -575,7 +583,7 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
  type NotUndefined<T> = T extends undefined ? never : T;
  type InferDefaults<T> = {
      [K in keyof T]?: InferDefault<T, T[K]>;
-@@ -1366,8 +1594,11 @@ type PropsWithDefaults<T, Defaults extends InferDefaults<T>, BKeys extends keyof
+@@ -1366,8 +1602,11 @@ type PropsWithDefaults<T, Defaults extends InferDefaults<T>, BKeys extends keyof
  export declare function withDefaults<T, BKeys extends keyof T, Defaults extends InferDefaults<T>>(props: DefineProps<T, BKeys>, defaults: Defaults): PropsWithDefaults<T, Defaults, BKeys>;
  export declare function useSlots(): SetupContext['slots'];
  export declare function useAttrs(): SetupContext['attrs'];
@@ -589,7 +597,7 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
  
  type RawProps = VNodeProps & {
      __v_isVNode?: never;
-@@ -1396,8 +1627,7 @@ export declare function h(type: typeof Fragment, props?: RawProps | null, childr
+@@ -1396,8 +1635,7 @@ export declare function h(type: typeof Fragment, props?: RawProps | null, childr
  export declare function h(type: typeof Teleport, props: RawProps & TeleportProps, children: RawChildren | RawSlots): VNode;
  export declare function h(type: typeof Suspense, children?: RawChildren): VNode;
  export declare function h(type: typeof Suspense, props?: (RawProps & SuspenseProps) | null, children?: RawChildren | RawSlots): VNode;
@@ -599,7 +607,7 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
  export declare function h<P>(type: ConcreteComponent | string, children?: RawChildren): VNode;
  export declare function h<P>(type: ConcreteComponent<P> | string, props?: (RawProps & P) | ({} extends P ? null : never), children?: RawChildren): VNode;
  export declare function h<P>(type: Component<P>, props?: (RawProps & P) | null, children?: RawChildren | RawSlots): VNode;
-@@ -1406,8 +1636,10 @@ export declare function h(type: Constructor, children?: RawChildren): VNode;
+@@ -1406,8 +1644,10 @@ export declare function h(type: Constructor, children?: RawChildren): VNode;
  export declare function h<P>(type: Constructor<P>, props?: (RawProps & P) | ({} extends P ? null : never), children?: RawChildren | RawSlots): VNode;
  export declare function h(type: DefineComponent, children?: RawChildren): VNode;
  export declare function h<P>(type: DefineComponent<P>, props?: (RawProps & P) | ({} extends P ? null : never), children?: RawChildren | RawSlots): VNode;
@@ -612,7 +620,7 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
  
  export declare const ssrContextKey: unique symbol;
  export declare const useSSRContext: <T = Record<string, any>>() => T | undefined;
-@@ -1590,12 +1822,12 @@ interface LegacyPublicProperties {
+@@ -1590,12 +1830,12 @@ interface LegacyPublicProperties {
   */
  export type CompatVue = Pick<App, 'version' | 'component' | 'directive'> & {
      configureCompat: typeof configureCompat;
@@ -627,7 +635,7 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
      component(name: string): Component | undefined;
      component(name: string, component: Component): CompatVue;
      directive<T = any, V = any>(name: string): Directive<T, V> | undefined;
-@@ -1604,7 +1836,7 @@ export type CompatVue = Pick<App, 'version' | 'component' | 'directive'> & {
+@@ -1604,7 +1844,7 @@ export type CompatVue = Pick<App, 'version' | 'component' | 'directive'> & {
      /**
       * @deprecated Vue 3 no longer supports extending constructors.
       */
@@ -636,7 +644,7 @@ index c485727f4c8651e2fcb005650ce2983f2e520858..06488e622c8b8e32fdb13068dca01978
      /**
       * @deprecated Vue 3 no longer needs set() for adding new properties.
       */
-@@ -1640,7 +1872,7 @@ declare module '@vue/reactivity' {
+@@ -1640,7 +1880,7 @@ declare module '@vue/reactivity' {
  
  export declare const DeprecationTypes: typeof DeprecationTypes$1;
  

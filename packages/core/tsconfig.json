@@ -1,7 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
   "include": ["./src"],
-  "exclude": ["dist", "node_modules"],
+  "exclude": [
+    "dist",
+    "node_modules",
+    "src/generator/_tests_",
+    "src/**/*/_gen.ts"
+  ],
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
