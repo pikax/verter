@@ -9,5 +9,11 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "pnpm": {
+    "patchedDependencies": {
+      "@vue/runtime-core@3.4.13": "patches/@vue__runtime-core@3.4.13.patch",
+      "@vue/shared@3.4.13": "patches/@vue__shared@3.4.13.patch"
+    }
+  }
 }

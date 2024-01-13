@@ -1,0 +1,16 @@
+diff --git a/dist/shared.d.ts b/dist/shared.d.ts
+index dfbba9c0ed1f6b1e0aeb7d7a40f24fb8cf985ff9..264876fd4542ff21441b536077bd11470876e6b0 100644
+--- a/dist/shared.d.ts
++++ b/dist/shared.d.ts
+@@ -312,6 +312,11 @@ export type UnionToIntersection<U> = (U extends any ? (k: U) => void : never) ex
+ export type LooseRequired<T> = {
+     [P in keyof (T & Required<T>)]: T[P];
+ };
++export type LooseOptional<T> = {
++    [P in keyof T as undefined extends T[P] ? P : never]?: T[P];
++} extends infer Optional ? {
++    [K in keyof (Omit<T, keyof Optional> & Optional)]: (T & Optional)[K];
++} : never;
+ export type IfAny<T, Y, N> = 0 extends 1 & T ? Y : N;
+ export type Awaited<T> = T extends null | undefined ? T : T extends object & {
+     then(onfulfilled: infer F, ...args: infer _): any;

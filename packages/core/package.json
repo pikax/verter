@@ -22,6 +22,7 @@
   },
   "devDependencies": {
     "@vue/compiler-dom": "^3.4.13",
+    "@vue/runtime-core": "^3.4.13",
     "vite": "^5.0.11",
     "vitest": "^1.2.0"
   }

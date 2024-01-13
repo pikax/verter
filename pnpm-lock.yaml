@@ -4,6 +4,14 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@vue/runtime-core@3.4.13':
+    hash: qplnchknellfbypacrpvxrzzsy
+    path: patches/@vue__runtime-core@3.4.13.patch
+  '@vue/shared@3.4.13':
+    hash: wximcujn62nz4pccw2imtws3gu
+    path: patches/@vue__shared@3.4.13.patch
+
 importers:
 
   .: {}
@@ -42,6 +50,9 @@ importers:
       '@vue/compiler-dom':
         specifier: ^3.4.13
         version: 3.4.13
+      '@vue/runtime-core':
+        specifier: ^3.4.13
+        version: 3.4.13(patch_hash=qplnchknellfbypacrpvxrzzsy)
       vite:
         specifier: ^5.0.11
         version: 5.0.11
@@ -506,7 +517,7 @@ packages:
     resolution: {integrity: sha512-zGUdmB3j3Irn9z51GXLJ5s0EAHxmsm5/eXl0y6MBaajMeOAaiT4+zaDoxui4Ets98dwIRr8BBaqXXHtHSfm+KA==}
     dependencies:
       '@babel/parser': 7.23.6
-      '@vue/shared': 3.4.13
+      '@vue/shared': 3.4.13(patch_hash=wximcujn62nz4pccw2imtws3gu)
       entities: 4.5.0
       estree-walker: 2.0.2
       source-map-js: 1.0.2
@@ -515,7 +526,7 @@ packages:
     resolution: {integrity: sha512-XSNbpr5Rs3kCfVAmBqMu/HDwOS+RL6y28ZZjDlnDUuf146pRWt2sQkwhsOYc9uu2lxjjJy2NcyOkK7MBLVEc7w==}
     dependencies:
       '@vue/compiler-core': 3.4.13
-      '@vue/shared': 3.4.13
+      '@vue/shared': 3.4.13(patch_hash=wximcujn62nz4pccw2imtws3gu)
 
   /@vue/compiler-sfc@3.4.13:
     resolution: {integrity: sha512-SkpmQN8xIFBd5onT413DFSDdjxULJf6jmJg/t3w/DZ9I8ZzyNlLIBLO0qFLewVHyHCiAgpPZlWqSRZXYrawk3Q==}
@@ -524,7 +535,7 @@ packages:
       '@vue/compiler-core': 3.4.13
       '@vue/compiler-dom': 3.4.13
       '@vue/compiler-ssr': 3.4.13
-      '@vue/shared': 3.4.13
+      '@vue/shared': 3.4.13(patch_hash=wximcujn62nz4pccw2imtws3gu)
       estree-walker: 2.0.2
       magic-string: 0.30.5
       postcss: 8.4.33
@@ -535,11 +546,26 @@ packages:
     resolution: {integrity: sha512-rwnw9SVBgD6eGKh8UucnwztieQo/R3RQrEGpE0b0cxb2xxvJeLs/fe7DoYlhEfaSyzM/qD5odkK87hl3G3oW+A==}
     dependencies:
       '@vue/compiler-dom': 3.4.13
-      '@vue/shared': 3.4.13
+      '@vue/shared': 3.4.13(patch_hash=wximcujn62nz4pccw2imtws3gu)
     dev: false
 
-  /@vue/shared@3.4.13:
+  /@vue/reactivity@3.4.13:
+    resolution: {integrity: sha512-/ZdUOrGKkGVONzVJkfDqNcn2fLMvaa5VlYx2KwTbnRbX06YZ4GJE0PVTmWzIxtBYdpSTLLXgw3pDggO+96KXzg==}
+    dependencies:
+      '@vue/shared': 3.4.13(patch_hash=wximcujn62nz4pccw2imtws3gu)
+    dev: true
+
+  /@vue/runtime-core@3.4.13(patch_hash=qplnchknellfbypacrpvxrzzsy):
+    resolution: {integrity: sha512-Ov4d4At7z3goxqzSqQxdfVYEcN5HY4dM1uDYL6Hu/Es9Za9BEN602zyjWhhi2+BEki5F9NizRSvn02k/tqNWlg==}
+    dependencies:
+      '@vue/reactivity': 3.4.13
+      '@vue/shared': 3.4.13(patch_hash=wximcujn62nz4pccw2imtws3gu)
+    dev: true
+    patched: true
+
+  /@vue/shared@3.4.13(patch_hash=wximcujn62nz4pccw2imtws3gu):
     resolution: {integrity: sha512-56crFKLPpzk85WXX1L1c0QzPOuoapWlPVys8eMG8kkRmqdMjWUqK8KpFdE2d7BQA4CEbXwyyHPq6MpFr8H9rcg==}
+    patched: true
 
   /acorn-walk@8.3.2:
     resolution: {integrity: sha512-cjkyv4OtNCIeqhHrfS81QWXoCBPExR/J62oyEqepVw8WaQeSqpW2uhuLPh1m9eWhDuOo/jUXVTlifvesOWp/4A==}

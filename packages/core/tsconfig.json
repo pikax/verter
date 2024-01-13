@@ -1,11 +1,10 @@
 {
+  "extends": "../../tsconfig.base.json",
   "include": ["./src"],
   "exclude": ["dist", "node_modules"],
   "compilerOptions": {
-    "module": "CommonJS",
-    "target": "ESNext",
     "outDir": "./dist",
-    "preserveConstEnums": true,
+    "rootDir": "./src",
     "types": ["vitest/importMeta", "vitest/globals"]
   }
 }
