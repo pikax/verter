@@ -8,7 +8,8 @@ export type VueAPISetup =
   | "defineSlots"
   | "defineOptions"
   | "defineModel"
-  | "defineExpose";
+  | "defineExpose"
+  | "withDefaults";
 
 export interface ParseScriptContext {
   filename: string;
