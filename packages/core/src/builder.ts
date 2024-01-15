@@ -38,6 +38,9 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
       const parsed = parse(source, {
         filename,
       });
+      // TODO we should still process it
+      if (!parsed.descriptor.scriptSetup && !parsed.descriptor.script)
+        return "";
 
       const compiled = compileScript(parsed.descriptor, {
         id: filename,
@@ -73,12 +76,8 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
       //   const processed = [...processPlugins(locations, plugins, context)];
     },
     finalise(map: LocationByType, context: ParseScriptContext) {
-      // TODO should group imports
-      const imports = map[LocationType.Import]?.reduce((prev, curr) => {
-        return `${prev}\nimport { ${curr.items
-          .map((it) => it.name)
-          .join(", ")} } from '${curr.from}';`;
-      }, "");
+      const importsArray =
+        map[LocationType.Import] ?? (map[LocationType.Import] = []);
 
       const declarations = map[LocationType.Declaration]?.reduce(
         (prev, curr) => {
@@ -121,15 +120,16 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
       const slots =
         map[LocationType.Slots]?.map((x) => x.content).join(" & ") || "{}";
 
+      // if is generic don't use the __PROPS__ since it won't have the correct type
       const genericOrProps = context.generic
         ? `{ new<${context.generic}>(): { $props: ${props || "{}"}, $emit: ${
             emits || "{}"
           } , $children: ${slots || "{}"}  } }`
-        : props;
+        : "__PROPS__";
 
       // TODO better resolve the final variable names, especially options
       // because it relying on the plugin to build
-      const declareComponent = `type __COMP__ = DeclareComponent<__PROPS__, __DATA__, __EMITS__, __SLOTS__, Type__options>`;
+      const declareComponent = `type __COMP__ = DeclareComponent<${genericOrProps}, __DATA__, __EMITS__, __SLOTS__, Type__options>`;
 
       (map[LocationType.Export] ?? (map[LocationType.Export] = [])).push({
         type: LocationType.Export,
@@ -137,7 +137,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         item: {
           default: true,
           name: "__options",
-          alias: "__COMP__",
+          alias: "unknown as __COMP__",
           type: true,
         },
       });
@@ -150,18 +150,70 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         }${curr.item.alias ? " as " + curr.item.alias : ""};`;
       }, "");
 
+      importsArray.push({
+        type: LocationType.Import,
+        node: undefined as any,
+        from: "vue",
+        items: [
+          {
+            name: "DeclareComponent",
+            type: true,
+          },
+        ],
+      });
+
+      if (_emits) {
+        importsArray.push({
+          type: LocationType.Import,
+          node: undefined as any,
+          from: "vue",
+          items: [
+            { name: "DeclareEmits", type: true },
+            {
+              name: "EmitsToProps",
+              type: true,
+            },
+          ],
+        });
+      }
+      if (map[LocationType.Slots]?.length) {
+        importsArray.push({
+          type: LocationType.Import,
+          node: undefined as any,
+          from: "vue",
+          items: [{ name: "SlotsType", type: true }],
+        });
+      }
+
+      // TODO should group imports
+      const imports = map[LocationType.Import]?.reduce((prev, curr) => {
+        return `${prev}\nimport { ${curr.items
+          .map((it) => it.name)
+          .filter(Boolean)
+          .join(", ")} } from '${curr.from}';`;
+      }, "");
+
       return `${imports}\n
+
 ${declarations}\n
 
-type __PROPS__ = ${props};
-
-type __DATA__ = {};
-
-type __EMITS__ = ${emits};
-
-type __SLOTS__ = ${slots};
+${
+  context.generic
+    ? [
+        `type __DATA__ = {};`,
+        `type __EMITS__ = {};`,
+        `type __SLOTS__ = {};`,
+      ].join("\n")
+    : [
+        `type __PROPS__ = ${props};`,
+        `type __DATA__ = {};`,
+        `type __EMITS__ = ${emits};`,
+        `type __SLOTS__ = ${slots};`,
+      ].join("\n")
+}
 
 ${declareComponent}
+
 
 ${exports || ""}
         `;

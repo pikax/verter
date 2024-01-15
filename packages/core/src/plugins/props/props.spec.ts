@@ -208,6 +208,84 @@ describe("Props plugin", () => {
         ]);
       });
 
+      test("type defineProps + generic", () => {
+        const type = "{ foo: string; bar: number; }";
+        const expression = {
+          type: "CallExpression",
+          callee: {
+            name: "defineProps",
+          },
+          arguments: [],
+          typeParameters: {
+            type: "TSExpressionWithTypeParameters",
+            params: [
+              {
+                start: "defineProps<".length,
+                end: `defineProps<${type}`.length,
+              },
+            ],
+          },
+        };
+        expect(
+          PropsPlugin.walk(
+            {
+              type: "ExpressionStatement",
+              // @ts-expect-error
+              expression,
+            },
+            {
+              isSetup: true,
+              generic: true,
+              script: {
+                loc: {
+                  source: `defineProps<${type}>();`,
+                },
+              },
+            }
+          )
+        ).toEqual([
+          // {
+          //   type: LocationType.Import,
+          //   node: expression,
+          //   // TODO change the import location
+          //   from: "vue",
+          //   items: [
+          //     {
+          //       name: "ExtractPropTypes",
+          //       type: true,
+          //     },
+          //   ],
+          // },
+          // // create variable with return
+          // {
+          //   type: LocationType.Declaration,
+          //   node: expression,
+
+          //   declaration: {
+          //     name: "__props",
+          //     content: `defineProps<${type}>()`,
+          //   },
+          // },
+          // // get the type from variable
+          // {
+          //   type: LocationType.Declaration,
+          //   node: expression,
+
+          //   // TODO debug this to check if this is the correct type
+          //   declaration: {
+          //     type: "type",
+          //     name: "Type__props",
+          //     content: `ExtractPropTypes<typeof __props>;`,
+          //   },
+          // },
+          {
+            type: LocationType.Props,
+            node: expression.typeParameters.params[0],
+            content: type,
+          },
+        ]);
+      });
+
       test("defineProps array", () => {
         const code = `defineProps(['foo', 'bar'])`;
         const expression = {
@@ -415,9 +493,9 @@ defineProps(['foo']);
           })
         ).toMatchObject([
           {
+            from: "vue",
             items: [
               {
-                from: "vue",
                 name: "ExtractPropTypes",
                 type: true,
               },

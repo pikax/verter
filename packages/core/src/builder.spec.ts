@@ -5,9 +5,9 @@ describe("builder", () => {
 
     const res = builder.process(
       "test.vue",
-      `<script setup lang="ts">
-const model = defineModel<{ foo: string }>();
-const test = defineProps({ type: String });
+      `<script setup lang="ts" generic="T extends string">
+const model = defineModel<{ foo: T }>();
+const test = defineProps<{ type: T}>();
 </script>
 <template>
   <span>1</span>
@@ -18,20 +18,22 @@ const test = defineProps({ type: String });
     expect(res).toMatchInlineSnapshot(`
       "
       import { defineComponent } from 'vue';
-      import { ExtractPropTypes } from 'vue';
+
 
 
       const __options = defineComponent(({
         __name: 'test',
-        props: /*#__PURE__*/_mergeModels({ type: String }, {
+        props: /*#__PURE__*/_mergeModels({
+          type: { type: null, required: true }
+        }, {
           "modelValue": { type: Object },
           "modelModifiers": {},
         }),
         emits: ["update:modelValue"],
-        setup(__props, { expose: __expose }) {
+        setup(__props: any, { expose: __expose }) {
         __expose();
 
-      const model = _useModel<{ foo: string }>(__props, "modelValue");
+      const model = _useModel<{ foo: T }>(__props, "modelValue");
       const test = __props;
 
       const __returned__ = { model, test }
@@ -41,19 +43,13 @@ const test = defineProps({ type: String });
 
       }));
       type Type__options = typeof __options;
-      const __props = defineProps({ type: String });
-      type Type__props = ExtractPropTypes<typeof __props>;;
 
-
-      type __PROPS__ = { modelValue: { foo: string } } & Type__props & EmitsToProps<DeclareEmits<{ 'update:modelValue': [{ foo: string }] }>>;
 
       type __DATA__ = {};
-
-      type __EMITS__ = DeclareEmits<{ 'update:modelValue': [{ foo: string }] }>;
-
+      type __EMITS__ = {};
       type __SLOTS__ = {};
 
-      type __COMP__ = DeclareComponent<__PROPS__, __DATA__, __EMITS__, __SLOTS__, Type__options>
+      type __COMP__ = DeclareComponent<{ new<T extends string>(): { $props: { modelValue: { foo: T } } & { type: T} & EmitsToProps<DeclareEmits<{ 'update:modelValue': [{ foo: T }] }>>, $emit: DeclareEmits<{ 'update:modelValue': [{ foo: T }] }> , $children: {}  } }, __DATA__, __EMITS__, __SLOTS__, Type__options>
 
 
       export default __options as __COMP__;

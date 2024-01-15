@@ -1,14 +1,3 @@
-import {
-  defineComponent,
-  DeclareComponent,
-  ComponentData,
-  DeclareEmits,
-  EmitsToProps,
-  ComponentProps,
-  SlotsType,
-  useModel as _useModel,
-} from "vue";
-
 type __COMP__ = {};
 declare const Comp: __COMP__;
 

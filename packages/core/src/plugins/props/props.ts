@@ -12,6 +12,35 @@ export default {
     if (!expression) return;
     const source = context.script!.loc.source;
 
+    if (
+      context.generic &&
+      (expression.typeParameters?.params.length ?? 0) > 0
+    ) {
+      return [
+        // {
+        //   type: LocationType.Import,
+        //   node: expression,
+        //   // TODO change the import location
+        //   from: "vue",
+        //   items: [
+        //     {
+        //       name: "ExtractPropTypes",
+        //       type: true,
+        //     },
+        //   ],
+        // },
+
+        {
+          type: LocationType.Props,
+          node: expression.typeParameters!.params[0],
+          content: retrieveNodeString(
+            expression.typeParameters!.params[0],
+            source
+          ),
+        },
+      ];
+    }
+
     return [
       {
         type: LocationType.Import,

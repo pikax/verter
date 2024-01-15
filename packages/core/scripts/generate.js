@@ -1,17 +1,19 @@
 // import { generateScript } from "../dist/index.js";
-import { generateScript } from "../dist/generator/index.js";
+import { createBuilder } from "../dist/builder.js";
 import { glob } from "glob";
 import { dirname } from "path";
 import fs from "fs-extra";
 import { parse } from "@vue/compiler-sfc";
 
-const genFiles = glob.sync("./src/**/_gen.ts");
+const genFiles = glob.sync("./generator/**/_gen.ts");
 
 console.log("gen", genFiles);
 
 const dirs = genFiles.map((f) => dirname(f));
 
 console.log("dirs", dirs);
+
+const builder = createBuilder();
 
 async function processDir(dir) {
   const genFilePath = `${dir}/_gen.ts`;
@@ -24,12 +26,17 @@ async function processDir(dir) {
 
   const outputFilePath = `.\\generated\\${dir}\\index.ts`;
 
-  const parsed = parse(compFile, {
-    filename: "Comp.vue",
-    templateParseOptions: {},
-  });
+  // const parsed = parse(compFile, {
+  //   filename: "Comp.vue",
+  //   templateParseOptions: {},
+  // });
   //   console.log('parsed', parsed)
-  const output = generateScript(parsed);
+  const output = builder
+    .process("Comp.vue", compFile)
+    // .replace(
+    //   "export default __options as __COMP__",
+    //   "const Comp = __options as any as __COMP__;"
+    // );
 
   await fs.outputFile(
     outputFilePath,

@@ -81,7 +81,7 @@ function removeExportsAndDefineComponent(content: string) {
 function wrapWithDefineComponent(content: string) {
   return `const ${
     VariableName.Options
-  } = defineComponent(${removeExportsAndDefineComponent(content)})`;
+} = defineComponent(${removeExportsAndDefineComponent(content)})`;
 }
 
 function wrapGeneric(
