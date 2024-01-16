@@ -35,6 +35,9 @@ importers:
 
   packages/core:
     dependencies:
+      '@babel/parser':
+        specifier: ^7.23.6
+        version: 7.23.6
       '@babel/types':
         specifier: ^7.23.6
         version: 7.23.6

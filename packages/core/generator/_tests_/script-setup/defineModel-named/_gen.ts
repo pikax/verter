@@ -1,20 +1,23 @@
 type __COMP__ = {};
 declare const Comp: __COMP__;
 
+const emits = getComponentEmits(Comp);
+const props = getComponentProps(Comp);
+
 expectType<{
   (event: "update:test", value: { foo: string }): void;
-}>(getComponentEmits(Comp));
+}>(emits);
 
 expectType<{
   (event: "onUpdate:test", value: number): void;
   // @ts-expect-error not any
-}>(getComponentEmits(Comp));
+}>(emits);
 
 expectType<{
   test: { foo: string };
-}>(getComponentProps(Comp));
+}>(props);
 
 expectType<{
   onRandom?: () => void;
   // @ts-expect-error not any
-}>(getComponentProps(Comp));
+}>(props);

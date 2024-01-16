@@ -79,14 +79,32 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
       const importsArray =
         map[LocationType.Import] ?? (map[LocationType.Import] = []);
 
-      const declarations = map[LocationType.Declaration]?.reduce(
-        (prev, curr) => {
+      const _declarations =
+        map[LocationType.Declaration] ?? (map[LocationType.Declaration] = []);
+
+      const declarations = _declarations
+        .filter((x) => x.generated)
+        .reduce((prev, curr) => {
+          if (!curr.declaration.name) {
+            return `${prev}\n${curr.declaration.content}`;
+          }
+
           return `${prev}\n${curr.declaration.type ?? "const"} ${
             curr.declaration.name
           } = ${curr.declaration.content};`;
-        },
-        ""
-      );
+        }, "");
+
+      const notGenerated = _declarations
+        .filter((x) => !x.generated)
+        .reduce((prev, curr) => {
+          if (!curr.declaration.name) {
+            return `${prev}\n${curr.declaration.content}`;
+          }
+
+          return `${prev}\n${curr.declaration.type ?? "const"} ${
+            curr.declaration.name
+          } = ${curr.declaration.content};`;
+        }, "");
 
       const _props = map[LocationType.Props]
         ?.map((x) => {
@@ -112,6 +130,22 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         })
         .join(" & ");
 
+      const _expose = map[LocationType.Expose]
+        ?.map((x) => x.content)
+        .join(" & ");
+
+      const exposeContent = _expose
+        ? `
+        function __exposeResolver${
+          context.generic ? `<${context.generic}>` : ""
+        }() {
+          ${notGenerated}
+
+          return ${_expose};
+        }
+      `
+        : "";
+
       const emits = _emits ? `DeclareEmits<${_emits}>` : undefined;
       const props = [_props, emits && `EmitsToProps<${emits}>`]
         .filter(Boolean)
@@ -124,12 +158,18 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
       const genericOrProps = context.generic
         ? `{ new<${context.generic}>(): { $props: ${props || "{}"}, $emit: ${
             emits || "{}"
-          } , $children: ${slots || "{}"}  } }`
+          } , $children: ${slots || "{}"}, $data: ${
+            exposeContent
+              ? `ReturnType<typeof __exposeResolver<${context.generic}>>`
+              : "__DATA__"
+          }  } }`
         : "__PROPS__";
 
       // TODO better resolve the final variable names, especially options
       // because it relying on the plugin to build
-      const declareComponent = `type __COMP__ = DeclareComponent<${genericOrProps}, __DATA__, __EMITS__, __SLOTS__, Type__options>`;
+      const declareComponent = `type __COMP__${
+        context.generic ? `<${context.generic}>` : ""
+      } = DeclareComponent<${genericOrProps}, __DATA__, __EMITS__, __SLOTS__, Type__options>`;
 
       (map[LocationType.Export] ?? (map[LocationType.Export] = [])).push({
         type: LocationType.Export,
@@ -187,6 +227,15 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
 
       // TODO should group imports
       const imports = map[LocationType.Import]?.reduce((prev, curr) => {
+        if (!curr.items?.length) {
+          if (
+            curr.from.startsWith("import") &&
+            curr.from.indexOf(" from ") > 0
+          ) {
+            return `${prev}\n${curr.from}`;
+          }
+          return prev;
+        }
         return `${prev}\nimport { ${curr.items
           .map((it) => it.name)
           .filter(Boolean)
@@ -196,6 +245,9 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
       return `${imports}\n
 
 ${declarations}\n
+
+// expose
+${exposeContent}
 
 ${
   context.generic

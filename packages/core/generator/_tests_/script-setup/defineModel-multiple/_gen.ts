@@ -1,17 +1,20 @@
 type __COMP__ = {};
 declare const Comp: __COMP__;
 
+
+const emits = getComponentEmits(Comp);
+const props = getComponentProps(Comp);
+
 expectType<{
   (event: "update:modelValue", value: boolean): void;
   (event: "update:test", value: { foo: string }): void;
-}>(getComponentEmits(Comp));
+}>(emits);
 
 expectType<{
   (event: "onUpdate:modelValue"): void;
   // @ts-expect-error not any
-}>(getComponentEmits(Comp));
+}>(emits);
 
-const props = getComponentProps(Comp);
 
 props.modelValue;
 props.test;

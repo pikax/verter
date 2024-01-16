@@ -1,5 +1,5 @@
 import { checkForSetupMethodCall, retrieveNodeString } from "../helpers.js";
-import { LocationType, PluginOption } from "../types.js";
+import { LocationType, PluginOption, WalkResult } from "../types.js";
 
 const possibleExports = [
   "export default /*#__PURE__*/_",
@@ -30,6 +30,16 @@ export default {
         content = content.slice("defineComponent".length);
       }
 
+      // append generic to setup
+      if (context.generic) {
+        content = content.replace("setup(", `setup<${context.generic}>(`);
+      }
+
+      // vue imports
+      const imports = source.startsWith("import")
+        ? source.slice(0, source.indexOf("\n"))
+        : "";
+
       return [
         {
           type: LocationType.Import,
@@ -46,6 +56,9 @@ export default {
         {
           type: LocationType.Declaration,
           node: context.script,
+
+          generated: true,
+
           declaration: {
             name: "__options",
             content: `defineComponent(${content})`,
@@ -54,6 +67,8 @@ export default {
         {
           type: LocationType.Declaration,
           node: context.script,
+          generated: true,
+
           declaration: {
             type: "type",
             name: "Type__options",
@@ -70,7 +85,33 @@ export default {
         //     type: true,
         //   },
         // },
-      ];
+      ]
+        .concat(
+          Object.values(context.script!.imports ?? {}).map((x) => ({
+            type: LocationType.Import,
+            node: context.script,
+            from: x.source,
+            items: [
+              {
+                name: x.imported,
+                alias: x.local,
+                type: x.isType,
+              },
+            ],
+          }))
+        )
+        .concat(
+          imports
+            ? [
+                {
+                  type: LocationType.Import,
+                  node: context.script,
+                  from: imports.slice(),
+                  items: [],
+                },
+              ]
+            : []
+        );
     }
 
     return [

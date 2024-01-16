@@ -50,6 +50,8 @@ export const enum LocationType {
   Model = "model",
   Expose = "expose",
 
+  Generic = "generic",
+
   Declaration = "declaration",
   Import = "import",
   Export = "export",
@@ -72,6 +74,7 @@ export interface TypeLocationDeclaration {
   type: LocationType.Declaration;
   node: _babel_types.ObjectExpression;
 
+  generated?: boolean;
   declaration: {
     /**
      * Sets the variable type
@@ -81,7 +84,7 @@ export interface TypeLocationDeclaration {
     /**
      * The variable name
      */
-    name: string;
+    name?: string;
     /**
      * The variable content
      */
@@ -124,6 +127,19 @@ export interface TypeLocationProps {
   }[];
 }
 
+export interface TypeLocationGeneric {
+  type: LocationType.Generic;
+  node: _babel_types.TSTypeParameterDeclaration;
+
+  items: [
+    {
+      name: string;
+      content: string;
+      index: number;
+    }
+  ];
+}
+
 export type TypeLocationMap = {
   [LocationType.Declaration]: TypeLocationDeclaration;
   [LocationType.Import]: TypeLocationImport;
@@ -134,6 +150,7 @@ export type TypeLocationMap = {
   [LocationType.Model]: BaseTypeLocation;
   [LocationType.Expose]: BaseTypeLocation;
   [LocationType.Export]: TypeLocationExport;
+  [LocationType.Generic]: TypeLocationGeneric;
 };
 export type ValueOf<T> = T[keyof T];
 

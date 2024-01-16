@@ -1,4 +1,4 @@
-import { checkForSetupMethodCall } from "../helpers.js";
+import { checkForSetupMethodCall, retrieveNodeString } from "../helpers.js";
 import { LocationType, PluginOption } from "../types.js";
 
 export default {
@@ -9,11 +9,15 @@ export default {
     const expression = checkForSetupMethodCall("defineExpose", node);
     if (!expression) return;
 
-    console.log("found expose");
     // TODO add sourmap map
     return {
       type: LocationType.Expose,
       node: expression,
+
+      content: retrieveNodeString(
+        expression.arguments[0],
+        context.script!.loc.source
+      ),
     };
   },
 } satisfies PluginOption;

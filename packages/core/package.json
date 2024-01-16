@@ -16,6 +16,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@babel/parser": "^7.23.6",
     "@babel/types": "^7.23.6",
     "@types/ts-expose-internals": "npm:ts-expose-internals@5.2.2",
     "@vue/compiler-core": "^3.4.13",
