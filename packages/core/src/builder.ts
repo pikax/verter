@@ -154,21 +154,81 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
       const slots =
         map[LocationType.Slots]?.map((x) => x.content).join(" & ") || "{}";
 
+      const genericDeclaration = context.generic ? map.generic?.[0] : undefined;
+
+      function getGenericComponentName(name: string) {
+        return "_VUE_TS__" + name;
+      }
+
+      function replaceComponentNameUsage(name: string, content: string) {
+        const regex = new RegExp(`\\b${name}\\b`, "g");
+        return content.replace(regex, getGenericComponentName(name));
+      }
+
+      const genericNames = genericDeclaration
+        ? genericDeclaration.items.map((x) => x.name)
+        : undefined;
+
+      function sanitiseGenericNames(content: string | null | undefined) {
+        if (!content) return content;
+        return genericNames
+          ? genericNames.reduce((prev, cur) => {
+              return replaceComponentNameUsage(cur, prev);
+            }, content)
+          : content;
+      }
+
+      const CompGeneric = genericDeclaration
+        ? genericDeclaration.items
+            .map((x) => {
+              const name = getGenericComponentName(x.name);
+              const constraint = sanitiseGenericNames(x.constraint);
+              const defaultType = sanitiseGenericNames(x.default);
+
+              return [
+                name,
+                constraint ? `extends ${constraint}` : undefined,
+                `= ${defaultType || "any"}`,
+              ]
+                .filter(Boolean)
+                .join(" ");
+            })
+            .join(", ")
+        : undefined;
+      const InstanceGeneric = genericDeclaration
+        ? genericDeclaration.items
+            .map((x) => {
+              const name = x.name;
+              const constraint = x.constraint;
+              const defaultType = x.default || getGenericComponentName(x.name);
+
+              return [
+                name,
+                constraint ? `extends ${constraint}` : undefined,
+                `= ${defaultType || "any"}`,
+              ]
+                .filter(Boolean)
+                .join(" ");
+            })
+            .join(", ")
+        : undefined;
+
       // if is generic don't use the __PROPS__ since it won't have the correct type
-      const genericOrProps = context.generic
-        ? `{ new<${context.generic}>(): { $props: ${props || "{}"}, $emit: ${
+      const genericOrProps = InstanceGeneric
+        ? `{ new<${InstanceGeneric}>(): { $props: ${props || "{}"}, $emit: ${
             emits || "{}"
           } , $children: ${slots || "{}"}, $data: ${
             exposeContent
-              ? `ReturnType<typeof __exposeResolver<${context.generic}>>`
+              ? `ReturnType<typeof __exposeResolver<${genericDeclaration!.items
+                  .map((x) => x.name)
+                  .join(", ")}>>`
               : "__DATA__"
           }  } }`
         : "__PROPS__";
-
       // TODO better resolve the final variable names, especially options
       // because it relying on the plugin to build
       const declareComponent = `type __COMP__${
-        context.generic ? `<${context.generic}>` : ""
+        CompGeneric ? `<${CompGeneric}>` : ""
       } = DeclareComponent<${genericOrProps}, __DATA__, __EMITS__, __SLOTS__, Type__options>`;
 
       (map[LocationType.Export] ?? (map[LocationType.Export] = [])).push({

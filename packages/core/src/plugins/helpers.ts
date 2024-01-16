@@ -45,7 +45,7 @@ export function checkForSetupMethodCall(
 }
 
 export function retrieveNodeString(
-  node: Node | undefined,
+  node: Node | undefined | null,
   source: string 
 ) {
   if (!node) return undefined;

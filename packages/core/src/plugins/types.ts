@@ -133,9 +133,26 @@ export interface TypeLocationGeneric {
 
   items: [
     {
-      name: string;
-      content: string;
+      /**
+       * The generic param index
+       */
       index: number;
+      /**
+       * The generic name
+       */
+      name: string;
+      /**
+       * The generic constraint
+       */
+      constraint?: string;
+      /**
+       * The generic default value
+       */
+      default?: string;
+      /**
+       * The generic content contains name + constraint
+       */
+      content?: string;
     }
   ];
 }

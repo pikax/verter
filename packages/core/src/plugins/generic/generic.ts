@@ -1,18 +1,15 @@
-import {
-  TSTypeAliasDeclaration,
-  TSTypeParameterDeclaration,
-} from "@babel/types";
+import { TSTypeAliasDeclaration } from "@babel/types";
 import { PluginOption, LocationType } from "../types.js";
 
 import { parse } from "@babel/parser";
+import { retrieveNodeString } from "../helpers.js";
 
 export default {
   name: "Generic",
   process(context) {
     if (!context.generic) return;
-    const source = context.script?.content;
-    if (!source) return;
-
+    // const source = context.script?.content;
+    // if (!source) return;
     const genericCode = `type __GENERIC__<${context.generic}> = {}`;
 
     try {
@@ -27,7 +24,9 @@ export default {
 
       const items = params.map((param, index) => ({
         name: param.name,
-        content: source.slice(param.start!, param.end!),
+        content: retrieveNodeString(param, genericCode),
+        constraint: retrieveNodeString(param.constraint, genericCode),
+        default: retrieveNodeString(param.default, genericCode),
         index,
       }));
 

@@ -21,6 +21,10 @@ declare const CompItem: __COMP__<Item>;
 const propsItem = getComponentProps(CompItem);
 const dataItem = getComponentData(CompItem);
 
+expectType<"foo">(new Comp<Item>().$props.items[0].foo);
+
+expectType<"foo">(dataItem.getItemAtIndex(0)!.foo);
+
 expectType<{
   getItemAtIndex: (index: number) => Item;
 }>(dataItem);
