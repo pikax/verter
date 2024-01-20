@@ -1,19 +1,49 @@
 import {
   AttributeNode,
+  ComponentNode,
   DirectiveNode,
   ElementNode,
   ElementTypes,
   ExpressionNode,
   ForParseResult,
   NodeTypes,
+  PlainElementNode,
+  RootNode,
   TemplateChildNode,
 } from "@vue/compiler-core";
 import { MagicString } from "@vue/compiler-sfc";
 
-export function walk(node: TemplateChildNode, magicString: MagicString) {
+import { camelize, capitalize } from "@vue/shared";
+
+interface WalkContext {
+  root: RootNode;
+
+  parent: TemplateChildNode | RootNode;
+  prev: TemplateChildNode | undefined;
+  next: TemplateChildNode | undefined;
+}
+
+export function walkRoot(root: RootNode, magicString: MagicString) {
+  return root.children
+    .map((x, i, arr) =>
+      walk(x, magicString, {
+        root,
+        parent: root,
+        prev: i > 0 ? arr[i - 1] : undefined,
+        next: i < arr.length - 1 ? arr[i + 1] : undefined,
+      } satisfies WalkContext)
+    )
+    .join("\n");
+}
+
+export function walk(
+  node: TemplateChildNode,
+  magicString: MagicString,
+  ctx: WalkContext
+) {
   switch (node.type) {
     case NodeTypes.ELEMENT: {
-      return walkElement(node, magicString);
+      return walkElement(node, magicString, ctx);
     }
     case NodeTypes.TEXT: {
       return node.content;
@@ -49,10 +79,21 @@ export function walk(node: TemplateChildNode, magicString: MagicString) {
 
 export function walkElement(
   node: ElementNode,
-  magicString: MagicString
+  magicString: MagicString,
+  ctx: WalkContext
 ): string {
-  const childrenContent = node.children.map((x) => walk(x, magicString));
-  const attrs = node.props.map((node) => walkAttribute(node, magicString));
+  const childrenContent = node.children.map((x, i, arr) =>
+    walk(x, magicString, {
+      root: ctx.root,
+      parent: node,
+      prev: i > 0 ? arr[i - 1] : undefined,
+      next: i < arr.length - 1 ? arr[i + 1] : undefined,
+    } satisfies WalkContext)
+  );
+  const attrs = node.props.map((x) =>
+    // I don't see where the attribute context would be necessary :thinking:
+    walkAttribute(x, magicString, ctx)
+  );
 
   const vfor = attrs.find((x) => !!x.for) as WalkAttributeFor | undefined;
   const vIf = attrs.find((x) => !!x.if) as WalkAttributeIf | undefined;
@@ -63,39 +104,21 @@ export function walkElement(
     (x) => x.directive === true && x.binding !== true
   ) as WalkAttributeDirective[];
 
-  // if (vfor) {
-  //   attributes.unshift({
-  //     attribute: true,
-  //     name: "key",
-  //     content: `{${vfor.for.value}}`,
-  //     node: vfor.for.value,
-  //   });
-  // }
-
   switch (node.tagType) {
-    case ElementTypes.ELEMENT: {
-      // node.props;
-
-      // const props = node.props.map((x) => walkAttribute(x, magicString));
-
-      // const res = `<${node.tag} ${attributes.filter(x=>!x.for).map(x=> )}>${}`
-
-      const elementStr = `<${node.tag} ${attributes
+    case ElementTypes.ELEMENT:
+    case ElementTypes.COMPONENT: {
+      const tag = resolveComponentTag(node);
+      const elementStr = `<${tag} ${attributes
         .map((x) => attributeToString(x, magicString))
-        .join(" ")}>${childrenContent.join("\n")}</${node.tag}>`;
+        .join(" ")}>${childrenContent.join("\n")}</${tag}>`;
 
       // v-if has higher priority than v-for
       return wrapWithIf(
-        wrapWithFor(elementStr, vfor, magicString),
+        wrapWithFor(elementStr, vfor, magicString, ctx),
         vIf,
-        magicString
+        magicString,
+        ctx
       );
-    }
-    case ElementTypes.COMPONENT: {
-      // const props = node.props.map((x) => walkAttribute(x, magicString));
-
-      // if(props.)
-      break;
     }
     case ElementTypes.SLOT: {
       break;
@@ -111,19 +134,75 @@ export function walkElement(
   return "";
 }
 
+function resolveComponentTag(node: PlainElementNode | ComponentNode) {
+  if (node.tagType === ElementTypes.COMPONENT) {
+    const camel = camelize(node.tag);
+    // if not camel just return
+    if (camel === node.tag) return node.tag;
+    // NOTE probably this is not 100% correct, maybe we could check if the component exists
+    // by passing in the context
+    return capitalize(camel);
+  }
+  return node.tag;
+}
+
+const IfMap = {
+  if: "if",
+  else: "else",
+  "else-if": "else if",
+};
+
 function wrapWithIf(
   content: string,
   ifNode: WalkAttributeIf | undefined,
-  magicString: MagicString
+  magicString: MagicString,
+  ctx: WalkContext
 ): string {
   if (!ifNode) return content;
-  return `{ ${ifNode.if} ( ${ifNode.content} ){ ${content} } }`;
+
+  const isStart = ifNode.if === "if";
+  const isEnd =
+    (ctx.next as ElementNode)?.props?.find(
+      (x) =>
+        (x as DirectiveNode).rawName === "v-else" ||
+        (x as DirectiveNode).rawName === "v-else-if"
+    ) === undefined;
+
+  if (ifNode.if === "else" || ifNode.if === "else-if") {
+    const hasPreviousIf =
+      (ctx.prev as ElementNode)?.props?.find(
+        (x) =>
+          (x as DirectiveNode).rawName === "v-if" ||
+          (x as DirectiveNode).rawName === "v-else-if"
+        // (x as DirectiveNode).rawName === "v-else" ||
+      ) !== undefined;
+    if (!hasPreviousIf) {
+      throw new Error("v-else or v-else-if must be preceded by v-if");
+    }
+    if (ifNode.if === "else-if") {
+      const hasPreviousElse =
+        (ctx.prev as ElementNode)?.props?.find(
+          (x) =>
+            // (x as DirectiveNode).rawName === "v-if" ||
+            (x as DirectiveNode).rawName === "v-else" //||
+          // (x as DirectiveNode).rawName !== "v-else-if"
+        ) !== undefined;
+      if (hasPreviousElse) {
+        throw new Error("v-else-if must be preceded by v-if, not v-else");
+      }
+    }
+  }
+
+  return `${isStart ? "{" : ""} ${IfMap[ifNode.if]} ${
+    ifNode.content ? `(${ifNode.content})` : ""
+  }{ ${content} } ${isEnd ? "}" : ""}`;
 }
 
 function wrapWithFor(
   content: string,
   forNode: WalkAttributeFor | undefined,
-  magicString: MagicString
+  magicString: MagicString,
+  ctx: WalkContext
 ): string {
   if (!forNode) return content;
   const { source, value, key, index } = forNode.for;
@@ -161,7 +240,10 @@ function attributeToString(
 ) {
   const { name, content } = attribute;
   if (attribute.binding) {
-    return `${name}={${content}}`;
+    if (name) {
+      return `${name}={${content ?? name}}`;
+    }
+    return `{...${content}}`;
   }
   return `${name}=${content}`;
 }
@@ -174,7 +256,7 @@ interface WalkAttributeBase {
   directive?: boolean;
   binding?: boolean;
   for?: undefined | ForParseResult;
-  if?: "if" | "else";
+  if?: "if" | "else" | "else-if";
 }
 
 interface WalkAttributeAttr extends WalkAttributeBase {
@@ -202,7 +284,7 @@ interface WalkAttributeFor extends WalkAttributeBase {
   node: DirectiveNode;
 }
 interface WalkAttributeIf extends WalkAttributeBase {
-  if: "if" | "else";
+  if: "if" | "else" | "else-if";
   node: DirectiveNode;
 }
 
@@ -215,7 +297,8 @@ type WalkAttributeResult =
 
 export function walkAttribute(
   node: AttributeNode | DirectiveNode,
-  magicString: MagicString
+  magicString: MagicString,
+  ctx: WalkContext
 ): WalkAttributeResult {
   switch (node.type) {
     case NodeTypes.ATTRIBUTE: {
@@ -223,7 +306,7 @@ export function walkAttribute(
         attribute: true,
         node,
         name: node.name,
-        content: node.value ? walk(node.value, magicString) : undefined,
+        content: node.value ? walk(node.value, magicString, ctx) : undefined,
       };
     }
     case NodeTypes.DIRECTIVE: {
@@ -233,9 +316,9 @@ export function walkAttribute(
           node: node,
         };
       }
-      if (node.rawName === "v-if") {
+      if (node.rawName === "v-if" || node.rawName === "v-else-if") {
         return {
-          if: "if",
+          if: node.name as "if" | "else-if",
           node: node,
           content: node.exp
             ? walkExpressionNode(node.exp!, node, magicString)
@@ -246,7 +329,6 @@ export function walkAttribute(
         return {
           if: "else",
           node: node,
-          content: "true",
         };
       }
 

@@ -50,6 +50,9 @@ importers:
       '@vue/compiler-sfc':
         specifier: ^3.4.13
         version: 3.4.13
+      '@vue/shared':
+        specifier: ^3.4.13
+        version: 3.4.13(patch_hash=wximcujn62nz4pccw2imtws3gu)
       glob:
         specifier: ^10.3.10
         version: 10.3.10
