@@ -29,10 +29,10 @@ describe("walk", () => {
           ["MyComp", "MyComp"],
           ["myComp", "myComp"],
           ["Mycomp", "Mycomp"],
-          // NOTE maybe this is wrong!
-          ["my--comp", "My-Comp"],
           ["my_comp", "my_comp"],
           ["my-Comp", "MyComp"],
+          // NOTE maybe this is wrong!
+          ["my--comp", "My-Comp"],
         ])("%s => %s", (input, expected) => {
           const source = `<${input} />`;
           const res = parseAndWalk(source);
@@ -50,11 +50,109 @@ describe("walk", () => {
         const res = parseAndWalk(source);
         expect(res).toMatchInlineSnapshot(`"<MyComp {...props}></MyComp>"`);
       });
+
+      it("props + v-bind", () => {
+        const source = `<my-comp :props="props" v-bind="props" />`;
+        const res = parseAndWalk(source);
+        expect(res).toMatchInlineSnapshot(
+          `"<MyComp props={props} {...props}></MyComp>"`
+        );
+      });
+
+      it("v-bind + props", () => {
+        const source = `<my-comp v-bind="props" :props="props"/>`;
+        const res = parseAndWalk(source);
+        expect(res).toMatchInlineSnapshot(
+          `"<MyComp {...props} props={props}></MyComp>"`
+        );
+      });
+
+      // describe("slots", () => {
+      //   it("default slot", () => {
+      //     const source = `<my-comp><span>foo</span></my-comp>`;
+      //     const res = parseAndWalk(source);
+      //     expect(res).toMatchInlineSnapshot(
+      //       `"<MyComp ><span>foo</span></MyComp>"`
+      //     );
+      //   });
+
+      //   it("slots with name", () => {
+      //     const source = `<my-comp><template #foo><span>foo</span></template></my-comp>`;
+      //     const res = parseAndWalk(source);
+      //     expect(res).toMatchInlineSnapshot(
+      //       `"<MyComp ><template slot='foo'><span>foo</span></template></MyComp>"`
+      //     );
+      //   });
+      // });
+    });
+
+    describe("templates", () => {
+      it("simple template", () => {
+        const source = `<template><span>foo</span></template>`;
+        const res = parseAndWalk(source);
+        expect(res).toMatchInlineSnapshot(`"<span >foo</span>"`);
+      });
+
+      it('template with "v-if"', () => {
+        const source = `<template v-if="true"><span>foo</span></template>`;
+        const res = parseAndWalk(source);
+        expect(res).toMatchInlineSnapshot(
+          `"{ true ? <span >foo</span> : undefined }"`
+        );
+      });
+
+      it("template with multiple", () => {
+        const source = `<template><span>foo</span><span>bar</span></template>`;
+        const res = parseAndWalk(source);
+        expect(res).toMatchInlineSnapshot(`
+          "[<span >foo</span>,
+          <span >bar</span>]"
+        `);
+      });
+
+      it("template multiple v-if", () => {
+        const source = `<template v-if="true"><span>foo</span><span>foo2</span></template><template v-if="false"><span>bar</span></template>`;
+        const res = parseAndWalk(source);
+        expect(res).toMatchInlineSnapshot(`
+          "{ true ? [<span >foo</span>,
+          <span >foo2</span>] : undefined }
+          { false ? <span >bar</span> : undefined }"
+        `);
+      });
+
+      it('template with v-if + "v-else-if"', () => {
+        const source = `<template v-if="true"><span>foo</span></template><template v-else-if="false"><span>bar</span></template>`;
+        const res = parseAndWalk(source);
+        expect(res).toMatchInlineSnapshot(`
+          "{ true ? <span >foo</span> 
+          : false ? <span >bar</span> : undefined }"
+        `);
+      });
     });
   });
 
   describe("walkAttribute", () => {
-    // describe("attribute", () => {});
+    describe("attribute", () => {
+      it("simple", () => {
+        const source = `<span class="foo"></span>`;
+        const res = parseAndWalk(source);
+        expect(res).toMatchInlineSnapshot(`"<span class="foo"></span>"`);
+      });
+
+      it("multiple", () => {
+        const source = `<span class="foo" id="bar"></span>`;
+        const res = parseAndWalk(source);
+        expect(res).toMatchInlineSnapshot(
+          `"<span class="foo" id="bar"></span>"`
+        );
+      });
+
+      it("with '", () => {
+        const source = `<span class='foo'></span>`;
+        const res = parseAndWalk(source);
+        expect(res).toMatchInlineSnapshot(`"<span class="foo"></span>"`);
+      });
+    });
 
     describe("directive", () => {
       describe("v-for", () => {
@@ -147,6 +245,7 @@ describe("walk", () => {
         it("range", () => {
           const source = `<li v-for="n in 10"></li>`;
           const res = parseAndWalk(source);
+
           expect(res).toMatchInlineSnapshot(
             `"{ renderList(10, (n) => { <li ></li> }) }"`
           );
@@ -158,7 +257,7 @@ describe("walk", () => {
           const res = parseAndWalk(source);
 
           expect(res).toMatchInlineSnapshot(
-            `"{ if (n > 5){ { renderList(n, (i) => { <li ></li> }) } } }"`
+            `"{ n > 5 ? renderList(n, (i) => { <li ></li> }) : undefined }"`
           );
         });
       });
@@ -167,15 +266,17 @@ describe("walk", () => {
         it("v-if", () => {
           const source = `<li v-if="n > 5"></li>`;
           const res = parseAndWalk(source);
-          expect(res).toMatchInlineSnapshot(`"{ if (n > 5){ <li ></li> } }"`);
+          expect(res).toMatchInlineSnapshot(
+            `"{ n > 5 ? <li ></li> : undefined }"`
+          );
         });
 
         it("v-if + v-else", () => {
           const source = `<li v-if="n > 5"></li><li v-else></li>`;
           const res = parseAndWalk(source);
           expect(res).toMatchInlineSnapshot(`
-            "{ if (n > 5){ <li ></li> } 
-             else { <li ></li> } }"
+            "{ n > 5 ? <li ></li> 
+            : <li ></li> }"
           `);
         });
 
@@ -183,8 +284,8 @@ describe("walk", () => {
           const source = `<li v-if="n > 5"></li><li v-else-if="n > 3"></li>`;
           const res = parseAndWalk(source);
           expect(res).toMatchInlineSnapshot(`
-            "{ if (n > 5){ <li ></li> } 
-             else if (n > 3){ <li ></li> } }"
+            "{ n > 5 ? <li ></li> 
+            : n > 3 ? <li ></li> : undefined }"
           `);
         });
 
@@ -199,13 +300,13 @@ describe("walk", () => {
             <li v-else="n === 1"></li>`;
           const res = parseAndWalk(source);
           expect(res).toMatchInlineSnapshot(`
-            "{ if (n === 1){ <li ></li> } 
-             else if (n === 1){ <li ></li> } 
-             else if (n === 1){ <li ></li> } 
-             else if (n === 1){ <li ></li> } 
-             else if (n === 1){ <li ></li> } 
-             else if (n === 1){ <li ></li> } 
-             else { <li ></li> } }"
+            "{ n === 1 ? <li ></li> 
+            : n === 1 ? <li ></li> 
+            : n === 1 ? <li ></li> 
+            : n === 1 ? <li ></li> 
+            : n === 1 ? <li ></li> 
+            : n === 1 ? <li ></li> 
+            : <li ></li> }"
           `);
         });
 

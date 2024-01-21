@@ -104,17 +104,28 @@ export function walkElement(
     (x) => x.directive === true && x.binding !== true
   ) as WalkAttributeDirective[];
 
+  const content =
+    childrenContent.length === 0
+      ? ""
+      : childrenContent.length > 1
+      ? `[${childrenContent.join(",\n")}]`
+      : childrenContent[0];
+
   switch (node.tagType) {
     case ElementTypes.ELEMENT:
     case ElementTypes.COMPONENT: {
       const tag = resolveComponentTag(node);
-      const elementStr = `<${tag} ${attributes
-        .map((x) => attributeToString(x, magicString))
-        .join(" ")}>${childrenContent.join("\n")}</${tag}>`;
+
+      const elementStr =
+        tag === "template"
+          ? content
+          : `<${tag} ${attributes
+              .map((x) => attributeToString(x, magicString))
+              .join(" ")}>${content}</${tag}>`;
 
       // v-if has higher priority than v-for
       return wrapWithIf(
-        wrapWithFor(elementStr, vfor, magicString, ctx),
+        wrapWithFor(elementStr, vfor, magicString, !!vIf, ctx),
         vIf,
         magicString,
         ctx
@@ -124,7 +135,14 @@ export function walkElement(
       break;
     }
     case ElementTypes.TEMPLATE: {
-      break;
+      const elementStr = childrenContent.length > 1 ? `${content}` : content;
+
+      return wrapWithIf(
+        wrapWithFor(elementStr, vfor, magicString, !!vIf, ctx),
+        vIf,
+        magicString,
+        ctx
+      );
     }
     default: {
       // @ts-expect-error unknown type
@@ -193,15 +211,40 @@ function wrapWithIf(
     }
   }
 
-  return `${isStart ? "{" : ""} ${IfMap[ifNode.if]} ${
-    ifNode.content ? `(${ifNode.content})` : ""
-  }{ ${content} } ${isEnd ? "}" : ""}`;
+  // regular if / else / else-if
+  // return `${isStart ? "{" : ""} ${IfMap[ifNode.if]} ${
+  //   ifNode.content ? `(${ifNode.content})` : ""
+  // }{ ${content} } ${isEnd ? "}" : ""}`;
+
+  switch (ifNode.if) {
+    case "if": {
+      return `${isStart ? "{" : ""} ${
+        ifNode.content ? `${ifNode.content} ?` : ""
+      } ${content} ${isEnd ? ": undefined }" : ""}`;
+    }
+    case "else-if": {
+      return `${isStart ? "{" : ":"} ${
+        ifNode.content ? `${ifNode.content} ?` : ""
+      } ${content} ${isEnd ? ": undefined }" : ""}`;
+    }
+    case "else": {
+      return `: ${content} ${isEnd ? "}" : ""}`;
+    }
+  }
+
+  // ternany
+  return `${isStart ? "{" : ""} ${ifNode.content ? `${ifNode.content}` : ""} ${
+    ifNode.if === "else" ? "" : "?"
+  } ${content} ${ifNode.if === "else" && isEnd ? "" : ":"}  ${
+    isEnd && ifNode.if !== "else" ? "undefined }" : ""
+  }`;
 }
 
 function wrapWithFor(
   content: string,
   forNode: WalkAttributeFor | undefined,
   magicString: MagicString,
+  isWrapped: boolean,
   ctx: WalkContext
 ): string {
   if (!forNode) return content;
@@ -222,16 +265,19 @@ function wrapWithFor(
     ? walkExpressionNode(value, forNode.node, magicString)
     : "value";
 
-  const str = `{ renderList(${sourceString}, (${[
+  const str = `renderList(${sourceString}, (${[
     valueString,
     keyString,
     indexString,
   ]
     .filter(Boolean)
-    .join(", ")}) => { ${content} }) }`;
+    .join(", ")}) => { ${content} })`;
 
   // magicString.prependLeft(forParseResult.node.loc.start.offset, str);
-  return str;
+  if (isWrapped) {
+    return str;
+  }
+  return `{ ${str} }`;
 }
 
 function attributeToString(
@@ -245,7 +291,7 @@ function attributeToString(
     }
     return `{...${content}}`;
   }
-  return `${name}=${content}`;
+  return `${name}=${JSON.stringify(content)}`;
 }
 
 interface WalkAttributeBase {
