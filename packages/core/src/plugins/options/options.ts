@@ -12,7 +12,6 @@ export default {
 
   process: (context) => {
     const source = context.script?.content;
-    console.log("found source", source);
     // empty component
     if (!source) {
       return [
@@ -150,6 +149,32 @@ export default {
         );
     }
 
+    let content = source;
+    for (const it of possibleExports) {
+      const index = source.indexOf(it);
+      if (index === -1) continue;
+
+      const c = source.slice(index + it.length);
+      content = c.startsWith("{") ? `defineComponent(${c})` : c;
+      break;
+    }
+
+    // return [
+    //   {
+    //     type: LocationType.Import,
+    //     node: context.script,
+    //     // TODO change the import location
+    //     from: "vue",
+    //     items: [
+    //       {
+    //         name: "defineComponent",
+    //         type: true,
+    //       },
+    //     ],
+    //   },
+    //   {}
+    // ];
+
     return [
       {
         type: LocationType.Import,
@@ -162,6 +187,48 @@ export default {
             type: true,
           },
         ],
+      },
+      ...(context.generic
+        ? [
+            {
+              type: LocationType.Declaration,
+              generated: true,
+              node: undefined,
+              declaration: {
+                name: "__optionsGenerator",
+                content: `(<${context.generic},>() => { return ${content} })`,
+              },
+            },
+            {
+              type: LocationType.Declaration,
+              generated: true,
+              node: undefined,
+              declaration: {
+                name: "__options",
+                content: `__optionsGenerator()`,
+              },
+            },
+          ]
+        : [
+            {
+              type: LocationType.Declaration,
+              generated: true,
+              node: undefined,
+              declaration: {
+                name: "__options",
+                content,
+              },
+            },
+          ]),
+      {
+        type: LocationType.Declaration,
+        generated: true,
+        node: undefined,
+        declaration: {
+          type: "type",
+          name: "Type__options",
+          content: `typeof __options`,
+        },
       },
     ];
   },

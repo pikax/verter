@@ -278,6 +278,10 @@ defineExpose({ getItemAtIndex });
     `);
   });
 
+  it('simple test', ()=> {
+    
+  })
+
   it("babel parser", () => {
     // Wrap your type in an expression (TypeScript type assertion)
     const code = `type MyType<T extends { item: string }, X> = {}`;

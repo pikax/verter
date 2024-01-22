@@ -412,17 +412,109 @@ describe("builder template", () => {
     });
   });
 
+  describe("interpolation", () => {
+    it("simple", () => {
+      const source = `<div>{{ foo }}</div>`;
+      const parsed = doParseElement(source);
+      const built = build(parsed);
+      expect(built).toMatchInlineSnapshot(`"<div>{ foo }</div>"`);
+    });
+
+    it("multiple", () => {
+      const source = `<div>{{ foo }} {{ bar }}</div>`;
+      const parsed = doParseElement(source);
+      const built = build(parsed);
+      expect(built).toMatchInlineSnapshot(`
+        "<div>{ foo }
+        { " " }
+        { bar }</div>"
+      `);
+    });
+
+    it("with text", () => {
+      const source = `<div>hello {{ foo }} world</div>`;
+      const parsed = doParseElement(source);
+      const built = build(parsed);
+      expect(built).toMatchInlineSnapshot(`
+        "<div>{ "hello " }
+        { foo }
+        { " world" }</div>"
+      `);
+    });
+
+    it("with text + multiple", () => {
+      const source = `<div>hello {{ foo }} world {{ bar }}</div>`;
+      const parsed = doParseElement(source);
+      const built = build(parsed);
+      expect(built).toMatchInlineSnapshot(
+        `
+        "<div>{ "hello " }
+        { foo }
+        { " world " }
+        { bar }</div>"
+      `
+      );
+    });
+
+    it("with text + multiple + text", () => {
+      const source = `<div>hello {{ foo }} world {{ bar }} foo</div>`;
+      const parsed = doParseElement(source);
+      const built = build(parsed);
+      expect(built).toMatchInlineSnapshot(
+        `
+        "<div>{ "hello " }
+        { foo }
+        { " world " }
+        { bar }
+        { " foo" }</div>"
+      `
+      );
+    });
+
+    it("with text + multiple + text + multiple", () => {
+      const source = `<div>hello {{ foo }} world {{ bar }} foo {{ baz }}</div>`;
+      const parsed = doParseElement(source);
+      const built = build(parsed);
+      expect(built).toMatchInlineSnapshot(
+        `
+        "<div>{ "hello " }
+        { foo }
+        { " world " }
+        { bar }
+        { " foo " }
+        { baz }</div>"
+      `
+      );
+    });
+
+    it("with text + multiple + text + multiple + text", () => {
+      const source = `<div>hello {{ foo }} world {{ bar }} foo {{ baz }} bar</div>`;
+      const parsed = doParseElement(source);
+      const built = build(parsed);
+      expect(built).toMatchInlineSnapshot(
+        `
+        "<div>{ "hello " }
+        { foo }
+        { " world " }
+        { bar }
+        { " foo " }
+        { baz }
+        { " bar" }</div>"
+      `
+      );
+    });
+  });
+
   it("full example", () => {
-    const source = `<template>
-    <ol>
+    const source = `<ol>
       <li v-for="item in orderedItems" :key="getKey(item)">
         {{ getLabel(item) }}
       </li>
     </ol>
-  </template>
   `;
     const parsed = doParseElement(source);
     const built = build(parsed);
-    expect(built).toMatchInlineSnapshot(`"<template><ol>{ renderList(orderedItems, (item) => { <li key={getKey(item)}>NOT_KNOWN_INTERPOLATION</li> }) }</ol></template>"`);
+    expect(built).toMatchInlineSnapshot(
+    `"<ol>{ renderList(orderedItems, (item) => { <li key={getKey(item)}>{ getLabel(item) }</li> }) }</ol>"`);
   });
 });

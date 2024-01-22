@@ -10,6 +10,7 @@ import ExposePlugin from "./expose/index.js";
 import OptionsPlugin from "./options/index.js";
 import DeclarationPlugin from "./declaration/index.js";
 import GenericPlugin from "./generic/index.js";
+import TemplatePlugin from "./template/index.js";
 // import ExportPlugin from "./export/index.js";
 
 export const defaultPlugins = [
@@ -21,6 +22,7 @@ export const defaultPlugins = [
   OptionsPlugin,
   DeclarationPlugin,
   GenericPlugin,
+  TemplatePlugin,
   //   ImportPlugin,
   // ExportPlugin,
-] satisfies PluginOption[];
+] as PluginOption[];

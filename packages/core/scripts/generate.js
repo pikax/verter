@@ -24,23 +24,23 @@ async function processDir(dir) {
     fs.readFile(compFilePath, "utf8"),
   ]);
 
-  const outputFilePath = `.\\generated\\${dir}\\index.ts`;
+  const outputFilePath = `.\\generated\\${dir}\\index.tsx`;
 
   // const parsed = parse(compFile, {
   //   filename: "Comp.vue",
   //   templateParseOptions: {},
   // });
   //   console.log('parsed', parsed)
-  const output = builder
-    .process("Comp.vue", compFile)
-    // .replace(
-    //   "export default __options as __COMP__",
-    //   "const Comp = __options as any as __COMP__;"
-    // );
+  const output = builder.process("Comp.vue", compFile);
+  // .replace(
+  //   "export default __options as __COMP__",
+  //   "const Comp = __options as any as __COMP__;"
+  // );
 
   await fs.outputFile(
     outputFilePath,
-    genFile.replace("type __COMP__ = {};", output),
+    "/* @jsxImportSource vue */\n" +
+      genFile.replace("type __COMP__ = {};", output),
     {
       encoding: "utf8",
       // flag: "w",

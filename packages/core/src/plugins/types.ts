@@ -1,4 +1,8 @@
-import { SFCParseResult, SFCScriptBlock, SFCTemplateBlock } from "@vue/compiler-sfc";
+import {
+  SFCParseResult,
+  SFCScriptBlock,
+  SFCTemplateBlock,
+} from "@vue/compiler-sfc";
 import type * as _babel_types from "@babel/types";
 
 // TODO move somewhere else
@@ -20,7 +24,7 @@ export interface ParseScriptContext {
 
   sfc: SFCParseResult;
   script: SFCScriptBlock | null;
-  template: SFCTemplateBlock | null;  
+  template: SFCTemplateBlock | null;
 
   // locations: LocationType[];
 }
@@ -51,6 +55,8 @@ export const enum LocationType {
   Model = "model",
   Expose = "expose",
 
+  Template = "template",
+
   Generic = "generic",
 
   Declaration = "declaration",
@@ -73,7 +79,11 @@ export interface BaseTypeLocation {
 
 export interface TypeLocationDeclaration {
   type: LocationType.Declaration;
-  node: _babel_types.ObjectExpression;
+  node:
+    | _babel_types.VariableDeclaration
+    | _babel_types.FunctionDeclaration
+    | _babel_types.EnumDeclaration
+    | _babel_types.ClassDeclaration;
 
   generated?: boolean;
   declaration: {
@@ -158,6 +168,13 @@ export interface TypeLocationGeneric {
   ];
 }
 
+export interface TypeLocationTemplate {
+  type: LocationType.Template;
+  node: _babel_types.Node;
+
+  content: string;
+}
+
 export type TypeLocationMap = {
   [LocationType.Declaration]: TypeLocationDeclaration;
   [LocationType.Import]: TypeLocationImport;
@@ -169,6 +186,7 @@ export type TypeLocationMap = {
   [LocationType.Expose]: BaseTypeLocation;
   [LocationType.Export]: TypeLocationExport;
   [LocationType.Generic]: TypeLocationGeneric;
+  [LocationType.Template]: TypeLocationTemplate;
 };
 export type ValueOf<T> = T[keyof T];
 

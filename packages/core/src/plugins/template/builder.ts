@@ -120,7 +120,7 @@ function renderComment(node: ParsedNodeBase): string {
   return `\n/*${node.content}*/\n`;
 }
 function renderInterpolation(node: ParsedNodeBase): string {
-  return `NOT_KNOWN_INTERPOLATION`;
+  return `{ ${node.content?.content} }`;
 }
 
 function renderCondition(node: ParsedNodeBase): string {

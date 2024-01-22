@@ -14,6 +14,8 @@ export default {
 
     const content = retrieveNodeString(node, source);
 
+    const declaration = node as babel_types.VariableDeclaration;
+
     // TODO add more
     const supportedTypes = new Set([
       "VariableDeclaration",
@@ -24,11 +26,10 @@ export default {
 
     if (!supportedTypes.has(node.type)) return;
 
-    console.log(node.type, content);
-
     return {
       type: LocationType.Declaration,
       generated: false,
+      node,
       declaration: {
         content,
       },

@@ -42,7 +42,6 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
       if (!parsed.descriptor.scriptSetup && !parsed.descriptor.script)
         return "";
 
-
       const compiled = compileScript(parsed.descriptor, {
         id: filename,
         ...config?.vue?.compiler,
@@ -55,6 +54,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         sfc: parsed,
         script: compiled,
         generic: compiled.attrs.generic,
+        template: parsed.descriptor.template,
       } satisfies ParseScriptContext;
 
       if (!context.script) throw new Error("No script found");
@@ -104,7 +104,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
 
           return `${prev}\n${curr.declaration.type ?? "const"} ${
             curr.declaration.name
-          } = ${curr.declaration.content};`;
+          } = -${curr.declaration.content};`;
         }, "");
 
       const _props = map[LocationType.Props]
@@ -146,6 +146,114 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         }
       `
         : "";
+
+      const _template = map[LocationType.Template]
+        ?.map((x) => x.content)
+        .join(" \n ");
+      // const _templateCtx = map[]
+
+      importsArray.push({
+        type: LocationType.Import,
+        node: undefined,
+        from: "vue",
+        items: [
+          {
+            name: "unref",
+            // type: true,
+          },
+          {
+            name: "ComponentExpectedProps",
+            type: true,
+          },
+          {
+            name: "renderList",
+            // type: true,
+          },
+        ],
+      });
+
+      function getTemplate() {
+        if (!_template) return "";
+
+        const declared = new Set<string>();
+
+        // used to spread the props
+        let propsName = `({} as ComponentExpectedProps<__COMP__${
+          context.generic ? `<${context.generic}>` : ""
+        }>)`;
+
+        const propsProps = new Set<string>();
+
+        const declarations = _declarations
+          .filter((x) => !x.generated)
+          .map((x) => {
+            switch (x.node.type) {
+              case "VariableDeclaration": {
+                return x.node.declarations
+                  .map((x) => {
+                    // TODO handle withdefaults too
+                    if (x.init?.type === "CallExpression") {
+                      if (x.init.callee.name === "defineProps") {
+                        propsName = x.id.name;
+
+                        // TODO add argument support
+                        if (x.init.arguments) {
+                        }
+
+                        x.init.typeParameters?.params?.[0]?.members?.forEach(
+                          (x) => propsProps.add(x.key.name)
+                        );
+                      }
+                    }
+                    return x.id.name;
+                  })
+                  .join(", ");
+              }
+              case "FunctionDeclaration": {
+                return x.node.id.name;
+              }
+              case "EnumDeclaration": {
+                return x.node.id.name;
+              }
+              case "ClassDeclaration": {
+                return x.node.id.name;
+              }
+              default: {
+                return "";
+              }
+            }
+          })
+          .forEach((x) => declared.add(x));
+
+        const contextVars = new Set([...propsProps, ...declared]);
+
+        return _template
+          ? `
+        function __templateResolver${
+          context.generic ? `<${context.generic}>` : ""
+        }() {
+          const ctx = ()=> {
+            ${notGenerated}
+
+            return {
+              ...${propsName},
+              ${Array.from(declared)
+                .map((x) => [x, `unref(${x})`].join(": "))
+                .join(", ")}
+            }
+          }
+
+          const { ${[...contextVars].join(", ")} } = ctx();
+  
+          return (
+            ${_template}
+          );
+        }
+        `
+          : "";
+      }
+
+      const templateContent = getTemplate();
 
       const emits = _emits ? `DeclareEmits<${_emits}>` : "{}";
       const props =
@@ -311,6 +419,9 @@ ${declarations}\n
 
 // expose
 ${exposeContent}
+
+// template
+${templateContent}
 
 ${
   context.generic

@@ -2,9 +2,8 @@ import { MagicString } from "@vue/compiler-sfc";
 import { checkForSetupMethodCall, retrieveNodeString } from "../helpers.js";
 import { LocationType, PluginOption, WalkResult } from "../types.js";
 
-import { walk } from "./walk.js";
-
-import { NodeTypes, ElementTypes } from "@vue/compiler-core";
+import { parse } from "./parse.js";
+import { build } from "./builder.js";
 
 export default {
   name: "Template",
@@ -15,16 +14,27 @@ export default {
 
     const ast = template.ast;
     const source = template.content;
+
     if (!ast) return;
 
-    const multiRoot = ast.children.length > 1;
-
-    const str = new MagicString(source);
-
-    for (const it of ast.children) {
-      const ss = walk(it, str);
-      console.log(ss);
-    }
-    return str.toString();
+    const parsed = parse(ast);
+    const result = build(parsed);
+    return {
+      type: LocationType.Template,
+      node: ast,
+      content: result,
+    };
+    return {
+      type: LocationType.Template,
+      node: ast,
+      generated: true,
+      declaration: {
+        name: "VUE_render",
+        content: `${
+          context.generic ? `<${context.generic},>` : ""
+        }()=> { return (\n${result}\n) }`,
+        type: "const",
+      },
+    };
   },
 } satisfies PluginOption;
