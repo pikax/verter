@@ -7,14 +7,10 @@ export default {
   name: "Declaration",
 
   walk(node, context) {
-    // if (!context.isSetup) return;
-
     const source = context.script?.loc.source;
     if (!source) return;
 
     const content = retrieveNodeString(node, source);
-
-    const declaration = node as babel_types.VariableDeclaration;
 
     // TODO add more
     const supportedTypes = new Set([
