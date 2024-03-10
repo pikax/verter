@@ -18,31 +18,41 @@ const genFiles = glob.sync(`${mainDir}/**/*.vue`);
 const builder = createBuilder();
 
 async function processDir(file) {
-  const name = basename(file, ".vue");
-  const path = dirname(file);
+  try {
+    const name = basename(file, ".vue");
+    const path = dirname(file);
 
-  const [compFile] = await Promise.all([fs.readFile(file, "utf8")]);
+    const [compFile] = await Promise.all([fs.readFile(file, "utf8")]);
 
-  const outputFilePath = `.\\generated\\_dir\\${path.replace(
-    "D:\\",
-    ""
-  )}\\${name}.ts`;
+    const outputFilePath = `.\\generated\\_dir\\${path.replace(
+      "D:\\",
+      ""
+    )}\\${name}.tsx`;
 
-  // const parsed = parse(compFile, {
-  //   filename: "Comp.vue",
-  //   templateParseOptions: {},
-  // });
-  //   console.log('parsed', parsed)
-  const output = builder.process(basename(file), compFile);
-  // .replace(
-  //   "export default __options as __COMP__",
-  //   "const Comp = __options as any as __COMP__;"
-  // );
+    // const parsed = parse(compFile, {
+    //   filename: "Comp.vue",
+    //   templateParseOptions: {},
+    // });
+    //   console.log('parsed', parsed)
+    const output = builder.process(basename(file), compFile);
+    // .replace(
+    //   "export default __options as __COMP__",
+    //   "const Comp = __options as any as __COMP__;"
+    // );
 
-  await fs.outputFile(outputFilePath, output, {
-    encoding: "utf8",
-    // flag: "w",
-  });
+    await fs.outputFile(
+      outputFilePath,
+      "/* @jsxImportSource vue */\n" + output,
+      {
+        encoding: "utf8",
+        // flag: "w",
+      }
+    );
+  } catch (e) {
+    console.error("Error parsing file", file);
+    console.error(e);
+    // throw e;
+  }
 }
 
 await Promise.all(genFiles.map(processDir));

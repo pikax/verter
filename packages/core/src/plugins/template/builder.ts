@@ -5,11 +5,15 @@ import {
   ElementTypes,
   ExpressionNode,
   ForParseResult,
+  InterpolationNode,
   NodeTypes,
   PlainElementNode,
+  TemplateChildNode,
+  walkIdentifiers,
 } from "@vue/compiler-core";
 import { ParsedNodeBase, ParsedType, parse } from "./parse.js";
-import { camelize, capitalize } from "@vue/shared";
+import { camelize, capitalize, isGloballyAllowed } from "@vue/shared";
+import type * as _babel_types from "@babel/types";
 
 export function build(parsed: ReturnType<typeof parse>) {
   return parsed.children.map(renderNode).join("\n");
@@ -120,7 +124,134 @@ function renderComment(node: ParsedNodeBase): string {
   return `\n/*${node.content}*/\n`;
 }
 function renderInterpolation(node: ParsedNodeBase): string {
+  if (true) {
+    const g = node.node.content.ast
+      ? generateNodeText(node.node.content.ast)
+      : appendCtx(node.node.content.content);
+
+    if (g !== `_ctx.${node.node.content.content}`) {
+      const r = generateNodeText(node.node.content.ast);
+    }
+    const n = node.node as InterpolationNode;
+
+    return `{ ${g} }`;
+  }
   return `{ ${node.content?.content} }`;
+}
+
+function appendCtx(content: string, ctx: string = "_ctx") {
+  if (isGloballyAllowed(content)) return content;
+  return ctx ? `${ctx}.${content}` : content;
+}
+
+function generateNodeText(node: _babel_types.Node, ctx: string = "_ctx") {
+  console.log("ttytt", node.type);
+
+  switch (node.type) {
+    case "CallExpression": {
+      // TODO append ctx?
+      const callee = generateNodeText(node.callee); // appendCtx(node.callee.name, ctx);
+      const args = node.arguments
+        .map((x) => generateNodeText(x, ctx))
+        .join(", ");
+
+      return `${callee}(${args})`;
+    }
+    case "Identifier": {
+      // TODO append ctx?
+      return appendCtx(node.name, ctx);
+    }
+    case "MemberExpression": {
+      const object = generateNodeText(node.object, ctx);
+      const property = generateNodeText(
+        node.property,
+        node.property.type === "Identifier" ? "" : ctx
+      );
+      // if (node.extra.parenthesized) {
+      //   return `${object}[${property}]`;
+      // }
+      if (node.property.type === "Identifier") {
+        return `${object}.${property}`;
+      } else {
+        return `${object}[${property}]`;
+      }
+    }
+    case "OptionalMemberExpression": {
+      const object = generateNodeText(node.object, ctx);
+      const property = generateNodeText(node.property, "");
+      return `${object}?.${property}`;
+    }
+    case "LogicalExpression": {
+      const left = generateNodeText(node.left, ctx);
+      const right = generateNodeText(node.right, ctx);
+      return `${left} ${node.operator} ${right}`;
+    }
+    case "ObjectExpression": {
+      const properties = node.properties.map(generateNodeText);
+      return `{ ${properties.join(", ")} }`;
+    }
+
+    case "TSSatisfiesExpression": {
+      const value = generateNodeText(node.expression, ctx);
+      const type = generateNodeText(node.typeAnnotation, ctx);
+      return `${value} satisfies ${type}`;
+    }
+    case "TSAsExpression": {
+      const value = generateNodeText(node.expression, ctx);
+      const type = generateNodeText(node.typeAnnotation, ctx);
+      return `${value} as ${type}`;
+    }
+    case "TSTypeReference": {
+      // TODO double check if this needs to be ctx or not
+      return node.typeName.name;
+    }
+    case "BinaryExpression": {
+      const left = generateNodeText(node.left, ctx);
+      const right = generateNodeText(node.right, ctx);
+      return `${left} ${node.operator} ${right}`;
+    }
+    case "ConditionalExpression": {
+      const test = generateNodeText(node.test, ctx);
+      const consequent = generateNodeText(node.consequent, ctx);
+      const alternate = generateNodeText(node.alternate, ctx);
+      return `${test} ? ${consequent} : ${alternate}`;
+    }
+
+    case "StringLiteral":
+    case "NumericLiteral":
+    case "BooleanLiteral": {
+      return JSON.stringify(node.value);
+    }
+    case "NullLiteral": {
+      return "null";
+    }
+    case "UnaryExpression": {
+      const argument = generateNodeText(node.argument, ctx);
+      return `${node.operator}${argument}`;
+    }
+    case "ArrayExpression": {
+      const elements = node.elements.map((x) => generateNodeText(x, ctx));
+      return `[${elements.join(", ")}]`;
+    }
+    case "ArrowFunctionExpression": {
+      const params = node.params.map((x) => generateNodeText(x, ctx));
+      const body = generateNodeText(node.body, ctx);
+      return `(${params.join(", ")}) => ${body}`;
+    }
+    default: {
+      console.log("-----", node.type);
+      return node.content;
+    }
+    // case NodeTypes.SIMPLE_EXPRESSION: {
+    //   return generateSimpleExpressionText(node);
+    // }
+    // case NodeTypes.COMPOUND_EXPRESSION: {
+    //   return generateCompoundExpressionText(node);
+    // }
+    // default: {
+    //   throw new Error(`Unknown node type ${node.type}`);
+    // }
+  }
 }
 
 function renderCondition(node: ParsedNodeBase): string {
@@ -137,7 +268,7 @@ function renderCondition(node: ParsedNodeBase): string {
 
   const conditions = (node.conditions as []).map((x) => {
     const condition = retriveStringExpressionNode(x.expression);
-    const content = getContent(x.children);
+    const content = getContent(x.children ?? []);
     return {
       rawName: x.rawName,
       condition,
@@ -164,7 +295,10 @@ function retriveStringExpressionNode(node?: ExpressionNode) {
   if (!node) return undefined;
   switch (node.type) {
     case NodeTypes.SIMPLE_EXPRESSION: {
-      return node.content;
+      if (node.isStatic) return node.content;
+      const g = node.ast ? generateNodeText(node.ast) : appendCtx(node.content);
+      return g;
+      // return node.content;
       break;
     }
     case NodeTypes.COMPOUND_EXPRESSION: {

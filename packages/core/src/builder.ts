@@ -45,6 +45,21 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
       const compiled = compileScript(parsed.descriptor, {
         id: filename,
         ...config?.vue?.compiler,
+        templateOptions: {
+          compilerOptions: {
+            prefixIdentifiers: true,
+            inline: true,
+            // bindingMetadata: {
+            //   props: "setup",
+            // },
+
+            // decodeEntities(rawText, asAttr) {
+            //   console.log("decodeEntities", rawText);
+            //   return rawText;
+            // },
+            mode: "module",
+          },
+        },
       });
 
       const context = {
@@ -179,7 +194,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
 
         // used to spread the props
         let propsName = `({} as ComponentExpectedProps<__COMP__${
-          context.generic ? `<${genericNames.join(",")}>` : ""
+          genericNames ? `<${genericNames.join(",")}>` : ""
         }>)`;
 
         const propsProps = new Set<string>();
@@ -225,7 +240,15 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
           })
           .forEach((x) => declared.add(x));
 
-        const contextVars = new Set([...propsProps, ...declared]);
+        const contextVars = new Set(
+          [
+            ...(map[LocationType.Props]?.flatMap((x) =>
+              x.properties?.map((p) => p.name)
+            ) ?? []),
+            ...propsProps,
+            ...declared,
+          ].filter(Boolean)
+        );
 
         return _template
           ? `
@@ -243,7 +266,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
             }
           }
 
-          const { ${[...contextVars].join(", ")} } = ctx();
+          const _ctx = ctx();
   
           return (
             ${_template}
