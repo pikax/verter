@@ -154,7 +154,11 @@ function renderAttribute(
   if (n.name === "on") {
     return `on${capitalize(name)}={${content}}`;
   }
-  return `${name}=${JSON.stringify(content)}`;
+  if (n.type === NodeTypes.DIRECTIVE) {
+    return `${name}={${content}}`;
+  }
+
+  return `${name}={${JSON.stringify(content)}`;
 }
 
 function renderDirective(
