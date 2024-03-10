@@ -18,7 +18,8 @@ export default {
     if (!ast) return;
 
     const parsed = parse(ast);
-    const result = build(parsed);
+    const declarations = [];
+    const result = build(parsed, [], declarations);
     return {
       type: LocationType.Template,
       node: ast,

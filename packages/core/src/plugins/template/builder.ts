@@ -2,6 +2,7 @@ import {
   AttributeNode,
   ComponentNode,
   DirectiveNode,
+  ElementNode,
   ElementTypes,
   ExpressionNode,
   ForParseResult,
@@ -14,13 +15,15 @@ import {
 import { ParsedNodeBase, ParsedType, parse } from "./parse.js";
 import { camelize, capitalize, isGloballyAllowed } from "@vue/shared";
 import type * as _babel_types from "@babel/types";
+import { LocationType, WalkResult } from "../types.js";
 
 export function build(
   parsed: ReturnType<typeof parse>,
-  ignoredIdentifiers: string[] = []
+  ignoredIdentifiers: string[] = [],
+  declarations: WalkResult[] = []
 ) {
   return parsed.children
-    .map((x) => renderNode(x, ignoredIdentifiers))
+    .map((x) => renderNode(x, ignoredIdentifiers, declarations))
     .join("\n");
 }
 
@@ -37,8 +40,12 @@ const render = {
   [ParsedType.Condition]: renderCondition,
 };
 
-function renderNode(node: ParsedNodeBase, ignoredIdentifiers: string[] = []) {
-  return render[node.type](node, ignoredIdentifiers);
+function renderNode(
+  node: ParsedNodeBase,
+  ignoredIdentifiers: string[] = [],
+  declarations: WalkResult[] = []
+) {
+  return render[node.type](node, ignoredIdentifiers, declarations);
 }
 
 function renderChildren(
@@ -66,19 +73,55 @@ function renderChildren(
 }
 
 function renderElement(
-  node: ParsedNodeBase,
-  ignoredIdentifiers: string[]
+  node: ParsedNodeBase & { node: ElementNode; props: ParsedNodeBase[] },
+  ignoredIdentifiers: string[],
+  declarations: WalkResult[] = []
 ): string {
   const content = renderChildren(node.children, ignoredIdentifiers);
-  const tag = resolveComponentTag(node.node!);
+  const tag = resolveComponentTag(node.node);
 
   const props = node.props
     .map((p) => renderAttribute(p, ignoredIdentifiers))
     .join(" ");
+
+  // TODO add support for slots inferrence
+  // if (tag === "slot") {
+  //   declarations.push({
+  //     type: LocationType.Slots,
+  //     node: node.node,
+  //     content: content,
+  //     properties: retrieveProps(node.props, ignoredIdentifiers),
+  //   });
+  // }
+
   return `<${tag}${props ? " " + props : ""}>${content}</${tag}>`;
 }
 
-function resolveComponentTag(node: PlainElementNode | ComponentNode) {
+function retrieveProps(
+  props: ParsedNodeBase[],
+  ignoredIdentifiers: string[] = []
+) {
+  return props.flatMap((x) => {
+    const n = x.node as unknown as AttributeNode | DirectiveNode;
+    if (n.name === "name") return [];
+    if (n.name === "bind") {
+      if (!n.arg) {
+        // full v-bind v-bind={}
+        return [];
+      }
+    } else {
+    }
+    if (n.name === "bind") {
+      const content = retriveStringExpressionNode(n.exp, ignoredIdentifiers);
+      debugger;
+      return [];
+    }
+  });
+}
+
+function resolveComponentTag(
+  node: PlainElementNode | ComponentNode | ElementNode
+) {
   if (node.tagType === ElementTypes.COMPONENT) {
     const camel = camelize(node.tag);
     // if not camel just return
@@ -107,6 +150,9 @@ function renderAttribute(
       return `${name}={${content ?? name}}`;
     }
     return `{...${content}}`;
+  }
+  if (n.name === "on") {
+    return `on${capitalize(name)}={${content}}`;
   }
   return `${name}=${JSON.stringify(content)}`;
 }
@@ -168,7 +214,8 @@ function renderFor(node: ParsedNodeBase, ignoredIdentifiers: string[]): string {
 }
 function renderSlot(
   node: ParsedNodeBase,
-  ignoredIdentifiers: string[]
+  ignoredIdentifiers: string[],
+  declarations: WalkResult[]
 ): string {
   return `NOT_KNOWN_SLOT`;
 }
@@ -177,7 +224,7 @@ function renderComment(
   node: ParsedNodeBase,
   ignoredIdentifiers: string[]
 ): string {
-  return `\n/*${node.content}*/\n`;
+  return `\n{ /*${node.content}*/ }\n`;
 }
 function renderInterpolation(
   node: ParsedNodeBase,
@@ -254,8 +301,12 @@ function generateNodeText(
       return `${left} ${node.operator} ${right}`;
     }
     case "ObjectExpression": {
+      const keys = node.properties.map((x) => x.key.name).filter(Boolean);
+
+      const ignore = [...ignoreCtx, ...keys];
+
       const properties = node.properties.map((x) =>
-        generateNodeText(x, ignoreCtx, ctx)
+        generateNodeText(x, ignore, ctx)
       );
       return `{ ${properties.join(", ")} }`;
     }
@@ -326,6 +377,11 @@ function generateNodeText(
       const params = node.params.map((x) => generateNodeText(x, ignoreCtx, ""));
       const body = generateNodeText(node.body, [...ignoreCtx, ...params], ctx);
       return `(${params.join(", ")}) => ${body}`;
+    }
+    case "ObjectProperty": {
+      const key = generateNodeText(node.key, ignoreCtx, ctx);
+      const value = generateNodeText(node.value, ignoreCtx, ctx);
+      return `${key}: ${value}`;
     }
     default: {
       console.log("-----", node.type);

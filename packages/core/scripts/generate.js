@@ -5,7 +5,9 @@ import { dirname } from "path";
 import fs from "fs-extra";
 import { parse } from "@vue/compiler-sfc";
 
-const genFiles = glob.sync("./generator/**/_gen.ts");
+// const genFiles = glob.sync("./generator/**/_gen.ts");
+// const genFiles = glob.sync("./generator/**/slots-inferred/_gen.ts");
+const genFiles = glob.sync("./generator/**/template/**/_gen.ts");
 
 console.log("gen", genFiles);
 

@@ -1,5 +1,6 @@
 import { checkForSetupMethodCall, retrieveNodeString } from "../helpers.js";
 import { LocationType, PluginOption, WalkResult } from "../types.js";
+import Declaration from "../declaration/declaration.js";
 
 const possibleExports = [
   "export default /*#__PURE__*/_",
@@ -75,6 +76,28 @@ export default {
         ? source.slice(0, source.indexOf("\n"))
         : "";
 
+      // literal-const are declared outside of setup
+      // this adds them back in
+      const literalConst = new Set(
+        Object.entries(context.script.bindings ?? {})
+          .filter(([_, x]) => x === "literal-const")
+          .map(([x]) => x)
+      );
+
+      const declarations = context.script.scriptSetupAst
+        .filter((x) =>
+          x?.declarations?.find((d) => literalConst.has(d.id.name))
+        )
+        .map((x) => Declaration.walk(x, context))
+        .filter(Boolean) as WalkResult[] | undefined;
+
+      if (declarations.length) {
+        content = content.replace(
+          ") {",
+          `) { ${declarations?.map((x) => x.declaration?.content).join("")}`
+        );
+      }
+      
       return [
         {
           type: LocationType.Import,

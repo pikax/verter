@@ -175,12 +175,25 @@ export interface TypeLocationTemplate {
   content: string;
 }
 
+export interface TypeLocationSlots {
+  type: LocationType.Slots;
+  node: _babel_types.Node;
+
+  content?: string;
+  properties?: {
+    node: _babel_types.Node;
+    name: string;
+    // aka type?
+    content: string;
+  }[];
+}
+
 export type TypeLocationMap = {
   [LocationType.Declaration]: TypeLocationDeclaration;
   [LocationType.Import]: TypeLocationImport;
   [LocationType.Emits]: TypeLocationEmits;
   [LocationType.Props]: TypeLocationProps;
-  [LocationType.Slots]: BaseTypeLocation;
+  [LocationType.Slots]: TypeLocationSlots;
   [LocationType.Options]: BaseTypeLocation;
   [LocationType.Model]: BaseTypeLocation;
   [LocationType.Expose]: BaseTypeLocation;

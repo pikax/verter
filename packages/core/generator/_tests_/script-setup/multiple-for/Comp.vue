@@ -1,10 +1,9 @@
 <script lang="ts" setup>
+const Supa = "HELLO";
 const Items = [
   { name: "1", children: [{ value: "1" }, { value: "2" }] },
   { name: "2", children: [{ value: "1" }, { value: "2" }] },
 ];
-
-const Supa = "HELLO";
 
 defineExpose({ Items, Supa });
 </script>

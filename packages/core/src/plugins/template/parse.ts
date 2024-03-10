@@ -266,8 +266,10 @@ function groupConditions(elements: ParsedNodeBase[]) {
       default: {
         // add the comment to ifs, that way it will be appended coorectly
         if (it?.type === "comment") {
-          ifs.push(it);
-          continue;
+          if (lastIfIndex !== -1) {
+            ifs.push(it);
+            continue;
+          }
         }
 
         if (lastIfIndex !== -1) {

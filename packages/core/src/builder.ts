@@ -37,42 +37,29 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
     process(filename: string, source: string) {
       const parsed = parse(source, {
         filename,
+        ignoreEmpty: true,
       });
-      // TODO we should still process it
-      if (!parsed.descriptor.scriptSetup && !parsed.descriptor.script)
-        return "";
 
-      const compiled = compileScript(parsed.descriptor, {
-        id: filename,
-        ...config?.vue?.compiler,
-        templateOptions: {
-          compilerOptions: {
-            prefixIdentifiers: true,
-            inline: true,
-            // bindingMetadata: {
-            //   props: "setup",
-            // },
-
-            // decodeEntities(rawText, asAttr) {
-            //   console.log("decodeEntities", rawText);
-            //   return rawText;
-            // },
-            mode: "module",
-          },
-        },
-      });
+      const compiled =
+        !!parsed.descriptor.scriptSetup || !!parsed.descriptor.script
+          ? compileScript(parsed.descriptor, {
+              id: filename,
+              // genDefaultAs: "GEN_COMP",
+              ...config?.vue?.compiler,
+            })
+          : null;
 
       const context = {
         filename,
         id: filename,
-        isSetup: Boolean(compiled.setup),
+        isSetup: Boolean(compiled?.setup),
         sfc: parsed,
         script: compiled,
-        generic: compiled.attrs.generic,
+        generic: compiled?.attrs.generic,
         template: parsed.descriptor.template,
       } satisfies ParseScriptContext;
 
-      if (!context.script) throw new Error("No script found");
+      // if (!context.script) throw new Error("No script found");
 
       // create a map
       const locations = [
@@ -119,7 +106,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
 
           return `${prev}\n${curr.declaration.type ?? "const"} ${
             curr.declaration.name
-          } = -${curr.declaration.content};`;
+          } = ${curr.declaration.content};`;
         }, "");
 
       const _props = map[LocationType.Props]

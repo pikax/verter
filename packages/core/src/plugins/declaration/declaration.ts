@@ -10,7 +10,6 @@ export default {
     const source = context.script?.loc.source;
     if (!source) return;
 
-    const content = retrieveNodeString(node, source);
 
     const supportedTypes = new Set([
       "VariableDeclaration",
@@ -18,10 +17,10 @@ export default {
       "EnumDeclaration",
       "ClassDeclaration",
       "InterfaceDeclaration",
-      "VariableDeclarator",
     ] as Array<babel_types.Node["type"]>);
 
     if (!supportedTypes.has(node.type)) return;
+    const content = retrieveNodeString(node, source);
 
     return {
       type: LocationType.Declaration,
