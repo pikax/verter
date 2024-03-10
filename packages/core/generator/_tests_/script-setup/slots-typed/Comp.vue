@@ -2,5 +2,10 @@
 const slots = defineSlots<{ foo: () => any }>();
 </script>
 <template>
-  <span>1</span>
+  <div>
+    <slot name="foo" />
+
+    <!-- @ts-expect-error  -->
+    <slot name="bar" />
+  </div>
 </template>

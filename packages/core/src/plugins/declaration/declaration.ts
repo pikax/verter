@@ -18,6 +18,7 @@ export default {
       "EnumDeclaration",
       "ClassDeclaration",
       "InterfaceDeclaration",
+      "VariableDeclarator",
     ] as Array<babel_types.Node["type"]>);
 
     if (!supportedTypes.has(node.type)) return;

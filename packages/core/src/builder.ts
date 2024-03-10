@@ -219,9 +219,12 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
                           (x) => propsProps.add(x.key.name)
                         );
                       }
+                    } else if (x.id.type === "ObjectPattern") {
+                      return x.id.properties.map((x) => x.key.name).join(", ");
                     }
                     return x.id.name;
                   })
+                  .filter(Boolean)
                   .join(", ");
               }
               case "FunctionDeclaration": {
@@ -238,6 +241,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
               }
             }
           })
+          .filter(Boolean)
           .forEach((x) => declared.add(x));
 
         const contextVars = new Set(
@@ -259,6 +263,9 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
             ${notGenerated}
 
             return {
+              ...({} as ComponentInstance<__COMP__${
+                genericNames ? `<${genericNames.join(",")}>` : ""
+              }>),
               ...${propsName},
               ${Array.from(declared)
                 .map((x) => [x, `unref(${x})`].join(": "))
@@ -269,7 +276,9 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
           const _ctx = ctx();
   
           return (
+            <>
             ${_template}
+            </>
           );
         }
         `

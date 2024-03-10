@@ -15,8 +15,13 @@ import { ParsedNodeBase, ParsedType, parse } from "./parse.js";
 import { camelize, capitalize, isGloballyAllowed } from "@vue/shared";
 import type * as _babel_types from "@babel/types";
 
-export function build(parsed: ReturnType<typeof parse>) {
-  return parsed.children.map(renderNode).join("\n");
+export function build(
+  parsed: ReturnType<typeof parse>,
+  ignoredIdentifiers: string[] = []
+) {
+  return parsed.children
+    .map((x) => renderNode(x, ignoredIdentifiers))
+    .join("\n");
 }
 
 const render = {
@@ -32,24 +37,44 @@ const render = {
   [ParsedType.Condition]: renderCondition,
 };
 
-function renderNode(node: ParsedNodeBase) {
-  return render[node.type](node);
+function renderNode(node: ParsedNodeBase, ignoredIdentifiers: string[] = []) {
+  return render[node.type](node, ignoredIdentifiers);
 }
 
-function renderChildren(children?: ParsedNodeBase[]): string;
-function renderChildren(children?: ParsedNodeBase[], join?: true): string;
-function renderChildren(children?: ParsedNodeBase[], join?: false): string[];
-function renderChildren(children?: ParsedNodeBase[], join = true) {
+function renderChildren(
+  children: ParsedNodeBase[],
+  ignoredIdentifiers: string[]
+): string;
+function renderChildren(
+  children: ParsedNodeBase[],
+  ignoredIdentifiers: string[],
+  join?: true
+): string;
+function renderChildren(
+  children: ParsedNodeBase[],
+  ignoredIdentifiers: string[],
+  join?: false
+): string[];
+function renderChildren(
+  children: ParsedNodeBase[],
+  ignoredIdentifiers: string[],
+  join = true
+) {
   if (!children || children.length === 0) return "";
-  const c = children.map(renderNode);
+  const c = children.map((x) => renderNode(x, ignoredIdentifiers));
   return join ? c.join("\n") : c;
 }
 
-function renderElement(node: ParsedNodeBase): string {
-  const content = renderChildren(node.children);
+function renderElement(
+  node: ParsedNodeBase,
+  ignoredIdentifiers: string[]
+): string {
+  const content = renderChildren(node.children, ignoredIdentifiers);
   const tag = resolveComponentTag(node.node!);
 
-  const props = node.props.map(renderAttribute).join(" ");
+  const props = node.props
+    .map((p) => renderAttribute(p, ignoredIdentifiers))
+    .join(" ");
   return `<${tag}${props ? " " + props : ""}>${content}</${tag}>`;
 }
 
@@ -65,12 +90,17 @@ function resolveComponentTag(node: PlainElementNode | ComponentNode) {
   return node.tag;
 }
 
-function renderAttribute(node: ParsedNodeBase): string {
+function renderAttribute(
+  node: ParsedNodeBase,
+  ignoredIdentifiers: string[]
+): string {
   const n = node.node as unknown as AttributeNode | DirectiveNode;
 
-  const name = retriveStringExpressionNode(n.arg) || n.name;
+  const name = retriveStringExpressionNode(n.arg, ignoredIdentifiers) || n.name;
   const content =
-    retriveStringExpressionNode(n.exp) || n.value?.content || n.value;
+    retriveStringExpressionNode(n.exp, ignoredIdentifiers) ||
+    n.value?.content ||
+    n.value;
 
   if (n.name === "bind") {
     if (!!n.arg) {
@@ -81,30 +111,50 @@ function renderAttribute(node: ParsedNodeBase): string {
   return `${name}=${JSON.stringify(content)}`;
 }
 
-function renderDirective(node: ParsedNodeBase): string {
+function renderDirective(
+  node: ParsedNodeBase,
+  ignoredIdentifiers: string[]
+): string {
   return `NOT_KNOWN_DIRECTIVE`;
 }
 
-function renderTemplate(node: ParsedNodeBase): string {
+function renderTemplate(
+  node: ParsedNodeBase,
+  ignoredIdentifiers: string[]
+): string {
   return `NOT_KNOWN_TEMPLATE`;
 }
 
-function renderText(node: ParsedNodeBase): string {
+function renderText(
+  node: ParsedNodeBase,
+  ignoredIdentifiers: string[]
+): string {
   return `{ ${JSON.stringify(node.content)} }`;
 }
-function renderFor(node: ParsedNodeBase): string {
+function renderFor(node: ParsedNodeBase, ignoredIdentifiers: string[]): string {
   const forResult = node.for as ForParseResult;
 
   const { source, value, key, index } = forResult;
 
-  const keyString = key ? retriveStringExpressionNode(key) : "";
-  const indexString = index ? retriveStringExpressionNode(index) : "";
+  const keyString = key
+    ? retriveStringExpressionNode(key, ignoredIdentifiers, "")
+    : "";
+  const indexString = index
+    ? retriveStringExpressionNode(index, ignoredIdentifiers, "")
+    : "";
 
-  const sourceString = source ? retriveStringExpressionNode(source) : "()";
+  const sourceString = source
+    ? retriveStringExpressionNode(source, ignoredIdentifiers)
+    : "()";
 
-  const valueString = value ? retriveStringExpressionNode(value) : "value";
+  const valueString = value
+    ? retriveStringExpressionNode(value, ignoredIdentifiers, "")
+    : "value";
 
-  const content = renderChildren(node.children);
+  const content = renderChildren(
+    node.children,
+    [...ignoredIdentifiers, valueString, keyString, indexString].filter(Boolean)
+  );
 
   const str = `renderList(${sourceString}, (${[
     valueString,
@@ -116,21 +166,30 @@ function renderFor(node: ParsedNodeBase): string {
 
   return `{ ${str} }`;
 }
-function renderSlot(node: ParsedNodeBase): string {
+function renderSlot(
+  node: ParsedNodeBase,
+  ignoredIdentifiers: string[]
+): string {
   return `NOT_KNOWN_SLOT`;
 }
 
-function renderComment(node: ParsedNodeBase): string {
+function renderComment(
+  node: ParsedNodeBase,
+  ignoredIdentifiers: string[]
+): string {
   return `\n/*${node.content}*/\n`;
 }
-function renderInterpolation(node: ParsedNodeBase): string {
+function renderInterpolation(
+  node: ParsedNodeBase,
+  ignoredIdentifiers: string[]
+): string {
   if (true) {
     const g = node.node.content.ast
-      ? generateNodeText(node.node.content.ast)
-      : appendCtx(node.node.content.content);
+      ? generateNodeText(node.node.content.ast, ignoredIdentifiers)
+      : appendCtx(node.node.content.content, ignoredIdentifiers);
 
     if (g !== `_ctx.${node.node.content.content}`) {
-      const r = generateNodeText(node.node.content.ast);
+      const r = generateNodeText(node.node.content.ast, ignoredIdentifiers);
     }
     const n = node.node as InterpolationNode;
 
@@ -139,32 +198,42 @@ function renderInterpolation(node: ParsedNodeBase): string {
   return `{ ${node.content?.content} }`;
 }
 
-function appendCtx(content: string, ctx: string = "_ctx") {
-  if (isGloballyAllowed(content)) return content;
-  return ctx ? `${ctx}.${content}` : content;
+function appendCtx(
+  content: string,
+  ignoreCtx: string[] = [],
+  ctx: string = "_ctx"
+) {
+  if (isGloballyAllowed(content) || ~ignoreCtx.indexOf(content) || !ctx)
+    return content;
+  return `${ctx}.${content}`;
 }
 
-function generateNodeText(node: _babel_types.Node, ctx: string = "_ctx") {
+function generateNodeText(
+  node: _babel_types.Node,
+  ignoreCtx: string[] = [],
+  ctx: string = "_ctx"
+) {
   console.log("ttytt", node.type);
 
   switch (node.type) {
     case "CallExpression": {
       // TODO append ctx?
-      const callee = generateNodeText(node.callee); // appendCtx(node.callee.name, ctx);
+      const callee = generateNodeText(node.callee, ignoreCtx); // appendCtx(node.callee.name, ctx);
       const args = node.arguments
-        .map((x) => generateNodeText(x, ctx))
+        .map((x) => generateNodeText(x, ignoreCtx, ctx))
         .join(", ");
 
       return `${callee}(${args})`;
     }
     case "Identifier": {
       // TODO append ctx?
-      return appendCtx(node.name, ctx);
+      return appendCtx(node.name, ignoreCtx, ctx);
     }
     case "MemberExpression": {
-      const object = generateNodeText(node.object, ctx);
+      const object = generateNodeText(node.object, ignoreCtx, ctx);
       const property = generateNodeText(
         node.property,
+        ignoreCtx,
         node.property.type === "Identifier" ? "" : ctx
       );
       // if (node.extra.parenthesized) {
@@ -177,28 +246,30 @@ function generateNodeText(node: _babel_types.Node, ctx: string = "_ctx") {
       }
     }
     case "OptionalMemberExpression": {
-      const object = generateNodeText(node.object, ctx);
-      const property = generateNodeText(node.property, "");
+      const object = generateNodeText(node.object, ignoreCtx, ctx);
+      const property = generateNodeText(node.property, ignoreCtx, "");
       return `${object}?.${property}`;
     }
     case "LogicalExpression": {
-      const left = generateNodeText(node.left, ctx);
-      const right = generateNodeText(node.right, ctx);
+      const left = generateNodeText(node.left, ignoreCtx, ctx);
+      const right = generateNodeText(node.right, ignoreCtx, ctx);
       return `${left} ${node.operator} ${right}`;
     }
     case "ObjectExpression": {
-      const properties = node.properties.map(generateNodeText);
+      const properties = node.properties.map((x) =>
+        generateNodeText(x, ignoreCtx, ctx)
+      );
       return `{ ${properties.join(", ")} }`;
     }
 
     case "TSSatisfiesExpression": {
-      const value = generateNodeText(node.expression, ctx);
-      const type = generateNodeText(node.typeAnnotation, ctx);
+      const value = generateNodeText(node.expression, ignoreCtx, ctx);
+      const type = generateNodeText(node.typeAnnotation, ignoreCtx, ctx);
       return `${value} satisfies ${type}`;
     }
     case "TSAsExpression": {
-      const value = generateNodeText(node.expression, ctx);
-      const type = generateNodeText(node.typeAnnotation, ctx);
+      const value = generateNodeText(node.expression, ignoreCtx, ctx);
+      const type = generateNodeText(node.typeAnnotation, ignoreCtx, ctx);
       return `${value} as ${type}`;
     }
     case "TSTypeReference": {
@@ -206,19 +277,20 @@ function generateNodeText(node: _babel_types.Node, ctx: string = "_ctx") {
       return node.typeName.name;
     }
     case "BinaryExpression": {
-      const left = generateNodeText(node.left, ctx);
-      const right = generateNodeText(node.right, ctx);
+      const left = generateNodeText(node.left, ignoreCtx, ctx);
+      const right = generateNodeText(node.right, ignoreCtx, ctx);
       return `${left} ${node.operator} ${right}`;
     }
     case "ConditionalExpression": {
-      const test = generateNodeText(node.test, ctx);
-      const consequent = generateNodeText(node.consequent, ctx);
-      const alternate = generateNodeText(node.alternate, ctx);
+      const test = generateNodeText(node.test, ignoreCtx, ctx);
+      const consequent = generateNodeText(node.consequent, ignoreCtx, ctx);
+      const alternate = generateNodeText(node.alternate, ignoreCtx, ctx);
       return `${test} ? ${consequent} : ${alternate}`;
     }
 
     case "StringLiteral":
     case "NumericLiteral":
+    case "TemplateLiteral":
     case "BooleanLiteral": {
       return JSON.stringify(node.value);
     }
@@ -226,16 +298,18 @@ function generateNodeText(node: _babel_types.Node, ctx: string = "_ctx") {
       return "null";
     }
     case "UnaryExpression": {
-      const argument = generateNodeText(node.argument, ctx);
+      const argument = generateNodeText(node.argument, ignoreCtx, ctx);
       return `${node.operator}${argument}`;
     }
     case "ArrayExpression": {
-      const elements = node.elements.map((x) => generateNodeText(x, ctx));
+      const elements = node.elements.map((x) =>
+        generateNodeText(x, ignoreCtx, ctx)
+      );
       return `[${elements.join(", ")}]`;
     }
     case "ArrowFunctionExpression": {
-      const params = node.params.map((x) => generateNodeText(x, ctx));
-      const body = generateNodeText(node.body, ctx);
+      const params = node.params.map((x) => generateNodeText(x, ignoreCtx, ""));
+      const body = generateNodeText(node.body, [...ignoreCtx, ...params], ctx);
       return `(${params.join(", ")}) => ${body}`;
     }
     default: {
@@ -254,9 +328,12 @@ function generateNodeText(node: _babel_types.Node, ctx: string = "_ctx") {
   }
 }
 
-function renderCondition(node: ParsedNodeBase): string {
+function renderCondition(
+  node: ParsedNodeBase,
+  ignoredIdentifiers: string[]
+): string {
   function getContent(children: ParsedNodeBase[]) {
-    return renderChildren(children, false).map((x) => {
+    return renderChildren(children, ignoredIdentifiers, false).map((x) => {
       // check if wrapped, if it is unwrap
       if (x[0] === "{" && x[x.length - 1] === "}") {
         x = x.slice(1);
@@ -267,7 +344,10 @@ function renderCondition(node: ParsedNodeBase): string {
   }
 
   const conditions = (node.conditions as []).map((x) => {
-    const condition = retriveStringExpressionNode(x.expression);
+    const condition = retriveStringExpressionNode(
+      x.expression,
+      ignoredIdentifiers
+    );
     const content = getContent(x.children ?? []);
     return {
       rawName: x.rawName,
@@ -291,12 +371,18 @@ function renderCondition(node: ParsedNodeBase): string {
   return `{ ${c} }`;
 }
 
-function retriveStringExpressionNode(node?: ExpressionNode) {
+function retriveStringExpressionNode(
+  node: ExpressionNode,
+  ignoredIdentifiers: string[],
+  ctx = "_ctx"
+) {
   if (!node) return undefined;
   switch (node.type) {
     case NodeTypes.SIMPLE_EXPRESSION: {
       if (node.isStatic) return node.content;
-      const g = node.ast ? generateNodeText(node.ast) : appendCtx(node.content);
+      const g = node.ast
+        ? generateNodeText(node.ast, ignoredIdentifiers, ctx)
+        : appendCtx(node.content, ignoredIdentifiers, ctx);
       return g;
       // return node.content;
       break;
