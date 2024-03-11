@@ -241,6 +241,13 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
           ].filter(Boolean)
         );
 
+        const imports = map[LocationType.Import]?.reduce((prev, curr) => {
+          if (curr.generated === false) {
+            prev.push(...curr.items.map((x) => x.alias ?? x.name));
+          }
+          return prev;
+        }, []);
+
         return _template
           ? `
         function __templateResolver${
@@ -249,7 +256,9 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
           const ctx = ()=> {
             ${notGenerated}
 
+
             return {
+              ${context.isSetup && imports.length > 0 ? imports.join(", ") + ', ' : ""}
               ...({} as ComponentInstance<__COMP__${
                 genericNames ? `<${genericNames.join(",")}>` : ""
               }>),
@@ -414,8 +423,6 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         });
       }
 
-      const templateContent = getTemplate();
-
       // TODO should group imports
       const imports = map[LocationType.Import]?.reduce((prev, curr) => {
         if (!curr.items?.length) {
@@ -432,6 +439,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
           .filter(Boolean)
           .join(", ")} } from '${curr.from}';`;
       }, "");
+      const templateContent = getTemplate();
 
       return `${imports}\n
 

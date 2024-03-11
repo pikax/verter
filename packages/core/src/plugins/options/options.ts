@@ -18,6 +18,7 @@ export default {
       return [
         {
           type: LocationType.Import,
+          generated: true,
           node: context.script,
           // TODO change the import location
           from: "vue",
@@ -97,10 +98,11 @@ export default {
           `) { ${declarations?.map((x) => x.declaration?.content).join("")}`
         );
       }
-      
+
       return [
         {
           type: LocationType.Import,
+          generated: true,
           node: context.script,
           // TODO change the import location
           from: "vue",
@@ -147,6 +149,7 @@ export default {
         .concat(
           Object.values(context.script!.imports ?? {}).map((x) => ({
             type: LocationType.Import,
+            generated: false,
             node: context.script,
             from: x.source,
             items: [
@@ -163,6 +166,7 @@ export default {
             ? [
                 {
                   type: LocationType.Import,
+                  generated: false,
                   node: context.script,
                   from: imports.slice(),
                   items: [],
@@ -202,6 +206,7 @@ export default {
       {
         type: LocationType.Import,
         node: context.script,
+        generated: true,
         // TODO change the import location
         from: "vue",
         items: [

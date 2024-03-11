@@ -105,6 +105,7 @@ export interface TypeLocationDeclaration {
 
 export interface TypeLocationImport {
   type: LocationType.Import;
+  generated?: boolean;
   node: _babel_types.ImportDeclaration;
   items: ImportItem[];
   from: string;

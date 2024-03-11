@@ -14,6 +14,7 @@ export default {
       {
         type: LocationType.Import,
         node: expression,
+        generated: true,
         // TODO change the import location
         from: "vue",
         items: [

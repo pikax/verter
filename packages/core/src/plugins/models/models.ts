@@ -39,8 +39,9 @@ export default {
       return [
         {
           type: LocationType.Import,
+          generated: true,
           node: propTypeArgument,
-              // TODO change the import location
+          // TODO change the import location
           from: "<helpers>",
           items: [
             {

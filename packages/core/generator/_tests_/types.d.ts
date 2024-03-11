@@ -72,7 +72,9 @@ declare global {
     : never;
 
   type ExtractRenderComponents<T> = OmitNever<{
-    [K in keyof T]: ExtractComponent<T[K]>;
+    [K in keyof T as K extends `$${string}` ? never : K]: ExtractComponent<
+      T[K]
+    >;
   }> &
     GlobalComponents & {};
 }
