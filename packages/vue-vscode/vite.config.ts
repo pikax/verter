@@ -7,9 +7,10 @@ export default defineConfig({
       fileName: "extension",
       formats: ["cjs"],
     },
+    sourcemap: true,
 
     rollupOptions: {
-      external: ["path", "vscode", "vscode-languageclient/node"],
+      external: ["path", "vscode", "vscode-languageclient/node", "lodash"],
     },
   },
 });

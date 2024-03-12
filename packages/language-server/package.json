@@ -2,7 +2,7 @@
   "name": "@verter/language-server",
   "version": "1.0.0",
   "description": "A language server for Vue",
-  "type": "module",
+  "type": "commonjs",
   "main": "dist/index.js",
   "scripts": {
     "build": "vite build",
@@ -16,8 +16,11 @@
     "node": ">=14.0.0"
   },
   "dependencies": {
+    "@verter/core": "workspace:^",
+    "@verter/language-shared": "workspace:^",
     "typescript": "^5.3.3",
-    "vscode-languageserver": "^9.0.1"
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.11"
   },
   "devDependencies": {
     "vite": "^5.0.11"

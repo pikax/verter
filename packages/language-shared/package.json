@@ -1,0 +1,20 @@
+{
+  "name": "@verter/language-shared",
+  "version": "1.0.0",
+  "description": "Contains shared information between the language server and the language client",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "type": "commonjs",
+  "scripts": {
+    "build": "vite build",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "Carlos Rodrigues <pikax>",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "vite": "^5.0.11",
+    "vite-plugin-dts": "^3.7.3"
+  }
+}

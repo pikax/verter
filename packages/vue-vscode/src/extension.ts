@@ -1,5 +1,11 @@
-import * as path from "path";
-import { window, commands, workspace, ExtensionContext } from "vscode";
+import {
+  window,
+  commands,
+  workspace,
+  ExtensionContext,
+  ProgressLocation,
+  ViewColumn,
+} from "vscode";
 import {
   LanguageClient,
   LanguageClientOptions,
@@ -8,45 +14,22 @@ import {
   RevealOutputChannelOn,
 } from "vscode-languageclient/node";
 
-let getClient: (() => LanguageClient) | undefined;
+import type { PatchClient } from "@verter/language-shared";
+import { patchClient, NotificationType } from "@verter/language-shared";
+import CompiledCodeContentProvider from "./CompiledCodeContentProvider";
+
+type GetClient = () => PatchClient<LanguageClient>;
+
+let getClient: GetClient | undefined;
 
 export function activate(context: ExtensionContext) {
-  // // The server is implemented in node
-  // const serverModule = context.asAbsolutePath(
-  //   path.join("server", "out", "server.js")
-  // );
-  // // If the extension is launched in debug mode then the debug server options are used
-  // // Otherwise the run options are used
-  // const serverOptions: ServerOptions = {
-  //   run: { module: serverModule, transport: TransportKind.ipc },
-  //   debug: {
-  //     module: serverModule,
-  //     transport: TransportKind.ipc,
-  //   },
-  // };
-  // // Options to control the language client
-  // const clientOptions: LanguageClientOptions = {
-  //   // Register the server for plain text documents
-  //   documentSelector: [{ scheme: "file", language: "plaintext" }],
-  //   synchronize: {
-  //     // Notify the server about file changes to '.clientrc files contained in the workspace
-  //     fileEvents: workspace.createFileSystemWatcher("**/.clientrc"),
-  //   },
-  // };
-  // // Create the language client and start the client.
-  // client = new LanguageClient(
-  //   "languageServerExample",
-  //   "Language Server Example",
-  //   serverOptions,
-  //   clientOptions
-  // );
-  // // Start the client. This will also launch the server
-  // client.start();
-
   const server = activateVueLanguageServer(context);
   getClient = server.getClient;
+
+  server.getClient().sendNotification;
+  server.getClient().onNotification;
 }
- 
+
 export function deactivate(): Thenable<void> | undefined {
   const stop = getClient?.().stop();
   getClient = undefined;
@@ -116,6 +99,7 @@ export function activateVueLanguageServer(context: ExtensionContext) {
   };
 
   let client = createLanguageServer(serverOptions, clientOptions);
+  const getClient = () => client as unknown as PatchClient<LanguageClient>;
 
   context.subscriptions.push(
     commands.registerCommand("verter.restartLanguageServer", async () => {
@@ -143,8 +127,11 @@ export function activateVueLanguageServer(context: ExtensionContext) {
     }
   }
 
+  addDidChangeTextDocumentListener(getClient);
+  addCompilePreviewCommand(getClient, context);
+
   return {
-    getClient: () => client,
+    getClient,
   };
 }
 
@@ -153,4 +140,72 @@ function createLanguageServer(
   clientOptions: LanguageClientOptions
 ) {
   return new LanguageClient("verter", "Verter", serverOptions, clientOptions);
+}
+
+function addDidChangeTextDocumentListener(getClient: GetClient) {
+  workspace.onDidChangeTextDocument((e) => {
+    if (
+      e.document.languageId !== "typescript" &&
+      e.document.languageId !== "javascript"
+    ) {
+      return;
+    }
+    const client = getClient();
+    client.sendNotification(NotificationType.OnDidChangeTsOrJsFile, {
+      uri: e.document.uri.toString(true),
+      changes: e.contentChanges.map((x) => ({
+        range: {
+          start: {
+            line: x.range.start.line,
+            character: x.range.start.character,
+          },
+          end: { line: x.range.end.line, character: x.range.end.character },
+        },
+        text: x.text,
+      })),
+    });
+  });
+}
+
+function addCompilePreviewCommand(
+  getClient: GetClient,
+  context: ExtensionContext
+) {
+  const compiledCodeContentProvider = new CompiledCodeContentProvider(
+    getClient
+  );
+
+  context.subscriptions.push(
+    // Register the content provider for "vue-compiled://" files
+    workspace.registerTextDocumentContentProvider(
+      CompiledCodeContentProvider.scheme,
+      compiledCodeContentProvider
+    ),
+    compiledCodeContentProvider
+  );
+
+  context.subscriptions.push(
+    commands.registerTextEditorCommand(
+      "veter.showCompiledCodeToSide",
+      async (editor) => {
+        if (editor?.document?.languageId !== "vue") {
+          return;
+        }
+
+        window.withProgress(
+          { location: ProgressLocation.Window, title: "Compiling..." },
+          async () => {
+            // Open a new preview window for the compiled code
+            return await window.showTextDocument(
+              CompiledCodeContentProvider.previewWindowUri,
+              {
+                preview: true,
+                viewColumn: ViewColumn.Beside,
+              }
+            );
+          }
+        );
+      }
+    )
+  );
 }

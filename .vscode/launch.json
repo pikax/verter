@@ -27,6 +27,7 @@
       ],
       "outFiles": [
         "${workspaceRoot}/packages/vue-vscode/dist/**/*.js",
+        "${workspaceRoot}/packages/core/dist/**/*.js",
         "${workspaceRoot}/packages/language-server/dist/**/*.js"
       ],
       "autoAttachChildProcesses": true

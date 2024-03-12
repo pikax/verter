@@ -13,8 +13,11 @@
   "author": "Carlos Rodrigues <pikax>",
   "license": "MIT",
   "dependencies": {
+    "@types/lodash": "^4.17.0",
     "@types/vscode": "^1.87.0",
     "@verter/language-server": "workspace:^",
+    "@verter/language-shared": "workspace:^",
+    "lodash": "^4.17.21",
     "vscode-languageclient": "^9.0.1"
   },
   "devDependencies": {
@@ -41,6 +44,31 @@
         }
       }
     },
+    "languages": [
+      {
+        "id": "vue",
+        "aliases": [
+          "Vue"
+        ],
+        "extensions": [
+          ".vue"
+        ],
+        "configuration": "./languages/vue-language-configuration.json"
+      },
+      {
+        "id": "vue-html",
+        "aliases": [
+          "Vue HTML",
+          "vhtml",
+          "vhtm"
+        ],
+        "extensions": [
+          ".vue-html",
+          ".vhtml"
+        ],
+        "configuration": "./languages/vue-html-language-configuration.json"
+      }
+    ],
     "commands": [
       {
         "command": "verter.helloWorld",
@@ -49,6 +77,10 @@
       {
         "command": "verter.restartLanguageServer",
         "title": "Verter: Restart Language Server"
+      },
+      {
+        "command": "veter.showCompiledCodeToSide",
+        "title": "Verter: Show compiled Code to Side"
       }
     ]
   }
