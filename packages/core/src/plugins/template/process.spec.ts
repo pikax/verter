@@ -78,10 +78,10 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent foo={bar}/></template>"`
+        `"<template><___VERTER__comp.MyComponent foo={___VETER__ctx.bar}/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAE,IAAI,CAAC,GAAG,CAAC"}"`
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAE,IAAI,eAAC,GAAG,CAAC"}"`
       );
     });
 
@@ -92,10 +92,10 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent foo={bar}/></template>"`
+        `"<template><___VERTER__comp.MyComponent foo={___VETER__ctx.bar}/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,IAAI,CAAC,GAAG,CAAC"}"`
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,IAAI,eAAC,GAAG,CAAC"}"`
       );
     });
 
@@ -106,10 +106,10 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent {...bar}/></template>"`
+        `"<template><___VERTER__comp.MyComponent {...___VETER__ctx.bar}/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,CAAP,GAAQ,GAAG,CAAC"}"`
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,CAAP,iBAAQ,GAAG,CAAC"}"`
       );
     });
 
@@ -120,10 +120,10 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent bind={bar}/></template>"`
+        `"<template><___VERTER__comp.MyComponent bind={___VETER__ctx.bar}/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAE,KAAK,CAAC,GAAG,CAAC"}"`
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAE,KAAK,eAAC,GAAG,CAAC"}"`
       );
     });
 
@@ -134,10 +134,10 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent bind={bar}/></template>"`
+        `"<template><___VERTER__comp.MyComponent bind={___VETER__ctx.bar}/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,KAAK,CAAC,GAAG,CAAC"}"`
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,KAAK,eAAC,GAAG,CAAC"}"`
       );
     });
 
@@ -148,10 +148,10 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent {...bar} foo="bar"/></template>"`
+        `"<template><___VERTER__comp.MyComponent {...___VETER__ctx.bar} foo="bar"/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,CAAP,GAAQ,GAAG,CAAC"}"`
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,CAAP,iBAAQ,GAAG,CAAC,CAAC,GAAG"}"`
       );
     });
 
@@ -162,12 +162,77 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent foo="bar" {...bar}/></template>"`
+        `"<template><___VERTER__comp.MyComponent foo="bar" {...___VETER__ctx.bar}/></template>"`
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,WAAkB,CAAP,GAAQ,GAAG,CAAC"}"`
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAC,GAAG,OAAc,CAAP,iBAAQ,GAAG,CAAC"}"`
       );
+    });
+
+    it("should pass boolen on just props", () => {
+      const source = `<span foo/>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><span foo/></template>"`
+      );
+
+      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,CAAC,GAAG"}"`
+      );
+    });
+
+    it("should camelCase props", () => {
+      const source = `<span supa-awesome-prop="hello"></span>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><span supaAwesomeProp="hello"></span></template>"`
+      );
+
+      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,CAAC,eAAiB,WAAW,IAAI"}"`
+      );
+    });
+    it('should camelCase "on" event listeners', () => {
+      const source = `<span @check-for-something="test"></span>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><span onCheckForSomething={___VETER__ctx.test}></span></template>"`
+      );
+
+      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,CAAC,EAAC,iBAAmB,CAAC,eAAC,IAAI,CAAC,GAAG,IAAI"}"`
+      );
+    });
+
+    it("should camelCase bind", () => {
+      const source = `<span :model-value="test"></span>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><span modelValue={___VETER__ctx.test}></span></template>"`
+      );
+
+      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,CAAE,UAAW,CAAC,eAAC,IAAI,CAAC,GAAG,IAAI"}"`
+      );
+    });
+
+    it.todo("should do class merge", () => {
+      const source = `<span class="foo" :class="['hello']"></span>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot();
+
+      expect(magicString.generateMap().toString()).toMatchInlineSnapshot();
     });
 
     it("simple", () => {
@@ -180,7 +245,7 @@ describe("process", () => {
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,eAAe,IAAI"}"`
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,CAAC,KAAK,SAAS,IAAI"}"`
       );
     });
 
@@ -194,7 +259,7 @@ describe("process", () => {
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,wBAAwB,IAAI"}"`
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,CAAC,KAAK,OAAO,EAAE,SAAS,IAAI"}"`
       );
     });
 
@@ -208,7 +273,7 @@ describe("process", () => {
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,eAAe,IAAI"}"`
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,CAAC,KAAK,SAAS,IAAI"}"`
       );
     });
 
@@ -437,18 +502,19 @@ describe("process", () => {
             `"<template>{(___VETER__ctx.n > 5)?<li ></li> : undefined}</template>"`
           );
 
-          expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAmB,eAAC,KAAK,CAAX,CAAJ,CAAC,EAAE,CAAa,GAAG,EAAE,cAAC"}"`
-          );
+          expect(magicString.generateMap().toString()).toMatchInlineSnapshot(`"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAmB,eAAC,KAAK,CAAX,CAAJ,CAAC,EAAE,CAAa,GAAG,EAAE,cAAC"}"`);
         });
 
         it("v-if + v-else", () => {
           const source = `<li v-if="n > 5" id="if"></li><li v-else id="else"></li>`;
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
-          expect(magicString.toString()).toMatchInlineSnapshot(`"<template>{(___VETER__ctx.n > 5)?<li  id="if"></li>:<li  id="else"></li>}</template>"`);
+          expect(magicString.toString()).toMatchInlineSnapshot(
+            `"<template>{(___VETER__ctx.n > 5)?<li  id="if"></li>:<li  id="else"></li>}</template>"`
+          );
 
-          expect(magicString.generateMap().toString()).toMatchInlineSnapshot(`"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAmB,eAAC,KAAK,CAAX,CAAJ,CAAC,EAAE,CAAa,WAAW,EAAE,CAAK,CAAJ,CAAC,EAAE,CAAO,aAAa,EAAE,EAAC"}"`);
+          expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+          `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAmB,eAAC,KAAK,CAAX,CAAJ,CAAC,EAAE,CAAa,CAAC,EAAE,QAAQ,EAAE,CAAK,CAAJ,CAAC,EAAE,CAAO,CAAC,EAAE,UAAU,EAAE,EAAC"}"`);
         });
 
         it("v-if + v-else-if", () => {
@@ -583,12 +649,10 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template><div {...props} /></template>"`
-          );
+          `"<template><div {...___VETER__ctx.props} /></template>"`);
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,GAAG,CAAQ,CAAP,GAAQ,KAAK,CAAC"}"`
-          );
+          `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,GAAG,CAAQ,CAAP,iBAAQ,KAAK,CAAC"}"`);
         });
         it("v-bind name", () => {
           const source = `<div v-bind:name="props" />`;
@@ -596,12 +660,10 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template><div name={props} /></template>"`
-          );
+          `"<template><div name={___VETER__ctx.props} /></template>"`);
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,GAAG,CAAQ,KAAK,CAAC,KAAK,CAAC"}"`
-          );
+          `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,GAAG,CAAQ,KAAK,eAAC,KAAK,CAAC"}"`);
         });
 
         it("v-bind :short", () => {
@@ -623,12 +685,10 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template><div name={name} /></template>"`
-          );
+          `"<template><div name={___VETER__ctx.name} /></template>"`);
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,GAAG,CAAE,KAAK,CAAC,IAAI,CAAC"}"`
-          );
+          `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,GAAG,CAAE,KAAK,eAAC,IAAI,CAAC"}"`);
         });
       });
 

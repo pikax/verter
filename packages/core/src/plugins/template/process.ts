@@ -96,7 +96,7 @@ function renderChildren(
 
 const render = {
   [ParsedType.Element]: renderElement,
-  // [ParsedType.Attribute]: renderAttribute,
+  [ParsedType.Attribute]: renderAttribute,
   // [ParsedType.Directive]: renderDirective,
   // [ParsedType.Template]: renderTemplate,
   [ParsedType.Text]: renderText,
@@ -173,6 +173,11 @@ function renderAttribute(
 ) {
   const n = node.node as unknown as AttributeNode | DirectiveNode;
 
+  if (n.nameLoc) {
+    const cameled = camelize(n.name);
+    s.overwrite(n.nameLoc.start.offset, n.nameLoc.end.offset, cameled);
+  }
+
   if (n.type === NodeTypes.ATTRIBUTE) {
   } else if (n.type === NodeTypes.DIRECTIVE) {
     if (n.name === "bind") {
@@ -180,6 +185,17 @@ function renderAttribute(
       const name = retriveStringExpressionNode(n.arg, undefined, context);
       // if is content let it apply the mapping
       //   const content = retriveStringExpressionNode(n.exp, s, context);
+
+      if (name) {
+        const fixedName = camelize(name);
+        if (fixedName !== name) {
+          s.overwrite(n.arg.loc.start.offset, n.arg.loc.end.offset, fixedName);
+        }
+      }
+
+      if (n.exp) {
+        retriveStringExpressionNode(n.exp, s, context);
+      }
 
       if (name !== n.rawName) {
         // used to replace \" or \' with \{ or \}
@@ -263,7 +279,38 @@ function renderAttribute(
       }
 
       // if(n.rawName[0])
+    } else if (n.name === "on") {
+      const name = retriveStringExpressionNode(n.arg, undefined, context);
+
+      const fixedName = capitalize(camelize(name));
+      if (fixedName !== name) {
+        s.overwrite(n.arg.loc.start.offset, n.arg.loc.end.offset, fixedName);
+      }
+
+      if (n.exp) {
+        retriveStringExpressionNode(n.exp, s, context);
+      }
+
+      if (name !== n.rawName) {
+        let updateDelimiter = false;
+
+        switch (n.rawName[0]) {
+          case "@": {
+            s.overwrite(n.loc.start.offset, n.loc.start.offset + 1, "on");
+            updateDelimiter = true;
+            break;
+          }
+        }
+        if (updateDelimiter) {
+          const start = n.exp.loc.start.offset - 1;
+          s.overwrite(start, start + 1, "{", { contentOnly: true }); // replace : with {
+          //   s.move(start, n.exp.loc.start.offset - 1, n.loc.start.offset + 1); // replace : with {
+          const end = n.exp.loc.end.offset;
+          s.overwrite(end, end + 1, "}", { contentOnly: true }); // replace : with }
+        }
+      }
     } else {
+      // TODO
     }
   }
 
@@ -312,10 +359,7 @@ function renderFor(
   const { source, value, key, index } = node.for;
 
   const keyString = key
-    ? retriveStringExpressionNode(key, undefined, context)
-    : "";
-  const indexString = index
-    ? retriveStringExpressionNode(index, undefined, context)
+    ? retriveStringExpressionNode(key, undefined, context, false)
     : "";
 
   const sourceString = source
@@ -325,6 +369,19 @@ function renderFor(
   const valueString = value
     ? retriveStringExpressionNode(value, undefined, context, false)
     : "value";
+
+  const ignoredIdentifiers = [
+    ...context.ignoredIdentifiers,
+    valueString,
+    keyString,
+  ].filter(Boolean);
+
+  const indexString = index
+    ? retriveStringExpressionNode(index, undefined, {
+        ...context,
+        ignoredIdentifiers,
+      })
+    : "";
 
   // TODO content
   //   const content = renderChildren(
@@ -422,13 +479,6 @@ function renderFor(
 
   // close v-for
   s.appendLeft(childEnd, "})");
-
-  const ignoredIdentifiers = [
-    ...context.ignoredIdentifiers,
-    valueString,
-    keyString,
-    indexString,
-  ].filter(Boolean);
 
   const childrenContext = {
     ...context,
@@ -764,6 +814,12 @@ function parseNodeText(
   }
 }
 
+const StaticNodeTypes = new Set<keyof _babel_types.ParentMaps>([
+  //   "StringLiteral",
+  //   "NumericLiteral",
+  //   "NullLiteral",
+]);
+
 function appendCtx(
   node: SimpleExpressionNode | _babel_types.Expression | string,
   s: MagicString | undefined,
@@ -782,7 +838,8 @@ function appendCtx(
   )
     return content;
 
-  if (node.type === "NumericLiteral") return content;
+  if (StaticNodeTypes.has(node.type) || node.type?.endsWith?.("Literal"))
+    return content;
 
   const accessor = context.accessor;
 
