@@ -95,7 +95,7 @@ export default {
       if (declarations.length) {
         content = content.replace(
           ") {",
-          `) { ${declarations?.map((x) => x.declaration?.content).join("")}`
+          `) { ${declarations?.map((x) =>  x.declaration?.content).join("")}`
         );
       }
 

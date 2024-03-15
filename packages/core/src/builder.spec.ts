@@ -1,6 +1,11 @@
-import { parse } from "@vue/compiler-sfc";
+import { parse, MagicString, compileScript } from "@vue/compiler-sfc";
 import { createBuilder } from "./builder.js";
 import { parseExpression, parse as babelParse } from "@babel/parser";
+import { SourceMapConsumer, SourceMapGenerator, SourceNode } from "source-map-js";
+import fs from 'fs'
+import remapping from '@ampproject/remapping'
+
+
 describe("builder", () => {
   it("test", () => {
     const builder = createBuilder({});
@@ -278,8 +283,8 @@ defineExpose({ getItemAtIndex });
     `);
   });
 
-  it('simple test', ()=> {
-    
+  it('simple test', () => {
+
   })
 
   it("babel parser", () => {
@@ -310,4 +315,43 @@ defineExpose({ getItemAtIndex });
     // console.log(parsed);
     // expect(parsed).toMatchInlineSnapshot();
   });
+
+
+  test.only('parse with sourcemaps', () => {
+    const codeStr = `<script setup lang="ts">
+      // defineProps({ foo: String })
+      defineProps<{ foo: string}>()
+      const test = 'hello'
+</script>`
+    const { descriptor } = parse(codeStr, {
+      sourceMap: true
+    })
+
+    const compiled = compileScript(descriptor, {
+      id: descriptor.filename,
+      sourceMap: true,
+    })
+
+
+
+    const s = new MagicString(compiled.content, {
+      filename: descriptor.filename
+    })
+    s.replace('hello', 'Welcome pikax');
+
+
+    const decoded = s.generateDecodedMap({ hires: true })
+    const finalStr = s.toString()
+    const r = remapping([decoded, compiled.map], () => null)
+
+    const finalMap = r.toString()
+
+    fs.writeFileSync("D:/Downloads/sourcemap-test/sourcemap-example.js", finalStr + '\n//# sourceMappingURL=sourcemap-example.js.map', 'utf-8')
+    fs.writeFileSync("D:/Downloads/sourcemap-test/sourcemap-example.js.map", finalMap.toString(), 'utf-8')
+
+    // console.log('--')
+    // console.log(generated)
+  })
 });
+
+

@@ -2,9 +2,9 @@
   "name": "@verter/core",
   "version": "1.0.0",
   "description": "",
-  "main": "dist/index.js",
-  "module": "dist/index.mjs",
-  "type": "commonjs",
+  "main": "dist/index.cjs",
+  "module": "dist/index.js",
+  "type": "module",
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -20,6 +20,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@ampproject/remapping": "^2.3.0",
     "@babel/parser": "^7.23.6",
     "@babel/types": "^7.23.6",
     "@types/ts-expose-internals": "npm:ts-expose-internals@5.2.2",

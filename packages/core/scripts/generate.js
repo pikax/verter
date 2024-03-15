@@ -1,11 +1,12 @@
 // import { generateScript } from "../dist/index.js";
-import { createBuilder } from "../dist/builder.js";
+import { createBuilder } from "../dist/index.js";
 import { glob } from "glob";
 import { dirname } from "path";
 import fs from "fs-extra";
 import { parse } from "@vue/compiler-sfc";
 
-const genFiles = glob.sync("./generator/**/_gen.ts");
+// const genFiles = glob.sync("./generator/**/_gen.ts");
+const genFiles = glob.sync("./generator/**/import/_gen.ts");
 // const genFiles = glob.sync("./generator/**/slots-typed/_gen.ts");
 // const genFiles = glob.sync("./generator/**/template/**/_gen.ts");
 

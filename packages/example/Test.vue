@@ -1,14 +1,12 @@
-<script>
-
-export default {
-
-  props: {
-    foo: String 
-  }
-}
+<script setup lang="ts">
+import Dep from './Dep.vue'
+defineProps<{
+  foo: string,
+  bar: number
+}>()
 </script>
 <template>
-  <div>
+<div>
     <!-- this is a comment :) 
     
         Thanks x
@@ -16,6 +14,8 @@ export default {
     <div></div>
     <!-- @ts-expect-error -->
     <div @click="(test) => test.xx"></div> 
+
+    <Dep/>
   </div> 
 </template> 
   

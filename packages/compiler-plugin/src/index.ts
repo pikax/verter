@@ -128,7 +128,6 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
       return r;
     };
 
-
     // info.project.updateGraph()
 
     const _getCompilationSettings = info.project.getCompilationSettings.bind(

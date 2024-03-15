@@ -30,7 +30,8 @@
     "onLanguage:vue",
     "onCommand:verter.restartLanguageServer",
     "onLanguage:javascript",
-    "onLanguage:typescript"
+    "onLanguage:typescript",
+    "onLanguage:vue"
   ],
   "contributes": {
     "configuration": {
@@ -48,7 +49,8 @@
       {
         "id": "vue",
         "aliases": [
-          "Vue"
+          "Vue",
+          "vue"
         ],
         "extensions": [
           ".vue"
@@ -58,15 +60,100 @@
       {
         "id": "vue-html",
         "aliases": [
-          "Vue HTML",
-          "vhtml",
-          "vhtm"
-        ],
-        "extensions": [
-          ".vue-html",
-          ".vhtml"
+          "Vue-html"
         ],
         "configuration": "./languages/vue-html-language-configuration.json"
+      },
+      {
+        "id": "vue-postcss",
+        "aliases": [
+          "Vue-PostCSS",
+          "Vue-POSTCSS",
+          "vue-postcss"
+        ],
+        "configuration": "./languages/vue-postcss-language-configuration.json"
+      },
+      {
+        "id": "vue-sugarss",
+        "aliases": [
+          "Vue-SugarSS",
+          "Vue-SUGARSS",
+          "vue-sugarss"
+        ],
+        "configuration": "./languages/vue-sugarss-language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "vue",
+        "scopeName": "source.vue",
+        "path": "./syntaxes/vue-generated.json",
+        "embeddedLanguages": {
+          "text.html.basic": "html",
+          "text.html.vue-html": "vue-html",
+          "text.jade.slm": "slm",
+          "text.pug": "jade",
+          "text.haml": "haml",
+          "text.slim": "slim",
+          "text.html.liquid": "liquid",
+          "source.css": "css",
+          "source.css.scss": "scss",
+          "source.css.less": "less",
+          "source.css.postcss": "vue-postcss",
+          "source.css.sugarss": "vue-sugarss",
+          "source.sass": "sass",
+          "source.stylus": "stylus",
+          "source.js": "javascript",
+          "source.ts": "typescript",
+          "source.coffee": "coffeescript",
+          "text.html.markdown": "md",
+          "source.yaml": "yaml",
+          "source.json": "json",
+          "source.php": "php",
+          "source.graphql": "graphql"
+        }
+      },
+      {
+        "language": "vue-postcss",
+        "scopeName": "source.css.postcss",
+        "path": "./syntaxes/vue-postcss.json"
+      },
+      {
+        "language": "vue-sugarss",
+        "scopeName": "source.css.sugarss",
+        "path": "./syntaxes/vue-sugarss.json"
+      },
+      {
+        "language": "vue-html",
+        "scopeName": "text.html.vue-html",
+        "path": "./syntaxes/vue-html.tmLanguage.json",
+        "embeddedLanguages": {
+          "source.js": "javascript"
+        }
+      },
+      {
+        "path": "./syntaxes/pug/directives.tmLanguage.json",
+        "scopeName": "vue.pug.directives",
+        "injectTo": [
+          "source.vue"
+        ]
+      },
+      {
+        "path": "./syntaxes/pug/interpolations.tmLanguage.json",
+        "scopeName": "vue.pug.interpolations",
+        "injectTo": [
+          "source.vue"
+        ]
+      },
+      {
+        "scopeName": "markdown.vue.codeblock",
+        "path": "./syntaxes/markdown-vue.json",
+        "injectTo": [
+          "text.html.markdown"
+        ],
+        "embeddedLanguages": {
+          "meta.embedded.block.vue": "vue"
+        }
       }
     ],
     "commands": [

@@ -195,6 +195,7 @@ function addCompilePreviewCommand(
       "veter.showCompiledCodeToSide",
       async (editor) => {
         if (editor?.document?.languageId !== "vue") {
+          window.showInformationMessage("Not a Vue file")
           return;
         }
 
@@ -207,6 +208,8 @@ function addCompilePreviewCommand(
               {
                 preview: true,
                 viewColumn: ViewColumn.Beside,
+                // TODO add selection to the window, it needs to be resolved 
+                // selection: editor.selection,
               }
             );
           }
