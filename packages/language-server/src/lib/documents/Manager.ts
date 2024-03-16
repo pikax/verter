@@ -5,15 +5,16 @@ import {
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import { VueDocumentManager } from "./VueDocumentManager";
+import { VueDocument } from "./VueDocument";
 
 class DocumentManager {
   //   readonly #documents = new Map<string, TextDocument>();
-  readonly #textDocuments = new TextDocuments(TextDocument);
+  readonly #textDocuments = new TextDocuments(TextDocument) as TextDocuments<VueDocument>;
   #disposable: Disposable | undefined;
 
   private readonly manager = new VueDocumentManager();
 
-  constructor() {}
+  constructor() { }
 
   public listen(connection: Connection) {
     const dispose = this.#textDocuments.listen(connection);
@@ -40,7 +41,19 @@ class DocumentManager {
 
     docs.onDidOpen((e) => {
       if (e.document.languageId !== "vue") return;
-      this.manager.openDocument(e.document);
+      const vueDoc = this.manager.openDocument(e.document);
+
+      // vueDoc.blocks.forEach((block)=> {
+      //   switch(block) {
+      //     case 'script': {
+
+      //     }
+      //   }
+      // })
+
+
+      // e.document.uri.startsWith('file:')
+
 
       connection.window.showInformationMessage(
         "Document changed: " + e.document.uri
@@ -71,7 +84,22 @@ class DocumentManager {
     return dispose;
   }
 
-  public getDocument(uri: string): TextDocument | undefined {
+  public getDocument(uri: string): VueDocument | undefined {
+    // if (uri.startsWith('virtual:')) {
+    //   uri = uri.replace('virtual:', "file:")
+
+    //   if (uri.endsWith('.vue.d.tsx')) {
+    //     uri = uri.replace('.vue.d.tsx', '.vue')
+    //   }
+    //   console.log('getting doc', uri)
+    // }
+    if (uri.endsWith('.vue.d.tsx')) {
+      if (uri.endsWith('.vue.d.tsx')) {
+        uri = uri.replace('.vue.d.tsx', '.vue')
+      }
+    }
+
+
     return this.#textDocuments.get(uri);
   }
 

@@ -502,7 +502,9 @@ describe("process", () => {
             `"<template>{(___VETER__ctx.n > 5)?<li ></li> : undefined}</template>"`
           );
 
-          expect(magicString.generateMap().toString()).toMatchInlineSnapshot(`"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAmB,eAAC,KAAK,CAAX,CAAJ,CAAC,EAAE,CAAa,GAAG,EAAE,cAAC"}"`);
+          expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAmB,eAAC,KAAK,CAAX,CAAJ,CAAC,EAAE,CAAa,GAAG,EAAE,cAAC"}"`
+          );
         });
 
         it("v-if + v-else", () => {
@@ -514,7 +516,8 @@ describe("process", () => {
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-          `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAmB,eAAC,KAAK,CAAX,CAAJ,CAAC,EAAE,CAAa,CAAC,EAAE,QAAQ,EAAE,CAAK,CAAJ,CAAC,EAAE,CAAO,CAAC,EAAE,UAAU,EAAE,EAAC"}"`);
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAmB,eAAC,KAAK,CAAX,CAAJ,CAAC,EAAE,CAAa,CAAC,EAAE,QAAQ,EAAE,CAAK,CAAJ,CAAC,EAAE,CAAO,CAAC,EAAE,UAAU,EAAE,EAAC"}"`
+          );
         });
 
         it("v-if + v-else-if", () => {
@@ -556,6 +559,32 @@ describe("process", () => {
             `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA;AACA,eAAuB,eAAC,OAAO,CAAb,CAAJ,CAAC,EAAE,CAAe,GAAG,EAAE;AACrC,cAA4B,gBAAC,OAAO,CAAlB,CAAJ,CAAC,EAAE,CAAoB,GAAG,EAAE;AAC1C,cAA4B,gBAAC,OAAO,CAAlB,CAAJ,CAAC,EAAE,CAAoB,GAAG,EAAE;AAC1C,cAA4B,gBAAC,OAAO,CAAlB,CAAJ,CAAC,EAAE,CAAoB,GAAG,EAAE;AAC1C,cAA4B,gBAAC,OAAO,CAAlB,CAAJ,CAAC,EAAE,CAAoB,GAAG,EAAE;AAC1C,cAA4B,gBAAC,OAAO,CAAlB,CAAJ,CAAC,EAAE,CAAoB,GAAG,EAAE;AAC1C,cAAkB,CAAJ,CAAC,EAAE,CAAO,GAAG,EAAE,EAAC"}"`
           );
         });
+
+        it('v-if with expression', () => {
+          const source = `<div v-if="(() => {
+            let ii = '0';
+            return ii === ii
+          })()">
+            t4est
+          </div>
+          <div v-else>
+            else
+          </div>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(
+            `
+            "<template>{((() => {
+                        let ii = '0';
+                        return ii === ii
+                      })())?<div >{ " t4est " }</div>
+                      :<div >{ " else " }</div>}</template>"
+          `);
+
+          expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAoB,CAAC;AACrB;AACA;AACA,cAAc,CAHC,CAAL,CAAC,GAAG,CAGC,CAAC,aAEN,EAAE,GAAG;AACf,UAAe,CAAL,CAAC,GAAG,CAAO,CAAC,YAEZ,EAAE,GAAG,EAAC"}"`);
+        })
 
         describe.skip("invalid conditions", () => {
           it("v-else without v-if", () => {
@@ -649,10 +678,12 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-          `"<template><div {...___VETER__ctx.props} /></template>"`);
+            `"<template><div {...___VETER__ctx.props} /></template>"`
+          );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-          `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,GAAG,CAAQ,CAAP,iBAAQ,KAAK,CAAC"}"`);
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,GAAG,CAAQ,CAAP,iBAAQ,KAAK,CAAC"}"`
+          );
         });
         it("v-bind name", () => {
           const source = `<div v-bind:name="props" />`;
@@ -660,10 +691,12 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-          `"<template><div name={___VETER__ctx.props} /></template>"`);
+            `"<template><div name={___VETER__ctx.props} /></template>"`
+          );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-          `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,GAAG,CAAQ,KAAK,eAAC,KAAK,CAAC"}"`);
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,GAAG,CAAQ,KAAK,eAAC,KAAK,CAAC"}"`
+          );
         });
 
         it("v-bind :short", () => {
@@ -685,10 +718,12 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-          `"<template><div name={___VETER__ctx.name} /></template>"`);
+            `"<template><div name={___VETER__ctx.name} /></template>"`
+          );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-          `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,GAAG,CAAE,KAAK,eAAC,IAAI,CAAC"}"`);
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,GAAG,CAAE,KAAK,eAAC,IAAI,CAAC"}"`
+          );
         });
       });
 

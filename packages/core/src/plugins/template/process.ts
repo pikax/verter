@@ -52,7 +52,7 @@ export function process(
     const firstChild = parsed.node.children[0];
     const lastChild = parsed.node.children[parsed.node.children.length - 1];
     s.overwrite(
-      parsed.node.loc.start.offset,
+      0,//parsed.node.loc.start.offset,
       firstChild.loc.start.offset,
       "(\n<>\n"
     );
@@ -62,6 +62,8 @@ export function process(
       parsed.node.loc.end.offset + parsed.node.source.length,
       "\n</>\n)"
     );
+
+    s.appendLeft(0, '/* @jsxImportSource vue */\n')
   }
 
   return {

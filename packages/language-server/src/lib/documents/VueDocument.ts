@@ -3,6 +3,12 @@ import { basename } from "path";
 import { WritableDocument } from "./Document";
 import { urlToPath } from "../../utils";
 import { importVueCompiler } from "../../importPackages";
+import { TemplateBuilder, createBuilder } from "@verter/core";
+import { ParseScriptContext } from "@verter/core/src/plugins";
+import { BulkRegistration } from "vscode-languageserver";
+import { MagicString } from "vue/compiler-sfc";
+
+import { SourceMapConsumer } from 'source-map-js'
 
 export class VueDocument extends WritableDocument {
   languageId = "vue";
@@ -19,8 +25,16 @@ export class VueDocument extends WritableDocument {
     return this._parsed;
   }
 
+  get blocks() {
+    return this._blocks
+  }
+
+  _name = ''
+
   private _compiler = importVueCompiler(this._uri);
   private _parsed = this.parseVue();
+  private _builder = createBuilder()
+  private _blocks = [] as Array<'script' | 'template' | 'style'>;
   constructor(private _uri: string, private content: string) {
     super();
   }
@@ -29,6 +43,7 @@ export class VueDocument extends WritableDocument {
     this.version = doc.version;
     this.content = doc.getText();
     this._parsed = this.parseVue();
+    this._blocks = this.updateBlocks()
     // this.lineCount = doc.lineCount;
   }
 
@@ -52,6 +67,8 @@ export class VueDocument extends WritableDocument {
     // TODO add options to parser
     const name = basename(this._uri);
 
+    this._name = name
+
     const parsed = this._compiler.parse(this.content, {
       filename: name,
       //   filename: this._uri,
@@ -60,8 +77,61 @@ export class VueDocument extends WritableDocument {
       },
     });
 
-    console.log("");
+    // console.log("");
+    // Template.process({
+
+    // })
+
+    const context = {
+      filename: name,
+      id: this._uri,
+      isSetup: false, //Boolean(compiled?.setup),
+      sfc: parsed,
+      script: null, // compiled,
+      generic: undefined, //compiled?.attrs.generic,
+      template: parsed.descriptor.template,
+    } satisfies ParseScriptContext;
+
+    const { content, map } = TemplateBuilder.process(context);
+
+    this.template = {
+      content,
+      map,
+      mapConsumer: new SourceMapConsumer(map!)
+    }
+
+    // const response = this._builder.process(name, this.content)
+    // console.log('contnet', content)
 
     return parsed;
+  }
+
+  template: {
+    content: string,
+    map?: ReturnType<MagicString['generateMap']>
+    mapConsumer: SourceMapConsumer
+  }
+
+  // something() {
+
+
+
+  //   this.template.mapConsumer.generatedPositionFor()
+  // }
+
+
+  protected updateBlocks() {
+    const parsed = this._parsed;
+    this._blocks = [];
+    if (parsed.descriptor.script || parsed.descriptor.scriptSetup) {
+      this._blocks.push('script')
+    }
+    if (parsed.descriptor.template) {
+      this._blocks.push('template')
+    }
+    if (parsed.descriptor.styles?.length > 0) {
+      this._blocks.push('style')
+    }
+    return this._blocks
   }
 }

@@ -87,6 +87,9 @@ importers:
       vite:
         specifier: ^5.0.11
         version: 5.0.11
+      vite-plugin-dts:
+        specifier: ^3.7.3
+        version: 3.7.3(typescript@5.3.3)(vite@5.0.11)
       vitest:
         specifier: ^1.2.0
         version: 1.2.0
@@ -117,6 +120,9 @@ importers:
       '@verter/language-shared':
         specifier: workspace:^
         version: link:../language-shared
+      source-map-js:
+        specifier: ^1.0.2
+        version: 1.0.2
       typescript:
         specifier: ^5.3.3
         version: 5.3.3

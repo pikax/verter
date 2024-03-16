@@ -4,9 +4,10 @@
   "description": "",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
+  "types": "dist/index.d.ts",
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "vite build",
     "dev": "tsc --watch",
     "generate": "node ./scripts/generate.js",
     "process": "node ./scripts/processDir.js",
@@ -36,6 +37,7 @@
     "@vue/runtime-core": "^3.4.13",
     "fs-extra": "^11.2.0",
     "vite": "^5.0.11",
+    "vite-plugin-dts": "^3.7.3",
     "vitest": "^1.2.0",
     "vue": "^3.4.13"
   }

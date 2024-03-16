@@ -2,28 +2,56 @@ import ts, { ScriptKind } from "typescript";
 import Logger from "../../logger";
 import { documentManager } from "../../lib/documents/Manager";
 import { readFileSync } from "node:fs";
+import { VueDocument } from "../../lib/documents/VueDocument";
 
 function getScriptFileNames() {
   const d = documentManager.getAllOpened();
-  return d.concat(
-    ...d.map((x) =>
-      decodeURIComponent(
-        x.replace("Test.vue", "Test.my.ts").replace("file:///", "")
-      )
-    )
-  );
+
+  const vueFiles = d.filter(x => x.endsWith('.vue'))/*.map(x => x.replace('file:', 'virtual:'))*/.flatMap(x => [
+    x + '.d.tsx',
+    // x + '.template.d.ts',
+    // TODO add more blocks
+    // x + '.css'
+  ])
+  // const vueFiles = []
+
+
+
+  return d.concat(vueFiles);
 }
 function getSnapshotIfExists(
   fileName: string
 ): ts.IScriptSnapshot & { version: number } {
-  if (fileName.startsWith("file:///")) {
-    fileName = decodeURIComponent(
-      fileName.replace("Test.vue", "Test.my.ts").replace("file:///", "")
-    );
+  if (fileName.endsWith('.vue')) {
+    fileName = fileName.replace('.vue', '.ts')
   }
+
+  // if(fileName.endsWith(''))
+  fileName = fileName.replace('Test.vue.d.tsx', 'test.ts')
+
+  // if (fileName.startsWith("file:///")) {
+  //   fileName = decodeURIComponent(
+  //     fileName.replace("Test.vue", "Test.my.ts").replace("file:///", "")
+  //   );
+  // }
   if (snapshots.has(fileName)) {
     return snapshots.get(fileName);
   }
+
+  if (fileName.startsWith('virtual:') || fileName.endsWith('.vue.d.tsx')) {
+    debugger
+    const doc = documentManager.getDocument(fileName)
+
+    const vueDoc = new VueDocument(doc?.uri, doc._content)
+
+
+    const snap = ts.ScriptSnapshot.fromString(vueDoc.template.content);
+    snapshots.set(fileName, snap)
+
+    return snap;
+  }
+
+
   const doc = documentManager.getDocument(fileName);
 
   let text = doc?.getText() ?? readFileSync(fileName, "utf-8");
@@ -40,6 +68,9 @@ declare const atemplate = {
   snap.version = doc?.version ?? 0;
 
   snapshots.set(fileName, snap);
+  if (doc) {
+    snapshots.set(doc?._uri, snap)
+  }
   return snap;
 }
 
@@ -50,11 +81,23 @@ function fileExists(fileName: string) {
     return true;
   }
   console.log("file exists", fileName);
+  if (~fileName.indexOf('.vue') || fileName.endsWith('.vue')) {
+    debugger
+  }
+
+  if (fileName.startsWith('virtual:')) {
+    debugger
+  }
 
   return e || snapshots.has(fileName) || ts.sys.fileExists(fileName);
 }
 
 function readFile(fileName: string) {
+  console.log('reading file', fileName)
+
+  if (fileName.startsWith('virtual:')) {
+    debugger
+  }
   if (fileName.endsWith("Test.my.ts")) {
     return `atemplate.
 
@@ -84,18 +127,19 @@ export function getTypescriptService(workspacePath: string) {
     getCompilationSettings: () => compilerOptions,
     getScriptFileNames,
     getScriptVersion: (fileName: string) =>
-      getSnapshotIfExists(fileName)?.version.toString() || "",
+      getSnapshotIfExists(fileName)?.version?.toString() || "",
     getScriptSnapshot: getSnapshotIfExists,
     getCurrentDirectory: () => workspacePath,
     getDefaultLibFileName: ts.getDefaultLibFilePath,
     fileExists: fileExists,
     readFile: readFile,
-    // readFile: svelteModuleLoader.readFile,
     // resolveModuleNames: svelteModuleLoader.resolveModuleNames,
     // readDirectory: svelteModuleLoader.readDirectory,
     getDirectories: tsSystem.getDirectories,
     useCaseSensitiveFileNames: () => tsSystem.useCaseSensitiveFileNames,
-    getScriptKind: (fileName: string) => ScriptKind.TSX,
+    getScriptKind: (fileName: string) => {
+      return ScriptKind.TSX
+    },
     // getProjectVersion: () => projectVersion.toString(),
     getNewLine: () => tsSystem.newLine,
     // resolveTypeReferenceDirectiveReferences:
@@ -106,7 +150,8 @@ export function getTypescriptService(workspacePath: string) {
   };
   const languageService = ts.createLanguageService(
     host,
-    ts.createDocumentRegistry()
+    ts.createDocumentRegistry(),
+    ts.LanguageServiceMode.PartialSemantic
   );
 
   return languageService;

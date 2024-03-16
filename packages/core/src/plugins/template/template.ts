@@ -1,14 +1,20 @@
 import { MagicString } from "@vue/compiler-sfc";
 import { checkForSetupMethodCall, retrieveNodeString } from "../helpers.js";
-import { LocationType, PluginOption, WalkResult } from "../types.js";
+import {
+  LocationType,
+  PluginOption,
+  TypeLocationTemplate,
+  WalkResult,
+} from "../types.js";
 
 import { parse } from "./parse.js";
-import { build } from "./builder.js";
+// import { build } from "./builder.js";
+import { process } from "./process.js";
 
 export default {
   name: "Template",
 
-  process: (context) => {
+  process: (context): TypeLocationTemplate => {
     const template = context.template;
     if (!template) return;
 
@@ -19,11 +25,15 @@ export default {
 
     const parsed = parse(ast);
     const declarations = [];
-    const result = build(parsed, [], declarations);
+    // const result = build(parsed, [], declarations);
+    const { magicString } = process(parsed, true);
+
+
     return {
       type: LocationType.Template,
       node: ast,
-      content: result,
+      content: magicString.toString(),
+      map: magicString.generateMap({ hires: true, includeContent: true }),
     };
     return {
       type: LocationType.Template,
@@ -31,8 +41,9 @@ export default {
       generated: true,
       declaration: {
         name: "VUE_render",
-        content: `${context.generic ? `<${context.generic},>` : ""
-          }()=> { return (\n${result}\n) }`,
+        content: `${
+          context.generic ? `<${context.generic},>` : ""
+        }()=> { return (\n${result}\n) }`,
         type: "const",
       },
     };

@@ -83,10 +83,10 @@ export interface BaseTypeLocation {
 export interface TypeLocationDeclaration {
   type: LocationType.Declaration;
   node:
-  | _babel_types.VariableDeclaration
-  | _babel_types.FunctionDeclaration
-  | _babel_types.EnumDeclaration
-  | _babel_types.ClassDeclaration;
+    | _babel_types.VariableDeclaration
+    | _babel_types.FunctionDeclaration
+    | _babel_types.EnumDeclaration
+    | _babel_types.ClassDeclaration;
 
   generated?: boolean;
   declaration: {
@@ -177,6 +177,10 @@ export interface TypeLocationTemplate {
   node: _babel_types.Node;
 
   content: string;
+
+  map?: any
+  // this causes compilation error
+  // map?: ReturnType<MagicString["generateMap"]>;
 }
 
 export interface TypeLocationSlots {
@@ -209,8 +213,8 @@ export type ValueOf<T> = T[keyof T];
 
 export type LocationByType = {
   [K in LocationType]?: K extends keyof TypeLocationMap
-  ? Array<TypeLocationMap[K]>
-  : never;
+    ? Array<TypeLocationMap[K]>
+    : never;
 };
 
 export type TypeLocation = BaseTypeLocation & ValueOf<TypeLocationMap>;

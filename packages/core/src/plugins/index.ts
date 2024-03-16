@@ -26,3 +26,9 @@ export const defaultPlugins = [
   //   ImportPlugin,
   // ExportPlugin,
 ] as PluginOption[];
+
+// import Template from "./template/index.js";
+// export { Template };
+
+
+export { default as TemplateBuilder } from './template/index.js'
