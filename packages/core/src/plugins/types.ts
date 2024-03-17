@@ -27,10 +27,13 @@ export interface ParseScriptContext {
   script: SFCScriptBlock | null;
   template: SFCTemplateBlock | null;
 
+
+  s: MagicString
+
   // locations: LocationType[];
 }
 
-export type WalkResult = TypeLocation | TypeLocation[] | undefined;
+export type WalkResult = TypeLocation | undefined | void | Array<WalkResult>;
 
 export interface PluginOption {
   name?: string;
@@ -38,14 +41,14 @@ export interface PluginOption {
   walk?: (
     state: _babel_types.Statement,
     context: ParseScriptContext
-  ) => void | WalkResult;
+  ) => WalkResult;
 
   deepWalk?: (
     state: _babel_types.Statement,
     context: ParseScriptContext
-  ) => void | WalkResult;
+  ) => WalkResult;
 
-  process?: (context: ParseScriptContext) => void | WalkResult;
+  process?: (context: ParseScriptContext) => WalkResult;
 }
 
 export const enum LocationType {
@@ -83,10 +86,10 @@ export interface BaseTypeLocation {
 export interface TypeLocationDeclaration {
   type: LocationType.Declaration;
   node:
-    | _babel_types.VariableDeclaration
-    | _babel_types.FunctionDeclaration
-    | _babel_types.EnumDeclaration
-    | _babel_types.ClassDeclaration;
+  | _babel_types.VariableDeclaration
+  | _babel_types.FunctionDeclaration
+  | _babel_types.EnumDeclaration
+  | _babel_types.ClassDeclaration;
 
   generated?: boolean;
   declaration: {
@@ -213,8 +216,8 @@ export type ValueOf<T> = T[keyof T];
 
 export type LocationByType = {
   [K in LocationType]?: K extends keyof TypeLocationMap
-    ? Array<TypeLocationMap[K]>
-    : never;
+  ? Array<TypeLocationMap[K]>
+  : never;
 };
 
 export type TypeLocation = BaseTypeLocation & ValueOf<TypeLocationMap>;

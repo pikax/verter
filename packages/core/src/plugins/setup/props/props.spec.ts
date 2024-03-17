@@ -1,5 +1,5 @@
 import { compileScript, parse } from "@vue/compiler-sfc";
-import { LocationType } from "../types.js";
+import { LocationType } from "../../types.js";
 import PropsPlugin from "./index.js";
 
 describe("Props plugin", () => {
@@ -97,7 +97,7 @@ describe("Props plugin", () => {
             generated: true,
             declaration: {
               name: "__props",
-              content: "defineProps({})",
+              content: "defineProps()",
             },
           },
           // get the type from variable
@@ -264,7 +264,7 @@ describe("Props plugin", () => {
         ]);
       });
 
-      test.only("defineProps array", () => {
+      test("defineProps array", () => {
         const code = `defineProps(['foo', 'bar'])`;
         const expression = {
           type: "CallExpression",
@@ -339,12 +339,13 @@ describe("Props plugin", () => {
           {
             type: LocationType.Declaration,
             node: expression,
+            generated: true,
 
             // TODO debug this to check if this is the correct type
             declaration: {
               type: "type",
               name: "Type__props",
-              content: `ExtractPropTypes<typeof __props>;`,
+              content: `typeof __props;`,
             },
           },
           {
@@ -403,22 +404,11 @@ describe("Props plugin", () => {
             }
           )
         ).toEqual([
-          {
-            type: LocationType.Import,
-            node: expression,
-            // TODO change the import location
-            from: "vue",
-            items: [
-              {
-                name: "ExtractPropTypes",
-                type: true,
-              },
-            ],
-          },
           // create variable with return
           {
             type: LocationType.Declaration,
             node: expression,
+            generated: true,
 
             declaration: {
               name: "__props",
@@ -429,12 +419,13 @@ describe("Props plugin", () => {
           {
             type: LocationType.Declaration,
             node: expression,
+            generated: true,
 
             // TODO debug this to check if this is the correct type
             declaration: {
               type: "type",
               name: "Type__props",
-              content: `ExtractPropTypes<typeof __props>;`,
+              content: `typeof __props;`,
             },
           },
           {
@@ -471,16 +462,6 @@ defineProps(['foo']);
           })
         ).toMatchObject([
           {
-            from: "vue",
-            items: [
-              {
-                name: "ExtractPropTypes",
-                type: true,
-              },
-            ],
-            type: "import",
-          },
-          {
             declaration: {
               content: `defineProps(['foo'])`,
               name: "__props",
@@ -489,7 +470,7 @@ defineProps(['foo']);
           },
           {
             declaration: {
-              content: "ExtractPropTypes<typeof __props>;",
+              content: "typeof __props;",
               name: "Type__props",
               type: "type",
             },

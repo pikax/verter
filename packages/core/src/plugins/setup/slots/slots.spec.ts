@@ -1,5 +1,5 @@
 import { compileScript, parse } from "@vue/compiler-sfc";
-import { LocationType } from "../types.js";
+import { LocationType } from "../../types.js";
 import SlotsPlugin from "./index.js";
 
 describe("Slots plugin", () => {
@@ -128,6 +128,7 @@ describe("Slots plugin", () => {
         ).toEqual([
           {
             type: LocationType.Import,
+            generated: true,
             node: expression,
             from: "vue",
             items: [

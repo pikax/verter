@@ -1,4 +1,4 @@
-import { LocationType } from "../types.js";
+import { LocationType } from "../../types.js";
 import ModelsPlugin, { getModelVarName } from "./models.js";
 
 describe("Props plugin", () => {
@@ -78,7 +78,7 @@ describe("Props plugin", () => {
             node: expression,
             properties: [
               {
-                name: `update:modelValue`,
+                name: `'update:modelValue'`,
                 content: "any",
               },
             ],
@@ -136,7 +136,7 @@ describe("Props plugin", () => {
             node: expression,
             properties: [
               {
-                name: `update:modelValue`,
+                name: `'update:modelValue'`,
                 content: type,
               },
             ],
@@ -190,7 +190,7 @@ describe("Props plugin", () => {
             node: expression,
             properties: [
               {
-                name: `update:${name}`,
+                name: `'update:${name}'`,
                 content: "any",
               },
             ],
@@ -264,6 +264,7 @@ describe("Props plugin", () => {
         ).toEqual([
           {
             type: LocationType.Import,
+            generated: true,
             node: argumentExpression,
             // TODO change the import location
             from: "<helpers>",
@@ -278,6 +279,7 @@ describe("Props plugin", () => {
           {
             type: LocationType.Declaration,
             node: argumentExpression,
+            generated: true,
 
             declaration: {
               name: varName,
@@ -287,6 +289,7 @@ describe("Props plugin", () => {
           // get the type from the variable
           {
             type: LocationType.Declaration,
+            generated: true,
             node: argumentExpression,
             declaration: {
               name: typeName,
@@ -296,16 +299,18 @@ describe("Props plugin", () => {
           },
           {
             type: LocationType.Emits,
+            generated: true,
             node: argumentExpression,
             properties: [
               {
-                name: `update:${name}`,
+                name: `'update:${name}'`,
                 content: typeName,
               },
             ],
           },
           {
             type: LocationType.Props,
+            generated: true,
             node: argumentExpression,
             properties: [
               {
@@ -378,6 +383,7 @@ describe("Props plugin", () => {
           {
             type: LocationType.Import,
             node: argumentExpression,
+            generated: true,
             // TODO change the import location
             from: "<helpers>",
             items: [
@@ -391,6 +397,7 @@ describe("Props plugin", () => {
           {
             type: LocationType.Declaration,
             node: argumentExpression,
+            generated: true,
 
             declaration: {
               name: varName,
@@ -400,6 +407,7 @@ describe("Props plugin", () => {
           // get the type from the variable
           {
             type: LocationType.Declaration,
+            generated: true,
             node: argumentExpression,
             declaration: {
               name: typeName,
@@ -410,15 +418,17 @@ describe("Props plugin", () => {
           {
             type: LocationType.Emits,
             node: argumentExpression,
+            generated: true,
             properties: [
               {
-                name: `update:${name}`,
+                name: `'update:${name}'`,
                 content: typeName,
               },
             ],
           },
           {
             type: LocationType.Props,
+            generated: true,
             node: argumentExpression,
             properties: [
               {

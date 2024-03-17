@@ -11,6 +11,7 @@ import { compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
 
 import { defaultPlugins } from "./plugins/index.js";
 import { Statement } from "@babel/types";
+import { processPlugins, walkPlugins } from "./utils/plugin.js";
 
 export interface Builder {
   build(): void;
@@ -463,53 +464,4 @@ ${exports || ""}
         `;
     },
   };
-}
-
-function* walkPlugins(plugins: PluginOption[], context: ParseScriptContext) {
-  yield* runPlugins((plugin) => plugin.walk, plugins, context);
-}
-function* processPlugins(plugins: PluginOption[], context: ParseScriptContext) {
-  for (const plugin of plugins) {
-    if (!plugin.process) continue;
-    const result = plugin.process(context);
-    if (!result) continue;
-    if (Array.isArray(result)) {
-      yield* result;
-    } else {
-      yield result;
-    }
-  }
-}
-
-function* runPlugins(
-  cb: (
-    plugin: PluginOption
-  ) =>
-    | undefined
-    | ((state: Statement, context: ParseScriptContext) => void | WalkResult),
-  plugins: PluginOption[],
-  context: ParseScriptContext
-) {
-  if (!context.script) return;
-  for (const [isSetup, ast] of [
-    [false, context.script.scriptAst],
-    [true, context.script.scriptSetupAst],
-  ] as const) {
-    if (!ast) continue;
-    const ctx = {
-      ...context,
-      isSetup,
-    };
-    for (const statement of ast) {
-      for (const plugin of plugins) {
-        const result = cb(plugin)?.(statement, ctx);
-        if (!result) continue;
-        if (Array.isArray(result)) {
-          yield* result;
-        } else {
-          yield result;
-        }
-      }
-    }
-  }
 }

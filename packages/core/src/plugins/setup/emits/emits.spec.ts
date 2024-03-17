@@ -1,5 +1,5 @@
 import { MagicString, compileScript, parse } from "@vue/compiler-sfc";
-import { LocationType } from "../types.js";
+import { LocationType } from "../../types.js";
 import EmitsPlugin from "./index.js";
 
 describe("Emits plugin", () => {

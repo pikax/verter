@@ -8,10 +8,7 @@ export default {
   name: "Generic",
   process(context) {
     if (!context.generic) return;
-    // const source = context.script?.content;
-    // if (!source) return;
     const genericCode = `type __GENERIC__<${context.generic}> = {}`;
-
     try {
       const ast = parse(genericCode, {
         sourceType: "module",

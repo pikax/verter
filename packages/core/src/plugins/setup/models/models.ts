@@ -1,5 +1,5 @@
-import { checkForSetupMethodCall, retrieveNodeString } from "../helpers.js";
-import { LocationType, PluginOption, TypeLocation } from "../types.js";
+import { checkForSetupMethodCall, retrieveNodeString } from "../../helpers.js";
+import { LocationType, PluginOption, TypeLocation } from "../../types.js";
 
 export default {
   name: "Model",
