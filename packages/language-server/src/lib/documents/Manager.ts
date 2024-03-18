@@ -90,9 +90,9 @@ class DocumentManager {
 
     const doc = this.#textDocuments.get(uri);
     if (!doc) {
-      if (!uri.startsWith('virtual:')) return
+      if (!uri.startsWith('verter-virtual:')) return
       if (this.compiledDocs.has(uri)) return this.compiledDocs.get(uri)!
-      const originalUri = uri.replace('virtual:', "file:").replace('.vue.tsx', '.vue')
+      const originalUri = uri.replace('verter-virtual:', "file:").replace('.vue.tsx', '.vue')
 
       const dd = this.#textDocuments.get(originalUri)
       if (dd) {

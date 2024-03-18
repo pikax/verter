@@ -141,12 +141,12 @@ export function startServer(options: LsConnectionOption = {}) {
 
   connection.onCompletion(async (params) => {
     if (!params.textDocument.uri.endsWith(".vue")) return null;
-    const virtualUrl = params.textDocument.uri.replace('file:', 'virtual:') + '.tsx'
+    const virtualUrl = params.textDocument.uri.replace('file:', 'verter-virtual:') + '.tsx'
     let doc = documentManager.getDocument(virtualUrl);
 
     if (doc) {
       // {
-      //   const virtualUrl = params.textDocument.uri.replace('file:', 'virtual:') + '.tsx'
+      //   const virtualUrl = params.textDocument.uri.replace('file:', 'verter-virtual:') + '.tsx'
       //   // const virtualUrl = params.textDocument.uri.replace('.vue', '.ts')
 
       //   let newIndex = 8
@@ -216,18 +216,18 @@ export function startServer(options: LsConnectionOption = {}) {
           triggerCharacter: params.context?.triggerCharacter,
         })
 
-        // const b = tsService.getQuickInfoAtPosition(virtualUrl, newIndex)
-        // const c = tsService.getTypeDefinitionAtPosition(virtualUrl, newIndex)
-        // const a = tsService.getReferencesAtPosition(virtualUrl, newIndex)
+        const b = tsService.getQuickInfoAtPosition(virtualUrl, newIndex)
+        const c = tsService.getTypeDefinitionAtPosition(virtualUrl, newIndex)
+        const a = tsService.getReferencesAtPosition(virtualUrl, newIndex)
 
-        // // const otherResults = tsService.getCompletionEntryDetails(virtualUrl, newIndex, 'div', undefined, '<div', undefined, undefined)
-        // // const otherResults1 = tsService.getCompletionEntrySymbol(virtualUrl, newIndex, 'div', '<div')
-        // const rrr = tsService.getDefinitionAtPosition(virtualUrl, newIndex)
-        // const aa = tsService.getReferencesAtPosition(virtualUrl, newIndex)
-        // console.log('got res', newIndex, `'${templateInfo.content.slice(index - 5, index + 5)}'`, results?.entries.length)
-        // console.log({
-        //   a, b, c, rrr, aa
-        // })
+        // const otherResults = tsService.getCompletionEntryDetails(virtualUrl, newIndex, 'div', undefined, '<div', undefined, undefined)
+        // const otherResults1 = tsService.getCompletionEntrySymbol(virtualUrl, newIndex, 'div', '<div')
+        const rrr = tsService.getDefinitionAtPosition(virtualUrl, newIndex)
+        const aa = tsService.getReferencesAtPosition(virtualUrl, newIndex)
+        console.log('got res', newIndex, `'${templateInfo.content.slice(index - 5, index + 5)}'`, results?.entries.length)
+        console.log({
+          a, b, c, rrr, aa
+        })
         // return results?.entries ?? []
         if (results) {
 
