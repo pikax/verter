@@ -7,19 +7,22 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import { VueDocumentManager } from "./VueDocumentManager";
 import { VueDocument } from "./VueDocument";
 
+import { readFileSync, existsSync } from 'node:fs'
+
 class DocumentManager {
   //   readonly #documents = new Map<string, TextDocument>();
-  readonly #textDocuments = new TextDocuments(TextDocument) as TextDocuments<VueDocument>;
+  readonly _textDocuments = new TextDocuments(TextDocument) as TextDocuments<VueDocument>;
   #disposable: Disposable | undefined;
 
   private readonly manager = new VueDocumentManager();
 
   private compiledDocs = new Map<string, VueDocument>()
+  private externalDocs = new Map<string, TextDocument>()
 
   constructor() { }
 
   public listen(connection: Connection) {
-    const dispose = this.#textDocuments.listen(connection);
+    const dispose = this._textDocuments.listen(connection);
 
     connection.workspace.onDidDeleteFiles((params) => {
       console.log("deleted files", params);
@@ -39,7 +42,7 @@ class DocumentManager {
     //   });
     // }, 1000);
 
-    const docs = this.#textDocuments;
+    const docs = this._textDocuments;
 
     docs.onDidOpen((e) => {
       if (e.document.languageId !== "vue") return;
@@ -71,6 +74,13 @@ class DocumentManager {
       // ignore non-vue documents
       if (change.document.languageId !== "vue") return;
 
+      const virtualUrl = change.document.uri.replace('file:', 'verter-virtual:').replace('.vue', '.vue.tsx')
+
+      const doc = this.getDocument(virtualUrl);
+      doc!.setText(change.document.getText())
+
+      ++doc!.version
+
       connection.window.showInformationMessage(
         "Document changed: " + change.document.uri
       );
@@ -86,28 +96,72 @@ class DocumentManager {
     return dispose;
   }
 
-  public getDocument(uri: string): VueDocument | undefined {
+  public getDocument(uri: string): VueDocument | TextDocument | undefined {
+    // if (!uri.startsWith('file:') && !uri.startsWith('verter-virtual')) {
+    //   const l = uri
+    //   uri = `file://${encodeURIComponent(uri)}`
 
-    const doc = this.#textDocuments.get(uri);
-    if (!doc) {
-      if (!uri.startsWith('verter-virtual:')) return
+    //   console.log('update uri', {
+    //     from: l,
+    //     to: uri
+    //   })
+    // }
+
+    const doc = this._textDocuments.get(uri);
+    if (doc) return doc;
+    if (uri.startsWith('verter-virtual:')) {
       if (this.compiledDocs.has(uri)) return this.compiledDocs.get(uri)!
       const originalUri = uri.replace('verter-virtual:', "file:").replace('.vue.tsx', '.vue')
 
-      const dd = this.#textDocuments.get(originalUri)
+      const dd = this._textDocuments.get(originalUri)
       if (dd) {
         const vueDoc = new VueDocument(uri, dd.getText())
         this.compiledDocs.set(uri, vueDoc)
         return vueDoc
       }
+    } else {
+      let external = this.externalDocs.get(uri);
+      if (!external && existsSync(uri)) {
+        external = TextDocument.create(uri, 'typescript', 1, readFileSync(uri, { encoding: 'utf-8' }))
 
+        this.externalDocs.set(uri, external)
+      }
+
+      return external;
     }
-    return doc;
+
+
+
+    // if (!doc) {
+    //   if
+    //   if (!uri.startsWith('verter-virtual:')) return
+    //   if (this.compiledDocs.has(uri)) return this.compiledDocs.get(uri)!
+    //   const originalUri = uri.replace('verter-virtual:', "file:").replace('.vue.tsx', '.vue')
+
+    //   const dd = this._textDocuments.get(originalUri)
+    //   if (dd) {
+    //     const vueDoc = new VueDocument(uri, dd.getText())
+    //     this.compiledDocs.set(uri, vueDoc)
+    //     return vueDoc
+    //   }
+
+    // } else if (uri.indexOf('///') === -1) {
+    //   let external = this.externalDocs.get(uri);
+    //   if (!external) {
+    //     external = TextDocument.create(uri, 'typescript', 1, readFileSync(uri, { encoding: 'utf-8' }))
+
+    //     this.externalDocs.set(uri, external)
+    //   }
+
+    //   return external;
+    //   // TODO we should watch these for changes
+    // }
+    // return doc;
   }
 
   public getAllOpened(): string[] {
     // TODO add virtual files
-    return this.#textDocuments.all().map((x) => x.uri);
+    return this._textDocuments.all().map((x) => x.uri);
   }
 
   public dispose() {

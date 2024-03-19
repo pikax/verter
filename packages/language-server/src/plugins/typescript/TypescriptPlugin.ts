@@ -1,4 +1,4 @@
-import ts, { ScriptKind } from "typescript";
+import ts, { ScriptKind, version } from "typescript";
 import Logger from "../../logger";
 import { documentManager } from "../../lib/documents/Manager";
 import { readFileSync, existsSync } from "node:fs";
@@ -35,87 +35,25 @@ const map = {
 
 function getSnapshotIfExists(
   fileName: string
-): ts.IScriptSnapshot & { version: number } {
-  // if (fileName.endsWith('.vue')) {
-  //   fileName = fileName.replace('.vue', '.ts')
-  // }
-
-  // if(fileName.endsWith(''))
-  // fileName = fileName.replace('Test.vue.d.tsx', 'test.ts')
-
-  // if (fileName.startsWith("file:///")) {
-  //   fileName = decodeURIComponent(
-  //     fileName.replace("Test.vue", "Test.my.ts").replace("file:///", "")
-  //   );
-  // }
-
-
-  if (snapshots.has(fileName)) {
-    return snapshots.get(fileName);
-  }
-
-  const d = Object.keys(map).find(x => fileName.endsWith(x))
-
-  if (d) {
-    const name = map[d];
-    const { resolvedModule } = ts.nodeModuleNameResolver(name, './test.ts', {}, ts.sys)
-    if (resolvedModule) {
-      console.log('ddasdasd', resolvedModule)
-      const f = ts.sys.readFile(resolvedModule.resolvedFileName, 'utf-8')
-      const snap = ts.ScriptSnapshot.fromString(f);
-      snapshots.set(fileName, snap)
-      return snap
-    }
-  }
-
-
-  // if (fileName.endsWith('/vue.ts') || fileName.endsWith('/vue/jsx-runtime.ts')) {
-
-
-
-
-  //   const name = fileName.endsWith('/vue.ts') ? 'vue' : 'vue/jsx-runtime';
-  //   const { resolvedModule } = ts.nodeModuleNameResolver(name, './test.ts', {}, ts.sys)
-  //   if (resolvedModule) {
-  //     console.log('ddasdasd', resolvedModule)
-  //     const f = ts.sys.readFile(resolvedModule.resolvedFileName, 'utf-8')
-  //     const snap = ts.ScriptSnapshot.fromString(f);
-  //     snapshots.set(fileName, snap)
-  //     return snap
-  //   }
-
-  // }
-
-  if (fileName.startsWith('verter-virtual:')) {
-    const doc = documentManager.getDocument(fileName)!
-
-    const snap = ts.ScriptSnapshot.fromString(doc.template.content);
-    snapshots.set(fileName, snap)
-
-    return snap;
-  }
-
+): (ts.IScriptSnapshot & { version: number }) | undefined {
 
   const doc = documentManager.getDocument(fileName);
-
-  let text = doc?.getText() ?? readFileSync(fileName, "utf-8");
-  if (fileName.endsWith("Test.my.ts")) {
-    text = `atemplate.
-
-
-
-declare const atemplate = { 
-    a: '1'
-} `;
+  if (!doc) {
+    console.log('no doc found', fileName)
+    return undefined;
   }
-  const snap = ts.ScriptSnapshot.fromString(text);
-  snap.version = doc?.version ?? 0;
-
-  snapshots.set(fileName, snap);
-  if (doc) {
-    snapshots.set(doc?._uri, snap)
+  let snap = snapshots.get(fileName);
+  if (snap?.version === doc.version) {
+    return snap
   }
-  return snap;
+
+  // snap = { ...ts.ScriptSnapshot.fromString(doc.template?.content ?? doc.getText()), version: doc.version }
+  snap = Object.assign(ts.ScriptSnapshot.fromString(doc.template?.content ?? doc.getText()), { version: doc.version })
+  snapshots.set(fileName, snap)
+
+  console.log('update snapshot for', snap.version, fileName)
+
+  return snap
 }
 
 function fileExists(fileName: string) {
@@ -212,8 +150,14 @@ export function getTypescriptService(workspacePath: string) {
     log: (message) => Logger.info(`[ts] ${message}`),
     getCompilationSettings: () => compilerOptions,
     getScriptFileNames,
-    getScriptVersion: (fileName: string) =>
-      getSnapshotIfExists(fileName)?.version?.toString() || "",
+    getScriptVersion: (fileName: string) => {
+      const snap = getSnapshotIfExists(fileName);
+      // if (fileName.indexOf('.vue')) {
+      //   debugger
+      // }
+
+      return snap?.version?.toString() || "";
+    },
     getScriptSnapshot: getSnapshotIfExists,
     getCurrentDirectory: () => workspacePath,
     getDefaultLibFileName: ts.getDefaultLibFilePath,

@@ -220,7 +220,6 @@ export function startServer(options: LsConnectionOption = {}) {
     if (!details) return item
 
     item.detail = ts.displayPartsToString(details.displayParts)
-    // ''.
 
     item.documentation = {
       kind: 'markdown',
@@ -291,7 +290,7 @@ export function startServer(options: LsConnectionOption = {}) {
             // ...results,
             isIncomplete: results.isIncomplete,
 
-            items: results.entries.map(x => mapTsCompletionToLspItem(x, {
+            items: results.entries.flatMap(x => mapTsCompletionToLspItem(x, {
               virtualUrl,
               index: index,
               triggerKind: params.context?.triggerKind,
