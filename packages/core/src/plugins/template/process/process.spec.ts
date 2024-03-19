@@ -137,6 +137,19 @@ describe("process", () => {
       );
     });
 
+    it('binding boolean', () => {
+      const source = `<my-component :bind="false"/>`;
+
+      const parsed = doParseContent(source);
+
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><___VERTER__comp.MyComponent bind={false}/></template>"`
+      );
+      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAE,KAAK,CAAC,KAAK,CAAC"}"`);
+    })
+
     it("binding with v-bind:bind", () => {
       const source = `<my-component v-bind:bind="bar"/>`;
 
@@ -161,8 +174,7 @@ describe("process", () => {
         `"<template><___VERTER__comp.MyComponent {...___VETER__ctx.bar} foo="bar"/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,CAAP,iBAAQ,GAAG,CAAC,CAAC,GAAG"}"`
-      );
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,CAAP,iBAAQ,GAAG,CAAC"}"`);
     });
 
     it("props + v-bind", () => {
@@ -176,11 +188,23 @@ describe("process", () => {
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAC,GAAG,OAAc,CAAP,iBAAQ,GAAG,CAAC"}"`
-      );
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,WAAkB,CAAP,iBAAQ,GAAG,CAAC"}"`);
     });
 
-    it("should pass boolen on just props", () => {
+    it('should keep casing', () => {
+      const source = `<my-component aria-autocomplete="bar"/>`;
+
+      const parsed = doParseContent(source);
+
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><___VERTER__comp.MyComponent aria-autocomplete="bar"/></template>"`);
+
+      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(`"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY"}"`)
+      // testSourceMaps(magicString.toString(), magicString.generateMap({ hires: true, includeContent: true }))
+    })
+
+    it("should pass boolean on just props", () => {
       const source = `<span foo/>`;
 
       const parsed = doParseContent(source);
@@ -190,22 +214,20 @@ describe("process", () => {
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,CAAC,GAAG"}"`
-      );
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI"}"`);
     });
 
-    it("should camelCase props", () => {
+    it("should not camelCase props", () => {
       const source = `<span supa-awesome-prop="hello"></span>`;
 
       const parsed = doParseContent(source);
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><span supaAwesomeProp="hello"></span></template>"`
+        `"<template><span supa-awesome-prop="hello"></span></template>"`
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,CAAC,eAAiB,WAAW,IAAI"}"`
-      );
+      `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,6BAA6B,IAAI"}"`);
     });
     it('should camelCase "on" event listeners', () => {
       const source = `<span @check-for-something="test"></span>`;
@@ -255,8 +277,7 @@ describe("process", () => {
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,CAAC,KAAK,SAAS,IAAI"}"`
-      );
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,eAAe,IAAI"}"`);
     });
 
     it("multiple", () => {
@@ -269,8 +290,7 @@ describe("process", () => {
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,CAAC,KAAK,OAAO,EAAE,SAAS,IAAI"}"`
-      );
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,wBAAwB,IAAI"}"`);
     });
 
     it("with '", () => {
@@ -283,8 +303,7 @@ describe("process", () => {
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,CAAC,KAAK,SAAS,IAAI"}"`
-      );
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAW,IAAI,eAAe,IAAI"}"`);
     });
 
     describe("directive", () => {
@@ -526,8 +545,7 @@ describe("process", () => {
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAmB,eAAC,KAAK,CAAX,CAAJ,CAAC,EAAE,CAAa,CAAC,EAAE,QAAQ,EAAE,CAAK,CAAJ,CAAC,EAAE,CAAO,CAAC,EAAE,UAAU,EAAE,EAAC"}"`
-          );
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAmB,eAAC,KAAK,CAAX,CAAJ,CAAC,EAAE,CAAa,WAAW,EAAE,CAAK,CAAJ,CAAC,EAAE,CAAO,aAAa,EAAE,EAAC"}"`);
         });
 
         it("v-if + v-else-if", () => {

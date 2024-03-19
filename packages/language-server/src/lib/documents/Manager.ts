@@ -2,12 +2,20 @@ import {
   TextDocuments,
   Disposable,
   Connection,
+  TextDocumentChangeEvent,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import { VueDocumentManager } from "./VueDocumentManager";
 import { VueDocument } from "./VueDocument";
 
 import { readFileSync, existsSync } from 'node:fs'
+
+export type ListenerType = 'open' | 'change' | 'close'
+
+export type ListenerCb = (type: ListenerType, params: TextDocumentChangeEvent<VueDocument>) => void
+// | ((type: 'open', params: TextDocumentChangeEvent<VueDocument>) => void)
+// | ((type: 'change', params: TextDocumentChangeEvent<VueDocument>) => void)
+// | ((type: 'close', params: TextDocumentChangeEvent<VueDocument>) => void)
 
 class DocumentManager {
   //   readonly #documents = new Map<string, TextDocument>();
@@ -19,7 +27,13 @@ class DocumentManager {
   private compiledDocs = new Map<string, VueDocument>()
   private externalDocs = new Map<string, TextDocument>()
 
+  private _listeners = new Array<ListenerCb>
+
   constructor() { }
+
+  public addListener(cb: ListenerCb) {
+    this._listeners.push(cb)
+  }
 
   public listen(connection: Connection) {
     const dispose = this._textDocuments.listen(connection);
@@ -48,6 +62,10 @@ class DocumentManager {
       if (e.document.languageId !== "vue") return;
       const vueDoc = this.manager.openDocument(e.document);
 
+      this._listeners.forEach(x => x('open', {
+        document: vueDoc
+      }))
+
       // vueDoc.blocks.forEach((block)=> {
       //   switch(block) {
       //     case 'script': {
@@ -67,12 +85,17 @@ class DocumentManager {
 
     docs.onDidClose((e) => {
       if (e.document.languageId !== "vue") return;
+      const vueDoc = this.manager.openDocument(e.document);
+      this._listeners.forEach(x => x('close', {
+        document: vueDoc
+      }))
       this.manager.closeDocument(e.document.uri);
     });
 
     docs.onDidChangeContent((change) => {
       // ignore non-vue documents
       if (change.document.languageId !== "vue") return;
+
 
       const virtualUrl = change.document.uri.replace('file:', 'verter-virtual:').replace('.vue', '.vue.tsx')
 
@@ -81,6 +104,10 @@ class DocumentManager {
 
       ++doc!.version
 
+
+      this._listeners.forEach(x => x('change', {
+        document: doc!
+      }))
       connection.window.showInformationMessage(
         "Document changed: " + change.document.uri
       );

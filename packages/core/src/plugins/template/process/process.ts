@@ -14,8 +14,10 @@ import {
   PlainElementNode,
   SimpleExpressionNode,
 } from "@vue/compiler-core";
-import { camelize, capitalize, isGloballyAllowed } from "@vue/shared";
+import { camelize, capitalize, isGloballyAllowed, makeMap } from "@vue/shared";
 import type * as _babel_types from "@babel/types";
+
+const isLiteralWhitelisted = /*#__PURE__*/ makeMap('true,false,null,this')
 
 interface ProcessContext {
   ignoredIdentifiers?: string[];
@@ -172,10 +174,10 @@ function renderAttribute(
 ) {
   const n = node.node as unknown as AttributeNode | DirectiveNode;
 
-  if (n.nameLoc) {
-    const cameled = camelize(n.name);
-    s.overwrite(n.nameLoc.start.offset, n.nameLoc.end.offset, cameled);
-  }
+  // if ((n as AttributeNode).nameLoc) {
+  //   const cameled = camelize(n.name);
+  //   s.overwrite(n.nameLoc.start.offset, n.nameLoc.end.offset, cameled);
+  // }
 
   if (n.type === NodeTypes.ATTRIBUTE) {
   } else if (n.type === NodeTypes.DIRECTIVE) {
@@ -832,6 +834,7 @@ function appendCtx(
   const content = node.content ?? node.name ?? node;
   if (
     isGloballyAllowed(content) ||
+    isLiteralWhitelisted(content) ||
     ~context.ignoredIdentifiers.indexOf(content) ||
     !context.accessor
   )

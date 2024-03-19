@@ -60,6 +60,7 @@ export function mergeFull(locations: LocationByType, context: ParseScriptContext
     // append tsx 
 
     s.prepend(`/* @jsxImportSource vue */\nimport 'vue'\n`)
+    // s.prepend(`/* @jsxImportSource vue */`)
 
 
     // const scriptSource = context.script.loc.source;
