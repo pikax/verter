@@ -159,21 +159,12 @@ function readFile(fileName: string) {
   console.log('reading file', fileName)
 
 
-  if (fileName.endsWith('/vue') || fileName.endsWith('/vue/jsx-runtime')) {
-    return true
-  }
+  // if (fileName.endsWith('/vue') || fileName.endsWith('/vue/jsx-runtime')) {
+  //   return true
+  // }
 
   if (fileName.startsWith('verter-virtual:')) {
     debugger
-  }
-  if (fileName.endsWith("Test.my.ts")) {
-    return `atemplate.
-
-
-
-declare const atemplate = { 
-    a: '1'
-} `;
   }
   return ts.sys.readFile(fileName);
 
@@ -184,6 +175,7 @@ declare const atemplate = {
 }
 
 const snapshots = new Map<string, ts.IScriptSnapshot & { version: number }>();
+
 
 export function getTypescriptService(workspacePath: string) {
 
@@ -227,7 +219,6 @@ export function getTypescriptService(workspacePath: string) {
     getDefaultLibFileName: ts.getDefaultLibFilePath,
     fileExists: fileExists,
     readFile: readFile,
-    // resolveModuleNames: svelteModuleLoader.resolveModuleNames,
     // readDirectory: svelteModuleLoader.readDirectory,
     readDirectory: (path, extensions, exclude, include) => {
       console.log('reading dir', {
@@ -262,131 +253,45 @@ export function getTypescriptService(workspacePath: string) {
     //   svelteModuleLoader.mightHaveInvalidatedResolutions,
     // getModuleResolutionCache: svelteModuleLoader.getModuleResolutionCache,
 
-    resolveModuleNameLiteralsXX: (moduleLiterals, containingFile, redirectedReference, options, containingSourceFile, reusedNames) => {
-      const resolvedModules = moduleLiterals.map(({ text: moduleName }) => {
-        const r = ts.resolveModuleName(moduleName, containingFile, options, ts.sys)
+    resolveModuleNameLiterals(moduleLiterals, containingFile, redirectedReference, options, containingSourceFile, reusedNames) {
+      if (containingFile.startsWith('verter-virtual:')) {
+        containingFile = decodeURIComponent(containingFile.replace('verter-virtual:///', ''))
+      }
 
-        // TODO remove this
-        const n = ts.nodeModuleNameResolver(moduleName, './test.ts', options, ts.sys)
+      const modules = moduleLiterals.map((x) => {
+        const h = ts.sys
 
-        console.log('xxasdsad', {
-          r,
-          n
-        })
+        switch (options.moduleResolution) {
+          case ts.ModuleResolutionKind.Classic: {
+            return ts.resolveModuleName(x.text, containingFile, options, h, undefined, redirectedReference);
+          }
+          case ts.ModuleResolutionKind.NodeJs:
+          case ts.ModuleResolutionKind.Node10:
+          case ts.ModuleResolutionKind.Node16:
+          case ts.ModuleResolutionKind.NodeNext: {
+            return ts.nodeModuleNameResolver(x.text, containingFile, options, h, undefined, redirectedReference);
+          }
+          case ts.ModuleResolutionKind.Bundler:
+          default:
+            return ts.bundlerModuleNameResolver(x.text, containingFile, options, h, undefined, redirectedReference);
+        }
+      })
 
-        return {
-          resolvedModule: r.resolvedModule ?? n.resolvedModule
-        };
-      });
+      // TODO add debug flag
+      if (true) {
+        const emptyModules = modules.map((x, i) => !x.resolvedModule ? i : false).filter(Boolean).map(x => moduleLiterals[x].text)
+        if (emptyModules.length > 0) {
+          console.warn('Modules missing!', emptyModules)
+        }
+      }
 
-      console.log('dddd', resolvedModules)
 
-      return resolvedModules;
-    }
+      return modules
+    },
   };
 
 
-  const createModuleResolver =
-    (containingFile: string) =>
-      (
-        moduleName: string,
-        resolveModule: () =>
-          | (ts.ResolvedModuleWithFailedLookupLocations & {
-            failedLookupLocations: readonly string[];
-          })
-          | undefined
-      ): ts.ResolvedModuleFull | undefined => {
-        // logger.info(
-        //   "[[[" +
-        //     moduleName +
-        //     "| " +
-        //     containingFile +
-        //     "| " +
-        //     isRelativeVue(moduleName) +
-        //     "| " +
-        //     isVue(moduleName) +
-        //     "]]]"
-        // );
 
-        if (isRelativeVue(moduleName)) {
-          // logger.info(
-          //   "[Verter] createModuleResolver relative vue - " +
-          //     moduleName +
-          //     " -- " +
-          //     path.resolve(path.dirname(containingFile), moduleName)
-          // );
-          return {
-            extension: ts.Extension.Tsx,
-            isExternalLibraryImport: false,
-            resolvedFileName: path.resolve(
-              path.dirname(containingFile),
-              moduleName
-            ),
-          };
-        }
-        if (!isVue(moduleName)) {
-          return;
-        }
-
-        const resolvedModule = resolveModule();
-
-        if (!resolvedModule) return;
-
-        const baseUrl = workspacePath;
-        const match = "/index.ts";
-
-        const failedLocations = resolvedModule.failedLookupLocations;
-        // Filter to only one extension type, and remove that extension. This leaves us with the actual file name.
-        // Example: "usr/person/project/src/dir/File.module.css/index.d.ts" > "usr/person/project/src/dir/File.module.css"
-        const normalizedLocations = failedLocations.reduce<string[]>(
-          (locations, location) => {
-            if (
-              (baseUrl ? location.includes(baseUrl) : true) &&
-              location.endsWith(match)
-            ) {
-              return [...locations, location.replace(match, "")];
-            }
-            return locations;
-          },
-          []
-        );
-
-        // Find the imported CSS module, if it exists.
-        const vueModulePath = normalizedLocations.find((location) =>
-          existsSync(location)
-        );
-
-        // logger.info(
-        //   "[Verter] createModuleResolver vue - " +
-        //     resolvedModule +
-        //     " -ModulePath-  " +
-        //     vueModulePath
-        // );
-        if (vueModulePath) {
-          // logger.info("wwww -- Vue 3 Plugin found path" + vueModulePath);
-          return {
-            extension: ts.Extension.Tsx,
-            isExternalLibraryImport: false,
-            resolvedFileName: path.resolve(vueModulePath),
-          };
-        }
-
-        // logger.info("--- Vue 3 Plugin NOT found path" + vueModulePath);
-
-        // const vueModulePath = failedLocations.find(
-        //   (x) =>
-        //     (baseUrl ? x.includes(baseUrl) : true) &&
-        //     x.endsWith(match) &&
-        //     fs.existsSync(x)
-        // );
-
-        // if (!vueModulePath) return;
-        // return {
-        //   extension: ts.Extension.Dts,
-        //   isExternalLibraryImport: false,
-        //   resolvedFileName: path.resolve(vueModulePath),
-        // };
-      };
 
 
   // ts.readConfigFile()

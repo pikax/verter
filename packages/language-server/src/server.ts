@@ -1,5 +1,5 @@
 // import lsp from "vscode-languageserver/lib/node/main.js";
-import lsp, { TextDocuments } from "vscode-languageserver/node";
+import lsp, { CompletionItem, CompletionItemKind, InsertTextFormat, TextDocuments } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import Logger from "./logger";
 
@@ -13,6 +13,7 @@ import { documentManager } from "./lib/documents/Manager";
 import { getTypescriptService } from "./plugins/typescript/TypescriptPlugin";
 import { offsetAt } from "./lib/documents/utils";
 import { VueDocument } from "./lib/documents/VueDocument";
+import ts from "typescript";
 
 // import {
 //   ClientCapabilities,
@@ -138,6 +139,98 @@ export function startServer(options: LsConnectionOption = {}) {
   // connection.client.connection
 
 
+  const KindMap: Record<ts.ScriptElementKind, CompletionItemKind> = {
+    [ts.ScriptElementKind.unknown]: CompletionItemKind.Text,
+    [ts.ScriptElementKind.warning]: CompletionItemKind.Text,
+    [ts.ScriptElementKind.keyword]: CompletionItemKind.Keyword,
+    [ts.ScriptElementKind.scriptElement]: CompletionItemKind.File,
+    [ts.ScriptElementKind.moduleElement]: CompletionItemKind.Module,
+    [ts.ScriptElementKind.classElement]: CompletionItemKind.Class,
+    [ts.ScriptElementKind.localClassElement]: CompletionItemKind.Class,
+    [ts.ScriptElementKind.interfaceElement]: CompletionItemKind.Interface,
+    [ts.ScriptElementKind.typeElement]: CompletionItemKind.Class, // No direct equivalent in LSP; Class is a reasonable approximation.
+    [ts.ScriptElementKind.enumElement]: CompletionItemKind.Enum,
+    [ts.ScriptElementKind.enumMemberElement]: CompletionItemKind.EnumMember,
+    [ts.ScriptElementKind.variableElement]: CompletionItemKind.Variable,
+    [ts.ScriptElementKind.localVariableElement]: CompletionItemKind.Variable,
+    [ts.ScriptElementKind.functionElement]: CompletionItemKind.Function,
+    [ts.ScriptElementKind.localFunctionElement]: CompletionItemKind.Function,
+    [ts.ScriptElementKind.memberFunctionElement]: CompletionItemKind.Method,
+    [ts.ScriptElementKind.memberGetAccessorElement]: CompletionItemKind.Property,
+    [ts.ScriptElementKind.memberSetAccessorElement]: CompletionItemKind.Property,
+    [ts.ScriptElementKind.memberVariableElement]: CompletionItemKind.Field,
+    [ts.ScriptElementKind.constructorImplementationElement]: CompletionItemKind.Constructor,
+    [ts.ScriptElementKind.callSignatureElement]: CompletionItemKind.Method,
+    [ts.ScriptElementKind.indexSignatureElement]: CompletionItemKind.Property,
+    [ts.ScriptElementKind.constructSignatureElement]: CompletionItemKind.Constructor,
+    [ts.ScriptElementKind.parameterElement]: CompletionItemKind.Variable,
+    [ts.ScriptElementKind.typeParameterElement]: CompletionItemKind.TypeParameter,
+    [ts.ScriptElementKind.primitiveType]: CompletionItemKind.Class,
+    [ts.ScriptElementKind.label]: CompletionItemKind.Text,
+    [ts.ScriptElementKind.alias]: CompletionItemKind.Reference,
+    [ts.ScriptElementKind.constElement]: CompletionItemKind.Constant,
+    [ts.ScriptElementKind.letElement]: CompletionItemKind.Variable,
+    [ts.ScriptElementKind.directory]: CompletionItemKind.Folder,
+    [ts.ScriptElementKind.externalModuleName]: CompletionItemKind.Module,
+    [ts.ScriptElementKind.jsxAttribute]: CompletionItemKind.Property,
+    [ts.ScriptElementKind.string]: CompletionItemKind.Text,
+    [ts.ScriptElementKind.link]: CompletionItemKind.Reference,
+    [ts.ScriptElementKind.linkName]: CompletionItemKind.Reference,
+    [ts.ScriptElementKind.linkText]: CompletionItemKind.Text,
+
+    [ts.ScriptElementKind.variableAwaitUsingElement]: CompletionItemKind.Variable,
+    [ts.ScriptElementKind.variableUsingElement]: CompletionItemKind.Variable,
+    [ts.ScriptElementKind.memberAccessorVariableElement]: CompletionItemKind.Property
+  };
+
+  const r = {} as any as ts.ScriptElementKind
+  const a = CompletionItemKind[r]
+
+
+  function mapTsCompletionToLspItem(tsCompletion: ts.CompletionEntry, data: { virtualUrl: string, index: number, triggerKind: lsp.CompletionTriggerKind | undefined, triggerCharacter: string | undefined }): CompletionItem {
+    const lspItem: CompletionItem = {
+      label: tsCompletion.name,
+      kind: KindMap[tsCompletion.kind] || CompletionItemKind.Text,
+      detail: tsCompletion.source, // Example mapping, adjust as needed
+      insertText: tsCompletion.insertText || tsCompletion.name,
+      insertTextFormat: InsertTextFormat.PlainText,
+      sortText: tsCompletion.sortText,
+      filterText: tsCompletion.filterText,
+      documentation: tsCompletion.source,
+      data: Object.assign(data, tsCompletion.data)
+    };
+
+    // if (tsCompletion.replacementSpan) {
+    //   const start = tsCompletion.replacementSpan.start;
+    //   const length = tsCompletion.replacementSpan.length;
+    //   const startPos = document.positionAt(start);
+    //   const endPos = document.positionAt(start + length);
+
+    //   textEdit = TextEdit.replace(Range.create(startPos, endPos), tsCompletion.insertText || tsCompletion.name);
+    // }
+
+    return lspItem;
+  }
+
+
+  connection.onCompletionResolve((item) => {
+    const data: { virtualUrl: string, index: number, triggerKind: lsp.CompletionTriggerKind | undefined, triggerCharacter: string | undefined } = item.data ?? {}
+
+    const details = tsService.getCompletionEntryDetails(data.virtualUrl, data.index, item.label, undefined, undefined, undefined, item.data)
+    if (!details) return item
+
+    item.detail = ts.displayPartsToString(details.displayParts)
+    // ''.
+
+    item.documentation = {
+      kind: 'markdown',
+      value: ts.displayPartsToString(details.documentation) + (details.tags ? '\n\n' + details.tags.map(tag => `_@${tag.name}_ — \`${ts.displayPartsToString(tag.text?.slice(0, 1))}\` ${ts.displayPartsToString(tag.text?.slice(1))}\n`).join('\n') : '')
+    }
+
+    return item;
+  })
+
+
 
   connection.onCompletion(async (params) => {
     if (!params.textDocument.uri.endsWith(".vue")) return null;
@@ -145,44 +238,6 @@ export function startServer(options: LsConnectionOption = {}) {
     let doc = documentManager.getDocument(virtualUrl);
 
     if (doc) {
-      // {
-      //   const virtualUrl = params.textDocument.uri.replace('file:', 'verter-virtual:') + '.tsx'
-      //   // const virtualUrl = params.textDocument.uri.replace('.vue', '.ts')
-
-      //   let newIndex = 8
-
-      //   try {
-      //     const results = tsService.getCompletionsAtPosition(virtualUrl, newIndex, {
-      //       ...params.context,
-      //     })
-      //     console.log('got res', results?.entries.length)
-      //     // return results?.entries ?? []
-      //     if (results) {
-      //       return {
-      //         isIncomplete: true,
-      //         items: results.entries.map(x => {
-      //           return {
-      //             label: x.name,
-      //             kind: x.kind,
-      //             data: x.data
-      //           }
-      //         })
-      //       }
-      //     }
-      //   } catch (e) {
-      //     console.error('eeee', e)
-      //   }
-      // }
-
-
-
-
-      // const content = doc._content ?? doc.content;
-
-      // doc = new VueDocument(doc.uri, content)
-      // const templateInfo = doc.template
-      // const originalOffset = doc.offsetAt(params.position)
-
 
       const templateInfo = doc.template
       const content = doc.getText()
@@ -236,14 +291,12 @@ export function startServer(options: LsConnectionOption = {}) {
             // ...results,
             isIncomplete: results.isIncomplete,
 
-            items: results.entries.map(x => {
-              return {
-                ...x,
-                label: x.name,
-                kind: x.kind,
-                data: x.data,
-              }
-            })
+            items: results.entries.map(x => mapTsCompletionToLspItem(x, {
+              virtualUrl,
+              index: index,
+              triggerKind: params.context?.triggerKind,
+              triggerCharacter: params.context?.triggerCharacter,
+            }))
           }
         }
       } catch (e) {
