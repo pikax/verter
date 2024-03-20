@@ -14,6 +14,7 @@ import { getTypescriptService } from "./plugins/typescript/TypescriptPlugin";
 import { offsetAt } from "./lib/documents/utils";
 import { VueDocument } from "./lib/documents/VueDocument";
 import ts from "typescript";
+import { CompilerError } from "vue/compiler-sfc";
 
 // import {
 //   ClientCapabilities,
@@ -121,6 +122,30 @@ export function startServer(options: LsConnectionOption = {}) {
     const allDiagnostics = [...syntacticDiagnostics, ...semanticDiagnostics, ...suggestionDiagnostics];
     const lspDiagnostics = allDiagnostics.map(diagnostic => convertTsDiagnosticToLspDiagnostic(diagnostic, document));
 
+
+    if (document.parsed.errors.length) {
+      lspDiagnostics.push(...document.parsed.errors.filter(x => 'loc' in x && x.loc).map((x: CompilerError) => {
+        // const map = document.template.mapConsumer;
+        const range: lsp.Range = {
+          start: {
+            line: x.loc!.start.line - 1,
+            character: x.loc!.start.column,
+          },
+          end: {
+            line: x.loc!.end.line - 1,
+            character: x.loc!.end.column,
+          }
+        }
+
+        return {
+          message: x.message,
+          range,
+          source: 'vue-compiler',
+          severity: lsp.DiagnosticSeverity.Error,
+          code: x.code,
+        } as lsp.Diagnostic
+      }))
+    }
 
     // Get the semantic diagnostics for the source file
     // const diagnostics = ts.getPreEmitDiagnostics(tsService.getProgram(), sourceFile);
@@ -355,12 +380,10 @@ export function startServer(options: LsConnectionOption = {}) {
     const details = tsService.getCompletionEntryDetails(data.virtualUrl, data.index, label, undefined, undefined, undefined, item.data)
     if (!details) return item
 
-    item.detail = ts.displayPartsToString(details.displayParts)
 
-    // item.documentation = {
-    //   kind: 'markdown',
-    //   value: ts.displayPartsToString(details.documentation) + (details.tags ? '\n\n' + details.tags.map(tag => `_@${tag.name}_ — \`${ts.displayPartsToString(tag.text?.slice(0, 1))}\` ${ts.displayPartsToString(tag.text?.slice(1))}\n`).join('\n') : '')
-    // }
+    let displayDetail = ts.displayPartsToString(details.displayParts)
+    item.detail = displayDetail
+
     item.documentation = generateMarkdown(details)
 
     return item;
@@ -384,7 +407,7 @@ export function startServer(options: LsConnectionOption = {}) {
   function formatQuickInfo(quickInfo: ts.QuickInfo, fileName: string): lsp.Hover {
     const contents = generateMarkdown(quickInfo)
 
-    contents.value = ts.displayPartsToString(quickInfo.displayParts) + '\n\n' + contents.value
+    contents.value = '```ts\n' + ts.displayPartsToString(quickInfo.displayParts) + '\n\n' + contents.value
 
     // Convert the text span to an LSP range
     const range = convertTextSpanToRange(quickInfo.textSpan, fileName);
@@ -484,19 +507,6 @@ export function startServer(options: LsConnectionOption = {}) {
           // @ts-expect-error this is correct, I think
           triggerCharacter: params.context?.triggerCharacter === '@' ? '' : params.context?.triggerCharacter,
         })
-
-        const b = tsService.getQuickInfoAtPosition(virtualUrl, newIndex)
-        const c = tsService.getTypeDefinitionAtPosition(virtualUrl, newIndex)
-        const a = tsService.getReferencesAtPosition(virtualUrl, newIndex)
-
-        // const otherResults = tsService.getCompletionEntryDetails(virtualUrl, newIndex, 'div', undefined, '<div', undefined, undefined)
-        // const otherResults1 = tsService.getCompletionEntrySymbol(virtualUrl, newIndex, 'div', '<div')
-        const rrr = tsService.getDefinitionAtPosition(virtualUrl, newIndex)
-        const aa = tsService.getReferencesAtPosition(virtualUrl, newIndex)
-        console.log('got res', newIndex, `'${templateInfo.content.slice(index - 5, index + 5)}'`, results?.entries.length)
-        console.log({
-          a, b, c, rrr, aa
-        })
         // return results?.entries ?? []
         if (results) {
 
@@ -506,6 +516,9 @@ export function startServer(options: LsConnectionOption = {}) {
             isIncomplete: results.isIncomplete,
 
             items: results.entries.filter(x => {
+              if (x.name.startsWith('___VERTER__')) {
+                return false;
+              }
               switch (params.context?.triggerCharacter) {
                 case '@': {
                   return x.name.startsWith('on')
