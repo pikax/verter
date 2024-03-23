@@ -1,4 +1,4 @@
-import { checkForSetupMethodCall, retrieveNodeString } from "../helpers.js";
+// import { checkForSetupMethodCall, retrieveNodeString } from "../helpers.js";
 import { LocationType, PluginOption, WalkResult } from "../types.js";
 import Declaration from "../declaration/declaration.js";
 
@@ -12,6 +12,8 @@ export default {
   name: "Options",
 
   process: (context) => {
+    // NOTE Disabled to test things out
+    return;
     const source = context.script?.content;
     // empty component
     if (!source) {
@@ -95,7 +97,7 @@ export default {
       if (declarations.length) {
         content = content.replace(
           ") {",
-          `) { ${declarations?.map((x) =>  x.declaration?.content).join("")}`
+          `) { ${declarations?.map((x) => x.declaration?.content).join("")}`
         );
       }
 
@@ -164,18 +166,20 @@ export default {
         .concat(
           imports
             ? [
-                {
-                  type: LocationType.Import,
-                  generated: false,
-                  node: context.script,
-                  from: imports.slice(),
-                  items: [],
-                },
-              ]
+              {
+                type: LocationType.Import,
+                generated: false,
+                node: context.script,
+                from: imports.slice(),
+                items: [],
+              },
+            ]
             : []
         );
     }
 
+
+    // not SETUp
     let content = source;
     for (const it of possibleExports) {
       const index = source.indexOf(it);
@@ -218,36 +222,36 @@ export default {
       },
       ...(context.generic
         ? [
-            {
-              type: LocationType.Declaration,
-              generated: true,
-              node: undefined,
-              declaration: {
-                name: "__optionsGenerator",
-                content: `(<${context.generic},>() => { return ${content} })`,
-              },
+          {
+            type: LocationType.Declaration,
+            generated: true,
+            node: undefined,
+            declaration: {
+              name: "__optionsGenerator",
+              content: `(<${context.generic},>() => { return ${content} })`,
             },
-            {
-              type: LocationType.Declaration,
-              generated: true,
-              node: undefined,
-              declaration: {
-                name: "__options",
-                content: `__optionsGenerator()`,
-              },
+          },
+          {
+            type: LocationType.Declaration,
+            generated: true,
+            node: undefined,
+            declaration: {
+              name: "__options",
+              content: `__optionsGenerator()`,
             },
-          ]
+          },
+        ]
         : [
-            {
-              type: LocationType.Declaration,
-              generated: true,
-              node: undefined,
-              declaration: {
-                name: "__options",
-                content,
-              },
+          {
+            type: LocationType.Declaration,
+            generated: true,
+            node: undefined,
+            declaration: {
+              name: "__options",
+              content,
             },
-          ]),
+          },
+        ]),
       {
         type: LocationType.Declaration,
         generated: true,

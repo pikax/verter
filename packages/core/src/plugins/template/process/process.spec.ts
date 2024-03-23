@@ -88,7 +88,7 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent foo={___VETER__ctx.bar}/></template>"`
+        `"<template><___VERTER__comp.MyComponent foo={___VERTER__ctx.bar}/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
         `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAE,IAAI,eAAC,GAAG,CAAC"}"`
@@ -102,7 +102,7 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent foo={___VETER__ctx.bar}/></template>"`
+        `"<template><___VERTER__comp.MyComponent foo={___VERTER__ctx.bar}/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
         `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,IAAI,eAAC,GAAG,CAAC"}"`
@@ -116,7 +116,7 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent {...___VETER__ctx.bar}/></template>"`
+        `"<template><___VERTER__comp.MyComponent {...___VERTER__ctx.bar}/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
         `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,CAAP,iBAAQ,GAAG,CAAC"}"`
@@ -130,7 +130,7 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent bind={___VETER__ctx.bar}/></template>"`
+        `"<template><___VERTER__comp.MyComponent bind={___VERTER__ctx.bar}/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
         `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAE,KAAK,eAAC,GAAG,CAAC"}"`
@@ -157,7 +157,7 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent bind={___VETER__ctx.bar}/></template>"`
+        `"<template><___VERTER__comp.MyComponent bind={___VERTER__ctx.bar}/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
         `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,KAAK,eAAC,GAAG,CAAC"}"`
@@ -171,7 +171,7 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent {...___VETER__ctx.bar} foo="bar"/></template>"`
+        `"<template><___VERTER__comp.MyComponent {...___VERTER__ctx.bar} foo="bar"/></template>"`
       );
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
         `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAQ,CAAP,iBAAQ,GAAG,CAAC"}"`);
@@ -184,7 +184,7 @@ describe("process", () => {
 
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><___VERTER__comp.MyComponent foo="bar" {...___VETER__ctx.bar}/></template>"`
+        `"<template><___VERTER__comp.MyComponent foo="bar" {...___VERTER__ctx.bar}/></template>"`
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -235,7 +235,7 @@ describe("process", () => {
       const parsed = doParseContent(source);
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><span onCheckForSomething={___VETER__ctx.test}></span></template>"`
+        `"<template><span onCheckForSomething={___VERTER__ctx.test}></span></template>"`
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -249,7 +249,7 @@ describe("process", () => {
       const parsed = doParseContent(source);
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><span modelValue={___VETER__ctx.test}></span></template>"`
+        `"<template><span modelValue={___VERTER__ctx.test}></span></template>"`
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -314,7 +314,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VETER__ctx.items,(item)=>{<li ></li>})}</template>"`
+            `"<template>{renderList(___VERTER__ctx.items,(item)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -333,7 +333,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VETER__ctx.items,({ message })=>{<li ></li>})}</template>"`
+            `"<template>{renderList(___VERTER__ctx.items,({ message })=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -347,7 +347,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VETER__ctx.items,(item, index)=>{<li ></li>})}</template>"`
+            `"<template>{renderList(___VERTER__ctx.items,(item, index)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -361,7 +361,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VETER__ctx.items,(item, index)=>{<li  key={index + 'random'}></li>})}</template>"`
+            `"<template>{renderList(___VERTER__ctx.items,(item, index)=>{<li  key={index + 'random'}></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -375,7 +375,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VETER__ctx.items,({ message }, index)=>{<li ></li>})}</template>"`
+            `"<template>{renderList(___VERTER__ctx.items,({ message }, index)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -391,7 +391,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(`
-            "<template>{renderList(___VETER__ctx.items,(item)=>{<li >
+            "<template>{renderList(___VERTER__ctx.items,(item)=>{<li >
                   {renderList(item.children,(childItem)=>{<span ></span>})}
               </li>})}</template>"
           `);
@@ -407,7 +407,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VETER__ctx.items,(item)=>{<li ></li>})}</template>"`
+            `"<template>{renderList(___VERTER__ctx.items,(item)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -421,7 +421,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VETER__ctx.items,(item  )=>{<li ></li>})}</template>"`
+            `"<template>{renderList(___VERTER__ctx.items,(item  )=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -435,7 +435,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(    ___VETER__ctx.items,(item  )=>{<li ></li>})}</template>"`
+            `"<template>{renderList(    ___VERTER__ctx.items,(item  )=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -450,7 +450,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VETER__ctx.myObject,(value)=>{<li ></li>})}</template>"`
+            `"<template>{renderList(___VERTER__ctx.myObject,(value)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -464,7 +464,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VETER__ctx.myObject,(value, key)=>{<li ></li>})}</template>"`
+            `"<template>{renderList(___VERTER__ctx.myObject,(value, key)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -478,7 +478,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VETER__ctx.myObject,(value, key, index)=>{<li ></li>})}</template>"`
+            `"<template>{renderList(___VERTER__ctx.myObject,(value, key, index)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -508,7 +508,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{(___VETER__ctx.items > 5)?renderList(___VETER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
+            `"<template>{(___VERTER__ctx.items > 5)?renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -528,7 +528,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{(___VETER__ctx.n > 5)?<li ></li> : undefined}</template>"`
+            `"<template>{(___VERTER__ctx.n > 5)?<li ></li> : undefined}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -541,7 +541,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{(___VETER__ctx.n > 5)?<li  id="if"></li>:<li  id="else"></li>}</template>"`
+            `"<template>{(___VERTER__ctx.n > 5)?<li  id="if"></li>:<li  id="else"></li>}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -553,7 +553,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{(___VETER__ctx.n > 5)?<li ></li>:(___VETER__ctx.n > 3)?<li ></li> : undefined}</template>"`
+            `"<template>{(___VERTER__ctx.n > 5)?<li ></li>:(___VERTER__ctx.n > 3)?<li ></li> : undefined}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -574,12 +574,12 @@ describe("process", () => {
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(`
             "<template>
-                          {(___VETER__ctx.n === 1)?<li ></li>
-                          :(___VETER__ctx.n === 1)?<li ></li>
-                          :(___VETER__ctx.n === 1)?<li ></li>
-                          :(___VETER__ctx.n === 1)?<li ></li>
-                          :(___VETER__ctx.n === 1)?<li ></li>
-                          :(___VETER__ctx.n === 1)?<li ></li>
+                          {(___VERTER__ctx.n === 1)?<li ></li>
+                          :(___VERTER__ctx.n === 1)?<li ></li>
+                          :(___VERTER__ctx.n === 1)?<li ></li>
+                          :(___VERTER__ctx.n === 1)?<li ></li>
+                          :(___VERTER__ctx.n === 1)?<li ></li>
+                          :(___VERTER__ctx.n === 1)?<li ></li>
                           :<li ></li>}</template>"
           `);
 
@@ -623,7 +623,7 @@ describe("process", () => {
             const parsed = doParseContent(source);
             const { magicString } = process(parsed);
             expect(magicString.toString()).toMatchInlineSnapshot(
-              `"<template>{(___VETER__ctx.items > 5)?renderList(___VETER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
+              `"<template>{(___VERTER__ctx.items > 5)?renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
             );
 
             expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -644,7 +644,7 @@ describe("process", () => {
             const parsed = doParseContent(source);
             const { magicString } = process(parsed);
             expect(magicString.toString()).toMatchInlineSnapshot(
-              `"<template>{(___VETER__ctx.items > 5)?renderList(___VETER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
+              `"<template>{(___VERTER__ctx.items > 5)?renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
             );
 
             expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -664,7 +664,7 @@ describe("process", () => {
             const parsed = doParseContent(source);
             const { magicString } = process(parsed);
             expect(magicString.toString()).toMatchInlineSnapshot(
-              `"<template>{(___VETER__ctx.items > 5)?renderList(___VETER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
+              `"<template>{(___VERTER__ctx.items > 5)?renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
             );
 
             expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -685,7 +685,7 @@ describe("process", () => {
             const parsed = doParseContent(source);
             const { magicString } = process(parsed);
             expect(magicString.toString()).toMatchInlineSnapshot(
-              `"<template>{(___VETER__ctx.items > 5)?renderList(___VETER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
+              `"<template>{(___VERTER__ctx.items > 5)?renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
             );
 
             expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -706,7 +706,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template><div {...___VETER__ctx.props} /></template>"`
+            `"<template><div {...___VERTER__ctx.props} /></template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -719,7 +719,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template><div name={___VETER__ctx.props} /></template>"`
+            `"<template><div name={___VERTER__ctx.props} /></template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -732,7 +732,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template><div name={___VETER__ctx.name} /></template>"`
+            `"<template><div name={___VERTER__ctx.name} /></template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -746,7 +746,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template><div name={___VETER__ctx.name} /></template>"`
+            `"<template><div name={___VERTER__ctx.name} /></template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(

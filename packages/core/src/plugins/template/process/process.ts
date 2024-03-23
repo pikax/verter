@@ -25,7 +25,7 @@ interface ProcessContext {
 
   /**
    * Override the accessor for the template
-   * @default "___VETER__ctx"
+   * @default "___VERTER__ctx"
    */
   accessor?: string;
   /**
@@ -42,7 +42,7 @@ export function process(
   context: ProcessContext = {
     ignoredIdentifiers: [],
     declarations: [],
-    accessor: "___VETER__ctx",
+    accessor: "___VERTER__ctx",
     componentAccessor: "___VERTER__comp",
   }
 ) {
@@ -130,7 +130,9 @@ function renderElement(
 
   const openTagIndex = node.node.loc.start.offset;
   // NOTE this override is quite big, it does not provide a 1-1 mapping per character
-  s.overwrite(openTagIndex + 1, openTagIndex + node.tag.length + 1, tag);
+  if (tag !== node.tag) {
+    s.overwrite(openTagIndex + 1, openTagIndex + node.tag.length + 1, tag);
+  }
   if (accessor) {
     s.prependLeft(openTagIndex + 1, `${accessor}.`);
   }
