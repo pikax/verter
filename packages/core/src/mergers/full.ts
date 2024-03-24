@@ -31,6 +31,11 @@ export function mergeFull(
   const blocks: VerterSFCBlock[] = [];
   const SUPPORTED_BLOCKS = new Set(["template", "script"]);
 
+  const startScript = sfc.descriptor.scriptSetup ?? sfc.descriptor.script;
+
+  const startScriptIndex = startScript?.loc.start.offset;
+  const endScriptIndex = startScript?.loc.end.offset;
+
   {
     const allHTMLComments = retrieveHTMLComments(source);
 
@@ -72,9 +77,6 @@ export function mergeFull(
     const templateIndex = blocks.findIndex((x) => x.block.type === "template");
     if (templateIndex >= 0) {
       const templateBlock = blocks[templateIndex];
-      const endScriptIndex = (
-        sfc.descriptor.scriptSetup ?? sfc.descriptor.script
-      )?.loc.end.offset;
 
       s.move(
         templateBlock.tag.pos.open.start,
@@ -143,8 +145,97 @@ export function mergeFull(
     }
   }
 
-  //
+  // adding some imports and variable context
   {
+    const regexComp = /const ____VERTER_COMP_OPTION__ = [^\w]*{]*/gm;
+    const rawObjectDeclaration = regexComp.test(s.toString());
+
+    if (!rawObjectDeclaration) {
+      locations[LocationType.Import].push({
+        type: LocationType.Import,
+        generated: true,
+        from: "vue",
+        node: null,
+        items: [
+          {
+            name: "defineComponent",
+            alias: "___VERTER_defineComponent",
+            // note could be type
+            type: false,
+          },
+        ],
+      });
+    }
+
+    locations.declaration.push({
+      type: LocationType.Declaration,
+      generated: true,
+      context: "post",
+      declaration: {
+        type: "const",
+        name: "___VERTER__ctx",
+        content: `{ ${["...(new ___VERTER_COMP___())"].join(",\n")} }`,
+      },
+    });
+
+    locations.declaration.push({
+      type: LocationType.Declaration,
+      generated: true,
+      context: "post",
+      declaration: {
+        type: "const",
+        name: "___VERTER__comp",
+        content: `{ 
+            ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+          }`,
+      },
+    });
+  }
+
+  // add the generated declarations
+  {
+    // s.prependLeft(endScriptIndex, "");
+
+    // const pre = ;
+    // "global" | "pre" | "post" | "end"
+
+    function declarationToString(x: TypeLocationDeclaration): string {
+      if (!x.declaration.name) {
+        return x.declaration.content;
+      }
+      return [
+        x.declaration.type ?? "const",
+        x.declaration.name,
+        "=",
+        x.declaration.content,
+      ].join(" ");
+    }
+
+    const generatedDeclarations = locations.declaration.filter(
+      (x) => !!x.generated
+    );
+
+    const global = generatedDeclarations
+      .filter((x) => x.context === "global" || !x.context)
+      .map(declarationToString);
+
+    const pre = generatedDeclarations
+      .filter((x) => x.context === "pre")
+      .map(declarationToString);
+
+    const post = generatedDeclarations
+      .filter((x) => x.context === "post")
+      .map(declarationToString);
+
+    const end = generatedDeclarations
+      .filter((x) => x.context === "end")
+      .map(declarationToString);
+
+    // TODO add global, pre, end
+
+    s.prependLeft(startScriptIndex, pre.join("\n") + "\n");
+
+    s.prependLeft(endScriptIndex, post.join("\n") + "\n");
   }
 
   return {
@@ -396,15 +487,53 @@ function processBlock(
   const { s } = context;
   switch (block.tag.type) {
     case "script": {
+      scriptTagProcess(block, context);
+      const declarationStr = "const ____VERTER_COMP_OPTION__ = ";
       if (block.block.attrs.setup) {
+        locations.import.push({
+          type: LocationType.Import,
+          from: "vue",
+          generated: true,
+          node: null,
+          items: [
+            {
+              name: "defineComponent",
+              alias: "___VERTER_defineComponent",
+              // note could be type
+              type: false,
+            },
+          ],
+        });
+
+        locations.declaration.push({
+          type: LocationType.Declaration,
+          generated: true,
+          context: "pre",
+          declaration: {
+            // NOTE It might contain the other variables, we might need to slice
+            content:
+              context.script.content.replace(
+                "____VERTER_COMP_OPTION__ = ",
+                "____VERTER_COMP_OPTION__ = ___VERTER_defineComponent("
+              ) + ")",
+          },
+        });
+
+        // add ___VERTER_COMP___ in declaration
+        locations.declaration.push({
+          type: LocationType.Declaration,
+          generated: true,
+          context: "post",
+          declaration: {
+            type: "const",
+            name: "___VERTER_COMP___",
+            content: `____VERTER_COMP_OPTION__`,
+          },
+        });
       } else {
         // options
-
         {
-          scriptTagProcess(block, context);
-
           // override the export default
-          const declarationStr = "const ____VERTER_COMP_OPTION__ = ";
           for (const possibleExport of possibleExports) {
             s.replace(possibleExport, declarationStr);
           }
@@ -494,18 +623,15 @@ function clearTags(block: VerterSFCBlock, s: MagicString) {
 }
 
 function scriptTagProcess(block: VerterSFCBlock, context: ParseScriptContext) {
-  block.tag.pos.open.start;
-  block.tag.pos.close.end;
-
   const preGeneric = `\nfunction ___VERTER_COMPONENT__`;
   const postGeneric = `() {\n`;
 
   const generic =
     typeof context.generic === "string"
       ? context.generic
-      : context.script.attrs.generic;
+      : context.script?.attrs.generic;
   // generic information will be kept intact for the source-map
-  if (context) {
+  if (typeof generic === "string") {
     const tagContent = context.s.original.slice(
       block.tag.pos.open.start,
       block.tag.pos.open.end

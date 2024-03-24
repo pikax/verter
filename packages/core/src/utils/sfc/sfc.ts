@@ -98,7 +98,7 @@ export function extractBlocksFromDescriptor(
     descriptor.template,
     ...descriptor.styles,
     ...descriptor.customBlocks,
-    // ...catchEmptyBlocks(descriptor)
+    ...catchEmptyBlocks(descriptor)
   ]
     .filter(Boolean)
     .sort((a, b) => {

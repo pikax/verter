@@ -783,8 +783,7 @@ function retrieveStringExpressionNode(
       }
       const offset =
         overrideOffset >= 0 ? overrideOffset : node.loc.start.offset;
-      // -2 is magic offset :thinking:
-      return parseNodeText(node.ast, s, context, offset - 2, prepend);
+      return parseNodeText(node.ast, s, context, offset - 1, prepend);
     }
     case NodeTypes.COMPOUND_EXPRESSION: {
       return "NOT_KNOWN COMPOUND_EXPRESSION";
@@ -813,7 +812,7 @@ function parseNodeText(
   }
 
   if ("callee" in node) {
-    node.callee && parseNodeText(node.callee, s, context, offset, prepend);
+    node.callee && parseNodeText(node.callee, s, context, offset - 1, prepend);
   }
 
   if ("exprName" in node) {

@@ -46,37 +46,35 @@ describe("Mergers Full", () => {
     expect(p.source).toBe(source);
 
     expect(p.content).toMatchInlineSnapshot(`
-          "/* @jsxImportSource vue */
+      "import { defineComponent as ___VERTER_defineComponent } from 'vue';
 
-                  const ____VERTER_COMP_OPTION__ = {
-                      data(){
-                          return { test: 'hello' }
-                      }
+      function ___VERTER_COMPONENT__() {
+
+              const ____VERTER_COMP_OPTION__ = {
+                  data(){
+                      return { test: 'hello' }
                   }
-                  const ___VERTER_COMP___ = ___VERTER_defineComponent(___VERTER_COMP_OPTION__) 
-          /* verter:template-context start */
-          const ___VERTER_ctx = {
-          ...(new ____VERTER_COMP_OPTION__())
-          }
-          /* verter:template-context end */
+              }
+              const ___VERTER_COMP___ = ___VERTER_defineComponent(____VERTER_COMP_OPTION__)
+      const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+      const ___VERTER__comp = { 
+                  ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                }
+      function ___VERTER__TEMPLATE_RENDER() {
+      <>
+                  <div key={___VERTER__ctx.test}>{ "test" }</div>
+              
+      </>}
+      }
 
-
-          /* verter:template-render start */
-          function ___VERTER__TEMPLATE_RENDER() {
-          <>
-                      <div key={___VERTER__ctx.test}>{ "test" }</div>
-                  
-          </>
-          }
-          /* verter:template-render end */
-          "
-        `);
+              "
+    `);
 
     p.map;
     testSourceMaps(p);
   });
 
-  it("should work setup", () => {
+  it.only("should work setup", () => {
     const source = `<script setup>
         const test = ref('hello')
         </script>
@@ -89,29 +87,42 @@ describe("Mergers Full", () => {
     expect(p.source).toBe(source);
 
     expect(p.content).toMatchInlineSnapshot(`
-          "/* @jsxImportSource vue */
-          <script setup>
-                  const test = ref('hello')
-                  </script>
-                  
-          /* verter:template-context start */
-          const ___VERTER_ctx = {
-          ...(new ____VERTER_COMP_OPTION__())
-          test: unref(test)
-          }
-          /* verter:template-context end */
+      "import { defineComponent as ___VERTER_defineComponent } from 'vue';
 
+      function ___VERTER_COMPONENT__() {
 
-          /* verter:template-render start */
-          function ___VERTER__TEMPLATE_RENDER() {
-          <>
-                      <div key={___VERTER__ctx.test}>{ "test" }</div>
-                  
-          </>
-          }
-          /* verter:template-render end */
-          "
-        `);
+      const ____VERTER_COMP_OPTION__ = ___VERTER_defineComponent({
+        __name: 'test',
+        setup(__props, { expose: __expose }) {
+        __expose();
+
+              const test = ref('hello')
+              
+      const __returned__ = { test }
+      Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true })
+      return __returned__
+      }
+
+      })
+
+              const test = ref('hello')
+              const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
+      const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+      const ___VERTER__comp = { 
+                  ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                }
+      function ___VERTER__TEMPLATE_RENDER() {
+      <>
+                  <div key={___VERTER__ctx.test}>{ "test" }</div>
+              
+      </>}
+      }
+
+              "
+    `);
+
+    testSourceMaps(p);
+
   });
 
   describe("test", () => {
@@ -396,7 +407,7 @@ describe("Mergers Full", () => {
         testSourceMaps(p);
       });
 
-      it.only("should handle more complex generic on the template", () => {
+      it("should handle more complex generic on the template", () => {
         const source = `<script lang="ts" generic="T extends string & { supa?: () => number } = 'foo'">
         import { ref } from 'vue'
 
