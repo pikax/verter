@@ -10,7 +10,6 @@ export default {
     const source = context.script?.loc.source;
     if (!source) return;
 
-
     const supportedTypes = new Set([
       "VariableDeclaration",
       "FunctionDeclaration",
@@ -29,6 +28,7 @@ export default {
       declaration: {
         content,
       },
+      content: context.isSetup ? "pre" : "global",
     };
   },
 } satisfies PluginOption;

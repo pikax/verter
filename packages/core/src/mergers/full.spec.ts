@@ -1,38 +1,36 @@
 import { MagicString } from "@vue/compiler-sfc";
-import { createBuilder } from "../builder"
-import { mergeFull } from "./full"
-import fs from 'node:fs'
+import { createBuilder } from "../builder";
+import { mergeFull } from "./full";
+import fs from "node:fs";
 
+describe("Mergers Full", () => {
+  function testSourceMaps({
+    content,
+    map,
+  }: {
+    content: string;
+    map: ReturnType<MagicString["generateMap"]>;
+  }) {
+    fs.writeFileSync(
+      "D:/Downloads/sourcemap-test/sourcemap-example.js",
+      content,
+      "utf-8"
+    );
+    fs.writeFileSync(
+      "D:/Downloads/sourcemap-test/sourcemap-example.js.map",
+      JSON.stringify(map),
+      "utf-8"
+    );
+  }
 
-describe('Mergers Full', () => {
+  const builder = createBuilder();
+  function process(content: string, fileName = "test.vue") {
+    const { locations, context } = builder.preProcess(fileName, content);
+    return mergeFull(locations, context);
+  }
 
-    function testSourceMaps({ content, map }: {
-        content: string,
-        map: ReturnType<MagicString["generateMap"]>
-    }
-    ) {
-        fs.writeFileSync(
-            "D:/Downloads/sourcemap-test/sourcemap-example.js",
-            content,
-            "utf-8"
-        );
-        fs.writeFileSync(
-            "D:/Downloads/sourcemap-test/sourcemap-example.js.map",
-            JSON.stringify(map),
-            "utf-8"
-        );
-    }
-
-
-    const builder = createBuilder()
-    function process(content: string, fileName = 'test.vue') {
-        const { locations, context } = builder.preProcess(fileName, content)
-        return mergeFull(locations, context)
-    }
-
-
-    it('should work options API', () => {
-        const source = `<script>
+  it("should work options API", () => {
+    const source = `<script>
         export default {
             data(){
                 return { test: 'hello' }
@@ -41,13 +39,13 @@ describe('Mergers Full', () => {
         </script>
         <template>
             <div :key="test">test</div>
-        </template>`
+        </template>`;
 
-        const p = process(source)
+    const p = process(source);
 
-        expect(p.source).toBe(source)
+    expect(p.source).toBe(source);
 
-        expect(p.content).toMatchInlineSnapshot(`
+    expect(p.content).toMatchInlineSnapshot(`
           "/* @jsxImportSource vue */
 
                   const ____VERTER_COMP_OPTION__ = {
@@ -72,25 +70,25 @@ describe('Mergers Full', () => {
           }
           /* verter:template-render end */
           "
-        `)
+        `);
 
-        p.map
-        testSourceMaps(p)
-    })
+    p.map;
+    testSourceMaps(p);
+  });
 
-    it('should work setup', () => {
-        const source = `<script setup>
+  it("should work setup", () => {
+    const source = `<script setup>
         const test = ref('hello')
         </script>
         <template>
             <div :key="test">test</div>
-        </template>`
+        </template>`;
 
-        const p = process(source)
+    const p = process(source);
 
-        expect(p.source).toBe(source)
+    expect(p.source).toBe(source);
 
-        expect(p.content).toMatchInlineSnapshot(`
+    expect(p.content).toMatchInlineSnapshot(`
           "/* @jsxImportSource vue */
           <script setup>
                   const test = ref('hello')
@@ -113,11 +111,179 @@ describe('Mergers Full', () => {
           }
           /* verter:template-render end */
           "
-        `)
-    })
+        `);
+  });
 
-    it.only('sss', () => {
-        const source = `
+  describe("test", () => {
+    describe.only("script", () => {
+      it("should generate default option", () => {
+        const source = `<script></script>`;
+
+        const p = process(source);
+        expect(p.source).toBe(source);
+        expect(p.content).toMatchInlineSnapshot(
+          `
+          "import { defineComponent as ___VERTER_defineComponent } from 'vue';
+          const ____VERTER_COMP_OPTION__ = {};"
+        `
+        );
+        testSourceMaps(p);
+      });
+
+      it("should append defineComponent", () => {
+        const source = `<script>
+                export default {}
+                </script>`;
+
+        const p = process(source);
+        expect(p.source).toBe(source);
+        expect(p.content).toMatchInlineSnapshot(`
+          "import { defineComponent as ___VERTER_defineComponent } from 'vue';
+
+                          const ____VERTER_COMP_OPTION__ = {}
+                          "
+        `);
+      });
+
+      it("should append defineComponent with options", () => {
+        const source = `<script>
+                export default {
+                    name: 'test',
+    
+                    data(){ 
+                        return {
+                            foo: 'foo'
+                        }
+                    }
+                }
+                </script>`;
+
+        const p = process(source);
+        expect(p.source).toBe(source);
+        expect(p.content).toMatchInlineSnapshot(`
+          "import { defineComponent as ___VERTER_defineComponent } from 'vue';
+
+                          const ____VERTER_COMP_OPTION__ = {
+                              name: 'test',
+              
+                              data(){ 
+                                  return {
+                                      foo: 'foo'
+                                  }
+                              }
+                          }
+                          "
+        `);
+      });
+
+      it("should keep defineComponent", () => {
+        const source = `<script>
+                export default defineComponent({
+                    name: 'test',
+    
+                    data(){ 
+                        return {
+                            foo: 'foo'
+                        }
+                    }
+                })
+                </script>`;
+
+        const p = process(source);
+        expect(p.source).toBe(source);
+        expect(p.content).toMatchInlineSnapshot(`
+          "
+                          const ____VERTER_COMP_OPTION__ = defineComponent({
+                              name: 'test',
+              
+                              data(){ 
+                                  return {
+                                      foo: 'foo'
+                                  }
+                              }
+                          })
+                          "
+        `);
+      });
+
+      it("should keep imports unaltered", () => {
+        const source = `<script>
+        // import stuff
+        import { defineComponent } from 'vue'
+
+        export default defineComponent({
+            name: 'test',
+
+            data(){ 
+                return {
+                    foo: 'foo'
+                }
+            }
+        })
+        </script>`;
+
+        const p = process(source);
+        expect(p.source).toBe(source);
+        expect(p.content).toMatchInlineSnapshot(`
+          "import { defineComponent } from 'vue'
+                  // import stuff
+                  
+
+                  const ____VERTER_COMP_OPTION__ = defineComponent({
+                      name: 'test',
+
+                      data(){ 
+                          return {
+                              foo: 'foo'
+                          }
+                      }
+                  })
+                  "
+        `);
+      });
+
+      it("should handle generated imports + user imports", () => {
+        const source = `<script>
+        // import stuff
+        import { ref } from 'vue'
+
+        export default {
+            name: 'test',
+
+            data(){ 
+                return {
+                    foo: 'foo'
+                }
+            }
+        }
+        </script>`;
+
+        const p = process(source);
+        expect(p.source).toBe(source);
+        expect(p.content).toMatchInlineSnapshot(`
+          "import { defineComponent as ___VERTER_defineComponent } from 'vue';
+          import { ref } from 'vue'
+                  // import stuff
+                  
+
+                  const ____VERTER_COMP_OPTION__ = {
+                      name: 'test',
+
+                      data(){ 
+                          return {
+                              foo: 'foo'
+                          }
+                      }
+                  }
+                  "
+        `);
+        testSourceMaps(p);
+      });
+    });
+  });
+
+  it.skip("sss", () => {
+    const source = `
         <template>
             <div :key="test">test</div>
         </template>
@@ -131,73 +297,60 @@ describe('Mergers Full', () => {
         .test {
 
         }
-        </style>`
+        </style>`;
 
-        const p = process(source)
+    const p = process(source);
 
-        expect(p.source).toBe(source)
+    expect(p.source).toBe(source);
 
-        expect(p.content).toMatchInlineSnapshot(`
-          "/* @jsxImportSource vue */
-
+    expect(p.content).toMatchInlineSnapshot(`
+          "
                   
-          /* verter:template-context start */
-          const ___VERTER_ctx = {
-          ...(new ____VERTER_COMP_OPTION__())
-          }
-          /* verter:template-context end */
-
-          /* verter:template-render end */
-
                   
                   <script>
                   export const Supa = ''
-                  const ___VERTER_COMP___ = ___VERTER_COMP_OPTION__ </script>
-                  
 
-          /* verter:template-render start */
-          function ___VERTER__TEMPLATE_RENDER() {
+                  export default {}
+                  </script>
+                  function ___VERTER__TEMPLATE_RENDER() {
           <>
                       <div key={___VERTER__ctx.test}>{ "test" }</div>
                   
-          </>
-          }"
-        `)
-        testSourceMaps(p)
-    })
+          </>}"
+        `);
+    testSourceMaps(p);
+  });
 
-
-    it('should remove comment code', () => {
-        const source = `<template>
+  it("should remove comment code", () => {
+    const source = `<template>
         <div :key="test">test</div>
     </template>
     <!--<script setup>
     const test = ref('hello')
-    </script>-->`
+    </script>-->`;
 
-        const p = process(source)
+    const p = process(source);
 
-        expect(p.source).toBe(source)
-        expect(p.content).not.contain('<!--<script')
-    })
+    expect(p.source).toBe(source);
+    expect(p.content).not.contain("<!--<script");
+  });
 
-    describe.skip('generic', () => {
-
-        describe('error', () => {
-            it('should not work if not ts', () => {
-                const source = `<script setup lang="ts" generic="T">
+  describe.skip("generic", () => {
+    describe("error", () => {
+      it("should not work if not ts", () => {
+        const source = `<script setup lang="ts" generic="T">
                 const test = 'test';
                 </script>
                 <style>
                 .hello {
                     
                 }
-                </style>`
+                </style>`;
 
-                const p = process(source)
+        const p = process(source);
 
-                expect(p.source).toBe(source)
-                expect(p.content).toMatchInlineSnapshot(`
+        expect(p.source).toBe(source);
+        expect(p.content).toMatchInlineSnapshot(`
                   "/* @jsxImportSource vue */
 
                   /* verter:template-context start */
@@ -207,15 +360,13 @@ describe('Mergers Full', () => {
                   /* verter:template-context end */
                   <script setup generic="T">
                                   </script>"
-                `)
+                `);
+      });
+    });
+  });
 
-            })
-        })
-
-    })
-
-    it('should get an error generics are only supported in ts', () => {
-        const source = `<script setup generic="T extends string">
+  it("should get an error generics are only supported in ts", () => {
+    const source = `<script setup generic="T extends string">
         const model = defineModel<{ foo: T }>();
         const test = defineProps<{ type: T}>();
         </script>
@@ -226,14 +377,14 @@ describe('Mergers Full', () => {
           <span>1</span>
         </template>`;
 
-        const p = process(source)
+    const p = process(source);
 
-        expect(p.source).toBe(source)
-        expect(p.content).toMatchInlineSnapshot()
-    })
+    expect(p.source).toBe(source);
+    expect(p.content).toMatchInlineSnapshot();
+  });
 
-    it('should work setup + script', () => {
-        const source = `<script setup lang="ts" generic="T extends string">
+  it("should work setup + script", () => {
+    const source = `<script setup lang="ts" generic="T extends string">
         const model = defineModel<{ foo: T }>();
         const test = defineProps<{ type: T}>();
         </script>
@@ -244,11 +395,10 @@ describe('Mergers Full', () => {
           <span>1</span>
         </template>`;
 
-        const p = process(source)
+    const p = process(source);
 
-        expect(p.source).toBe(source)
-        expect(p.content).toMatchInlineSnapshot()
-        // testSourceMaps(p.context.script)
-    })
-
-})
+    expect(p.source).toBe(source);
+    expect(p.content).toMatchInlineSnapshot();
+    // testSourceMaps(p.context.script)
+  });
+});

@@ -1,5 +1,6 @@
 import {
   MagicString,
+  SFCBlock,
   SFCParseResult,
   SFCScriptBlock,
   SFCTemplateBlock,
@@ -27,9 +28,7 @@ export interface ParseScriptContext {
   script: SFCScriptBlock | null;
   template: SFCTemplateBlock | null;
 
-
-  s: MagicString,
-
+  s: MagicString;
 
   // locations: LocationType[];
 }
@@ -51,8 +50,8 @@ export interface PluginOption {
 
   /**
    * Processes the whole file
-   * @param context 
-   * @returns 
+   * @param context
+   * @returns
    */
   process?: (context: ParseScriptContext) => WalkResult;
 }
@@ -86,7 +85,7 @@ export interface BaseTypeLocation {
   // holds information if it was generated from script or scriptSetup,
   // this is necessary because when we walk the AST the babel nodes
   // are offset to the <script> and not to the file.
-  isSetup?: boolean
+  isSetup?: boolean;
 
   content?: string;
 
@@ -95,13 +94,22 @@ export interface BaseTypeLocation {
 
 export interface TypeLocationDeclaration {
   type: LocationType.Declaration;
-  node:
-  | _babel_types.VariableDeclaration
-  | _babel_types.FunctionDeclaration
-  | _babel_types.EnumDeclaration
-  | _babel_types.ClassDeclaration;
+  node?:
+    | _babel_types.VariableDeclaration
+    | _babel_types.FunctionDeclaration
+    | _babel_types.EnumDeclaration
+    | _babel_types.ClassDeclaration;
 
   generated?: boolean;
+
+  /**
+   * 'global' adds before the generator function
+   * 'pre': adds in the generator but before options
+   * 'post': adds in generator but after options
+   * 'end': adds in generator but at the end just before return
+   */
+  context?: "global" | "pre" | "post" | "end";
+
   declaration: {
     /**
      * Sets the variable type
@@ -125,6 +133,11 @@ export interface TypeLocationImport {
   node: _babel_types.ImportDeclaration;
   items: ImportItem[];
   from: string;
+
+  asType?: boolean;
+
+  // block?: SFCBlock;
+  offset?: number;
 }
 
 export interface TypeLocationExport {
@@ -191,7 +204,7 @@ export interface TypeLocationTemplate {
 
   content: string;
 
-  map?: any
+  map?: any;
   // this causes compilation error
   // map?: ReturnType<MagicString["generateMap"]>;
 }
@@ -226,8 +239,8 @@ export type ValueOf<T> = T[keyof T];
 
 export type LocationByType = {
   [K in LocationType]?: K extends keyof TypeLocationMap
-  ? Array<TypeLocationMap[K]>
-  : never;
+    ? Array<TypeLocationMap[K]>
+    : never;
 };
 
 export type TypeLocation = BaseTypeLocation & ValueOf<TypeLocationMap>;

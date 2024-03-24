@@ -11,7 +11,8 @@ import OptionsPlugin from "./options/index.js";
 import DeclarationPlugin from "./declaration/index.js";
 import GenericPlugin from "./generic/index.js";
 import TemplatePlugin from "./template/index.js";
-import SetupPlugin from "./setup/setup.js";
+import SetupPlugin from "./setup/index.js";
+import ImportsPlugin from "./imports/index.js";
 // import ExportPlugin from "./export/index.js";
 
 export const defaultPlugins = [
@@ -20,12 +21,11 @@ export const defaultPlugins = [
   DeclarationPlugin,
   GenericPlugin,
   TemplatePlugin,
-  //   ImportPlugin,
+  ImportsPlugin,
   // ExportPlugin,
 ] as PluginOption[];
 
 // import Template from "./template/index.js";
 // export { Template };
 
-
-export { default as TemplateBuilder } from './template/index.js'
+export { default as TemplateBuilder } from "./template/index.js";
