@@ -74,7 +74,7 @@ describe("Mergers Full", () => {
     testSourceMaps(p);
   });
 
-  it.only("should work setup", () => {
+  it("should work setup", () => {
     const source = `<script setup>
         const test = ref('hello')
         </script>
@@ -122,26 +122,29 @@ describe("Mergers Full", () => {
     `);
 
     testSourceMaps(p);
-
   });
 
   describe("test", () => {
     describe("script", () => {
-      it("should generate default option", () => {
+      it.only("should generate default option", () => {
         const source = `<script></script>`;
 
         const p = process(source);
         expect(p.source).toBe(source);
-        expect(p.content).toMatchInlineSnapshot(
-          `
+        expect(p.content).toMatchInlineSnapshot(`
           "import { defineComponent as ___VERTER_defineComponent } from 'vue';
 
           function ___VERTER_COMPONENT__() {
-          const ____VERTER_COMP_OPTION__ = {};
+          const ____VERTER_COMP_OPTION__ = ___VERTER_defineComponent({})
+          const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
+          const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+          const ___VERTER__comp = { 
+                      ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                    }
+
           }
           "
-        `
-        );
+        `);
         testSourceMaps(p);
       });
 
@@ -157,8 +160,14 @@ describe("Mergers Full", () => {
 
           function ___VERTER_COMPONENT__() {
 
+
                           const ____VERTER_COMP_OPTION__ = {}
-                          
+                          const ___VERTER_COMP___ = ___VERTER_defineComponent(____VERTER_COMP_OPTION__)
+          const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+          const ___VERTER__comp = { 
+                      ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                    }
+
           }
           "
         `);
@@ -184,6 +193,7 @@ describe("Mergers Full", () => {
 
           function ___VERTER_COMPONENT__() {
 
+
                           const ____VERTER_COMP_OPTION__ = {
                               name: 'test',
               
@@ -193,7 +203,12 @@ describe("Mergers Full", () => {
                                   }
                               }
                           }
-                          
+                          const ___VERTER_COMP___ = ___VERTER_defineComponent(____VERTER_COMP_OPTION__)
+          const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+          const ___VERTER__comp = { 
+                      ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                    }
+
           }
           "
         `);
@@ -218,6 +233,7 @@ describe("Mergers Full", () => {
           "
           function ___VERTER_COMPONENT__() {
 
+
                           const ____VERTER_COMP_OPTION__ = defineComponent({
                               name: 'test',
               
@@ -227,7 +243,12 @@ describe("Mergers Full", () => {
                                   }
                               }
                           })
-                          
+                          const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
+          const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+          const ___VERTER__comp = { 
+                      ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                    }
+
           }
           "
         `);
@@ -255,6 +276,7 @@ describe("Mergers Full", () => {
           "import { defineComponent } from 'vue'
           function ___VERTER_COMPONENT__() {
 
+
                   // import stuff
                   
 
@@ -267,7 +289,12 @@ describe("Mergers Full", () => {
                           }
                       }
                   })
-                  
+                  const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
+          const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+          const ___VERTER__comp = { 
+                      ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                    }
+
           }
           "
         `);
@@ -296,6 +323,7 @@ describe("Mergers Full", () => {
           import { ref } from 'vue'
           function ___VERTER_COMPONENT__() {
 
+
                   // import stuff
                   
 
@@ -308,7 +336,12 @@ describe("Mergers Full", () => {
                           }
                       }
                   }
-                  
+                  const ___VERTER_COMP___ = ___VERTER_defineComponent(____VERTER_COMP_OPTION__)
+          const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+          const ___VERTER__comp = { 
+                      ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                    }
+
           }
           "
         `);
@@ -336,6 +369,7 @@ describe("Mergers Full", () => {
           import { ref } from 'vue'
           function ___VERTER_COMPONENT__<T extends string = 'foo'>() {
 
+
                   
 
                   const ____VERTER_COMP_OPTION__ = {
@@ -347,7 +381,12 @@ describe("Mergers Full", () => {
                           }
                       }
                   }
-                  
+                  const ___VERTER_COMP___ = ___VERTER_defineComponent(____VERTER_COMP_OPTION__)
+          const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+          const ___VERTER__comp = { 
+                      ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                    }
+
           }
           "
         `);
@@ -381,6 +420,7 @@ describe("Mergers Full", () => {
           import { ref } from 'vue'
           function ___VERTER_COMPONENT__<T extends string = 'foo'>() {
 
+
                   
 
                   const ____VERTER_COMP_OPTION__ = {
@@ -392,7 +432,12 @@ describe("Mergers Full", () => {
                           }
                       }
                   }
-                  function ___VERTER__TEMPLATE_RENDER() {
+                  const ___VERTER_COMP___ = ___VERTER_defineComponent(____VERTER_COMP_OPTION__)
+          const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+          const ___VERTER__comp = { 
+                      ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                    }
+          function ___VERTER__TEMPLATE_RENDER() {
           <>
                       <div>
                           { ___VERTER__ctx.foo + 'aa' as T}
@@ -434,6 +479,7 @@ describe("Mergers Full", () => {
           import { ref } from 'vue'
           function ___VERTER_COMPONENT__<T extends string & { supa?: () => number } = 'foo'>() {
 
+
                   
 
                   const ____VERTER_COMP_OPTION__ = {
@@ -445,7 +491,12 @@ describe("Mergers Full", () => {
                           }
                       }
                   }
-                  function ___VERTER__TEMPLATE_RENDER() {
+                  const ___VERTER_COMP___ = ___VERTER_defineComponent(____VERTER_COMP_OPTION__)
+          const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+          const ___VERTER__comp = { 
+                      ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                    }
+          function ___VERTER__TEMPLATE_RENDER() {
           <>
                       <div>
                           { (___VERTER__ctx.foo + 'aa' as typeof ___VERTER__ctx.foo).supa?.()}

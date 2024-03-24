@@ -31,11 +31,6 @@ export function mergeFull(
   const blocks: VerterSFCBlock[] = [];
   const SUPPORTED_BLOCKS = new Set(["template", "script"]);
 
-  const startScript = sfc.descriptor.scriptSetup ?? sfc.descriptor.script;
-
-  const startScriptIndex = startScript?.loc.start.offset;
-  const endScriptIndex = startScript?.loc.end.offset;
-
   {
     const allHTMLComments = retrieveHTMLComments(source);
 
@@ -57,6 +52,14 @@ export function mergeFull(
       s.remove(block.tag.pos.open.start, block.tag.pos.close.end);
     }
   }
+
+  const startScript =
+    sfc.descriptor.scriptSetup ??
+    sfc.descriptor.script ??
+    blocks.find((x) => x.tag.type === "script")?.block;
+
+  const startScriptIndex = startScript?.loc.start.offset;
+  const endScriptIndex = startScript?.loc.end.offset;
 
   // if is setup, there's a change to have 2 script tags
   // we need to bring the non-setup to the top
@@ -235,7 +238,11 @@ export function mergeFull(
 
     s.prependLeft(startScriptIndex, pre.join("\n") + "\n");
 
-    s.prependLeft(endScriptIndex, post.join("\n") + "\n");
+    if (startScriptIndex === endScriptIndex) {
+      s.prependRight(endScriptIndex, post.join("\n") + "\n");
+    } else {
+      s.prependLeft(endScriptIndex, post.join("\n") + "\n");
+    }
   }
 
   return {
@@ -538,16 +545,22 @@ function processBlock(
             s.replace(possibleExport, declarationStr);
           }
 
+          //   if (s.toString().indexOf(declarationStr) === -1) {
+          //     s.appendLeft(block.block.loc.end.offset, `${declarationStr}{};`);
+          //   }
+          let wrap = false;
           if (s.toString().indexOf(declarationStr) === -1) {
-            s.appendLeft(block.block.loc.end.offset, `${declarationStr}{};`);
-          }
+            locations.declaration.push({
+              type: LocationType.Declaration,
+              generated: true,
+              context: "pre",
+              declaration: {
+                type: "const",
+                name: "____VERTER_COMP_OPTION__",
+                content: `___VERTER_defineComponent({})`,
+              },
+            });
 
-          // check if there's defineComponent or is pure object
-          const regexComp = /const ____VERTER_COMP_OPTION__ = [^\w]*{]*/gm;
-
-          const rawObjectDeclaration = regexComp.test(s.toString());
-
-          if (rawObjectDeclaration) {
             locations.import.push({
               type: LocationType.Import,
               from: "vue",
@@ -562,6 +575,29 @@ function processBlock(
                 },
               ],
             });
+          } else {
+            // check if there's defineComponent or is pure object
+            const regexComp = /const ____VERTER_COMP_OPTION__ = [^\w]*{]*/gm;
+
+            const rawObjectDeclaration = regexComp.test(s.toString());
+
+            if (rawObjectDeclaration) {
+              wrap = true;
+              locations.import.push({
+                type: LocationType.Import,
+                from: "vue",
+                generated: true,
+                node: null,
+                items: [
+                  {
+                    name: "defineComponent",
+                    alias: "___VERTER_defineComponent",
+                    // note could be type
+                    type: false,
+                  },
+                ],
+              });
+            }
           }
 
           // add ___VERTER_COMP___ in declaration
@@ -572,7 +608,7 @@ function processBlock(
             declaration: {
               type: "const",
               name: "___VERTER_COMP___",
-              content: rawObjectDeclaration
+              content: wrap
                 ? `___VERTER_defineComponent(____VERTER_COMP_OPTION__)`
                 : "____VERTER_COMP_OPTION__",
             },
