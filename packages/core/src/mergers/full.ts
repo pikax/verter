@@ -140,7 +140,9 @@ export function mergeFull(
                     (x) =>
                       x.items?.map((i) => i.alias ?? i.name) ??
                       // TODO maybe handle alias
-                      x.node.specifiers.map((x) => x.imported.name)
+                      x.node.specifiers.map(
+                        (x) => x.local?.name ?? x.imported.name
+                      )
                   )
                   .filter(Boolean),
 
@@ -352,7 +354,13 @@ export function mergeFull(
 
     s.prependLeft(startScriptIndex, pre.join("\n") + "\n");
 
-    const toRenderString = [...post, ...end, "return ___VERTER_COMP___;"];
+    const toRenderString = [
+      ...post,
+      ...end,
+      "___VERTER__comp;",
+      "___VERTER__ctx;",
+      "return ___VERTER_COMP___;",
+    ];
 
     // because of the way prepend works the rendering is reversed
     if (startScriptIndex === endScriptIndex) {
@@ -372,7 +380,7 @@ export function mergeFull(
     );
   }
 
-  s.prependLeft(0, "/* @jsxImportSource vue */\n");
+  s.prependLeft(0, "/* @jsxImportSource vue */\nimport 'vue/jsx';\n");
 
   return {
     locations,

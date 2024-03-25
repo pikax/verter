@@ -207,7 +207,6 @@ describe("process", () => {
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
         `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY"}"`
       );
-      // testSourceMaps(magicString.toString(), magicString.generateMap({ hires: true, includeContent: true }))
     });
 
     it("should keep casing on binding", () => {
@@ -221,7 +220,7 @@ describe("process", () => {
       );
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY"}"`
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY,CAAE,kBAAkB,CAAC,KAAK,CAAC"}"`
       );
     });
 
@@ -280,14 +279,112 @@ describe("process", () => {
       );
     });
 
-    it.todo("should do class merge", () => {
-      const source = `<span class="foo" :class="['hello']"></span>`;
+    describe("bind complex", () => {
+      it("should do class merge", () => {
+        const source = `<span class="foo" :class="['hello']"></span>`;
 
-      const parsed = doParseContent(source);
-      const { magicString } = process(parsed);
-      expect(magicString.toString()).toMatchInlineSnapshot();
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
 
-      expect(magicString.generateMap().toString()).toMatchInlineSnapshot();
+        testSourceMaps(
+          magicString.toString(),
+          magicString.generateMap({ hires: true, includeContent: true })
+        );
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span  class={__VERTER__normalizeClass([['hello'],"foo"])}></span></template>"`
+        );
+      });
+      it("should do class merge with v-bind", () => {
+        const source = `<span class="foo" :class="['hello']" v-bind:class="{'oi': true}"></span>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span  class={__VERTER__normalizeClass([['hello'],"foo",{'oi': true}])} ></span></template>"`
+        );
+
+        testSourceMaps(
+          magicString.toString(),
+          magicString.generateMap({ hires: true, includeContent: true })
+        );
+      });
+
+      it("should do class merge with v-bind with attributes in between", () => {
+        const source = `<span class="foo" don-t :class="['hello']" v-bind:class="{'oi': true}"></span>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span  don-t class={__VERTER__normalizeClass([['hello'],"foo",{'oi': true}])} ></span></template>"`
+        );
+      });
+      it("should do style merge", () => {
+        const source = `<span style="foo" :style="['hello']"></span>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span  style={__VERTER__normalizeStyle([['hello'],"foo"])}></span></template>"`
+        );
+      });
+      it("should do style merge with v-bind", () => {
+        const source = `<span style="foo" :style="['hello']" v-bind:style="{'oi': true}"></span>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span  style={__VERTER__normalizeStyle([['hello'],"foo",{'oi': true}])} ></span></template>"`
+        );
+      });
+      it("should do style merge with v-bind with attributes in between", () => {
+        const source = `<span style="foo" don-t :style="['hello']" v-bind:style="{'oi': true}"></span>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span  don-t style={__VERTER__normalizeStyle([['hello'],"foo",{'oi': true}])} ></span></template>"`
+        );
+      });
+
+      it("should append context on objects shothand", () => {
+        const source = `<span :style="{colour}"></span>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span style={{colour:___VERTER__ctx.colour}}></span></template>"`
+        );
+      });
+
+      it("should append context on objects", () => {
+        const source = `<span :style="{colour: myColour}"></span>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span style={{colour: ___VERTER__ctx.myColour}}></span></template>"`
+        );
+      });
+
+      it("should append context on dynamic accessor", () => {
+        const source = `<span :style="{[colour]: true}"></span>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span style={{[colour]: true}}></span></template>"`
+        );
+      });
+
+      it("should append context on dynamic accessor + value", () => {
+        const source = `<span :style="{[colour]: myColour}"></span>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span style={{[colour]: ___VERTER__ctx.myColour}}></span></template>"`
+        );
+      });
     });
 
     it("simple", () => {

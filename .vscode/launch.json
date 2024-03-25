@@ -28,6 +28,7 @@
       "outFiles": [
         "${workspaceRoot}/packages/vue-vscode/dist/**/*.js",
         "${workspaceRoot}/packages/core/dist/**/*.js",
+        "${workspaceRoot}/packages/typescript-plugin/dist/**/*.js",
         "${workspaceRoot}/packages/language-server/dist/**/*.js"
       ],
       "autoAttachChildProcesses": true
@@ -35,6 +36,21 @@
       //     "type": "npm",
       //     "script": "dev-extension"
       //   }
+    },
+    {
+      "type": "extensionHost",
+      "request": "launch",
+      "name": "Launch Working Client ",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceRoot}/packages/vue-vscode",
+      ],
+      "outFiles": [
+        "${workspaceRoot}/packages/vue-vscode/dist/**/*.js",
+        "${workspaceRoot}/packages/core/dist/**/*.js",
+        "${workspaceRoot}/packages/language-server/dist/**/*.js"
+      ],
+      "autoAttachChildProcesses": true
     }
   ]
 }

@@ -11,19 +11,19 @@ export default {
     const source = context.script!.loc.source;
 
     return [
-      {
-        type: LocationType.Import,
-        node: expression,
-        generated: true,
-        // TODO change the import location
-        from: "vue",
-        items: [
-          {
-            name: "DeclareEmits",
-            type: true,
-          },
-        ],
-      },
+      // {
+      //   type: LocationType.Import,
+      //   node: expression,
+      //   generated: true,
+      //   // TODO change the import location
+      //   from: "vue",
+      //   items: [
+      //     {
+      //       name: "DeclareEmits",
+      //       type: true,
+      //     },
+      //   ],
+      // },
       // create variable with return
       {
         type: LocationType.Declaration,

@@ -597,7 +597,7 @@ describe("Mergers Full", () => {
         `);
       });
 
-      it.only("handle generic list", () => {
+      it("handle generic list", () => {
         const source = `<script setup lang="ts" generic="T">
         import { computed } from "vue";
         
@@ -729,8 +729,7 @@ describe("Mergers Full", () => {
     });
   });
 
-
-  it.only("teet", () => {
+  it("teet", () => {
     const source = `<script lang="ts">
     import { ref } from 'vue'
     
@@ -786,7 +785,6 @@ describe("Mergers Full", () => {
     `);
   });
 
-
   it.skip("sss", () => {
     const source = `
         <template>
@@ -823,6 +821,99 @@ describe("Mergers Full", () => {
                   
           </>}"
         `);
+    testSourceMaps(p);
+  });
+
+  it.only("supa test", () => {
+    const source = `<script lang="ts" setup>
+    import { ref } from "vue";
+    import { isIOS } from "@/utils/browser";
+    import { useMotionProperties, useSpring } from "@vueuse/motion";
+    import { useDrag } from "@vueuse/gesture";
+    
+    const scrollElementEl = ref<HTMLElement | null>(null);
+    
+    if (!isIOS) {
+      const { motionProperties } = useMotionProperties(scrollElementEl, {
+        translateY: 0,
+        willChange: "transform",
+      });
+    
+      // Bind the motion properties to a spring reactive object.
+      const { set } = useSpring(motionProperties);
+    
+      let lastY = 0;
+      useDrag(
+        ({ movement: [x, y], dragging, velocity }) => {
+          const diff = y - lastY;
+          if (!dragging) {
+            set({
+              translateY: 0,
+            });
+            return;
+          }
+          if (diff < 0) {
+            if (!isBottom()) {
+              lastY = y;
+              return;
+            }
+          } else {
+            if (!isTop()) {
+              lastY = y;
+              return;
+            }
+          }
+          set({
+            translateY: diff,
+          });
+        },
+        {
+          domTarget: scrollElementEl,
+        },
+      );
+    }
+    
+    function isBottom() {
+      const s = Math.floor(
+        Math.abs(
+          scrollElementEl.value!.scrollHeight -
+            (scrollElementEl.value!.clientHeight +
+              scrollElementEl.value!.scrollTop),
+        ),
+      );
+      return s === 0;
+    }
+    function isTop() {
+      return scrollElementEl.value!.scrollTop === 0;
+    }
+    
+    function onTouchStart(e: Event) {
+      if (isIOS) return;
+      if (isTop()) {
+        return;
+      }
+      if (isBottom()) {
+        return;
+      }
+      e.stopImmediatePropagation();
+    }
+    </script>
+    <template>
+      <div class="flex-1 overflow-y-auto pt-9x" ref="scrollElementEl">
+        <div
+          :class="[isIOS ? 'h-force-scroll' : 'min-h-full']"
+          @touchstart="onTouchStart"
+        >
+          <slot />
+        </div>
+      </div>
+    </template>
+    `;
+    const p = process(source);
+
+    expect(p.source).toBe(source);
+
+    // expect(p.content).toMatchInlineSnapshot();
     testSourceMaps(p);
   });
 

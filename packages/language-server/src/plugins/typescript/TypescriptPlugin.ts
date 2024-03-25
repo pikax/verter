@@ -5,6 +5,7 @@ import { readFileSync, existsSync } from "node:fs";
 import { VueDocument } from "../../lib/documents/VueDocument";
 import { findTsConfigPath } from "../../utils";
 
+
 import { VirtualFiles } from "@verter/language-shared";
 
 import path from "node:path";
@@ -143,8 +144,32 @@ export function getTypescriptService(workspacePath: string) {
     tsConfigStr
   );
 
+  const parseConfigHost: ts.ParseConfigHost = {
+    ...ts.sys,
+    readDirectory: ts.sys.readDirectory,
+    useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+  };
+
+  // const config = ts.parseJsonConfigFileContent(
+  //   config,
+  //   parseConfigHost,
+  //   workspacePath
+  // );
+
+  const parsedConfig = ts.parseJsonConfigFileContent(
+    config,
+    parseConfigHost,
+    workspacePath
+  );
+
+  // const fileCompilerOptions = ts.parseJsonConfigFileContent(
+  //   config,
+  //   parseConfigHost,
+  //   workspacePath
+  // ).options;
+
   const compilerOptions: ts.CompilerOptions = {
-    ...config.compilerOptions,
+    ...parsedConfig.options,
     // moduleResolution: ts.ModuleResolutionKind.Bundler,
     jsx: ts.JsxEmit.Preserve,
     target: ts.ScriptTarget.ESNext,
@@ -166,7 +191,8 @@ export function getTypescriptService(workspacePath: string) {
   const host: ts.LanguageServiceHost = {
     log: (message) => Logger.info(`[ts] ${message}`),
     getCompilationSettings: () => compilerOptions,
-    getScriptFileNames,
+    getScriptFileNames: () =>
+      getScriptFileNames().concat(parsedConfig.fileNames),
     getScriptVersion: (fileName: string) => {
       const snap = getSnapshotIfExists(fileName);
       // if (fileName.indexOf('.vue')) {
@@ -211,6 +237,7 @@ export function getTypescriptService(workspacePath: string) {
     },
     // getProjectVersion: () => projectVersion.toString(),
     getNewLine: () => tsSystem.newLine,
+
     // resolveTypeReferenceDirectiveReferences:
     //   svelteModuleLoader.resolveTypeReferenceDirectiveReferences,
     // hasInvalidatedResolutions:
@@ -306,6 +333,17 @@ export function getTypescriptService(workspacePath: string) {
     ts.createDocumentRegistry(tsSystem.useCaseSensitiveFileNames)
     // ts.LanguageServiceMode.Semantic
   );
+
+  // // Read and add files specified in tsconfig.json to the virtual file system
+  // function includeProjectFiles() {
+  //   const fileNames = parsedConfig.fileNames;
+  //   fileNames.forEach((fileName) => {
+  //     const fileContent = readFileSync(fileName, "utf8");
+  //     files[fileName] = { version: 0, text: fileContent };
+  //   });
+  // }
+
+  // includeProjectFiles();
 
   return languageService;
 }

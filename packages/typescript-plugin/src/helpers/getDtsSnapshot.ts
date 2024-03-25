@@ -1,6 +1,6 @@
 // import { readFileSync } from "fs";
 import type tsModule from "typescript/lib/tsserverlibrary";
-import { createBuilder } from "@verter/core";
+import { createBuilder, mergeFull } from "@verter/core";
 
 // export const getDtsSnapshot = (
 //   ts: typeof tsModule,
@@ -34,5 +34,10 @@ export const parseFile = (
 ) => {
   logger.info(`[Verter] parsing ${fileName}`);
   const builder = createBuilder({});
-  return builder.process(fileName, content);
+  const p = builder.preProcess(fileName, content);
+
+  const merged = mergeFull(p.locations, p.context);
+
+  console.log('meerd ', merged.content)
+  return merged.content;
 };

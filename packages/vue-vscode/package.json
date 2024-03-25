@@ -17,6 +17,7 @@
     "@types/vscode": "^1.87.0",
     "@verter/language-server": "workspace:^",
     "@verter/language-shared": "workspace:^",
+    "@verter/typescript-plugin": "workspace:^",
     "lodash": "^4.17.21",
     "vscode-languageclient": "^9.0.1"
   },
@@ -30,8 +31,7 @@
     "onLanguage:vue",
     "onCommand:verter.restartLanguageServer",
     "onLanguage:javascript",
-    "onLanguage:typescript",
-    "onLanguage:vue"
+    "onLanguage:typescript"
   ],
   "contributes": {
     "configuration": {
@@ -45,6 +45,12 @@
         }
       }
     },
+    "typescriptServerPlugins": [
+      {
+          "name": "@verter/typescript-plugin",
+          "enableForWorkspaceTypeScriptVersions": true
+      }
+  ],
     "languages": [
       {
         "id": "vue",

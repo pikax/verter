@@ -8,7 +8,7 @@
   "author": "Carlos Rodrigues <pikax>",
   "license": "MIT",
   "scripts": {
-    "build": "tsc",
+    "build": "vite build",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {

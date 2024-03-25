@@ -3,8 +3,10 @@ import lsp, {
   CompletionItem,
   CompletionItemKind,
   DefinitionLink,
+  DiagnosticTag,
   InsertTextFormat,
   LocationLink,
+  Position,
   Range,
   TextDocuments,
 } from "vscode-languageserver/node";
@@ -49,6 +51,7 @@ export interface LsConnectionOption {
 
 export function startServer(options: LsConnectionOption = {}) {
   Logger.error("in startServer", options);
+  console.log('started serrver? ')
   //   const connection = lsp.createConnection(lsp.ProposedFeatures.all);
 
   let connection = patchClient(options.connection);
@@ -75,7 +78,7 @@ export function startServer(options: LsConnectionOption = {}) {
   });
 
   connection.onInitialize((params) => {
-    // console.log("inited --- lOL");
+    console.log("inited --- lOL");
     // debugger;
 
     return {
@@ -103,7 +106,8 @@ export function startServer(options: LsConnectionOption = {}) {
         typeDefinitionProvider: true,
         declarationProvider: true,
         definitionProvider: true,
-        inlayHintProvider: true,
+        // inlayHintProvider: true,
+        renameProvider: true,
       },
     };
   });
@@ -115,7 +119,7 @@ export function startServer(options: LsConnectionOption = {}) {
   });
   const builder = createBuilder();
 
-  function sendDiagnostics(document: VueDocument): void {
+  async function sendDiagnostics(document: VueDocument) {
     const fileName = document.uri;
     if (fileName.startsWith("file:")) return;
     const content = document.template.content;
@@ -125,68 +129,77 @@ export function startServer(options: LsConnectionOption = {}) {
     // Parse the file content to get a SourceFile object
     // const sourceFile = ts.createSourceFile(fileName, content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 
-    const syntacticDiagnostics = tsService.getSyntacticDiagnostics(fileName);
-    const semanticDiagnostics = tsService.getSemanticDiagnostics(fileName);
-    const suggestionDiagnostics = tsService.getSuggestionDiagnostics(fileName);
+    try {
+      const syntacticDiagnostics = tsService.getSyntacticDiagnostics(fileName);
+      const semanticDiagnostics = tsService.getSemanticDiagnostics(fileName);
+      const suggestionDiagnostics =
+        tsService.getSuggestionDiagnostics(fileName);
 
-    const allDiagnostics = [
-      ...syntacticDiagnostics,
-      ...semanticDiagnostics,
-      ...suggestionDiagnostics,
-    ];
-    const lspDiagnostics = allDiagnostics.map((diagnostic) =>
-      convertTsDiagnosticToLspDiagnostic(diagnostic, document)
-    );
+      const allDiagnostics = [
+        ...syntacticDiagnostics,
+        ...semanticDiagnostics,
+        ...suggestionDiagnostics,
+      ];
+      const lspDiagnostics = allDiagnostics
+        .map((diagnostic) =>
+          convertTsDiagnosticToLspDiagnostic(diagnostic, document)
+        )
+        .filter(Boolean);
 
-    if (document.parsed.errors.length) {
-      lspDiagnostics.push(
-        ...document.parsed.errors
-          .filter((x) => "loc" in x && x.loc)
-          .map((x: CompilerError) => {
-            // const map = document.template.mapConsumer;
-            const range: lsp.Range = {
-              start: {
-                line: x.loc!.start.line - 1,
-                character: x.loc!.start.column,
-              },
-              end: {
-                line: x.loc!.end.line - 1,
-                character: x.loc!.end.column,
-              },
-            };
+      if (document.parsed.errors.length) {
+        lspDiagnostics.push(
+          ...document.parsed.errors
+            .filter((x) => "loc" in x && x.loc)
+            .map((x: CompilerError) => {
+              // const map = document.template.mapConsumer;
+              const range: lsp.Range = {
+                start: {
+                  line: x.loc!.start.line - 1,
+                  character: x.loc!.start.column,
+                },
+                end: {
+                  line: x.loc!.end.line - 1,
+                  character: x.loc!.end.column,
+                },
+              };
 
-            return {
-              message: x.message,
-              range,
-              source: "vue-compiler",
-              severity: lsp.DiagnosticSeverity.Error,
-              code: x.code,
-            } as lsp.Diagnostic;
-          })
-      );
+              return {
+                message: x.message,
+                range,
+                source: "vue-compiler",
+                severity: lsp.DiagnosticSeverity.Error,
+                code: x.code,
+              } as lsp.Diagnostic;
+            })
+        );
+      }
+
+      // Get the semantic diagnostics for the source file
+      // const diagnostics = ts.getPreEmitDiagnostics(tsService.getProgram(), sourceFile);
+
+      // Convert TypeScript diagnostics to LSP diagnostics
+      // const lspDiagnostics: lsp.Diagnostic[] = diagnostics.map(diagnostic => convertTsDiagnosticToLspDiagnostic(diagnostic));
+
+      // Send the diagnostics to the client
+
+      const originalFile = fileName
+        .replace("verter-virtual:", "file:")
+        .replace(".vue.tsx", ".vue");
+      await connection!.sendDiagnostics({
+        uri: originalFile,
+        diagnostics: lspDiagnostics,
+        // diagnostics: [],
+        version: document.version,
+      });
+    } catch (e) {
+      console.error(e);
     }
-
-    // Get the semantic diagnostics for the source file
-    // const diagnostics = ts.getPreEmitDiagnostics(tsService.getProgram(), sourceFile);
-
-    // Convert TypeScript diagnostics to LSP diagnostics
-    // const lspDiagnostics: lsp.Diagnostic[] = diagnostics.map(diagnostic => convertTsDiagnosticToLspDiagnostic(diagnostic));
-
-    // Send the diagnostics to the client
-
-    const originalFile = fileName
-      .replace("verter-virtual:", "file:")
-      .replace(".vue.tsx", ".vue");
-    connection!.sendDiagnostics({
-      uri: originalFile,
-      diagnostics: lspDiagnostics,
-    });
   }
 
   function convertTsDiagnosticToLspDiagnostic(
     diagnostic: ts.Diagnostic,
     document: VueDocument
-  ): lsp.Diagnostic {
+  ): lsp.Diagnostic | undefined {
     const templateInfo = document.template;
 
     const start = diagnostic.start
@@ -207,17 +220,52 @@ export function startServer(options: LsConnectionOption = {}) {
       line: end!.line + 1,
     });
 
+    if (mappedStart.column === null) {
+      // TODO make sure these are correct
+      console.error("Cannot find map", start, diagnostic);
+      return undefined;
+    }
+
+    function catergoryToSeverity(
+      category: ts.DiagnosticCategory
+    ): lsp.DiagnosticSeverity {
+      switch (category) {
+        case ts.DiagnosticCategory.Error: {
+          return lsp.DiagnosticSeverity.Error;
+        }
+        case ts.DiagnosticCategory.Warning: {
+          return lsp.DiagnosticSeverity.Warning;
+        }
+
+        case ts.DiagnosticCategory.Message: {
+          return lsp.DiagnosticSeverity.Information;
+        }
+        case ts.DiagnosticCategory.Suggestion: {
+          return lsp.DiagnosticSeverity.Hint;
+        }
+      }
+    }
+
+    // diagnostic.
     return {
-      severity:
-        diagnostic.category === ts.DiagnosticCategory.Error
-          ? lsp.DiagnosticSeverity.Error
-          : lsp.DiagnosticSeverity.Warning,
+      severity: catergoryToSeverity(diagnostic.category),
       range: {
         start: { line: mappedStart.line - 1, character: mappedStart.column },
         end: { line: mappedEnd.line - 1, character: mappedEnd.column },
       },
+      // range: Range.create(
+      //   Position.create(mappedStart.line - 1, mappedStart.column),
+      //   Position.create(mappedEnd.line - 1, mappedEnd.column)
+      // ),
       message: ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
       source: "Verter",
+      code: diagnostic.code,
+      // relatedInformation: diagnostic.relatedInformation,
+
+      tags: [
+        diagnostic.reportsUnnecessary && DiagnosticTag.Unnecessary,
+        diagnostic.reportsDeprecated && DiagnosticTag.Deprecated,
+      ].filter(Boolean),
     };
   }
 
@@ -438,7 +486,8 @@ export function startServer(options: LsConnectionOption = {}) {
     );
     if (!details) return item;
 
-    let displayDetail = ts.displayPartsToString(details.displayParts);
+    let displayDetail =
+      "```ts\n" + ts.displayPartsToString(details.displayParts) + "\n```\n";
     item.detail = displayDetail;
 
     item.documentation = generateMarkdown(details);
@@ -485,7 +534,11 @@ export function startServer(options: LsConnectionOption = {}) {
     const contents = generateMarkdown(quickInfo);
 
     contents.value =
-      ts.displayPartsToString(quickInfo.displayParts) + "\n\n" + contents.value;
+      "```ts\n" +
+      ts.displayPartsToString(quickInfo.displayParts) +
+      "\n```\n" +
+      "\n\n" +
+      contents.value;
 
     // Convert the text span to an LSP range
     const range = convertTextSpanToRange(quickInfo.textSpan, fileName);
@@ -553,6 +606,50 @@ export function startServer(options: LsConnectionOption = {}) {
       return null;
     }
   );
+
+  connection.onRenameRequest((params) => {
+    if (!params.textDocument.uri.endsWith(".vue")) return null;
+    const virtualUrl =
+      params.textDocument.uri.replace("file:", "verter-virtual:") + ".tsx";
+    let doc = documentManager.getDocument(virtualUrl);
+
+    if (doc && "template" in doc) {
+      const templateInfo = doc.template;
+      const content = doc.getText();
+
+      // const originalIndex = offsetAt(params.position, content);
+      const templatePos = templateInfo.mapConsumer.generatedPositionFor({
+        column: params.position.character,
+        line: params.position.line + 1,
+        source: ".",
+      });
+
+      const index = offsetAt(
+        {
+          character: templatePos.column,
+          line: templatePos.line - 1,
+        },
+        templateInfo.content
+      );
+      const locations = tsService.findRenameLocations(
+        virtualUrl,
+        index,
+        true,
+        true,
+        {
+          providePrefixAndSuffixTextForRename: true,
+        }
+      );
+
+      if(!locations) return
+
+
+      // TODO apply rename for locations
+
+      console.log("locaitons fgound", locations);
+      // tsService.toLineColumnOffset(params.textDocument.uri, params.position)
+    }
+  });
   connection.onReferences((params) => {
     if (!params.textDocument.uri.endsWith(".vue")) return null;
     const virtualUrl =

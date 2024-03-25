@@ -28,6 +28,16 @@ export function activate(context: ExtensionContext) {
 
   server.getClient().sendNotification;
   server.getClient().onNotification;
+
+  if (workspace.textDocuments.some((doc) => doc.languageId === "vue")) {
+    commands.executeCommand(
+      "_typescript.configurePlugin",
+      "@verter/typescript-plugin",
+      {
+        enable: true,
+      }
+    );
+  }
 }
 
 export function deactivate(): Thenable<void> | undefined {
@@ -195,7 +205,7 @@ function addCompilePreviewCommand(
       "veter.showCompiledCodeToSide",
       async (editor) => {
         if (editor?.document?.languageId !== "vue") {
-          window.showInformationMessage("Not a Vue file")
+          window.showInformationMessage("Not a Vue file");
           return;
         }
 
@@ -208,7 +218,7 @@ function addCompilePreviewCommand(
               {
                 preview: true,
                 viewColumn: ViewColumn.Beside,
-                // TODO add selection to the window, it needs to be resolved 
+                // TODO add selection to the window, it needs to be resolved
                 // selection: editor.selection,
               }
             );

@@ -182,6 +182,9 @@ importers:
       '@verter/language-shared':
         specifier: workspace:^
         version: link:../language-shared
+      '@verter/typescript-plugin':
+        specifier: workspace:^
+        version: link:../typescript-plugin
       lodash:
         specifier: ^4.17.21
         version: 4.17.21

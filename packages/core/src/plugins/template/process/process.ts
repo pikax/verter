@@ -14,6 +14,7 @@ import {
   NodeTypes,
   PlainElementNode,
   SimpleExpressionNode,
+  SourceLocation,
 } from "@vue/compiler-core";
 import { camelize, capitalize, isGloballyAllowed, makeMap } from "@vue/shared";
 import type * as _babel_types from "@babel/types";
@@ -143,10 +144,6 @@ function renderElement(
     s.prependLeft(openTagIndex + 1, `${accessor}.`);
   }
 
-  // node.props
-  // .map((p) => renderAttribute(p, ignoredIdentifiers))
-  // .join(" ");
-
   renderAttributes(node.props, s, context);
 
   // renderChildren(node.props, s, ignoredIdentifiers, declarations);
@@ -169,10 +166,170 @@ function renderAttributes(
   s: MagicString,
   context: ProcessContext
 ) {
+  const classesToNormalise: ParsedNodeBase[] = [];
+  const stylesToNormalise: ParsedNodeBase[] = [];
   for (let i = 0; i < attributes.length; i++) {
     const attribute = attributes[i];
-    renderAttribute(attribute, s, context);
+
+    // const name =
+    //   attribute.node.name ?? retrieveStringExpressionNode(attribute.node.arg);
+
+    let name =
+      retrieveStringExpressionNode(attribute.node.arg, undefined, context) ??
+      attribute.node.name;
+
+    if (name === "class") {
+      classesToNormalise.push(attribute);
+    } else if (name === "style") {
+      stylesToNormalise.push(attribute);
+    } else {
+      renderAttribute(attribute, s, context);
+    }
   }
+
+  if (classesToNormalise.length > 1) {
+    // find the first binding attribute, the other ones
+    // will be moved in
+    const firstBindClass = classesToNormalise.find(
+      (x) => x.directive === "bind"
+    );
+    // renderAttribute(firstClass, s, context);
+    renderAttribute(firstBindClass, s, context);
+
+    // append at the end of firstBindClass
+    const startIndex = (firstBindClass.expression ?? firstBindClass.exp).loc
+      .start.offset;
+    const endIndex = (firstBindClass.expression ?? firstBindClass.exp).loc.end
+      .offset;
+
+    s.appendRight(startIndex, "__VERTER__normalizeClass([");
+    s.appendRight(endIndex, "])");
+
+    try {
+      for (const attrClass of classesToNormalise) {
+        if (attrClass === firstBindClass) {
+          continue;
+        }
+
+        const node = attrClass.node;
+
+        let loc: SourceLocation | null = null;
+
+        if ("value" in node) {
+          loc = node.value.loc;
+        } else {
+          loc = (node.exp ?? node.expression).loc;
+        }
+
+        if (loc) {
+          // tried to append, but the moving was breaking things
+          s.overwrite(
+            loc.start.offset,
+            loc.start.offset + 1,
+            `,${loc.source[0]}`
+          );
+          s.move(loc.start.offset, loc.end.offset, endIndex);
+
+          s.remove(node.loc.start.offset, loc.start.offset);
+          s.remove(loc.end.offset, node.loc.end.offset);
+        } else {
+          console.error("Unknown error happened!!!");
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  } else {
+    // if just one, just do the normal mapping
+    classesToNormalise.forEach((x) => renderAttribute(x, s, context));
+  }
+
+  if (stylesToNormalise.length > 1) {
+    // find the first binding attribute, the other ones
+    // will be moved in
+    const firstBindStyle = stylesToNormalise.find(
+      (x) => x.directive === "bind"
+    );
+    // renderAttribute(firstClass, s, context);
+    renderAttribute(firstBindStyle, s, context);
+
+    // append at the end of firstBindClass
+    const startIndex = (firstBindStyle.expression ?? firstBindStyle.exp).loc
+      .start.offset;
+    const endIndex = (firstBindStyle.expression ?? firstBindStyle.exp).loc.end
+      .offset;
+
+    s.appendRight(startIndex, "__VERTER__normalizeStyle([");
+    s.appendRight(endIndex, "])");
+
+    try {
+      for (const attrStyle of stylesToNormalise) {
+        if (attrStyle === firstBindStyle) {
+          continue;
+        }
+
+        const node = attrStyle.node;
+
+        let loc: SourceLocation | null = null;
+
+        if ("value" in node) {
+          loc = node.value.loc;
+        } else {
+          loc = (node.exp ?? node.expression).loc;
+        }
+
+        if (loc) {
+          // tried to append, but the moving was breaking things
+          s.overwrite(
+            loc.start.offset,
+            loc.start.offset + 1,
+            `,${loc.source[0]}`
+          );
+          s.move(loc.start.offset, loc.end.offset, endIndex);
+
+          s.remove(node.loc.start.offset, loc.start.offset);
+          s.remove(loc.end.offset, node.loc.end.offset);
+        } else {
+          console.error("Unknown error happened!!!");
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  } else {
+    // if just one, just do the normal mapping
+    stylesToNormalise.forEach((x) => renderAttribute(x, s, context));
+  }
+
+  if (stylesToNormalise.length > 1 || classesToNormalise.length > 1) {
+    context.declarations.push({
+      type: LocationType.Import,
+      from: "vue",
+      node: undefined,
+      items: [
+        classesToNormalise.length > 1
+          ? {
+              name: "normalizeClass",
+              alias: "__VERTER__normalizeClass",
+            }
+          : undefined,
+        stylesToNormalise.length > 1
+          ? {
+              name: "normalizeStyle",
+              alias: "__VERTER__normalizeStyle",
+            }
+          : undefined,
+      ],
+    });
+  }
+}
+
+const ATTRIBUTE_NAME_WHITELIST = ["aria-", "data-"];
+function sanitiseAttributeName(name: string) {
+  if (ATTRIBUTE_NAME_WHITELIST.some((x) => name.startsWith(x))) {
+    return name;
+  }
+  return camelize(name);
 }
 
 function renderAttribute(
@@ -182,10 +339,13 @@ function renderAttribute(
 ) {
   const n = node.node as unknown as AttributeNode | DirectiveNode;
 
-  // if ((n as AttributeNode).nameLoc) {
-  //   const cameled = camelize(n.name);
-  //   s.overwrite(n.nameLoc.start.offset, n.nameLoc.end.offset, cameled);
-  // }
+  // if there's an attribute only camialize if not an element
+  if ((n as AttributeNode).nameLoc && node.parent?.tagType !== 0) {
+    const cameled = sanitiseAttributeName(n.name);
+    if (cameled !== n.name) {
+      s.overwrite(n.nameLoc.start.offset, n.nameLoc.end.offset, cameled);
+    }
+  }
 
   if (n.type === NodeTypes.ATTRIBUTE) {
   } else if (n.type === NodeTypes.DIRECTIVE) {
@@ -196,7 +356,7 @@ function renderAttribute(
       //   const content = retriveStringExpressionNode(n.exp, s, context);
 
       if (name) {
-        const fixedName = camelize(name);
+        const fixedName = sanitiseAttributeName(name);
         if (fixedName !== name) {
           s.overwrite(n.arg.loc.start.offset, n.arg.loc.end.offset, fixedName);
         }
@@ -840,13 +1000,20 @@ function parseNodeText(
     node.exprName && parseNodeText(node.exprName, s, context, offset, prepend);
   }
 
+  if ("properties" in node) {
+    node.properties &&
+      node.properties.forEach((p) =>
+        parseNodeText(p, s, context, offset, prepend)
+      );
+  }
+
   switch (node.type) {
     case "CallExpression": {
       const callee = node.callee;
       break;
     }
     case "Identifier": {
-      appendCtx(node, s, context, offset);
+      prepend && appendCtx(node, s, context, offset);
       break;
     }
     case "MemberExpression": {
@@ -908,6 +1075,16 @@ function parseNodeText(
       break;
     }
     case "ObjectProperty": {
+      if (node.shorthand) {
+        const v = appendCtx(node.key, undefined, context);
+
+        s.appendLeft(offset + node.key.loc.end.index - 1, `:${v}`);
+      } else {
+        if (node.key.type !== "Identifier") {
+          parseNodeText(node.key, s, context, offset);
+        }
+        node.value && parseNodeText(node.value, s, context, offset);
+      }
       break;
     }
     default: {
