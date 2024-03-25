@@ -31,6 +31,29 @@ export function mergeFull(
   const blocks: VerterSFCBlock[] = [];
   const SUPPORTED_BLOCKS = new Set(["template", "script"]);
 
+  const genericInfo = genericProcess(context, locations);
+
+  {
+    // move non Generated imports to the top
+    // this need to be before other moves to respesct the imports to top
+    for (const { node, offset } of locations.import.filter(
+      (x) => !x.generated
+    )) {
+      // node AST are offset based on the content not on the file
+      s.move(offset + node.loc.start.index, offset + node.loc.end.index, 0);
+    }
+
+    // handle generated imports from scriptSetup
+    if (sfc.descriptor.scriptSetup) {
+      const content = context.script.content;
+
+      // this is the added imports from vue
+      const firstLineEndIndex = content.indexOf("\n");
+      const line = content.slice(0, firstLineEndIndex + 1);
+      s.prependLeft(0, line);
+    }
+  }
+
   {
     const allHTMLComments = retrieveHTMLComments(source);
 
@@ -66,9 +89,13 @@ export function mergeFull(
   if (isSetup) {
     const scriptBlocks = blocks.filter((x) => x.block.type === "script");
     if (scriptBlocks.length > 1) {
-      const firstBlock = scriptBlocks[0];
-      if (firstBlock.block.attrs.setup === true) {
-        s.move(firstBlock.tag.pos.open.start, firstBlock.tag.pos.close.end, 0);
+      const secondBlock = scriptBlocks[1];
+      if (secondBlock.block.attrs.setup !== true) {
+        s.move(
+          secondBlock.tag.pos.open.start,
+          secondBlock.tag.pos.close.end,
+          scriptBlocks[0].tag.pos.open.start
+        );
       }
     }
   }
@@ -121,7 +148,39 @@ export function mergeFull(
     });
 
     if (generic) {
-      // TODO handle generic
+      const sanitisedGenericNames = genericInfo.sanitisedNames.join(", ");
+      const genericNames = genericInfo.genericNames.join(", ");
+
+      locations.declaration.push({
+        type: LocationType.Declaration,
+        generated: true,
+        context: "finish",
+        declaration: {
+          type: "const",
+          name: "__VERTER__RESULT",
+          content: `___VERTER_COMPONENT__<${genericInfo.genericNames.map(
+            () => "any"
+          )}>();`,
+        },
+      });
+
+      // this will remove the instance and constructor from __VERTER_COMPONENT__
+      const removeInstanceFromType = `ReturnType<typeof ___VERTER_COMPONENT__<${sanitisedGenericNames}>> extends infer Comp ? Pick<Comp, keyof Comp> : never`;
+
+      const betterInstance = `{ new<${genericInfo.instance}>(): { $props: { 
+        /* props info here */
+
+       }} }`;
+      locations.declaration.push({
+        type: LocationType.Declaration,
+        generated: true,
+        context: "finish",
+        declaration: {
+          type: "type",
+          name: `__VERTER_RESULT_TYPE__<${genericInfo.component}>`,
+          content: `(${removeInstanceFromType}) & ${betterInstance};`,
+        },
+      });
     } else {
       locations.declaration.push({
         type: LocationType.Declaration,
@@ -130,7 +189,7 @@ export function mergeFull(
         declaration: {
           type: "const",
           name: "__VERTER__RESULT",
-          content: `___VERTER_COMPONENT__()`,
+          content: `___VERTER_COMPONENT__();`,
         },
       });
     }
@@ -151,14 +210,6 @@ export function mergeFull(
 
   // append imports
   {
-    // move non Generated imports to the top
-    for (const { node, offset } of locations.import.filter(
-      (x) => !x.generated
-    )) {
-      // node AST are offset based on the content not on the file
-      s.move(offset + node.loc.start.index, offset + node.loc.end.index, 0);
-    }
-
     // reduce generated imports
     const generated = locations.import
       .filter((x) => !!x.generated && !x.asType)
@@ -253,15 +304,16 @@ export function mergeFull(
     if (startScriptIndex === endScriptIndex) {
       s.prependRight(endScriptIndex, toRenderString.join("\n"));
     } else {
-      s.prependLeft(endScriptIndex, toRenderString.join("\n"));
+      s.prependRight(endScriptIndex, toRenderString.join("\n"));
     }
 
     s.prependRight(
       s.original.length,
       [
-        finish,
-        // TODO add generic
-        `export default __VERTER__RESULT${generic ? " as something" : ""};`,
+        ...finish,
+        `export default __VERTER__RESULT${
+          generic ? " as unknown as __VERTER_RESULT_TYPE__" : ""
+        };`,
       ].join("\n")
     );
   }
@@ -518,20 +570,20 @@ function processBlock(
       scriptTagProcess(block, context);
       const declarationStr = "const ____VERTER_COMP_OPTION__ = ";
       if (block.block.attrs.setup) {
-        locations.import.push({
-          type: LocationType.Import,
-          from: "vue",
-          generated: true,
-          node: null,
-          items: [
-            {
-              name: "defineComponent",
-              alias: "___VERTER_defineComponent",
-              // note could be type
-              type: false,
-            },
-          ],
-        });
+        // locations.import.push({
+        //   type: LocationType.Import,
+        //   from: "vue",
+        //   generated: true,
+        //   node: null,
+        //   items: [
+        //     {
+        //       name: "defineComponent",
+        //       alias: "___VERTER_defineComponent",
+        //       // note could be type
+        //       type: false,
+        //     },
+        //   ],
+        // });
 
         locations.declaration.push({
           type: LocationType.Declaration,
@@ -539,11 +591,13 @@ function processBlock(
           context: "pre",
           declaration: {
             // NOTE It might contain the other variables, we might need to slice
-            content:
-              context.script.content.replace(
-                "____VERTER_COMP_OPTION__ = ",
-                "____VERTER_COMP_OPTION__ = ___VERTER_defineComponent("
-              ) + ")",
+            content: context.script.content.slice(
+              context.script.content.indexOf("const ____VERTER_COMP_OPTION__")
+            ),
+            //   context.script.content.replace(
+            //     "____VERTER_COMP_OPTION__ = ",
+            //     "____VERTER_COMP_OPTION__ = ___VERTER_defineComponent("
+            //   ) + ")",
           },
         });
 
@@ -559,6 +613,11 @@ function processBlock(
           },
         });
       } else {
+        // if there's a setup and this block is not a setup, we just ignore it
+        // there's no further work needed here
+        if (context.isSetup && !block.block.attrs.setup) {
+          return;
+        }
         // options
         {
           // override the export default
@@ -603,21 +662,47 @@ function processBlock(
             const rawObjectDeclaration = regexComp.test(s.toString());
 
             if (rawObjectDeclaration) {
-              wrap = true;
-              locations.import.push({
-                type: LocationType.Import,
-                from: "vue",
-                generated: true,
-                node: null,
-                items: [
-                  {
-                    name: "defineComponent",
-                    alias: "___VERTER_defineComponent",
-                    // note could be type
-                    type: false,
-                  },
-                ],
-              });
+              const defaultExport = context.script.scriptAst.find(
+                (x) => x.type === "ExportDefaultDeclaration"
+              );
+
+              // if we find the defualt export wrap it with defineComponent
+              // to allow intellisense
+              if (defaultExport) {
+                // Babel Nodes are not offset correctly
+                const offset = block.tag.pos.open.end;
+                const startOffset = defaultExport.loc.start.index + offset;
+                const endOffset = defaultExport.loc.end.index + offset;
+
+                const exportContent = s.original.slice(startOffset, endOffset);
+
+                // find first {
+                const openingIndex = exportContent.indexOf("{");
+
+                // find last }
+                const closeIndex = exportContent.lastIndexOf("}");
+
+                s.prependRight(openingIndex + startOffset, "defineComponent(");
+
+                s.prependRight(closeIndex + startOffset + 1, ")");
+              } else {
+                wrap = true;
+
+                locations.import.push({
+                  type: LocationType.Import,
+                  from: "vue",
+                  generated: true,
+                  node: null,
+                  items: [
+                    {
+                      name: "defineComponent",
+                      alias: "___VERTER_defineComponent",
+                      // note could be type
+                      type: false,
+                    },
+                  ],
+                });
+              }
             }
           }
 
@@ -680,13 +765,15 @@ function clearTags(block: VerterSFCBlock, s: MagicString) {
 }
 
 function scriptTagProcess(block: VerterSFCBlock, context: ParseScriptContext) {
+  if (context.isSetup && !block.block.attrs.setup) {
+    clearTags(block, context.s);
+    return;
+  }
+
   const preGeneric = `\nfunction ___VERTER_COMPONENT__`;
   const postGeneric = `() {\n`;
 
-  const generic =
-    typeof context.generic === "string"
-      ? context.generic
-      : context.script?.attrs.generic;
+  const generic = block.block.attrs.generic;
   // generic information will be kept intact for the source-map
   if (typeof generic === "string") {
     const tagContent = context.s.original.slice(
@@ -722,4 +809,82 @@ function scriptTagProcess(block: VerterSFCBlock, context: ParseScriptContext) {
     block.tag.pos.close.end,
     "\n}\n"
   );
+}
+
+function genericProcess(
+  context: ParseScriptContext,
+  locations: LocationByType
+) {
+  if (!context.generic) {
+    return undefined;
+  }
+  const genericDeclaration = locations.generic[0];
+  if (!genericDeclaration) return undefined;
+
+  function getGenericComponentName(name: string) {
+    return "_VUE_TS__" + name;
+  }
+
+  function replaceComponentNameUsage(name: string, content: string) {
+    const regex = new RegExp(`\\b${name}\\b`, "g");
+    return content.replace(regex, getGenericComponentName(name));
+  }
+
+  const genericNames = genericDeclaration.items.map((x) => x.name);
+  const sanitisedNames = genericNames.map(sanitiseGenericNames);
+
+  function sanitiseGenericNames(content: string | null | undefined) {
+    if (!content) return content;
+    return genericNames
+      ? genericNames.reduce((prev, cur) => {
+          return replaceComponentNameUsage(cur, prev);
+        }, content)
+      : content;
+  }
+
+  const CompGeneric = genericDeclaration.items
+    .map((x) => {
+      const name = getGenericComponentName(x.name);
+      const constraint = sanitiseGenericNames(x.constraint);
+      const defaultType = sanitiseGenericNames(x.default);
+
+      return [
+        name,
+        constraint ? `extends ${constraint}` : undefined,
+        `= ${defaultType || "any"}`,
+      ]
+        .filter(Boolean)
+        .join(" ");
+    })
+    .join(", ");
+
+  const InstanceGeneric = genericDeclaration.items
+    .map((x) => {
+      const name = x.name;
+      const constraint = x.constraint || getGenericComponentName(x.name);
+      const defaultType = x.default || getGenericComponentName(x.name);
+
+      return [
+        name,
+        constraint ? `extends ${constraint}` : undefined,
+        `= ${defaultType || "any"}`,
+      ]
+        .filter(Boolean)
+        .join(" ");
+    })
+    .join(", ");
+
+  return {
+    /**
+     * this is to be used for the external component
+     */
+    component: CompGeneric,
+    /**
+     * This is to be a direct replace from user declaration
+     */
+    instance: InstanceGeneric,
+
+    genericNames,
+    sanitisedNames,
+  };
 }
