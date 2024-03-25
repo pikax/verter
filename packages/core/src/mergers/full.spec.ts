@@ -636,6 +636,7 @@ describe("Mergers Full", () => {
         expect(p.source).toBe(source);
         expect(p.content).toMatchInlineSnapshot(`
           "import { defineComponent as _defineComponent } from 'vue'
+          import { renderList as __VERTER__renderList } from 'vue';
           import { computed } from "vue";
           function ___VERTER_COMPONENT__<T>() {
           const ____VERTER_COMP_OPTION__ = /*#__PURE__*/_defineComponent({
@@ -696,7 +697,7 @@ describe("Mergers Full", () => {
                   function ___VERTER__TEMPLATE_RENDER() {
           <>
                     <ol>
-                      {renderList(___VERTER__ctx.orderedItems,(item)=>{<li  key=___VERTER__ctx.{getKey(item)}>
+                      {__VERTER__renderList(___VERTER__ctx.orderedItems,(item)=>{<li  key={___VERTER__ctx.getKey(item)}>
                         {___VERTER__ctx. getLabel(item) }
                       </li>})}
                     </ol>
@@ -706,7 +707,7 @@ describe("Mergers Full", () => {
           const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
           const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
           const ___VERTER__comp = { 
-                      ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                      //...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
                       ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } })
                     }
           return ___VERTER_COMP___;
@@ -722,9 +723,69 @@ describe("Mergers Full", () => {
                  }} };
           export default __VERTER__RESULT as unknown as __VERTER_RESULT_TYPE__;"
         `);
+
+        testSourceMaps(p);
       });
     });
   });
+
+
+  it.only("teet", () => {
+    const source = `<script lang="ts">
+    import { ref } from 'vue'
+    
+    
+    const hh = 'hh';
+    
+    const eee= ref();
+    
+    </script> 
+    <template>
+    <div>
+        <div aria-autocomplete='' :about="false"></div>
+        <span ></span>
+        <image></image>
+        </div>
+    </template>`;
+    const p = process(source);
+    expect(p.source).toBe(source);
+    expect(p.content).toMatchInlineSnapshot(`
+      "import { defineComponent as ___VERTER_defineComponent } from 'vue';
+      import { ref } from 'vue'
+      function ___VERTER_COMPONENT__() {
+      const ____VERTER_COMP_OPTION__ = ___VERTER_defineComponent({})
+
+          
+          
+          
+          const hh = 'hh';
+          
+          const eee= ref();
+          
+          function ___VERTER__TEMPLATE_RENDER() {
+      <>
+          <div>
+              <div aria-autocomplete='' about={false}></div>
+              <span ></span>
+              <image></image>
+              </div>
+          
+      </>}
+      ___VERTER__TEMPLATE_RENDER();
+      const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
+      const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+      const ___VERTER__comp = { 
+                  //...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                  ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } })
+                }
+      return ___VERTER_COMP___;
+      }
+       
+          const __VERTER__RESULT = ___VERTER_COMPONENT__();
+      export default __VERTER__RESULT;"
+    `);
+  });
+
 
   it.skip("sss", () => {
     const source = `

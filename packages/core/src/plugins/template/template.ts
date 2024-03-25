@@ -22,23 +22,25 @@ export default {
     if (!ast) return;
 
     const parsed = parse(ast);
-    const declarations = [];
     // const result = build(parsed, [], declarations);
-    process(parsed, context.s, false);
+    const { declarations } = process(parsed, context.s, false);
 
-
-    return [{
-      type: LocationType.Template,
-      node: parsed.node,
-    }];
+    return [
+      {
+        type: LocationType.Template,
+        node: parsed.node,
+      },
+      ...declarations,
+    ];
     return {
       type: LocationType.Template,
       node: ast,
       generated: true,
       declaration: {
         name: "VUE_render",
-        content: `${context.generic ? `<${context.generic},>` : ""
-          }()=> { return (\n${result}\n) }`,
+        content: `${
+          context.generic ? `<${context.generic},>` : ""
+        }()=> { return (\n${result}\n) }`,
         type: "const",
       },
     };

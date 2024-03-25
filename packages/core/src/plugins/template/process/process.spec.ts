@@ -210,6 +210,21 @@ describe("process", () => {
       // testSourceMaps(magicString.toString(), magicString.generateMap({ hires: true, includeContent: true }))
     });
 
+    it("should keep casing on binding", () => {
+      const source = `<my-component :aria-autocomplete="'bar'"/>`;
+
+      const parsed = doParseContent(source);
+
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><___VERTER__comp.MyComponent aria-autocomplete={'bar'}/></template>"`
+      );
+
+      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,2BAAW,WAAY"}"`
+      );
+    });
+
     it("should pass boolean on just props", () => {
       const source = `<span foo/>`;
 
@@ -325,11 +340,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VERTER__ctx.items,(item)=>{<li ></li>})}</template>"`
+            `"<template>{__VERTER__renderList(___VERTER__ctx.items,(item)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,gBAAS,KAAJ,EAAJ,IAAa,IAAxB,IAAyB,GAAG,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,gBAAS,KAAJ,EAAJ,IAAa,IAAxB,IAAyB,GAAG,EAAE,IAAC"}"`
           );
 
           testSourceMaps(
@@ -344,11 +359,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VERTER__ctx.items,({ message })=>{<li ></li>})}</template>"`
+            `"<template>{__VERTER__renderList(___VERTER__ctx.items,({ message })=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,gBAAgB,KAAJ,EAAX,WAAoB,IAA/B,IAAgC,GAAG,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,gBAAgB,KAAJ,EAAX,WAAoB,IAA/B,IAAgC,GAAG,EAAE,IAAC"}"`
           );
         });
 
@@ -358,11 +373,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VERTER__ctx.items,(item, index)=>{<li ></li>})}</template>"`
+            `"<template>{__VERTER__renderList(___VERTER__ctx.items,(item, index)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,gBAAkB,KAAJ,CAAb,aAAsB,GAAjC,IAAkC,GAAG,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,gBAAkB,KAAJ,CAAb,aAAsB,GAAjC,IAAkC,GAAG,EAAE,IAAC"}"`
           );
         });
 
@@ -372,11 +387,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VERTER__ctx.items,(item, index)=>{<li  key={index + 'random'}></li>})}</template>"`
+            `"<template>{__VERTER__renderList(___VERTER__ctx.items,(item, index)=>{<li  key={index + 'random'}></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,gBAAkB,KAAJ,CAAb,aAAsB,GAAjC,IAAkC,CAAE,IAAI,CAAC,gBAAgB,CAAC,GAAG,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,gBAAkB,KAAJ,CAAb,aAAsB,GAAjC,IAAkC,CAAE,IAAI,CAAC,gBAAgB,CAAC,GAAG,EAAE,IAAC"}"`
           );
         });
 
@@ -386,11 +401,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VERTER__ctx.items,({ message }, index)=>{<li ></li>})}</template>"`
+            `"<template>{__VERTER__renderList(___VERTER__ctx.items,({ message }, index)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,gBAAyB,KAAJ,CAApB,oBAA6B,GAAxC,IAAyC,GAAG,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,gBAAyB,KAAJ,CAApB,oBAA6B,GAAxC,IAAyC,GAAG,EAAE,IAAC"}"`
           );
         });
 
@@ -402,13 +417,13 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(`
-            "<template>{renderList(___VERTER__ctx.items,(item)=>{<li >
-                  {renderList(item.children,(childItem)=>{<span ></span>})}
+            "<template>{__VERTER__renderList(___VERTER__ctx.items,(item)=>{<li >
+                  {__VERTER__renderList(item.children,(childItem)=>{<span ></span>})}
               </li>})}</template>"
           `);
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,gBAAS,KAAJ,EAAJ,IAAa,IAAxB,IAAyB;AACnC,OAAY,UAAM,CAAc,aAAJ,EAAT,SAA0B,IAAvC,MAAwC,GAAG,IAAI,IAAC;AACtD,IAAI,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,gBAAS,KAAJ,EAAJ,IAAa,IAAxB,IAAyB;AACnC,OAAY,oBAAM,CAAc,aAAJ,EAAT,SAA0B,IAAvC,MAAwC,GAAG,IAAI,IAAC;AACtD,IAAI,EAAE,IAAC"}"`
           );
         });
 
@@ -418,11 +433,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VERTER__ctx.items,(item)=>{<li ></li>})}</template>"`
+            `"<template>{__VERTER__renderList(___VERTER__ctx.items,(item)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,gBAAS,KAAJ,EAAJ,IAAa,IAAxB,IAAyB,GAAG,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,gBAAS,KAAJ,EAAJ,IAAa,IAAxB,IAAyB,GAAG,EAAE,IAAC"}"`
           );
         });
 
@@ -432,11 +447,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VERTER__ctx.items,(item  )=>{<li ></li>})}</template>"`
+            `"<template>{__VERTER__renderList(___VERTER__ctx.items,(item  )=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,gBAAW,KAAJ,EAAN,MAAe,IAA1B,IAA2B,GAAG,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,gBAAW,KAAJ,EAAN,MAAe,IAA1B,IAA2B,GAAG,EAAE,IAAC"}"`
           );
         });
 
@@ -446,11 +461,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(    ___VERTER__ctx.items,(item  )=>{<li ></li>})}</template>"`
+            `"<template>{__VERTER__renderList(    ___VERTER__ctx.items,(item  )=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,CAAW,mBAAI,KAAR,EAAN,MAAmB,IAA9B,IAA+B,GAAG,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,CAAW,mBAAI,KAAR,EAAN,MAAmB,IAA9B,IAA+B,GAAG,EAAE,IAAC"}"`
           );
         });
 
@@ -461,11 +476,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VERTER__ctx.myObject,(value)=>{<li ></li>})}</template>"`
+            `"<template>{__VERTER__renderList(___VERTER__ctx.myObject,(value)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,gBAAU,QAAJ,EAAL,KAAiB,IAA5B,IAA6B,GAAG,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,gBAAU,QAAJ,EAAL,KAAiB,IAA5B,IAA6B,GAAG,EAAE,IAAC"}"`
           );
         });
 
@@ -475,11 +490,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VERTER__ctx.myObject,(value, key)=>{<li ></li>})}</template>"`
+            `"<template>{__VERTER__renderList(___VERTER__ctx.myObject,(value, key)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,gBAAiB,QAAJ,CAAZ,YAAwB,GAAnC,IAAoC,GAAG,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,gBAAiB,QAAJ,CAAZ,YAAwB,GAAnC,IAAoC,GAAG,EAAE,IAAC"}"`
           );
         });
 
@@ -489,11 +504,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(___VERTER__ctx.myObject,(value, key, index)=>{<li ></li>})}</template>"`
+            `"<template>{__VERTER__renderList(___VERTER__ctx.myObject,(value, key, index)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,gBAAwB,QAAJ,CAAnB,mBAA+B,GAA1C,IAA2C,GAAG,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,gBAAwB,QAAJ,CAAnB,mBAA+B,GAA1C,IAA2C,GAAG,EAAE,IAAC"}"`
           );
         });
 
@@ -504,11 +519,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{renderList(10,(n)=>{<li ></li>})}</template>"`
+            `"<template>{__VERTER__renderList(10,(n)=>{<li ></li>})}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,UAAM,CAAM,EAAJ,EAAD,CAAO,IAAlB,IAAmB,GAAG,EAAE,IAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAc,oBAAM,CAAM,EAAJ,EAAD,CAAO,IAAlB,IAAmB,GAAG,EAAE,IAAC"}"`
           );
         });
 
@@ -519,11 +534,11 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{(___VERTER__ctx.items > 5)?renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
+            `"<template>{(___VERTER__ctx.items > 5)?__VERTER__renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAsC,gBAAC,SAAS,CAAf,CAAnB,UAAM,gBAAM,KAAJ,EAAD,CAAU,IAArB,IAAsB,CAAiB,GAAG,EAAE,gBAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAsC,gBAAC,SAAS,CAAf,CAAnB,oBAAM,gBAAM,KAAJ,EAAD,CAAU,IAArB,IAAsB,CAAiB,GAAG,EAAE,gBAAC"}"`
           );
 
           testSourceMaps(
@@ -637,7 +652,7 @@ describe("process", () => {
             const parsed = doParseContent(source);
             const { magicString } = process(parsed);
             expect(magicString.toString()).toMatchInlineSnapshot(
-              `"<template>{(___VERTER__ctx.items > 5)?renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
+              `"<template>{(___VERTER__ctx.items > 5)?__VERTER__renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
             );
 
             expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -658,7 +673,7 @@ describe("process", () => {
             const parsed = doParseContent(source);
             const { magicString } = process(parsed);
             expect(magicString.toString()).toMatchInlineSnapshot(
-              `"<template>{(___VERTER__ctx.items > 5)?renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
+              `"<template>{(___VERTER__ctx.items > 5)?__VERTER__renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
             );
 
             expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -678,7 +693,7 @@ describe("process", () => {
             const parsed = doParseContent(source);
             const { magicString } = process(parsed);
             expect(magicString.toString()).toMatchInlineSnapshot(
-              `"<template>{(___VERTER__ctx.items > 5)?renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
+              `"<template>{(___VERTER__ctx.items > 5)?__VERTER__renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
             );
 
             expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -699,7 +714,7 @@ describe("process", () => {
             const parsed = doParseContent(source);
             const { magicString } = process(parsed);
             expect(magicString.toString()).toMatchInlineSnapshot(
-              `"<template>{(___VERTER__ctx.items > 5)?renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
+              `"<template>{(___VERTER__ctx.items > 5)?__VERTER__renderList(___VERTER__ctx.items,(i)=>{<li  ></li>}) : undefined}</template>"`
             );
 
             expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -960,7 +975,9 @@ describe("process", () => {
 
       const parsed = doParseContent(source);
       const { magicString } = process(parsed);
-      expect(magicString.toString()).toMatchInlineSnapshot(`"<template><div>{ ___VERTER__ctx.foo + 'myString' + ___VERTER__ctx.document.width }</div></template>"`);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><div>{ ___VERTER__ctx.foo + 'myString' + ___VERTER__ctx.document.width }</div></template>"`
+      );
     });
   });
 });

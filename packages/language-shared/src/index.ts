@@ -13,3 +13,5 @@ export function patchClient<T>(client?: T): PatchClient<T> | undefined;
 export function patchClient<T>(client: T): PatchClient<T> {
   return client as any;
 }
+
+export * as VirtualFiles from "./virtual";

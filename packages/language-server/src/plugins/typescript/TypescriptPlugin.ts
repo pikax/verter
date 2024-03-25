@@ -1,109 +1,123 @@
-import ts, { ScriptKind, version } from "typescript";
+import ts, { ResolvedModuleFull, ScriptKind, version } from "typescript";
 import Logger from "../../logger";
 import { documentManager } from "../../lib/documents/Manager";
 import { readFileSync, existsSync } from "node:fs";
 import { VueDocument } from "../../lib/documents/VueDocument";
 import { findTsConfigPath } from "../../utils";
 
-import path from 'node:path'
+import { VirtualFiles } from "@verter/language-shared";
+
+import path from "node:path";
 import { resolve } from "vscode-languageserver/lib/node/files";
 
 function getScriptFileNames() {
   const d = documentManager.getAllOpened();
 
-  const vueFiles = d.filter(x => x.endsWith('.vue')).map(x => x.replace('file:', 'verter-virtual:')).flatMap(x => [
-    x + '.tsx',
-    // x + '.template.d.ts',
-    // TODO add more blocks
-    // x + '.css'
-  ])
+  const vueFiles = d
+    .filter((x) => x.endsWith(".vue"))
+    .map((x) => x.replace("file:", "verter-virtual:"))
+    .flatMap((x) => [
+      x + ".tsx",
+      // x + '.template.d.ts',
+      // TODO add more blocks
+      // x + '.css'
+    ]);
   // const vueFiles = []
-
-
 
   return d.concat(vueFiles);
 }
 
 const map = {
-  '/vue.ts': 'vue',
-  '@vue/runtime-dom.ts': '@vue/runtime-dom',
-  '@vue/runtime-core.ts': '@vue/runtime-core',
-  '@vue/reactivity.ts': '@vue/reactivity',
-  '/vue/jsx-runtime.ts': 'vue/jsx-runtime',
-  '@vue/shared.ts': '@vue/shared'
-}
+  "/vue.ts": "vue",
+  "@vue/runtime-dom.ts": "@vue/runtime-dom",
+  "@vue/runtime-core.ts": "@vue/runtime-core",
+  "@vue/reactivity.ts": "@vue/reactivity",
+  "/vue/jsx-runtime.ts": "vue/jsx-runtime",
+  "@vue/shared.ts": "@vue/shared",
+};
 
 function getSnapshotIfExists(
   fileName: string
 ): (ts.IScriptSnapshot & { version: number }) | undefined {
-
   const doc = documentManager.getDocument(fileName);
   if (!doc) {
-    console.log('no doc found', fileName)
+    console.log("no doc found", fileName);
     return undefined;
   }
   let snap = snapshots.get(fileName);
   if (snap?.version === doc.version) {
-    return snap
+    return snap;
   }
 
   // snap = { ...ts.ScriptSnapshot.fromString(doc.template?.content ?? doc.getText()), version: doc.version }
-  snap = Object.assign(ts.ScriptSnapshot.fromString(doc.template?.content ?? doc.getText()), { version: doc.version })
-  snapshots.set(fileName, snap)
+  snap = Object.assign(
+    ts.ScriptSnapshot.fromString(doc.template?.content ?? doc.getText()),
+    { version: doc.version }
+  );
+  snapshots.set(fileName, snap);
 
-  console.log('update snapshot for', snap.version, fileName)
+  console.log("update snapshot for", snap.version, fileName);
 
-  return snap
+  return snap;
 }
 
 function fileExists(fileName: string) {
   const e = !!documentManager.getDocument(fileName);
-  if (fileName.endsWith("Test.my.ts")) {
-    debugger;
-    return true;
-  }
   console.log("checking if file exists", fileName);
-  if (~fileName.indexOf('.vue') || fileName.endsWith('.vue')) {
+  if (~fileName.indexOf(".vue") || fileName.endsWith(".vue")) {
     // debugger
   }
 
-  if (fileName.startsWith('verter-virtual:')) {
+  // these are virtual files
+  if (fileName.startsWith("verter:")) {
+    const name = fileName.slice("verter:".length);
+    return name in VirtualFiles;
+  }
+
+  if (fileName.startsWith("verter-virtual:")) {
     if (snapshots.has(fileName)) {
-      return true
+      return true;
     }
 
-    const d = Object.keys(map).find(x => fileName.endsWith(x))
+    const d = Object.keys(map).find((x) => fileName.endsWith(x));
     if (d) {
-      return true
+      return true;
     }
 
-    if (fileName.endsWith('/vue.ts') || fileName.endsWith('/vue/jsx-runtime.ts')) {
-      return true
+    if (
+      fileName.endsWith("/vue.ts") ||
+      fileName.endsWith("/vue/jsx-runtime.ts")
+    ) {
+      return true;
     }
 
-    fileName = fileName.replace('verter-virtual:', 'file:')
-    console.log('updated fileName to', fileName)
+    fileName = fileName.replace("verter-virtual:", "file:");
+    console.log("updated fileName to", fileName);
     // debugger
   }
 
-  if (fileName.startsWith('virtual:')) {
-    debugger
+  if (fileName.startsWith("virtual:")) {
+    debugger;
   }
 
   return e || snapshots.has(fileName) || ts.sys.fileExists(fileName);
 }
 
 function readFile(fileName: string) {
-  console.log('reading file', fileName)
+  console.log("reading file", fileName);
 
+  if (fileName.startsWith("verter:")) {
+    const name = fileName.slice("verter:".length);
+    return VirtualFiles[name];
+  }
 
   // if (fileName.endsWith('/vue') || fileName.endsWith('/vue/jsx-runtime')) {
   //   return true
   // }
 
-  if (fileName.startsWith('verter-virtual:')) {
-    debugger
-  }
+  // if (fileName.startsWith("verter-virtual:")) {
+  //   debugger;
+  // }
   return ts.sys.readFile(fileName);
 
   //   if (fileExists(fileName)) {
@@ -114,20 +128,23 @@ function readFile(fileName: string) {
 
 const snapshots = new Map<string, ts.IScriptSnapshot & { version: number }>();
 
-
 export function getTypescriptService(workspacePath: string) {
-
   // console.log('current workspace ', workspacePath)
 
   // const dd = findTsConfigPath(path.resolve(workspacePath, './tsconfig.json'), [workspacePath], existsSync, e => e);
 
-  const tsConfigStr = readFileSync(path.resolve(workspacePath, './tsconfig.json'), 'utf-8')
+  const tsConfigStr = readFileSync(
+    path.resolve(workspacePath, "./tsconfig.json"),
+    "utf-8"
+  );
 
-  const { config } = ts.parseConfigFileTextToJson(path.resolve(workspacePath, './tsconfig.json'), tsConfigStr)
-
+  const { config } = ts.parseConfigFileTextToJson(
+    path.resolve(workspacePath, "./tsconfig.json"),
+    tsConfigStr
+  );
 
   const compilerOptions: ts.CompilerOptions = {
-    // ...config.compilerOptions,
+    ...config.compilerOptions,
     // moduleResolution: ts.ModuleResolutionKind.Bundler,
     jsx: ts.JsxEmit.Preserve,
     target: ts.ScriptTarget.ESNext,
@@ -165,15 +182,18 @@ export function getTypescriptService(workspacePath: string) {
     readFile: readFile,
     // readDirectory: svelteModuleLoader.readDirectory,
     readDirectory: (path, extensions, exclude, include) => {
-      console.log('reading dir', {
-        path, extensions, exclude, include
-      })
-      return tsSystem.readDirectory(path, extensions, exclude, include)
+      console.log("reading dir", {
+        path,
+        extensions,
+        exclude,
+        include,
+      });
+      return tsSystem.readDirectory(path, extensions, exclude, include);
     },
     getDirectories: tsSystem.getDirectories,
     useCaseSensitiveFileNames: () => tsSystem.useCaseSensitiveFileNames,
     getScriptKind: (fileName: string) => {
-      const ext = fileName.slice(fileName.lastIndexOf('.'));
+      const ext = fileName.slice(fileName.lastIndexOf("."));
       switch (ext.toLowerCase()) {
         case ts.Extension.Js:
           return ts.ScriptKind.JS;
@@ -197,60 +217,98 @@ export function getTypescriptService(workspacePath: string) {
     //   svelteModuleLoader.mightHaveInvalidatedResolutions,
     // getModuleResolutionCache: svelteModuleLoader.getModuleResolutionCache,
 
-    resolveModuleNameLiterals(moduleLiterals, containingFile, redirectedReference, options, containingSourceFile, reusedNames) {
-      if (containingFile.startsWith('verter-virtual:')) {
-        containingFile = decodeURIComponent(containingFile.replace('verter-virtual:///', ''))
+    resolveModuleNameLiterals(
+      moduleLiterals,
+      containingFile,
+      redirectedReference,
+      options,
+      containingSourceFile,
+      reusedNames
+    ) {
+      if (containingFile.startsWith("verter-virtual:")) {
+        containingFile = decodeURIComponent(
+          containingFile.replace("verter-virtual:///", "")
+        );
       }
 
       const modules = moduleLiterals.map((x) => {
-        const h = ts.sys
+        const h = ts.sys;
+
+        if (x.text.startsWith("verter:")) {
+          return {
+            resolvedModule: {
+              extension: "ts",
+              resolvedFileName: x.text,
+              packageId: {
+                name: "verter",
+              },
+              resolvedUsingTsExtension: true,
+              isExternalLibraryImport: true,
+            } as ResolvedModuleFull,
+          };
+        }
 
         switch (options.moduleResolution) {
           case ts.ModuleResolutionKind.Classic: {
-            return ts.resolveModuleName(x.text, containingFile, options, h, undefined, redirectedReference);
+            return ts.resolveModuleName(
+              x.text,
+              containingFile,
+              options,
+              h,
+              undefined,
+              redirectedReference
+            );
           }
           case ts.ModuleResolutionKind.NodeJs:
           case ts.ModuleResolutionKind.Node10:
           case ts.ModuleResolutionKind.Node16:
           case ts.ModuleResolutionKind.NodeNext: {
-            return ts.nodeModuleNameResolver(x.text, containingFile, options, h, undefined, redirectedReference);
+            return ts.nodeModuleNameResolver(
+              x.text,
+              containingFile,
+              options,
+              h,
+              undefined,
+              redirectedReference
+            );
           }
           case ts.ModuleResolutionKind.Bundler:
           default:
-            return ts.bundlerModuleNameResolver(x.text, containingFile, options, h, undefined, redirectedReference);
+            return ts.bundlerModuleNameResolver(
+              x.text,
+              containingFile,
+              options,
+              h,
+              undefined,
+              redirectedReference
+            );
         }
-      })
+      });
 
       // TODO add debug flag
       if (true) {
-        const emptyModules = modules.map((x, i) => !x.resolvedModule ? i : false).filter(Boolean).map(x => moduleLiterals[x].text)
+        const emptyModules = modules
+          .map((x, i) => (!x.resolvedModule ? i : false))
+          .filter(Boolean)
+          .map((x) => moduleLiterals[x].text);
         if (emptyModules.length > 0) {
-          console.warn('Modules missing!', emptyModules)
+          console.warn("Modules missing!", emptyModules);
         }
       }
 
-
-      return modules
+      return modules;
     },
   };
-
-
-
-
 
   // ts.readConfigFile()
   const languageService = ts.createLanguageService(
     host,
-    ts.createDocumentRegistry(tsSystem.useCaseSensitiveFileNames),
+    ts.createDocumentRegistry(tsSystem.useCaseSensitiveFileNames)
     // ts.LanguageServiceMode.Semantic
   );
 
-
   return languageService;
 }
-
-
-
 
 const DEFAULT_REGEXP = /\.vue$/;
 const RELATIVE_REGEXP = /^\.\.?($|[\\/])/;

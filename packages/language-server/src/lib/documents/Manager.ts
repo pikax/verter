@@ -8,31 +8,38 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import { VueDocumentManager } from "./VueDocumentManager";
 import { VueDocument } from "./VueDocument";
 
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync } from "node:fs";
+import { VirtualFiles } from "@verter/language-shared";
 
-export type ListenerType = 'open' | 'change' | 'close'
+export type ListenerType = "open" | "change" | "close";
 
-export type ListenerCb = (type: ListenerType, params: TextDocumentChangeEvent<VueDocument>) => void
+export type ListenerCb = (
+  type: ListenerType,
+  params: TextDocumentChangeEvent<VueDocument>
+) => void;
 // | ((type: 'open', params: TextDocumentChangeEvent<VueDocument>) => void)
 // | ((type: 'change', params: TextDocumentChangeEvent<VueDocument>) => void)
 // | ((type: 'close', params: TextDocumentChangeEvent<VueDocument>) => void)
 
 class DocumentManager {
   //   readonly #documents = new Map<string, TextDocument>();
-  readonly _textDocuments = new TextDocuments(TextDocument) as TextDocuments<VueDocument>;
+  readonly _textDocuments = new TextDocuments(
+    TextDocument
+  ) as TextDocuments<VueDocument>;
   #disposable: Disposable | undefined;
 
   private readonly manager = new VueDocumentManager();
 
-  private compiledDocs = new Map<string, VueDocument>()
-  private externalDocs = new Map<string, TextDocument>()
+  private compiledDocs = new Map<string, VueDocument>();
+  private externalDocs = new Map<string, TextDocument>();
+  private virtualDocs = new Map<string, TextDocument>();
 
-  private _listeners = new Array<ListenerCb>
+  private _listeners = new Array<ListenerCb>();
 
-  constructor() { }
+  constructor() {}
 
   public addListener(cb: ListenerCb) {
-    this._listeners.push(cb)
+    this._listeners.push(cb);
   }
 
   public listen(connection: Connection) {
@@ -62,9 +69,11 @@ class DocumentManager {
       if (e.document.languageId !== "vue") return;
       const vueDoc = this.manager.openDocument(e.document);
 
-      this._listeners.forEach(x => x('open', {
-        document: vueDoc
-      }))
+      this._listeners.forEach((x) =>
+        x("open", {
+          document: vueDoc,
+        })
+      );
 
       // vueDoc.blocks.forEach((block)=> {
       //   switch(block) {
@@ -74,9 +83,7 @@ class DocumentManager {
       //   }
       // })
 
-
       // e.document.uri.startsWith('file:')
-
 
       connection.window.showInformationMessage(
         "Document changed: " + e.document.uri
@@ -86,9 +93,11 @@ class DocumentManager {
     docs.onDidClose((e) => {
       if (e.document.languageId !== "vue") return;
       const vueDoc = this.manager.openDocument(e.document);
-      this._listeners.forEach(x => x('close', {
-        document: vueDoc
-      }))
+      this._listeners.forEach((x) =>
+        x("close", {
+          document: vueDoc,
+        })
+      );
       this.manager.closeDocument(e.document.uri);
     });
 
@@ -96,21 +105,23 @@ class DocumentManager {
       // ignore non-vue documents
       if (change.document.languageId !== "vue") return;
 
-
-      const virtualUrl = change.document.uri.replace('file:', 'verter-virtual:').replace('.vue', '.vue.tsx')
+      const virtualUrl = change.document.uri
+        .replace("file:", "verter-virtual:")
+        .replace(".vue", ".vue.tsx");
 
       const doc = this.getDocument(virtualUrl);
-      doc!.setText(change.document.getText())
+      doc!.setText(change.document.getText());
 
-      ++doc!.version
+      ++doc!.version;
 
-
-      this._listeners.forEach(x => x('change', {
-        document: doc!
-      }))
-      connection.window.showInformationMessage(
-        "Document changed: " + change.document.uri
+      this._listeners.forEach((x) =>
+        x("change", {
+          document: doc!,
+        })
       );
+      // connection.window.showInformationMessage(
+      //   "Document changed: " + change.document.uri
+      // );
       //   this.#documents.set(change.document.uri, change.document());
     });
 
@@ -136,28 +147,46 @@ class DocumentManager {
 
     const doc = this._textDocuments.get(uri);
     if (doc) return doc;
-    if (uri.startsWith('verter-virtual:')) {
-      if (this.compiledDocs.has(uri)) return this.compiledDocs.get(uri)!
-      const originalUri = uri.replace('verter-virtual:', "file:").replace('.vue.tsx', '.vue')
 
-      const dd = this._textDocuments.get(originalUri)
+    if (uri.startsWith("verter-virtual:")) {
+      if (this.compiledDocs.has(uri)) return this.compiledDocs.get(uri)!;
+      const originalUri = uri
+        .replace("verter-virtual:", "file:")
+        .replace(".vue.tsx", ".vue");
+
+      const dd = this._textDocuments.get(originalUri);
       if (dd) {
-        const vueDoc = new VueDocument(uri, dd.getText())
-        this.compiledDocs.set(uri, vueDoc)
-        return vueDoc
+        const vueDoc = new VueDocument(uri, dd.getText());
+        this.compiledDocs.set(uri, vueDoc);
+        return vueDoc;
       }
+    } else if (uri.startsWith("verter:")) {
+      let virtualDoc = this.virtualDocs.get(uri);
+      if (!virtualDoc) {
+        const name = uri.slice("verter:".length);
+        const content = VirtualFiles[name];
+        if (content) {
+          const doc = TextDocument.create(uri, "typescript", 1, content);
+          this.virtualDocs.set(uri, doc);
+          return doc;
+        }
+      }
+      return virtualDoc;
     } else {
       let external = this.externalDocs.get(uri);
       if (!external && existsSync(uri)) {
-        external = TextDocument.create(uri, 'typescript', 1, readFileSync(uri, { encoding: 'utf-8' }))
+        external = TextDocument.create(
+          uri,
+          "typescript",
+          1,
+          readFileSync(uri, { encoding: "utf-8" })
+        );
 
-        this.externalDocs.set(uri, external)
+        this.externalDocs.set(uri, external);
       }
 
       return external;
     }
-
-
 
     // if (!doc) {
     //   if

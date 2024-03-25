@@ -90,7 +90,7 @@ export default class CompiledCodeContentProvider
     const path = this.selectedVueFile.replace("file://", "");
 
     if (response?.js?.code) {
-      return `/* Compiled: ${path} */\n/* @jsxImportSource vue */\n${response.js.code}`;
+      return `/* Compiled: ${path} */\n${response.js.code}`;
     } else {
       window.setStatusBarMessage(`Verter: fail to compile ${path}`, 3000);
     }

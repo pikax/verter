@@ -80,7 +80,7 @@ export class VueDocument extends WritableDocument {
     });
 
 
-    const { locations, context } = createBuilder().preProcess(name, this.content, true)
+    const { locations, context } = createBuilder().preProcess(name, this.content)
 
     const result = mergeFull(locations, context)
 

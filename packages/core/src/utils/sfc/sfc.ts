@@ -45,9 +45,22 @@ export function retrieveHTMLComments(source: string) {
  */
 export function catchEmptyBlocks(descriptor: SFCDescriptor): SFCBlock[] {
   const source = descriptor.source;
-  const matches = source.matchAll(EMPTY_BLOCK_REGEX);
 
+  const matches = source.matchAll(EMPTY_BLOCK_REGEX);
   const commentedBlocks = retrieveHTMLComments(source);
+
+  const knownBlocks = [
+    ...descriptor.customBlocks,
+    descriptor.template,
+    descriptor.script,
+    descriptor.scriptSetup,
+  ]
+    .filter(Boolean)
+    .map((x) => ({
+      start: x.loc.start.offset,
+      end: x.loc.end.offset,
+    }))
+    .concat(commentedBlocks);
 
   const blocks: SFCBlock[] = [];
 
@@ -55,7 +68,7 @@ export function catchEmptyBlocks(descriptor: SFCDescriptor): SFCBlock[] {
     const contentStartIndex = it.index + `<${it[1] + it[2]}`.length;
     const contentEndIndex = contentStartIndex + it[3].length;
 
-    const isInComment = commentedBlocks.some((block) => {
+    const isInComment = knownBlocks.some((block) => {
       return (
         (contentStartIndex >= block.start && contentStartIndex < block.end) ||
         (contentEndIndex > block.start && contentEndIndex <= block.end)
@@ -98,7 +111,7 @@ export function extractBlocksFromDescriptor(
     descriptor.template,
     ...descriptor.styles,
     ...descriptor.customBlocks,
-    ...catchEmptyBlocks(descriptor)
+    ...catchEmptyBlocks(descriptor),
   ]
     .filter(Boolean)
     .sort((a, b) => {
@@ -124,7 +137,8 @@ export function extractBlocksFromDescriptor(
     const tagMatch = tagInit.matchAll(BLOCK_TAG_REGEX).next()
       .value as RegExpMatchArray;
 
-    const hasClosingTagOnContent = tagInit.indexOf(">") < tagInit.length - 1;
+    const hasClosingTagOnContent =
+      tagInit.lastIndexOf(">") < tagInit.length - 1;
 
     const tag = tagMatch.groups.tag;
     // const content = tagInit.slice(tag.length+ 1, -1)// tagMatch.groups.content
@@ -136,6 +150,7 @@ export function extractBlocksFromDescriptor(
         : tagMatch.groups.content;
 
     const tagStartIndex = tagMatch.index + initTagOffset;
+
     const startTagPos: BlockPosition = {
       start: tagStartIndex,
       end:

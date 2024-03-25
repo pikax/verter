@@ -11,6 +11,7 @@ import {
   extractBlocksFromDescriptor,
   retrieveHTMLComments,
 } from "../utils/sfc";
+import { VariableDeclaration } from "@babel/types";
 
 const possibleExports = [
   "export default /*#__PURE__*/_",
@@ -129,7 +130,32 @@ export function mergeFull(
       declaration: {
         type: "const",
         name: "___VERTER__ctx",
-        content: `{ ${["...(new ___VERTER_COMP___())"].join(",\n")} }`,
+        content: `{ ${[
+          "...(new ___VERTER_COMP___())",
+          ...(context.isSetup
+            ? [
+                ...locations.import
+                  .filter((x) => !x.generated)
+                  .flatMap(
+                    (x) =>
+                      x.items?.map((i) => i.alias ?? i.name) ??
+                      // TODO maybe handle alias
+                      x.node.specifiers.map((x) => x.imported.name)
+                  )
+                  .filter(Boolean),
+
+                ...locations.declaration
+                  .filter((x) => !x.generated)
+                  .flatMap(
+                    (x) =>
+                      x.declaration.name ??
+                      x.node.declarations?.map((x) => x.id.name) ??
+                      x.node.id?.name
+                  )
+                  .filter(Boolean),
+              ]
+            : []),
+        ].join(",\n")} }`,
       },
     });
 
@@ -141,11 +167,26 @@ export function mergeFull(
         type: "const",
         name: "___VERTER__comp",
         content: `{ 
-            ...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
-            ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } })
+            //...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+            ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+            ...___VERTER__ctx
           }`,
       },
     });
+
+    // locations.import.push({
+    //   type: LocationType.Import,
+    //   generated: true,
+    //   from: "verter:helper",
+    //   asType: true,
+    //   items: [
+    //     {
+    //       name: "ExtractRenderComponents",
+    //       // TODO prepend __VERTER__ to avoid collisions
+    //       alias: "ExtractRenderComponents",
+    //     },
+    //   ],
+    // });
 
     if (generic) {
       const sanitisedGenericNames = genericInfo.sanitisedNames.join(", ");
@@ -330,6 +371,8 @@ export function mergeFull(
       ].join("\n")
     );
   }
+
+  s.prependLeft(0, "/* @jsxImportSource vue */\n");
 
   return {
     locations,

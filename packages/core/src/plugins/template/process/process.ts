@@ -1,5 +1,5 @@
 import { MagicString } from "@vue/compiler-sfc";
-import { WalkResult } from "../../types";
+import { LocationType, WalkResult } from "../../types";
 import { ParsedType, parse } from "../parse/parse";
 import type { ParsedNodeBase } from "../parse/parse";
 import {
@@ -70,6 +70,7 @@ export function process(
     type: parsed.node.type,
     node: parsed.node,
     magicString: s,
+    declarations: context.declarations,
   };
 }
 
@@ -202,7 +203,13 @@ function renderAttribute(
       }
 
       if (n.exp) {
-        retrieveStringExpressionNode(n.exp, s, context);
+        retrieveStringExpressionNode(
+          n.exp,
+          s,
+          context,
+          true,
+          n.exp.loc.start.offset
+        );
       }
 
       if (name !== n.rawName) {
@@ -453,7 +460,20 @@ function renderFor(
   }
 
   // {v-for="itemitems,"<li >} -> { renderList"itemitems,"<li
-  s.overwrite(vForStart, vForStart + "v-for=".length, `renderList`);
+  s.overwrite(vForStart, vForStart + "v-for=".length, `__VERTER__renderList`);
+
+  context.declarations.push({
+    type: LocationType.Import,
+    generated: true,
+    from: "vue",
+    node: null,
+    items: [
+      {
+        name: "renderList",
+        alias: "__VERTER__renderList",
+      },
+    ],
+  });
 
   // { renderList"item in _ctx.items"<li -> { renderList(item in _ctx.items)<li
   //   if (value) {
@@ -782,8 +802,8 @@ function retrieveStringExpressionNode(
         return prepend ? appendCtx(node, s, context) : node.content;
       }
       const offset =
-        overrideOffset >= 0 ? overrideOffset : node.loc.start.offset;
-      return parseNodeText(node.ast, s, context, offset - 1, prepend);
+        overrideOffset >= 0 ? overrideOffset : node.loc.start.offset - 1;
+      return parseNodeText(node.ast, s, context, offset, prepend);
     }
     case NodeTypes.COMPOUND_EXPRESSION: {
       return "NOT_KNOWN COMPOUND_EXPRESSION";
