@@ -507,7 +507,13 @@ function renderAttribute(
       }
 
       if (n.exp) {
-        retrieveStringExpressionNode(n.exp, s, context);
+        retrieveStringExpressionNode(
+          n.exp,
+          s,
+          context,
+          true,
+          n.exp.loc.start.offset
+        );
       }
 
       if (name !== n.rawName) {
@@ -1047,6 +1053,12 @@ function parseNodeText(
 
   if ("expression" in node) {
     node.expression && parseNodeText(node.expression, s, context, offset);
+  }
+  if ("expressions" in node) {
+    node.expressions &&
+      node.expressions.forEach((x) =>
+        parseNodeText(x, s, context, offset, prepend)
+      );
   }
 
   if ("callee" in node) {

@@ -160,7 +160,10 @@ export function mergeFull(
           .flatMap(
             (x) =>
               x.declaration.name ??
-              x.node.declarations?.map((x) => x.id.name) ??
+              x.node.declarations?.flatMap(
+                (x) =>
+                  x.id.name ?? x.id.properties.map((p) => p.name ?? p.key.name)
+              ) ??
               x.node.id?.name
           )
           .filter(Boolean)

@@ -285,6 +285,14 @@ describe("process", () => {
       );
     });
 
+    it("should  append ctx inside a string interpolation", () => {
+      const source = '<span :check-for-something="`foo=${bar}`"></span>';
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(`"<template><span checkForSomething={\`foo=\${___VERTER__ctx.bar}\`}></span></template>"`);
+    });
+
     describe("events", () => {
       it('should camelCase "on" event listeners', () => {
         const source = `<span @check-for-something="test"></span>`;
@@ -307,6 +315,16 @@ describe("process", () => {
         const { magicString } = process(parsed);
         expect(magicString.toString()).toMatchInlineSnapshot(
           `"<template><span onCheckForSomething={e=> { ___VERTER__ctx.foo = e }}></span></template>"`
+        );
+      });
+
+      it("should add event correctly", () => {
+        const source = `<span @back="navigateToSession(null)"/>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span onBack={___VERTER__ctx.navigateToSession(null)}/></template>"`
         );
       });
     });

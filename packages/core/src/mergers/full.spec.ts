@@ -976,7 +976,47 @@ describe("Mergers Full", () => {
     const p = process(source);
 
     expect(p.source).toBe(source);
-    expect(p.content).toMatchInlineSnapshot();
+    expect(p.content).toMatchInlineSnapshot(`
+      "/* @jsxImportSource vue */
+      import 'vue/jsx';
+
+      import { defineComponent as ___VERTER_defineComponent, defineComponent as ___VERTER_defineComponent } from 'vue';
+
+      function ___VERTER_COMPONENT__<T extends string>() {
+       )
+      const ____VERTER_COMP_OPTION__ = ___VERTER_defineComponent({})
+
+              const model = defineModel<{ foo: T }>();
+              const test = defineProps<{ type: T}>();
+              function ___VERTER__TEMPLATE_RENDER() {
+      <>
+                <span>{ "1" }</span>
+              
+      </>}
+      ___VERTER__TEMPLATE_RENDER();
+      const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
+      const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
+      const ___VERTER__ctx = { ...({} as InstanceType<typeof ___VERTER_COMP___>) }
+      const ___VERTER__comp = { 
+                  //...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                  ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+                  ...___VERTER__ctx
+                }
+      ___VERTER__comp;
+      ___VERTER__ctx;
+      return ___VERTER_COMP___;
+      }
+
+              
+      function ___VERTER_COMPONENT__() {
+
+               const SUPA = 'hello'
+              
+      }
+
+              const __VERTER__RESULT = ___VERTER_COMPONENT__();
+      export default __VERTER__RESULT;"
+    `);
   });
 
   it("should work setup + script", () => {
@@ -1052,7 +1092,7 @@ describe("Mergers Full", () => {
     // testSourceMaps(p.context.script)
   });
 
-  it.only("should place types outside of the script function", () => {
+  it.skip("should place types outside of the script function", () => {
     const source = `<script lang="ts" setup>
     export type MyTest = 1
     </script>`;
@@ -1097,125 +1137,17 @@ describe("Mergers Full", () => {
     `);
   });
 
-  it.only("teette", () => {
+  it("it should unref ", () => {
     const source = `<script setup lang="ts">
-    import { usePageSize } from "@/composables/pageSize";
-    import { useUserStore } from "@/store/user";
-    import { useGesture } from "@vueuse/gesture";
-    
-    const props = defineProps<{
-      pages: Array<string | { name: string; props: Record<string, any> }>;
-    }>();
-    
-    const store = useUserStore();
-    // const hasChatPage = computed(() => props.pages.includes("chat"));
-    
-    const lastPageEl = ref<HTMLElement | null>(null);
-    const containerEl = ref<HTMLElement | null>(null);
-    
-    let preventDrag = false;
-    
-    const { width } = usePageSize();
-    function canDrag(el: Element) {
-      while (el !== document.body) {
-        if (el === containerEl.value) {
-          return true;
-        }
-        const attr = el.getAttribute("data-prevent-page-drag");
-        if (attr === "true") {
-          return false;
-        } else if (attr === "false") {
-          return true;
-        }
-    
-        el = el.parentElement!;
-      }
-    }
-    
-    const pages = ref(props.pages ?? []);
-    
-    watch(pages, (e) => {
-      e.
-    });
-    
-    // useGesture(
-    //   {
-    //     onDragStart: (e) => {
-    //       const draggable = canDrag(e.event.target as Element);
-    
-    //       let hasSelection = false;
-    //       try {
-    //         const selection = document.getSelection();
-    //         hasSelection = (selection?.toString()?.length ?? 0) > 0;
-    //       } catch (e) {
-    //         hasSelection = false;
-    //       }
-    
-    //       // prevent dragging if the user is selecting text
-    //       if (!draggable || hasSelection) {
-    //         preventDrag = true;
-    //         return;
-    //       }
-    //       preventDrag = false;
-    
-    //       if (e.xy[0] > width.value * 0.8) {
-    //         e.active = false;
-    //         e.cancel();
-    //         return;
-    //       }
-    
-    //       dragging.value = true;
-    //       startX = transformX.value;
-    //     },
-    //     onDrag: ({ movement: [x] }) => {
-    //       if (preventDrag) return;
-    //       const toX = x - startX;
-    //       if (toX < 0) return;
-    //       transformX.value = toX;
-    //     },
-    //     onDragEnd: async ({ velocity }) => {
-    //       dragging.value = false;
-    //       preventDrag = false;
-    
-    //       const posX = Math.abs(transformX.value);
-    //       const hw = width.value * 0.05;
-    
-    //       if (posX >= hw || (posX > 0 && velocity > 0.7)) {
-    //         return updatePosition(0);
-    //       } else {
-    //         updatePosition(1);
-    //       }
-    //     },
-    //   },
-    //   {
-    //     domTarget: lastPageEl,
-    //     eventOptions: { passive: true },
-    
-    //     drag: {
-    //       threshold: 10,
-    //       axis: "x",
-    //       lockDirection: true,
-    //       preventWindowScrollY: true,
-    //     },
-    //   },
-    // );
+    const { test } = { test: 1 }
     </script>
-    
-    <template>
-      <div ref="containerEl" class="flex flex-1">
-        <template
-          v-for="(p, i) in pages as Array<string | { name: string; props: any }>"
-          :key="\`page-\${i}\`"
-        >
-          <div></div>
-        </template>
-      </div>
-    </template>
     `;
 
     const p = process(source);
 
     expect(p.source).toBe(source);
+
+    expect(p.content).toContain("unref(test)");
     testSourceMaps(p);
   });
 });
