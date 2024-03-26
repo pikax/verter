@@ -994,15 +994,29 @@ function retrieveStringExpressionNode(
 }
 
 function parseNodeText(
-  node: _babel_types.Node,
+  node: _babel_types.Node | _babel_types.Node[],
   s: MagicString | undefined,
   context: ProcessContext,
   offset: number,
   prepend = true
 ) {
+  if (Array.isArray(node)) {
+    return node.forEach((x) => parseNodeText(x, s, context, offset, prepend));
+  }
   // if (offset > 0) {
   //   --offset;
   // }
+
+  if ("params" in node) {
+    const names = node.params.map((x) => x.content ?? x.name ?? x);
+
+    if (names.length) {
+      context = {
+        ...context,
+        ignoredIdentifiers: [...context.ignoredIdentifiers, ...names],
+      };
+    }
+  }
 
   if ("expression" in node) {
     node.expression && parseNodeText(node.expression, s, context, offset);
@@ -1052,6 +1066,10 @@ function parseNodeText(
   }
   if ("right" in node) {
     node.right && parseNodeText(node.right, s, context, offset);
+  }
+
+  if ("body" in node) {
+    node.body && parseNodeText(node.body, s, context, offset);
   }
 
   switch (node.type) {

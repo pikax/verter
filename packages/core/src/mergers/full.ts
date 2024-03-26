@@ -153,6 +153,7 @@ export function mergeFull(
       if (exposedCtx.length > 0) {
         locations.import.push({
           type: LocationType.Import,
+          generated: true,
           from: "vue",
           node: undefined,
           items: [{ name: "unref", alias: "__VERTER__unref" }],
@@ -168,7 +169,7 @@ export function mergeFull(
         type: "const",
         name: "___VERTER__ctx",
         content: `{ ${[
-          "...(new ___VERTER_COMP___())",
+          "...({} as InstanceType<typeof ___VERTER_COMP___>)",
           ...(context.isSetup
             ? exposedCtx.map((x) => `${x}: __VERTER__unref(${x})`)
             : []),

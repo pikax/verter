@@ -274,20 +274,42 @@ describe("process", () => {
         `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,4CAA4C,IAAI"}"`
       );
     });
-    it('should camelCase "on" event listeners', () => {
-      const source = `<span @check-for-something="test"></span>`;
+
+    it("should append ctx inside of functions", () => {
+      const source = `<span :check-for-something="e=> { foo = e }"></span>`;
 
       const parsed = doParseContent(source);
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><span onCheckForSomething={___VERTER__ctx.test}></span></template>"`
-      );
-
-      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,gBAAgB,EAAC,iBAAmB,CAAC,gBAAC,IAAI,CAAC,GAAG,IAAI"}"`
+        `"<template><span checkForSomething={e=> { ___VERTER__ctx.foo = e }}></span></template>"`
       );
     });
 
+    describe("events", () => {
+      it('should camelCase "on" event listeners', () => {
+        const source = `<span @check-for-something="test"></span>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span onCheckForSomething={___VERTER__ctx.test}></span></template>"`
+        );
+
+        expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+          `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,gBAAgB,EAAC,iBAAmB,CAAC,gBAAC,IAAI,CAAC,GAAG,IAAI"}"`
+        );
+      });
+
+      it("should append ctx inside of functions", () => {
+        const source = `<span @check-for-something="e=> { foo = e }"></span>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span onCheckForSomething={e=> { ___VERTER__ctx.foo = e }}></span></template>"`
+        );
+      });
+    });
     it("should camelCase bind", () => {
       const source = `<span :model-value="test"></span>`;
 
@@ -299,6 +321,48 @@ describe("process", () => {
 
       expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
         `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,gBAAiB,UAAW,CAAC,gBAAC,IAAI,CAAC,GAAG,IAAI"}"`
+      );
+    });
+
+    it("simple", () => {
+      const source = `<span class="foo"></span>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><span class="foo"></span></template>"`
+      );
+
+      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,8BAA8B,IAAI"}"`
+      );
+    });
+
+    it("multiple", () => {
+      const source = `<span class="foo" id="bar"></span>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><span class="foo" id="bar"></span></template>"`
+      );
+
+      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,uCAAuC,IAAI"}"`
+      );
+    });
+
+    it("with '", () => {
+      const source = `<span class='foo'></span>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><span class='foo'></span></template>"`
+      );
+
+      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,8BAA8B,IAAI"}"`
       );
     });
 
@@ -459,49 +523,6 @@ describe("process", () => {
         );
       });
     });
-
-    it("simple", () => {
-      const source = `<span class="foo"></span>`;
-
-      const parsed = doParseContent(source);
-      const { magicString } = process(parsed);
-      expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><span class="foo"></span></template>"`
-      );
-
-      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,8BAA8B,IAAI"}"`
-      );
-    });
-
-    it("multiple", () => {
-      const source = `<span class="foo" id="bar"></span>`;
-
-      const parsed = doParseContent(source);
-      const { magicString } = process(parsed);
-      expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><span class="foo" id="bar"></span></template>"`
-      );
-
-      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,uCAAuC,IAAI"}"`
-      );
-    });
-
-    it("with '", () => {
-      const source = `<span class='foo'></span>`;
-
-      const parsed = doParseContent(source);
-      const { magicString } = process(parsed);
-      expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><span class='foo'></span></template>"`
-      );
-
-      expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-        `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,8BAA8B,IAAI"}"`
-      );
-    });
-
     describe("directive", () => {
       describe("v-for", () => {
         it("simple", () => {
@@ -798,18 +819,16 @@ describe("process", () => {
 
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
-          expect(magicString.toString()).toMatchInlineSnapshot(
-            `
+          expect(magicString.toString()).toMatchInlineSnapshot(`
             "<template>{((() => {
                         let ii = '0';
-                        return ii === ii
+                        return___VERTER__ctx. ii ===___VERTER__ctx. ii
                       })())?<div >{ " t4est " }</div>
                       :<div >{ " else " }</div>}</template>"
-          `
-          );
+          `);
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAoB,CAAC;AACrB;AACA;AACA,cAAc,CAHC,CAAL,KAGK,CAAC,aAEN,EAAE,GAAG;AACf,UAAe,CAAL,KAAW,CAAC,YAEZ,EAAE,GAAG,EAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAoB,CAAC;AACrB;AACA,iCAAkB,sBAAO;AACzB,cAAc,CAHC,CAAL,KAGK,CAAC,aAEN,EAAE,GAAG;AACf,UAAe,CAAL,KAAW,CAAC,YAEZ,EAAE,GAAG,EAAC"}"`
           );
         });
 
