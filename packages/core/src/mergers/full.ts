@@ -46,7 +46,8 @@ export function mergeFull(
 
     // handle generated imports from scriptSetup
     if (sfc.descriptor.scriptSetup) {
-      const content = context.script.content;
+      const content =
+        context.script?.content ?? context.sfc.descriptor.scriptSetup.content;
 
       // this is the added imports from vue
       const firstLineEndIndex = content.indexOf("\n");
@@ -125,6 +126,20 @@ export function mergeFull(
   {
     const exposedCtx: string[] = [];
 
+    const globalUser = locations.declaration.filter(
+      (x) => !x.generated && x.context === "global"
+    );
+
+    if (globalUser.length) {
+      globalUser.forEach((x) => {
+        s.move(
+          startScriptIndex + x.node.loc.start.index,
+          startScriptIndex + x.node.loc.end.index,
+          0
+        );
+      });
+    }
+
     if (context.isSetup) {
       exposedCtx.push(
         ...locations.import
@@ -138,9 +153,10 @@ export function mergeFull(
           .filter(Boolean)
       );
 
+      const declarations = locations.declaration.filter((x) => !x.generated);
+
       exposedCtx.push(
-        ...locations.declaration
-          .filter((x) => !x.generated)
+        ...declarations
           .flatMap(
             (x) =>
               x.declaration.name ??
@@ -368,7 +384,13 @@ export function mergeFull(
 
     // TODO add global
 
-    s.prependLeft(startScriptIndex, pre.join("\n") + "\n");
+    if (global.length) {
+      s.appendRight(0, global.join("\n") + "\n");
+    }
+
+    if (pre.length) {
+      s.prependLeft(startScriptIndex, pre.join("\n") + "\n");
+    }
 
     const toRenderString = [
       ...post,
@@ -665,8 +687,11 @@ function processBlock(
         //   ],
         // });
 
-        let content = context.script.content.slice(
-          context.script.content.indexOf("const ____VERTER_COMP_OPTION__")
+        const scriptContent =
+          context.script?.content ?? context.sfc.descriptor.scriptSetup.content;
+
+        let content = scriptContent.slice(
+          scriptContent.indexOf("const ____VERTER_COMP_OPTION__")
         );
 
         // no defineComponent, we need to append the defineComponent

@@ -387,7 +387,7 @@ describe("process", () => {
         const parsed = doParseContent(source);
         const { magicString } = process(parsed);
         expect(magicString.toString()).toMatchInlineSnapshot(
-          `"<template><span  class={__VERTER__normalizeClass([['hello'],"foo"])} v-bind:class="{'oi': true}"></span></template>"`
+          `"<template><span  class={__VERTER__normalizeClass([['hello'],"foo",{'oi': true}])} ></span></template>"`
         );
 
         testSourceMaps(
@@ -402,7 +402,7 @@ describe("process", () => {
         const parsed = doParseContent(source);
         const { magicString } = process(parsed);
         expect(magicString.toString()).toMatchInlineSnapshot(
-          `"<template><span  don-t class={__VERTER__normalizeClass([['hello'],"foo"])} v-bind:class="{'oi': true}"></span></template>"`
+          `"<template><span  don-t class={__VERTER__normalizeClass([['hello'],"foo",{'oi': true}])} ></span></template>"`
         );
       });
 
@@ -459,7 +459,7 @@ describe("process", () => {
         const parsed = doParseContent(source);
         const { magicString } = process(parsed);
         expect(magicString.toString()).toMatchInlineSnapshot(
-          `"<template><span  style={__VERTER__normalizeStyle([['hello'],"foo"])} v-bind:style="{'oi': true}"></span></template>"`
+          `"<template><span  style={__VERTER__normalizeStyle([['hello'],"foo",{'oi': true}])} ></span></template>"`
         );
       });
       it("should do style merge with v-bind with attributes in between", () => {
@@ -468,7 +468,7 @@ describe("process", () => {
         const parsed = doParseContent(source);
         const { magicString } = process(parsed);
         expect(magicString.toString()).toMatchInlineSnapshot(
-          `"<template><span  don-t style={__VERTER__normalizeStyle([['hello'],"foo"])} v-bind:style="{'oi': true}"></span></template>"`
+          `"<template><span  don-t style={__VERTER__normalizeStyle([['hello'],"foo",{'oi': true}])} ></span></template>"`
         );
       });
 
@@ -1146,6 +1146,53 @@ describe("process", () => {
               </template>"
       `);
     });
+
+    it("should add accessor on opening and closing tag", () => {
+      const source = `<awesome-component>
+        <span></span>
+      </awesome-component>
+      `;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(`
+        "<template><___VERTER__comp.AwesomeComponent>
+                <span></span>
+              </___VERTER__comp.AwesomeComponent>
+              </template>"
+      `);
+    });
+
+    it("should add accessor on closing tag even with spaces before < ", () => {
+      const source = `<awesome-component>
+        <span></span>
+      </   awesome-component>
+      `;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(`
+          "<template><___VERTER__comp.AwesomeComponent>
+                  <span></span>
+                </   ___VERTER__comp.AwesomeComponent>
+                </template>"
+        `);
+    });
+    it("should add accessor on closing tag even with spaces before >", () => {
+      const source = `<awesome-component>
+        <span></span>
+      </awesome-component     >
+      `;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(`
+          "<template><___VERTER__comp.AwesomeComponent>
+                  <span></span>
+                </___VERTER__comp.AwesomeComponent     >
+                </template>"
+        `);
+    });
   });
 
   describe("interpolation", () => {
@@ -1166,6 +1213,53 @@ describe("process", () => {
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot(
         `"<template><div>{ ___VERTER__ctx.foo + 'myString' + ___VERTER__ctx.document.width }</div></template>"`
+      );
+    });
+  });
+
+  describe("extra", () => {
+    it("should not parse as text <", () => {
+      const source = `<div> < </div>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><div> < </div></template>"`
+      );
+    });
+
+    it("should not parse as text <my-test-component", () => {
+      const source = `<div> <my-test-component </div>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><div> <___VERTER__comp.MyTestComponent </div></template>"`
+      );
+    });
+
+    it("should not parse as text <div", () => {
+      const source = `<div> <div </div>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><div> <div </div></template>"`
+      );
+    });
+
+    // TODO handle attribute on partial
+    it.todo("should handle attributes", () => {
+      const source = `<div> <div content='test' </div>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><div> <div content{'test'} </div></template>"`
       );
     });
   });

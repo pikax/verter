@@ -7,9 +7,7 @@ import type {
   RootNode,
   TemplateChildNode,
 } from "@vue/compiler-core";
-import {
-  NodeTypes,
-} from "@vue/compiler-core";
+import { NodeTypes } from "@vue/compiler-core";
 
 export interface ParseContext {
   root: RootNode;
@@ -98,6 +96,7 @@ export function parse(root: RootNode) {
 }
 
 export enum ParsedType {
+  PartialElement = "partial-element",
   Element = "element",
   Attribute = "attribute",
   Directive = "directive",
@@ -117,6 +116,8 @@ export type ParsedNodeBase = {
   children?: ParsedNodeBase[];
 };
 
+const ExtractTagRegex = /^\s*<(?<tag>[^\s]*)/g;
+
 function parseNode(
   node: TemplateChildNode,
   context: ParseContext
@@ -126,6 +127,16 @@ function parseNode(
       return parseElement(node, context);
     }
     case NodeTypes.TEXT: {
+      if (node.content.trimStart().startsWith("<")) {
+        return {
+          type: ParsedType.PartialElement,
+          content: node.content,
+          children: [],
+          node: node,
+          tag: node.content.match(ExtractTagRegex).groups?.tag,
+        };
+      }
+
       return {
         type: ParsedType.Text,
         node,
@@ -376,7 +387,12 @@ export function parseProps(
   }
 }
 
-const WrapableDirectives = new Set<string>(["v-if", "v-else-if", "v-else", "v-for"] as NativeDirectives[]);
+const WrapableDirectives = new Set<string>([
+  "v-if",
+  "v-else-if",
+  "v-else",
+  "v-for",
+] as NativeDirectives[]);
 export function isWrapable(node: DirectiveNode) {
   if (node.rawName) {
     return WrapableDirectives.has(node.rawName);

@@ -3,6 +3,22 @@ import { LocationType, PluginOption } from "../types.js";
 
 import babel_types from "@babel/types";
 
+const supportedTypes = new Set([
+  "VariableDeclaration",
+  "FunctionDeclaration",
+  "EnumDeclaration",
+  "ClassDeclaration",
+  "InterfaceDeclaration",
+  "TSTypeAliasDeclaration",
+  "ExportNamedDeclaration",
+] as Array<babel_types.Node["type"]>);
+
+const globalDeclarations = new Set([
+  // "InterfaceDeclaration",
+  // "TSTypeAliasDeclaration",
+  "ExportNamedDeclaration",
+] as Array<babel_types.Node["type"]>);
+
 export default {
   name: "Declaration",
 
@@ -10,25 +26,17 @@ export default {
     const source = context.script?.loc.source;
     if (!source) return;
 
-    const supportedTypes = new Set([
-      "VariableDeclaration",
-      "FunctionDeclaration",
-      "EnumDeclaration",
-      "ClassDeclaration",
-      "InterfaceDeclaration",
-    ] as Array<babel_types.Node["type"]>);
-
     if (!supportedTypes.has(node.type)) return;
     const content = retrieveNodeString(node, source);
 
     return {
       type: LocationType.Declaration,
       generated: false,
+      context: globalDeclarations.has(node.type) ? "global" : undefined,
       node,
       declaration: {
         content,
       },
-      content: context.isSetup ? "pre" : "global",
     };
   },
 } satisfies PluginOption;

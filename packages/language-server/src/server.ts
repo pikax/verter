@@ -51,7 +51,7 @@ export interface LsConnectionOption {
 
 export function startServer(options: LsConnectionOption = {}) {
   Logger.error("in startServer", options);
-  console.log('started serrver? ')
+  console.log("started serrver? ");
   //   const connection = lsp.createConnection(lsp.ProposedFeatures.all);
 
   let connection = patchClient(options.connection);
@@ -409,6 +409,59 @@ export function startServer(options: LsConnectionOption = {}) {
   const r = {} as any as ts.ScriptElementKind;
   const a = CompletionItemKind[r];
 
+  function retrieveKindBasedOnSymbol(
+    symbol?: ts.Symbol
+  ): CompletionItemKind | null {
+    if (!symbol) return null;
+    const flags = symbol.getFlags();
+
+    if (flags & ts.SymbolFlags.Function) {
+      return CompletionItemKind.Function;
+    } else if (flags & ts.SymbolFlags.Method) {
+      return CompletionItemKind.Method;
+    } else if ((flags & ts.SymbolFlags.Class) !== 0) {
+      return CompletionItemKind.Class;
+    } else if ((flags & ts.SymbolFlags.Interface) !== 0) {
+      return CompletionItemKind.Interface;
+    } else if (
+      (flags & ts.SymbolFlags.Enum) !== 0 ||
+      (flags & ts.SymbolFlags.ConstEnum) !== 0 ||
+      (flags & ts.SymbolFlags.RegularEnum) !== 0
+    ) {
+      return CompletionItemKind.Enum;
+    } else if (
+      (flags & ts.SymbolFlags.ValueModule) !== 0 ||
+      (flags & ts.SymbolFlags.NamespaceModule) !== 0
+    ) {
+      return CompletionItemKind.Module;
+    } else if (
+      (flags & ts.SymbolFlags.Variable) !== 0 ||
+      (flags & ts.SymbolFlags.BlockScopedVariable) !== 0 ||
+      (flags & ts.SymbolFlags.FunctionScopedVariable) !== 0
+    ) {
+      return CompletionItemKind.Variable;
+    } else if (flags & ts.SymbolFlags.ClassMember) {
+      return CompletionItemKind.Class;
+    } else if (
+      (flags & ts.SymbolFlags.Property) !== 0 ||
+      (flags & ts.SymbolFlags.Accessor) !== 0
+    ) {
+      return CompletionItemKind.Property;
+    } else if ((flags & ts.SymbolFlags.GetAccessor) !== 0) {
+      return CompletionItemKind.Property; // No direct mapping for getters; Property is a reasonable approximation
+    } else if ((flags & ts.SymbolFlags.SetAccessor) !== 0) {
+      return CompletionItemKind.Property; // Similar to GetAccessor
+    } else if ((flags & ts.SymbolFlags.EnumMember) !== 0) {
+      return CompletionItemKind.EnumMember;
+    } else if ((flags & ts.SymbolFlags.TypeAlias) !== 0) {
+      return CompletionItemKind.TypeParameter; // Using TypeParameter for TypeAlias as a close match
+    } else if ((flags & ts.SymbolFlags.Alias) !== 0) {
+      return CompletionItemKind.Reference; // Using Reference for Alias
+    }
+
+    return null;
+  }
+
   function mapTsCompletionToLspItem(
     tsCompletion: ts.CompletionEntry,
     data: {
@@ -420,7 +473,10 @@ export function startServer(options: LsConnectionOption = {}) {
   ): CompletionItem | CompletionItem[] {
     const lspItem: CompletionItem = {
       label: tsCompletion.name,
-      kind: KindMap[tsCompletion.kind] || CompletionItemKind.Text,
+      kind:
+        retrieveKindBasedOnSymbol(tsCompletion.symbol) ||
+        KindMap[tsCompletion.kind] ||
+        CompletionItemKind.Text,
       detail: tsCompletion.source, // Example mapping, adjust as needed
       insertText: tsCompletion.insertText || tsCompletion.name,
       insertTextFormat: InsertTextFormat.PlainText,
@@ -482,12 +538,11 @@ export function startServer(options: LsConnectionOption = {}) {
       undefined,
       undefined,
       undefined,
-      item.data
+      undefined // item.data
     );
     if (!details) return item;
 
-    let displayDetail =
-      "```ts\n" + ts.displayPartsToString(details.displayParts) + "\n```\n";
+    let displayDetail = ts.displayPartsToString(details.displayParts) + "\n";
     item.detail = displayDetail;
 
     item.documentation = generateMarkdown(details);
@@ -641,8 +696,7 @@ export function startServer(options: LsConnectionOption = {}) {
         }
       );
 
-      if(!locations) return
-
+      if (!locations) return;
 
       // TODO apply rename for locations
 
@@ -968,12 +1022,18 @@ export function startServer(options: LsConnectionOption = {}) {
           newIndex,
           {
             triggerKind: params.context?.triggerKind,
-            // @ts-expect-error this is correct, I think
             triggerCharacter:
               params.context?.triggerCharacter === "@"
                 ? ""
                 : params.context?.triggerCharacter,
-          }
+
+            includeSymbol: true,
+            includeAutomaticOptionalChainCompletions: true,
+            jsxAttributeCompletionStyle: "auto",
+            importModuleSpecifierEnding: "auto",
+            disableSuggestions: true,
+          } as ts.GetCompletionsAtPositionOptions,
+          {}
         );
         // return results?.entries ?? []
         if (results) {
@@ -984,12 +1044,21 @@ export function startServer(options: LsConnectionOption = {}) {
 
             items: results.entries
               .filter((x) => {
-                if (x.name.startsWith("___VERTER__")) {
+                // TODO sanitise these variables :sweaty_smile:
+                if (
+                  x.name.startsWith("___VERTER") ||
+                  x.name.startsWith("__VERTER") ||
+                  x.name.startsWith("___VERTER") ||
+                  x.name.startsWith("____VERTER")
+                ) {
                   return false;
                 }
                 switch (params.context?.triggerCharacter) {
                   case "@": {
                     return x.name.startsWith("on");
+                  }
+                  case "<": {
+                    return x.kind === "property";
                   }
                   // case ':':
                 }

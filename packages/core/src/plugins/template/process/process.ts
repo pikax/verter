@@ -99,6 +99,7 @@ function renderChildren(
 }
 
 const render = {
+  [ParsedType.PartialElement]: renderPartialElement,
   [ParsedType.Element]: renderElement,
   [ParsedType.Attribute]: renderAttribute,
   // [ParsedType.Directive]: renderDirective,
@@ -123,6 +124,20 @@ function renderNode(
   }
 }
 
+function renderPartialElement(
+  node: ParsedNodeBase & {
+    node: ElementNode;
+    tag?: string;
+  },
+  s: MagicString,
+  context: ProcessContext
+) {
+  if (node.tag) {
+    const tagIndex = node.content.indexOf(node.tag);
+    appendCtx(node.tag, s, context, node.node.loc.start.offset + tagIndex);
+  }
+}
+
 function renderElement(
   node: ParsedNodeBase & {
     node: ElementNode;
@@ -136,12 +151,20 @@ function renderElement(
   const { name: tag, accessor } = resolveComponentTag(node.node, context);
 
   const openTagIndex = node.node.loc.start.offset;
+  const closeTagIndex =
+    node.node.loc.source.lastIndexOf(node.tag) + openTagIndex;
   // NOTE this override is quite big, it does not provide a 1-1 mapping per character
   if (tag !== node.tag) {
     s.overwrite(openTagIndex + 1, openTagIndex + node.tag.length + 1, tag);
+    if (closeTagIndex > openTagIndex + node.tag.length) {
+      s.overwrite(closeTagIndex, closeTagIndex + node.tag.length, tag);
+    }
   }
   if (accessor) {
     s.prependLeft(openTagIndex + 1, `${accessor}.`);
+    if (closeTagIndex > openTagIndex + node.tag.length) {
+      s.prependLeft(closeTagIndex, `${accessor}.`);
+    }
   }
 
   renderAttributes(node.props, s, context);
@@ -234,13 +257,15 @@ function renderAttributes(
         } else {
           console.error("Unknown error happened!!!");
         }
-        retrieveStringExpressionNode(
-          node.exp,
-          s,
-          context,
-          true,
-          node.exp.loc.start.offset
-        );
+        if (node.exp) {
+          retrieveStringExpressionNode(
+            node.exp,
+            s,
+            context,
+            true,
+            node.exp.loc.start.offset
+          );
+        }
       }
 
       // classesToNormalise.forEach((x) => renderAttribute(x, s, context));
@@ -301,13 +326,15 @@ function renderAttributes(
           console.error("Unknown error happened!!!");
         }
 
-        retrieveStringExpressionNode(
-          node.exp,
-          s,
-          context,
-          true,
-          node.exp.loc.start.offset
-        );
+        if (node.exp) {
+          retrieveStringExpressionNode(
+            node.exp,
+            s,
+            context,
+            true,
+            node.exp.loc.start.offset
+          );
+        }
       }
     } catch (e) {
       console.error(e);
@@ -1186,8 +1213,10 @@ function appendCtx(
     // node.loc.start.index is babel accessing, the first char pos is 1
     // instead of zero-based
     const start =
-      (node.loc.start.offset ?? node.loc.start.index - 1) + __offset;
-    const end = (node.loc.end.offset ?? node.loc.end.index - 1) + __offset;
+      (node.loc ? node.loc.start.offset ?? node.loc.start.index - 1 : 0) +
+      __offset;
+    const end =
+      (node.loc ? node.loc.end.offset ?? node.loc.end.index - 1 : 0) + __offset;
     // there's a case where the offset is off
     if (s.original.slice(start, end) !== content) {
       s.prependRight(start + 1, `${accessor}.`);

@@ -7,7 +7,14 @@ import {
   WalkResult,
 } from "./plugins/types.js";
 import type { CompilerOptions } from "@vue/compiler-core";
-import { MagicString, compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
+import {
+  MagicString,
+  SFCDescriptor,
+  SFCScriptCompileOptions,
+  compileScript,
+  compileTemplate,
+  parse,
+} from "@vue/compiler-sfc";
 
 import { defaultPlugins } from "./plugins/index.js";
 import { Statement } from "@babel/types";
@@ -28,6 +35,18 @@ export interface BuilderOptions {
   legacy: boolean;
 }
 
+function compileScriptSafe(
+  descriptor: SFCDescriptor,
+  options: SFCScriptCompileOptions
+) {
+  try {
+    return compileScript(descriptor, options);
+  } catch (e) {
+    console.error("failed compiling script", e);
+    return null;
+  }
+}
+
 export function createBuilder(config?: Partial<BuilderOptions>) {
   const plugins: PluginOption[] = [
     ...defaultPlugins,
@@ -38,18 +57,19 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
     preProcess(filename: string, source: string, ignoreScript = false) {
       const parsed = parse(source, {
         filename,
-        ignoreEmpty: true,
-        sourceMap: true
+        // ignoreEmpty: true,
+        sourceMap: true,
       });
 
       const compiled =
-        !ignoreScript && (!!parsed.descriptor.scriptSetup || !!parsed.descriptor.script)
-          ? compileScript(parsed.descriptor, {
-            id: filename,
-            genDefaultAs: "____VERTER_COMP_OPTION__",
-            ...config?.vue?.compiler,
-            sourceMap: true
-          })
+        !ignoreScript &&
+        (!!parsed.descriptor.scriptSetup || !!parsed.descriptor.script)
+          ? compileScriptSafe(parsed.descriptor, {
+              id: filename,
+              genDefaultAs: "____VERTER_COMP_OPTION__",
+              ...config?.vue?.compiler,
+              sourceMap: true,
+            })
           : null;
 
       const context = {
@@ -60,7 +80,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         script: compiled,
         generic: compiled?.attrs.generic as string,
         template: parsed.descriptor.template,
-        s: new MagicString(source)
+        s: new MagicString(source),
       } satisfies ParseScriptContext;
 
       // if (!context.script) throw new Error("No script found");
@@ -79,8 +99,8 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
 
       return {
         locations,
-        context
-      }
+        context,
+      };
     },
 
     process(filename: string, source: string) {
@@ -92,11 +112,11 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
       const compiled =
         !!parsed.descriptor.scriptSetup || !!parsed.descriptor.script
           ? compileScript(parsed.descriptor, {
-            id: filename,
-            // genDefaultAs: "GEN_COMP",
-            ...config?.vue?.compiler,
-            sourceMap: true
-          })
+              id: filename,
+              // genDefaultAs: "GEN_COMP",
+              ...config?.vue?.compiler,
+              sourceMap: true,
+            })
           : null;
 
       const context = {
@@ -107,7 +127,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         script: compiled,
         generic: compiled?.attrs.generic,
         template: parsed.descriptor.template,
-        s: new MagicString(source)
+        s: new MagicString(source),
       } satisfies ParseScriptContext;
 
       // if (!context.script) throw new Error("No script found");
@@ -143,8 +163,9 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
             return `${prev}\n${curr.declaration.content}`;
           }
 
-          return `${prev}\n${curr.declaration.type ?? "const"} ${curr.declaration.name
-            } = ${curr.declaration.content};`;
+          return `${prev}\n${curr.declaration.type ?? "const"} ${
+            curr.declaration.name
+          } = ${curr.declaration.content};`;
         }, "");
 
       const notGenerated = _declarations
@@ -154,8 +175,9 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
             return `${prev}\n${curr.declaration.content}`;
           }
 
-          return `${prev}\n${curr.declaration.type ?? "const"} ${curr.declaration.name
-            } = ${curr.declaration.content};`;
+          return `${prev}\n${curr.declaration.type ?? "const"} ${
+            curr.declaration.name
+          } = ${curr.declaration.content};`;
         }, "");
 
       const _props = map[LocationType.Props]
@@ -188,7 +210,8 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
 
       const exposeContent = _expose
         ? `
-        function __exposeResolver${context.generic ? `<${context.generic}>` : ""
+        function __exposeResolver${
+          context.generic ? `<${context.generic}>` : ""
         }() {
           ${notGenerated}
 
@@ -228,8 +251,9 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         const declared = new Set<string>();
 
         // used to spread the props
-        let propsName = `({} as ComponentExpectedProps<__COMP__${genericNames ? `<${genericNames.join(",")}>` : ""
-          }>)`;
+        let propsName = `({} as ComponentExpectedProps<__COMP__${
+          genericNames ? `<${genericNames.join(",")}>` : ""
+        }>)`;
 
         const propsProps = new Set<string>();
 
@@ -297,20 +321,26 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
 
         return _template
           ? `
-        function __templateResolver${context.generic ? `<${context.generic}>` : ""
-          }() {
+        function __templateResolver${
+          context.generic ? `<${context.generic}>` : ""
+        }() {
           const ctx = ()=> {
             ${notGenerated}
 
 
             return {
-              ${context.isSetup && imports.length > 0 ? imports.join(", ") + ', ' : ""}
-              ...({} as ComponentInstance<__COMP__${genericNames ? `<${genericNames.join(",")}>` : ""
-          }>),
+              ${
+                context.isSetup && imports.length > 0
+                  ? imports.join(", ") + ", "
+                  : ""
+              }
+              ...({} as ComponentInstance<__COMP__${
+                genericNames ? `<${genericNames.join(",")}>` : ""
+              }>),
               ...${propsName},
               ${Array.from(declared)
-            .map((x) => [x, `unref(${x})`].join(": "))
-            .join(", ")}
+                .map((x) => [x, `unref(${x})`].join(": "))
+                .join(", ")}
             }
           }
 
@@ -355,61 +385,64 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         if (!content) return content;
         return genericNames
           ? genericNames.reduce((prev, cur) => {
-            return replaceComponentNameUsage(cur, prev);
-          }, content)
+              return replaceComponentNameUsage(cur, prev);
+            }, content)
           : content;
       }
 
       const CompGeneric = genericDeclaration
         ? genericDeclaration.items
-          .map((x) => {
-            const name = getGenericComponentName(x.name);
-            const constraint = sanitiseGenericNames(x.constraint);
-            const defaultType = sanitiseGenericNames(x.default);
+            .map((x) => {
+              const name = getGenericComponentName(x.name);
+              const constraint = sanitiseGenericNames(x.constraint);
+              const defaultType = sanitiseGenericNames(x.default);
 
-            return [
-              name,
-              constraint ? `extends ${constraint}` : undefined,
-              `= ${defaultType || "any"}`,
-            ]
-              .filter(Boolean)
-              .join(" ");
-          })
-          .join(", ")
+              return [
+                name,
+                constraint ? `extends ${constraint}` : undefined,
+                `= ${defaultType || "any"}`,
+              ]
+                .filter(Boolean)
+                .join(" ");
+            })
+            .join(", ")
         : undefined;
       const InstanceGeneric = genericDeclaration
         ? genericDeclaration.items
-          .map((x) => {
-            const name = x.name;
-            const constraint =
-              x.constraint || getGenericComponentName(x.name);
-            const defaultType = x.default || getGenericComponentName(x.name);
+            .map((x) => {
+              const name = x.name;
+              const constraint =
+                x.constraint || getGenericComponentName(x.name);
+              const defaultType = x.default || getGenericComponentName(x.name);
 
-            return [
-              name,
-              constraint ? `extends ${constraint}` : undefined,
-              `= ${defaultType || "any"}`,
-            ]
-              .filter(Boolean)
-              .join(" ");
-          })
-          .join(", ")
+              return [
+                name,
+                constraint ? `extends ${constraint}` : undefined,
+                `= ${defaultType || "any"}`,
+              ]
+                .filter(Boolean)
+                .join(" ");
+            })
+            .join(", ")
         : undefined;
 
       // if is generic don't use the __PROPS__ since it won't have the correct type
       const genericOrProps = InstanceGeneric
-        ? `{ new<${InstanceGeneric}>(): { $props: ${props || "{}"}, $emit: ${emits || "{}"
-        } , $children: ${slots || "{}"}, $data: ${exposeContent
-          ? `ReturnType<typeof __exposeResolver<${genericDeclaration!.items
-            .map((x) => x.name)
-            .join(", ")}>>`
-          : "__DATA__"
-        }  } }`
+        ? `{ new<${InstanceGeneric}>(): { $props: ${props || "{}"}, $emit: ${
+            emits || "{}"
+          } , $children: ${slots || "{}"}, $data: ${
+            exposeContent
+              ? `ReturnType<typeof __exposeResolver<${genericDeclaration!.items
+                  .map((x) => x.name)
+                  .join(", ")}>>`
+              : "__DATA__"
+          }  } }`
         : "__PROPS__";
       // TODO better resolve the final variable names, especially options
       // because it relying on the plugin to build
-      const declareComponent = `type __COMP__${CompGeneric ? `<${CompGeneric}>` : ""
-        } = DeclareComponent<${genericOrProps}, __DATA__, __EMITS__, __SLOTS__,  "setup" extends keyof Type__options ? Type__options & { setup: () => {} } : Type__options >`;
+      const declareComponent = `type __COMP__${
+        CompGeneric ? `<${CompGeneric}>` : ""
+      } = DeclareComponent<${genericOrProps}, __DATA__, __EMITS__, __SLOTS__,  "setup" extends keyof Type__options ? Type__options & { setup: () => {} } : Type__options >`;
 
       (map[LocationType.Export] ?? (map[LocationType.Export] = [])).push({
         type: LocationType.Export,
@@ -423,10 +456,11 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
       });
 
       const exports = map[LocationType.Export]?.reduce((prev, curr) => {
-        return `${prev}\nexport ${curr.item.default ? "default" : "const"} ${curr.item.default
-          ? curr.item.content || curr.item.name
-          : curr.item.name
-          }${curr.item.alias ? " as " + curr.item.alias : ""};`;
+        return `${prev}\nexport ${curr.item.default ? "default" : "const"} ${
+          curr.item.default
+            ? curr.item.content || curr.item.name
+            : curr.item.name
+        }${curr.item.alias ? " as " + curr.item.alias : ""};`;
       }, "");
 
       importsArray.push({
@@ -476,7 +510,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
           return prev;
         }
         return `${prev}\nimport { ${curr.items
-          .map((it) => it.alias ? `${it.name} as ${it.alias}` : it.name)
+          .map((it) => (it.alias ? `${it.name} as ${it.alias}` : it.name))
           .filter(Boolean)
           .join(", ")} } from '${curr.from}';`;
       }, "");
@@ -492,19 +526,20 @@ ${exposeContent}
 // template
 ${templateContent}
 
-${context.generic
-          ? [
-            `type __DATA__ = {};`,
-            `type __EMITS__ = {};`,
-            `type __SLOTS__ = {};`,
-          ].join("\n")
-          : [
-            `type __PROPS__ = ${props};`,
-            `type __DATA__ = {};`,
-            `type __EMITS__ = ${emits};`,
-            `type __SLOTS__ = ${slots};`,
-          ].join("\n")
-        }
+${
+  context.generic
+    ? [
+        `type __DATA__ = {};`,
+        `type __EMITS__ = {};`,
+        `type __SLOTS__ = {};`,
+      ].join("\n")
+    : [
+        `type __PROPS__ = ${props};`,
+        `type __DATA__ = {};`,
+        `type __EMITS__ = ${emits};`,
+        `type __SLOTS__ = ${slots};`,
+      ].join("\n")
+}
 
 ${declareComponent}
 

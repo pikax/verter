@@ -1,12 +1,13 @@
-<script lang="ts" generic="T">
-import { PropType, computed, defineComponent } from "vue";
+<script lang="ts" generic="T extends 'foo'">
+import type { PropType } from "vue";
 
-export default defineComponent({
+export default {
   props: {
     items: {
-      type: Array as PropType<T[]>,
+      type: Array as () => T[],
       required: true,
     },
+
     getKey: {
       type: Function as PropType<(item: T) => string | number>,
       required: true,
@@ -16,29 +17,23 @@ export default defineComponent({
       required: true,
     },
   },
+  computed: {
+    orderedItems() {
+      return this.items.sort((item1, item2) =>
+        this.getLabel(item1).localeCompare(this.getLabel(item2))
+      );
+    },
+  },
 
-  setup(props, { expose }) {
-    const orderedItems = computed<T[]>(() =>
-      props.items.sort((item1, item2) =>
-        props.getLabel(item1).localeCompare(props.getLabel(item2))
-      )
-    );
-
-    function getItemAtIndex(index: number): T | undefined {
-      if (index < 0 || index >= orderedItems.value.length) {
+  methods: {
+    getItemAtIndex(index: number): T | undefined {
+      if (index < 0 || index >= this.orderedItems.length) {
         return undefined;
       }
-      return orderedItems.value[index];
-    }
-
-    expose({ getItemAtIndex });
-
-    return {
-      orderedItems,
-      getItemAtIndex,
-    };
+      return this.orderedItems[index];
+    },
   },
-});
+};
 </script>
 
 <template>
