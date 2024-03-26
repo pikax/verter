@@ -23,6 +23,7 @@ export default defineConfig({
         "path",
         "node:path",
         'node:fs',
+        'fs',
 
         // deps
 

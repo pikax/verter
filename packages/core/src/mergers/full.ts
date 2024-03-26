@@ -123,6 +123,43 @@ export function mergeFull(
 
   // adding some imports and variable context
   {
+    const exposedCtx: string[] = [];
+
+    if (context.isSetup) {
+      exposedCtx.push(
+        ...locations.import
+          .filter((x) => !x.generated)
+          .flatMap(
+            (x) =>
+              x.items?.map((i) => i.alias ?? i.name) ??
+              // TODO maybe handle alias
+              x.node.specifiers.map((x) => x.local?.name ?? x.imported.name)
+          )
+          .filter(Boolean)
+      );
+
+      exposedCtx.push(
+        ...locations.declaration
+          .filter((x) => !x.generated)
+          .flatMap(
+            (x) =>
+              x.declaration.name ??
+              x.node.declarations?.map((x) => x.id.name) ??
+              x.node.id?.name
+          )
+          .filter(Boolean)
+      );
+
+      if (exposedCtx.length > 0) {
+        locations.import.push({
+          type: LocationType.Import,
+          from: "vue",
+          node: undefined,
+          items: [{ name: "unref", alias: "__VERTER__unref" }],
+        });
+      }
+    }
+
     locations.declaration.push({
       type: LocationType.Declaration,
       generated: true,
@@ -133,29 +170,7 @@ export function mergeFull(
         content: `{ ${[
           "...(new ___VERTER_COMP___())",
           ...(context.isSetup
-            ? [
-                ...locations.import
-                  .filter((x) => !x.generated)
-                  .flatMap(
-                    (x) =>
-                      x.items?.map((i) => i.alias ?? i.name) ??
-                      // TODO maybe handle alias
-                      x.node.specifiers.map(
-                        (x) => x.local?.name ?? x.imported.name
-                      )
-                  )
-                  .filter(Boolean),
-
-                ...locations.declaration
-                  .filter((x) => !x.generated)
-                  .flatMap(
-                    (x) =>
-                      x.declaration.name ??
-                      x.node.declarations?.map((x) => x.id.name) ??
-                      x.node.id?.name
-                  )
-                  .filter(Boolean),
-              ]
+            ? exposedCtx.map((x) => `${x}: __VERTER__unref(${x})`)
             : []),
         ].join(",\n")} }`,
       },

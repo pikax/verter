@@ -1,7 +1,7 @@
 import ts, { ResolvedModuleFull, ScriptKind, version } from "typescript";
 import Logger from "../../logger";
 import { documentManager } from "../../lib/documents/Manager";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "fs";
 import { VueDocument } from "../../lib/documents/VueDocument";
 import { findTsConfigPath } from "../../utils";
 

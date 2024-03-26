@@ -1,5 +1,5 @@
 import { URI } from "vscode-uri";
-import { dirname } from 'node:path'
+import { dirname } from 'path'
 import ts from 'typescript';
 
 

@@ -194,6 +194,29 @@ describe("process", () => {
       );
     });
 
+    it("props + binding on array", () => {
+      const source = `<my-component :foo="[bar]" />`;
+
+      const parsed = doParseContent(source);
+
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><___VERTER__comp.MyComponent foo={[___VERTER__ctx.bar]} /></template>"`
+      );
+    });
+
+    it("props + binding complex", () => {
+      const source = `<my-component :foo="isFoo ? { myFoo: foo } : undefined" />`;
+
+      const parsed = doParseContent(source);
+
+      const { magicString } = process(parsed);
+
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><___VERTER__comp.MyComponent foo={___VERTER__ctx.isFoo ? { myFoo: ___VERTER__ctx.foo } : undefined} /></template>"`
+      );
+    });
+
     it("should keep casing", () => {
       const source = `<my-component aria-autocomplete="bar"/>`;
 
@@ -300,7 +323,7 @@ describe("process", () => {
         const parsed = doParseContent(source);
         const { magicString } = process(parsed);
         expect(magicString.toString()).toMatchInlineSnapshot(
-          `"<template><span  class={__VERTER__normalizeClass([['hello'],"foo",{'oi': true}])} ></span></template>"`
+          `"<template><span  class={__VERTER__normalizeClass([['hello'],"foo"])} v-bind:class="{'oi': true}"></span></template>"`
         );
 
         testSourceMaps(
@@ -315,9 +338,48 @@ describe("process", () => {
         const parsed = doParseContent(source);
         const { magicString } = process(parsed);
         expect(magicString.toString()).toMatchInlineSnapshot(
-          `"<template><span  don-t class={__VERTER__normalizeClass([['hello'],"foo",{'oi': true}])} ></span></template>"`
+          `"<template><span  don-t class={__VERTER__normalizeClass([['hello'],"foo"])} v-bind:class="{'oi': true}"></span></template>"`
         );
       });
+
+      it("should still append context accessor", () => {
+        const source = `<span :class="foo" don-t :class="['hello', bar]" v-bind:class="{'oi': true, sup}"></span>`;
+
+        const parsed = doParseContent(source);
+
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span class={__VERTER__normalizeClass([___VERTER__ctx.foo,['hello', ___VERTER__ctx.bar],{'oi': true, sup:___VERTER__ctx.sup}])} don-t  ></span></template>"`
+        );
+      });
+
+      it("complex class", () => {
+        const source = `
+        <span  :class="[
+          noBackdrop || (isBackdropAnimationDone && shouldClose)
+            ? 'bg-transparent'
+            : ' bg-black bg-opacity-70',
+          !isBackdropAnimationDone && !noBackdrop ? 'animate-modal-backdrop' : '',
+          from === 'bottom' ? 'justify-end' : 'justify-center',
+          shouldClose && !noBackdrop ? 'animate-modal-backdrop-close' : '',
+        ]"></span>`;
+
+        const parsed = doParseContent(source);
+
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(`
+          "<template>
+                  <span  class={[
+                    ___VERTER__ctx.noBackdrop || (___VERTER__ctx.isBackdropAnimationDone && ___VERTER__ctx.shouldClose)
+                      ? 'bg-transparent'
+                      : ' bg-black bg-opacity-70',
+                    !___VERTER__ctx.isBackdropAnimationDone && !___VERTER__ctx.noBackdrop ? 'animate-modal-backdrop' : '',
+                    ___VERTER__ctx.from === 'bottom' ? 'justify-end' : 'justify-center',
+                    ___VERTER__ctx.shouldClose && !___VERTER__ctx.noBackdrop ? 'animate-modal-backdrop-close' : '',
+                  ]}></span></template>"
+        `);
+      });
+
       it("should do style merge", () => {
         const source = `<span style="foo" :style="['hello']"></span>`;
 
@@ -327,13 +389,13 @@ describe("process", () => {
           `"<template><span  style={__VERTER__normalizeStyle([['hello'],"foo"])}></span></template>"`
         );
       });
-      it("should do style merge with v-bind", () => {
+      it("should do style merge with v-bind ", () => {
         const source = `<span style="foo" :style="['hello']" v-bind:style="{'oi': true}"></span>`;
 
         const parsed = doParseContent(source);
         const { magicString } = process(parsed);
         expect(magicString.toString()).toMatchInlineSnapshot(
-          `"<template><span  style={__VERTER__normalizeStyle([['hello'],"foo",{'oi': true}])} ></span></template>"`
+          `"<template><span  style={__VERTER__normalizeStyle([['hello'],"foo"])} v-bind:style="{'oi': true}"></span></template>"`
         );
       });
       it("should do style merge with v-bind with attributes in between", () => {
@@ -342,7 +404,18 @@ describe("process", () => {
         const parsed = doParseContent(source);
         const { magicString } = process(parsed);
         expect(magicString.toString()).toMatchInlineSnapshot(
-          `"<template><span  don-t style={__VERTER__normalizeStyle([['hello'],"foo",{'oi': true}])} ></span></template>"`
+          `"<template><span  don-t style={__VERTER__normalizeStyle([['hello'],"foo"])} v-bind:style="{'oi': true}"></span></template>"`
+        );
+      });
+
+      it("should still append context accessor style", () => {
+        const source = `<span :style="foo" don-t :style="['hello', bar]" v-bind:style="{'oi': true, sup}"></span>`;
+
+        const parsed = doParseContent(source);
+
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot(
+          `"<template><span style={__VERTER__normalizeStyle([___VERTER__ctx.foo,['hello', ___VERTER__ctx.bar],{'oi': true, sup:___VERTER__ctx.sup}])} don-t  ></span></template>"`
         );
       });
 

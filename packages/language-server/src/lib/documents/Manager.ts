@@ -8,7 +8,7 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import { VueDocumentManager } from "./VueDocumentManager";
 import { VueDocument } from "./VueDocument";
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "fs";
 import { VirtualFiles } from "@verter/language-shared";
 
 export type ListenerType = "open" | "change" | "close";

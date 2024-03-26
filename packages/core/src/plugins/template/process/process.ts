@@ -193,7 +193,6 @@ function renderAttributes(
     const firstBindClass = classesToNormalise.find(
       (x) => x.directive === "bind"
     );
-    // renderAttribute(firstClass, s, context);
     renderAttribute(firstBindClass, s, context);
 
     // append at the end of firstBindClass
@@ -202,8 +201,8 @@ function renderAttributes(
     const endIndex = (firstBindClass.expression ?? firstBindClass.exp).loc.end
       .offset;
 
-    s.appendRight(startIndex, "__VERTER__normalizeClass([");
-    s.appendRight(endIndex, "])");
+    s.prependRight(startIndex, "__VERTER__normalizeClass([");
+    s.prependRight(endIndex, "])");
 
     try {
       for (const attrClass of classesToNormalise) {
@@ -235,7 +234,16 @@ function renderAttributes(
         } else {
           console.error("Unknown error happened!!!");
         }
+        retrieveStringExpressionNode(
+          node.exp,
+          s,
+          context,
+          true,
+          node.exp.loc.start.offset
+        );
       }
+
+      // classesToNormalise.forEach((x) => renderAttribute(x, s, context));
     } catch (e) {
       console.error(e);
     }
@@ -259,8 +267,8 @@ function renderAttributes(
     const endIndex = (firstBindStyle.expression ?? firstBindStyle.exp).loc.end
       .offset;
 
-    s.appendRight(startIndex, "__VERTER__normalizeStyle([");
-    s.appendRight(endIndex, "])");
+    s.prependRight(startIndex, "__VERTER__normalizeStyle([");
+    s.prependRight(endIndex, "])");
 
     try {
       for (const attrStyle of stylesToNormalise) {
@@ -292,6 +300,14 @@ function renderAttributes(
         } else {
           console.error("Unknown error happened!!!");
         }
+
+        retrieveStringExpressionNode(
+          node.exp,
+          s,
+          context,
+          true,
+          node.exp.loc.start.offset
+        );
       }
     } catch (e) {
       console.error(e);
@@ -305,6 +321,7 @@ function renderAttributes(
     context.declarations.push({
       type: LocationType.Import,
       from: "vue",
+      generated: true,
       node: undefined,
       items: [
         classesToNormalise.length > 1
@@ -319,7 +336,7 @@ function renderAttributes(
               alias: "__VERTER__normalizeStyle",
             }
           : undefined,
-      ],
+      ].filter(Boolean),
     });
   }
 }
@@ -988,12 +1005,16 @@ function parseNodeText(
   // }
 
   if ("expression" in node) {
-    node.expression && appendCtx(node.expression, s, context, offset);
+    node.expression && parseNodeText(node.expression, s, context, offset);
   }
 
   if ("callee" in node) {
     // NOTE -1 is magic
     node.callee && parseNodeText(node.callee, s, context, offset - 1, prepend);
+  }
+
+  if ("argument" in node) {
+    node.argument && parseNodeText(node.argument, s, context, offset, prepend);
   }
 
   if ("exprName" in node) {
@@ -1007,6 +1028,32 @@ function parseNodeText(
       );
   }
 
+  if ("elements" in node) {
+    node.elements &&
+      node.elements.forEach((p) =>
+        parseNodeText(p, s, context, offset - 1, prepend)
+      );
+  }
+
+  if ("test" in node) {
+    node.test && parseNodeText(node.test, s, context, offset, prepend);
+  }
+  if ("consequent" in node) {
+    node.consequent &&
+      parseNodeText(node.consequent, s, context, offset, prepend);
+  }
+  if ("alternate" in node) {
+    node.alternate &&
+      parseNodeText(node.alternate, s, context, offset, prepend);
+  }
+
+  if ("left" in node) {
+    node.left && parseNodeText(node.left, s, context, offset);
+  }
+  if ("right" in node) {
+    node.right && parseNodeText(node.right, s, context, offset);
+  }
+
   switch (node.type) {
     case "CallExpression": {
       const callee = node.callee;
@@ -1017,8 +1064,8 @@ function parseNodeText(
       break;
     }
     case "MemberExpression": {
-      node.object &&
-        parseNodeText(node.object, s, context, node.object.start - 1 + offset);
+      node.object && parseNodeText(node.object, s, context, offset);
+      node.property && parseNodeText(node.property, s, context, offset, false);
       // node.property && appendCtx(node.property, s, context, offset);
       break;
     }
@@ -1043,8 +1090,6 @@ function parseNodeText(
       break;
     }
     case "BinaryExpression": {
-      node.left && appendCtx(node.left, s, context, offset);
-      node.right && appendCtx(node.right, s, context, offset);
       break;
     }
     case "ConditionalExpression": {
@@ -1066,9 +1111,6 @@ function parseNodeText(
       break;
     }
     case "UnaryExpression": {
-      break;
-    }
-    case "ArrayExpression": {
       break;
     }
     case "ArrowFunctionExpression": {

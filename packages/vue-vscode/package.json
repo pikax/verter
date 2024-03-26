@@ -1,5 +1,6 @@
 {
-  "name": "@verter/vue-vscode",
+  "name": "verter-vscode",
+  "displayName": "Verter VSCode",
   "version": "1.0.0",
   "description": "Verter VSCode Extension",
   "main": "dist/extension.js",
@@ -7,9 +8,17 @@
   "scripts": {
     "build": "vite build",
     "watch": "pnpm build --watch",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "package": "vsce package"
   },
-  "keywords": [],
+  "keywords": [
+    "vue",
+    "verter",
+    "vetur"
+  ],
+  "repository": {
+    "url": "https://github.com/pikax/verter"
+  },
   "author": "Carlos Rodrigues <pikax>",
   "license": "MIT",
   "dependencies": {
@@ -18,20 +27,39 @@
     "@verter/language-server": "workspace:^",
     "@verter/language-shared": "workspace:^",
     "@verter/typescript-plugin": "workspace:^",
+    "brace-expansion": "^4.0.0",
     "lodash": "^4.17.21",
-    "vscode-languageclient": "^9.0.1"
+    "minimatch": "^9.0.3",
+    "vscode-jsonrpc": "^8.2.0",
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver-protocol": "^3.17.5",
+    "vscode-languageserver-types": "^3.17.5"
   },
   "devDependencies": {
+    "@vscode/vsce": "^2.24.0",
     "vite": "^5.0.11"
+  },
+  "files": [
+    "dist",
+    "node_modules"
+  ],
+  "vsce": {
+    "dependencies": false,
+    "yarn": false
   },
   "engines": {
     "vscode": "^1.75.0"
   },
+  "categories": [
+    "Programming Languages"
+  ],
   "activationEvents": [
     "onLanguage:vue",
     "onCommand:verter.restartLanguageServer",
     "onLanguage:javascript",
-    "onLanguage:typescript"
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:javascriptreact"
   ],
   "contributes": {
     "configuration": {
@@ -47,10 +75,10 @@
     },
     "typescriptServerPlugins": [
       {
-          "name": "@verter/typescript-plugin",
-          "enableForWorkspaceTypeScriptVersions": true
+        "name": "@verter/typescript-plugin",
+        "enableForWorkspaceTypeScriptVersions": true
       }
-  ],
+    ],
     "languages": [
       {
         "id": "vue",
