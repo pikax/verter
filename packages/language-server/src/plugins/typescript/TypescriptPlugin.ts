@@ -5,7 +5,6 @@ import { readFileSync, existsSync } from "fs";
 import { VueDocument } from "../../lib/documents/VueDocument";
 import { findTsConfigPath } from "../../utils";
 
-
 import { VirtualFiles } from "@verter/language-shared";
 
 import path from "node:path";
@@ -134,33 +133,46 @@ export function getTypescriptService(workspacePath: string) {
 
   // const dd = findTsConfigPath(path.resolve(workspacePath, './tsconfig.json'), [workspacePath], existsSync, e => e);
 
-  const tsConfigStr = readFileSync(
-    path.resolve(workspacePath, "./tsconfig.json"),
-    "utf-8"
-  );
-
-  const { config } = ts.parseConfigFileTextToJson(
-    path.resolve(workspacePath, "./tsconfig.json"),
-    tsConfigStr
-  );
-
-  const parseConfigHost: ts.ParseConfigHost = {
-    ...ts.sys,
-    readDirectory: ts.sys.readDirectory,
-    useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+  let tsconfigOptions: ts.CompilerOptions = {
+    allowJs: true,
+    noImplicitAny: false,
+    noImplicitThis: false,
+    noImplicitReturns: false,
   };
+  let fileNames: string[] = [];
+  const configFile = path.resolve(workspacePath, "./tsconfig.json");
 
-  // const config = ts.parseJsonConfigFileContent(
-  //   config,
-  //   parseConfigHost,
-  //   workspacePath
-  // );
+  if (fileExists(configFile)) {
+    const tsConfigStr = readFileSync(
+      path.resolve(workspacePath, "./tsconfig.json"),
+      "utf-8"
+    );
 
-  const parsedConfig = ts.parseJsonConfigFileContent(
-    config,
-    parseConfigHost,
-    workspacePath
-  );
+    const { config } = ts.parseConfigFileTextToJson(
+      path.resolve(workspacePath, "./tsconfig.json"),
+      tsConfigStr
+    );
+
+    const parseConfigHost: ts.ParseConfigHost = {
+      ...ts.sys,
+      readDirectory: ts.sys.readDirectory,
+      useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+    };
+
+    // const config = ts.parseJsonConfigFileContent(
+    //   config,
+    //   parseConfigHost,
+    //   workspacePath
+    // );
+
+    const parsedConfig = ts.parseJsonConfigFileContent(
+      config,
+      parseConfigHost,
+      workspacePath
+    );
+    tsconfigOptions = parsedConfig.options;
+    fileNames = parsedConfig.fileNames;
+  }
 
   // const fileCompilerOptions = ts.parseJsonConfigFileContent(
   //   config,
@@ -169,13 +181,13 @@ export function getTypescriptService(workspacePath: string) {
   // ).options;
 
   const compilerOptions: ts.CompilerOptions = {
-    ...parsedConfig.options,
     // moduleResolution: ts.ModuleResolutionKind.Bundler,
     jsx: ts.JsxEmit.Preserve,
     target: ts.ScriptTarget.ESNext,
     module: ts.ModuleKind.ESNext,
     alwaysStrict: true,
     noImplicitAny: true,
+    ...tsconfigOptions,
     // jsxFactory: 'vue'
     // // jsxFactory: 'vue'
     // "allowJs": true,
@@ -191,8 +203,7 @@ export function getTypescriptService(workspacePath: string) {
   const host: ts.LanguageServiceHost = {
     log: (message) => Logger.info(`[ts] ${message}`),
     getCompilationSettings: () => compilerOptions,
-    getScriptFileNames: () =>
-      getScriptFileNames().concat(parsedConfig.fileNames),
+    getScriptFileNames: () => getScriptFileNames().concat(fileNames),
     getScriptVersion: (fileName: string) => {
       const snap = getSnapshotIfExists(fileName);
       // if (fileName.indexOf('.vue')) {
