@@ -32,16 +32,25 @@ export default {
 
         {
           type: LocationType.Props,
+          generated: false,
           node: expression.typeParameters!.params[0],
           content: retrieveNodeString(
             expression.typeParameters!.params[0],
             source
           ),
+          expression,
         },
       ];
     }
 
     return [
+      {
+        type: LocationType.Props,
+        generated: false,
+        content: retrieveNodeString(expression, source),
+        expression,
+      },
+
       // {
       //   type: LocationType.Import,
       //   node: expression,
@@ -55,48 +64,50 @@ export default {
       //   ],
       // },
       // create variable with return
-      {
-        type: LocationType.Declaration,
-        node: expression,
+      // {
+      //   type: LocationType.Declaration,
+      //   node: expression,
+      //   expression,
 
-        generated: true,
+      //   generated: true,
 
-        declaration: {
-          name: "__props",
+      //   declaration: {
+      //     name: "__props",
 
-          // content: expression.arguments.length.
+      //     // content: expression.arguments.length.
 
-          content: retrieveNodeString(expression, source) || "{}",
-          // content: expression.typeParameters?.params.length
-          //   ? retrieveNodeString(expression, source)
-          //   : expression.arguments.length === 0
-          //   ? "defineProps({})"
-          //   : // Simple method to extract the correct prop types, this will keep
-          //     // required: true, instead of `required: boolean`, const cast could also
-          //     // be possible, but it would change the type of Component.props
-          //     `(<T extends Record<string, Prop<any>>>(o: T) => o) ({ ${
-          //       retrieveNodeString(expression, source) || "{}"
-          //     } })`,
-        },
-      },
-      // get the type from variable
-      {
-        type: LocationType.Declaration,
-        node: expression,
+      //     content: retrieveNodeString(expression, source) || "{}",
+      //     // content: expression.typeParameters?.params.length
+      //     //   ? retrieveNodeString(expression, source)
+      //     //   : expression.arguments.length === 0
+      //     //   ? "defineProps({})"
+      //     //   : // Simple method to extract the correct prop types, this will keep
+      //     //     // required: true, instead of `required: boolean`, const cast could also
+      //     //     // be possible, but it would change the type of Component.props
+      //     //     `(<T extends Record<string, Prop<any>>>(o: T) => o) ({ ${
+      //     //       retrieveNodeString(expression, source) || "{}"
+      //     //     } })`,
+      //   },
+      // },
+      // // get the type from variable
+      // {
+      //   type: LocationType.Declaration,
+      //   node: expression,
+      //   expression,
 
-        generated: true,
+      //   generated: true,
 
-        declaration: {
-          type: "type",
-          name: "Type__props",
-          content: `typeof __props;`,
-        },
-      },
-      {
-        type: LocationType.Props,
-        node: expression,
-        content: "Type__props",
-      },
+      //   declaration: {
+      //     type: "type",
+      //     name: "Type__props",
+      //     content: `typeof __props;`,
+      //   },
+      // },
+      // {
+      //   type: LocationType.Props,
+      //   node: expression,
+      //   content: "Type__props",
+      // },
     ];
   },
 

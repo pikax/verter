@@ -77,7 +77,10 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
               id: filename,
               genDefaultAs: "____VERTER_COMP_OPTION__",
               ...config?.vue?.compiler,
-              sourceMap: true,
+              // sourceMap: true,
+              sourceMap: false,
+              // globalTypeFiles: []
+              isProd: true,
             })
           : null;
 

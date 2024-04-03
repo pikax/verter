@@ -766,14 +766,12 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
 
-          expect(magicString.toString()).toMatchInlineSnapshot(`
-            "<template>{ ()=> { if(___VERTER__ctx.n > 5){
-            const ___VERTER__ctx_narrower = {...___VERTER__ctx, n: ___VERTER__ctx.n};
-            <li></li>} } }</template>"
-          `);
+          expect(magicString.toString()).toMatchInlineSnapshot(
+            `"<template>{(___VERTER__ctx.n > 5)?<li ></li> : undefined}</template>"`
+          );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,kBAAa,CAAG,EAAG,gBAAC,KAAK;;AAAf,GAAgB,GAAG,EAAE,MAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAmB,gBAAC,KAAK,CAAX,CAAJ,IAAgB,GAAG,EAAE,cAAC"}"`
           );
         });
 
@@ -799,7 +797,7 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,kBAAa,CAAG,EAAG,gBAAC,KAAK;;AAAf,GAAgB,WAAW,EAAE,EAAK;;AAAJ,IAAU,aAAa,EAAE,MAAC"}"`
+            `"<template>{(___VERTER__ctx.n > 5)?<li ></li>:(___VERTER__ctx.n > 3)?<li ></li> : undefined}</template>"`
           );
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
@@ -859,13 +857,13 @@ describe("process", () => {
           expect(magicString.toString()).toMatchInlineSnapshot(`
             "<template>{((() => {
                         let ii = '0';
-                        return___VERTER__ctx. ii ===___VERTER__ctx. ii
+                        return ___VERTER__ctx.ii === ___VERTER__ctx.ii
                       })())?<div >{ " t4est " }</div>
                       :<div >{ " else " }</div>}</template>"
           `);
 
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAoB,CAAC;AACrB;AACA,iCAAkB,sBAAO;AACzB,cAAc,CAHC,CAAL,KAGK,CAAC,aAEN,EAAE,GAAG;AACf,UAAe,CAAL,KAAW,CAAC,YAEZ,EAAE,GAAG,EAAC"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAoB,CAAC;AACrB;AACA,kCAAmB,sBAAO;AAC1B,cAAc,CAHC,CAAL,KAGK,CAAC,aAEN,EAAE,GAAG;AACf,UAAe,CAAL,KAAW,CAAC,YAEZ,EAAE,GAAG,EAAC"}"`
           );
         });
 
@@ -875,18 +873,24 @@ describe("process", () => {
           const { magicString } = process(parsed);
 
           expect(magicString.toString()).toMatchInlineSnapshot(
-            `"<template>{ ()=> { if(___VERTER__ctx.n === true){const ___VERTER__ctx_n_narrow = ___VERTER__ctx.n;<li key={___VERTER__ctx_n_narrow}></li>} else {const ___VERTER__ctx_n_narrow = ___VERTER__ctx.n;<li  key={___VERTER__ctx_n_narrow}/>} } }</template>"`
+            `"<template>{(___VERTER__ctx.n === true)?<li  key={___VERTER__ctx.n}></li>:<li  key={___VERTER__ctx.n}/>}</template>"`
           );
           expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
-            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,kBAAa,CAAG,EAAG,CAAC,gBAAC,SAAS,mDAApB,GAAqB,CAAE,IAAI,CAAC,uBAAC,CAAC,GAAG,EAAE,EAAK,wDAAJ,IAAU,CAAE,IAAI,CAAC,uBAAC,CAAC,OAAE"}"`
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAmB,gBAAC,UAAU,CAAhB,CAAJ,IAAqB,CAAE,IAAI,gBAAC,CAAC,CAAC,GAAG,EAAE,CAAK,CAAJ,IAAU,CAAE,IAAI,gBAAC,CAAC,CAAC,GAAE"}"`
           );
         });
 
-        it.only("should narrow deep objects", () => {
+        it.todo("should narrow deep objects", () => {
           const source = `<li v-if="n.n.n === true" :key="n.n"></li><li v-else :key="n.n"/>`;
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
-          expect(magicString.toString()).toMatchInlineSnapshot(`"<template>{ ()=> { if(___VERTER__ctx.n.n === true){const ___VERTER__ctx_n_n_narrow = ___VERTER__ctx.n.n;<li key={___VERTER__ctx.n.n}></li>} else {const ___VERTER__ctx_n_n_narrow = ___VERTER__ctx.n.n;<li  key={___VERTER__ctx.n.n}/>} } }</template>"`);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template>{ ()=> { if(___VERTER__ctx.n.n.n === true){
+            const ___VERTER__ctx_narrower = {...___VERTER__ctx, ___VERTER__ctx.___VERTER__ctx.n.n.n: ___VERTER__ctx.___VERTER__ctx.___VERTER__ctx.n.n.n};
+            <li key={___VERTER__ctx.n.n}></li>} else {
+            const ___VERTER__ctx_narrower = {...___VERTER__ctx, ___VERTER__ctx.___VERTER__ctx.n.n.n: ___VERTER__ctx.___VERTER__ctx.___VERTER__ctx.n.n.n};
+            <li  key={___VERTER__ctx.n.n}/>} } }</template>"
+          `);
         });
 
         describe.skip("invalid conditions", () => {
@@ -1287,6 +1291,28 @@ describe("process", () => {
       );
     });
 
+    it("support argument", () => {
+      const source = `<div>{{ format(message.date, 'test', message.user.id) }}</div>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><div>{ ___VERTER__ctx.format(___VERTER__ctx.message.date, 'test', ___VERTER__ctx.message.user.id) }</div></template>"`
+      );
+    });
+
+    it("array access", () => {
+      const source = `<div>{{ foo[index] }}</div>`;
+
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `"<template><div>{ ___VERTER__ctx.foo[___VERTER__ctx.index] }</div></template>"`
+      );
+    });
+
     it.todo("more complex", () => {
       const source = `<div v-if="!!floor || !!door" class="c3-address-floor">
       (<span v-if="!!floor">{{ $t('user.floor') }}: {{ floor }}{{ !!door ? ', ' : '' }}</span><span v-if="!!door">{{ $t('user.door') }}: {{ door }}</span>)
@@ -1341,6 +1367,12 @@ describe("process", () => {
       expect(magicString.toString()).toMatchInlineSnapshot(
         `"<template><div> <div content{'test'} </div></template>"`
       );
+    });
+
+    it.todo("should handle comments between conditions", () => {
+      const source = `<div v-if="true"></div>
+<!-- this should parsed -->
+<div v-else></div>`;
     });
   });
 });

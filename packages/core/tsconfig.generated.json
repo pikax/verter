@@ -1,5 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
   "include": ["./generated/**/*.tsx", "./generator/types.d.ts"],
-  "exclude": ["./src/**/*"]
+  "exclude": ["./src/**/*"],
+  "compilerOptions": {
+    "jsx": "preserve",
+    "jsxFactory": "vue"
+  }
 }

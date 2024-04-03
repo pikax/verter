@@ -35,11 +35,6 @@ interface ProcessContext {
    * @default "___VETER__comp"
    */
   componentAccessor?: string;
-
-  /**
-   * alias if narrowed in v-if
-   */
-  alias?: ReadonlyMap<string, string>;
 }
 
 export function process(
@@ -51,7 +46,6 @@ export function process(
     declarations: [],
     accessor: "___VERTER__ctx",
     componentAccessor: "___VERTER__comp",
-    alias: new Map<string, string>(),
   }
 ) {
   renderChildren(parsed.children, s, context);
@@ -735,7 +729,7 @@ function renderFor(
   renderChildren(node.children, s, childrenContext);
 }
 
-function renderCondition(
+function renderConditionNarrowed(
   node: ParsedNodeBase & { conditions: ParsedNodeBase[] },
   s: MagicString,
   context: ProcessContext
@@ -744,6 +738,8 @@ function renderCondition(
 
   const firstCondition = conditions[0];
   const lastCondition = conditions[conditions.length - 1];
+
+  const expressionAccessors: Array<string> = [];
 
   if (firstCondition) {
     const firstChild =
@@ -766,8 +762,6 @@ function renderCondition(
     const childEnd = lastChild.node.loc.end.offset;
     s.appendRight(childEnd, " } }");
   }
-  const seenAccessors = new Set([]);
-  const accessorAlias = new Map(context.alias.entries());
 
   for (let i = 0; i < conditions.length; i++) {
     const condition = conditions[i];
@@ -856,19 +850,7 @@ function renderCondition(
       const expression = condition.expression as ExpressionNode;
 
       if (expression.ast) {
-        // const accessor = Array.from(
-        //   retrieveAccessors(expression.ast, context)
-        // );
-        for (const it of retrieveAccessors(expression.ast, context)) {
-          if (!seenAccessors.has(it)) {
-            seenAccessors.add(it);
-            const alias = accessorAlias.get(it);
-            const resolvedName = alias ?? it;
-            const newAlias = `${resolvedName.replaceAll(".", "_")}_narrow`;
-
-            accessorAlias.set(it, newAlias);
-          }
-        }
+        expressionAccessors.push(...retrieveAccessors(expression.ast, context));
       }
 
       // replace delimiters with ()
@@ -888,37 +870,21 @@ function renderCondition(
     }
     // append new accessors
     let overriddenContext = context;
-    if (accessorAlias.size) {
-      // const prevAccessor = context.accessor + ".";
-      // const accessor = context.accessor + "_narrower";
+    if (expressionAccessors.length) {
+      const prevAccessor = context.accessor + ".";
+      const accessor = context.accessor + "_narrower";
 
-      // const newAccessorStr = `\nconst ${accessor} = {...${
-      //   context.accessor
-      // }, ${expressionAccessors.map(
-      //   (x) => `${x.replace(prevAccessor, "")}: ${x}`
-      // )}};\n`;
-
-      // const narrowedNames = expressionAccessors
-      //   .map(
-      //     (x) =>
-      //       [x, context.alias.get(x)] as [name: string, alias: string | null]
-      //   )
-      //   .map(([name, alias]) => {
-      //     const resolvedName = alias ?? name;
-      //     const newAlias = `${resolvedName}_narrow`;
-      //     context.alias.set(resolvedName, newAlias);
-
-      //     return [resolvedName, alias] as [original: string, newAlias: string];
-      //   })
-      const narrowedNames = Array.from(accessorAlias.entries())
-        .map(([name, alias]) => `const ${[alias, name].join(" = ")};`)
-        .join("\n");
-
-      s.prependRight(childStart, narrowedNames);
+      const newAccessorStr = `\nconst ${accessor} = {...${
+        context.accessor
+      }, ${expressionAccessors.map(
+        (x) => `${x.replace(prevAccessor, "")}: ${x}`
+      )}};\n`;
+      // s.prependLeft(expression.loc.end.offset + 1, newAccessorStr);
+      s.prependRight(childStart, newAccessorStr);
 
       overriddenContext = {
         ...context,
-        alias: accessorAlias,
+        accessor,
       };
     }
 
@@ -931,7 +897,7 @@ function renderCondition(
         return x;
       }),
       s,
-      overriddenContext
+      context
     );
 
     if (condition.children.length > 0) {
@@ -941,7 +907,7 @@ function renderCondition(
     }
   }
 }
-function renderConditionOld(
+function renderCondition(
   node: ParsedNodeBase & { conditions: ParsedNodeBase[] },
   s: MagicString,
   context: ProcessContext
@@ -1278,7 +1244,15 @@ function parseNodeText(
 
   if ("callee" in node) {
     // NOTE -1 is magic
-    node.callee && parseNodeText(node.callee, s, context, offset - 1, prepend);
+    // node.callee && parseNodeText(node.callee, s, context, offset - 1, prepend);
+    node.callee && parseNodeText(node.callee, s, context, offset, prepend);
+  }
+
+  if ("arguments" in node) {
+    node.arguments &&
+      node.arguments.forEach((p) =>
+        parseNodeText(p, s, context, offset, prepend)
+      );
   }
 
   if ("argument" in node) {
@@ -1337,8 +1311,8 @@ function parseNodeText(
     }
     case "MemberExpression": {
       node.object && parseNodeText(node.object, s, context, offset);
-      node.property && parseNodeText(node.property, s, context, offset, false);
-      // node.property && appendCtx(node.property, s, context, offset);
+      // computed is true if is access []
+      node.property && parseNodeText(node.property, s, context, offset, node.computed);
       break;
     }
     case "OptionalMemberExpression": {
@@ -1435,38 +1409,7 @@ function appendCtx(
   if (StaticNodeTypes.has(node.type) || node.type?.endsWith?.("Literal"))
     return content;
 
-  // resolve the last alias
   const accessor = context.accessor;
-  const res = `${accessor}.${content}`;
-  let alias = res;
-  do {
-    let newAlias = context.alias.get(alias);
-    // if there's no more alias
-    if (!newAlias && alias !== content) {
-      if (s) {
-        // node.loc.start.index is babel accessing, the first char pos is 1
-        // instead of zero-based
-        const start =
-          (node.loc ? node.loc.start.offset ?? node.loc.start.index - 1 : 0) +
-          __offset;
-        const end =
-          (node.loc ? node.loc.end.offset ?? node.loc.end.index - 1 : 0) +
-          __offset;
-        // there's a case where the offset is off
-        if (s.original.slice(start, end) !== content) {
-          s.overwrite(start + 1, end + 1, alias);
-          // s.prependRight(start + 1, `${accessor}.`);
-        } else {
-          // s.prependRight(start, `${accessor}.`);
-          s.overwrite(start, end, alias);
-        }
-      }
-
-      return alias;
-    }
-    alias = newAlias;
-  } while (alias);
-
   if (s) {
     // node.loc.start.index is babel accessing, the first char pos is 1
     // instead of zero-based
@@ -1483,7 +1426,7 @@ function appendCtx(
     }
   }
 
-  return res;
+  return `${accessor}.${content}`;
 }
 
 function* retrieveAccessors(
@@ -1508,9 +1451,8 @@ function* retrieveAccessors(
       yield* retrieveAccessors(node.id, context);
       break;
     }
-
     case "MemberExpression": {
-      const obj = retrieveAccessors(node.object, context).next().value
+      const obj = retrieveAccessors(node.object, context).next().value;
       const property = node.property.name;
       yield appendCtx(`${obj}.${property}`, undefined, context);
       break;

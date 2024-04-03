@@ -34,22 +34,26 @@ async function processDir(dir) {
   //   templateParseOptions: {},
   // });
   console.log("generating for ", compFilePath);
-  const processed = builder.preProcess("Comp.vue", compFile);
-  const output = mergeFull(processed.locations, processed.context);
-  // .replace(
-  //   "export default __options as __COMP__",
-  //   "const Comp = __options as any as __COMP__;"
-  // );
+  try {
+    const processed = builder.preProcess("Comp.vue", compFile);
+    const output = mergeFull(processed.locations, processed.context);
+    // .replace(
+    //   "export default __options as __COMP__",
+    //   "const Comp = __options as any as __COMP__;"
+    // );
 
-  await fs.outputFile(
-    outputFilePath,
-    // "/* @jsxImportSource vue */\n" +
-    genFile.replace("type __COMP__ = {};", output.content),
-    {
-      encoding: "utf8",
-      // flag: "w",
-    }
-  );
+    await fs.outputFile(
+      outputFilePath,
+      // "/* @jsxImportSource vue */\n" +
+      genFile.replace("type __COMP__ = {};", output.content),
+      {
+        encoding: "utf8",
+        // flag: "w",
+      }
+    );
+  } catch (e) {
+    console.error("failed", dir, e);
+  }
 }
 
 await Promise.all(dirs.map(processDir));

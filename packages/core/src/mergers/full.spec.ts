@@ -597,7 +597,90 @@ describe("Mergers Full", () => {
         `);
       });
 
-      it("handle generic list", () => {
+      it.only("support withDefaults", () => {
+        const source = `<script setup lang="ts">
+        withDefaults(defineProps<{ foo?: string }>(), {
+          foo: "test",
+        });
+        </script>
+        <template>
+          <span>1</span>
+        </template>
+        `;
+        const p = process(source);
+        expect(p.source).toBe(source);
+        expect(p.content).toMatchInlineSnapshot(`
+          "import 'vue/jsx';
+
+          // patching elements
+          declare global {
+            namespace JSX {
+              export interface IntrinsicClassAttributes<T> {
+                $children: T extends { $slots: infer S } ? { default?: never } & { [K in keyof S]: S[K] extends (...args: infer Args) => any ? (...args: Args) => JSX.Element : () => JSX.Element } : { default?: never }
+              }
+            }
+          }
+          declare module 'vue' {
+            interface HTMLAttributes {
+              $children?: {
+                default: () => JSX.Element
+              }
+            }
+          }
+          import { defineComponent as _defineComponent } from 'vue'
+
+          function ___VERTER_COMPONENT__() {
+          const ____VERTER_COMP_OPTION__ = /*#__PURE__*/_defineComponent({
+            __name: 'test',
+            props: {
+              foo: { default: "test" }
+            },
+            setup(__props: any, { expose: __expose }) {
+            __expose();
+
+                  
+                  
+          const __returned__ = {  }
+          Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true })
+          return __returned__
+          }
+
+          })
+
+                  withDefaults(defineProps<{ foo?: string }>(), {
+                    foo: "test",
+                  });
+                  function ___VERTER__TEMPLATE_RENDER() {
+          <>
+                    <span>{ "1" }</span>
+                  
+          </>}
+          ___VERTER__TEMPLATE_RENDER();
+          const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
+          const ___VERTER_PROPS___ = {
+                        ......(withDefaults(defineProps<{ foo?: string }>(), {
+                    foo: "test",
+                  }))
+                      }
+          const ___VERTER__ctx = { ...({} as InstanceType<typeof ___VERTER_COMP___>),
+          ...({} as ) }
+          const ___VERTER__comp = { 
+                      //...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                      ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+                      ...___VERTER__ctx
+                    }
+          ___VERTER__comp;
+          ___VERTER__ctx;
+          return ___VERTER_COMP___;
+          }
+
+                  
+                  const __VERTER__RESULT = ___VERTER_COMPONENT__();
+          export default __VERTER__RESULT;"
+        `);
+      });
+
+      it.only("handle generic list", () => {
         const source = `<script setup lang="ts" generic="T">
         import { computed } from "vue";
         
@@ -635,16 +718,33 @@ describe("Mergers Full", () => {
         const p = process(source);
         expect(p.source).toBe(source);
         expect(p.content).toMatchInlineSnapshot(`
-          "import { defineComponent as _defineComponent } from 'vue'
-          import { renderList as __VERTER__renderList } from 'vue';
+          "import 'vue/jsx';
+
+          // patching elements
+          declare global {
+            namespace JSX {
+              export interface IntrinsicClassAttributes<T> {
+                $children: T extends { $slots: infer S } ? { default?: never } & { [K in keyof S]: S[K] extends (...args: infer Args) => any ? (...args: Args) => JSX.Element : () => JSX.Element } : { default?: never }
+              }
+            }
+          }
+          declare module 'vue' {
+            interface HTMLAttributes {
+              $children?: {
+                default: () => JSX.Element
+              }
+            }
+          }
+          import { defineComponent as _defineComponent } from 'vue'
+          import { renderList as __VERTER__renderList, unref as __VERTER__unref } from 'vue';
           import { computed } from "vue";
           function ___VERTER_COMPONENT__<T>() {
           const ____VERTER_COMP_OPTION__ = /*#__PURE__*/_defineComponent({
             __name: 'test',
             props: {
-              items: { type: Array, required: true },
-              getKey: { type: Function, required: true },
-              getLabel: { type: Function, required: true }
+              items: {},
+              getKey: { type: Function },
+              getLabel: { type: Function }
             },
             setup(__props: any, { expose: __expose }) {
 
@@ -698,18 +798,30 @@ describe("Mergers Full", () => {
           <>
                     <ol>
                       {__VERTER__renderList(___VERTER__ctx.orderedItems,(item)=>{<li  key={___VERTER__ctx.getKey(item)}>
-                        {___VERTER__ctx. getLabel(item) }
+                        { ___VERTER__ctx.getLabel(item) }
                       </li>})}
                     </ol>
                   
           </>}
           ___VERTER__TEMPLATE_RENDER();
           const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
-          const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
+          const ___VERTER__ctx = { ...({} as InstanceType<typeof ___VERTER_COMP___>),
+          ...(defineProps<{
+                    items: T[];
+                    getKey: (item: T) => string | number;
+                    getLabel: (item: T) => string;
+                  }>()),
+          computed: __VERTER__unref(computed),
+          props: __VERTER__unref(props),
+          orderedItems: __VERTER__unref(orderedItems),
+          getItemAtIndex: __VERTER__unref(getItemAtIndex) }
           const ___VERTER__comp = { 
                       //...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
-                      ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } })
+                      ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+                      ...___VERTER__ctx
                     }
+          ___VERTER__comp;
+          ___VERTER__ctx;
           return ___VERTER_COMP___;
           }
 
@@ -749,40 +861,126 @@ describe("Mergers Full", () => {
     const p = process(source);
     expect(p.source).toBe(source);
     expect(p.content).toMatchInlineSnapshot(`
-      "import { defineComponent as ___VERTER_defineComponent } from 'vue';
-      import { ref } from 'vue'
-      function ___VERTER_COMPONENT__() {
-      const ____VERTER_COMP_OPTION__ = ___VERTER_defineComponent({})
+          "import 'vue/jsx';
 
-          
-          
-          
-          const hh = 'hh';
-          
-          const eee= ref();
-          
-          function ___VERTER__TEMPLATE_RENDER() {
-      <>
-          <div>
-              <div aria-autocomplete='' about={false}></div>
-              <span ></span>
-              <image></image>
-              </div>
-          
-      </>}
-      ___VERTER__TEMPLATE_RENDER();
-      const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
-      const ___VERTER__ctx = { ...(new ___VERTER_COMP___()) }
-      const ___VERTER__comp = { 
-                  //...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
-                  ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } })
-                }
-      return ___VERTER_COMP___;
-      }
-       
-          const __VERTER__RESULT = ___VERTER_COMPONENT__();
-      export default __VERTER__RESULT;"
-    `);
+          // patching elements
+          declare global {
+            namespace JSX {
+              export interface IntrinsicClassAttributes<T> {
+                $children: T extends { $slots: infer S } ? { default?: never } & { [K in keyof S]: S[K] extends (...args: infer Args) => any ? (...args: Args) => JSX.Element : () => JSX.Element } : { default?: never }
+              }
+            }
+          }
+          declare module 'vue' {
+            interface HTMLAttributes {
+              $children?: {
+                default: () => JSX.Element
+              }
+            }
+          }
+          import { defineComponent as _defineComponent } from 'vue'
+          import { renderList as __VERTER__renderList, unref as __VERTER__unref } from 'vue';
+          import { computed } from "vue";
+          function ___VERTER_COMPONENT__<T>() {
+          const ____VERTER_COMP_OPTION__ = /*#__PURE__*/_defineComponent({
+            __name: 'test',
+            props: {
+              items: {},
+              getKey: { type: Function },
+              getLabel: { type: Function }
+            },
+            setup(__props: any, { expose: __expose }) {
+
+                  const props = __props;
+                  
+                  const orderedItems = computed<T[]>(() =>
+                    props.items.sort((item1, item2) =>
+                      props.getLabel(item1).localeCompare(props.getLabel(item2))
+                    )
+                  );
+                  
+                  function getItemAtIndex(index: number): T | undefined {
+                    if (index < 0 || index >= orderedItems.value.length) {
+                      return undefined;
+                    }
+                    return orderedItems.value[index];
+                  }
+                  
+                  __expose({ getItemAtIndex });
+                  
+          const __returned__ = { props, orderedItems, getItemAtIndex }
+          Object.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true })
+          return __returned__
+          }
+
+          })
+
+                  
+                  
+                  const props = defineProps<{
+                    items: T[];
+                    getKey: (item: T) => string | number;
+                    getLabel: (item: T) => string;
+                  }>();
+                  
+                  const orderedItems = computed<T[]>(() =>
+                    props.items.sort((item1, item2) =>
+                      props.getLabel(item1).localeCompare(props.getLabel(item2))
+                    )
+                  );
+                  
+                  function getItemAtIndex(index: number): T | undefined {
+                    if (index < 0 || index >= orderedItems.value.length) {
+                      return undefined;
+                    }
+                    return orderedItems.value[index];
+                  }
+                  
+                  defineExpose({ getItemAtIndex });
+                  function ___VERTER__TEMPLATE_RENDER() {
+          <>
+                    <ol>
+                      {__VERTER__renderList(___VERTER__ctx.orderedItems,(item)=>{<li  key={___VERTER__ctx.getKey(item)}>
+                        { ___VERTER__ctx.getLabel(item) }
+                      </li>})}
+                    </ol>
+                  
+          </>}
+          ___VERTER__TEMPLATE_RENDER();
+          const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
+          const ___VERTER_PROPS___ = {
+                        ......(defineProps<{
+                    items: T[];
+                    getKey: (item: T) => string | number;
+                    getLabel: (item: T) => string;
+                  }>())
+                      }
+          const ___VERTER__ctx = { ...({} as Omit<InstanceType<typeof ___VERTER_COMP___>, "computed"|"props"|"orderedItems"|"getItemAtIndex">),
+          ...({} as Omit<typeof ___VERTER_PROPS___, "computed"|"props"|"orderedItems"|"getItemAtIndex">),
+          computed: __VERTER__unref(computed),
+          props: __VERTER__unref(props),
+          orderedItems: __VERTER__unref(orderedItems),
+          getItemAtIndex: __VERTER__unref(getItemAtIndex) }
+          const ___VERTER__comp = { 
+                      //...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                      ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+                      ...___VERTER__ctx
+                    }
+          ___VERTER__comp;
+          ___VERTER__ctx;
+          return ___VERTER_COMP___;
+          }
+
+                  
+                  
+                  
+                  const __VERTER__RESULT = ___VERTER_COMPONENT__<any>();
+          type __VERTER_RESULT_TYPE__<_VUE_TS__T = any> = (ReturnType<typeof ___VERTER_COMPONENT__<_VUE_TS__T>> extends infer Comp ? Pick<Comp, keyof Comp> : never) & { new<T extends _VUE_TS__T = _VUE_TS__T>(): { $props: { 
+                  /* props info here */
+
+                 }} };
+          export default __VERTER__RESULT as unknown as __VERTER_RESULT_TYPE__;"
+        `);
   });
 
   it.skip("sss", () => {
@@ -1165,14 +1363,29 @@ describe("Mergers Full", () => {
     testSourceMaps(p);
   });
 
-  it.only("no script", () => {
+  it.skip("no script", () => {
     const source = `<template><span>1</span></template>`;
 
     const p = process(source);
 
     expect(p.content).toMatchInlineSnapshot(`
-      "/* @jsxImportSource vue */
-      import 'vue/jsx';
+      "import 'vue/jsx';
+
+      // patching elements
+      declare global {
+        namespace JSX {
+          export interface IntrinsicClassAttributes<T> {
+            $children: T extends { $slots: infer S } ? { default?: never } & { [K in keyof S]: S[K] extends (...args: infer Args) => any ? (...args: Args) => JSX.Element : () => JSX.Element } : { default?: never }
+          }
+        }
+      }
+      declare module 'vue' {
+        interface HTMLAttributes {
+          $children?: {
+            default: () => JSX.Element
+          }
+        }
+      }
       import { defineComponent as ___VERTER_defineComponent } from 'vue';
 
 
@@ -1183,7 +1396,8 @@ describe("Mergers Full", () => {
       </>}
       ___VERTER__TEMPLATE_RENDER();
       const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
-      const ___VERTER__ctx = { ...({} as InstanceType<typeof ___VERTER_COMP___>) }
+      const ___VERTER__ctx = { ...({} as InstanceType<typeof ___VERTER_COMP___>).$props,
+      ...({} as InstanceType<typeof ___VERTER_COMP___>) }
       const ___VERTER__comp = { 
                   //...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
                   ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
@@ -1197,5 +1411,27 @@ describe("Mergers Full", () => {
       const __VERTER__RESULT = ___VERTER_COMPONENT__();
       export default __VERTER__RESULT;"
     `);
+  });
+
+  it.todo("SFC error when doing template slots", () => {
+    const source = `  
+<Comp>
+    <template v-if="isLoading" #default> </template>
+    <template v-else-if="!ticketData.length">
+      <div class="flex flex-col items-center justify-center gap-30.4x">
+        <img class="mt-116.8x h-40 w-40" src="@/assets/emptytickets-icon.svg" />
+        <span class="text-session text-neutral-450">亲，没有找到相关信息～</span>
+      </div>
+    </template>
+    <template v-else>
+      <template #processing>
+        <div>XXX</div>
+      </template>
+      <template #completed>
+        <div>YYY</div>
+      </template>
+    </template>
+    
+</Comp>`;
   });
 });

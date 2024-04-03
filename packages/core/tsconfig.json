@@ -14,6 +14,7 @@
     
     "target": "ES2017",
     "module": "CommonJS",
-    "types": ["vitest/importMeta", "vitest/globals"]
+    "types": ["vitest/importMeta", "vitest/globals"],
+    "jsx": "preserve",
   }
 }

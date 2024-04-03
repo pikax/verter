@@ -125,6 +125,7 @@ export function mergeFull(
   // adding some imports and variable context
   {
     const exposedCtx: string[] = [];
+    const rawToExposeCtx: string[] = [];
 
     const globalUser = locations.declaration.filter(
       (x) => !x.generated && x.context === "global"
@@ -141,7 +142,7 @@ export function mergeFull(
     }
 
     if (context.isSetup) {
-      exposedCtx.push(
+      rawToExposeCtx.push(
         ...locations.import
           .filter((x) => !x.generated)
           .flatMap(
@@ -155,7 +156,7 @@ export function mergeFull(
 
       const declarations = locations.declaration.filter((x) => !x.generated);
 
-      exposedCtx.push(
+      rawToExposeCtx.push(
         ...declarations
           .flatMap(
             (x) =>
@@ -170,7 +171,7 @@ export function mergeFull(
           .filter(Boolean)
       );
 
-      if (exposedCtx.length > 0) {
+      if (rawToExposeCtx.length > 0) {
         locations.import.push({
           type: LocationType.Import,
           generated: true,
@@ -179,7 +180,60 @@ export function mergeFull(
           items: [{ name: "unref", alias: "__VERTER__unref" }],
         });
       }
+
+      // handle props
+      if (locations.props.length) {
+        // generate a named prop that we can reference
+        locations.declaration.push({
+          type: LocationType.Declaration,
+          context: "post",
+          generated: true,
+          declaration: {
+            type: "const",
+            name: "___VERTER_PROPS___",
+            content: `{
+              ${locations.props
+                .map((x) =>
+                  s.original.slice(
+                    x.expression.start + context.script.loc.start.offset,
+                    x.expression.end + context.script.loc.start.offset
+                  )
+                )
+                .map((x) => `...(${x})`)
+                .join(",\n")}
+            }`,
+          },
+        });
+        const propsType = "typeof ___VERTER_PROPS___";
+
+        // to prevent typescript from merging types, we need to omit
+        // the exposed values, props have a lower priority in the context
+        exposedCtx.push(
+          `...({} as ${
+            rawToExposeCtx.length
+              ? `Omit<${propsType}, ${rawToExposeCtx
+                  .map((x) => JSON.stringify(x))
+                  .join("|")}>`
+              : propsType
+          })`
+        );
+      }
+      exposedCtx.push(
+        ...rawToExposeCtx.map((x) => `${x}: __VERTER__unref(${x})`)
+      );
     }
+
+    const instanceType = `InstanceType<typeof ___VERTER_COMP___>`;
+
+    exposedCtx.unshift(
+      `...({} as ${
+        rawToExposeCtx.length
+          ? `Omit<${instanceType}, ${rawToExposeCtx
+              .map((x) => JSON.stringify(x))
+              .join("|")}>`
+          : instanceType
+      })`
+    );
 
     locations.declaration.push({
       type: LocationType.Declaration,
@@ -188,12 +242,7 @@ export function mergeFull(
       declaration: {
         type: "const",
         name: "___VERTER__ctx",
-        content: `{ ${[
-          "...({} as InstanceType<typeof ___VERTER_COMP___>)",
-          ...(context.isSetup
-            ? exposedCtx.map((x) => `${x}: __VERTER__unref(${x})`)
-            : []),
-        ].join(",\n")} }`,
+        content: `{ ${exposedCtx.join(",\n")} }`,
       },
     });
 
@@ -422,7 +471,29 @@ export function mergeFull(
     );
   }
 
-  s.prependLeft(0, "/* @jsxImportSource vue */\nimport 'vue/jsx';\n");
+  // s.prependLeft(0, "/* @jsxImportSource vue */\nimport 'vue/jsx';\n");
+
+  // VoidElementTags = 'area' | 'base' | 'br' | 'col' | 'embed' | 'hr' | 'img' | 'input' | 'link' | 'meta' | 'source' | 'track' | 'wbr'
+
+  const patchSlots = `
+// patching elements
+declare global {
+  namespace JSX {
+    export interface IntrinsicClassAttributes<T> {
+      $children: T extends { $slots: infer S } ? { default?: never } & { [K in keyof S]: S[K] extends (...args: infer Args) => any ? (...args: Args) => JSX.Element : () => JSX.Element } : { default?: never }
+    }
+  }
+}
+declare module 'vue' {
+  interface HTMLAttributes {
+    $children?: {
+      default: () => JSX.Element
+    }
+  }
+}
+`;
+
+  s.prependLeft(0, "import 'vue/jsx';\n" + patchSlots);
 
   return {
     locations,

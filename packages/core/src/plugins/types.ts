@@ -160,7 +160,9 @@ export interface TypeLocationEmits {
 }
 export interface TypeLocationProps {
   type: LocationType.Props;
-  node: _babel_types.CallExpression;
+  node: _babel_types.CallExpression | _babel_types.TSTypeLiteral;
+  // always the `defineProps` expression
+  expression: _babel_types.Expression;
 
   content?: string;
   properties?: {
