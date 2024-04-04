@@ -1803,7 +1803,9 @@ function appendCtx(
    */
   __offset: number = 0
 ) {
-  const content = node.content ?? node.name ?? node;
+  // babel parses `.` at the end as the name instead of member expression,
+  // when typing we don't want to attach the ctx if end in a .
+  const content = (node.content ?? node.name ?? node).split(".")[0];
   if (
     isGloballyAllowed(content) ||
     isLiteralWhitelisted(content) ||

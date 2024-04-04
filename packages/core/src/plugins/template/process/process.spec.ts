@@ -758,6 +758,20 @@ describe("process", () => {
             magicString.generateMap({ hires: true, includeContent: true })
           );
         });
+
+        it("should not append ctx to item.", () => {
+          const source = `<li v-for="item in items">
+          {{ item. }}            
+          </li>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template>{__VERTER__renderList(___VERTER__ctx.items,(item)=>{<li >
+                      { item. }            
+                      </li>})}</template>"
+          `);
+        });
       });
 
       describe("conditional v-if", () => {
@@ -1403,7 +1417,7 @@ describe("process", () => {
     });
   });
 
-  describe.only("slots", () => {
+  describe("slots", () => {
     it("declaring slots", () => {
       const source = `<div><slot /><div>`;
       const parsed = doParseContent(source);
