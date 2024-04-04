@@ -745,9 +745,13 @@ describe("process", () => {
 
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
-          expect(magicString.toString()).toMatchInlineSnapshot(`"<template>{(___VERTER__ctx.items > 5)?__VERTER__renderList(___VERTER__ctx.items,(i)=>{!((___VERTER__ctx.items > 5)) ? undefined : <li  ></li>}) : undefined}</template>"`);
+          expect(magicString.toString()).toMatchInlineSnapshot(
+            `"<template>{(___VERTER__ctx.items > 5)?__VERTER__renderList(___VERTER__ctx.items,(i)=>{!((___VERTER__ctx.items > 5)) ? undefined : <li  ></li>}) : undefined}</template>"`
+          );
 
-          expect(magicString.generateMap().toString()).toMatchInlineSnapshot(`"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAsC,gBAAC,SAAS,CAAf,CAAnB,oBAAM,gBAAM,KAAJ,EAAD,CAAU,gDAArB,IAAsB,CAAiB,GAAG,EAAE,gBAAC"}"`);
+          expect(magicString.generateMap().toString()).toMatchInlineSnapshot(
+            `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,WAAsC,gBAAC,SAAS,CAAf,CAAnB,oBAAM,gBAAM,KAAJ,EAAD,CAAU,gDAArB,IAAsB,CAAiB,GAAG,EAAE,gBAAC"}"`
+          );
 
           testSourceMaps(
             magicString.toString(),
@@ -1396,6 +1400,104 @@ describe("process", () => {
       const parsed = doParseContent(source);
       const { magicString } = process(parsed);
       expect(magicString.toString()).toMatchInlineSnapshot();
+    });
+  });
+
+  describe("slots", () => {
+    it("declaring slots", () => {
+      const source = `<div><slot /><div>`;
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(`
+        "<template><div>{()=>{
+        const Comp = ___VERTER_SLOT_COMP.default 
+        return <Comp />
+        }}<div></template>"
+      `);
+    });
+    it("declaring slots named", () => {
+      const source = `<div><slot name="foo"/><div>`;
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(`
+        "<template><div>{()=>{
+        const Comp = ___VERTER_SLOT_COMP .foo
+        return <Comp />
+        }}<div></template>"
+      `);
+    });
+
+    it("declaring slots binding name", () => {
+      const source = `<div><slot :name="'test'" /><div>`;
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(`
+        "<template><div>{()=>{
+        const Comp = ___VERTER_SLOT_COMP ['test']
+        return <Comp  />
+        }}<div></template>"
+      `);
+    });
+
+    it("declaring slots binding name short", () => {
+      const source = `<div><slot :name /><div>`;
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(`
+        "<template><div>{()=>{
+        const Comp = ___VERTER_SLOT_COMP [___VERTER__ctx.name]
+        return <Comp  />
+        }}<div></template>"
+      `);
+    });
+
+    it("declaring slots with attributes", () => {
+      const source = `<div><slot foo="foo"/><div>`;
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(`
+        "<template><div>{()=>{
+        const Comp = ___VERTER_SLOT_COMP.default 
+        return <Comp foo="foo"/>
+        }}<div></template>"
+      `);
+    });
+
+    it("declaring slots with attributes and name", () => {
+      const source = `<div><slot foo="foo" :name="bar"/><div>`;
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(`
+        "<template><div>{()=>{
+        const Comp = ___VERTER_SLOT_COMP [___VERTER__ctx.bar]
+        return <Comp foo="foo" />
+        }}<div></template>"
+      `);
+    });
+    it("declaring slots with children", () => {
+      const source = `<div><slot foo="foo" name="foo"> <span> default </span></slot><div>`;
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(
+        `
+        "<template><div>{()=>{
+        const Comp = ___VERTER_SLOT_COMP .foo
+        return <Comp foo="foo" > <span> default </span></Comp>
+        }}<div></template>"
+      `
+      );
+    });
+
+    it("declaring slots with empty children", () => {
+      const source = `<div><slot foo="foo" name="foo"> </slot><div>`;
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(`
+        "<template><div>{()=>{
+        const Comp = ___VERTER_SLOT_COMP .foo
+        return <Comp foo="foo" > </Comp>
+        }}<div></template>"
+      `);
     });
   });
 

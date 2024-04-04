@@ -1,7 +1,8 @@
-import type {
+import {
   AttributeNode,
   DirectiveNode,
   ElementNode,
+  ElementTypes,
   ExpressionNode,
   ForParseResult,
   RootNode,
@@ -107,6 +108,7 @@ export enum ParsedType {
   Condition = "condition",
   For = "for",
   RenderSlot = "render-slot",
+  Slot = "slot",
 }
 
 export type ParsedNodeBase = {
@@ -211,7 +213,8 @@ export function parseElement(
   }
 
   const currentNode = {
-    type: ParsedType.Element,
+    type:
+      node.tagType === ElementTypes.SLOT ? ParsedType.Slot : ParsedType.Element,
     tag: node.tag,
     node,
     children: content,

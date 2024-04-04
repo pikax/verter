@@ -597,7 +597,7 @@ describe("Mergers Full", () => {
         `);
       });
 
-      it.only("support withDefaults", () => {
+      it("support withDefaults", () => {
         const source = `<script setup lang="ts">
         withDefaults(defineProps<{ foo?: string }>(), {
           foo: "test",
@@ -680,7 +680,7 @@ describe("Mergers Full", () => {
         `);
       });
 
-      it.only("handle generic list", () => {
+      it("handle generic list", () => {
         const source = `<script setup lang="ts" generic="T">
         import { computed } from "vue";
         
@@ -1398,6 +1398,71 @@ describe("Mergers Full", () => {
       const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
       const ___VERTER__ctx = { ...({} as InstanceType<typeof ___VERTER_COMP___>).$props,
       ...({} as InstanceType<typeof ___VERTER_COMP___>) }
+      const ___VERTER__comp = { 
+                  //...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+                  ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+                  ...___VERTER__ctx
+                }
+      ___VERTER__comp;
+      ___VERTER__ctx;
+      return ___VERTER_COMP___;
+      }
+
+      const __VERTER__RESULT = ___VERTER_COMPONENT__();
+      export default __VERTER__RESULT;"
+    `);
+  });
+
+  it.only("slot def", () => {
+    const source = `<template> 
+  <div> 
+    <slot />
+  </div>
+</template>`;
+    const p = process(source);
+
+    expect(p.content).toMatchInlineSnapshot(`
+      "import 'vue/jsx';
+
+      // patching elements
+      declare global {
+        namespace JSX {
+          export interface IntrinsicClassAttributes<T> {
+            // $children: T extends { $slots: infer S } ? { default?: never } & { [K in keyof S]: S[K] extends (...args: infer Args) => any ? (...args: Args) => JSX.Element : () => JSX.Element } : { default?: never }
+            $children?: T extends { $slots: infer S } ? S : undefined
+          }
+        }
+      }
+      declare module 'vue' {
+        interface HTMLAttributes {
+          $children?: {
+            default: () => JSX.Element
+          }
+        }
+      }
+      import { defineComponent as ___VERTER_defineComponent } from 'vue';
+      // Helper to retrieve slots definitions
+      declare function ___VERTER_extract_Slots<CompSlots>(comp: { new(): { $slots: CompSlots } }, slots?: undefined): CompSlots
+      declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string, any> = {}>(comp: { new(): { $slots: CompSlots } }, slots?: Slots): Slots extends undefined ? CompSlots : Slots
+      // Generate slot component based on the slots
+      declare function ___VERTER_Create_Slot_Component<T>(slots: T): T extends { readonly [x: string]: (...args: any[]) => any } ? (props: {
+        [K in keyof T]: (T[K] extends (props: infer Props) => any ? Props : {}) & (K extends 'default' ? { name?: 'default' } : { name: K })
+      }[keyof T]) => JSX.Element : never
+
+
+      function ___VERTER_COMPONENT__() {
+      const ____VERTER_COMP_OPTION__ = ___VERTER_defineComponent({})
+      function ___VERTER__TEMPLATE_RENDER() {
+      <> 
+        <div> 
+          <___VERTER_SLOT_COMP />
+        </div>
+
+      </>}
+      ___VERTER__TEMPLATE_RENDER();
+      const ___VERTER_COMP___ = ____VERTER_COMP_OPTION__
+      const ___VERTER_SLOT_COMP = ___VERTER_Create_Slot_Component(___VERTER_extract_Slots(___VERTER_COMP___))
+      const ___VERTER__ctx = { ...({} as InstanceType<typeof ___VERTER_COMP___>) }
       const ___VERTER__comp = { 
                   //...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
                   ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),

@@ -122,6 +122,64 @@ export function mergeFull(
     processBlock(block, context, locations);
   }
 
+  // handling slots
+  {
+    locations.declaration.push(
+      {
+        type: LocationType.Declaration,
+        generated: true,
+        context: "global",
+        declaration: {
+          content: `// Helper to retrieve slots definitions
+declare function ___VERTER_extract_Slots<CompSlots>(comp: { new(): { $slots: CompSlots } }, slots?: undefined): CompSlots
+declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string, any> = {}>(comp: { new(): { $slots: CompSlots } }, slots?: Slots): Slots extends undefined ? CompSlots : Slots`,
+        },
+      },
+      // TODO add defineSlots definition here as ___VERTER_DEFINE_SLOTS___
+      // also introduce generating slots
+
+      ...(isSetup
+        ? [
+            {
+              type: LocationType.Declaration,
+              generated: true,
+              context: "post",
+
+              declaration: {
+                name: "___VERTER_DEFINE_SLOTS___",
+                type: "const",
+                content: `{
+              ${locations.slots
+                .map(
+                  (x) =>
+                    x.varName ||
+                    s.original.slice(
+                      x.expression.start + context.script.loc.start.offset,
+                      x.expression.end + context.script.loc.start.offset
+                    )
+                )
+                .map((x) => `...(${x})`)
+                .join(",\n")}
+            }`,
+              },
+            } as TypeLocationDeclaration,
+          ]
+        : []),
+      {
+        type: LocationType.Declaration,
+        generated: true,
+        context: "post",
+        declaration: {
+          name: "___VERTER_SLOT_COMP",
+          type: "const",
+          content: `___VERTER_extract_Slots(___VERTER_COMP___${
+            isSetup ? `, ___VERTER_DEFINE_SLOTS___` : ""
+          })`,
+        },
+      }
+    );
+  }
+
   // adding some imports and variable context
   {
     const exposedCtx: string[] = [];
@@ -446,7 +504,7 @@ export function mergeFull(
     // TODO add global
 
     if (global.length) {
-      s.appendRight(0, global.join("\n") + "\n");
+      s.appendLeft(0, global.join("\n") + "\n");
     }
 
     if (pre.length) {

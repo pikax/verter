@@ -42,6 +42,8 @@ interface ProcessContext {
    */
   componentAccessor?: string;
 
+  slotAccessor?: string;
+
   conditions: {
     // current conditions
     ifs: string[];
@@ -59,6 +61,7 @@ export function process(
     declarations: [],
     accessor: "___VERTER__ctx",
     componentAccessor: "___VERTER__comp",
+    slotAccessor: "___VERTER_SLOT_COMP",
     conditions: {
       ifs: [],
       elses: [],
@@ -124,6 +127,7 @@ const render = {
   [ParsedType.Text]: renderText,
   [ParsedType.For]: renderFor,
   // [ParsedType.RenderSlot]: renderSlot,
+  [ParsedType.Slot]: renderSlot,
   [ParsedType.Comment]: renderComment,
   [ParsedType.Interpolation]: renderInterpolation,
   // [ParsedType.Condition]: renderCondition,
@@ -153,6 +157,134 @@ function renderPartialElement(
   if (node.tag) {
     const tagIndex = node.content.indexOf(node.tag);
     appendCtx(node.tag, s, context, node.node.loc.start.offset + tagIndex);
+  }
+}
+
+function renderSlot(
+  node: ParsedNodeBase & {
+    tag: "slot";
+    props: ParsedNodeBase[];
+  },
+  s: MagicString,
+  context: ProcessContext
+) {
+  // this renders slots <slot>
+
+  // TODO add information in the context
+
+  const startIndex = node.node.loc.start.offset;
+  const endIndex = node.node.loc.end.offset;
+
+  const tagNameEndIndex = startIndex + 1 + node.tag.length;
+
+  // replace < with {()=>{\n
+  s.overwrite(startIndex, startIndex + 1, "{()=>{\n");
+
+  if ("isSelfClosing" in node.node && node.node.isSelfClosing) {
+    // replace last `/>` with \n}}
+    s.prependRight(endIndex, "\n}}");
+  } else {
+    const lastKnownStartIndex = Math.max(
+      ...(node.children.length > 0
+        ? // if there's children get the last offset of the children
+          node.children!.map((x) => x.node.loc.end.offset)
+        : // otherwise
+          node.props.map((x) => x.node.loc.end.offset + 1))
+    );
+    const slotNameIndex = s.original.indexOf("slot", lastKnownStartIndex);
+
+    s.overwrite(slotNameIndex, slotNameIndex + "slot".length, "Comp");
+    s.prependRight(endIndex, "\n}}");
+  }
+
+  const nameAttribute = node.props.find(
+    (x) =>
+      (retrieveStringExpressionNode(x.node.arg, undefined, context) ??
+        x.node.name) === "name"
+  );
+  // move name attribute to the beginning
+  if (nameAttribute) {
+    if (nameAttribute.node.loc.start.offset > tagNameEndIndex + 1) {
+      // don't append really at the end because it might cause issues when overriding it
+      s.move(
+        nameAttribute.node.loc.start.offset,
+        nameAttribute.node.loc.end.offset,
+        tagNameEndIndex + 1
+      );
+    }
+  }
+
+  // replace slot with ___VERTER_SLOT_COMP
+  s.overwrite(
+    startIndex + 1,
+    tagNameEndIndex,
+    context.slotAccessor + `${nameAttribute ? "" : ".default"}`
+  );
+
+  // prepending variable `declaration const Comp = `
+  s.prependLeft(startIndex + 1, "const Comp = ");
+
+  // check if the nameAttribute was moved, if it was we prependRight
+  if (
+    !nameAttribute ||
+    nameAttribute.node.loc.start.offset > tagNameEndIndex + 1
+  ) {
+    s.prependRight(tagNameEndIndex + 1, "\nreturn <Comp ");
+  } else {
+    s.prependRight(nameAttribute.node.loc.end.offset, "\nreturn <Comp ");
+  }
+
+  // process non-name attributes
+
+  renderAttributes(
+    node.props.filter((x) => x !== nameAttribute),
+    s,
+    context
+  );
+  // replace name attribute
+  if (nameAttribute) {
+    if (nameAttribute.node.type === NodeTypes.ATTRIBUTE) {
+      s.overwrite(
+        nameAttribute.node.nameLoc.start.offset,
+        // add +1 to remove = + '
+        nameAttribute.node.nameLoc.end.offset + 2,
+        "."
+      );
+
+      s.remove(
+        nameAttribute.node.value.loc.end.offset - 1,
+        nameAttribute.node.value.loc.end.offset
+      );
+    } else if (nameAttribute.node.type === NodeTypes.DIRECTIVE) {
+      if ("exp" in nameAttribute.node && nameAttribute.node.exp) {
+        retrieveStringExpressionNode(nameAttribute.node.exp, s, context);
+
+        // replace :name with [
+        s.overwrite(
+          nameAttribute.node.loc.start.offset,
+          nameAttribute.node.exp.loc.start.offset,
+          "["
+        );
+        // replace delimetor with ]
+        s.overwrite(
+          nameAttribute.node.exp.loc.end.offset,
+          nameAttribute.node.exp.loc.end.offset + 1,
+          "]"
+        );
+      } else {
+        appendCtx(nameAttribute.node.arg, s, context);
+
+        // replace `:` with `[`
+        s.overwrite(
+          nameAttribute.node.loc.start.offset,
+          nameAttribute.node.loc.start.offset + 1,
+          "["
+        );
+
+        // add `]`
+        s.appendLeft(nameAttribute.node.loc.end.offset, "]");
+      }
+    }
   }
 }
 
@@ -196,10 +328,6 @@ function renderElement(
   }
 
   renderChildren(node.children, s, context);
-
-  if (tag === "Slot") {
-    // TODO add declarations
-  }
 }
 
 function renderAttributes(
@@ -1359,7 +1487,7 @@ function resolveComponentTag(
   }
   if (node.tagType === ElementTypes.SLOT) {
     return {
-      name: "Slot",
+      name: "___VERTER_SLOT_COMP",
     };
   }
   return { name: node.tag };

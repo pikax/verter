@@ -217,7 +217,12 @@ export interface TypeLocationTemplate {
 
 export interface TypeLocationSlots {
   type: LocationType.Slots;
-  node: _babel_types.Node;
+  node: _babel_types.CallExpression | _babel_types.TSTypeLiteral;
+  // always the `defineProps` expression
+  expression: _babel_types.Expression;
+
+  // parent of the expression, can be
+  varName?: string;
 
   content?: string;
   properties?: {

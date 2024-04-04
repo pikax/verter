@@ -462,7 +462,7 @@ describe("parse", () => {
       });
     });
 
-    it("multiple if/else", () => {
+    it.only("multiple if/else", () => {
       const source = `<div><span v-if="a===1">1</span><span v-else-if="a===2">2</span><span v-if="a === 3">3</span></div>`;
       const el = doParseElement(source);
       const r = parseElement(el.parent, el.context);
@@ -472,7 +472,7 @@ describe("parse", () => {
         node: el.parent,
         props: [],
 
-        children: [
+        conditions: [
           {
             type: ParsedType.Condition,
             children: [
@@ -551,11 +551,12 @@ describe("parse", () => {
         tag: "div",
         node: parent,
         props: [],
+        type: ParsedType.Element,
 
         children: [
           {
             type: ParsedType.Condition,
-            children: [
+            conditions: [
               {
                 rawName: "v-if",
                 wrap: true,
@@ -581,6 +582,7 @@ describe("parse", () => {
               },
               {
                 rawName: "v-else",
+                type: ParsedType.Condition,
                 wrap: true,
                 parent: parent.children[2],
                 children: [
@@ -680,6 +682,53 @@ describe("parse", () => {
             ],
           },
         ],
+      });
+    });
+
+    describe("slots", () => {
+      it("component declaring slots", () => {
+        const source = `
+        <my-comp>
+          <slot name="test">
+            <span>fallback</span>
+          </slot>
+        </my-comp>`;
+
+        const { parent, context } = doParseElement(source);
+        const r = parseElement(parent, context);
+        expect(r).toMatchObject({
+          tag: "my-comp",
+          node: parent,
+          props: [],
+
+          children: [
+            {
+              tag: ParsedType.Element,
+              node: parent.children[0],
+              props: [
+                {
+                  name: "name",
+                  value: "test",
+
+                  node: parent.children[0].props[0],
+                },
+              ],
+              children: [
+                {
+                  node: parent.children[0].children[0],
+                  tag: "span",
+                  children: [
+                    {
+                      type: ParsedType.Text,
+                      content: "fallback",
+                    },
+                  ],
+                  props: [],
+                },
+              ],
+            },
+          ],
+        });
       });
     });
   });
