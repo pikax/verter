@@ -315,7 +315,7 @@ function splitProps(attrs: Array<ParsedAttribute | ParsedDirective>) {
         type: it.for ? ParsedType.For : ParsedType.Condition,
         ...(it as ParsedDirective & { wrap: true }),
       });
-    } else if ((it as ParsedDirective).rawName === "v-slot") {
+    } else if ((it as ParsedDirective).directive === "slot") {
       childWrappers.push({
         type: ParsedType.RenderSlot,
         ...(it as ParsedDirective),

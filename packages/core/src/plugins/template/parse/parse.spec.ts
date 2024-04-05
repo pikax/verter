@@ -419,7 +419,7 @@ describe("parse", () => {
         children: [
           {
             type: ParsedType.Condition,
-            children: [
+            conditions: [
               {
                 rawName: "v-if",
                 wrap: true,
@@ -462,7 +462,7 @@ describe("parse", () => {
       });
     });
 
-    it.only("multiple if/else", () => {
+    it("multiple if/else", () => {
       const source = `<div><span v-if="a===1">1</span><span v-else-if="a===2">2</span><span v-if="a === 3">3</span></div>`;
       const el = doParseElement(source);
       const r = parseElement(el.parent, el.context);
@@ -471,11 +471,12 @@ describe("parse", () => {
         tag: "div",
         node: el.parent,
         props: [],
+        type: ParsedType.Element,
 
-        conditions: [
+        children: [
           {
             type: ParsedType.Condition,
-            children: [
+            conditions: [
               {
                 rawName: "v-if",
                 wrap: true,
@@ -515,8 +516,8 @@ describe("parse", () => {
             ],
           },
           {
-            type: "condition",
-            children: [
+            type: ParsedType.Condition,
+            conditions: [
               {
                 rawName: "v-if",
                 wrap: true,
@@ -700,10 +701,11 @@ describe("parse", () => {
           tag: "my-comp",
           node: parent,
           props: [],
+          type: ParsedType.Element,
 
           children: [
             {
-              tag: ParsedType.Element,
+              tag: ParsedType.Slot,
               node: parent.children[0],
               props: [
                 {
@@ -729,6 +731,19 @@ describe("parse", () => {
             },
           ],
         });
+      });
+
+      describe.skip("rendering slots", () => {
+        it("v-slot", () => {
+          const source = `<my-comp v-slot>
+            <span>fallback</span>
+        </my-comp>`;
+
+          const { parent, context } = doParseElement(source);
+          const r = parseElement(parent, context);
+          expect(r).toMatchObject({});
+        });
+        it("template #", () => {});
       });
     });
   });

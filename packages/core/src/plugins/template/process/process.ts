@@ -127,7 +127,7 @@ const render = {
   // [ParsedType.Template]: renderTemplate,
   [ParsedType.Text]: renderText,
   [ParsedType.For]: renderFor,
-  // [ParsedType.RenderSlot]: renderSlot,
+  // [ParsedType.RenderSlot]: renderRenderSlot,
   [ParsedType.Slot]: renderSlot,
   [ParsedType.Comment]: renderComment,
   [ParsedType.Interpolation]: renderInterpolation,
@@ -158,6 +158,155 @@ function renderPartialElement(
   if (node.tag) {
     const tagIndex = node.content.indexOf(node.tag);
     appendCtx(node.tag, s, context, node.node.loc.start.offset + tagIndex);
+  }
+}
+
+/**
+ * Renders children in `$children` attribute, this is to allow strict type
+ * checking
+ * @param childrenPos position where $children it will be inserted
+ * @param children
+ * @param s
+ * @param context
+ */
+function renderComponentChildren(
+  childrenPos: number,
+  children: ParsedNodeBase[],
+  s: MagicString,
+  context: ProcessContext
+) {
+  debugger;
+
+  const conditionNarrow = generateNarrowCondition(context, false);
+  const renderFunctionStart = `=>${conditionNarrow} <>\n`;
+  const renderFunctionEnd = `\n</>}}`;
+
+  // node in <my-el v-slot...>
+  if (children.length === 1 && children[0].type === ParsedType.RenderSlot) {
+    const child = children[0];
+    const node = child.node as unknown as DirectiveNode;
+
+    const name =
+      retrieveStringExpressionNode(node.arg, undefined, context) ?? "default";
+
+    // replace v-slot with $children
+    const attributeStart = node.loc.start.offset;
+    const attributeEnd = attributeStart + node.rawName.split(":")[0].length;
+
+    s.overwrite(attributeStart, attributeEnd, "$children");
+
+    const identifiers: string[] = [];
+
+    let moveToIndex = attributeEnd;
+
+    const { exp, arg } = node;
+    if (exp && arg) {
+      const expStart = exp.loc.start.offset;
+      const expEnd = exp.loc.end.offset;
+
+      // update delimiters
+      s.overwrite(expStart - 1, expStart, "(");
+      s.overwrite(expEnd, expEnd + 1, ")");
+
+      // replace : with =
+      s.overwrite(attributeEnd, attributeEnd + 1, "=");
+
+      // append {{
+      s.appendLeft(attributeEnd + 1, `{{`);
+
+      // override = with :
+      s.overwrite(
+        attributeStart + node.rawName.length,
+        attributeStart + node.rawName.length + 1,
+        ":"
+      );
+
+      // s.appendLeft(expStart, `{{ ${name}: (`);
+      s.appendLeft(expEnd + 1, renderFunctionStart);
+
+      //if is an dynamic expression
+      if (arg.loc.source[0] === "[") {
+        retrieveStringExpressionNode(arg, s, context);
+      }
+    } else if (exp) {
+      const expStart = exp.loc.start.offset;
+      const expEnd = exp.loc.end.offset;
+
+      // update delimiters
+      s.remove(expStart - 1, expStart);
+      s.remove(expEnd, expEnd + 1);
+
+      s.appendLeft(expStart, `{{ ${name}: (`);
+      s.appendLeft(expEnd, ")" + renderFunctionStart);
+
+      moveToIndex = exp.loc.end.offset;
+    } else if (arg) {
+      // replace : with  ={{
+      s.overwrite(attributeEnd, attributeEnd + 1, "={{\n");
+
+      // no expression, append ()=>
+      s.appendLeft(
+        attributeStart + node.rawName.length,
+        ": ()" + renderFunctionStart
+      );
+
+      //if is an dynamic expression
+      if (arg.loc.source[0] === "[") {
+        retrieveStringExpressionNode(arg, s, context);
+      }
+
+      moveToIndex = arg.loc.end.offset;
+    } else {
+      // no expression add ={
+      s.appendLeft(attributeEnd, "={{");
+
+      // no name
+      // replace v-slot with default: ()=>
+      s.appendLeft(attributeEnd, `${name}: ()${renderFunctionStart}`);
+    }
+
+    if (exp) {
+      if (exp.ast) {
+        // AST is actually an arrow functionsa
+        for (const param of exp.ast.params) {
+          identifiers.push(...retrieveAccessors(param, context));
+        }
+      } else {
+        identifiers.push(exp.loc.source);
+      }
+    }
+
+    try {
+      // move children
+      for (const it of child.children) {
+        s.move(
+          it.node.loc.start.offset,
+          it.node.loc.end.offset,
+          // set it after expression or after the attribute end
+          // node.exp?.loc.end.offset ?? node.arg?.loc.end.offset ?? attributeEnd
+          moveToIndex
+        );
+      }
+
+      renderChildren(child.children, s, {
+        ...context,
+        ignoredIdentifiers: [...context.ignoredIdentifiers, ...identifiers],
+      });
+    } catch (e) {
+      console.error(e);
+    }
+
+    if (node.exp) {
+      s.appendRight(
+        node.exp.loc.end.offset + (node.arg ? 1 : 0),
+        renderFunctionEnd
+      );
+    } else if (node.arg) {
+      s.appendRight(node.arg.loc.end.offset, renderFunctionEnd);
+    } else {
+      // no expression add }}
+      s.appendRight(attributeEnd, renderFunctionEnd);
+    }
   }
 }
 
@@ -350,7 +499,18 @@ function renderElement(
     s.overwrite(closeTagIndex - node.tag.length - 1, closeTagIndex - 1, tag);
   }
 
-  renderChildren(node.children, s, context);
+  if (node.node.tagType === ElementTypes.COMPONENT) {
+    const lastKnownIndex =
+      node.children.find((x) => x.type === ParsedType.RenderSlot)?.node.loc
+        .start.offset ??
+      (node.props.length
+        ? Math.max(...node.props.map((x) => x.node.loc.end.offset))
+        : openTagIndex + node.node.tag.length + 1);
+
+    renderComponentChildren(lastKnownIndex, node.children, s, context);
+  } else {
+    renderChildren(node.children, s, context);
+  }
 }
 
 function renderAttributes(
@@ -556,11 +716,14 @@ function renderAttribute(
       // if is content let it apply the mapping
       //   const content = retriveStringExpressionNode(n.exp, s, context);
 
-      if (name) {
-        const fixedName = sanitiseAttributeName(name);
-        if (fixedName !== name) {
-          s.overwrite(n.arg.loc.start.offset, n.arg.loc.end.offset, fixedName);
-        }
+      const sanitisedName = name ? sanitiseAttributeName(name) : name;
+
+      if (sanitisedName !== name) {
+        s.overwrite(
+          n.arg.loc.start.offset,
+          n.arg.loc.end.offset,
+          sanitisedName
+        );
       }
 
       if (n.exp) {
@@ -603,7 +766,7 @@ function renderAttribute(
               s.overwrite(
                 n.loc.start.offset,
                 n.loc.start.offset + 1,
-                `={${appendCtx(name, undefined, context)}}`
+                `={${appendCtx(sanitisedName, undefined, context)}}`
               );
               s.move(
                 n.loc.start.offset,
@@ -1533,15 +1696,12 @@ function retrieveStringExpressionNode(
 
       // Not very complex condition
       if (!node.ast) {
+        // TODO this should only be available on special content when
+        // inside vscode
         if (!node.isStatic) {
           // this is probably partial element
           // while the user is typing is useful to keep parsing
           if (NonWordRegex.test(node.content)) {
-            // function preprocessCode(code: string) {
-            //   // Simple regex to remove a trailing dot that's not followed by an identifier
-            //   return code.replace(/\.(\W)/g, " $1");
-            // }
-
             try {
               // const p = preprocessCode(node.content);
               const ast = acornParse(node.content, {
@@ -1720,14 +1880,12 @@ function parseNodeText(
       prepend && appendCtx(node, s, context, offset);
       break;
     }
+    case "OptionalMemberExpression":
     case "MemberExpression": {
       node.object && parseNodeText(node.object, s, context, offset);
       // computed is true if is access []
       node.property &&
         parseNodeText(node.property, s, context, offset, node.computed);
-      break;
-    }
-    case "OptionalMemberExpression": {
       break;
     }
     case "LogicalExpression": {
@@ -1886,7 +2044,10 @@ function* retrieveAccessors(
     | _babel_types.BinaryExpression
     | _babel_types.Identifier
     | _babel_types.PrivateName
-    | _babel_types.Expression,
+    | _babel_types.Expression
+    | _babel_types.ObjectPattern
+    | _babel_types.ObjectProperty
+    | _babel_types.RestElement,
   context: ProcessContext
 ) {
   switch (node.type) {
@@ -1907,6 +2068,31 @@ function* retrieveAccessors(
       const obj = retrieveAccessors(node.object, context).next().value;
       const property = node.property.name;
       yield appendCtx(`${obj}.${property}`, undefined, context);
+      break;
+    }
+    case "ObjectPattern": {
+      for (const it of node.properties) {
+        yield* retrieveAccessors(it, context);
+      }
+      break;
+    }
+
+    case "ObjectProperty": {
+      // if (node.shorthand) {
+      yield* retrieveAccessors(node.shorthand ? node.key : node.value, {
+        ...context,
+        accessor: undefined,
+      });
+      // }
+
+      break;
+    }
+
+    case "RestElement": {
+      yield* retrieveAccessors(node.argument, {
+        ...context,
+        accessor: undefined,
+      });
       break;
     }
   }

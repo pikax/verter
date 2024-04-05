@@ -1269,6 +1269,14 @@ describe("process", () => {
             `"{"version":3,"sources":[""],"names":[],"mappings":"AAAA,eAAgB,IAAD,sBAAK"}"`
           );
         });
+        it("v-bind :short camelise", () => {
+          const source = `<div :foo-bar />`;
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(
+            `"<template><div fooBar={___VERTER__ctx.fooBar} /></template>"`
+          );
+        });
 
         it("v-bind :shorter", () => {
           const source = `<div :name="name" />`;
@@ -1303,6 +1311,17 @@ describe("process", () => {
 
           expect(magicString.toString()).toMatchInlineSnapshot(
             `"<template><div name={()=>{ return ___VERTER__ctx.name }} /></template>"`
+          );
+        });
+
+        it("bind with ?.", () => {
+          const source = `<div :name="test?.random" />`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+
+          expect(magicString.toString()).toMatchInlineSnapshot(
+            `"<template><div name={___VERTER__ctx.test?.random} /></template>"`
           );
         });
 
@@ -1762,6 +1781,282 @@ describe("process", () => {
         } : undefined}</template>"
       `);
     });
+
+    describe("rendering", () => {
+      describe.only("v-slot", () => {
+        it("v-slot", () => {
+          const source = `<my-comp v-slot>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{default: ()=> <>
+
+            </>}}>
+                      </___VERTER__comp.MyComp></template>"
+          `);
+        });
+        it("v-slot selfClosing", () => {
+          const source = `<my-comp v-slot/>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{default: ()=> <>
+
+            </>}}/></template>"
+          `);
+        });
+        it("v-slot with children", () => {
+          const source = `<my-comp v-slot>
+          <span> {{test}} </span>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{default: ()=> <>
+            <span> {___VERTER__ctx.test} </span>
+            </>}}>
+                      
+                      </___VERTER__comp.MyComp></template>"
+          `);
+        });
+
+        it("v-slot='props'", () => {
+          const source = `<my-comp v-slot='props'>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{ default: (props)=> <>
+
+            </>}}>
+                      </___VERTER__comp.MyComp></template>"
+          `);
+        });
+        it("v-slot='props' with children", () => {
+          const source = `<my-comp v-slot='props'>
+          <span> {{test}} </span>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{ default: (props)=> <>
+            <span> {___VERTER__ctx.test} </span>
+            </>}}>
+                      
+                      </___VERTER__comp.MyComp></template>"
+          `);
+        });
+
+        it("v-slot='props' with children + accessing ctx", () => {
+          const source = `<my-comp v-slot='props'>
+          <span> {{props}} </span>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{ default: (props)=> <>
+            <span> {props} </span>
+            </>}}>
+                      
+                      </___VERTER__comp.MyComp></template>"`);
+        });
+
+        it("v-slot='{ foo, bar }' with children + accessing ctx", () => {
+          const source = `<my-comp v-slot='{ foo, bar }'>
+          <span> {{foo + bar}} </span>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{ default: ({ foo, bar })=> <>
+            <span> {foo + bar} </span>
+            </>}}>
+                      
+                      </___VERTER__comp.MyComp></template>"
+          `);
+        });
+
+        it("v-slot='{ foo, ...rest }' with children + accessing ctx", () => {
+          const source = `<my-comp v-slot='{ foo, ...rest }'>
+          <span> {{foo + rest}} </span>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{ default: ({ foo, ...rest })=> <>
+            <span> {foo + rest} </span>
+            </>}}>
+                      
+                      </___VERTER__comp.MyComp></template>"`);
+        });
+        it("v-slot='{ foo: test}' with children + accessing ctx", () => {
+          const source = `<my-comp v-slot='{ foo: test }'>
+          <span> {{foo + test}} </span>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{ default: ({ foo: test })=> <>
+            <span> {___VERTER__ctx.foo + test} </span>
+            </>}}>
+                      
+                      </___VERTER__comp.MyComp></template>"`);
+        });
+
+        it("v-slot:header", () => {
+          const source = `<my-comp v-slot:header>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{
+            header: ()=> <>
+
+            </>}}>
+                      </___VERTER__comp.MyComp></template>"
+          `);
+        });
+
+        it("v-slot:header='props'", () => {
+          const source = `<my-comp v-slot:header='props'>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{header:(props)=> <>
+
+            </>}}>
+                      </___VERTER__comp.MyComp></template>"
+          `);
+        });
+
+        it("v-slot:[foo]", () => {
+          const source = `<my-comp v-slot:[foo]>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{
+            [___VERTER__ctx.foo]: ()=> <>
+
+            </>}}>
+                      </___VERTER__comp.MyComp></template>"
+          `);
+        });
+        it.skip("v-slot:[foo]='props'", () => {
+          const source = `<my-comp v-slot:[foo]="props">
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot();
+        });
+
+        it.skip("should narrow", () => {
+          const source = `<my-comp v-if="foo === true" v-slot>
+          {{foo === false ? 0 : true}}
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot();
+        });
+      });
+
+      describe("template #", () => {
+        it.skip("template #default", () => {
+          const source = `<my-comp>
+            <template #default>
+            </template>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp>
+                        <template #default>
+                        </template>
+                      </___VERTER__comp.MyComp></template>"
+          `);
+        });
+        it.skip("template #default='props'", () => {
+          const source = `<my-comp>
+            <template #default='props'>
+            </template>
+          </my-comp>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot();
+        });
+      });
+
+      it.skip("template #header", () => {
+        const source = `<my-comp>
+          <template #header>
+          </template>
+        </my-comp>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot();
+      });
+      it.skip("template #header='props'", () => {
+        const source = `<my-comp>
+          <template #header='props'>
+          </template>
+        </my-comp>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot();
+      });
+
+      it.skip("template #[foo]", () => {
+        const source = `<my-comp>
+          <template #[foo]>
+          </template>
+        </my-comp>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot();
+      });
+      it.skip("template #[foo]='props'", () => {
+        const source = `<my-comp>
+          <template #[foo]='props'>
+          </template>
+        </my-comp>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot();
+      });
+      it.skip("should narrow", () => {
+        const source = `<my-comp v-if="foo === true">
+        <template #default>
+          {{foo === false ? 0 : true}}
+        </template>
+        </my-comp>`;
+
+        const parsed = doParseContent(source);
+        const { magicString } = process(parsed);
+        expect(magicString.toString()).toMatchInlineSnapshot();
+      });
+    });
   });
 
   describe("extra", () => {
@@ -1772,7 +2067,11 @@ describe("process", () => {
       const { magicString } = process(parsed);
 
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `"<template><div> < </div></template>"`
+        `
+            "<template>{(___VERTER__ctx.foo === true)?<___VERTER__comp.MyComp  v-slot>
+                      {{foo === false ? 0 : true}}
+                      </___VERTER__comp.MyComp> : undefined}</template>"
+          `
       );
     });
 
