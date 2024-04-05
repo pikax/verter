@@ -1783,7 +1783,7 @@ describe("process", () => {
     });
 
     describe("rendering", () => {
-      describe.only("v-slot", () => {
+      describe("v-slot", () => {
         it("v-slot", () => {
           const source = `<my-comp v-slot>
           </my-comp>`;
@@ -1956,23 +1956,34 @@ describe("process", () => {
                       </___VERTER__comp.MyComp></template>"
           `);
         });
-        it.skip("v-slot:[foo]='props'", () => {
+        it("v-slot:[foo]='props'", () => {
           const source = `<my-comp v-slot:[foo]="props">
           </my-comp>`;
 
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
-          expect(magicString.toString()).toMatchInlineSnapshot();
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={{[___VERTER__ctx.foo]:(props)=> <>
+
+            </>}}>
+                      </___VERTER__comp.MyComp></template>"
+          `);
         });
 
-        it.skip("should narrow", () => {
+        it("should narrow", () => {
           const source = `<my-comp v-if="foo === true" v-slot>
           {{foo === false ? 0 : true}}
           </my-comp>`;
 
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
-          expect(magicString.toString()).toMatchInlineSnapshot();
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template>{(___VERTER__ctx.foo === true)?<___VERTER__comp.MyComp  $children={{default: ()=>!((___VERTER__ctx.foo === true)) ? undefined :  <>
+            {___VERTER__ctx.foo === false ? 0 : true}
+            </>}}>
+                      
+                      </___VERTER__comp.MyComp> : undefined}</template>"
+          `);
         });
       });
 
@@ -2067,11 +2078,7 @@ describe("process", () => {
       const { magicString } = process(parsed);
 
       expect(magicString.toString()).toMatchInlineSnapshot(
-        `
-            "<template>{(___VERTER__ctx.foo === true)?<___VERTER__comp.MyComp  v-slot>
-                      {{foo === false ? 0 : true}}
-                      </___VERTER__comp.MyComp> : undefined}</template>"
-          `
+        `"<template><div> < </div></template>"`
       );
     });
 

@@ -175,8 +175,6 @@ function renderComponentChildren(
   s: MagicString,
   context: ProcessContext
 ) {
-  debugger;
-
   const conditionNarrow = generateNarrowCondition(context, false);
   const renderFunctionStart = `=>${conditionNarrow} <>\n`;
   const renderFunctionEnd = `\n</>}}`;
