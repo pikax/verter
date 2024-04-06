@@ -182,6 +182,8 @@ function renderComponentChildren(
   // node in <my-el v-slot...>
   // attributes will use $children={ { default: ()=> {}}}
   const child = children[0];
+  // empty
+  if (!child) return;
   if (
     children.length === 1 &&
     child.type === ParsedType.RenderSlot &&
@@ -340,7 +342,7 @@ function renderComponentChildren(
     s.appendLeft(
       childrenPos,
       [
-        " $children={ ({ $slots })=> {",
+        " $children={ ({ $slots })=> {\n$slots;\n",
         ...(nonSlotChildren.length > 1
           ? ["renderSlot($slots.default, ()=> {", narrowCondition]
           : []),
@@ -489,7 +491,14 @@ function renderRenderSlot(
   s: MagicString,
   context: ProcessContext
 ) {
-  renderChildren(node.children, s, context);
+  renderChildren(
+    node.children.map((x) => {
+      x.NO_WRAP = true;
+      return x;
+    }),
+    s,
+    context
+  );
 }
 
 function renderSlot(
@@ -1224,6 +1233,8 @@ function renderFor(
     throw new Error("Invalid v-for expression");
   }
 
+  // move
+
   const startInOf = node.exp.loc.start.offset + inOfIndex;
   const endInOf = startInOf + 4;
 
@@ -1291,9 +1302,6 @@ function renderFor(
     // TODO
   }
 
-  // close v-for
-  s.appendLeft(childEnd, "})");
-
   // append conditions
   const narrowConditions = generateNarrowCondition(context, !node.NO_WRAP);
   if (narrowConditions) {
@@ -1306,6 +1314,9 @@ function renderFor(
   };
 
   renderChildren(node.children, s, childrenContext);
+
+  // close v-for
+  s.appendLeft(childEnd, "})");
 }
 
 function renderConditionBetter(

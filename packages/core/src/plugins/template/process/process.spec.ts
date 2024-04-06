@@ -589,7 +589,7 @@ describe("process", () => {
     });
     describe("directive", () => {
       describe("v-for", () => {
-        it.only("simple", () => {
+        it("simple", () => {
           const source = `<li v-for="item in items"></li>`;
 
           const parsed = doParseContent(source);
@@ -1763,6 +1763,31 @@ describe("process", () => {
       `);
     });
 
+    it.only("allow slot after condition", () => {
+      const source = `<my-comp>
+        <div v-if="foo === 'name'"> </div>
+        <slot name="bar"></slot>
+      </my-comp>`;
+      const parsed = doParseContent(source);
+      const { magicString } = process(parsed);
+      expect(magicString.toString()).toMatchInlineSnapshot(`
+        "<template><___VERTER__comp.MyComp $children={ ({ $slots })=> {
+        $slots;
+
+        renderSlot($slots.default, ()=> {
+
+        (___VERTER__ctx.foo === 'name')?<div > </div>{()=>{
+        const Comp = ___VERTER_SLOT_COMP .bar
+        return <Comp ></Comp>
+        }}
+        }
+        }}>
+                { : undefined}
+                
+              </___VERTER__comp.MyComp></template>"
+      `);
+    });
+
     it("nested", () => {
       const source = `<slot v-if="disableDrag" :name="selected as T">
       <slot :disableDrag />
@@ -1967,6 +1992,27 @@ describe("process", () => {
 
             </>}}>
                       </___VERTER__comp.MyComp></template>"
+          `);
+        });
+
+        it("process children", () => {
+          const source = `<div >
+            <slot name="src" style="random">
+              <MyComp :src="test.src"/>
+            </slot>
+          </div>`;
+
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><div >
+                        {()=>{
+            const Comp = ___VERTER_SLOT_COMP.default>
+            return <Comp 
+                          <___VERTER__comp.MyComp src={___VERTER__ctx.test.src}/>
+                        </Comp>
+            }}
+                      </div></template>"
           `);
         });
 
@@ -2207,7 +2253,7 @@ describe("process", () => {
           expect(magicString.toString()).toMatchInlineSnapshot();
         });
 
-        it.skip("support with v-for", () => {
+        it("support with v-for", () => {
           const source = `<my-comp>
         <template v-for="foo in $slots" :key="foo" #[foo]='props'>
         </template>
@@ -2216,17 +2262,18 @@ describe("process", () => {
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
           expect(magicString.toString()).toMatchInlineSnapshot(`
-          "<template>{(___VERTER__ctx.foo === true)?<___VERTER__comp.MyComp $children={ ({ $slots })=> {
-          if(!((___VERTER__ctx.foo === true))) { return; } 
-          __VERTER__renderList(___VERTER__ctx.$slots,(foo)=>{if(!((___VERTER__ctx.foo === true))) { return; } <___VERTER_TEMPLATE_COMP  key={foo} #[foo]='props'>
-                  </___VERTER_TEMPLATE_COMP>})
-          }} >
-                  {}
-                </___VERTER__comp.MyComp> : undefined}</template>"
-        `);
+            "<template><___VERTER__comp.MyComp $children={ ({ $slots })=> {
+            __VERTER__renderList(___VERTER__ctx.$slots,(foo)=>{renderSlot($slots[foo],(props)=>{ 
+            <___VERTER_TEMPLATE_COMP  key={foo} >
+                    </___VERTER_TEMPLATE_COMP>})})
+
+            }}>
+                    
+                  </___VERTER__comp.MyComp></template>"
+          `);
         });
 
-        it.skip("v-for with Object.keys", () => {
+        it("v-for with Object.keys", () => {
           const source = `<my-comp>
       <template v-for="slot in Object.keys($slots)" :key="\`slot:\${slot}\`" #[slot]="slotProps">
         <slot :name="slot" v-bind="slotProps" />
@@ -2235,7 +2282,20 @@ describe("process", () => {
 
           const parsed = doParseContent(source);
           const { magicString } = process(parsed);
-          expect(magicString.toString()).toMatchInlineSnapshot();
+          expect(magicString.toString()).toMatchInlineSnapshot(`
+            "<template><___VERTER__comp.MyComp $children={ ({ $slots })=> {
+            __VERTER__renderList(Object.keys(___VERTER__ctx.$slots),(slot)=>{renderSlot($slots[slot],(slotProps)=>{ 
+            <___VERTER_TEMPLATE_COMP  key={\`slot:\${slot}\`} >
+                    {()=>{
+            const Comp = ___VERTER_SLOT_COMP [slot]
+            return <Comp  {...___VERTER__ctx.slotProps} />
+            }}
+                  </___VERTER_TEMPLATE_COMP>})})
+
+            }}>
+                  
+                </___VERTER__comp.MyComp></template>"
+          `);
         });
 
         it.skip("support comments", () => {

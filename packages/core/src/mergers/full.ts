@@ -561,6 +561,8 @@ declare module 'vue' {
 }
 
 declare function ___VERTER_renderSlot<T extends Array<any>>(slot: (...args: T) => any, cb: (...cb: T) => any): void;
+declare function ___VERTER_TEMPLATE_COMP(): JSX.Element;
+
 `;
 
   s.prependLeft(0, "import 'vue/jsx';\n" + patchSlots);
