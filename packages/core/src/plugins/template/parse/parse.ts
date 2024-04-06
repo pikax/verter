@@ -54,8 +54,8 @@ interface ParsedDirective {
 
   parent: ElementNode;
   node: DirectiveNode;
-  argument: ExpressionNode | undefined;
-  expression: ExpressionNode | undefined;
+  arg: ExpressionNode | undefined;
+  exp: ExpressionNode | undefined;
 
   for: ForParseResult | undefined;
 
@@ -214,7 +214,11 @@ export function parseElement(
 
   const currentNode = {
     type:
-      node.tagType === ElementTypes.SLOT ? ParsedType.Slot : ParsedType.Element,
+      node.tagType === ElementTypes.SLOT
+        ? ParsedType.Slot
+        : node.tagType === ElementTypes.TEMPLATE
+        ? ParsedType.Template
+        : ParsedType.Element,
     tag: node.tag,
     node,
     children: content,
@@ -226,6 +230,7 @@ export function parseElement(
       return {
         ...cur,
         children: [prev],
+        wrapped: true,
       };
     }, currentNode);
 
@@ -310,11 +315,18 @@ function splitProps(attrs: Array<ParsedAttribute | ParsedDirective>) {
 
   for (const it of attrs) {
     if ("wrap" in it && it.wrap) {
-      // push it to the end
-      wrappers.push({
-        type: it.for ? ParsedType.For : ParsedType.Condition,
-        ...(it as ParsedDirective & { wrap: true }),
-      });
+      if (it.directive === "slot") {
+        wrappers.unshift({
+          type: ParsedType.RenderSlot,
+          ...(it as ParsedDirective & { wrap: true }),
+        });
+      } else {
+        // push it to the end
+        wrappers.push({
+          type: it.for ? ParsedType.For : ParsedType.Condition,
+          ...(it as ParsedDirective & { wrap: true }),
+        });
+      }
     } else if ((it as ParsedDirective).directive === "slot") {
       childWrappers.push({
         type: ParsedType.RenderSlot,
@@ -340,6 +352,12 @@ function splitProps(attrs: Array<ParsedAttribute | ParsedDirective>) {
         b.rawName === "v-else-if" ||
         b.rawName === "v-else"
       ) {
+        return -1;
+      }
+      if (a.directive === "slot") {
+        return 1;
+      }
+      if (b.directive === "slot") {
         return -1;
       }
     }
@@ -375,10 +393,10 @@ export function parseProps(
 
         directive: prop.name,
         rawName: prop.rawName,
-        argument: prop.arg,
-        expression: prop.exp,
+        arg: prop.arg,
+        exp: prop.exp,
 
-        wrap: isWrapable(prop),
+        wrap: isWrapable(prop, node),
         for: prop.forParseResult,
         children: undefined,
       } satisfies ParsedDirective;
@@ -396,7 +414,15 @@ const WrapableDirectives = new Set<string>([
   "v-else",
   "v-for",
 ] as NativeDirectives[]);
-export function isWrapable(node: DirectiveNode) {
+export function isWrapable(node: DirectiveNode, parent: ElementNode) {
+  // only wrap directives
+  if (
+    node.name === "slot" &&
+    (node.rawName[0] === "#" ||
+      (node.rawName.startsWith("v-slot:") &&
+        parent.tagType === ElementTypes.TEMPLATE))
+  )
+    return true;
   if (node.rawName) {
     return WrapableDirectives.has(node.rawName);
   }

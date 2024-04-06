@@ -124,10 +124,10 @@ const render = {
   [ParsedType.Element]: renderElement,
   [ParsedType.Attribute]: renderAttribute,
   // [ParsedType.Directive]: renderDirective,
-  // [ParsedType.Template]: renderTemplate,
+  [ParsedType.Template]: renderTemplate,
   [ParsedType.Text]: renderText,
   [ParsedType.For]: renderFor,
-  // [ParsedType.RenderSlot]: renderRenderSlot,
+  [ParsedType.RenderSlot]: renderRenderSlot,
   [ParsedType.Slot]: renderSlot,
   [ParsedType.Comment]: renderComment,
   [ParsedType.Interpolation]: renderInterpolation,
@@ -180,8 +180,14 @@ function renderComponentChildren(
   const renderFunctionEnd = `\n</>}}`;
 
   // node in <my-el v-slot...>
-  if (children.length === 1 && children[0].type === ParsedType.RenderSlot) {
-    const child = children[0];
+  // attributes will use $children={ { default: ()=> {}}}
+  const child = children[0];
+  if (
+    children.length === 1 &&
+    child.type === ParsedType.RenderSlot &&
+    child.directive === "slot" &&
+    !child.wrapped
+  ) {
     const node = child.node as unknown as DirectiveNode;
 
     const name =
@@ -305,7 +311,185 @@ function renderComponentChildren(
       // no expression add }}
       s.appendRight(attributeEnd, renderFunctionEnd);
     }
+  } else {
+    /**
+     * This should use the syntax
+     * $children={({$slots})=> {
+     *   // <template #default> ... </template>
+     *
+     *   {
+     *      ___VERTER_renderSlot($slots.default, ()=> <>...</>)
+     *   }
+     * }}
+     */
+
+    //___VERTER_renderSlot
+
+    const renderSlotChildren: DirectiveNode[] = children.filter(
+      (x) => x.type === ParsedType.RenderSlot
+    );
+
+    // const hasDefaultSlot = renderSlotChildren./
+
+    // non slot children should be handle as default slot
+    const nonSlotChildren = children.filter(
+      (x) => x.type !== ParsedType.RenderSlot
+    );
+    const narrowCondition = generateNarrowCondition(context, true);
+
+    s.appendLeft(
+      childrenPos,
+      [
+        " $children={ ({ $slots })=> {",
+        ...(nonSlotChildren.length > 1
+          ? ["renderSlot($slots.default, ()=> {", narrowCondition]
+          : []),
+        "",
+      ].join("\n")
+    );
+
+    for (const slot of renderSlotChildren) {
+      renderComponentSlot(childrenPos, slot, s, context);
+    }
+
+    // const toDefaultSlot = [];
+    // for (const element of nonSlotChildren) {
+    //   switch (element.type) {
+    //     case ParsedType.Condition: {
+    //       break;
+    //     }
+    //     case ParsedType.For: {
+    //       break;
+    //     }
+    //     default: {
+    //     }
+    //   }
+    // }
+
+    nonSlotChildren.forEach((x) =>
+      renderComponentSlot(childrenPos, x, s, context)
+    );
+
+    s.appendRight(
+      childrenPos,
+      ["", nonSlotChildren.length > 1 ? "}" : undefined, "}}"].join("\n")
+    );
   }
+}
+
+function renderComponentSlot(
+  childrenPos: number,
+  node: ParsedNodeBase & {
+    tag: "template";
+    props: ParsedNodeBase[];
+  },
+  s: MagicString,
+  context: ProcessContext,
+  dry = false
+) {
+  try {
+    // append children index
+    // NOTE not sure if the narrow is necessary here
+
+    switch (node.type) {
+      case ParsedType.Condition: {
+        node.conditions.forEach((x) => {
+          x.children.forEach((c) => {
+            if (c.type === ParsedType.RenderSlot) {
+              const parent = c.parent;
+              s.move(
+                parent.loc.start.offset,
+                parent.loc.end.offset + 1,
+                childrenPos
+              );
+              // renderComponentSlot(childrenPos, c, s, context);
+            } else {
+              s.move(
+                c.node.loc.start.offset,
+                c.node.loc.end.offset,
+                childrenPos
+              );
+            }
+          });
+          // renderNode(node, s, context);
+        });
+        break;
+      }
+      case ParsedType.For: {
+        s.move(node.loc.start.offset, node.loc.end.offset, childrenPos);
+
+        break;
+      }
+
+      default: {
+        const parent = node.parent as ParsedNodeBase;
+        if (parent) {
+          s.move(parent.loc.start.offset, parent.loc.end.offset, childrenPos);
+        } else {
+          s.move(
+            (node.loc ?? node.node.loc).start.offset,
+            (node.loc ?? node.node.loc).end.offset,
+            childrenPos
+          );
+        }
+        break;
+      }
+    }
+
+    renderNode(node, s, context);
+
+    return;
+
+    const parent = node.parent as ParsedNodeBase;
+    if (parent) {
+      s.move(parent.loc.start.offset, parent.loc.end.offset, childrenPos);
+      // renderChildren(node.children, s, context);
+    } else {
+      if (node.type === ParsedType.Condition) {
+        node.conditions.forEach((x) => {
+          x.children.forEach((c) => {
+            if (c.type === ParsedType.RenderSlot) {
+              const parent = c.parent;
+              s.move(
+                parent.loc.start.offset,
+                parent.loc.end.offset + 1,
+                childrenPos
+              );
+              // renderComponentSlot(childrenPos, c, s, context);
+            } else {
+              s.move(
+                c.node.loc.start.offset,
+                c.node.loc.end.offset,
+                childrenPos
+              );
+            }
+          });
+          // renderNode(node, s, context);
+        });
+      } else {
+        s.move(
+          (node.loc ?? node.node.loc).start.offset,
+          (node.loc ?? node.node.loc).end.offset,
+          childrenPos
+        );
+        // renderNode(node, s, context);
+      }
+    }
+
+    renderNode(node, s, context);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function renderRenderSlot(
+  node: ParsedNodeBase & {
+    tag: "render-slot";
+  },
+  s: MagicString,
+  context: ProcessContext
+) {
+  renderChildren(node.children, s, context);
 }
 
 function renderSlot(
@@ -458,6 +642,78 @@ function renderSlot(
   renderChildren(node.children, s, context);
 }
 
+function renderTemplate(
+  node: ParsedNodeBase & {
+    node: ElementNode;
+    props: ParsedNodeBase[];
+    tag: "template";
+  },
+  s: MagicString,
+  context: ProcessContext
+) {
+  // const { name: tag, accessor } = resolveComponentTag(node.node, context);
+
+  // handle slots
+  const slot = node.node.props.find((x) => x.name === "slot");
+  if (slot) {
+    const templateTagStart = node.node.loc.start.offset;
+    const templateTagEnd = node.node.loc.end.offset;
+
+    const narrowCondition = generateNarrowCondition(context, true);
+
+    const name =
+      retrieveStringExpressionNode(slot.arg, undefined, context) ?? "default";
+    const attributeStart = slot.loc.start.offset;
+    const attributeEnd = attributeStart + slot.rawName.split(":")[0].length;
+
+    // appending is not playing nice with the moving attribute
+    // // s.appendRight(templateTagStart, "renderSlot(");
+
+    // prepend renderSlot
+    const { exp, arg } = slot as DirectiveNode;
+
+    const isDynamic = arg.loc.source[0] === "[";
+    // current #default
+    // replace # with $slots.
+    s.overwrite(
+      attributeStart,
+      attributeStart + 1,
+      `$slots${isDynamic ? "" : "."}`
+    );
+
+    // move attribute to the beginning
+    s.move(attributeStart, slot.loc.end.offset, templateTagStart);
+
+    if (exp) {
+      const expStart = exp.loc.start.offset;
+      const expEnd = exp.loc.end.offset;
+      // update delimiters
+      s.overwrite(expStart - 1, expStart, "(");
+      s.overwrite(expEnd, expEnd + 1, ")");
+
+      // replace = with ,
+      s.overwrite(attributeEnd, attributeEnd + 1, ",");
+
+      // add => {
+      s.appendLeft(expEnd + 1, ["=>{ ", narrowCondition].join("\n"));
+    } else {
+      s.appendLeft(attributeEnd, [", ()=>{ ", narrowCondition].join("\n"));
+    }
+
+    //if is an dynamic expression
+    if (isDynamic) {
+      retrieveStringExpressionNode(arg, s, context);
+    }
+    s.appendRight(attributeStart, "renderSlot(");
+
+    // prepend renderSlot
+    s.prependLeft(templateTagEnd, "})");
+  }
+
+  // do rendering
+  renderElement(node, s, context);
+}
+
 function renderElement(
   node: ParsedNodeBase & {
     node: ElementNode;
@@ -499,8 +755,8 @@ function renderElement(
 
   if (node.node.tagType === ElementTypes.COMPONENT) {
     const lastKnownIndex =
-      node.children.find((x) => x.type === ParsedType.RenderSlot)?.node.loc
-        .start.offset ??
+      node.children.find((x) => x.type === ParsedType.RenderSlot && !x.wrapped)
+        ?.node.loc.start.offset ??
       (node.props.length
         ? Math.max(...node.props.map((x) => x.node.loc.end.offset))
         : openTagIndex + node.node.tag.length + 1);
@@ -899,7 +1155,7 @@ function renderText(
 function renderFor(
   node: ParsedNodeBase & {
     for: ForParseResult;
-    expression: SimpleExpressionNode;
+    exp: SimpleExpressionNode;
   },
   s: MagicString,
   context: ProcessContext
@@ -942,10 +1198,11 @@ function renderFor(
   const vForStart = node.node.loc.start.offset;
   const vForEnd = node.node.loc.end.offset;
 
-  const shouldWrapParentesis = !node.expression.content.startsWith("(");
+  const shouldWrapParentesis = !node.exp.content.startsWith("(");
 
   // index of in or of, can be " in " or " of "
 
+  // TODO do a trim
   const InOf = [
     " in ",
     "   in ",
@@ -960,14 +1217,14 @@ function renderFor(
 
   let inOfIndex = -1;
   for (let i = 0; i < InOf.length && inOfIndex === -1; i++) {
-    inOfIndex = node.expression.content.indexOf(InOf[i]);
+    inOfIndex = node.exp.content.indexOf(InOf[i]);
   }
   // couldn't find 'in' or 'of'
   if (inOfIndex < 0) {
     throw new Error("Invalid v-for expression");
   }
 
-  const startInOf = node.expression.loc.start.offset + inOfIndex;
+  const startInOf = node.exp.loc.start.offset + inOfIndex;
   const endInOf = startInOf + 4;
 
   // move " in " or " of " after source
@@ -1010,11 +1267,7 @@ function renderFor(
 
   // { renderList"item in _ctx.items"<li -> { renderList(item in _ctx.items)<li
   //   if (value) {
-  s.overwrite(
-    node.expression.loc.start.offset - 1,
-    node.expression.loc.start.offset,
-    `(`
-  );
+  s.overwrite(node.exp.loc.start.offset - 1, node.exp.loc.start.offset, `(`);
   //   } else {
   //     // TODO
   //   }
@@ -1030,8 +1283,8 @@ function renderFor(
   if (value) {
     // move the value to after the source
     s.move(
-      node.expression.loc.start.offset,
-      node.expression.loc.start.offset + inOfIndex,
+      node.exp.loc.start.offset,
+      node.exp.loc.start.offset + inOfIndex,
       source.loc.end.offset
     );
   } else {
@@ -1055,185 +1308,6 @@ function renderFor(
   renderChildren(node.children, s, childrenContext);
 }
 
-function renderConditionNarrowed(
-  node: ParsedNodeBase & { conditions: ParsedNodeBase[] },
-  s: MagicString,
-  context: ProcessContext
-) {
-  const { conditions } = node;
-
-  const firstCondition = conditions[0];
-  const lastCondition = conditions[conditions.length - 1];
-
-  const expressionAccessors: Array<string> = [];
-
-  if (firstCondition) {
-    const firstChild =
-      firstCondition.children[0]?.type === "for"
-        ? firstCondition.children[0]?.children[0]
-        : firstCondition.children[0];
-    const childStart = firstChild.node.loc.start.offset;
-
-    // append { ()=> {
-
-    s.prependLeft(childStart, "{ ()=> {");
-
-    const lastChild =
-      lastCondition.children[lastCondition.children.length - 1]?.type === "for"
-        ? lastCondition.children[lastCondition.children.length - 1]?.children[
-            lastCondition.children[lastCondition.children.length - 1]?.children
-              .length - 1
-          ]
-        : lastCondition.children[lastCondition.children.length - 1];
-    const childEnd = lastChild.node.loc.end.offset;
-    s.appendRight(childEnd, " } }");
-  }
-
-  for (let i = 0; i < conditions.length; i++) {
-    const condition = conditions[i];
-
-    const firstChild =
-      condition.children[0]?.type === "for"
-        ? condition.children[0]?.children[0]
-        : condition.children[0];
-    const lastChild =
-      condition.children[condition.children.length - 1]?.type === "for"
-        ? condition.children[condition.children.length - 1]?.children[
-            condition.children[condition.children.length - 1]?.children.length -
-              1
-          ]
-        : condition.children[condition.children.length - 1];
-
-    const childStart = firstChild.node.loc.start.offset;
-    const childEnd = lastChild.node.loc.end.offset;
-    const conditionStart = condition.node.loc.start.offset;
-    const conditionEnd = condition.node.loc.end.offset;
-
-    const directiveStart = condition.node.loc.start.offset;
-    const directiveEnd = directiveStart + condition.node.rawName.length + 1; // with =
-
-    if (condition.directive !== "else") {
-      // move v-if/v-else-if to before the first child
-      s.move(conditionStart - 1, conditionEnd, childStart);
-    } /*else {
-      // move v-if/v-else-if to before the first child
-      s.move(conditionStart, conditionEnd, childStart + 1);
-    }*/
-
-    switch (condition.directive) {
-      case "if": {
-        // move v-if to after the expression
-
-        //remove v-
-        s.remove(directiveStart, directiveStart + 2);
-
-        // remove =
-        s.remove(directiveEnd - 1, directiveEnd);
-
-        // // replace " " with ( )
-        // s.overwrite(directiveEnd, directiveEnd + 1, "(");
-        // s.overwrite(
-        //   condition.expression.loc.end.offset,
-        //   condition.expression.loc.end.offset + 1,
-        //   ")"
-        // );
-
-        // // now the expression is at childStart
-        // s.move(directiveStart, directiveEnd, childStart);
-
-        // // replace v-if with ?
-        // s.overwrite(directiveStart, directiveEnd, "?");
-
-        // add accessors
-
-        // replace v-if with
-        break;
-      }
-      case "else-if": {
-        // now the expression is at childStart
-        s.move(directiveStart, directiveEnd, childStart);
-
-        // replace v-else-if with ?
-        s.overwrite(directiveStart, directiveEnd, "?");
-        break;
-      }
-      case "else": {
-        // // now the expression is at childStart
-        // directive end contains `=`
-        s.move(directiveStart, directiveEnd - 1, childStart);
-
-        // replave v-else with :
-        s.overwrite(directiveStart, directiveEnd - 1, " else ");
-        // s.move(directiveStart, directiveStart + 1, childStart);
-
-        break;
-      }
-    }
-
-    // add wrap { } to children
-
-    if ("expression" in condition && condition.expression) {
-      const expression = condition.expression as ExpressionNode;
-
-      if (expression.ast) {
-        expressionAccessors.push(...retrieveAccessors(expression.ast, context));
-      }
-
-      // replace delimiters with ()
-      s.overwrite(
-        expression.loc.start.offset - 1,
-        expression.loc.start.offset,
-        // (condition.directive === "else-if" ? "}" : "") + "("
-        "("
-      );
-      s.overwrite(
-        expression.loc.end.offset,
-        expression.loc.end.offset + 1,
-        ")"
-      );
-
-      retrieveStringExpressionNode(expression, s, context, true);
-    }
-    // append new accessors
-    let overriddenContext = context;
-    if (expressionAccessors.length) {
-      const prevAccessor = context.accessor + ".";
-      const accessor = context.accessor + "_narrower";
-
-      const newAccessorStr = `\nconst ${accessor} = {...${
-        context.accessor
-      }, ${expressionAccessors.map(
-        (x) => `${x.replace(prevAccessor, "")}: ${x}`
-      )}};\n`;
-      // s.prependLeft(expression.loc.end.offset + 1, newAccessorStr);
-      s.prependRight(childStart, newAccessorStr);
-
-      overriddenContext = {
-        ...context,
-        accessor,
-      };
-    }
-
-    renderChildren(
-      condition.children.map((x) => {
-        if (x.type === "for" || x.type === "slot") {
-          // prevent wrapping of the for loop
-          x.NO_WRAP = true;
-        }
-        return x;
-      }),
-      s,
-      context
-    );
-
-    if (condition.children.length > 0) {
-      // add {  }
-      s.prependRight(childStart, "{");
-      s.prependLeft(childEnd, "}");
-    }
-  }
-}
-
 function renderConditionBetter(
   node: ParsedNodeBase & { conditions: ParsedNodeBase[] },
   s: MagicString,
@@ -1246,23 +1320,27 @@ function renderConditionBetter(
   const firstCondition = conditions[0];
   const lastCondition = conditions[conditions.length - 1];
 
+  const WRAPABLE_TYPES = new Set(["for", "render-slot"]);
   if (firstCondition) {
-    const firstChild =
-      firstCondition.children[0]?.type === "for"
+    // if is template #slot do not add external block
+    if (firstCondition.children[0]?.type !== "render-slot") {
+      const firstChild = WRAPABLE_TYPES.has(firstCondition.children[0]?.type)
         ? firstCondition.children[0]?.children[0]
         : firstCondition.children[0];
-    const childStart = firstChild.node.loc.start.offset;
-    s.prependLeft(childStart, "{");
+      const childStart = firstChild.node.loc.start.offset;
+      s.prependLeft(childStart, "{");
 
-    const lastChild =
-      lastCondition.children[lastCondition.children.length - 1]?.type === "for"
+      const lastChild = WRAPABLE_TYPES.has(
+        lastCondition.children[lastCondition.children.length - 1]?.type
+      )
         ? lastCondition.children[lastCondition.children.length - 1]?.children[
             lastCondition.children[lastCondition.children.length - 1]?.children
               .length - 1
           ]
         : lastCondition.children[lastCondition.children.length - 1];
-    const childEnd = lastChild.node.loc.end.offset;
-    s.appendRight(childEnd, "}");
+      const childEnd = lastChild.node.loc.end.offset;
+      s.appendRight(childEnd, "}");
+    }
   }
 
   const conditionsContent: string[] = [];
@@ -1270,17 +1348,18 @@ function renderConditionBetter(
   for (let i = 0; i < conditions.length; i++) {
     const condition = conditions[i];
 
-    const firstChild =
-      condition.children[0]?.type === "for"
-        ? condition.children[0]?.children[0]
-        : condition.children[0];
-    const lastChild =
-      condition.children[condition.children.length - 1]?.type === "for"
-        ? condition.children[condition.children.length - 1]?.children[
-            condition.children[condition.children.length - 1]?.children.length -
-              1
-          ]
-        : condition.children[condition.children.length - 1];
+    const firstChild = WRAPABLE_TYPES.has(condition.children[0]?.type)
+      ? condition.children[0]?.children[0]
+      : condition.children[0];
+    const lastChild = WRAPABLE_TYPES.has(
+      condition.children[condition.children.length - 1]?.type
+    )
+      ? condition.children[condition.children.length - 1]?.children[
+          condition.children[condition.children.length - 1]?.children.length - 1
+        ]
+      : condition.children[condition.children.length - 1];
+
+    const isSlot = condition.type === "render-slot";
 
     const childStart = firstChild.node.loc.start.offset;
     const childEnd = lastChild.node.loc.end.offset;
@@ -1335,8 +1414,8 @@ function renderConditionBetter(
       }
     }
 
-    if ("expression" in condition && condition.expression) {
-      const expression = condition.expression as ExpressionNode;
+    if ("exp" in condition && condition.exp) {
+      const expression = condition.exp as ExpressionNode;
 
       // replace delimiters with ()
       s.overwrite(
@@ -1362,7 +1441,7 @@ function renderConditionBetter(
     //   renderNode(child, s, context);
     // }
 
-    let currentCondition = condition.expression
+    let currentCondition = condition.exp
       ? s.snip(conditionStart, conditionEnd).toString()
       : "";
     // there's an ? on the last because of moving
@@ -1396,15 +1475,30 @@ function renderConditionBetter(
   if (!hasElse) {
     const lastCondition = conditions[conditions.length - 1];
 
-    const lastChild =
-      lastCondition.children[lastCondition.children.length - 1]?.type === "for"
-        ? lastCondition.children[lastCondition.children.length - 1]?.children[
-            lastCondition.children[lastCondition.children.length - 1]?.children
-              .length - 1
-          ]
-        : lastCondition.children[lastCondition.children.length - 1];
+    const lastChild = WRAPABLE_TYPES.has(
+      lastCondition.children[lastCondition.children.length - 1]?.type
+    )
+      ? lastCondition.children[lastCondition.children.length - 1]?.children[
+          lastCondition.children[lastCondition.children.length - 1]?.children
+            .length - 1
+        ]
+      : lastCondition.children[lastCondition.children.length - 1];
     const childEnd = lastChild.node.loc.end.offset;
-    s.prependRight(childEnd, " : undefined");
+    if (lastCondition.children[0].type === "render-slot") {
+      // NOTE there's a case where the end tag is not applied correctly
+      // this is an hack
+      if (s.original.at(childEnd - 1) === ">") {
+        // s.overwrite(childEnd - 1, childEnd, "> : undefined", {
+        //   contentOnly: true,
+        // });
+        // s.overwrite(childEnd - 1, childEnd, ">");
+      }
+      // } else {
+      s.prependRight(childEnd, " : undefined");
+      // }
+    } else {
+      s.prependRight(childEnd, " : undefined");
+    }
   }
 }
 
@@ -1507,8 +1601,8 @@ function renderCondition(
       }
     }
 
-    if ("expression" in condition && condition.expression) {
-      const expression = condition.expression as ExpressionNode;
+    if ("expression" in condition && condition.exp) {
+      const expression = condition.exp as ExpressionNode;
 
       // replace delimiters with ()
       s.overwrite(
@@ -1653,28 +1747,37 @@ function resolveComponentTag(
   name: string;
   accessor?: string;
 } {
-  if (node.tagType === ElementTypes.COMPONENT) {
-    const camel = camelize(node.tag);
-    // if not camel just return
-    if (camel === node.tag) {
+  switch (node.tagType) {
+    case ElementTypes.COMPONENT: {
+      const camel = camelize(node.tag);
+      // if not camel just return
+      if (camel === node.tag) {
+        return {
+          name: node.tag,
+          accessor: context.componentAccessor,
+        };
+      }
+      // NOTE probably this is not 100% correct, maybe we could check if the component exists
+      // by passing in the context
       return {
-        name: node.tag,
+        name: capitalize(camel),
         accessor: context.componentAccessor,
       };
     }
-    // NOTE probably this is not 100% correct, maybe we could check if the component exists
-    // by passing in the context
-    return {
-      name: capitalize(camel),
-      accessor: context.componentAccessor,
-    };
+    case ElementTypes.TEMPLATE: {
+      return {
+        name: "___VERTER_TEMPLATE_COMP",
+      };
+    }
+    case ElementTypes.SLOT: {
+      return {
+        name: "___VERTER_SLOT_COMP",
+      };
+    }
+    default: {
+      return { name: node.tag };
+    }
   }
-  if (node.tagType === ElementTypes.SLOT) {
-    return {
-      name: "___VERTER_SLOT_COMP",
-    };
-  }
-  return { name: node.tag };
 }
 
 const NonWordRegex = /\W/;
