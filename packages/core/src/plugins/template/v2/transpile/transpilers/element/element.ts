@@ -203,12 +203,6 @@ function retrieveSlotNamed(node: ComponentNode) {
       continue;
     }
 
-    // const name = slotProp.arg;
-    // if (!name) {
-    //   buffer.push(element);
-    //   continue;
-    // }
-
     const items: TemplateChildNode[] = [];
     while (buffer.length > 0) {
       if (buffer.at(-1).type === NodeTypes.COMMENT) {
@@ -293,10 +287,17 @@ function renderSlot(
       return;
     }
 
-    context.s.appendLeft(
-      insertAt,
-      ["", `{${context.accessors.slotCallback}(`].join("\n")
-    );
+    // context.s.appendLeft(
+    //   insertAt,
+    //   ["", `{${context.accessors.slotCallback}(`].join("\n")
+    // );
+
+    const prepend = ["", `{${context.accessors.slotCallback}(`].join("\n");
+
+    // s.prependLeft(
+    //   slotProp.loc.start.offset,
+    //   ["", `{${context.accessors.slotCallback}(`].join("\n")
+    // );
 
     if (slotProp.arg) {
       processExpression(slotProp.arg, context);
@@ -308,6 +309,8 @@ function renderSlot(
         slotProp.loc.start.offset + 1,
         `$slots${slotProp.rawName[1] === "[" ? "" : "."}`
       );
+
+      s.appendRight(slotProp.loc.start.offset, prepend);
 
       s.move(slotProp.loc.start.offset, slotProp.loc.end.offset, insertAt);
 
@@ -328,6 +331,7 @@ function renderSlot(
             : ".default"
         }`
       );
+      s.appendRight(slotProp.loc.start.offset, prepend);
 
       s.move(slotProp.loc.start.offset, slotProp.loc.end.offset, insertAt);
 
@@ -386,7 +390,8 @@ function renderSlot(
 
   s.move(start, end, insertAt);
 
-  context.s.appendRight(insertAt, `\n})}\n`);
+  // context.s.appendRight(insertAt, `\n})}\n`);
+  context.s.prependLeft(end, `\n})}\n`);
 }
 
 // SLOT CALLBACK DEFINIITON

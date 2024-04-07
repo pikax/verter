@@ -93,7 +93,7 @@ describe("tranpiler element", () => {
         `);
       });
 
-      it.only("with #default", () => {
+      it("with #default", () => {
         const { result } = transpile(
           `<my-component><template #default/></my-component>`
         );
@@ -265,7 +265,7 @@ describe("tranpiler element", () => {
         `);
       });
 
-      it.skip("multiple slots", () => {
+      it("multiple slots", () => {
         const { result } = transpile(
           `<my-component>
             <template #header/>
@@ -275,15 +275,14 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
           const $slots = ComponentInstance.$slots;
-          
           {___VERTER___SLOT_CALLBACK($slots.header)(()=>{
 
           <___VERTER___template />
-        })}
-        {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          })}
+
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
           <___VERTER___template />
-
           })}
 
           }}>
@@ -292,7 +291,7 @@ describe("tranpiler element", () => {
                     </___VERTER___comp.MyComponent>"
         `);
       });
-      it.skip("with slot and implicit default", () => {
+      it("with slot and implicit default", () => {
         const { result } = transpile(
           `<my-component>
           <template #default/>
@@ -302,14 +301,14 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
           const $slots = ComponentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK(
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
-          $slots.default)(()=>{
 
-          <___VERTER___template /><span>{{test}}</span>
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+
+          <___VERTER___template />
           })}
-
+          <span>{{test}}</span>
           })}
 
           }}>
@@ -318,16 +317,33 @@ describe("tranpiler element", () => {
                   </___VERTER___comp.MyComponent>"
         `);
       });
-      it.skip("implicit default with default", () => {
+      it("implicit default with default", () => {
         const { result } = transpile(
           `<my-component>
           <span>{{test}}</span>
           <template #default/>
         </my-component>`
         );
-        expect(result).toMatchInlineSnapshot();
+        expect(result).toMatchInlineSnapshot(`
+          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
+          const $slots = ComponentInstance.$slots;
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+
+
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+
+          <___VERTER___template />
+          })}
+          <span>{{test}}</span>
+          })}
+
+          }}>
+                    
+                    
+                  </___VERTER___comp.MyComponent>"
+        `);
       });
-      it.skip("implicit default + comment and default", () => {
+      it("implicit default + comment and default", () => {
         const { result } = transpile(
           `<my-component>
           <span>{{test}}</span>
@@ -335,7 +351,25 @@ describe("tranpiler element", () => {
           <template #default/>
         </my-component>`
         );
-        expect(result).toMatchInlineSnapshot();
+        expect(result).toMatchInlineSnapshot(`
+          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
+          const $slots = ComponentInstance.$slots;
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+
+
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+
+          <!-- test -->
+                    <___VERTER___template />
+          })}
+          <span>{{test}}</span>
+          })}
+
+          }}>
+                    
+                    
+                  </___VERTER___comp.MyComponent>"
+        `);
       });
     });
   });
