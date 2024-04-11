@@ -28,18 +28,22 @@ export function transpile(
     prefix: DEFAULT_PREFIX,
   }
 ) {
-  const { plugins, prefix, ...context } = options;
+  const {
+    plugins = Transpilers,
+    prefix = DEFAULT_PREFIX,
+    ...context
+  } = options;
 
   walk(
     root,
     {
-      enter(node, parent, context) {
+      enter(node, parent, context, parentContext) {
         const transpiler = plugins[node.type];
-        transpiler?.enter?.(node, parent, context);
+        transpiler?.enter?.(node, parent, context, parentContext);
       },
-      leave(node, parent, context) {
+      leave(node, parent, context, parentContext) {
         const transpiler = plugins[node.type];
-        transpiler?.leave?.(node, parent, context);
+        transpiler?.leave?.(node, parent, context, parentContext);
       },
     },
     deepmerge(
@@ -53,6 +57,7 @@ export function transpile(
           slotCallback: PrefixSTR("SLOT_CALLBACK", prefix),
           normalizeClass: PrefixSTR("normalizeClass", prefix),
           normalizeStyle: PrefixSTR("normalizeStyle", prefix),
+          renderList: PrefixSTR("renderList", prefix),
         },
         declarations: [],
         conditions: {

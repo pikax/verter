@@ -7,31 +7,26 @@ import {
   ElementTypes,
   ExpressionNode,
   NodeTypes,
-  SimpleExpressionNode,
   TemplateChildNode,
   TemplateNode,
-  extractIdentifiers,
   AttributeNode,
   walkIdentifiers,
+  ElementNode,
 } from "@vue/compiler-core";
 import {
   appendCtx,
   createTranspiler,
   generateNarrowCondition,
+  processExpression,
   withNarrowCondition,
 } from "../../utils";
 import { TranspileContext } from "../../types";
-import type * as babel_types from "@babel/types";
-import {
-  isExpression as isExpressionBabel,
-  isNode as isNodeBabel,
-} from "@babel/types";
 import { VerterNode } from "../../../walk";
 import { camelize, capitalize, isString } from "@vue/shared";
 import { LocationType } from "../../../../../types";
 
 export default createTranspiler(NodeTypes.ELEMENT, {
-  enter(node, parent, context) {
+  enter(node, parent, context, parentContext) {
     const tagOffset = node.loc.source.indexOf(node.tag, 0);
     const tag = resolveTag(node, context);
 
@@ -44,7 +39,13 @@ export default createTranspiler(NodeTypes.ELEMENT, {
       context.s.overwrite(tagIndex, tagIndex + node.tag.length, tag);
     }
 
-    processProps(node, context);
+    const overrideContext = processProps(
+      node,
+      context,
+      node,
+      parent,
+      parentContext
+    );
 
     switch (node.tagType) {
       case ElementTypes.COMPONENT: {
@@ -63,8 +64,13 @@ export default createTranspiler(NodeTypes.ELEMENT, {
         break;
       }
     }
+
+    return {
+      ...context,
+      ...overrideContext,
+    };
   },
-  leave(node, parent, context) {
+  leave(node, parent, context, parentContext) {
     const tag = resolveTag(node, context);
 
     const isWebComponent =
@@ -125,16 +131,26 @@ export default createTranspiler(NodeTypes.ELEMENT, {
               context,
               tagBlockEnd,
               definition.items,
+              parentContext,
               definition.templateNode
             );
           }
 
           if (orphans.length) {
-            renderSlot(context, tagBlockEnd, orphans);
+            renderSlot(context, tagBlockEnd, orphans, parentContext);
           }
           context.s.appendRight(tagBlockEnd, "\n}}");
         }
       }
+    }
+
+    // if we are in a condition block and are the last element close the block
+    if (parentContext.conditionBlock && parent.children.at(-1) === node) {
+      // parentContext.conditionBlock = true;
+      // context.s.appendRight(node.loc.end.offset, "}}}");
+      // context.s.prependRight(node.loc.end.offset, "}}}");
+      // context.s.prependLeft(node.loc.end.offset, "}}}");
+      // context.s.appendLeft(node.loc.end.offset, "}}");
     }
   },
 });
@@ -246,48 +262,6 @@ function retrieveSlotNamed(node: ComponentNode) {
   return map;
 }
 
-function processExpression(
-  exp: ExpressionNode,
-  context: TranspileContext,
-  dry = false
-) {
-  switch (exp.type) {
-    case NodeTypes.SIMPLE_EXPRESSION: {
-      if (exp.ast) {
-        const ast = exp.ast;
-        walkIdentifiers(ast, (id, parent) => {
-          const extraPrepend =
-            parent.type === "ObjectProperty" && parent.shorthand
-              ? `${id.name}:`
-              : "";
-
-          appendCtx(
-            id,
-            context,
-            false,
-            exp.loc.start.offset - ast.start,
-            extraPrepend
-          );
-        });
-        // todo retrieve ast
-
-        return;
-      }
-      if (exp.isStatic) {
-        return exp.content;
-      }
-
-      return appendCtx(exp, context, dry);
-    }
-    case NodeTypes.COMPOUND_EXPRESSION: {
-      if (exp.ast) {
-        // todo retrieve ast
-        return;
-      }
-      return exp.identifiers[0];
-    }
-  }
-}
 function getSlotProp(node: BaseElementNode): DirectiveNode | null | undefined {
   return node.props.find(
     (x) => x.type === NodeTypes.DIRECTIVE && x.name === "slot"
@@ -298,11 +272,23 @@ function renderSlot(
   context: TranspileContext,
   insertAt: number,
   items: TemplateChildNode[],
+  parentContext: Record<string, any>,
   template?: TemplateNode | null
 ) {
   const { s } = context;
 
-  const narrowCondition = generateNarrowCondition(context, true);
+  const narrowCondition = generateNarrowCondition(
+    parentContext.conditions?.length > 0
+      ? {
+          ...context,
+          conditions: {
+            ...context.conditions,
+            elses: [...context.conditions.elses, ...parentContext.conditions],
+          },
+        }
+      : context,
+    true
+  );
   if (template) {
     const slotProp = getSlotProp(template);
     if (!slotProp) {
@@ -416,7 +402,13 @@ function sanitiseAttributeName(name: string, context: TranspileContext) {
 
 function processProps(
   node: VerterNode & { type: NodeTypes.ELEMENT },
-  context: TranspileContext
+  context: TranspileContext,
+  parent: ElementNode,
+  parentParent: VerterNode,
+  parentContext: Record<string, any> & {
+    conditionBlock?: VerterNode | null;
+    conditions?: Array<string> | null;
+  }
 ) {
   const shouldCamel = node.tagType !== ElementTypes.ELEMENT;
 
@@ -425,16 +417,103 @@ function processProps(
     classes: [] as Array<DirectiveNode | AttributeNode>,
   };
 
-  for (let i = 0; i < node.props.length; i++) {
-    const prop = node.props[i];
+  let overrideContext = {
+    ...context,
+    conditions: {
+      ...context.conditions,
+      ifs: [...context.conditions.ifs],
+    },
+  };
+
+  const IfMap = {
+    if: "if",
+    else: "else",
+    "else-if": "else if",
+  };
+
+  const sorted = [...node.props].sort((a, b) => {
+    let av =
+      a.type === NodeTypes.DIRECTIVE
+        ? IfMap[a.name]
+          ? 9000
+          : a.name === "for"
+          ? 100
+          : 1
+        : 1;
+    let bv =
+      b.type === NodeTypes.DIRECTIVE
+        ? IfMap[b.name]
+          ? 9000
+          : b.name === "for"
+          ? 100
+          : 1
+        : 1;
+    return bv - av;
+  });
+
+  const conditionDirective = sorted.find(
+    (x) => x.type === NodeTypes.DIRECTIVE && IfMap[x.name]
+  );
+  // add initial block
+  if (conditionDirective?.name === "if") {
+    if (parentContext.conditionBlock) {
+      // already in block close the previous one
+      context.s.prependLeft(parent.loc.end.offset, "}}");
+    }
+
+    parentContext.conditions = [];
+    parentContext.conditionBlock = conditionDirective;
+
+    // // wrap { }
+    // s.prependRight(
+    //   prop.loc.start.offset,
+    //   withNarrowCondition("{ ()=> {", context)
+    // );
+    // s.prependLeft(parent.loc.end.offset, "}}}");
+  } else if (conditionDirective) {
+    parentContext.conditionBlock = conditionDirective;
+  } else if (parentContext.conditionBlock) {
+    // already in block close the previous one
+    context.s.prependLeft(parentContext.conditionBlock.loc.end.offset, "}}");
+  }
+
+  const conditions: string[] = [];
+
+  for (let i = 0; i < sorted.length; i++) {
+    const prop = sorted[i];
+    const currentContext = mergeConditionToContext(
+      overrideContext ?? context,
+      conditions,
+      parentContext.conditions
+    );
+
     const name =
       "arg" in prop && prop.arg
-        ? processExpression(prop.arg, context, true)
+        ? processExpression(prop.arg, currentContext, true)
         : prop.name;
 
     switch (name) {
       default: {
-        processProp(prop, context, shouldCamel);
+        const c = processProp(
+          prop,
+          currentContext,
+          parent,
+          parentParent,
+          parentContext,
+          shouldCamel
+        );
+        conditions.push(...c.conditions);
+
+        if (c.ignoredIdentifiers.length) {
+          overrideContext = {
+            ...overrideContext,
+            ignoredIdentifiers: [
+              ...overrideContext.ignoredIdentifiers,
+              ...c.ignoredIdentifiers,
+            ],
+          };
+        }
+
         break;
       }
       case "class": {
@@ -447,16 +526,58 @@ function processProps(
     }
   }
 
-  normaliseProps("class", toNormalise.classes, context);
-  normaliseProps("style", toNormalise.styles, context);
+  normaliseProps(
+    "class",
+    toNormalise.classes,
+    overrideContext,
+    parent,
+    parentParent,
+    parentContext
+  );
+  normaliseProps(
+    "style",
+    toNormalise.styles,
+    overrideContext,
+    parent,
+    parentParent,
+    parentContext
+  );
+
+  if (conditionDirective?.name === "if") {
+    // wrap if
+    context.s.prependRight(
+      conditionDirective.loc.start.offset,
+      withNarrowCondition("{ ()=> {", context)
+    );
+
+    parentContext.inConditionBlock = true;
+  }
+
+  if (parentContext.conditions) {
+    parentContext.conditions.push(...conditions);
+  } else {
+    parentContext.conditions = conditions;
+  }
+
+  return overrideContext;
 }
 
 function processProp(
   prop: AttributeNode | DirectiveNode,
   context: TranspileContext,
+  parent: ElementNode,
+  parentParent: VerterNode,
+  parentContext: Record<string, any>,
   camelise = false
 ) {
   const { s } = context;
+  const identifiers: string[] = [];
+
+  const returnItem: { ignoredIdentifiers: string[]; conditions: string[] } = {
+    ignoredIdentifiers: [],
+    conditions: [],
+  };
+
   if (prop.type === NodeTypes.ATTRIBUTE) {
     if (camelise) {
       const cameled = sanitiseAttributeName(prop.name, context);
@@ -468,7 +589,7 @@ function processProp(
         );
       }
     }
-    return;
+    return returnItem;
   }
 
   switch (prop.name) {
@@ -554,18 +675,215 @@ function processProp(
       break;
     }
 
+    case "for": {
+      if (!("forParseResult" in prop) || !prop.forParseResult) {
+        console.error("expected valid for");
+        debugger;
+        break;
+      }
+
+      const { source, value, key, index } = prop.forParseResult;
+
+      if (key) {
+        const v = processExpression(key, context, true, false);
+        identifiers.push(v);
+      }
+
+      if (value) {
+        const v = processExpression(value, context, true, false);
+        identifiers.push(v);
+      }
+
+      if (source) {
+        processExpression(source, context);
+      }
+
+      returnItem.ignoredIdentifiers.push(...identifiers);
+
+      if (index) {
+        processExpression(value, {
+          ...context,
+          ignoredIdentifiers: [...context.ignoredIdentifiers, ...identifiers],
+        });
+      }
+
+      // move v-for to beginning
+      s.move(
+        prop.loc.start.offset,
+        prop.loc.end.offset,
+        parent.loc.start.offset
+      );
+
+      // update delimiters
+      s.overwrite(
+        prop.exp.loc.start.offset - 1,
+        prop.exp.loc.start.offset,
+        "("
+      );
+
+      //remove end delimiter because is not needed
+      s.remove(prop.exp.loc.end.offset, prop.exp.loc.end.offset + 1);
+      // s.overwrite(prop.exp.loc.end.offset, prop.exp.loc.end.offset + 1, ")");
+
+      // update v-for with renderList
+      s.overwrite(
+        prop.loc.start.offset,
+        prop.exp.loc.start.offset,
+        `${context.accessors.renderList}(`
+      );
+
+      // move source to the beginning
+      s.move(
+        source.loc.start.offset,
+        source.loc.end.offset,
+        prop.exp.loc.start.offset
+      );
+
+      // find in or of and replace with ,
+      let inOfIndex = -1;
+      const tokens = ["in", "of"];
+
+      const fromIndex = Math.max(
+        key?.loc.end.offset ?? 0,
+        index?.loc.end.offset ?? 0,
+        value?.loc.end.offset ?? 0
+      );
+      const condition = s.original.slice(fromIndex, source.loc.start.offset);
+
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i];
+        const index = condition.indexOf(token);
+        if (index !== -1) {
+          inOfIndex = index;
+          break;
+        }
+      }
+
+      // move , to start of expression
+      s.move(
+        fromIndex + inOfIndex,
+        fromIndex + inOfIndex + 2,
+        prop.exp.loc.start.offset
+      );
+
+      s.overwrite(fromIndex + inOfIndex, fromIndex + inOfIndex + 2, ",");
+
+      // add => { after the exp
+
+      s.appendRight(
+        prop.exp.loc.end.offset,
+        withNarrowCondition(" =>{ ", context)
+      );
+
+      // check if it needs to be wrapped
+      if (prop.exp.loc.source.startsWith("{")) {
+        s.prependRight(value.loc.start.offset, "(");
+        s.appendLeft(value.loc.end.offset, ")");
+      }
+
+      // wrap { }
+      s.prependRight(prop.loc.start.offset, "{");
+      s.prependLeft(parent.loc.end.offset, "})}");
+
+      break;
+    }
+
+    case "else":
+    case "else-if":
+    case "if": {
+      // move v-if/else-if/else to the beginning
+      s.move(
+        prop.loc.start.offset,
+        prop.loc.end.offset,
+        parent.loc.start.offset
+      );
+
+      // remove v-
+      s.remove(prop.loc.start.offset, prop.loc.start.offset + 2);
+
+      if (prop.exp) {
+        // remove =
+        s.remove(
+          prop.loc.start.offset + prop.rawName.length,
+          prop.loc.start.offset + prop.rawName.length + 1
+        );
+
+        // update delimiters
+        s.overwrite(
+          prop.exp.loc.start.offset - 1,
+          prop.exp.loc.start.offset,
+          "("
+        );
+        s.overwrite(prop.exp.loc.end.offset, prop.exp.loc.end.offset + 1, ")");
+
+        processExpression(prop.exp, context);
+        s.prependLeft(prop.exp.loc.end.offset + 1, "{");
+
+        const condition = s
+          .snip(prop.exp.loc.start.offset, prop.exp.loc.end.offset)
+          .toString();
+
+        returnItem.conditions.push(condition);
+
+        // overrideContext = {
+        //   ...context,
+        //   conditions: {
+        //     ...context.conditions,
+        //     elses: [...context.conditions.elses, ...parentContext.conditions],
+        //     ifs: [...context.conditions.ifs, condition],
+        //   },
+        // };
+
+        // (parentContext.conditions ?? (parentContext.conditions = [])).push(
+        //   condition
+        // );
+      }
+
+      if (prop.name === "else") {
+        // s.prependLeft(prop.loc.end.offset, withNarrowCondition("{\n", context));
+        s.prependLeft(prop.loc.end.offset, "{\n");
+        s.prependLeft(parent.loc.end.offset, "\n}");
+      } else {
+        // // wrap { }
+        // s.prependRight(
+        //   prop.loc.start.offset,
+        //   withNarrowCondition("{ ()=> {", context)
+        // );
+        // s.prependLeft(parent.loc.end.offset, "}}}");
+        
+        s.appendRight(parent.loc.end.offset, "}");
+
+        // s.appendLeft(parentParent.loc.end.offset, "}");
+
+        if (prop.name === "else-if") {
+          const hiphenIndex = prop.loc.start.offset + "v-else".length;
+          s.overwrite(hiphenIndex, hiphenIndex + 1, " ");
+        }
+      }
+      break;
+    }
+
+    case "show": {
+      // TODO v-show
+      break;
+    }
+
     default: {
       // unknown
       debugger;
       break;
     }
   }
+  return returnItem;
 }
 
 function normaliseProps(
   type: "style" | "class",
   props: Array<DirectiveNode | AttributeNode>,
-  context: TranspileContext
+  context: TranspileContext,
+  parent: ElementNode,
+  parentParent: VerterNode,
+  parentContext: Record<string, any>
 ) {
   if (props.length === 0) {
     return;
@@ -575,36 +893,41 @@ function normaliseProps(
     (x) => x.type === NodeTypes.DIRECTIVE
   ) as DirectiveNode;
 
-  processProp(firstDirective, context);
-
-  if (props.length === 1) return;
-
-  const start =
-    firstDirective.exp?.loc.start.offset ?? firstDirective.arg.loc.end.offset;
-  const end =
-    firstDirective.exp?.loc.end.offset ?? firstDirective.arg.loc.end.offset;
-
   const accessor =
     type === "class"
       ? context.accessors.normalizeClass
       : context.accessors.normalizeStyle;
 
-  if (firstDirective.exp) {
-    s.prependLeft(start, `${accessor}([`);
-    s.prependRight(end, "])");
+  let end = 0;
+
+  if (firstDirective) {
+    processProp(firstDirective, context, parent, parentParent, parentContext);
+    if (props.length === 1) return;
+
+    const start =
+      firstDirective.exp?.loc.start.offset ?? firstDirective.arg.loc.end.offset;
+    end =
+      firstDirective.exp?.loc.end.offset ?? firstDirective.arg.loc.end.offset;
+
+    if (firstDirective.exp) {
+      s.prependLeft(start, `${accessor}([`);
+      s.prependRight(end, "])");
+    } else {
+      // sugar
+
+      s.overwrite(
+        firstDirective.loc.start.offset,
+        firstDirective.loc.start.offset + 1,
+        `class={${accessor}([`,
+        {}
+      );
+
+      s.prependRight(end, "])");
+    }
   } else {
-    // sugar
-
-    s.overwrite(
-      firstDirective.loc.start.offset,
-      firstDirective.loc.start.offset + 1,
-      `class={${accessor}([`,
-      {}
-    );
-
-    s.prependRight(end, "])");
+    // just attribute]
+    return;
   }
-
   try {
     for (let i = 0; i < props.length; i++) {
       const prop = props[i];
@@ -648,6 +971,27 @@ function normaliseProps(
       },
     ],
   });
+}
+
+function mergeConditionToContext(
+  context: TranspileContext,
+  conditions: Array<string>,
+  sibblingsConditions?: Array<string>
+) {
+  sibblingsConditions = sibblingsConditions ?? [];
+
+  let { ifs, elses } = context.conditions;
+
+  ifs = ifs.filter((x) => !sibblingsConditions.includes(x)).concat(conditions);
+  elses = [...elses, ...sibblingsConditions];
+
+  return {
+    ...context,
+    conditions: {
+      ifs,
+      elses,
+    },
+  };
 }
 
 // SLOT CALLBACK DEFINIITON

@@ -307,7 +307,7 @@ declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string,
       context: "post",
       declaration: {
         type: "const",
-        name: "___VERTER__ctx",
+        name: "___VERTER___ctx",
         content: `{ ${exposedCtx.join(",\n")} }`,
       },
     });
@@ -318,11 +318,11 @@ declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string,
       context: "post",
       declaration: {
         type: "const",
-        name: "___VERTER__comp",
+        name: "___VERTER___comp",
         content: `{ 
-            //...({} as ExtractRenderComponents<typeof ___VERTER__ctx>),
+            //...({} as ExtractRenderComponents<typeof ___VERTER___ctx>),
             ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
-            ...___VERTER__ctx
+            ...___VERTER___ctx
           }`,
       },
     });
@@ -514,8 +514,8 @@ declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string,
     const toRenderString = [
       ...post,
       ...end,
-      "___VERTER__comp;",
-      "___VERTER__ctx;",
+      "___VERTER___comp;",
+      "___VERTER___ctx;",
       "return ___VERTER_COMP___;",
     ];
 

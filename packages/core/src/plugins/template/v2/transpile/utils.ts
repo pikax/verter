@@ -1,4 +1,8 @@
-import { NodeTypes, type ExpressionNode } from "@vue/compiler-core";
+import {
+  NodeTypes,
+  walkIdentifiers,
+  type ExpressionNode,
+} from "@vue/compiler-core";
 import { VerterNode, WalkOptions } from "../walk";
 import type { TranspileContext } from "./types";
 
@@ -8,17 +12,20 @@ import {
   isExpression as isExpressionBabel,
   isNode as isNodeBabel,
 } from "@babel/types";
+import { walk } from "estree-walker";
 
 export type TranspilerOptions<T extends NodeTypes> = {
-  enter?: (
+  enter?: <ParentContext = Record<string, any>>(
     node: VerterNode & { type: T },
     parent: VerterNode,
-    context: TranspileContext
+    context: TranspileContext,
+    parentContext: ParentContext
   ) => TranspileContext | void;
-  leave?: (
+  leave?: <ParentContext = Record<string, any>>(
     node: VerterNode & { type: T },
     parent: VerterNode,
-    context: TranspileContext
+    context: TranspileContext,
+    parentContext: ParentContext
   ) => TranspileContext | void;
 };
 export type TranspilerPlugin<T extends NodeTypes = NodeTypes> = [
@@ -61,9 +68,24 @@ export function generateNarrowCondition(
 }
 export function withNarrowCondition(
   text: string | string[],
-  context: TranspileContext
+  context: TranspileContext,
+  siblingsConditions: string[] = []
 ) {
-  return [...[text].flat(), generateNarrowCondition(context, true)]
+  return [
+    ...[text].flat(),
+    generateNarrowCondition(
+      siblingsConditions.length > 0
+        ? {
+            ...context,
+            conditions: {
+              ...context.conditions,
+              elses: [...context.conditions.elses, ...siblingsConditions],
+            },
+          }
+        : context,
+      true
+    ),
+  ]
     .filter(Boolean)
     .join("\n");
 }
@@ -156,4 +178,74 @@ export function appendCtx(
     }
   }
   return `${__extraPrepend}${accessor}.${content}`;
+}
+
+export function processExpression(
+  exp: ExpressionNode,
+  context: TranspileContext,
+  dry = false,
+  append = true
+) {
+  switch (exp.type) {
+    case NodeTypes.SIMPLE_EXPRESSION: {
+      if (exp.ast) {
+        const ast = exp.ast;
+        walkIdentifiers(ast, (id, parent) => {
+          const extraPrepend =
+            parent.type === "ObjectProperty" && parent.shorthand
+              ? `${id.name}:`
+              : "";
+
+          appendCtx(
+            id,
+            context,
+            false,
+            exp.loc.start.offset - ast.start,
+            extraPrepend
+          );
+        });
+
+        walk(ast, {
+          enter(node) {
+            // note if we want we can walk AST to patch all the function/blocks
+            // but let's start just by just patching the first
+            switch (node.type) {
+              case "FunctionExpression":
+              case "ArrowFunctionExpression": {
+                const inblock = node.body.type === "BlockStatement";
+                const condition = generateNarrowCondition(context, inblock);
+
+                // append condition
+                if (condition) {
+                  const start =
+                    exp.loc.start.offset -
+                    ast.start +
+                    (node.body.type === "BlockStatement"
+                      ? node.body.body[0].start
+                      : node.body.start);
+
+                  context.s.prependRight(start, condition);
+                }
+                break;
+              }
+            }
+          },
+        });
+
+        return;
+      }
+      if (exp.isStatic || !append) {
+        return exp.content;
+      }
+
+      return appendCtx(exp, context, dry);
+    }
+    case NodeTypes.COMPOUND_EXPRESSION: {
+      if (exp.ast) {
+        // todo retrieve ast
+        return;
+      }
+      return exp.identifiers[0];
+    }
+  }
 }

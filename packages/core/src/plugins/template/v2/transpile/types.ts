@@ -48,8 +48,10 @@ export type TranspileContext = {
      */
     slotCallback: string;
 
-    normaliseClass: string;
-    normaliseStyle: string;
+    normalizeClass: string;
+    normalizeStyle: string;
+
+    renderList: string;
   };
 
   conditions: {

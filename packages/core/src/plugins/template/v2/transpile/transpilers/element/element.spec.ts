@@ -786,5 +786,479 @@ describe("tranpiler element", () => {
         );
       });
     });
+
+    describe("v-for", () => {
+      it("simple", () => {
+        const { result } = transpile(`<li v-for="item in items"></li>`);
+
+        expect(result).toMatchInlineSnapshot(
+          `"{___VERTER___renderList(___VERTER___ctx.items,item   =>{ <li ></li>})}"`
+        );
+      });
+
+      it("destructing", () => {
+        const { result } = transpile(`<li v-for="{ message } in items"></li>`);
+
+        expect(result).toMatchInlineSnapshot(
+          `"{___VERTER___renderList(___VERTER___ctx.items,({ message })   =>{ <li ></li>})}"`
+        );
+      });
+
+      it("index", () => {
+        const { result } = transpile(
+          `<li v-for="(item, index) in items"></li>`
+        );
+
+        expect(result).toMatchInlineSnapshot(
+          `"{___VERTER___renderList(___VERTER___ctx.items,(item, index)   =>{ <li ></li>})}"`
+        );
+      });
+
+      it("index + key", () => {
+        const { result } = transpile(
+          `<li v-for="(item, index) in items" :key="index + 'random'"></li>`
+        );
+
+        expect(result).toMatchInlineSnapshot(
+          `"{___VERTER___renderList(___VERTER___ctx.items,(item, index)   =>{ <li  key={index + 'random'}></li>})}"`
+        );
+      });
+
+      it("destructing + index", () => {
+        const { result } = transpile(
+          `<li v-for="({ message }, index) in items"></li>`
+        );
+
+        expect(result).toMatchInlineSnapshot(
+          `"{___VERTER___renderList(___VERTER___ctx.items,({ message }, index)   =>{ <li ></li>})}"`
+        );
+      });
+
+      it("nested", () => {
+        const { result } = transpile(`<li v-for="item in items">
+        <span v-for="childItem in item.children"></span>
+      </li>`);
+
+        expect(result).toMatchInlineSnapshot(`
+          "{___VERTER___renderList(___VERTER___ctx.items,item   =>{ <li >
+                  {___VERTER___renderList(___VERTER___ctx.item.children,childItem   =>{ <span ></span>})}
+                </li>})}"
+        `);
+      });
+
+      it("of", () => {
+        const { result } = transpile(`<li v-for="item of items"></li>`);
+
+        expect(result).toMatchInlineSnapshot(
+          `"{___VERTER___renderList(___VERTER___ctx.items,item   =>{ <li ></li>})}"`
+        );
+      });
+
+      it("of with tab", () => {
+        const { result } = transpile(`<li v-for="item   of items"></li>`);
+
+        expect(result).toMatchInlineSnapshot(
+          `"{___VERTER___renderList(___VERTER___ctx.items,item     =>{ <li ></li>})}"`
+        );
+      });
+
+      it("of with tabs", () => {
+        const { result } = transpile(`<li v-for="item   of     items"></li>`);
+
+        expect(result).toMatchInlineSnapshot(
+          `"{___VERTER___renderList(___VERTER___ctx.items,item         =>{ <li ></li>})}"`
+        );
+      });
+
+      // object
+      it("object", () => {
+        const { result } = transpile(`<li v-for="value in myObject"></li>`);
+
+        expect(result).toMatchInlineSnapshot(
+          `"{___VERTER___renderList(___VERTER___ctx.myObject,value   =>{ <li ></li>})}"`
+        );
+      });
+
+      it("object + key", () => {
+        const { result } = transpile(
+          `<li v-for="(value, key) in myObject"></li>`
+        );
+
+        expect(result).toMatchInlineSnapshot(
+          `"{___VERTER___renderList(___VERTER___ctx.myObject,(value, key)   =>{ <li ></li>})}"`
+        );
+      });
+
+      it("object + key + index", () => {
+        const { result } = transpile(
+          `<li v-for="(value, key, index) in myObject"></li>`
+        );
+
+        expect(result).toMatchInlineSnapshot(
+          `"{___VERTER___renderList(___VERTER___ctx.myObject,(value, key, index)   =>{ <li ></li>})}"`
+        );
+      });
+
+      // range
+      it("range", () => {
+        const { result } = transpile(`<li v-for="n in 10"></li>`);
+
+        expect(result).toMatchInlineSnapshot(
+          `"{___VERTER___renderList(10,n   =>{ <li ></li>})}"`
+        );
+      });
+
+      // v-if has higher priority than v-for
+      it("v-if", () => {
+        const { result } = transpile(
+          `<li v-for="i in items" v-if="items > 5"></li>`
+        );
+
+        expect(result).toMatchInlineSnapshot(`
+          "{ ()=> {if(___VERTER___ctx.items > 5){{___VERTER___renderList(___VERTER___ctx.items,i   =>{ 
+          if(!(___VERTER___ctx.items > 5)) { return; } <li  ></li>})}}}}"
+        `);
+      });
+
+      it("should not append ctx to item.", () => {
+        const { result } = transpile(`<li v-for="item in items">
+            {{ item. }}            
+            </li>`);
+
+        expect(result).toMatchInlineSnapshot(`
+          "{___VERTER___renderList(___VERTER___ctx.items,item   =>{ <li >
+                      {{ item. }}            
+                      </li>})}"
+        `);
+      });
+
+      // TODO move this to transpile.spec.ts
+      it.skip("should append ctx to item", () => {
+        const { result } = transpile(`<li v-for="item in items">
+            {{ foo. }}            
+            </li>`);
+
+        expect(result).toMatchInlineSnapshot(`
+              "{___VERTER___renderList(___VERTER___ctx.items,(item)=>{<li >
+                        { ___VERTER___ctx.foo. }            
+                        </li>})}"
+            `);
+      });
+    });
+
+    describe("conditions", () => {
+      it("v-if", () => {
+        const { result } = transpile(`<li v-if="n > 5"></li>`);
+
+        expect(result).toMatchInlineSnapshot(
+          `"{ ()=> {if(___VERTER___ctx.n > 5){<li ></li>}}}"`
+        );
+      });
+
+      it("v-if + v-else", () => {
+        const { result } = transpile(
+          `<li v-if="n > 5" id="if"></li><li v-else id="else"></li>`
+        );
+        expect(result).toMatchInlineSnapshot(
+          `
+          "{ ()=> {if(___VERTER___ctx.n > 5){<li  id="if"></li>}else{
+          <li  id="else"></li>
+          }}}"
+        `
+        );
+      });
+
+      it("v-if + v-else component", () => {
+        const { result } = transpile(
+          `<Comp v-if="n > 5" id="if"></Comp><Comp v-else id="else"></Comp>`
+        );
+        expect(result).toMatchInlineSnapshot(
+          `
+          "{ ()=> {if(___VERTER___ctx.n > 5){<___VERTER___comp.Comp  id="if"></___VERTER___comp.Comp>}else{
+          <___VERTER___comp.Comp  id="else"></___VERTER___comp.Comp>
+          }}}"
+        `
+        );
+      });
+
+      it("v-if + v-else-if", () => {
+        const { result } = transpile(
+          `<li v-if="n > 5"></li><li v-else-if="n > 3"></li>`
+        );
+        expect(result).toMatchInlineSnapshot(
+          `"{ ()=> {if(___VERTER___ctx.n > 5){<li ></li>}else if(___VERTER___ctx.n > 3){<li ></li>}}}"`
+        );
+      });
+
+      it("v-if + >", () => {
+        const { result } = transpile(`<div v-if="getData.length > 0"> </div>`);
+
+        expect(result).toMatchInlineSnapshot(
+          `"{ ()=> {if(___VERTER___ctx.getData.length > 0){<div > </div>}}}"`
+        );
+      });
+
+      it("multiple conditions", () => {
+        const { result } = transpile(`
+                <li v-if="n === 1"></li>
+                <li v-else-if="n === 1"></li>
+                <li v-else-if="n === 1"></li>
+                <li v-else-if="n === 1"></li>
+                <li v-else-if="n === 1"></li>
+                <li v-else-if="n === 1"></li>
+                <li v-else></li>`);
+
+        expect(result).toMatchInlineSnapshot(`
+          "
+                          { ()=> {if(___VERTER___ctx.n === 1){<li ></li>}
+                          else if(___VERTER___ctx.n === 1){<li ></li>}
+                          else if(___VERTER___ctx.n === 1){<li ></li>}
+                          else if(___VERTER___ctx.n === 1){<li ></li>}
+                          else if(___VERTER___ctx.n === 1){<li ></li>}
+                          else if(___VERTER___ctx.n === 1){<li ></li>}
+                          else{
+          <li ></li>
+          }}}"
+        `);
+      });
+      it.only("multiple real-case", () => {
+        const { result } = transpile(`<div class="flex flex">
+        <div class="flex flex-row items-center pb-2.5">
+          <img
+            v-if="props.type === 3"
+            class="mr-2 h-9 w-9 select-none"
+            src="@/assets/test.svg"
+          />
+          <img
+            v-else-if="props.type === 2"
+            class="mr-2 h-9 w-9 select-none"
+            src="@/assets/test.svg"
+          />
+          <span v-if="props.type === 3">发送兑换订单</span>
+          <span v-else-if="props.type === 2"
+            >some text</span
+          >
+        </div>
+        <span
+          class="flex h-9 items-center justify-between border-t border-solid border-neutral-300 pb-2 pt-2.5 text-sm text-neutral-900"
+          >more text
+          <img class="select-none" src="@/assets/arrow-right-small.svg" />
+        </span>
+      </div>`);
+
+        expect(result).toMatchInlineSnapshot(`
+          "<div class="flex flex">
+                  <div class="flex flex-row items-center pb-2.5">
+                    { ()=> {if(___VERTER___ctx.props.type === 3){<img
+                      
+                      class="mr-2 h-9 w-9 select-none"
+                      src="@/assets/test.svg"
+                    />}
+                    else if(___VERTER___ctx.props.type === 2){<img
+                      
+                      class="mr-2 h-9 w-9 select-none"
+                      src="@/assets/test.svg"
+                    />}
+                    { ()=> {if(___VERTER___ctx.props.type === 3){<span >发送兑换订单</span>}}}
+                    else if(___VERTER___ctx.props.type === 2){<span 
+                      >some text</span
+          }}}          >
+                  </div>
+                  <span
+                    class="flex h-9 items-center justify-between border-t border-solid border-neutral-300 pb-2 pt-2.5 text-sm text-neutral-900"
+                    >more text
+                    <img class="select-none" src="@/assets/arrow-right-small.svg" />
+                  </span>
+                </div>"
+        `);
+      });
+      it.skip("multiple real-case", () => {
+        const { result } =
+          transpile(`<div @click="openModal" class="flex flex-col">
+        <div class="flex flex-row items-center pb-2.5">
+          <img
+            v-if="props.item.content.content.type === 3"
+            class="mr-2 h-9 w-9 select-none"
+            src="@/assets/exchangeorder-icon.svg"
+          />
+          <img
+            v-else-if="props.item.content.content.type === 2"
+            class="mr-2 h-9 w-9 select-none"
+            src="@/assets/rechargeorder-icon.svg"
+          />
+          <span v-if="props.item.content.content.type === 3">发送兑换订单</span>
+          <span v-else-if="props.item.content.content.type === 2"
+            >发送充值订单</span
+          >
+        </div>
+        <span
+          class="flex h-9 items-center justify-between border-t border-solid border-neutral-300 pb-2 pt-2.5 text-sm text-neutral-900"
+          >选择您要查询的订单
+          <img class="select-none" src="@/assets/arrow-right-small.svg" />
+        </span>
+      </div>`);
+
+        expect(result).toMatchInlineSnapshot(`
+          ","flex flex-col","flex flex-row items-center pb-2.5","mr-2 h-9 w-9 select-none","mr-2 h-9 w-9 select-none","flex h-9 items-center justify-between border-t border-solid border-neutral-300 pb-2 pt-2.5 text-sm text-neutral-900","select-none"<div onClick={___VERTER___ctx.openModal} >
+                  <div >
+                    { ()=> {if(___VERTER___ctx.props.item.content.content.type === 3){<img
+                      
+                      
+                      src="@/assets/exchangeorder-icon.svg"
+                    />}
+                    else if(___VERTER___ctx.props.item.content.content.type === 2)}}{<img
+                      
+                      
+                      src="@/assets/rechargeorder-icon.svg"
+                    />}
+                    { ()=> {if(___VERTER___ctx.props.item.content.content.type === 3){<span >发送兑换订单</span>}
+                    else if(___VERTER___ctx.props.item.content.content.type === 2){<span 
+                      >发送充值订单</span
+          }}}          >
+                  </div>
+                  <span
+                    
+                    >选择您要查询的订单
+                    <img  src="@/assets/arrow-right-small.svg" />
+                  </span>
+                </div>"
+        `);
+      });
+
+      it("should narrow", () => {
+        const { result } = transpile(
+          `<li v-if="n === true" :key="n"></li><li v-else :key="n"/>`
+        );
+        expect(result).toMatchInlineSnapshot(
+          `
+          "{ ()=> {if(___VERTER___ctx.n === true){<li  key={___VERTER___ctx.n}></li>}else{
+          <li  key={___VERTER___ctx.n}/>
+          }}}"
+        `
+        );
+      });
+
+      describe("narrow", () => {
+        it("arrow function", () => {
+          const { result } = transpile(
+            `<li v-if="n.n.n === true" :onClick="()=> n.n.n === false ? 1 : undefined"></li><li v-else :onClick="()=> n.n.n === true ? 1 : undefined"/>`
+          );
+
+          // NOTE the resulted snapshot should give an error with typescript in the correct environment
+          expect(result).toMatchInlineSnapshot(
+            `
+            "{ ()=> {if(___VERTER___ctx.n.n.n === true){<li  onClick={()=> !(___VERTER___ctx.n.n.n === true) ? undefined : ___VERTER___ctx.n.n.n === false ? 1 : undefined}></li>}else{
+            <li  onClick={()=> ___VERTER___ctx.n.n.n === true ? undefined : ___VERTER___ctx.n.n.n === true ? 1 : undefined}/>
+            }}}"
+          `
+          );
+        });
+        it("arrow function with return", () => {
+          const { result } = transpile(
+            `<li v-if="n.n.n === true" :onClick="()=> { return  n.n.n === false ? 1 : undefined }" ></li><li v-else :onClick="()=>{ return n.n.n === true ? 1 : undefined}"/>`
+          );
+
+          // NOTE the resulted snapshot should give an error with typescript in the correct environment
+          expect(result).toMatchInlineSnapshot(
+            `
+            "{ ()=> {if(___VERTER___ctx.n.n.n === true){<li  onClick={()=> { if(!(___VERTER___ctx.n.n.n === true)) { return; } return  ___VERTER___ctx.n.n.n === false ? 1 : undefined }} ></li>}else{
+            <li  onClick={()=>{ if(___VERTER___ctx.n.n.n === true) { return; } return ___VERTER___ctx.n.n.n === true ? 1 : undefined}}/>
+            }}}"
+          `
+          );
+        });
+
+        it("function", () => {
+          const { result } = transpile(
+            `<li v-if="n.n.n === true" :onClick="function() { return  n.n.n === false ? 1 : undefined } "></li><li v-else :onClick="function(){ return n.n.n === true ? 1 : undefined}"/>`
+          );
+
+          // NOTE the resulted snapshot should give an error with typescript in the correct environment
+          expect(result).toMatchInlineSnapshot(
+            `
+            "{ ()=> {if(___VERTER___ctx.n.n.n === true){<li  onClick={function() { if(!(___VERTER___ctx.n.n.n === true)) { return; } return  ___VERTER___ctx.n.n.n === false ? 1 : undefined } }></li>}else{
+            <li  onClick={function(){ if(___VERTER___ctx.n.n.n === true) { return; } return ___VERTER___ctx.n.n.n === true ? 1 : undefined}}/>
+            }}}"
+          `
+          );
+        });
+
+        // NOTE Maybe we could enable this behaviour, something to think about
+        // it.only("narrow on conditional arrow function", () => {
+        //   const { result } = transpile(
+        //     `<li v-if="n.n.n === true" :onClick="n.n.a === true ? (()=> n.n.n === false || n.n.a === false) : undefined "></li>`
+        //   );
+
+        //   // NOTE the resulted snapshot should give an error with typescript in the correct environment
+        //   expect(result).toMatchInlineSnapshot(
+        //     `"{(___VERTER___ctx.n.n.n === true)?<li  onClick={___VERTER___ctx.n.n.a === true ? (()=> !((___VERTER___ctx.n.n.n === true) && ___VERTER___ctx.n.n.a === true) ? undefined : ___VERTER___ctx.n.n.n === false || ___VERTER___ctx.n.n.a === false) : undefined }></li> : undefined}"`
+        //   );
+        // });
+
+        it("narrow with v-for", () => {
+          /**
+           * To test, check with
+           * ```ts
+           * declare const r: { n: true, items: string[] } | { n: false, items: number[] };
+           * ```
+           */
+          const { result } = transpile(
+            `<div v-for="item in r.items" v-if="r.n === false" :key="r.n === true ? 1 : false"></div>`
+          );
+          // NOTE the resulted snapshot should give an error with typescript in the correct environment
+          expect(result).toMatchInlineSnapshot(
+            `
+            "{ ()=> {if(___VERTER___ctx.r.n === false){{___VERTER___renderList(___VERTER___ctx.r.items,item   =>{ 
+            if(!(___VERTER___ctx.r.n === false)) { return; } <div   key={___VERTER___ctx.r.n === true ? 1 : false}></div>})}}}}"
+          `
+          );
+        });
+      });
+
+      describe.skip("invalid conditions", () => {
+        it("v-else without v-if", () => {
+          const { result } = transpile(`<li v-else></li>`);
+          // expect(() => build(doParseElement(source))).throw(
+          //   "v-else or v-else-if must be preceded by v-if"
+          // );
+          expect(result).toMatchInlineSnapshot(
+            `"{(___VERTER___ctx.items > 5)?__VERTER__renderList(___VERTER___ctx.items,(i)=>{<li  ></li>}) : undefined}"`
+          );
+        });
+
+        it("v-else-if without v-if", () => {
+          const { result } = transpile(`<li v-else-if></li>`);
+          // expect(() => build(doParseElement(source))).throw(
+          //   "v-else or v-else-if must be preceded by v-if"
+          // );
+          const parsed = doParseContent(source);
+          const { magicString } = process(parsed);
+          expect(result).toMatchInlineSnapshot(
+            `"{(___VERTER___ctx.items > 5)?__VERTER__renderList(___VERTER___ctx.items,(i)=>{<li  ></li>}) : undefined}"`
+          );
+        });
+        it("v-else after v-else", () => {
+          const { result } = transpile(
+            `<li v-if="true"></li><li v-else></li><li v-else></li>`
+          );
+
+          expect(result).toMatchInlineSnapshot(
+            `"{(___VERTER___ctx.items > 5)?__VERTER__renderList(___VERTER___ctx.items,(i)=>{<li  ></li>}) : undefined}"`
+          );
+        });
+
+        it("v-else-if after v-else", () => {
+          const { result } = transpile(
+            `<li v-if="true"></li><li v-else></li><li v-else></li>`
+          );
+          // expect(() => build(doParseElement(source))).throw(
+          //   "v-else or v-else-if must be preceded by v-if"
+          // );
+          expect(result).toMatchInlineSnapshot(
+            `"{(___VERTER___ctx.items > 5)?__VERTER__renderList(___VERTER___ctx.items,(i)=>{<li  ></li>}) : undefined}"`
+          );
+        });
+      });
+    });
   });
 });

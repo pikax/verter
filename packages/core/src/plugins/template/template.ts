@@ -6,9 +6,10 @@ import {
   TypeLocationTemplate,
   WalkResult,
 } from "../types.js";
-
+import { transpile } from "./v2/transpile";
 import { parse } from "./parse";
 import { process } from "./process";
+import { createCompoundExpression } from "@vue/compiler-core";
 
 export default {
   name: "Template",
@@ -21,14 +22,22 @@ export default {
 
     if (!ast) return;
 
-    const parsed = parse(ast);
+    const declarations = [] as WalkResult[];
+    try {
+      transpile(ast, context.s, { declarations });
+    } catch (e) {
+      console.error("eee", e);
+      debugger;
+    }
+    // const parsed = parse(ast);
+
     // const result = build(parsed, [], declarations);
-    const { declarations } = process(parsed, context.s, false);
+    // const { declarations } = process(parsed, context.s, false);
 
     return [
       {
         type: LocationType.Template,
-        node: parsed.node,
+        node: ast,
       },
       ...declarations,
     ];
