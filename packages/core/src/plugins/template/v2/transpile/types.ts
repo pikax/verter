@@ -52,6 +52,11 @@ export type TranspileContext = {
     normalizeStyle: string;
 
     renderList: string;
+
+    /**
+     * helper to call events
+     */
+    eventCb: string;
   };
 
   conditions: {

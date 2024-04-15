@@ -32,6 +32,5 @@ import {
   WorkspaceEdit,
   InlayHint,
 } from "vscode-languageserver";
-import { performance } from "node:perf_hooks";
 
 export class PluginHost implements LSProvider, OnWatchFileChanges {}

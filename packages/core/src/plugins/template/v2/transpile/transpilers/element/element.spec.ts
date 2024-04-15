@@ -417,9 +417,9 @@ describe("tranpiler element", () => {
     });
 
     it("camelcasing", () => {
-      const { result } = transpile(`<slot test-prop="hello"/>`);
+      const { result } = transpile(`<MyComp test-prop="hello"/>`);
       expect(result).toMatchInlineSnapshot(
-        `"<___VERTER___slot testProp="hello"/>"`
+        `"<___VERTER___comp.MyComp testProp="hello"/>"`
       );
     });
 
@@ -428,7 +428,7 @@ describe("tranpiler element", () => {
       expect(result).toMatchInlineSnapshot(`"<div test-prop="hello"/>"`);
     });
   });
-
+  (";#");
   describe("directives", () => {
     describe("binding", () => {
       it("props w/:", () => {
@@ -763,7 +763,7 @@ describe("tranpiler element", () => {
         const { result } = transpile(`<span @back="navigateToSession(null)"/>`);
 
         expect(result).toMatchInlineSnapshot(
-          `"<span onBack={___VERTER___ctx.navigateToSession(null)}/>"`
+          `"<span onBack={(...args)=>___VERTER___eventCb(args,($event)=>___VERTER___ctx.navigateToSession(null))}/>"`
         );
       });
       it('should camelCase "on" event listeners', () => {
@@ -771,9 +771,7 @@ describe("tranpiler element", () => {
           `<span @check-for-something="test"></span>`
         );
 
-        expect(result).toMatchInlineSnapshot(
-          `"<span onCheckForSomething={___VERTER___ctx.test}></span>"`
-        );
+        expect(result).toMatchInlineSnapshot(`"<span onCheckForSomething={(...args)=>___VERTER___eventCb(args,($event)=>___VERTER___ctx.test)}></span>"`);
       });
 
       it("should append ctx inside of functions", () => {
@@ -782,7 +780,16 @@ describe("tranpiler element", () => {
         );
 
         expect(result).toMatchInlineSnapshot(
-          `"<span onCheckForSomething={e=> { ___VERTER___ctx.foo = e }}></span>"`
+        `"<span onCheckForSomething={(...args)=>___VERTER___eventCb(args,e=> { ___VERTER___ctx.foo = e })}></span>"`);
+      });
+
+      it("event should be ignored", () => {
+        const { result } = transpile(
+          `<span @back="navigateToSession($event)"/>`
+        );
+
+        expect(result).toMatchInlineSnapshot(
+          `"<span onBack={(...args)=>___VERTER___eventCb(args,($event)=>___VERTER___ctx.navigateToSession($event))}/>"`
         );
       });
     });
@@ -841,7 +848,7 @@ describe("tranpiler element", () => {
 
         expect(result).toMatchInlineSnapshot(`
           "{___VERTER___renderList(___VERTER___ctx.items,item   =>{ <li >
-                  {___VERTER___renderList(___VERTER___ctx.item.children,childItem   =>{ <span ></span>})}
+                  {___VERTER___renderList(item.children,childItem   =>{ <span ></span>})}
                 </li>})}"
         `);
       });
@@ -1097,7 +1104,7 @@ describe("tranpiler element", () => {
           const $slots = ComponentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
-          <div onClick={___VERTER___ctx.openModal} class="flex flex-col">
+          <div onClick={(...args)=>___VERTER___eventCb(args,($event)=>___VERTER___ctx.openModal)} class="flex flex-col">
                     <div class="flex flex-row items-center pb-2.5">
                       { ()=> {if(___VERTER___ctx.props.item.content.content.type === 3){<img
                         
@@ -1315,6 +1322,68 @@ describe("tranpiler element", () => {
           );
         });
       });
+    });
+  });
+
+  describe("slot", () => {
+    it("parse slot", () => {
+      const { result } = transpile(`<slot/>`);
+      expect(result).toMatchInlineSnapshot(`
+        "{()=>{
+
+        const RENDER_SLOT = ___VERTER___slot.default;
+        return <RENDER_SLOT/>"
+      `);
+    });
+
+    it("parse slot with name", () => {
+      const { result } = transpile(`<slot name="test"/>`);
+      expect(result).toMatchInlineSnapshot(`
+        "{()=>{
+
+        const RENDER_SLOT = ___VERTER___slot["test"];
+        return <RENDER_SLOT />"
+      `);
+    });
+
+    it("parse slot with name expression", () => {
+      const { result } = transpile(`<slot :name="test"/>`);
+      expect(result).toMatchInlineSnapshot(`
+        "{()=>{
+
+        const RENDER_SLOT = ___VERTER___slot[___VERTER___ctx.test];
+        return <RENDER_SLOT />"
+      `);
+    });
+
+    it("with v-bind should be default", () => {
+      const { result } = transpile(`<slot :[msg]="test"/>`);
+      expect(result).toMatchInlineSnapshot(`
+        "{()=>{
+
+        const RENDER_SLOT = ___VERTER___slot.default;
+        return <RENDER_SLOT [___VERTER___ctx.msg]={___VERTER___ctx.test}/>"
+      `);
+    });
+
+    it("with v-if", () => {
+      const { result } = transpile(`<slot v-if="false"/>`);
+      expect(result).toMatchInlineSnapshot(`
+        "{ ()=> {if(false){const RENDER_SLOT = ___VERTER___slot.default;
+        return <RENDER_SLOT />}}}"
+      `);
+    });
+
+    it.skip("with v-for", () => {
+      const { result } = transpile(
+        `<slot v-for="name in $slots" :name="name"/>`
+      );
+      expect(result).toMatchInlineSnapshot(`
+        "{()=>{
+
+        const RENDER_SLOT = ___VERTER___slot{___VERTER___renderList(___VERTER___ctx.$slots,name   =>{ .default;
+        return <RENDER_SLOT  name={name}/>})}"
+      `);
     });
   });
 });

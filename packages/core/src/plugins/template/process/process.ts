@@ -62,7 +62,7 @@ export function process(
     declarations: [],
     accessor: "___VERTER__ctx",
     componentAccessor: "___VERTER__comp",
-    slotAccessor: "___VERTER_SLOT_COMP",
+    slotAccessor: "___VERTER___slot",
     conditions: {
       ifs: [],
       elses: [],
@@ -565,7 +565,7 @@ function renderSlot(
     }
   }
 
-  // replace slot with ___VERTER_SLOT_COMP
+  // replace slot with ___VERTER___slot
   s.overwrite(
     startIndex + 1,
     tagNameEndIndex,
@@ -1782,7 +1782,7 @@ function resolveComponentTag(
     }
     case ElementTypes.SLOT: {
       return {
-        name: "___VERTER_SLOT_COMP",
+        name: "___VERTER___slot",
       };
     }
     default: {

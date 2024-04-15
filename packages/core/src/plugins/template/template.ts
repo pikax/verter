@@ -14,7 +14,7 @@ import { createCompoundExpression } from "@vue/compiler-core";
 export default {
   name: "Template",
 
-  process: (context): TypeLocationTemplate => {
+  process: (context) => {
     const template = context.template;
     if (!template) return;
 
@@ -24,7 +24,27 @@ export default {
 
     const declarations = [] as WalkResult[];
     try {
-      transpile(ast, context.s, { declarations });
+      const { accessors } = transpile(ast, context.s, { declarations });
+
+      declarations.push({
+        type: LocationType.Import,
+        from: "vue",
+        generated: true,
+        items: [
+          {
+            name: "renderList",
+            alias: accessors.renderList,
+          },
+          {
+            name: "normalizeClass",
+            alias: accessors.normalizeClass,
+          },
+          {
+            name: "normalizeStyle",
+            alias: accessors.normalizeStyle,
+          },
+        ],
+      });
     } catch (e) {
       console.error("eee", e);
       debugger;
@@ -39,6 +59,16 @@ export default {
         type: LocationType.Template,
         node: ast,
       },
+      // {
+      //   type: LocationType.Import,
+      //   from: 'vue',
+      //   items: [
+      //     {
+      //       name: 'renderList',
+      //       alias: context.
+      //     }
+      //   ]
+      // },
       ...declarations,
     ];
     return {

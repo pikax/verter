@@ -10,21 +10,29 @@ import { VirtualFiles } from "@verter/language-shared";
 import path from "node:path";
 import { resolve } from "vscode-languageserver/lib/node/files";
 
-function getScriptFileNames() {
+function getScriptFileNames(resolvedFileNames: string[]) {
   const d = documentManager.getAllOpened();
 
-  const vueFiles = d
+  const vueFiles = [...d, ...resolvedFileNames]
     .filter((x) => x.endsWith(".vue"))
-    .map((x) => x.replace("file:", "verter-virtual:"))
+    .map((x) =>
+      x.startsWith("file:")
+        ? x.replace("file:", "verter-virtual:")
+        : `verter-virtual:///${x.replace(":", "%3A")}`
+    )
+    // .map((x) => x.replace("%3A", ":"))
     .flatMap((x) => [
       x + ".tsx",
       // x + '.template.d.ts',
       // TODO add more blocks
       // x + '.css'
     ]);
-  // const vueFiles = []
 
-  return d.concat(vueFiles);
+  // const r = Array.from(
+  //   new Set(d.concat(vueFiles).concat(resolvedFileNames)).values()
+  // );
+
+  return vueFiles.concat(resolvedFileNames);
 }
 
 const map = {
@@ -65,7 +73,9 @@ function fileExists(fileName: string) {
   const e = !!documentManager.getDocument(fileName);
   console.log("checking if file exists", fileName);
   if (~fileName.indexOf(".vue") || fileName.endsWith(".vue")) {
-    // debugger
+    if (fileName.endsWith(".vue")) {
+      debugger;
+    }
   }
 
   // these are virtual files
@@ -155,7 +165,15 @@ export function getTypescriptService(workspacePath: string) {
 
     const parseConfigHost: ts.ParseConfigHost = {
       ...ts.sys,
-      readDirectory: ts.sys.readDirectory,
+      readDirectory: (rootDir, extensions, excludes, includes, depth) => {
+        return ts.sys.readDirectory(
+          rootDir,
+          [...extensions, ".vue"],
+          excludes,
+          includes,
+          depth
+        );
+      },
       useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
     };
 
@@ -170,6 +188,8 @@ export function getTypescriptService(workspacePath: string) {
       parseConfigHost,
       workspacePath
     );
+
+    parsedConfig.wildcardDirectories;
     tsconfigOptions = parsedConfig.options;
     fileNames = parsedConfig.fileNames;
   }
@@ -203,7 +223,7 @@ export function getTypescriptService(workspacePath: string) {
   const host: ts.LanguageServiceHost = {
     log: (message) => Logger.info(`[ts] ${message}`),
     getCompilationSettings: () => compilerOptions,
-    getScriptFileNames: () => getScriptFileNames().concat(fileNames),
+    getScriptFileNames: () => getScriptFileNames(fileNames),
     getScriptVersion: (fileName: string) => {
       const snap = getSnapshotIfExists(fileName);
       // if (fileName.indexOf('.vue')) {
@@ -225,7 +245,12 @@ export function getTypescriptService(workspacePath: string) {
         exclude,
         include,
       });
-      return tsSystem.readDirectory(path, extensions, exclude, include);
+      return tsSystem.readDirectory(
+        path,
+        [...extensions, ".vue"],
+        exclude,
+        include
+      );
     },
     getDirectories: tsSystem.getDirectories,
     useCaseSensitiveFileNames: () => tsSystem.useCaseSensitiveFileNames,

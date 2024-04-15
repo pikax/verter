@@ -12,6 +12,7 @@ import {
   AttributeNode,
   walkIdentifiers,
   ElementNode,
+  isFunctionType,
 } from "@vue/compiler-core";
 import {
   appendCtx,
@@ -27,6 +28,8 @@ import { LocationType } from "../../../../../types";
 
 export default createTranspiler(NodeTypes.ELEMENT, {
   enter(node, parent, context, parentContext) {
+    const { s } = context;
+
     const tagOffset = node.loc.source.indexOf(node.tag, 0);
     const tag = resolveTag(node, context);
 
@@ -35,8 +38,12 @@ export default createTranspiler(NodeTypes.ELEMENT, {
       checkWebComponent(node.tag, tag, context);
 
     const tagIndex = node.loc.start.offset + tagOffset;
-    if (!isWebComponent && tag !== node.tag) {
-      context.s.overwrite(tagIndex, tagIndex + node.tag.length, tag);
+    if (
+      !isWebComponent &&
+      node.tagType !== ElementTypes.SLOT &&
+      tag !== node.tag
+    ) {
+      s.overwrite(tagIndex, tagIndex + node.tag.length, tag);
     }
 
     const overrideContext = processProps(
@@ -50,7 +57,7 @@ export default createTranspiler(NodeTypes.ELEMENT, {
     switch (node.tagType) {
       case ElementTypes.COMPONENT: {
         if (!isWebComponent && context.accessors.comp) {
-          context.s.appendLeft(tagIndex, context.accessors.comp + ".");
+          s.appendLeft(tagIndex, context.accessors.comp + ".");
         }
         break;
       }
@@ -58,6 +65,7 @@ export default createTranspiler(NodeTypes.ELEMENT, {
         break;
       }
       case ElementTypes.SLOT: {
+        processSlot(node, context, parentContext);
         break;
       }
       case ElementTypes.TEMPLATE: {
@@ -154,6 +162,76 @@ export default createTranspiler(NodeTypes.ELEMENT, {
     }
   },
 });
+
+function processSlot(
+  node: VerterNode & { type: NodeTypes.ELEMENT; tagType: ElementTypes.SLOT },
+  context: TranspileContext,
+  parentContext: Record<string, any>
+) {
+  const { s } = context;
+  const name = node.props.find((x) =>
+    x.type === NodeTypes.DIRECTIVE
+      ? x.arg && x.arg.type === NodeTypes.SIMPLE_EXPRESSION
+        ? x.arg.content === "name"
+        : undefined
+      : x.name === "name"
+  );
+
+  if (name) {
+    s.move(name.loc.start.offset, name.loc.end.offset, node.loc.start.offset);
+  }
+
+  if (parentContext.conditionBlock || parentContext.for) {
+    s.appendRight(
+      node.loc.start.offset,
+      `const RENDER_SLOT = ${context.accessors.slot}`
+    );
+  } else {
+    // append { ()=>
+    s.prependLeft(
+      node.loc.start.offset,
+      [
+        "{()=>{",
+        generateNarrowCondition(context, true),
+        `const RENDER_SLOT = ${context.accessors.slot}`,
+      ].join("\n")
+    );
+  }
+  if (name) {
+    s.appendLeft(node.loc.start.offset, "[");
+    if (name.type === NodeTypes.ATTRIBUTE) {
+      s.remove(name.loc.start.offset, name.loc.start.offset + "name=".length);
+    } else {
+      s.remove(
+        name.loc.start.offset,
+        name.loc.start.offset + "name={".length + 1
+      );
+
+      s.remove(name.exp.loc.end.offset, name.exp.loc.end.offset + 1);
+    }
+
+    s.appendRight(node.loc.start.offset, "];\n");
+  } else {
+    s.appendRight(node.loc.start.offset, ".default;\n");
+  }
+
+  s.appendRight(node.loc.start.offset, "return ");
+
+  s.overwrite(
+    node.loc.start.offset + 1,
+    node.loc.start.offset + 1 + "slot".length,
+    "RENDER_SLOT"
+  );
+
+  if (!node.isSelfClosing) {
+    const index = node.loc.source.lastIndexOf("slot");
+    s.overwrite(
+      node.loc.start.offset + index,
+      node.loc.start.offset + index + "slot".length,
+      "RENDER_SLOT"
+    );
+  }
+}
 
 function resolveTag(
   node: VerterNode & { type: NodeTypes.ELEMENT },
@@ -663,15 +741,29 @@ function processProp(
 
       s.overwrite(prop.loc.start.offset, prop.loc.start.offset + 1, "on");
 
-      // update delimeters
-      s.overwrite(
-        prop.exp.loc.start.offset - 1,
-        prop.exp.loc.start.offset,
-        "{"
-      );
-      s.overwrite(prop.exp.loc.end.offset, prop.exp.loc.end.offset + 1, "}");
+      // add callback
 
-      processExpression(prop.exp, context);
+      if (prop.exp) {
+        const exp = prop.exp;
+        // update delimeters
+        s.overwrite(exp.loc.start.offset - 1, exp.loc.start.offset, "{");
+        s.overwrite(exp.loc.end.offset, exp.loc.end.offset + 1, "}");
+
+        // append $event=>
+        s.prependLeft(
+          exp.loc.start.offset,
+          `(...args)=>${context.accessors.eventCb}(args,${
+            !exp.ast || !isFunctionType(exp.ast) ? "($event)=>" : ""
+          }`
+        );
+
+        s.prependLeft(exp.loc.end.offset, ")");
+
+        processExpression(exp, {
+          ...context,
+          ignoredIdentifiers: [...context.ignoredIdentifiers, "$event"],
+        });
+      }
 
       break;
     }
@@ -688,6 +780,7 @@ function processProp(
       }
 
       const { source, value, key, index } = prop.forParseResult;
+      parentContext.for = prop.forParseResult;
 
       if (key) {
         const v = processExpression(key, context, true, false);

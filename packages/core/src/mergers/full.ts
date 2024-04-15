@@ -134,7 +134,8 @@ export function mergeFull(
 declare function ___VERTER_extract_Slots<CompSlots>(comp: { new(): { $slots: CompSlots } }, slots?: undefined): CompSlots;
 declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string, any> = {}>(comp: { new(): { $slots: CompSlots } }, slots: Slots): Slots;
 
-declare function ___VERTER___SLOT_CALLBACK<T>(slot: (...args: T[]) => any): (cb: ((...args: T[]) => any));`,
+declare function ___VERTER___SLOT_CALLBACK<T>(slot: (...args: T[]) => any): (cb: ((...args: T[]) => any));
+declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event: TArgs[0],) => any>(event: TArgs, cb: R): R;`,
         },
       },
       // TODO add defineSlots definition here as ___VERTER_DEFINE_SLOTS___
@@ -172,7 +173,7 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot: (...args: T[]) => any): (cb:
         generated: true,
         context: "post",
         declaration: {
-          name: "___VERTER_SLOT_COMP",
+          name: "___VERTER___slot",
           type: "const",
           content: `___VERTER_extract_Slots(___VERTER_COMP___${
             isSetup ? `, ___VERTER_DEFINE_SLOTS___` : ""
@@ -563,7 +564,7 @@ declare module 'vue' {
 }
 
 declare function ___VERTER_renderSlot<T extends Array<any>>(slot: (...args: T) => any, cb: (...cb: T) => any): void;
-declare function ___VERTER_TEMPLATE_COMP(): JSX.Element;
+declare function ___VERTER___template(): JSX.Element;
 
 `;
 

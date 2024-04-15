@@ -32,6 +32,10 @@ export function fromTranspiler<T extends NodeTypes>(
     fullOriginal: s.original,
 
     original: s.original.slice(contentIndex, contentIndex + content.length),
-    result: s.snip(contentIndex, contentIndex + content.length).toString(),
+    // result: s.snip(contentIndex, contentIndex + content.length).toString(),
+    result: s.toString().slice("<template>".length, -"</template>".length),
+
+    // .snip(prop.exp.loc.start.offset - 1, prop.exp.loc.end.offset + 1)
+    // .slice(1, -1)
   };
 }
