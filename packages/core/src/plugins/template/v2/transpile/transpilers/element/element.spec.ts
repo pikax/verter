@@ -1387,6 +1387,23 @@ describe("tranpiler element", () => {
           return <RENDER_SLOT  />})}"
         `);
       });
+
+      it("element + slot", () => {
+        const { result } = transpile(`<my-comp><slot/></my-comp>`);
+        expect(result).toMatchInlineSnapshot(`
+          "<___VERTER___comp.MyComp v-slot={(ComponentInstance)=>{
+          const $slots = ComponentInstance.$slots;
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+
+          {()=>{
+
+          const RENDER_SLOT = ___VERTER___slot.default;
+          return <RENDER_SLOT/>}}
+          })}
+
+          }}></___VERTER___comp.MyComp>"
+        `);
+      });
     });
     describe("with children", () => {
       it("parse slot", () => {
@@ -1463,9 +1480,10 @@ describe("tranpiler element", () => {
           </RENDER_SLOT>}}}"
         `);
       });
-      
+
       it("nested + v-if + typescript", () => {
-        const { result } = transpile(`<slot v-if="disableDrag" :name="selected as T">
+        const { result } =
+          transpile(`<slot v-if="disableDrag" :name="selected as T">
   <slot :tab="item" />
 </slot>`);
         expect(result).toMatchInlineSnapshot(`
@@ -1477,6 +1495,34 @@ describe("tranpiler element", () => {
           return <RENDER_SLOT tab={___VERTER___ctx.item} />}}
           </RENDER_SLOT>}}}"
         `);
+      });
+
+      it("nested + default", () => {
+        const { result } = transpile(
+          '<slot :name="`page-${p?.name || p}`" :page="p">\n' +
+            '<slot v-bind="p" />\n' +
+            "</slot>"
+        );
+        expect(result).toMatchInlineSnapshot(`
+          "{()=>{
+
+          const RENDER_SLOT = ___VERTER___slot[\`page-\${___VERTER___ctx.p?.name || ___VERTER___ctx.p}\`];
+          return <RENDER_SLOT  page={___VERTER___ctx.p}>
+          {()=>{
+
+          const RENDER_SLOT = ___VERTER___slot.default;
+          return <RENDER_SLOT {...___VERTER___ctx.p} />}}
+          </RENDER_SLOT>}}"
+        `);
+      });
+
+      it.skip("element + nested + default", () => {
+        const { result } = transpile(
+          '<my-comp><slot :name="`page-${p?.name || p}`" :page="p">\n' +
+            '<slot v-bind="p" />\n' +
+            "</slot></my-comp>"
+        );
+        expect(result).toMatchInlineSnapshot();
       });
     });
   });

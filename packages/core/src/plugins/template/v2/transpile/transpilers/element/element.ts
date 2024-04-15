@@ -162,12 +162,15 @@ export default createTranspiler(NodeTypes.ELEMENT, {
       }
     }
 
+    if (
+      node.tagType === ElementTypes.SLOT &&
+      !parentContext.conditionBlock &&
+      !parentContext.for
+    ) {
+      context.s.prependLeft(node.loc.end.offset, "}}");
+    }
     // if we are in a condition block and are the last element close the block
     if (parentContext.conditionBlock && parent.children.at(-1) === node) {
-      // parentContext.conditionBlock = true;
-      // context.s.appendRight(node.loc.end.offset, "}}");
-      // context.s.prependRight(node.loc.end.offset, "}}}");
-      // context.s.prependLeft(node.loc.end.offset, "}}");
       context.s.appendLeft(node.loc.end.offset, "}}");
     }
   },
@@ -201,7 +204,7 @@ function processSlot(
   } else {
     // append { ()=>
     s.prependLeft(
-      node.loc.start.offset,
+      node.loc.start.offset + 1,
       [
         "{()=>{",
         generateNarrowCondition(context, true),
@@ -243,10 +246,6 @@ function processSlot(
       contentOnly: true,
     }
   );
-
-  if (!parentContext.conditionBlock && !parentContext.for) {
-    s.prependLeft(node.loc.end.offset, "}}");
-  }
 }
 
 function resolveTag(
@@ -484,7 +483,7 @@ function renderSlot(
 
   s.move(start, end, insertAt);
 
-  context.s.prependLeft(end, `\n})}\n`);
+  context.s.appendLeft(end, `\n})}\n`);
 }
 
 function sanitiseAttributeName(name: string, context: TranspileContext) {
