@@ -22,11 +22,11 @@ export class DocumentManager {
   public listen(connection: Connection) {
     const dispose = this._textDocuments.listen(connection);
 
-    connection.workspace.onDidChangeTextDocument((e) => {
-      if (e.document.languageId !== "vue") return;
+    // connection.workspace.onDidChangeTextDocument((e) => {
+    //   if (e.document.languageId !== "vue") return;
 
-      console.log("sdee", e);
-    });
+    //   console.log("sdee", e);
+    // });
 
     this._textDocuments.onDidOpen((e) => {
       if (e.document.languageId !== "vue") return;
@@ -35,9 +35,11 @@ export class DocumentManager {
     this._textDocuments.onDidChangeContent((e) => {
       if (e.document.languageId !== "vue") return;
 
-      const changes = e.document.getText();
+      // const changes = e.document.getText();
 
-      console.onlog("ee", changes);
+      // const doc = this.getDocument(e.document.uri);
+
+      // doc?.overrideDoc(e.document)
     });
 
     return (this.#disposable = dispose);

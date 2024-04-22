@@ -162,11 +162,6 @@ export function getTypescriptService(
       //   if (parsedConfig) {
       //     parsedConfig.fileNames;
       //   }
-
-      const rrr = uriToVerterVirtual("d:/dev/csc-web/Card.vue");
-
-      console.log("rrr", rrr);
-
       return parsedConfig?.fileNames.map(uriToVerterVirtual) ?? [];
     },
 

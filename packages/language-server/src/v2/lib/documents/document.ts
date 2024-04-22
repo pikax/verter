@@ -109,8 +109,6 @@ export class VueDocument implements TextDocument {
       column: position.character,
       source: ".",
     });
-    console.log('sss', s)
-
     return {
       character: column,
       line: line - 1,

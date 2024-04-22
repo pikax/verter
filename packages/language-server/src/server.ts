@@ -20,11 +20,13 @@ import { VueDocument } from "./v2/lib/documents/document";
 import {
   getTypescriptService,
   mapCompletion,
+  mapDiagnostic,
 } from "./v2/lib/plugins/typescript";
 // import { uriToFilePath } from "vscode-languageserver/lib/node/files";
 
 import { URI } from "vscode-uri";
 import {
+  isVerterVirtual,
   uriToVerterVirtual,
   urlToFileUri,
   urlToPath,
@@ -370,8 +372,61 @@ export function startServer(options: LsConnectionOption = {}) {
     };
   });
 
+
+  async function sendDiagnostics(document: VueDocument) {
+    if (document.languageId !== 'vue') return;
+
+    try {
+      const filename = document.virtualUri;
+
+      const syntacticDiagnostics = tsService.getSyntacticDiagnostics(filename);
+      const semanticDiagnostics = tsService.getSemanticDiagnostics(filename);
+      const suggestionDiagnostics =
+        tsService.getSuggestionDiagnostics(filename);
+
+      const allDiagnostics = [
+        ...syntacticDiagnostics,
+        ...semanticDiagnostics,
+        ...suggestionDiagnostics,
+      ].map(x => mapDiagnostic(x, document)).filter(Boolean);
+
+
+
+      await connection.sendDiagnostics({
+        uri: document.uri,
+        diagnostics: allDiagnostics,
+        version: document.version
+      })
+
+
+
+    } catch (e) {
+      console.error(e)
+      debugger
+    }
+  }
+
+  documentManager._textDocuments.onDidOpen((params) => {
+    const doc = documentManager.getDocument(params.document.uri);
+
+    if (!doc) return;
+    if (doc.version !== params.document.version) {
+      doc.overrideDoc(params.document)
+    }
+    sendDiagnostics(doc)
+  })
+
+  documentManager._textDocuments.onDidClose(params => {
+    const doc = documentManager.getDocument(params.document.uri);
+    if (!doc) return;
+    sendDiagnostics(doc)
+  })
+
   documentManager.listen(originalConnection);
   connection.listen();
 }
 
 startServer();
+
+
+

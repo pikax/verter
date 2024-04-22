@@ -3,6 +3,7 @@ import { defineConfig } from "vite";
 export default defineConfig({
   build: {
     lib: {
+      // entry: "./src/old_server.ts",
       entry: "./src/server.ts",
       fileName: "server",
       formats: ["cjs"],
