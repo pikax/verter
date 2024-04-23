@@ -94,6 +94,13 @@ export class VueDocument implements TextDocument {
   }
 
   getParsedText(range?: Range | undefined): string {
+    try {
+      this.parse()
+    } catch (e) {
+      console.error('ff', e)
+      debugger
+      this.parse()
+    }
     return this._compiledDoc.getText(range);
   }
 

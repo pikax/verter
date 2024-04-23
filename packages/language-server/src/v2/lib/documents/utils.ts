@@ -22,7 +22,7 @@ export function urlToPath(stringUrl: string): string | null {
     return null;
   }
   const p = url.fsPath.replace(/\\/g, "/");
-  if (url.scheme === "verter-virtual") {
+  if (url.scheme === "verter-virtual" && p.endsWith('.vue.tsx')) {
     return p.slice(0, -4);
   }
   return p;

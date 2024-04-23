@@ -15,6 +15,7 @@ import { DocumentManager } from "../documents/manager";
 import logger from "../../../logger";
 import {
   isVerterVirtual,
+  pathToUrl,
   uriToVerterVirtual,
   urlToPath,
 } from "../documents/utils";
@@ -106,7 +107,17 @@ export function getTypescriptService(
     getDefaultLibFileName: ts.getDefaultLibFilePath,
 
     readFile: (filepath, encoding) => {
-      return ts.sys.readFile(filepath, encoding);
+      if (isVerterVirtual(filepath)) {
+        filepath = urlToPath(filepath)!
+      }
+      try {
+        return ts.sys.readFile(filepath, encoding);
+      } catch (e) {
+
+        console.log('ee', e);
+        debugger
+        return ''
+      }
     },
     fileExists: (filepath) => {
       const d = Object.keys(map).find((x) => filepath.endsWith(x));
@@ -114,6 +125,10 @@ export function getTypescriptService(
         return true;
       }
 
+      if (isVerterVirtual(filepath)) {
+        filepath = urlToPath(filepath)!
+        debugger
+      }
       return ts.sys.fileExists(filepath);
     },
     getDirectories: ts.sys.getDirectories,
@@ -162,7 +177,14 @@ export function getTypescriptService(
       //   if (parsedConfig) {
       //     parsedConfig.fileNames;
       //   }
-      return parsedConfig?.fileNames.map(uriToVerterVirtual) ?? [];
+
+      const files = parsedConfig?.fileNames ?? [];
+
+      const map = files.map(uriToVerterVirtual) ?? [];
+
+      console.log('mnm', map.length)
+
+      return map;
     },
 
     resolveModuleNameLiterals(
@@ -177,12 +199,52 @@ export function getTypescriptService(
         containingFile = urlToPath(containingFile)!;
       }
       const modules = moduleLiterals.map((x) => {
-        const h = ts.sys;
+        // const h = this;
+        // const h = ts.sys;
+        // const h = {
+        //   ...ts.sys,
+        //   ...this
+        // }
+
+        const h = {
+          fileExists(filename: string) {
+            if (filename.endsWith('.vue.tsx')) {
+              try {
+                return ts.sys.fileExists('.vue.tsx') || ts.sys.fileExists(filename.slice(0, -4))
+              } catch {
+                return ts.sys.fileExists(filename.slice(0, -4))
+              }
+            }
+
+            return ts.sys.fileExists(filename)
+          },
+          readFile(filename: string) {
+            if (filename.endsWith('.vue.tsx')) {
+              if (!ts.sys.fileExists('.vue.tsx')) {
+                filename = filename.slice(0, -4)
+              }
+            }
+            try {
+              return ts.sys.readFile(filename)
+            }
+            catch (e) {
+              console.error('ss', e)
+              debugger
+            }
+          }
+        }
+
+        let moduleLoc = x.text;
+
+        if (x.text.endsWith('.vue')) {
+          debugger
+          moduleLoc = x.text + '.tsx'
+        }
 
         switch (options.moduleResolution) {
           case ts.ModuleResolutionKind.Classic: {
             return ts.resolveModuleName(
-              x.text,
+              moduleLoc,
               containingFile,
               options,
               h,
@@ -195,7 +257,7 @@ export function getTypescriptService(
           case ts.ModuleResolutionKind.Node16:
           case ts.ModuleResolutionKind.NodeNext: {
             return ts.nodeModuleNameResolver(
-              x.text,
+              moduleLoc,
               containingFile,
               options,
               h,
@@ -205,14 +267,17 @@ export function getTypescriptService(
           }
           case ts.ModuleResolutionKind.Bundler:
           default:
-            return ts.bundlerModuleNameResolver(
-              x.text,
+
+            const r = ts.bundlerModuleNameResolver(
+              moduleLoc,
               containingFile,
               options,
               h,
               undefined,
               redirectedReference
             );
+            console.log('sss', r)
+            return r;
         }
       });
 
@@ -301,14 +366,14 @@ export function itemToMarkdown(item: ts.CompletionEntryDetails | ts.QuickInfo) {
       ts.displayPartsToString(item.documentation) +
       (item.tags
         ? "\n\n" +
-          item.tags
-            .map(
-              (tag) =>
-                `_@${tag.name}_ — \`${ts.displayPartsToString(
-                  tag.text?.slice(0, 1)
-                )}\` ${ts.displayPartsToString(tag.text?.slice(1))}\n`
-            )
-            .join("\n")
+        item.tags
+          .map(
+            (tag) =>
+              `_@${tag.name}_ — \`${ts.displayPartsToString(
+                tag.text?.slice(0, 1)
+              )}\` ${ts.displayPartsToString(tag.text?.slice(1))}\n`
+          )
+          .join("\n")
         : ""),
   };
 }
@@ -324,7 +389,12 @@ export function mapTextSpanToRange(
   const start = document.originalPosition(textSpan.start);
   const end = document.originalPosition(textSpan.start + textSpan.length);
 
-  return lsp.Range.create(start, end);
+  try {
+    return lsp.Range.create(start, end);
+  } catch (e) {
+    console.error('invalid range', e)
+    // debugger
+  }
 }
 
 export function formatQuickInfo(

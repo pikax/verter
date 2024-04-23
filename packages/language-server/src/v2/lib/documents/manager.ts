@@ -9,6 +9,8 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import { VueDocument } from "./document";
 import { isVerterVirtual, urlToFileUri, urlToPath } from "./utils";
 import { URI } from "vscode-uri";
+
+import { readFileSync } from 'node:fs'
 // import { workspace } from "vscode";
 
 export class DocumentManager {
@@ -56,7 +58,7 @@ export class DocumentManager {
   ): (VueDocument & { languageId: "vue" }) | TextDocument | undefined {
     const filePath = urlToPath(uri);
     const fileUri = urlToFileUri(uri);
-    const doc = this._textDocuments.get(fileUri);
+    let doc = this._textDocuments.get(fileUri);
 
     if (doc) {
       if (doc.languageId === "vue") {
@@ -72,36 +74,77 @@ export class DocumentManager {
       return doc;
     }
 
-    const parsedUri = URI.parse(uri);
+    if (!filePath) {
+      debugger;
+      return undefined;
+    }
+
+    let file = this.files.get(filePath);
+    if (file) {
+      return file
+    }
+
+    const content = readFileSync(filePath, 'utf8')
+
+    doc = filePath.endsWith('.vue') ? VueDocument.create(uri, content) : TextDocument.create(uri, 'typescript', 1, content)
+
+    this.files.set(filePath, doc)
+
+    return doc;
   }
 
   public getSnapshotIfExists(
     uri: string
   ): (ts.IScriptSnapshot & { version: number }) | undefined {
-    if (isVerterVirtual(uri)) {
-      uri = urlToPath(uri)!;
-    }
 
-    const doc = this.files.get(uri) ?? this._textDocuments.get(uri);
+    // if (isVerterVirtual(uri)) {
+    //   debugger
+
+    //   const doc = this.getDocument(uri);
+
+
+
+
+    //   // uri = urlToPath(uri)!;
+    // }
+
+    // const doc = this.files.get(uri) ?? this._textDocuments.get(uri);
+    // if (!doc) {
+    //   // todo maybe resolve this?
+    //   // let snap = this.snapshots.get(uri);
+
+    //   // if (!snap) {
+    //   // }
+
+    //   return undefined;
+    // }
+
+    const doc = this.getDocument(uri);
     if (!doc) {
       // todo maybe resolve this?
-      // let snap = this.snapshots.get(uri);
+      // 
 
       // if (!snap) {
-      // }
+      // }`
 
       return undefined;
     }
 
     let snap = this.snapshots.get(uri);
-    if (snap?.version === doc.version) {
+    if (snap && snap.version === doc.version) {
       return snap;
     }
 
+
     const content =
-      "getParsedText" in doc && doc.languageId === "vue"
+      isVerterVirtual(uri)
         ? (doc as VueDocument).getParsedText()
         : doc.getText();
+
+
+    // if (isVerterVirtual(uri)) {
+    //   debugger
+    // }
 
     snap = Object.assign(ts.ScriptSnapshot.fromString(content), {
       version: doc.version,

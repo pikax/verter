@@ -134,7 +134,7 @@ export function mergeFull(
 declare function ___VERTER_extract_Slots<CompSlots>(comp: { new(): { $slots: CompSlots } }, slots?: undefined): CompSlots;
 declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string, any> = {}>(comp: { new(): { $slots: CompSlots } }, slots: Slots): Slots;
 
-declare function ___VERTER___SLOT_CALLBACK<T>(slot: (...args: T[]) => any): (cb: ((...args: T[]) => any));
+declare function ___VERTER___SLOT_CALLBACK<T>(slot: (...args: T[]) => any): (cb: ((...args: T[]) => any))=>void;
 declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event: TArgs[0],) => any>(event: TArgs, cb: R): R;`,
         },
       },
@@ -257,10 +257,10 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
                 .map(
                   (x) =>
                     x.varName ||
-                    s.original.slice(
+                    x.expression && s.original.slice(
                       x.expression.start + context.script.loc.start.offset,
                       x.expression.end + context.script.loc.start.offset
-                    )
+                    ) || '' /*TODO handle model value etc*/ 
                 )
                 .map((x) => `...(${x})`)
                 .join(",\n")}
