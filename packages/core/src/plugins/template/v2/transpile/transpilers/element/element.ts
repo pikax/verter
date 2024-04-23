@@ -1010,7 +1010,7 @@ function processProp(
 
     default: {
       // unknown
-      debugger;
+      // debugger;
       break;
     }
   }

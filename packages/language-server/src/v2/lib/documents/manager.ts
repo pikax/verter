@@ -10,7 +10,7 @@ import { VueDocument } from "./document";
 import { isVerterVirtual, urlToFileUri, urlToPath } from "./utils";
 import { URI } from "vscode-uri";
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from "node:fs";
 // import { workspace } from "vscode";
 
 export class DocumentManager {
@@ -81,14 +81,23 @@ export class DocumentManager {
 
     let file = this.files.get(filePath);
     if (file) {
-      return file
+      return file;
     }
 
-    const content = readFileSync(filePath, 'utf8')
+    if (!existsSync(filePath)) {
+      if (filePath.endsWith(".vue.tsx")) {
+        return this.getDocument(filePath.slice(0, -4));
+      }
+      return undefined;
+    }
 
-    doc = filePath.endsWith('.vue') ? VueDocument.create(uri, content) : TextDocument.create(uri, 'typescript', 1, content)
+    const content = readFileSync(filePath, "utf8");
 
-    this.files.set(filePath, doc)
+    doc = filePath.endsWith(".vue")
+      ? VueDocument.create(uri, content)
+      : TextDocument.create(uri, "typescript", 1, content);
+
+    this.files.set(filePath, doc);
 
     return doc;
   }
@@ -96,33 +105,10 @@ export class DocumentManager {
   public getSnapshotIfExists(
     uri: string
   ): (ts.IScriptSnapshot & { version: number }) | undefined {
-
-    // if (isVerterVirtual(uri)) {
-    //   debugger
-
-    //   const doc = this.getDocument(uri);
-
-
-
-
-    //   // uri = urlToPath(uri)!;
-    // }
-
-    // const doc = this.files.get(uri) ?? this._textDocuments.get(uri);
-    // if (!doc) {
-    //   // todo maybe resolve this?
-    //   // let snap = this.snapshots.get(uri);
-
-    //   // if (!snap) {
-    //   // }
-
-    //   return undefined;
-    // }
-
     const doc = this.getDocument(uri);
     if (!doc) {
       // todo maybe resolve this?
-      // 
+      //
 
       // if (!snap) {
       // }`
@@ -135,12 +121,9 @@ export class DocumentManager {
       return snap;
     }
 
-
-    const content =
-      isVerterVirtual(uri)
-        ? (doc as VueDocument).getParsedText()
-        : doc.getText();
-
+    const content = isVerterVirtual(uri)
+      ? (doc as VueDocument).getParsedText()
+      : doc.getText();
 
     // if (isVerterVirtual(uri)) {
     //   debugger

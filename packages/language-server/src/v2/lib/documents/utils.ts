@@ -19,10 +19,10 @@ export function urlToPath(stringUrl: string): string | null {
   const url = URI.parse(stringUrl);
 
   if (url.scheme !== "file" && url.scheme !== "verter-virtual") {
-    return null;
+    return stringUrl;
   }
   const p = url.fsPath.replace(/\\/g, "/");
-  if (url.scheme === "verter-virtual" && p.endsWith('.vue.tsx')) {
+  if (url.scheme === "verter-virtual" && p.endsWith(".vue.tsx")) {
     return p.slice(0, -4);
   }
   return p;

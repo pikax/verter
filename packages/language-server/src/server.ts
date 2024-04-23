@@ -18,7 +18,9 @@ import logger from "./logger";
 import { DocumentManager } from "./v2/lib/documents/manager";
 import { VueDocument } from "./v2/lib/documents/document";
 import {
+  formatQuickInfo,
   getTypescriptService,
+  itemToMarkdown,
   mapCompletion,
   mapDiagnostic,
 } from "./v2/lib/plugins/typescript";
@@ -31,7 +33,11 @@ import {
   urlToFileUri,
   urlToPath,
 } from "./v2/lib/documents/utils";
-import { GetCompletionsAtPositionOptions } from "typescript";
+import ts, {
+  Diagnostic,
+  DiagnosticWithLocation,
+  GetCompletionsAtPositionOptions,
+} from "typescript";
 
 export interface LsConnectionOption {
   /**
@@ -139,7 +145,7 @@ export function startServer(options: LsConnectionOption = {}) {
     if (!quickInfo) {
       return null;
     }
-    return quickInfo;
+    return formatQuickInfo(quickInfo, doc);
   });
 
   connection.onReferences((params) => {
@@ -372,6 +378,37 @@ export function startServer(options: LsConnectionOption = {}) {
     };
   });
 
+  connection.onCompletionResolve((item) => {
+    const data: {
+      virtualUrl: string;
+      index: number;
+      triggerKind: lsp.CompletionTriggerKind | undefined;
+      triggerCharacter: string | undefined;
+    } = item.data ?? {};
+
+    const label = item.label.startsWith("@")
+      ? `on${item.label[1].toLocaleUpperCase()}${item.label.slice(2)}`
+      : item.label;
+
+    const details = tsService.getCompletionEntryDetails(
+      data.virtualUrl,
+      data.index,
+      label,
+      undefined,
+      undefined,
+      undefined,
+      undefined // item.data
+    );
+    if (!details) return item;
+
+    let displayDetail = ts.displayPartsToString(details.displayParts) + "\n";
+    item.detail = displayDetail;
+
+    item.documentation = itemToMarkdown(details);
+
+    return item;
+  });
+
   connection.onRequest("textDocument/diagnostic", async (params) => {
     const doc = documentManager.getDocument(params.textDocument.uri);
     if (doc) {
@@ -387,10 +424,24 @@ export function startServer(options: LsConnectionOption = {}) {
     try {
       const filename = document.virtualUri;
 
-      const syntacticDiagnostics = tsService.getSyntacticDiagnostics(filename);
-      const semanticDiagnostics = tsService.getSemanticDiagnostics(filename);
-      const suggestionDiagnostics =
-        tsService.getSuggestionDiagnostics(filename);
+      let syntacticDiagnostics: DiagnosticWithLocation[] = [];
+      try {
+        syntacticDiagnostics = tsService.getSyntacticDiagnostics(filename);
+      } catch (e) {
+        console.error("syntacticDiagnostics", e);
+      }
+      let semanticDiagnostics: Diagnostic[] = [];
+      try {
+        semanticDiagnostics = tsService.getSemanticDiagnostics(filename);
+      } catch (e) {
+        console.error("semanticDiagnostics", e);
+      }
+      let suggestionDiagnostics: DiagnosticWithLocation[] = [];
+      try {
+        suggestionDiagnostics = tsService.getSuggestionDiagnostics(filename);
+      } catch (e) {
+        console.error("tsService.getSuggestionDiagnostics", e);
+      }
 
       const allDiagnostics = [
         ...syntacticDiagnostics,

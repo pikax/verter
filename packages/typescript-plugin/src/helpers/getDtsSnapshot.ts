@@ -1,6 +1,7 @@
 // import { readFileSync } from "fs";
 import type tsModule from "typescript/lib/tsserverlibrary";
 import { createBuilder, mergeFull } from "@verter/core";
+import { dirname, resolve, basename } from "node:path";
 
 // export const getDtsSnapshot = (
 //   ts: typeof tsModule,
@@ -27,17 +28,62 @@ import { createBuilder, mergeFull } from "@verter/core";
 //   return ts.ScriptSnapshot.fromString(result);
 // };
 
+function getRequire(packageName: string) {
+  return require(packageName);
+}
+
+export function getPackage(packageName: string, path: string) {
+  const paths = [__dirname, path];
+
+  // TODO handle untrusted workspacesF
+
+  const pkgPath = require.resolve(`${packageName}/package.json`, {
+    paths,
+  });
+
+  return {
+    path: dirname(pkgPath),
+  };
+}
+
+export function importVueCompiler(
+  fromPath: string
+): typeof import("vue/compiler-sfc") {
+  const pkg = getPackage("vue", fromPath);
+  const main = resolve(pkg.path, "compiler-sfc");
+  return getRequire(main);
+}
+
 export const parseFile = (
   fileName: string,
   content: string,
   logger: tsModule.server.Logger
 ) => {
   logger.info(`[Verter] parsing ${fileName}`);
+
+  return `export default {
+    test: 1
+  }`;
+
   const builder = createBuilder({});
-  const p = builder.preProcess(fileName, content);
+  const compiler = importVueCompiler(fileName)!;
+  const parsed = compiler.parse(content, {
+    filename: basename(fileName),
+    sourceMap: true,
+    ignoreEmpty: false,
+    templateParseOptions: {
+      parseMode: "sfc",
+    },
+  });
 
-  const merged = mergeFull(p.locations, p.context);
+  const { locations, context } = builder.fromCompiled(parsed);
+  const result = mergeFull(locations, context);
 
-  console.log('meerd ', merged.content)
-  return merged.content;
+  return result.content;
+  // const p = builder.preProcess(fileName, content);
+
+  // const merged = mergeFull(p.locations, p.context);
+
+  // console.log('meerd ', merged.content)
+  // return merged.content;
 };

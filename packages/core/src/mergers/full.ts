@@ -257,10 +257,12 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
                 .map(
                   (x) =>
                     x.varName ||
-                    x.expression && s.original.slice(
-                      x.expression.start + context.script.loc.start.offset,
-                      x.expression.end + context.script.loc.start.offset
-                    ) || '' /*TODO handle model value etc*/ 
+                    (x.expression &&
+                      s.original.slice(
+                        x.expression.start + context.script.loc.start.offset,
+                        x.expression.end + context.script.loc.start.offset
+                      )) ||
+                    "" /*TODO handle model value etc*/
                 )
                 .map((x) => `...(${x})`)
                 .join(",\n")}
@@ -569,6 +571,9 @@ declare function ___VERTER___template(): JSX.Element;
 `;
 
   s.prependLeft(0, "import 'vue/jsx';\n" + patchSlots);
+
+  // // fix imports
+  // s.replaceAll(/\.vue(["'`])/gm, ".vue.tsx$1");
 
   return {
     locations,
