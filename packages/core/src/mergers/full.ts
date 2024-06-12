@@ -326,6 +326,19 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
 
       // handle props
       if (locations.props.length) {
+        const props = [];
+        for (const it of locations.props) {
+          if (it.varName) {
+            props.push(it.varName);
+          } else if (it.expression) {
+            s.prependLeft(
+              it.expression.start + context.script.loc.start.offset,
+              "const ___VERTER_PROPS_DECLARATION___ = "
+            );
+            props.push("___VERTER_PROPS_DECLARATION___");
+          }
+        }
+
         // generate a named prop that we can reference
         locations.declaration.push({
           type: LocationType.Declaration,
@@ -335,19 +348,7 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
             type: "const",
             name: "___VERTER_PROPS___",
             content: `{
-              ${locations.props
-                .map(
-                  (x) =>
-                    x.varName ||
-                    (x.expression &&
-                      s.original.slice(
-                        x.expression.start + context.script.loc.start.offset,
-                        x.expression.end + context.script.loc.start.offset
-                      )) ||
-                    "" /*TODO handle model value etc*/
-                )
-                .map((x) => `...(${x})`)
-                .join(",\n")}
+              ${props.map((x) => `...(${x})`).join(",\n")}
             }`,
           },
         });

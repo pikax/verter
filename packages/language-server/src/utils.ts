@@ -1,7 +1,6 @@
 import { URI } from "vscode-uri";
-import { dirname } from 'path'
-import ts from 'typescript';
-
+import { dirname } from "path";
+import ts from "typescript";
 
 export function pathToUrl(path: string) {
   return URI.file(path).toString();
@@ -9,10 +8,10 @@ export function pathToUrl(path: string) {
 
 export function urlToPath(stringUrl: string): string | null {
   const url = URI.parse(stringUrl);
-  if (url.scheme !== 'file') {
+  if (url.scheme !== "file") {
     return null;
   }
-  return url.fsPath.replace(/\\/g, '/');
+  return url.fsPath.replace(/\\/g, "/");
 }
 
 export type GetCanonicalFileName = (fileName: string) => string;
@@ -25,20 +24,24 @@ export function findTsConfigPath(
 ) {
   const searchDir = dirname(fileName);
 
-  const tsconfig = ts.findConfigFile(searchDir, fileExists, 'tsconfig.json') || '';
-  const jsconfig = ts.findConfigFile(searchDir, fileExists, 'jsconfig.json') || '';
+  const tsconfig =
+    ts.findConfigFile(searchDir, fileExists, "tsconfig.json") || "";
+  const jsconfig =
+    ts.findConfigFile(searchDir, fileExists, "jsconfig.json") || "";
   // Prefer closest config file
   const config = tsconfig.length >= jsconfig.length ? tsconfig : jsconfig;
 
   // Don't return config files that exceed the current workspace context or cross a node_modules folder
   return !!config &&
-    rootUris.some((rootUri) => isSubPath(rootUri, config, getCanonicalFileName)) &&
+    rootUris.some((rootUri) =>
+      isSubPath(rootUri, config, getCanonicalFileName)
+    ) &&
     !fileName
       .substring(config.length - 13)
-      .split('/')
-      .includes('node_modules')
+      .split("/")
+      .includes("node_modules")
     ? config
-    : '';
+    : "";
 }
 
 export function isSubPath(
@@ -48,6 +51,22 @@ export function isSubPath(
 ): boolean {
   // URL escape codes are in upper-case
   // so getCanonicalFileName should be called after converting to file url
-  return getCanonicalFileName(pathToUrl(possibleSubPath)).startsWith(getCanonicalFileName(uri));
+  return getCanonicalFileName(pathToUrl(possibleSubPath)).startsWith(
+    getCanonicalFileName(uri)
+  );
 }
 
+export function uniqueArray<T>(items: T[]) {
+  const uniqueLinks: T[] = [];
+  const seenLinks = new Set<string>();
+
+  for (const item of items) {
+    const linkIdentifier = JSON.stringify(item);
+    if (!seenLinks.has(linkIdentifier)) {
+      seenLinks.add(linkIdentifier);
+      uniqueLinks.push(item);
+    }
+  }
+
+  return uniqueLinks;
+}

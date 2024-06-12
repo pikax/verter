@@ -1413,7 +1413,7 @@ describe("Mergers Full", () => {
     `);
   });
 
-  it.only("slot def", () => {
+  it("slot def", () => {
     const source = `<template> 
   <div> 
     <slot />

@@ -40,6 +40,7 @@ import ts, {
   DiagnosticWithLocation,
   GetCompletionsAtPositionOptions,
 } from "typescript";
+import { uniqueArray } from "./utils";
 
 export interface LsConnectionOption {
   /**
@@ -261,100 +262,106 @@ export function startServer(options: LsConnectionOption = {}) {
     if (!definition) {
       return null;
     }
-    return definition.map((x) => {
-      const doc = documentManager.getDocument(x.fileName);
-      if (!doc || doc.languageId !== "vue") {
-        console.log("geting defineiciton", doc?.virtualUri, x);
-        const start = tsService.toLineColumnOffset!(
-          x.fileName,
-          x.textSpan.start
-        );
-        const end = tsService.toLineColumnOffset!(
-          x.fileName,
-          x.textSpan.start + x.textSpan.length
-        );
+    return uniqueArray(
+      definition.map((x) => {
+        const doc = documentManager.getDocument(x.fileName);
+        if (!doc || doc.languageId !== "vue") {
+          console.log("geting defineiciton", doc?.virtualUri, x);
+          const start = tsService.toLineColumnOffset!(
+            x.fileName,
+            x.textSpan.start
+          );
+          const end = tsService.toLineColumnOffset!(
+            x.fileName,
+            x.textSpan.start + x.textSpan.length
+          );
 
-        let contextRange: lsp.Range | undefined = undefined;
+          let contextRange: lsp.Range | undefined = undefined;
 
+          if (x.contextSpan) {
+            const contextStart = tsService.toLineColumnOffset!(
+              x.fileName,
+              x.contextSpan.start
+            );
+            const contextEnd = tsService.toLineColumnOffset!(
+              x.fileName,
+              x.contextSpan.start + x.contextSpan!.length
+            );
+
+            console.log(
+              "resolved context start end ",
+              contextStart,
+              contextEnd
+            );
+
+            contextRange = Range.create(contextStart, contextEnd);
+          }
+
+          try {
+            const range = Range.create(start, end);
+            return LocationLink.create(
+              urlToFileUri(x.fileName),
+              range,
+              contextRange ?? range
+            );
+          } catch (e) {
+            console.error(e);
+            debugger;
+            return x;
+          }
+        }
+        const file = urlToFileUri(x.fileName)!;
+
+        let contextSpan: Range | undefined = undefined;
         if (x.contextSpan) {
-          const contextStart = tsService.toLineColumnOffset!(
-            x.fileName,
-            x.contextSpan.start
+          console.log("context span", x.contextSpan);
+          const startPos = doc.originalPosition(x.contextSpan.start);
+          const endPos = doc.originalPosition(
+            x.contextSpan.start + x.contextSpan.length
           );
-          const contextEnd = tsService.toLineColumnOffset!(
-            x.fileName,
-            x.contextSpan.start + x.contextSpan!.length
-          );
-
-          console.log("resolved context start end ", contextStart, contextEnd);
-
-          contextRange = Range.create(contextStart, contextEnd);
+          console.log("resovled ", startPos, endPos);
+          try {
+            if (startPos.line >= 0 && endPos.line >= 0) {
+              contextSpan = Range.create(startPos, endPos);
+            }
+          } catch (e) {
+            console.error(e);
+            debugger;
+          }
         }
 
         try {
-          const range = Range.create(start, end);
-          return LocationLink.create(
-            urlToFileUri(x.fileName),
-            range,
-            contextRange ?? range
-          );
-        } catch (e) {
-          console.error(e);
-          debugger;
-          return x;
-        }
-      }
-      const file = urlToFileUri(x.fileName)!;
+          console.log("textSpan", x.textSpan);
 
-      let contextSpan: Range | undefined = undefined;
-      if (x.contextSpan) {
-        console.log("context span", x.contextSpan);
-        const startPos = doc.originalPosition(x.contextSpan.start);
-        const endPos = doc.originalPosition(
-          x.contextSpan.start + x.contextSpan.length
-        );
-        console.log("resovled ", startPos, endPos);
-        try {
+          const startPos = doc.originalPosition(x.textSpan.start);
+          const endPos = doc.originalPosition(
+            x.textSpan.start + x.textSpan.length
+          );
+          console.log("rsolving with ", startPos, endPos);
+
           if (startPos.line >= 0 && endPos.line >= 0) {
-            contextSpan = Range.create(startPos, endPos);
+            const textSpan = Range.create(startPos, endPos);
+
+            console.log("resolved ", file, textSpan);
+
+            return LocationLink.create(file, contextSpan ?? textSpan, textSpan);
+          } else {
+            const range = Range.create(
+              { character: 0, line: 1 },
+              { character: 0, line: 1 }
+            );
+
+            console.log("textSpan not found"), file, x.textSpan;
+            return LocationLink.create(file, range, range);
           }
         } catch (e) {
           console.error(e);
           debugger;
         }
-      }
 
-      try {
-        console.log("textSpan", x.textSpan);
-
-        const startPos = doc.originalPosition(x.textSpan.start);
-        const endPos = doc.originalPosition(
-          x.textSpan.start + x.textSpan.length
-        );
-        console.log("rsolving with ", startPos, endPos);
-
-        if (startPos.line >= 0 && endPos.line >= 0) {
-          const textSpan = Range.create(startPos, endPos);
-
-          console.log("resolved ", textSpan);
-
-          return LocationLink.create(file, contextSpan ?? textSpan, textSpan);
-        } else {
-          const range = Range.create(
-            { character: 0, line: 1 },
-            { character: 0, line: 1 }
-          );
-
-          console.log("textSpan not found"), file, x.textSpan;
-          return LocationLink.create(file, range, range);
-        }
-      } catch (e) {
-        console.error(e);
-        debugger;
-      }
-
-      return x;
-    });
+        return x;
+      })
+    );
   });
 
   connection.onCompletion((params) => {

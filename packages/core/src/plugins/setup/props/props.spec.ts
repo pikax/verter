@@ -37,7 +37,7 @@ describe("Props plugin", () => {
         ).toBeUndefined();
       });
 
-      test("different callee", () => {
+      test("different callee", () => {6
         expect(
           PropsPlugin.walk(
             {
@@ -89,34 +89,12 @@ describe("Props plugin", () => {
             }
           )
         ).toEqual([
-          // create variable with return
-          {
-            type: LocationType.Declaration,
-            node: expression,
-
-            generated: true,
-            declaration: {
-              name: "__props",
-              content: "defineProps()",
-            },
-          },
-          // get the type from variable
-          {
-            type: LocationType.Declaration,
-            node: expression,
-
-            generated: true,
-            // TODO debug this to check if this is the correct type
-            declaration: {
-              type: "type",
-              name: "Type__props",
-              content: `typeof __props;`,
-            },
-          },
           {
             type: LocationType.Props,
-            node: expression,
-            content: "Type__props",
+            generated: false,
+            content: "defineProps()",
+            expression,
+            varName: "___VERTER_PROPS_DECLARATION___",
           },
         ]);
       });
@@ -156,32 +134,12 @@ describe("Props plugin", () => {
             }
           )
         ).toEqual([
-          // create variable with return
-          {
-            type: LocationType.Declaration,
-            node: expression,
-            generated: true,
-            declaration: {
-              name: "__props",
-              content: `defineProps<${type}>()`,
-            },
-          },
-          // get the type from variable
-          {
-            type: LocationType.Declaration,
-            node: expression,
-            generated: true,
-            // TODO debug this to check if this is the correct type
-            declaration: {
-              type: "type",
-              name: "Type__props",
-              content: `typeof __props;`,
-            },
-          },
           {
             type: LocationType.Props,
-            node: expression,
-            content: "Type__props",
+            generated: false,
+            content: `defineProps<${type}>()`,
+            expression,
+            varName: "___VERTER_PROPS_DECLARATION___",
           },
         ]);
       });
@@ -222,44 +180,13 @@ describe("Props plugin", () => {
             }
           )
         ).toEqual([
-          // {
-          //   type: LocationType.Import,
-          //   node: expression,
-          //   // TODO change the import location
-          //   from: "vue",
-          //   items: [
-          //     {
-          //       name: "ExtractPropTypes",
-          //       type: true,
-          //     },
-          //   ],
-          // },
-          // // create variable with return
-          // {
-          //   type: LocationType.Declaration,
-          //   node: expression,
-
-          //   declaration: {
-          //     name: "__props",
-          //     content: `defineProps<${type}>()`,
-          //   },
-          // },
-          // // get the type from variable
-          // {
-          //   type: LocationType.Declaration,
-          //   node: expression,
-
-          //   // TODO debug this to check if this is the correct type
-          //   declaration: {
-          //     type: "type",
-          //     name: "Type__props",
-          //     content: `ExtractPropTypes<typeof __props>;`,
-          //   },
-          // },
           {
             type: LocationType.Props,
+            generated: false,
             node: expression.typeParameters.params[0],
             content: type,
+            expression,
+            varName: "___VERTER_PROPS_DECLARATION___",
           },
         ]);
       });
@@ -313,45 +240,12 @@ describe("Props plugin", () => {
             }
           )
         ).toEqual([
-          // {
-          //   type: LocationType.Import,
-          //   node: expression,
-          //   // TODO change the import location
-          //   from: "vue",
-          //   items: [
-          //     {
-          //       name: "ExtractPropTypes",
-          //       type: true,
-          //     },
-          //   ],
-          // },
-          // create variable with return
-          {
-            type: LocationType.Declaration,
-            node: expression,
-            generated: true,
-            declaration: {
-              name: "__props",
-              content: code,
-            },
-          },
-          // get the type from variable
-          {
-            type: LocationType.Declaration,
-            node: expression,
-            generated: true,
-
-            // TODO debug this to check if this is the correct type
-            declaration: {
-              type: "type",
-              name: "Type__props",
-              content: `typeof __props;`,
-            },
-          },
           {
             type: LocationType.Props,
-            node: expression,
-            content: "Type__props",
+            generated: false,
+            content: code,
+            expression,
+            varName: "___VERTER_PROPS_DECLARATION___",
           },
         ]);
       });
@@ -404,34 +298,12 @@ describe("Props plugin", () => {
             }
           )
         ).toEqual([
-          // create variable with return
-          {
-            type: LocationType.Declaration,
-            node: expression,
-            generated: true,
-
-            declaration: {
-              name: "__props",
-              content: code,
-            },
-          },
-          // get the type from variable
-          {
-            type: LocationType.Declaration,
-            node: expression,
-            generated: true,
-
-            // TODO debug this to check if this is the correct type
-            declaration: {
-              type: "type",
-              name: "Type__props",
-              content: `typeof __props;`,
-            },
-          },
           {
             type: LocationType.Props,
-            node: expression,
-            content: "Type__props",
+            generated: false,
+            content: code,
+            expression,
+            varName: "___VERTER_PROPS_DECLARATION___",
           },
         ]);
       });
@@ -462,30 +334,12 @@ defineProps(['foo']);
           })
         ).toMatchObject([
           {
-            declaration: {
-              content: `defineProps(['foo'])`,
-              name: "__props",
-            },
-            type: "declaration",
-          },
-          {
-            declaration: {
-              content: "typeof __props;",
-              name: "Type__props",
-              type: "type",
-            },
-            type: "declaration",
-          },
-          {
-            content: "Type__props",
-            type: "props",
+            type: LocationType.Props,
+            generated: false,
+            content: `defineProps(['foo'])`,
+            varName: "___VERTER_PROPS_DECLARATION___",
           },
         ]);
-
-        // for (let i = 0; i < parseAst.length; i++) {
-        //   const element = parseAst[i];
-        //   checkForSetupMethodCall("defineProps", element);
-        // }
       });
 
       // TODO add example with type override
