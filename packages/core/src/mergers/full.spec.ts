@@ -1477,26 +1477,4 @@ describe("Mergers Full", () => {
       export default __VERTER__RESULT;"
     `);
   });
-
-  it.todo("SFC error when doing template slots", () => {
-    const source = `  
-<Comp>
-    <template v-if="isLoading" #default> </template>
-    <template v-else-if="!ticketData.length">
-      <div class="flex flex-col items-center justify-center gap-30.4x">
-        <img class="mt-116.8x h-40 w-40" src="@/assets/emptytickets-icon.svg" />
-        <span class="text-session text-neutral-450">亲，没有找到相关信息～</span>
-      </div>
-    </template>
-    <template v-else>
-      <template #processing>
-        <div>XXX</div>
-      </template>
-      <template #completed>
-        <div>YYY</div>
-      </template>
-    </template>
-    
-</Comp>`;
-  });
 });

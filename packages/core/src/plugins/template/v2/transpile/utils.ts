@@ -205,7 +205,7 @@ export function processExpression(
           );
         });
 
-        walk(ast, {
+        walk(ast as any, {
           enter(node) {
             // note if we want we can walk AST to patch all the function/blocks
             // but let's start just by just patching the first
@@ -221,8 +221,8 @@ export function processExpression(
                     exp.loc.start.offset -
                     ast.start +
                     (node.body.type === "BlockStatement"
-                      ? node.body.body[0].start
-                      : node.body.start);
+                      ? (node.body.body[0] as any).start
+                      : (node.body as any).start);
 
                   context.s.prependRight(start, condition);
                 }

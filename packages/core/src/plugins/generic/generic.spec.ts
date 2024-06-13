@@ -26,8 +26,8 @@ describe("Generic plugin", () => {
       expect(
         GenericPlugin.process({
           script: parsed.scriptSetupAst!,
-          generic: parsed.attrs.generic,
-        })
+          generic: parsed.attrs.generic?.toString(),
+        } as any)
       ).toBe(undefined);
     });
 
@@ -98,7 +98,7 @@ describe("Generic plugin", () => {
       const generic = "T extends string";
       // const generic = "T extends string, A = number";
 
-      expect(GenericPlugin.process({ generic })).toEqual({
+      expect(GenericPlugin.process({ generic } as any)).toEqual({
         type: LocationType.Generic,
         node: undefined,
         items: [

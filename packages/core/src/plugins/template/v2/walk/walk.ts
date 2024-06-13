@@ -59,7 +59,7 @@ export function walk<Context>(
 
     if ("children" in node) {
       for (let i = 0; i < node.children.length; i++) {
-        const element = node.children[i];
+        const element = node.children[i] as VerterNode;
         if (isObject(element)) {
           visit(element, node, overrideContext, childContext);
         }

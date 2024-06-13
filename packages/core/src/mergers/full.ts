@@ -11,7 +11,6 @@ import {
   extractBlocksFromDescriptor,
   retrieveHTMLComments,
 } from "../utils/sfc";
-import { VariableDeclaration } from "@babel/types";
 
 const possibleExports = [
   "export default /*#__PURE__*/_",
@@ -22,7 +21,13 @@ const possibleExports = [
 export function mergeFull(
   locations: LocationByType,
   context: ParseScriptContext
-) {
+): {
+  locations: LocationByType;
+  source: string;
+  content: string;
+  map: ReturnType<MagicString["generateMap"]>;
+  context: ParseScriptContext;
+} {
   sanitiseMap(locations);
 
   const { s, generic, isSetup, sfc } = context;
@@ -292,7 +297,11 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
             (x) =>
               x.items?.map((i) => i.alias ?? i.name) ??
               // TODO maybe handle alias
-              x.node.specifiers.map((x) => x.local?.name ?? x.imported.name)
+              x.node.specifiers.map(
+                (x) =>
+                  x.local?.name ??
+                  ("imported" in x ? (x.imported as any).name : null)
+              )
           )
           .filter(Boolean)
       );
@@ -304,12 +313,22 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
           .flatMap(
             (x) =>
               x.declaration.name ??
-              x.node.declarations?.flatMap(
-                (x) =>
-                  x.id.name ??
-                  x.id.properties.map((p) => p.name ?? p.value.name)
-              ) ??
-              x.node.id?.name
+              ("declarations" in x.node
+                ? x.node.declarations?.flatMap(
+                    (x) =>
+                      ("name" in x.id ? x.id.name : null) ??
+                      ("properties" in x.id
+                        ? x.id.properties.map((p) =>
+                            "name" in p
+                              ? p.name
+                              : "value" in p
+                              ? (p.value as any).name
+                              : null
+                          )
+                        : null)
+                  )
+                : null) ??
+              (x.node as any).id?.name
           )
           .filter(Boolean)
       );
@@ -352,7 +371,7 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
             }`,
         },
       });
-      const propsType = "typeof ___VERTER_PROPS___";
+      // const propsType = "typeof ___VERTER_PROPS___";
 
       // to prevent typescript from merging types, we need to omit
       // the exposed values, props have a lower priority in the context
@@ -465,7 +484,7 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
 
     if (generic) {
       const sanitisedGenericNames = genericInfo.sanitisedNames.join(", ");
-      const genericNames = genericInfo.genericNames.join(", ");
+      // const genericNames = genericInfo.genericNames.join(", ");
 
       locations.declaration.push({
         type: LocationType.Declaration,

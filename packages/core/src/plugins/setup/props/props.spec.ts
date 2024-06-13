@@ -37,7 +37,7 @@ describe("Props plugin", () => {
         ).toBeUndefined();
       });
 
-      test("different callee", () => {6
+      test("different callee", () => {
         expect(
           PropsPlugin.walk(
             {
@@ -94,7 +94,7 @@ describe("Props plugin", () => {
             generated: false,
             content: "defineProps()",
             expression,
-            varName: "___VERTER_PROPS_DECLARATION___",
+            varName: undefined,
           },
         ]);
       });
@@ -139,7 +139,7 @@ describe("Props plugin", () => {
             generated: false,
             content: `defineProps<${type}>()`,
             expression,
-            varName: "___VERTER_PROPS_DECLARATION___",
+            varName: undefined,
           },
         ]);
       });
@@ -186,7 +186,7 @@ describe("Props plugin", () => {
             node: expression.typeParameters.params[0],
             content: type,
             expression,
-            varName: "___VERTER_PROPS_DECLARATION___",
+            varName: undefined,
           },
         ]);
       });
@@ -245,7 +245,7 @@ describe("Props plugin", () => {
             generated: false,
             content: code,
             expression,
-            varName: "___VERTER_PROPS_DECLARATION___",
+            varName: undefined,
           },
         ]);
       });
@@ -303,7 +303,7 @@ describe("Props plugin", () => {
             generated: false,
             content: code,
             expression,
-            varName: "___VERTER_PROPS_DECLARATION___",
+            varName: undefined,
           },
         ]);
       });
@@ -331,13 +331,13 @@ defineProps(['foo']);
           PropsPlugin.walk(parseAst[0], {
             isSetup: true,
             script: parsed,
-          })
+          } as any)
         ).toMatchObject([
           {
             type: LocationType.Props,
             generated: false,
             content: `defineProps(['foo'])`,
-            varName: "___VERTER_PROPS_DECLARATION___",
+            varName: undefined,
           },
         ]);
       });

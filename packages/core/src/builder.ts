@@ -1,11 +1,4 @@
-import {
-  LocationByType,
-  LocationType,
-  ParseScriptContext,
-  PluginOption,
-  TypeLocation,
-  WalkResult,
-} from "./plugins/types.js";
+import { ParseScriptContext, PluginOption } from "./plugins/types.js";
 import type { CompilerOptions } from "@vue/compiler-core";
 import {
   MagicString,
@@ -17,8 +10,7 @@ import {
 } from "@vue/compiler-sfc";
 
 import { defaultPlugins } from "./plugins/index.js";
-import { Statement } from "@babel/types";
-import { processPlugins, walkPlugins } from "./utils/plugin.js";
+import { pluginsToLocations } from "./utils/plugin.js";
 
 export interface Builder {
   build(): void;
@@ -55,7 +47,6 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
 
   return {
     preProcess(filename: string, source: string, ignoreScript = false) {
-      const originalSouce = source;
       // add empty script at the end
       if (
         source.indexOf("</script>") === -1 &&
@@ -89,6 +80,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         filename,
         id: filename,
         isSetup: Boolean(compiled?.setup),
+        isAsync: false,
         sfc: parsed,
         script: compiled,
         generic: compiled?.attrs.generic as string,
@@ -98,17 +90,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
 
       // if (!context.script) throw new Error("No script found");
 
-      // create a map
-      const locations = [
-        ...processPlugins(plugins, context),
-        ...walkPlugins(plugins, context),
-      ].reduce((prev, curr) => {
-        if (!curr) return prev;
-        const type = curr.type;
-        if (!prev[type]) prev[type] = [];
-        prev[type]!.push(curr);
-        return prev;
-      }, {} as Record<LocationType, TypeLocation[]>) as unknown as LocationByType;
+      const locations = pluginsToLocations(plugins, context);
 
       return {
         locations,
@@ -135,6 +117,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         filename: result.descriptor.filename,
         id: result.descriptor.filename,
         isSetup: Boolean(compiled?.setup),
+        isAsync: false,
         sfc: result,
         script: compiled,
         generic: compiled?.attrs.generic as string,
@@ -144,17 +127,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
 
       // if (!context.script) throw new Error("No script found");
 
-      // create a map
-      const locations = [
-        ...processPlugins(plugins, context),
-        ...walkPlugins(plugins, context),
-      ].reduce((prev, curr) => {
-        if (!curr) return prev;
-        const type = curr.type;
-        if (!prev[type]) prev[type] = [];
-        prev[type]!.push(curr);
-        return prev;
-      }, {} as Record<LocationType, TypeLocation[]>) as unknown as LocationByType;
+      const locations = pluginsToLocations(plugins, context);
 
       return {
         locations,
@@ -162,450 +135,443 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
       };
     },
 
-    process(filename: string, source: string) {
-      const parsed = parse(source, {
-        filename,
-        ignoreEmpty: true,
-      });
-
-      const compiled =
-        !!parsed.descriptor.scriptSetup || !!parsed.descriptor.script
-          ? compileScript(parsed.descriptor, {
-              id: filename,
-              // genDefaultAs: "GEN_COMP",
-              ...config?.vue?.compiler,
-              sourceMap: true,
-            })
-          : null;
-
-      const context = {
-        filename,
-        id: filename,
-        isSetup: Boolean(compiled?.setup),
-        isAsync: false /* This will be populated by plugins */,
-        sfc: parsed,
-        script: compiled,
-        generic: compiled?.attrs.generic,
-        template: parsed.descriptor.template,
-        s: new MagicString(source),
-      } satisfies ParseScriptContext;
-
-      // if (!context.script) throw new Error("No script found");
-
-      // create a map
-      const locations = [
-        ...processPlugins(plugins, context),
-        ...walkPlugins(plugins, context),
-      ].reduce((prev, curr) => {
-        if (!curr) return prev;
-        const type = curr.type;
-        if (!prev[type]) prev[type] = [];
-        prev[type]!.push(curr);
-        return prev;
-      }, {} as Record<LocationType, TypeLocation[]>) as unknown as LocationByType;
-
-      // todo move this away
-      return this.finalise(locations, context);
-
-      //   const processed = [...processPlugins(locations, plugins, context)];
+    process(_filename, _source) {
+      // TODO
+      return {} as any;
     },
-    finalise(map: LocationByType, context: ParseScriptContext) {
-      const importsArray =
-        map[LocationType.Import] ?? (map[LocationType.Import] = []);
 
-      const _declarations =
-        map[LocationType.Declaration] ?? (map[LocationType.Declaration] = []);
+    //     process(filename: string, source: string) {
+    //       const parsed = parse(source, {
+    //         filename,
+    //         ignoreEmpty: true,
+    //       });
 
-      const declarations = _declarations
-        .filter((x) => x.generated)
-        .reduce((prev, curr) => {
-          if (!curr.declaration.name) {
-            return `${prev}\n${curr.declaration.content}`;
-          }
+    //       const compiled =
+    //         !!parsed.descriptor.scriptSetup || !!parsed.descriptor.script
+    //           ? compileScript(parsed.descriptor, {
+    //               id: filename,
+    //               // genDefaultAs: "GEN_COMP",
+    //               ...config?.vue?.compiler,
+    //               sourceMap: true,
+    //             })
+    //           : null;
 
-          return `${prev}\n${curr.declaration.type ?? "const"} ${
-            curr.declaration.name
-          } = ${curr.declaration.content};`;
-        }, "");
+    //       const context = {
+    //         filename,
+    //         id: filename,
+    //         isSetup: Boolean(compiled?.setup),
+    //         isAsync: false /* This will be populated by plugins */,
+    //         sfc: parsed,
+    //         script: compiled,
+    //         generic: compiled?.attrs.generic.toString(),
+    //         template: parsed.descriptor.template,
+    //         s: new MagicString(source),
+    //       } satisfies ParseScriptContext;
 
-      const notGenerated = _declarations
-        .filter((x) => !x.generated)
-        .reduce((prev, curr) => {
-          if (!curr.declaration.name) {
-            return `${prev}\n${curr.declaration.content}`;
-          }
+    //       // if (!context.script) throw new Error("No script found");
 
-          return `${prev}\n${curr.declaration.type ?? "const"} ${
-            curr.declaration.name
-          } = ${curr.declaration.content};`;
-        }, "");
+    //       const locations = pluginsToLocations(plugins, context);
 
-      const _props = map[LocationType.Props]
-        ?.map((x) => {
-          if (x.properties) {
-            return `{ ${x.properties
-              .map((x) => `${x.name}: ${x.content}`)
-              .join(", ")} }`;
-          } else {
-            return x.content;
-          }
-        })
-        .join(" & ");
+    //       // todo move this away
+    //       return this.finalise(locations, context);
 
-      const _emits = map[LocationType.Emits]
-        ?.map((x) => {
-          if (x.properties) {
-            return `{ ${x.properties
-              .map((x) => `${x.name}: [${x.content}]`)
-              .join(", ")} }`;
-          } else {
-            return x.content;
-          }
-        })
-        .join(" & ");
+    //       //   const processed = [...processPlugins(locations, plugins, context)];
+    //     },
+    //     finalise(map: LocationByType, context: ParseScriptContext) {
+    //       const importsArray =
+    //         map[LocationType.Import] ?? (map[LocationType.Import] = []);
 
-      const _expose = map[LocationType.Expose]
-        ?.map((x) => x.content)
-        .join(" & ");
+    //       const _declarations =
+    //         map[LocationType.Declaration] ?? (map[LocationType.Declaration] = []);
 
-      const exposeContent = _expose
-        ? `
-        function __exposeResolver${
-          context.generic ? `<${context.generic}>` : ""
-        }() {
-          ${notGenerated}
+    //       const declarations = _declarations
+    //         .filter((x) => x.generated)
+    //         .reduce((prev, curr) => {
+    //           if (!curr.declaration.name) {
+    //             return `${prev}\n${curr.declaration.content}`;
+    //           }
 
-          return ${_expose};
-        }
-      `
-        : "";
+    //           return `${prev}\n${curr.declaration.type ?? "const"} ${
+    //             curr.declaration.name
+    //           } = ${curr.declaration.content};`;
+    //         }, "");
 
-      const _template = map[LocationType.Template]
-        ?.map((x) => x.content)
-        .join(" \n ");
-      // const _templateCtx = map[]
+    //       const notGenerated = _declarations
+    //         .filter((x) => !x.generated)
+    //         .reduce((prev, curr) => {
+    //           if (!curr.declaration.name) {
+    //             return `${prev}\n${curr.declaration.content}`;
+    //           }
 
-      importsArray.push({
-        type: LocationType.Import,
-        node: undefined,
-        from: "vue",
-        items: [
-          {
-            name: "unref",
-            // type: true,
-          },
-          {
-            name: "ComponentExpectedProps",
-            type: true,
-          },
-          {
-            name: "renderList",
-            // type: true,
-          },
-        ],
-      });
+    //           return `${prev}\n${curr.declaration.type ?? "const"} ${
+    //             curr.declaration.name
+    //           } = ${curr.declaration.content};`;
+    //         }, "");
 
-      function getTemplate() {
-        if (!_template) return "";
+    //       const _props = map[LocationType.Props]
+    //         ?.map((x) => {
+    //           if (x.properties) {
+    //             return `{ ${x.properties
+    //               .map((x) => `${x.name}: ${x.content}`)
+    //               .join(", ")} }`;
+    //           } else {
+    //             return x.content;
+    //           }
+    //         })
+    //         .join(" & ");
 
-        const declared = new Set<string>();
+    //       const _emits = map[LocationType.Emits]
+    //         ?.map((x) => {
+    //           if (x.properties) {
+    //             return `{ ${x.properties
+    //               .map((x) => `${x.name}: [${x.content}]`)
+    //               .join(", ")} }`;
+    //           } else {
+    //             return x.content;
+    //           }
+    //         })
+    //         .join(" & ");
 
-        // used to spread the props
-        let propsName = `({} as ComponentExpectedProps<__COMP__${
-          genericNames ? `<${genericNames.join(",")}>` : ""
-        }>)`;
+    //       const _expose = map[LocationType.Expose]
+    //         ?.map((x) => x.content)
+    //         .join(" & ");
 
-        const propsProps = new Set<string>();
+    //       const exposeContent = _expose
+    //         ? `
+    //         function __exposeResolver${
+    //           context.generic ? `<${context.generic}>` : ""
+    //         }() {
+    //           ${notGenerated}
 
-        const declarations = _declarations
-          .filter((x) => !x.generated)
-          .map((x) => {
-            switch (x.node.type) {
-              case "VariableDeclaration": {
-                return x.node.declarations
-                  .map((x) => {
-                    // TODO handle withdefaults too
-                    if (x.init?.type === "CallExpression") {
-                      if (x.init.callee.name === "defineProps") {
-                        propsName = x.id.name;
+    //           return ${_expose};
+    //         }
+    //       `
+    //         : "";
 
-                        // TODO add argument support
-                        if (x.init.arguments) {
-                        }
+    //       const _template = map[LocationType.Template]
+    //         ?.map((x) => x.content)
+    //         .join(" \n ");
+    //       // const _templateCtx = map[]
 
-                        x.init.typeParameters?.params?.[0]?.members?.forEach(
-                          (x) => propsProps.add(x.key.name)
-                        );
-                      }
-                    } else if (x.id.type === "ObjectPattern") {
-                      return x.id.properties.map((x) => x.key.name).join(", ");
-                    }
-                    return x.id.name;
-                  })
-                  .filter(Boolean)
-                  .join(", ");
-              }
-              case "FunctionDeclaration": {
-                return x.node.id.name;
-              }
-              case "EnumDeclaration": {
-                return x.node.id.name;
-              }
-              case "ClassDeclaration": {
-                return x.node.id.name;
-              }
-              default: {
-                return "";
-              }
-            }
-          })
-          .filter(Boolean)
-          .forEach((x) => declared.add(x));
+    //       importsArray.push({
+    //         type: LocationType.Import,
+    //         node: undefined,
+    //         from: "vue",
+    //         items: [
+    //           {
+    //             name: "unref",
+    //             // type: true,
+    //           },
+    //           {
+    //             name: "ComponentExpectedProps",
+    //             type: true,
+    //           },
+    //           {
+    //             name: "renderList",
+    //             // type: true,
+    //           },
+    //         ],
+    //       });
 
-        const contextVars = new Set(
-          [
-            ...(map[LocationType.Props]?.flatMap((x) =>
-              x.properties?.map((p) => p.name)
-            ) ?? []),
-            ...propsProps,
-            ...declared,
-          ].filter(Boolean)
-        );
+    //       function getTemplate() {
+    //         if (!_template) return "";
 
-        const imports = map[LocationType.Import]?.reduce((prev, curr) => {
-          if (curr.generated === false) {
-            prev.push(...curr.items.map((x) => x.alias ?? x.name));
-          }
-          return prev;
-        }, []);
+    //         const declared = new Set<string>();
 
-        return _template
-          ? `
-        function __templateResolver${
-          context.generic ? `<${context.generic}>` : ""
-        }() {
-          const ctx = ()=> {
-            ${notGenerated}
+    //         // used to spread the props
+    //         let propsName = `({} as ComponentExpectedProps<__COMP__${
+    //           genericNames ? `<${genericNames.join(",")}>` : ""
+    //         }>)`;
 
+    //         const propsProps = new Set<string>();
 
-            return {
-              ${
-                context.isSetup && imports.length > 0
-                  ? imports.join(", ") + ", "
-                  : ""
-              }
-              ...({} as ComponentInstance<__COMP__${
-                genericNames ? `<${genericNames.join(",")}>` : ""
-              }>),
-              ...${propsName},
-              ${Array.from(declared)
-                .map((x) => [x, `unref(${x})`].join(": "))
-                .join(", ")}
-            }
-          }
+    //         const declarations = _declarations
+    //           .filter((x) => !x.generated)
+    //           .map((x) => {
+    //             switch (x.node.type) {
+    //               case "VariableDeclaration": {
+    //                 return x.node.declarations
+    //                   .map((x) => {
+    //                     // TODO handle withdefaults too
+    //                     if (x.init?.type === "CallExpression") {
+    //                       if (x.init.callee.name === "defineProps") {
+    //                         propsName = x.id.name;
 
-          const _ctx = ctx();
-          const _comp = {} as any as ExtractRenderComponents<typeof _ctx>;
-  
-          return (
-            <>
-            ${_template}
-            </>
-          );
-        }
-        `
-          : "";
-      }
+    //                         // TODO add argument support
+    //                         if (x.init.arguments) {
+    //                         }
 
-      const emits = _emits ? `DeclareEmits<${_emits}>` : "{}";
-      const props =
-        [_props, emits && `EmitsToProps<${emits}>`]
-          .filter(Boolean)
-          .join(" & ") || "{}";
+    //                         x.init.typeParameters?.params?.[0]?.members?.forEach(
+    //                           (x) => propsProps.add(x.key.name)
+    //                         );
+    //                       }
+    //                     } else if (x.id.type === "ObjectPattern") {
+    //                       return x.id.properties.map((x) => x.key.name).join(", ");
+    //                     }
+    //                     return x.id.name;
+    //                   })
+    //                   .filter(Boolean)
+    //                   .join(", ");
+    //               }
+    //               case "FunctionDeclaration": {
+    //                 return x.node.id.name;
+    //               }
+    //               case "EnumDeclaration": {
+    //                 return x.node.id.name;
+    //               }
+    //               case "ClassDeclaration": {
+    //                 return x.node.id.name;
+    //               }
+    //               default: {
+    //                 return "";
+    //               }
+    //             }
+    //           })
+    //           .filter(Boolean)
+    //           .forEach((x) => declared.add(x));
 
-      const slots =
-        map[LocationType.Slots]?.map((x) => x.content).join(" & ") || "{}";
+    //         const contextVars = new Set(
+    //           [
+    //             ...(map[LocationType.Props]?.flatMap((x) =>
+    //               x.properties?.map((p) => p.name)
+    //             ) ?? []),
+    //             ...propsProps,
+    //             ...declared,
+    //           ].filter(Boolean)
+    //         );
 
-      const genericDeclaration = context.generic ? map.generic?.[0] : undefined;
+    //         const imports = map[LocationType.Import]?.reduce((prev, curr) => {
+    //           if (curr.generated === false) {
+    //             prev.push(...curr.items.map((x) => x.alias ?? x.name));
+    //           }
+    //           return prev;
+    //         }, []);
 
-      function getGenericComponentName(name: string) {
-        return "_VUE_TS__" + name;
-      }
+    //         return _template
+    //           ? `
+    //         function __templateResolver${
+    //           context.generic ? `<${context.generic}>` : ""
+    //         }() {
+    //           const ctx = ()=> {
+    //             ${notGenerated}
 
-      function replaceComponentNameUsage(name: string, content: string) {
-        const regex = new RegExp(`\\b${name}\\b`, "g");
-        return content.replace(regex, getGenericComponentName(name));
-      }
+    //             return {
+    //               ${
+    //                 context.isSetup && imports.length > 0
+    //                   ? imports.join(", ") + ", "
+    //                   : ""
+    //               }
+    //               ...({} as ComponentInstance<__COMP__${
+    //                 genericNames ? `<${genericNames.join(",")}>` : ""
+    //               }>),
+    //               ...${propsName},
+    //               ${Array.from(declared)
+    //                 .map((x) => [x, `unref(${x})`].join(": "))
+    //                 .join(", ")}
+    //             }
+    //           }
 
-      const genericNames = genericDeclaration
-        ? genericDeclaration.items.map((x) => x.name)
-        : undefined;
+    //           const _ctx = ctx();
+    //           const _comp = {} as any as ExtractRenderComponents<typeof _ctx>;
 
-      function sanitiseGenericNames(content: string | null | undefined) {
-        if (!content) return content;
-        return genericNames
-          ? genericNames.reduce((prev, cur) => {
-              return replaceComponentNameUsage(cur, prev);
-            }, content)
-          : content;
-      }
+    //           return (
+    //             <>
+    //             ${_template}
+    //             </>
+    //           );
+    //         }
+    //         `
+    //           : "";
+    //       }
 
-      const CompGeneric = genericDeclaration
-        ? genericDeclaration.items
-            .map((x) => {
-              const name = getGenericComponentName(x.name);
-              const constraint = sanitiseGenericNames(x.constraint);
-              const defaultType = sanitiseGenericNames(x.default);
+    //       const emits = _emits ? `DeclareEmits<${_emits}>` : "{}";
+    //       const props =
+    //         [_props, emits && `EmitsToProps<${emits}>`]
+    //           .filter(Boolean)
+    //           .join(" & ") || "{}";
 
-              return [
-                name,
-                constraint ? `extends ${constraint}` : undefined,
-                `= ${defaultType || "any"}`,
-              ]
-                .filter(Boolean)
-                .join(" ");
-            })
-            .join(", ")
-        : undefined;
-      const InstanceGeneric = genericDeclaration
-        ? genericDeclaration.items
-            .map((x) => {
-              const name = x.name;
-              const constraint =
-                x.constraint || getGenericComponentName(x.name);
-              const defaultType = x.default || getGenericComponentName(x.name);
+    //       const slots =
+    //         map[LocationType.Slots]?.map((x) => x.content).join(" & ") || "{}";
 
-              return [
-                name,
-                constraint ? `extends ${constraint}` : undefined,
-                `= ${defaultType || "any"}`,
-              ]
-                .filter(Boolean)
-                .join(" ");
-            })
-            .join(", ")
-        : undefined;
+    //       const genericDeclaration = context.generic ? map.generic?.[0] : undefined;
 
-      // if is generic don't use the __PROPS__ since it won't have the correct type
-      const genericOrProps = InstanceGeneric
-        ? `{ new<${InstanceGeneric}>(): { $props: ${props || "{}"}, $emit: ${
-            emits || "{}"
-          } , $children: ${slots || "{}"}, $data: ${
-            exposeContent
-              ? `ReturnType<typeof __exposeResolver<${genericDeclaration!.items
-                  .map((x) => x.name)
-                  .join(", ")}>>`
-              : "__DATA__"
-          }  } }`
-        : "__PROPS__";
-      // TODO better resolve the final variable names, especially options
-      // because it relying on the plugin to build
-      const declareComponent = `type __COMP__${
-        CompGeneric ? `<${CompGeneric}>` : ""
-      } = DeclareComponent<${genericOrProps}, __DATA__, __EMITS__, __SLOTS__,  "setup" extends keyof Type__options ? Type__options & { setup: () => {} } : Type__options >`;
+    //       function getGenericComponentName(name: string) {
+    //         return "_VUE_TS__" + name;
+    //       }
 
-      (map[LocationType.Export] ?? (map[LocationType.Export] = [])).push({
-        type: LocationType.Export,
-        node: undefined as any,
-        item: {
-          default: true,
-          name: "__options",
-          alias: "unknown as __COMP__",
-          type: true,
-        },
-      });
+    //       function replaceComponentNameUsage(name: string, content: string) {
+    //         const regex = new RegExp(`\\b${name}\\b`, "g");
+    //         return content.replace(regex, getGenericComponentName(name));
+    //       }
 
-      const exports = map[LocationType.Export]?.reduce((prev, curr) => {
-        return `${prev}\nexport ${curr.item.default ? "default" : "const"} ${
-          curr.item.default
-            ? curr.item.content || curr.item.name
-            : curr.item.name
-        }${curr.item.alias ? " as " + curr.item.alias : ""};`;
-      }, "");
+    //       const genericNames = genericDeclaration
+    //         ? genericDeclaration.items.map((x) => x.name)
+    //         : undefined;
 
-      importsArray.push({
-        type: LocationType.Import,
-        node: undefined as any,
-        from: "vue",
-        items: [
-          {
-            name: "DeclareComponent",
-            type: true,
-          },
-        ],
-      });
+    //       function sanitiseGenericNames(content: string | null | undefined) {
+    //         if (!content) return content;
+    //         return genericNames
+    //           ? genericNames.reduce((prev, cur) => {
+    //               return replaceComponentNameUsage(cur, prev);
+    //             }, content)
+    //           : content;
+    //       }
 
-      if (emits) {
-        importsArray.push({
-          type: LocationType.Import,
-          node: undefined as any,
-          from: "vue",
-          items: [
-            { name: "DeclareEmits", type: true },
-            {
-              name: "EmitsToProps",
-              type: true,
-            },
-          ],
-        });
-      }
-      if (map[LocationType.Slots]?.length) {
-        importsArray.push({
-          type: LocationType.Import,
-          node: undefined as any,
-          from: "vue",
-          items: [{ name: "SlotsType", type: true }],
-        });
-      }
+    //       const CompGeneric = genericDeclaration
+    //         ? genericDeclaration.items
+    //             .map((x) => {
+    //               const name = getGenericComponentName(x.name);
+    //               const constraint = sanitiseGenericNames(x.constraint);
+    //               const defaultType = sanitiseGenericNames(x.default);
 
-      // TODO should group imports
-      const imports = map[LocationType.Import]?.reduce((prev, curr) => {
-        if (!curr.items?.length) {
-          if (
-            curr.from.startsWith("import") &&
-            curr.from.indexOf(" from ") > 0
-          ) {
-            return `${prev}\n${curr.from}`;
-          }
-          return prev;
-        }
-        return `${prev}\nimport { ${curr.items
-          .map((it) => (it.alias ? `${it.name} as ${it.alias}` : it.name))
-          .filter(Boolean)
-          .join(", ")} } from '${curr.from}';`;
-      }, "");
-      const templateContent = getTemplate();
+    //               return [
+    //                 name,
+    //                 constraint ? `extends ${constraint}` : undefined,
+    //                 `= ${defaultType || "any"}`,
+    //               ]
+    //                 .filter(Boolean)
+    //                 .join(" ");
+    //             })
+    //             .join(", ")
+    //         : undefined;
+    //       const InstanceGeneric = genericDeclaration
+    //         ? genericDeclaration.items
+    //             .map((x) => {
+    //               const name = x.name;
+    //               const constraint =
+    //                 x.constraint || getGenericComponentName(x.name);
+    //               const defaultType = x.default || getGenericComponentName(x.name);
 
-      return `${imports}\n
+    //               return [
+    //                 name,
+    //                 constraint ? `extends ${constraint}` : undefined,
+    //                 `= ${defaultType || "any"}`,
+    //               ]
+    //                 .filter(Boolean)
+    //                 .join(" ");
+    //             })
+    //             .join(", ")
+    //         : undefined;
 
-${declarations}\n
+    //       // if is generic don't use the __PROPS__ since it won't have the correct type
+    //       const genericOrProps = InstanceGeneric
+    //         ? `{ new<${InstanceGeneric}>(): { $props: ${props || "{}"}, $emit: ${
+    //             emits || "{}"
+    //           } , $children: ${slots || "{}"}, $data: ${
+    //             exposeContent
+    //               ? `ReturnType<typeof __exposeResolver<${genericDeclaration!.items
+    //                   .map((x) => x.name)
+    //                   .join(", ")}>>`
+    //               : "__DATA__"
+    //           }  } }`
+    //         : "__PROPS__";
+    //       // TODO better resolve the final variable names, especially options
+    //       // because it relying on the plugin to build
+    //       const declareComponent = `type __COMP__${
+    //         CompGeneric ? `<${CompGeneric}>` : ""
+    //       } = DeclareComponent<${genericOrProps}, __DATA__, __EMITS__, __SLOTS__,  "setup" extends keyof Type__options ? Type__options & { setup: () => {} } : Type__options >`;
 
-// expose
-${exposeContent}
+    //       (map[LocationType.Export] ?? (map[LocationType.Export] = [])).push({
+    //         type: LocationType.Export,
+    //         node: undefined as any,
+    //         item: {
+    //           default: true,
+    //           name: "__options",
+    //           alias: "unknown as __COMP__",
+    //           type: true,
+    //         },
+    //       });
 
-// template
-${templateContent}
+    //       const exports = map[LocationType.Export]?.reduce((prev, curr) => {
+    //         return `${prev}\nexport ${curr.item.default ? "default" : "const"} ${
+    //           curr.item.default
+    //             ? curr.item.content || curr.item.name
+    //             : curr.item.name
+    //         }${curr.item.alias ? " as " + curr.item.alias : ""};`;
+    //       }, "");
 
-${
-  context.generic
-    ? [
-        `type __DATA__ = {};`,
-        `type __EMITS__ = {};`,
-        `type __SLOTS__ = {};`,
-      ].join("\n")
-    : [
-        `type __PROPS__ = ${props};`,
-        `type __DATA__ = {};`,
-        `type __EMITS__ = ${emits};`,
-        `type __SLOTS__ = ${slots};`,
-      ].join("\n")
-}
+    //       importsArray.push({
+    //         type: LocationType.Import,
+    //         node: undefined as any,
+    //         from: "vue",
+    //         items: [
+    //           {
+    //             name: "DeclareComponent",
+    //             type: true,
+    //           },
+    //         ],
+    //       });
 
-${declareComponent}
+    //       if (emits) {
+    //         importsArray.push({
+    //           type: LocationType.Import,
+    //           node: undefined as any,
+    //           from: "vue",
+    //           items: [
+    //             { name: "DeclareEmits", type: true },
+    //             {
+    //               name: "EmitsToProps",
+    //               type: true,
+    //             },
+    //           ],
+    //         });
+    //       }
+    //       if (map[LocationType.Slots]?.length) {
+    //         importsArray.push({
+    //           type: LocationType.Import,
+    //           node: undefined as any,
+    //           from: "vue",
+    //           items: [{ name: "SlotsType", type: true }],
+    //         });
+    //       }
 
+    //       // TODO should group imports
+    //       const imports = map[LocationType.Import]?.reduce((prev, curr) => {
+    //         if (!curr.items?.length) {
+    //           if (
+    //             curr.from.startsWith("import") &&
+    //             curr.from.indexOf(" from ") > 0
+    //           ) {
+    //             return `${prev}\n${curr.from}`;
+    //           }
+    //           return prev;
+    //         }
+    //         return `${prev}\nimport { ${curr.items
+    //           .map((it) => (it.alias ? `${it.name} as ${it.alias}` : it.name))
+    //           .filter(Boolean)
+    //           .join(", ")} } from '${curr.from}';`;
+    //       }, "");
+    //       const templateContent = getTemplate();
 
-${exports || ""}
-        `;
-    },
+    //       return `${imports}\n
+
+    // ${declarations}\n
+
+    // // expose
+    // ${exposeContent}
+
+    // // template
+    // ${templateContent}
+
+    // ${
+    //   context.generic
+    //     ? [
+    //         `type __DATA__ = {};`,
+    //         `type __EMITS__ = {};`,
+    //         `type __SLOTS__ = {};`,
+    //       ].join("\n")
+    //     : [
+    //         `type __PROPS__ = ${props};`,
+    //         `type __DATA__ = {};`,
+    //         `type __EMITS__ = ${emits};`,
+    //         `type __SLOTS__ = ${slots};`,
+    //       ].join("\n")
+    // }
+
+    // ${declareComponent}
+
+    // ${exports || ""}
+    //         `;
+    //     },
   };
 }

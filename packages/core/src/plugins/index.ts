@@ -1,4 +1,4 @@
-import { ParseScriptContext, PluginOption, LocationType } from "./types.js";
+import { PluginOption } from "./types.js";
 
 export * from "./types.js";
 

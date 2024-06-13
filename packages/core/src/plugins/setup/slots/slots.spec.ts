@@ -88,7 +88,15 @@ describe("Slots plugin", () => {
               },
             }
           )
-        ).toBeUndefined();
+        ).toEqual([
+          {
+            type: LocationType.Slots,
+            generated: false,
+            content: "defineSlots()",
+            expression,
+            varName: undefined,
+          },
+        ]);
       });
 
       test("type defineSlots", () => {
@@ -127,21 +135,11 @@ describe("Slots plugin", () => {
           )
         ).toEqual([
           {
-            type: LocationType.Import,
-            generated: true,
-            node: expression,
-            from: "vue",
-            items: [
-              {
-                name: "SlotsType",
-                type: true,
-              },
-            ],
-          },
-          {
             type: LocationType.Slots,
-            node: expression,
-            content: `SlotsType<${type}>`,
+            generated: false,
+            content: "defineSlots<{ foo: string; bar: number; }>()",
+            expression,
+            varName: undefined,
           },
         ]);
       });
@@ -194,7 +192,15 @@ describe("Slots plugin", () => {
               },
             }
           )
-        ).toBeUndefined();
+        ).toEqual([
+          {
+            type: LocationType.Slots,
+            generated: false,
+            content: code,
+            expression,
+            varName: undefined,
+          },
+        ]);
       });
 
       test("defineSlots Options undefined", () => {
@@ -244,7 +250,15 @@ describe("Slots plugin", () => {
               },
             }
           )
-        ).toBeUndefined();
+        ).toEqual([
+          {
+            type: LocationType.Slots,
+            generated: false,
+            content: code,
+            expression,
+            varName: undefined,
+          },
+        ]);
       });
 
       it("test with parse", () => {
@@ -268,28 +282,16 @@ defineSlots<{ foo: (test: string)=> any}>();
           SlotsPlugin.walk(parseAst[0], {
             isSetup: true,
             script: parsed,
-          })
-        ).toMatchObject([
-          {
-            from: "vue",
-            items: [
-              {
-                name: "SlotsType",
-                type: true,
-              },
-            ],
-            type: "import",
-          },
+          } as any)
+        ).toEqual([
           {
             type: LocationType.Slots,
-            content: `SlotsType<{ foo: (test: string)=> any}>`,
+            generated: false,
+            content: "defineSlots<{ foo: (test: string)=> any}>()",
+            expression: expect.any(Object),
+            varName: undefined,
           },
         ]);
-
-        // for (let i = 0; i < parseAst.length; i++) {
-        //   const element = parseAst[i];
-        //   checkForSetupMethodCall("defineSlots", element);
-        // }
       });
 
       // TODO add example with type override

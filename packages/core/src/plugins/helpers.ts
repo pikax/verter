@@ -1,10 +1,4 @@
-import {
-  CallExpression,
-  Expression,
-  ExpressionStatement,
-  Node,
-  Statement,
-} from "@babel/types";
+import { Node, Statement } from "@babel/types";
 import { VueAPISetup } from "./types.js";
 
 export function* checkForSetupMethodCalls(
@@ -46,7 +40,7 @@ export function checkForSetupMethodCall(
 
 export function retrieveNodeString(
   node: Node | undefined | null,
-  source: string 
+  source: string
 ) {
   if (!node) return undefined;
   return source.slice(node.start ?? 0, node.end ?? -1);

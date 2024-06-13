@@ -1,11 +1,11 @@
 import {
   MagicString,
-  SFCBlock,
   SFCParseResult,
   SFCScriptBlock,
   SFCTemplateBlock,
 } from "@vue/compiler-sfc";
 import type * as _babel_types from "@babel/types";
+import { RootNode } from "@vue/compiler-core";
 
 // TODO move somewhere else
 export type VueAPISetup =
@@ -82,7 +82,7 @@ export interface ImportItem {
 
 export interface BaseTypeLocation {
   type: LocationType;
-  node: _babel_types.Node;
+  node?: _babel_types.Node | RootNode;
   // holds information if it was generated from script or scriptSetup,
   // this is necessary because when we walk the AST the babel nodes
   // are offset to the <script> and not to the file.
@@ -208,9 +208,9 @@ export interface TypeLocationGeneric {
 
 export interface TypeLocationTemplate {
   type: LocationType.Template;
-  node: _babel_types.Node;
+  node: RootNode;
 
-  content: string;
+  content?: string;
 
   map?: any;
   // this causes compilation error

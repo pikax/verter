@@ -670,7 +670,7 @@ function processProp(
   prop: AttributeNode | DirectiveNode,
   context: TranspileContext,
   parent: ElementNode,
-  parentParent: VerterNode,
+  _parentParent: VerterNode,
   parentContext: Record<string, any>,
   camelise = false
 ) {

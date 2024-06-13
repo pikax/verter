@@ -1,5 +1,6 @@
 import { parse } from "@vue/compiler-sfc";
 import TemplatePlugin from "./index.js";
+import { ParseScriptContext } from "../types.js";
 
 describe("template", () => {
   it("should work", () => {
@@ -20,7 +21,7 @@ describe("template", () => {
     const res = TemplatePlugin.process({
       sfc: parsed,
       template: parsed.descriptor.template,
-    });
+    } as ParseScriptContext);
 
     expect(res).toBe(
       "Array.from({ length: 5 }).map((i) => <MyComp key={i} test={i} />);"
