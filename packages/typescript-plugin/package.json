@@ -8,11 +8,12 @@
   "author": "Carlos Rodrigues <pikax>",
   "license": "MIT",
   "scripts": {
-    "build": "vite build",
+    "build": "tsc -b",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
-    "@verter/core": "workspace:^"
+    "@verter/core": "workspace:^",
+    "vue": "^3.4.21"
   },
   "devDependencies": {
     "typescript": "^5.4.5",

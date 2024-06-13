@@ -51,10 +51,11 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           try {
             const resolvedModule = moduleResolver(
               moduleName,
-              () => resolvedModules[index]
+              () => resolvedModules[index] as any
             );
             if (resolvedModule) return { resolvedModule };
           } catch (e) {
+            // @ts-expect-error
             logger.msg(e.toString(), "Err");
             return resolvedModules[index];
           }
@@ -85,6 +86,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         return moduleNames.map((moduleName, index) => {
           try {
             const resolvedModule = moduleResolver(moduleName, () =>
+              // @ts-expect-error
               languageServiceHost.getResolvedModuleWithFailedLookupLocationsFromCache?.(
                 moduleName,
                 containingFile
@@ -92,6 +94,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             );
             if (resolvedModule) return resolvedModule;
           } catch (e) {
+              // @ts-expect-error
             logger.msg(e.toString(), "Err");
             return resolvedModules[index];
           }

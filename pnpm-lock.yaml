@@ -172,6 +172,9 @@ importers:
       '@verter/core':
         specifier: workspace:^
         version: link:../core
+      vue:
+        specifier: ^3.4.21
+        version: 3.4.21(typescript@5.4.5)
     devDependencies:
       typescript:
         specifier: ^5.4.5
