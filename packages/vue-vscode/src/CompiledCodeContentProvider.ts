@@ -18,7 +18,7 @@ export default class CompiledCodeContentProvider
 {
   static previewWindowUri = Uri.parse("verter-compiled:///preview.tsx");
   static scheme = "verter-compiled";
-
+ 
   private didChangeEmitter = new EventEmitter<Uri>();
   private selectedVueFile: string | undefined;
   private subscriptions: Disposable[] = [];

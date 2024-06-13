@@ -222,6 +222,9 @@ importers:
       '@vscode/vsce':
         specifier: ^2.25.0
         version: 2.25.0
+      typescript:
+        specifier: ^5.4.5
+        version: 5.4.5
       vite:
         specifier: ^5.2.8
         version: 5.2.8(@types/node@20.12.7)
