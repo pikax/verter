@@ -412,7 +412,7 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
         declaration: {
           type: "const",
           name: "___VERTER_EMITS___",
-          content: emits[0],
+          content: emits[0] ?? "{}",
           // content: `{
           //     ${emits.map((x) => `...(${x})`).join(",\n")}
           //   }`,
