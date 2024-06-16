@@ -22,6 +22,9 @@ export interface ParseScriptContext {
   id: string;
 
   isSetup: boolean;
+  /**
+   * This will only be resolved when running plugin
+   */
   isAsync: boolean;
   generic?: string | undefined;
 
@@ -96,10 +99,10 @@ export interface BaseTypeLocation {
 export interface TypeLocationDeclaration {
   type: LocationType.Declaration;
   node?:
-    | _babel_types.VariableDeclaration
-    | _babel_types.FunctionDeclaration
-    | _babel_types.EnumDeclaration
-    | _babel_types.ClassDeclaration;
+  | _babel_types.VariableDeclaration
+  | _babel_types.FunctionDeclaration
+  | _babel_types.EnumDeclaration
+  | _babel_types.ClassDeclaration;
 
   generated?: boolean;
 
@@ -252,8 +255,8 @@ export type ValueOf<T> = T[keyof T];
 
 export type LocationByType = {
   [K in LocationType]?: K extends keyof TypeLocationMap
-    ? Array<TypeLocationMap[K]>
-    : never;
+  ? Array<TypeLocationMap[K]>
+  : never;
 };
 
 export type TypeLocation = BaseTypeLocation & ValueOf<TypeLocationMap>;

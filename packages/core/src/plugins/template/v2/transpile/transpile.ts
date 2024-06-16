@@ -19,6 +19,35 @@ export type TranspileOptions = Partial<
   }
 >;
 
+const DefaultAccessors = {
+  ctx: PrefixSTR("ctx", DEFAULT_PREFIX),
+  comp: PrefixSTR("comp", DEFAULT_PREFIX),
+  slot: PrefixSTR("slot", DEFAULT_PREFIX),
+  template: PrefixSTR("template", DEFAULT_PREFIX),
+  slotCallback: PrefixSTR("SLOT_CALLBACK", DEFAULT_PREFIX),
+  normalizeClass: PrefixSTR("normalizeClass", DEFAULT_PREFIX),
+  normalizeStyle: PrefixSTR("normalizeStyle", DEFAULT_PREFIX),
+  renderList: PrefixSTR("renderList", DEFAULT_PREFIX),
+  eventCb: PrefixSTR("eventCb", DEFAULT_PREFIX),
+}
+
+export function getAccessors(prefix?: string): Readonly<typeof DefaultAccessors> {
+  return prefix === DEFAULT_PREFIX || !prefix ? DefaultAccessors : {
+    ctx: PrefixSTR("ctx", prefix),
+    comp: PrefixSTR("comp", prefix),
+    slot: PrefixSTR("slot", prefix),
+    template: PrefixSTR("template", prefix),
+    slotCallback: PrefixSTR("SLOT_CALLBACK", prefix),
+    normalizeClass: PrefixSTR("normalizeClass", prefix),
+    normalizeStyle: PrefixSTR("normalizeStyle", prefix),
+    renderList: PrefixSTR("renderList", prefix),
+    eventCb: PrefixSTR("eventCb", prefix),
+  };
+}
+
+
+
+
 export function transpile(
   root: RootNode,
   s: MagicString,
@@ -37,17 +66,7 @@ export function transpile(
   const finalOptions = deepmerge(
     {
       s,
-      accessors: {
-        ctx: PrefixSTR("ctx", prefix),
-        comp: PrefixSTR("comp", prefix),
-        slot: PrefixSTR("slot", prefix),
-        template: PrefixSTR("template", prefix),
-        slotCallback: PrefixSTR("SLOT_CALLBACK", prefix),
-        normalizeClass: PrefixSTR("normalizeClass", prefix),
-        normalizeStyle: PrefixSTR("normalizeStyle", prefix),
-        renderList: PrefixSTR("renderList", prefix),
-        eventCb: PrefixSTR("eventCb", prefix),
-      },
+      accessors: getAccessors(prefix),
       declarations: [],
       conditions: {
         ifs: [],

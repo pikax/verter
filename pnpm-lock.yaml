@@ -126,6 +126,9 @@ importers:
       '@verter/language-shared':
         specifier: workspace:^
         version: link:../language-shared
+      '@vue/compiler-core':
+        specifier: ^3.4.21
+        version: 3.4.21(patch_hash=vykp5zqjsgp3jtmg4q7gowonxy)
       source-map-js:
         specifier: ^1.2.0
         version: 1.2.0

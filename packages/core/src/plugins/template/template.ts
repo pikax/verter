@@ -1,10 +1,11 @@
 import { LocationType, PluginOption, WalkResult } from "../types.js";
-import { transpile } from "./v2/transpile/index.js";
+import { transpile, TranspileOptions } from "./v2/transpile/index.js";
+
 
 export default {
   name: "Template",
 
-  process: (context) => {
+  process: (context, options: Partial<TranspileOptions> = {}) => {
     const template = context.template;
     if (!template) return;
 
@@ -12,9 +13,9 @@ export default {
 
     if (!ast) return;
 
-    const declarations = [] as WalkResult[];
+    const declarations = options.declarations ?? [];
     try {
-      const { accessors } = transpile(ast, context.s, { declarations });
+      const { accessors } = transpile(ast, context.s, { ...options, declarations });
 
       declarations.push({
         type: LocationType.Import,

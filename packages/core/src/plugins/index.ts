@@ -1,6 +1,7 @@
 import { PluginOption } from "./types.js";
 
 export * from "./types.js";
+export { getAccessors } from "./template/index.js";
 
 // import EmitsPlugin from "./emits/index.js";
 // import PropsPlugin from "./props/index.js";
