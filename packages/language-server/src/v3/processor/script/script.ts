@@ -1,0 +1,1 @@
+// it should generate the script 

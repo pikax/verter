@@ -16,6 +16,7 @@ import {
   mapCompletion,
   mapDiagnostic,
 } from "./v2/lib/plugins/typescript";
+
 // import { uriToFilePath } from "vscode-languageserver/lib/node/files";
 
 import { uriToVerterVirtual, urlToFileUri } from "./v2/lib/documents/utils";
@@ -88,7 +89,7 @@ export function startServer(options: LsConnectionOption = {}) {
     };
   });
 
-  connection.onRequest(RequestType.GetCompiledCode, (uri): any => {
+  connection.onRequest(RequestType.GetCompiledCode, (uri) => {
     const doc = documentManager.getDocument(uri);
 
     if (doc?.languageId === "vue") {
@@ -97,7 +98,7 @@ export function startServer(options: LsConnectionOption = {}) {
       return {
         js: {
           code: vueDoc.template.content,
-          map: vueDoc.template.map,
+          map: vueDoc.template.map as unknown as string,
         },
         css: {
           code: "",

@@ -24,7 +24,7 @@ export type RequestParams = {
 
 export type RequestResponse = {
   [RequestType.GetCompiledCode]: {
-    js: { code: string; map: string };
-    css: { code: string; map: string };
+    js: { code: string; map: any | undefined };
+    css: { code: string; map: any | undefined };
   };
 };

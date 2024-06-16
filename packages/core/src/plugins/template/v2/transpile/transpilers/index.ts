@@ -6,4 +6,4 @@ import Interpolation from "./interpolation/index.js";
 import Root from "./root/index.js";
 import Text from "./text/index.js";
 
-export default reducePlugins([Element, Comment, Interpolation, Root, Text]);
+export default reducePlugins([Element, Comment, Interpolation, /*Root,*/ Text]);

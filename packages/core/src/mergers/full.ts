@@ -209,7 +209,9 @@ export type ___VERTER__DeclareComponent<
     ___VERTER__SlotsType<Slots>
   > & (Options extends infer O extends Record<PropertyKey, {}> ? O : {})) extends infer C ? C & { new(): { $props: { 'v-slot'?: (c: C & { $slots: Slots }) => any } } } : never
 
-  declare function ___VERTER___AssertAny<T>(o: T extends T & 0 ? never : T): T extends T & 0 ? never : T
+  // commenting the function ahead because it does not play nicely with generics :(
+  // declare function ___VERTER___AssertAny<T>(o: T extends T & 0 ? never : T): T extends T & 0 ? never : T
+  declare function ___VERTER___AssertAny<T>(o: T): T extends T & 0 ? never : T
 
   declare function ___VERTER___PATCH_TYPE<T>(options: T): T
   declare function ___VERTER___PATCH_TYPE<T, Props, Data extends Record<string, any>, Emits, Slots extends Record<PropertyKey, any>>(options: T, props: Props, data?: Data, emits?: Emits, slots?: Slots)
@@ -230,30 +232,30 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
 
       ...(isSetup
         ? [
-            {
-              type: LocationType.Declaration,
-              generated: true,
-              context: "post",
+          {
+            type: LocationType.Declaration,
+            generated: true,
+            context: "post",
 
-              declaration: {
-                name: "___VERTER_DEFINE_SLOTS___",
-                type: "const",
-                content: `{
+            declaration: {
+              name: "___VERTER_DEFINE_SLOTS___",
+              type: "const",
+              content: `{
               ${locations.slots
-                .map(
-                  (x) =>
-                    x.varName ||
-                    s.original.slice(
-                      x.expression.start + context.script.loc.start.offset,
-                      x.expression.end + context.script.loc.start.offset
-                    )
-                )
-                .map((x) => `...(${x})`)
-                .join(",\n")}
+                  .map(
+                    (x) =>
+                      x.varName ||
+                      s.original.slice(
+                        x.expression.start + context.script.loc.start.offset,
+                        x.expression.end + context.script.loc.start.offset
+                      )
+                  )
+                  .map((x) => `...(${x})`)
+                  .join(",\n")}
             }`,
-              },
-            } as TypeLocationDeclaration,
-          ]
+            },
+          } as TypeLocationDeclaration,
+        ]
         : []),
       {
         type: LocationType.Declaration,
@@ -262,9 +264,8 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
         declaration: {
           name: "___VERTER___slot",
           type: "const",
-          content: `___VERTER_extract_Slots(___VERTER_COMP___${
-            isSetup ? `, ___VERTER_DEFINE_SLOTS___` : ""
-          })`,
+          content: `___VERTER_extract_Slots(___VERTER_COMP___${isSetup ? `, ___VERTER_DEFINE_SLOTS___` : ""
+            })`,
         },
       }
     );
@@ -315,18 +316,18 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
               x.declaration.name ??
               ("declarations" in x.node
                 ? x.node.declarations?.flatMap(
-                    (x) =>
-                      ("name" in x.id ? x.id.name : null) ??
-                      ("properties" in x.id
-                        ? x.id.properties.map((p) =>
-                            "name" in p
-                              ? p.name
-                              : "value" in p
-                              ? (p.value as any).name
-                              : null
-                          )
-                        : null)
-                  )
+                  (x) =>
+                    ("name" in x.id ? x.id.name : null) ??
+                    ("properties" in x.id
+                      ? x.id.properties.map((p) =>
+                        "name" in p
+                          ? p.name
+                          : "value" in p
+                            ? (p.value as any).name
+                            : null
+                      )
+                      : null)
+                )
                 : null) ??
               (x.node as any).id?.name
           )
@@ -428,17 +429,16 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
     const instanceType = `InstanceType<typeof ___VERTER_COMP___>`;
 
     exposedCtx.unshift(
-      `...({} as ${
-        rawToExposeCtx.length || locations.props.length
-          ? `Omit<${instanceType}, ${rawToExposeCtx
-              .map((x) => JSON.stringify(x))
-              .concat(
-                locations.props.length
-                  ? ["keyof typeof ___VERTER_PROPS___"]
-                  : []
-              )
-              .join("|")}>`
-          : instanceType
+      `...({} as ${rawToExposeCtx.length || locations.props.length
+        ? `Omit<${instanceType}, ${rawToExposeCtx
+          .map((x) => JSON.stringify(x))
+          .concat(
+            locations.props.length
+              ? ["keyof typeof ___VERTER_PROPS___"]
+              : []
+          )
+          .join("|")}>`
+        : instanceType
       })`
     );
 
@@ -500,9 +500,8 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
       });
 
       // this will remove the instance and constructor from __VERTER_COMPONENT__
-      const removeInstanceFromType = `ReturnType<typeof ___VERTER_COMPONENT__<${sanitisedGenericNames}>> extends ${
-        context.isAsync ? "Promise<infer Comp>" : "infer Comp"
-      } ? Pick<Comp, keyof Comp> : never`;
+      const removeInstanceFromType = `ReturnType<typeof ___VERTER_COMPONENT__<${sanitisedGenericNames}>> extends ${context.isAsync ? "Promise<infer Comp>" : "infer Comp"
+        } ? Pick<Comp, keyof Comp> : never`;
 
       const betterInstance = `{ new<${genericInfo.instance}>(): { $props: { 
         /* props info here */
@@ -526,11 +525,10 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
         declaration: {
           type: "const",
           name: "__VERTER__RESULT",
-          content: `___VERTER_COMPONENT__()${
-            context.isAsync
-              ? "as unknown as ReturnType<typeof ___VERTER_COMPONENT__> extends Promise<infer V> ? V : ReturnType<typeof ___VERTER_COMPONENT__>"
-              : ""
-          };`,
+          content: `___VERTER_COMPONENT__()${context.isAsync
+            ? "as unknown as ReturnType<typeof ___VERTER_COMPONENT__> extends Promise<infer V> ? V : ReturnType<typeof ___VERTER_COMPONENT__>"
+            : ""
+            };`,
         },
       });
     }
@@ -677,8 +675,7 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
       s.original.length,
       [
         ...finish,
-        `export default __VERTER__RESULT${
-          generic ? " as unknown as __VERTER_RESULT_TYPE__" : ""
+        `export default __VERTER__RESULT${generic ? " as unknown as __VERTER_RESULT_TYPE__" : ""
         };`,
       ].join("\n")
     );
@@ -1003,9 +1000,8 @@ function scriptTagProcess(block: VerterSFCBlock, context: ParseScriptContext) {
     return;
   }
 
-  const preGeneric = `\n${
-    context.isAsync ? "async " : ""
-  }function ___VERTER_COMPONENT__`;
+  const preGeneric = `\n${context.isAsync ? "async " : ""
+    }function ___VERTER_COMPONENT__`;
   const postGeneric = `() {\n`;
 
   const generic = block.block.attrs.generic;
@@ -1072,8 +1068,8 @@ function genericProcess(
     if (!content) return content;
     return genericNames
       ? genericNames.reduce((prev, cur) => {
-          return replaceComponentNameUsage(cur, prev);
-        }, content)
+        return replaceComponentNameUsage(cur, prev);
+      }, content)
       : content;
   }
 
