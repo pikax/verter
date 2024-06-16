@@ -1,14 +1,11 @@
-import { LocationByType, ParseScriptContext, TemplateBuilder, getAccessors } from "@verter/core";
-import type { SourceLocation } from "@vue/compiler-core";
+import { MagicString } from "vue/compiler-sfc";
+import { type ParseScriptContext, TemplateBuilder, getAccessors } from "@verter/core";
 import { relative } from 'path/posix'
 
 import { RenderContextExportName } from '../script/index.js'
 import { getBlockFilename } from "../utils.js";
-import { MagicString } from "vue/compiler-sfc";
-
 
 export const FunctionExportName = 'Render'
-
 
 export function processRender(context: ParseScriptContext) {
     const accessors = getAccessors()

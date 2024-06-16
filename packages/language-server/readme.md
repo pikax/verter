@@ -8,6 +8,7 @@ Language-server that handles the heavy-lifting
 
 `VueDocument` will be broken down into multiple files, based on the SFC regions:
 
+- `{path}.vue.ts`: Contains the bundled modules
 - `<script>`:
   - `{path}.vue.script.ts`: Contains the exposed module it imports the Render
 - `<template>`:

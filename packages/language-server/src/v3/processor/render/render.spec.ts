@@ -34,7 +34,6 @@ describe('processRender', () => {
         `)
   })
 
-
   it('should return the render function', () => {
     const result = process(`<template><div></div></template>`)
 
@@ -50,7 +49,6 @@ describe('processRender', () => {
     `)
   })
 
-
   it('should be generic', () => {
     const result = process(`<template><div></div></template><script generic="T"></script>`)
     expect(result.content).toMatchInlineSnapshot(`
@@ -65,7 +63,6 @@ describe('processRender', () => {
     `)
 
   })
-
 
   it('should handle empty template', () => {
     const result = process(`<template></template>`)
@@ -104,6 +101,31 @@ describe('processRender', () => {
       }
       "
     `)
+  })
+
+  describe('comments', () => {
+    it('should ignore the template if is commmented', () => {
+      const result = process(`<template><!--<div></div>--></template>`)
+      expect(result.content).toMatchInlineSnapshot(`
+        "import { RenderContext } from './../test.vue.script.ts'
+        export function Render() {
+        const ___VERTER___ctx = RenderContext()
+        return <>
+        {/*<div></div>*/}
+        </>
+        }
+        "
+      `)
+    })
+
+    it('empty if template in comment', () => {
+      const result = process(`<!--<template></template>-->`)
+      expect(result.content).toMatchInlineSnapshot(`
+        "export function Render() {} {
+        return <></>
+        } "
+      `)
+    })
   })
 })
 

@@ -3,7 +3,8 @@ import {
     SFCScriptCompileOptions,
     parse,
 } from "@vue/compiler-sfc";
-import { ParseScriptContext } from "./plugins";
+import { defaultPlugins, ParseScriptContext, PluginOption } from "./plugins";
+import { pluginsToLocations } from "./utils/plugin";
 export function createContext(source: string, filename: string = 'temp.vue', options: Partial<SFCScriptCompileOptions> = {}) {
     // add empty script at the end
     if (
@@ -37,4 +38,13 @@ export function createContext(source: string, filename: string = 'temp.vue', opt
     } satisfies ParseScriptContext;
 
     return context
+}
+
+export function parseLocations(context: ParseScriptContext, appendPlugins: PluginOption[] = []) {
+    const plugins = [
+        ...defaultPlugins,
+        ...appendPlugins
+    ]
+    const locations = pluginsToLocations(plugins, context);
+    return locations;
 }
