@@ -36,7 +36,9 @@ describe('processScript', () => {
     it('should return RenderContext', () => {
         const result = process(`<script></script>`)
         expect(result.content).toMatchInlineSnapshot(`
-          "export function RenderContext() {
+          "
+          export function RenderContext() {
+
           return {
 
           }
@@ -50,7 +52,9 @@ describe('processScript', () => {
     it('should be generic', () => {
         const result = process(`<script generic="T"></script>`)
         expect(result.content).toMatchInlineSnapshot(`
-          "export function RenderContext<T>() {
+          "
+          export function RenderContext<T>() {
+
           return {
 
           }
@@ -62,7 +66,9 @@ describe('processScript', () => {
     it('should handle empty script', () => {
         const result = process(``)
         expect(result.content).toMatchInlineSnapshot(`
-          "export function RenderContext() {
+          "
+          export function RenderContext() {
+
           return {
 
           }
@@ -73,7 +79,9 @@ describe('processScript', () => {
     it('should handle no script', () => {
         const result = process(``)
         expect(result.content).toMatchInlineSnapshot(`
-          "export function RenderContext() {
+          "
+          export function RenderContext() {
+
           return {
 
           }
@@ -83,15 +91,77 @@ describe('processScript', () => {
     })
 
     // TODO handle multiple scripts
-    it('should handle multiple scripts', () => {
+    it.todo('should handle multiple scripts', () => {
         const result = process(`<script setup></script><script></script>`)
         expect(result.content).toMatchInlineSnapshot(`
-          "export function RenderContext() {
-          return {
+          "
+          export function RenderContext() {
 
+          return {
           }
           }
           "
         `)
+    })
+
+
+    describe('setup', () => {
+        it('should handle setup', () => {
+            const result = process(`<script setup></script>`)
+            expect(result.content).toMatchInlineSnapshot(`
+              "
+              export function RenderContext() {
+
+              return {
+
+              }
+              }
+              "
+            `)
+        })
+
+        test('not move import', () => {
+            const result = process(`<script setup>import {ref} from 'vue'; const a = {}</script>`)
+            expect(result.content).toMatchInlineSnapshot(`
+              "import {ref} from 'vue';
+              export function RenderContext() {
+               const a = {}
+              return {
+              ref,
+              a
+              }
+              }
+              "
+            `)
+        })
+        test('move import', () => {
+            const result = process(`<script setup>const a = {};import {ref} from 'vue'; </script>`)
+            expect(result.content).toMatchInlineSnapshot(`
+              "import {ref} from 'vue';
+              export function RenderContext() {
+              const a = {}; 
+              return {
+              ref,
+              a
+              }
+              }
+              "
+            `)
+        })
+
+        test('keep import order', () => {
+            const result = process(`<script setup>import 'a'; import 'b'; const a = {};import {ref} from 'vue';</script>`)
+            expect(result.content).toMatchInlineSnapshot(`
+              "import 'a';import 'b';import {ref} from 'vue';
+              export function RenderContext() {
+                const a = {};
+              return {
+              ref,
+              a
+              }
+              }
+              "
+            `)
+        })
     })
 })

@@ -12,8 +12,8 @@ export default {
 
     const varName =
       node.type === "VariableDeclaration" &&
-      node.declarations.length === 1 &&
-      "name" in node.declarations[0].id
+        node.declarations.length === 1 &&
+        "name" in node.declarations[0].id
         ? node.declarations[0].id.name
         : undefined;
 

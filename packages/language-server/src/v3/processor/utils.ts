@@ -1,7 +1,7 @@
 import { ParseScriptContext } from "@verter/core";
 
 
-export type BlockType = 'render' | 'script' | 'style' | 'custom';
+export type BlockType = 'bundle' | 'render' | 'script' | 'style' | 'custom';
 
 // const BlockExtensionMap = {
 //     render: 'render.tsx',
@@ -12,6 +12,8 @@ export type BlockType = 'render' | 'script' | 'style' | 'custom';
 
 export function getBlockFilename(block: BlockType, context: ParseScriptContext) {
     switch (block) {
+        case 'bundle':
+            return context.filename + '.bundle.tsx';
         case 'render':
             return context.filename + '.render.tsx';
         case 'script':
