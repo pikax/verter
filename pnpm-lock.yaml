@@ -148,6 +148,9 @@ importers:
         specifier: ^3.0.8
         version: 3.0.8
     devDependencies:
+      '@babel/types':
+        specifier: ^7.24.0
+        version: 7.24.0
       vite:
         specifier: ^5.2.8
         version: 5.2.8(@types/node@20.12.7)

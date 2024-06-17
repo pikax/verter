@@ -57,6 +57,8 @@ export function pluginsToLocations(
 
   handleResult(locations, items);
 
+
+
   return locations;
 }
 
