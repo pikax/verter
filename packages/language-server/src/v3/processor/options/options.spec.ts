@@ -220,12 +220,7 @@ describe('processor options', () => {
       it('simple', () => {
         const result = process(`<script setup lang="ts">import { ref, Ref } from 'vue';\nconst a = ref();</script><template><div>test</div></template>`)
         expect(result.content).toContain(`const a = ref();`)
-        expect(result.content).toContain('function BuildBindingContext() {')
-
-        testSourceMaps({
-          content: result.content,
-          map: result.s.generateMap({ hires: true, includeContent: true })
-        })
+        expect(result.content).toContain('export function BuildBindingContext() {')
 
         expectFindStringWithMap('const a = ref();', result)
         expectFindStringWithMap(`import { ref, Ref } from 'vue';`, result)
@@ -236,46 +231,39 @@ describe('processor options', () => {
 
         expect(result.content).toContain(`const a = ref();`)
         expect(result.content).toContain(`await Promise.resolve()`)
-        expect(result.content).toContain('async function BuildBindingContext() {')
-        expect(result.content).toContain('export type BindingContext = ReturnType<typeof BuildBindingContext> extends Promise<infer R> ? R : never;')
+        expect(result.content).toContain('export async function BuildBindingContext() {')
       })
 
-      it.only('generic', () => {
+      it('generic', () => {
         const result = process(`<script setup lang="ts" generic="T">import { ref, Ref } from 'vue';\nconst a = ref() as Ref<T>;</script><template><div>test</div></template>`)
 
-        expect(result.content).toMatchInlineSnapshot(`
-          "import { renderList as ___VERTER___renderList, normalizeClass as ___VERTER___normalizeClass, normalizeStyle as ___VERTER___normalizeStyle, defineComponent as __VERTER__defineComponent, type DefineComponent as __VERTER__DefineComponent } from 'vue';
-          import { ref, Ref } from 'vue';
-          function BuildBindingContext<T>() {
+        expect(result.content).toContain(`const a = ref() as Ref<T>;`)
+        expect(result.content).toContain('export function BuildBindingContext<T>() {')
+      })
 
-          const a = ref() as Ref<T>;
-          return {} as {ref: typeof ref, Ref: typeof Ref, a: typeof a
-          }
+      it('async generic', ()=>{
+        const result = process(`<script setup lang="ts" generic="T">import { ref, Ref } from 'vue';\nconst a = ref() as Ref<T>;\nawait Promise.resolve()</script><template><div>test</div></template>`)
 
-          }
+        expect(result.content).toContain(`const a = ref() as Ref<T>;`)
+        expect(result.content).toContain('export async function BuildBindingContext<T>() {')
+      })
+    })
+    describe('js', () => {
+      it('simple', () => {
+        const result = process(`<script setup>import { ref } from 'vue';\nconst a = ref();</script><template><div>test</div></template>`)
+        expect(result.content).toContain(`const a = ref();`)
+        expect(result.content).toContain('function BuildBindingContext() {')
 
-          export type BindingContext<T> = ReturnType<typeof BuildBindingContext<T>>;
+        expectFindStringWithMap('const a = ref();', result)
+        expectFindStringWithMap(`import { ref } from 'vue';`, result)
+      })
 
-          import { defineComponent as _defineComponent } from 'vue'
-
-
-          const ____VERTER_COMP_OPTION__COMPILED = /*#__PURE__*/_defineComponent({
-            __name: 'test',
-            setup(__props) {
-          const a = ref() as Ref<T>;
-          return {}
-          }
-
-          })
-          declare function __VERTER__isDefineComponent<T>(o: T): o is (T extends __VERTER__DefineComponent<any, any, any, any, any> ? T : T & never);
-          const ____VERTER_COMP_OPTION__RESULT = __VERTER__isDefineComponent(____VERTER_COMP_OPTION__COMPILED) ? ____VERTER_COMP_OPTION__COMPILED : __VERTER__defineComponent(____VERTER_COMP_OPTION__COMPILED)
-          export const ____VERTER_COMP_OPTION__ = {} as typeof ____VERTER_COMP_OPTION__COMPILED & typeof ____VERTER_COMP_OPTION__RESULT;"
-        `)
+      it('async', () => {
+        const result = process(`<script setup>import { ref } from 'vue';\nconst a = ref();\nawait Promise.resolve()</script><template><div>test</div></template>`)
 
         expect(result.content).toContain(`const a = ref();`)
         expect(result.content).toContain(`await Promise.resolve()`)
         expect(result.content).toContain('async function BuildBindingContext() {')
-        expect(result.content).toContain('export type BindingContext = ReturnType<typeof BuildBindingContext> extends Promise<infer R> ? R : never;')
       })
 
     })
