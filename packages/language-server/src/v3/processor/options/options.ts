@@ -1,4 +1,4 @@
-import { LocationType, parseLocations, ParseScriptContext } from "@verter/core";
+import { LocationByType, LocationType, parseLocations, ParseScriptContext } from "@verter/core";
 import { getBlockFilename } from "../utils";
 import { MagicString } from "vue/compiler-sfc";
 import { transform } from "sucrase";
@@ -7,6 +7,86 @@ import { transform } from "sucrase";
 export const OptionsExportName = 'ComponentOptions'
 
 export const BindingContextExportName = 'BindingContext'
+
+
+function genericProcess(
+    context: ParseScriptContext,
+    locations: LocationByType
+) {
+    if (!context.generic) {
+        return undefined;
+    }
+    const genericDeclaration = locations.generic[0];
+    if (!genericDeclaration) return undefined;
+
+    function getGenericComponentName(name: string) {
+        return "_VUE_TS__" + name;
+    }
+
+    function replaceComponentNameUsage(name: string, content: string) {
+        const regex = new RegExp(`\\b${name}\\b`, "g");
+        return content.replace(regex, getGenericComponentName(name));
+    }
+
+    const genericNames = genericDeclaration.items.map((x) => x.name);
+    const sanitisedNames = genericNames.map(sanitiseGenericNames);
+
+    function sanitiseGenericNames(content: string | null | undefined) {
+        if (!content) return content;
+        return genericNames
+            ? genericNames.reduce((prev, cur) => {
+                return replaceComponentNameUsage(cur, prev);
+            }, content)
+            : content;
+    }
+
+    const CompGeneric = genericDeclaration.items
+        .map((x) => {
+            const name = getGenericComponentName(x.name);
+            const constraint = sanitiseGenericNames(x.constraint);
+            const defaultType = sanitiseGenericNames(x.default);
+
+            return [
+                name,
+                constraint ? `extends ${constraint}` : undefined,
+                `= ${defaultType || "any"}`,
+            ]
+                .filter(Boolean)
+                .join(" ");
+        })
+        .join(", ");
+
+    const InstanceGeneric = genericDeclaration.items
+        .map((x) => {
+            const name = x.name;
+            const constraint = x.constraint || getGenericComponentName(x.name);
+            const defaultType = x.default || getGenericComponentName(x.name);
+
+            return [
+                name,
+                constraint ? `extends ${constraint}` : undefined,
+                `= ${defaultType || "any"}`,
+            ]
+                .filter(Boolean)
+                .join(" ");
+        })
+        .join(", ");
+
+    return {
+        /**
+         * this is to be used for the external component
+         */
+        component: CompGeneric,
+        /**
+         * This is to be a direct replace from user declaration
+         */
+        instance: InstanceGeneric,
+
+        genericNames,
+        sanitisedNames,
+    };
+}
+
 
 export function processOptions(context: ParseScriptContext) {
     // todo move locations to argument
@@ -22,20 +102,71 @@ export function processOptions(context: ParseScriptContext) {
     if (context.script == null) {
         s = new MagicString('');
     } else {
-        const startOffset = context.script.loc.start.offset;
+        const scriptStartOffset = context.s.original.slice(0, context.script.loc.start.offset).lastIndexOf('<script')
+        const startOffset = context.script.loc.start.offset
         const endOffset = context.script.loc.end.offset;
 
-        s = context.s.snip(startOffset, endOffset)
+        s = context.s.snip(scriptStartOffset, endOffset)
         const isAsync = context.isAsync
         const isTypescript = context.script.lang?.startsWith('ts') ?? false
-        const generic = context.generic ? `<${context.generic}>` : ''
+        const generic = context.generic ? genericProcess(context, locations) : null
+
+
+
+        // do work for <script ... >
+        {
+            const preGeneric = `\n${context.isAsync ? "async " : ""
+                }function Build${BindingContextExportName}`;
+            const postGeneric = `() {\n`;
+
+            const generic = context.generic;
+            // generic information will be kept intact for the source-map
+            if (typeof generic === "string") {
+
+                // get <script ... >
+                const tagContent = context.s.original.slice(
+                    scriptStartOffset,
+                    context.script.loc.start.offset
+                );
+
+                const genericIndex = tagContent.indexOf(generic);
+
+                // replace before generic with `preGeneric`
+                s.overwrite(
+                    0,
+                    genericIndex,
+                    preGeneric + "<"
+                );
+
+                // replace after generic with `postGeneric`
+                s.overwrite(
+                    genericIndex + generic.length,
+                    context.script.loc.start.offset,
+                    ">" + postGeneric
+                );
+            } else {
+                s.overwrite(
+                    0,
+                    context.script.loc.start.offset,
+                    preGeneric + postGeneric
+                );
+            }
+
+            // s.append('\n}\n')
+
+            // context.s.overwrite(
+            //     block.tag.pos.close.start,
+            //     block.tag.pos.close.end,
+            //     "\n}\n"
+            // );
+        }
+
 
         /**
          * This will move the import statements to the top of the file
          * and also keep track of the end of the import statements 
          */
         let importContentEndIndex = 0
-
 
         // expose the compile script
         let compiled = '\n' + context.script.content;
@@ -124,10 +255,11 @@ export function processOptions(context: ParseScriptContext) {
 
         // context function 
         if (context.isSetup) {
-            s.prependLeft(importContentEndIndex, `\nexport ${isAsync ? 'async ' : ''}function ${BindingContextExportName}${generic}() {\n`)
+            // s.prependLeft(importContentEndIndex, `\n${isAsync ? 'async ' : ''}function Build${BindingContextExportName}${generic}() {\n`)
 
             s.append(`\nreturn {} as {${Object.keys(context.script.bindings ?? {}).map(x => `${x}: typeof ${x}`).join(', ')}\n}\n`)
             s.append(`\n}\n`)
+            s.append(`\nexport type ${BindingContextExportName}${context.generic ? `<${context.generic}>` : ''} = ReturnType<typeof Build${BindingContextExportName}${generic ? `<${generic.genericNames.join(',')}>` : ''}>${isAsync ? ` extends Promise<infer R> ? R : never` : ''};\n`)
         }
 
 
