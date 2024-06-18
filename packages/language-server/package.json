@@ -21,6 +21,7 @@
     "@verter/language-shared": "workspace:^",
     "@vue/compiler-core": "^3.4.21",
     "source-map-js": "^1.2.0",
+    "sucrase": "^3.35.0",
     "typescript": "^5.4.5",
     "vscode-languageserver": "^9.0.1",
     "vscode-languageserver-protocol": "^3.17.5",

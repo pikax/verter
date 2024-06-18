@@ -9,31 +9,21 @@ import type * as _babel_types from "@babel/types";
 export const RenderContextExportName = 'RenderContext'
 
 
-function compileScriptSafe(
-  descriptor: SFCDescriptor,
-  options: SFCScriptCompileOptions
-) {
-  try {
-    return compileScript(descriptor, options);
-  } catch (e) {
-    console.error("failed compiling script", e);
-    return null;
-  }
-}
+// function compileScriptSafe(
+//   descriptor: SFCDescriptor,
+//   options: SFCScriptCompileOptions
+// ) {
+//   try {
+//     return compileScript(descriptor, options);
+//   } catch (e) {
+//     console.error("failed compiling script", e);
+//     return null;
+//   }
+// }
 
 
 export function processScript(context: ParseScriptContext) {
-  const compiled = compileScriptSafe(context.sfc.descriptor, {
-    id: context.filename,
-    genDefaultAs: "____VERTER_COMP_OPTION__",
-    // ...config?.vue?.compiler,
-    sourceMap: false,
-    isProd: true,
-  })
-  context = {
-    ...context,
-    script: compiled
-  }
+  // todo move locations to argument
   const locations = parseLocations(context);
   const filename = getBlockFilename("script", context)
 
@@ -123,9 +113,9 @@ export function processScript(context: ParseScriptContext) {
         continue
       }
       walkIdentifiers(node, (name, parent) => {
-        if (parent?.type === 'CallExpression') {
-          return;
-        }
+        // if (parent?.type === 'CallExpression') {
+        //   return;
+        // }
         // if (parent?.type === 'ImportSpecifier') {
         //   if (parent.importKind === 'type') {
         //     return
