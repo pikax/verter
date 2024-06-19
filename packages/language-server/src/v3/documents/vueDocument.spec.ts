@@ -1,4 +1,4 @@
-import * from './vueDocument'
+// import * from './vueDocument'
 
 describe('VueDocument', () => {
 

@@ -6,9 +6,9 @@ import type { TranspileContext } from "./types.js";
 
 import deepmerge from "deepmerge";
 
-const DEFAULT_PREFIX = `___VERTER___`;
-
-function PrefixSTR(s: string, prefix = DEFAULT_PREFIX) {
+// TODO possibly move this to another file
+export const DEFAULT_PREFIX = `___VERTER___`;
+export function PrefixSTR(s: string, prefix = DEFAULT_PREFIX) {
   return [prefix, s].join("");
 }
 
@@ -29,24 +29,25 @@ const DefaultAccessors = {
   normalizeStyle: PrefixSTR("normalizeStyle", DEFAULT_PREFIX),
   renderList: PrefixSTR("renderList", DEFAULT_PREFIX),
   eventCb: PrefixSTR("eventCb", DEFAULT_PREFIX),
+};
+
+export function getAccessors(
+  prefix?: string
+): Readonly<typeof DefaultAccessors> {
+  return prefix === DEFAULT_PREFIX || !prefix
+    ? DefaultAccessors
+    : {
+        ctx: PrefixSTR("ctx", prefix),
+        comp: PrefixSTR("comp", prefix),
+        slot: PrefixSTR("slot", prefix),
+        template: PrefixSTR("template", prefix),
+        slotCallback: PrefixSTR("SLOT_CALLBACK", prefix),
+        normalizeClass: PrefixSTR("normalizeClass", prefix),
+        normalizeStyle: PrefixSTR("normalizeStyle", prefix),
+        renderList: PrefixSTR("renderList", prefix),
+        eventCb: PrefixSTR("eventCb", prefix),
+      };
 }
-
-export function getAccessors(prefix?: string): Readonly<typeof DefaultAccessors> {
-  return prefix === DEFAULT_PREFIX || !prefix ? DefaultAccessors : {
-    ctx: PrefixSTR("ctx", prefix),
-    comp: PrefixSTR("comp", prefix),
-    slot: PrefixSTR("slot", prefix),
-    template: PrefixSTR("template", prefix),
-    slotCallback: PrefixSTR("SLOT_CALLBACK", prefix),
-    normalizeClass: PrefixSTR("normalizeClass", prefix),
-    normalizeStyle: PrefixSTR("normalizeStyle", prefix),
-    renderList: PrefixSTR("renderList", prefix),
-    eventCb: PrefixSTR("eventCb", prefix),
-  };
-}
-
-
-
 
 export function transpile(
   root: RootNode,

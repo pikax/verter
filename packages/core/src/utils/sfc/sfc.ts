@@ -6,7 +6,7 @@ export type BlockPosition = {
 };
 
 export interface VerterSFCBlock {
-  block: SFCBlock;
+  block: SFCBlock & { setup?: boolean };
 
   tag: {
     type: string;

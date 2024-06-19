@@ -17,9 +17,11 @@
     "node": ">=14.0.0"
   },
   "dependencies": {
+    "@swc/core": "^1.6.3",
     "@verter/core": "workspace:^",
     "@verter/language-shared": "workspace:^",
     "@vue/compiler-core": "^3.4.21",
+    "acorn-loose": "^8.4.0",
     "source-map-js": "^1.2.0",
     "sucrase": "^3.35.0",
     "typescript": "^5.4.5",
