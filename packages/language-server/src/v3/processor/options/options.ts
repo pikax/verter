@@ -7,6 +7,7 @@ import {
 import { getBlockFilename } from "../utils";
 import { MagicString } from "vue/compiler-sfc";
 import { transform } from "sucrase";
+import { VerterSFCBlock } from "@verter/core/dist/utils/sfc";
 
 export const OptionsExportName = "ComponentOptions";
 
@@ -99,41 +100,60 @@ export function processOptions(context: ParseScriptContext) {
     locations.import = [];
   }
 
-  let s: MagicString;
-  if (context.script == null) {
-    s = new MagicString("");
-  } else {
-    const scriptStartOffset = context.s.original
-      .slice(0, context.script.loc.start.offset)
-      .lastIndexOf("<script");
-    const startOffset = context.script.loc.start.offset;
-    const endOffset = context.script.loc.end.offset;
+  const s = context.s.clone();
 
-    s = context.s.snip(scriptStartOffset, endOffset);
-    const isAsync = context.isAsync;
+  // remove unknown blocks
+  const SUPPORTED_BLOCKS = new Set(["script"]);
+  const blocks: VerterSFCBlock[] = [];
+  for (const block of context.blocks) {
+    if (SUPPORTED_BLOCKS.has(block.tag.type)) {
+      blocks.push(block);
+    } else {
+      s.remove(block.tag.pos.open.start, block.tag.pos.close.end);
+    }
+  }
+
+  if (context.script) {
+    const isSetup = context.isSetup;
     const isTypescript = context.script.lang?.startsWith("ts") ?? false;
     const generic = context.generic ? genericProcess(context, locations) : null;
 
+    const mainBlock =
+      blocks.find(
+        (x) => x.tag.type === "script" && x.block.setup === isSetup
+      ) ?? blocks.find((x) => x.tag.type === "script");
+
+    const scriptEndOffset = mainBlock.tag.pos.close.end;
+    const startOffset = context.script.loc.start.offset;
+
     // do work for <script ... >
-    {
+    if (isSetup) {
       const preGeneric = `\nexport ${
         context.isAsync ? "async " : ""
       }function Build${BindingContextExportName}`;
       const postGeneric = `() {\n`;
 
+      // remove close tag
+      s.remove(mainBlock.tag.pos.close.start, mainBlock.tag.pos.close.end);
+
       const generic = context.generic;
       // generic information will be kept intact for the source-map
       if (typeof generic === "string") {
         // get <script ... >
-        const tagContent = context.s.original.slice(
-          scriptStartOffset,
-          context.script.loc.start.offset
+        const tagContent = s.original.slice(
+          mainBlock.tag.pos.open.start,
+          mainBlock.tag.pos.open.end
         );
 
-        const genericIndex = tagContent.indexOf(generic);
+        const genericIndex =
+          tagContent.indexOf(generic) + mainBlock.tag.pos.open.start;
 
         // replace before generic with `preGeneric`
-        s.overwrite(0, genericIndex, preGeneric + "<");
+        s.overwrite(
+          mainBlock.tag.pos.open.start,
+          genericIndex,
+          preGeneric + "<"
+        );
 
         // replace after generic with `postGeneric`
         s.overwrite(
@@ -143,8 +163,8 @@ export function processOptions(context: ParseScriptContext) {
         );
       } else {
         s.overwrite(
-          0,
-          context.script.loc.start.offset,
+          mainBlock.tag.pos.open.start,
+          mainBlock.tag.pos.open.end,
           preGeneric + postGeneric
         );
       }
@@ -156,13 +176,58 @@ export function processOptions(context: ParseScriptContext) {
       //     block.tag.pos.close.end,
       //     "\n}\n"
       // );
+    } else {
+      // todo
     }
 
-    /**
-     * This will move the import statements to the top of the file
-     * and also keep track of the end of the import statements
-     */
-    let importContentEndIndex = 0;
+    // remove block tags
+    blocks.forEach((block) => {
+      // check if the block was already handled
+      if (block === mainBlock && isSetup) return;
+      s.remove(block.tag.pos.open.start, block.tag.pos.open.end);
+
+      s.remove(block.tag.pos.close.start, block.tag.pos.close.end);
+    });
+
+    // context function
+    if (isSetup) {
+      const bindings = Object.keys(context.script.bindings ?? {});
+      const typeofBindings = bindings
+        .map((x) => `${x}: typeof ${x}`)
+        .join(", ");
+      if (isTypescript) {
+        s.appendRight(
+          scriptEndOffset,
+          `\nreturn {} as {${typeofBindings}\n}\n`
+        );
+      } else {
+        // if not typescript we need to the types in JSDoc to make sure the types are correct
+        // because when the variables are const the types are not inferred correctly
+        // e.g. const a = 1; a is inferred as number but it should be inferred as 1
+        s.prependRight(
+          mainBlock.tag.pos.open.start,
+          `/**\n * @returns {{${typeofBindings}}} \n*/`
+        );
+
+        s.appendRight(
+          scriptEndOffset,
+          `\nreturn {\n${bindings.join(", ")}\n}\n`
+        );
+      }
+
+      // close the BuildBindingContext function
+      s.appendRight(scriptEndOffset, `\n}\n`);
+
+      // TODO should be moved to the render and bundler
+      // because this file can be javascript
+      //   s.append(
+      //     `\nexport type ${BindingContextExportName}${
+      //       context.generic ? `<${context.generic}>` : ""
+      //     } = ReturnType<typeof Build${BindingContextExportName}${
+      //       generic ? `<${generic.genericNames.join(",")}>` : ""
+      //     }>${isAsync ? ` extends Promise<infer R> ? R : never` : ""};\n`
+      //   );
+    }
 
     // expose the compile script
     let compiled = "\n" + context.script.content;
@@ -176,27 +241,30 @@ export function processOptions(context: ParseScriptContext) {
       if (locations.import.length > 0) {
         locations.import.forEach((x) => {
           if (!x.node) return;
-          const start = x.node.start + startOffset;
-          const end = x.node.end + startOffset;
-          const content = context.s.original.slice(start, end);
+          const start = x.node.start + x.offset;
+          const end = x.node.end + x.offset;
+          const content = s.original.slice(start, end);
           compiled = compiled.replace(content, "");
 
           s.move(start, end, 0);
-
-          if (importContentEndIndex < end) {
-            importContentEndIndex = end;
-          }
         });
       }
 
-      if (locations.export?.length > 0) {
-        // remove default export
-        locations.export.forEach((x) => {
+      const toRemoveLocations = [
+        ...(locations.declaration ?? []),
+        ...(locations.export ?? []),
+      ];
+
+      if (toRemoveLocations.length > 0) {
+        toRemoveLocations.forEach((x) => {
           if (!x.node) return;
-          const content = context.s.slice(
-            x.node.start + startOffset,
-            x.node.end + startOffset
-          );
+          const script =
+            x.isSetup === false
+              ? context.sfc.descriptor.script
+              : context.sfc.descriptor.scriptSetup ??
+                context.sfc.descriptor.script;
+
+          const content = script.loc.source.slice(x.node.start, x.node.end);
           compiled = compiled.replace(content, "");
         });
       }
@@ -252,36 +320,6 @@ export function processOptions(context: ParseScriptContext) {
       }
     }
 
-    // context function
-    if (context.isSetup) {
-      // s.prependLeft(importContentEndIndex, `\n${isAsync ? 'async ' : ''}function Build${BindingContextExportName}${generic}() {\n`)
-
-      if (isTypescript) {
-        s.append(
-          `\nreturn {} as {${Object.keys(context.script.bindings ?? {})
-            .map((x) => `${x}: typeof ${x}`)
-            .join(", ")}\n}\n`
-        );
-      } else {
-
-        s.append(
-            `\nreturn {\n${Object.keys(context.script.bindings ?? {})
-              .join(", ")}\n}\n`
-          );
-      }
-      s.append(`\n}\n`);
-
-      // TODO should be moved to the render and bundler
-      // because this file can be javascript
-    //   s.append(
-    //     `\nexport type ${BindingContextExportName}${
-    //       context.generic ? `<${context.generic}>` : ""
-    //     } = ReturnType<typeof Build${BindingContextExportName}${
-    //       generic ? `<${generic.genericNames.join(",")}>` : ""
-    //     }>${isAsync ? ` extends Promise<infer R> ? R : never` : ""};\n`
-    //   );
-    }
-
     {
       // add generated imports
       if (locations.import?.length > 0) {
@@ -311,12 +349,27 @@ export function processOptions(context: ParseScriptContext) {
         }
       }
     }
+
+    // remove default export if exists
+    {
+      locations.export
+        ?.filter((x) => x.item.default)
+        .forEach((x) => {
+          if (!x.node) return;
+          s.remove(x.node.start + x.offset, x.node.end + x.offset);
+        });
+    }
+
     s.append(compiled);
   }
 
   return {
     filename,
-    loc: context.script?.loc ?? { source: "" },
+    blocks,
+    loc: {
+      source: s.original.toString(),
+    },
+    // loc: context.script?.loc ?? { source: "" },
 
     s,
     content: s.toString(),

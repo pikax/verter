@@ -14,7 +14,7 @@ import GenericPlugin from "./generic/index.js";
 import TemplatePlugin from "./template/index.js";
 import SetupPlugin from "./setup/index.js";
 import ImportsPlugin from "./imports/index.js";
-// import ExportPlugin from "./export/index.js";
+import ExportsPlugin from "./exports/index.js";
 
 export const defaultPlugins = [
   SetupPlugin,
@@ -23,6 +23,7 @@ export const defaultPlugins = [
   GenericPlugin,
   TemplatePlugin,
   ImportsPlugin,
+  ExportsPlugin,
 ] as PluginOption[];
 
 // import Template from "./template/index.js";

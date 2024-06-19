@@ -11,6 +11,7 @@ import {
 
 import { defaultPlugins } from "./plugins/index.js";
 import { pluginsToLocations } from "./utils/plugin.js";
+import { extractBlocksFromDescriptor } from "./utils/sfc/sfc.js";
 
 export interface Builder {
   build(): void;
@@ -75,6 +76,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
               isProd: true,
             })
           : null;
+      const blocks = extractBlocksFromDescriptor(parsed.descriptor);
 
       const context = {
         filename,
@@ -86,6 +88,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         generic: compiled?.attrs.generic as string,
         template: parsed.descriptor.template,
         s: new MagicString(source),
+        blocks,
       } satisfies ParseScriptContext;
 
       // if (!context.script) throw new Error("No script found");
@@ -112,6 +115,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
               isProd: true,
             })
           : null;
+      const blocks = extractBlocksFromDescriptor(result.descriptor);
 
       const context = {
         filename: result.descriptor.filename,
@@ -123,6 +127,7 @@ export function createBuilder(config?: Partial<BuilderOptions>) {
         generic: compiled?.attrs.generic as string,
         template: result.descriptor.template,
         s: new MagicString(result.descriptor.source),
+        blocks,
       } satisfies ParseScriptContext;
 
       // if (!context.script) throw new Error("No script found");

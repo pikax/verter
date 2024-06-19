@@ -1,5 +1,5 @@
 import { Node, Statement } from "@babel/types";
-import { VueAPISetup } from "./types.js";
+import { ParseScriptContext, VueAPISetup } from "./types.js";
 
 export function* checkForSetupMethodCalls(
   name: VueAPISetup,
@@ -44,4 +44,18 @@ export function retrieveNodeString(
 ) {
   if (!node) return undefined;
   return source.slice(node.start ?? 0, node.end ?? -1);
+}
+
+export function getContextSource(context: ParseScriptContext) {
+  const script = context.isSetup
+    ? context.sfc.descriptor.scriptSetup
+    : context.sfc.descriptor.script;
+
+  return script.loc.source;
+}
+
+export function getContextOffset(context: ParseScriptContext) {
+  return context.isSetup
+    ? context.sfc.descriptor.scriptSetup.loc.start.offset
+    : context.sfc.descriptor.script.loc.start.offset;
 }

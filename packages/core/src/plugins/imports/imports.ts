@@ -1,12 +1,16 @@
 import { PluginOption, LocationType } from "../types.js";
 
-import { retrieveNodeString } from "../helpers.js";
+import {
+  getContextOffset,
+  getContextSource,
+  retrieveNodeString,
+} from "../helpers.js";
 import babel_types from "@babel/types";
 
 export default {
   name: "Imports",
   walk(node, context) {
-    const source = context.script?.loc.source;
+    const source = getContextSource(context);
     if (!source) return;
 
     const supportedTypes = new Set(["ImportDeclaration"] as Array<
@@ -18,7 +22,7 @@ export default {
 
     return {
       type: LocationType.Import,
-      offset: context.script.loc.start.offset,
+      offset: getContextOffset(context),
 
       generated: false,
       node,

@@ -80,6 +80,7 @@ export function* runPlugins(
     const ctx = {
       ...context,
       isSetup,
+      // source: isSetup
     };
     for (const statement of ast) {
       for (const plugin of plugins) {

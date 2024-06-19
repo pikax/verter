@@ -1,12 +1,11 @@
-import { createContext } from '@verter/core'
-import { processOptions } from './options.js'
+import { createContext } from "@verter/core";
+import { processOptions } from "./options.js";
 import { type Position, SourceMapConsumer } from "source-map-js";
-import { MagicString } from 'vue/compiler-sfc';
+import { MagicString } from "vue/compiler-sfc";
 
-import fs from 'fs'
+import fs from "fs";
 
-
-describe('processor options', () => {
+describe("processor options", () => {
   function testSourceMaps({
     content,
     map,
@@ -26,18 +25,25 @@ describe('processor options', () => {
     );
   }
 
-
-  function process(source: string, filename = 'test.vue') {
-    const context = createContext(source, filename, true)
-    return processOptions(context)
+  function process(source: string, filename = "test.vue") {
+    const context = createContext(source, filename, true);
+    return processOptions(context);
   }
 
   function getSourceMap({ s }: { s: MagicString }) {
-    return new SourceMapConsumer(s.generateMap({ hires: true, includeContent: true }) as any)
+    return new SourceMapConsumer(
+      s.generateMap({ hires: true, includeContent: true }) as any
+    );
   }
 
-
-  function expectFindStringWithMap(toFind: string, { content, s, loc: { source } }: { content: string, s: MagicString, loc: { source: string } }) {
+  function expectFindStringWithMap(
+    toFind: string,
+    {
+      content,
+      s,
+      loc: { source },
+    }: { content: string; s: MagicString; loc: { source: string } }
+  ) {
     function getLineOffsets(text: string) {
       const lineOffsets: number[] = [];
       let isLineStart = true;
@@ -92,7 +98,7 @@ describe('processor options', () => {
         if (lineOffset === offset) {
           return {
             line: mid + 1,
-            column: 0
+            column: 0,
           };
         } else if (offset > lineOffset) {
           low = mid + 1;
@@ -107,169 +113,321 @@ describe('processor options', () => {
       return { line, column: offset - lineOffsets[line] };
     }
 
-    const map = getSourceMap({ s })
+    const map = getSourceMap({ s });
 
-    const index = content.indexOf(toFind)
+    const index = content.indexOf(toFind);
 
-    const pos = positionAt(index, content)
-    const loc = map.originalPositionFor(pos)
+    const pos = positionAt(index, content);
+    const loc = map.originalPositionFor(pos);
 
-    const sourceLines = getLineOffsets(source)
+    const sourceLines = getLineOffsets(source);
 
-    const lineOffset = sourceLines[loc.line - 1]
-    expect(source.slice(lineOffset, lineOffset + toFind.length)).toBe(toFind)
+    const lineOffset = sourceLines[loc.line - 1] + loc.column;
+    const mappedString = source.slice(lineOffset, lineOffset + toFind.length);
+    expect(mappedString).toBe(toFind);
   }
 
-
-
-  describe('filename', () => {
-    test.each([
-      'ts',
-      'js',
-      'jsx',
-      'tsx',
-      ''
-    ])('correct filename %s', (lang) => {
-      const result = process(`<script${lang ? ` lang="${lang}"` : ''}>export default {};</script>`)
+  describe("filename", () => {
+    test.each(["ts", "js", "jsx", "tsx", ""])("correct filename %s", (lang) => {
+      const result = process(
+        `<script${lang ? ` lang="${lang}"` : ""}>export default {};</script>`
+      );
       expect(result).toMatchObject({
-        filename: 'test.vue.options.' + (lang || 'js'),
-      })
-    })
-  })
+        filename: "test.vue.options." + (lang || "js"),
+      });
+    });
+  });
 
-  it('should have the correct loc', () => {
-    const result = process(`<script>export default {}</script><template><div></div></template>`)
+  it("should have the correct loc", () => {
+    const result = process(
+      `<script>export default {}</script><template><div></div></template>`
+    );
     expect(result.loc).toMatchInlineSnapshot(`
-          {
-            "end": {
-              "column": 26,
-              "line": 1,
-              "offset": 25,
-            },
-            "source": "export default {}",
-            "start": {
-              "column": 9,
-              "line": 1,
-              "offset": 8,
-            },
-          }
-        `)
-  })
+      {
+        "source": "<script>export default {}</script><template><div></div></template>",
+      }
+    `);
+  });
 
+  describe("compile export", () => {
+    test("script", () => {
+      const result = process(`<script>export default {}</script>`);
 
-  describe('compile export', () => {
-    test('script', () => {
-      const result = process(`<script>export default {}</script>`)
+      expect(result.content).toContain(
+        "const ____VERTER_COMP_OPTION__COMPILED = {}"
+      );
+    });
+    test("defineComponent", () => {
+      const result = process(
+        `<script>export default defineComponent({})</script>`
+      );
+      expect(result.content).toContain(
+        "const ____VERTER_COMP_OPTION__COMPILED = defineComponent({})"
+      );
+    });
 
-      expect(result.content).toContain('const ____VERTER_COMP_OPTION__COMPILED = {}')
-    })
-    test('defineComponent', () => {
-      const result = process(`<script>export default defineComponent({})</script>`)
-      expect(result.content).toContain('const ____VERTER_COMP_OPTION__COMPILED = defineComponent({})')
-    })
+    test("script setup", () => {
+      const result = process(
+        `<script setup>defineProps({test: String})</script>`
+      );
+      expect(result.content).toContain(
+        "const ____VERTER_COMP_OPTION__COMPILED = "
+      );
+    });
 
-    test('script setup', () => {
-      const result = process(`<script setup>defineProps({test: String})</script>`)
-      expect(result.content).toContain('const ____VERTER_COMP_OPTION__COMPILED = ')
-    })
+    test("script setup ts", () => {
+      const result = process(
+        `<script setup lang="ts" generic="T">defineProps<{test: T}>()</script>`
+      );
+      expect(result.content).toContain(
+        "const ____VERTER_COMP_OPTION__COMPILED = /*#__PURE__*/_defineComponent"
+      );
+    });
 
-    test('script setup ts', () => {
-      const result = process(`<script setup lang="ts" generic="T">defineProps<{test: T}>()</script>`)
-      expect(result.content).toContain('const ____VERTER_COMP_OPTION__COMPILED = /*#__PURE__*/_defineComponent');
-    })
+    test("export options", () => {
+      const result = process(`<script>export default {}</script>`);
 
+      expect(result.content).toContain(
+        "export const ____VERTER_COMP_OPTION__ = __VERTER__defineComponent(____VERTER_COMP_OPTION__COMPILED)"
+      );
+    });
+    test("export options ts", () => {
+      const result = process(`<script lang="ts">export default {}</script>`);
+      expect(result.content).toContain(
+        "export const ____VERTER_COMP_OPTION__ = {}"
+      );
+    });
+  });
 
-    test('export options', () => {
-      const result = process(`<script>export default {}</script>`)
+  describe("imports", () => {
+    it("keep", () => {
+      const result = process(
+        `<script lang="ts">import { defineComponent } from 'vue'; import 'test/test'; import type {Test} from 'xx';</script>`
+      );
+      expect(result.content).toContain(
+        `import { defineComponent } from 'vue';import 'test/test';import type {Test} from 'xx';`
+      );
+    });
 
-      expect(result.content).toContain('export const ____VERTER_COMP_OPTION__ = __VERTER__defineComponent(____VERTER_COMP_OPTION__COMPILED)')
-    })
-    test('export options ts', () => {
-      const result = process(`<script lang="ts">export default {}</script>`)
-      expect(result.content).toContain('export const ____VERTER_COMP_OPTION__ = {}')
-    })
-  })
+    it("add compiled", () => {
+      const result = process(`<script setup lang="ts"></script>`);
+      expect(result.content).toContain(
+        `import { defineComponent as _defineComponent } from 'vue'`
+      );
+    });
 
-  describe('imports', () => {
-    it('keep', () => {
-      const result = process(`<script lang="ts">import { defineComponent } from 'vue'; import 'test/test'; import type {Test} from 'xx';</script>`)
-      expect(result.content).toContain(`import { defineComponent } from 'vue';import 'test/test';import type {Test} from 'xx';`)
-    })
+    it("add generated", () => {
+      const result = process(`<script setup lang="ts"></script>`);
+      expect(result.content).toContain(
+        `import { defineComponent as _defineComponent } from 'vue'`
+      );
+      expect(result.content).toContain(
+        `import { defineComponent as __VERTER__defineComponent, type DefineComponent as __VERTER__DefineComponent } from 'vue';`
+      );
+    });
 
-    it('add compiled', () => {
-      const result = process(`<script setup lang="ts"></script>`)
-      expect(result.content).toContain(`import { defineComponent as _defineComponent } from 'vue'`)
-    })
+    it("move to top", () => {
+      const result = process(
+        '<script setup>import {ref} from "vue"; const a = ref(); import "test";</script>'
+      );
+      expect(result.content).toContain(
+        `import {ref} from "vue";import "test";`
+      );
+    });
+  });
 
-    it('add generated', () => {
-      const result = process(`<script setup lang="ts"></script>`)
-      expect(result.content).toContain(`import { defineComponent as _defineComponent } from 'vue'`)
-      expect(result.content).toContain(`import { defineComponent as __VERTER__defineComponent, type DefineComponent as __VERTER__DefineComponent } from 'vue';`)
+  describe("setup", () => {
+    describe("ts", () => {
+      it("simple", () => {
+        const result = process(
+          `<script setup lang="ts">import { ref, Ref } from 'vue';\nconst a = ref();</script><template><div>test</div></template>`
+        );
+        expect(result.content).toContain(`const a = ref();`);
+        expect(result.content).toContain(
+          "export function BuildBindingContext() {"
+        );
 
-    })
+        expectFindStringWithMap("const a = ref();", result);
+        expectFindStringWithMap(`import { ref, Ref } from 'vue';`, result);
+      });
 
-    it('move to top', () => {
-      const result = process('<script setup>import {ref} from "vue"; const a = ref(); import "test";</script>')
-      expect(result.content).toContain(`import {ref} from "vue";import "test";`)
-    })
-  })
+      it("async", () => {
+        const result = process(
+          `<script setup lang="ts">import { ref, Ref } from 'vue';\nconst a = ref();\nawait Promise.resolve()</script><template><div>test</div></template>`
+        );
 
+        expect(result.content).toContain(`const a = ref();`);
+        expect(result.content).toContain(`await Promise.resolve()`);
+        expect(result.content).toContain(
+          "export async function BuildBindingContext() {"
+        );
 
-  describe('setup', () => {
-    describe('ts', () => {
-      it('simple', () => {
-        const result = process(`<script setup lang="ts">import { ref, Ref } from 'vue';\nconst a = ref();</script><template><div>test</div></template>`)
-        expect(result.content).toContain(`const a = ref();`)
-        expect(result.content).toContain('export function BuildBindingContext() {')
+        expectFindStringWithMap("const a = ref();", result);
+        expectFindStringWithMap(`await Promise.resolve()`, result);
+      });
 
-        expectFindStringWithMap('const a = ref();', result)
-        expectFindStringWithMap(`import { ref, Ref } from 'vue';`, result)
-      })
+      it("generic", () => {
+        const result = process(
+          `<script setup lang="ts" generic="T">import { ref, Ref } from 'vue';\nconst a = ref() as Ref<T>;</script><template><div>test</div></template>`
+        );
 
-      it('async', () => {
-        const result = process(`<script setup lang="ts">import { ref, Ref } from 'vue';\nconst a = ref();\nawait Promise.resolve()</script><template><div>test</div></template>`)
+        expect(result.content).toContain(`const a = ref() as Ref<T>;`);
+        expect(result.content).toContain(
+          "export function BuildBindingContext<T>() {"
+        );
 
-        expect(result.content).toContain(`const a = ref();`)
-        expect(result.content).toContain(`await Promise.resolve()`)
-        expect(result.content).toContain('export async function BuildBindingContext() {')
-      })
+        expectFindStringWithMap("const a = ref() as Ref<T>;", result);
+      });
 
-      it('generic', () => {
-        const result = process(`<script setup lang="ts" generic="T">import { ref, Ref } from 'vue';\nconst a = ref() as Ref<T>;</script><template><div>test</div></template>`)
+      it("async generic", () => {
+        const result = process(
+          `<script setup lang="ts" generic="T">import { ref, Ref } from 'vue';\nconst a = ref() as Ref<T>;\nawait Promise.resolve()</script><template><div>test</div></template>`
+        );
 
-        expect(result.content).toContain(`const a = ref() as Ref<T>;`)
-        expect(result.content).toContain('export function BuildBindingContext<T>() {')
-      })
+        expect(result.content).toContain(`const a = ref() as Ref<T>;`);
+        expect(result.content).toContain(
+          "export async function BuildBindingContext<T>() {"
+        );
 
-      it('async generic', ()=>{
-        const result = process(`<script setup lang="ts" generic="T">import { ref, Ref } from 'vue';\nconst a = ref() as Ref<T>;\nawait Promise.resolve()</script><template><div>test</div></template>`)
+        expectFindStringWithMap("const a = ref() as Ref<T>;", result);
+      });
 
-        expect(result.content).toContain(`const a = ref() as Ref<T>;`)
-        expect(result.content).toContain('export async function BuildBindingContext<T>() {')
-      })
-    })
-    describe('js', () => {
-      it('simple', () => {
-        const result = process(`<script setup>import { ref } from 'vue';\nconst a = ref();</script><template><div>test</div></template>`)
-        expect(result.content).toContain(`const a = ref();`)
-        expect(result.content).toContain('function BuildBindingContext() {')
+      it("multi script", () => {
+        const result = process(
+          `<script setup lang="ts">import { ref, Ref } from 'vue';\nconst a = ref();\nawait Promise.resolve()</script><script lang="ts">export default { specialOptions: true }</script><template><div>test</div></template>`
+        );
 
-        expectFindStringWithMap('const a = ref();', result)
-        expectFindStringWithMap(`import { ref } from 'vue';`, result)
-      })
+        expect(result.content).toContain(`const a = ref();`);
+        expect(result.content).toContain(
+          "export async function BuildBindingContext() {"
+        );
+        expect(result.content).toContain(
+          "const __default__ = { specialOptions: true }"
+        );
+        expect(result.content).not.toContain(
+          "export default { specialOptions: true }"
+        );
 
-      it('async', () => {
-        const result = process(`<script setup>import { ref } from 'vue';\nconst a = ref();\nawait Promise.resolve()</script><template><div>test</div></template>`)
+        expectFindStringWithMap("const a = ref();", result);
+        expectFindStringWithMap(`import { ref, Ref } from 'vue';`, result);
+      });
+    });
+    describe("js", () => {
+      it("simple", () => {
+        const result = process(
+          `<script setup>import { ref } from 'vue';\nconst a = ref();</script><template><div>test</div></template>`
+        );
 
-        expect(result.content).toContain(`const a = ref();`)
-        expect(result.content).toContain(`await Promise.resolve()`)
-        expect(result.content).toContain('async function BuildBindingContext() {')
-      })
+        expect(result.content).toContain(`const a = ref();`);
+        expect(result.content).toContain("function BuildBindingContext() {");
 
-    })
-  })
+        expect(result.content).not.toContain(`__VERTER__isDefineComponent`);
 
-  describe('options', () => {
+        expectFindStringWithMap("const a = ref();", result);
+        expectFindStringWithMap(`import { ref } from 'vue';`, result);
+      });
 
-  })
-})
+      it("async", () => {
+        const result = process(
+          `<script setup>import { ref } from 'vue';\nconst a = ref();\nawait Promise.resolve()</script><template><div>test</div></template>`
+        );
+
+        expect(result.content).toContain(`const a = ref();`);
+        expect(result.content).toContain(`await Promise.resolve()`);
+        expect(result.content).toContain(
+          "async function BuildBindingContext() {"
+        );
+
+        expect(result.content).not.toContain(`__VERTER__isDefineComponent`);
+
+        expectFindStringWithMap("const a = ref();", result);
+        expectFindStringWithMap(`await Promise.resolve()`, result);
+      });
+
+      it("multi script", () => {
+        const result = process(
+          `<script setup>import { ref, Ref } from 'vue';\nconst a = ref();\nawait Promise.resolve()</script><script>export default { specialOptions: true }</script><template><div>test</div></template>`
+        );
+
+        expect(result.content).toContain(`const a = ref();`);
+        expect(result.content).toContain(
+          "export async function BuildBindingContext() {"
+        );
+        expect(result.content).toContain(
+          "const __default__ = { specialOptions: true }"
+        );
+        expect(result.content).not.toContain(`__VERTER__isDefineComponent`);
+        expect(result.content).not.toContain(
+          "export default { specialOptions: true }"
+        );
+
+        expectFindStringWithMap("const a = ref();", result);
+        expectFindStringWithMap(`import { ref, Ref } from 'vue';`, result);
+      });
+
+      it("export", () => {
+        const result = process(
+          `<script setup>const msg = '';</script><script>export const a = 1;</script>`
+        );
+
+        expect(result.content).toContain(`export const a = 1;`);
+        expect(result.content).toContain(`const msg = '';`);
+
+        expect(result.content).toContain(
+          "@returns {{a: typeof a, msg: typeof msg}}"
+        );
+
+        testSourceMaps({
+          content: result.content,
+          map: result.s.generateMap({ hires: true, includeContent: true }),
+        });
+
+        expectFindStringWithMap("export const a = 1;", result);
+        expectFindStringWithMap(`const msg = '';`, result);
+      });
+    });
+  });
+
+  describe.skip("options", () => {
+    describe("ts", () => {
+      it.todo("simple", () => {
+        const result = process(`<script lang="ts">export default {}</script>`);
+        expect(result.content).toMatchInlineSnapshot(`
+          "import { defineComponent as __VERTER__defineComponent, type DefineComponent as __VERTER__DefineComponent } from 'vue';
+          export default {}
+          const ____VERTER_COMP_OPTION__COMPILED = {} as const;
+          declare function __VERTER__isDefineComponent<T>(o: T): o is (T extends __VERTER__DefineComponent<any, any, any, any, any> ? T : T & never);
+          const ____VERTER_COMP_OPTION__RESULT = __VERTER__isDefineComponent(____VERTER_COMP_OPTION__COMPILED) ? ____VERTER_COMP_OPTION__COMPILED : __VERTER__defineComponent(____VERTER_COMP_OPTION__COMPILED)
+          export const ____VERTER_COMP_OPTION__ = {} as typeof ____VERTER_COMP_OPTION__COMPILED & typeof ____VERTER_COMP_OPTION__RESULT;"
+        `);
+
+        expect(result.content).toContain("export default {}");
+        expect(result.content).toContain(
+          "export const ____VERTER_COMP_OPTION__ = __VERTER__defineComponent(____VERTER_COMP_OPTION__COMPILED)"
+        );
+      });
+
+      it("async", () => {
+        const result = process(
+          `<script options lang="ts">export default {}</script>`
+        );
+
+        expect(result.content).toContain("export default {}");
+        expect(result.content).toContain(
+          "export const ____VERTER_COMP_OPTION__ = __VERTER__defineComponent(____VERTER_COMP_OPTION__COMPILED)"
+        );
+      });
+
+      it("generic", () => {
+        const result = process(
+          `<script options lang="ts" generic="T">export default {}</script>`
+        );
+
+        expect(result.content).toContain("export default {}");
+        expect(result.content).toContain(
+          "export const ____VERTER_COMP_OPTION__ = __VERTER__defineComponent(____VERTER_COMP_OPTION__COMPILED)"
+        );
+      });
+    });
+  });
+});

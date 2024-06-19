@@ -6,6 +6,7 @@ import {
 } from "@vue/compiler-sfc";
 import type * as _babel_types from "@babel/types";
 import { RootNode } from "@vue/compiler-core";
+import { VerterSFCBlock } from "../utils/sfc";
 
 // TODO move somewhere else
 export type VueAPISetup =
@@ -33,6 +34,8 @@ export interface ParseScriptContext {
   template: SFCTemplateBlock | null;
 
   s: MagicString;
+
+  blocks: VerterSFCBlock[];
 
   // locations: LocationType[];
 }
@@ -99,10 +102,10 @@ export interface BaseTypeLocation {
 export interface TypeLocationDeclaration {
   type: LocationType.Declaration;
   node?:
-  | _babel_types.VariableDeclaration
-  | _babel_types.FunctionDeclaration
-  | _babel_types.EnumDeclaration
-  | _babel_types.ClassDeclaration;
+    | _babel_types.VariableDeclaration
+    | _babel_types.FunctionDeclaration
+    | _babel_types.EnumDeclaration
+    | _babel_types.ClassDeclaration;
 
   generated?: boolean;
 
@@ -148,6 +151,7 @@ export interface TypeLocationImport {
 export interface TypeLocationExport {
   type: LocationType.Export;
   node: _babel_types.ImportDeclaration;
+  offset?: number;
 
   item: ImportItem & { default?: boolean; content?: string };
 }
@@ -255,8 +259,8 @@ export type ValueOf<T> = T[keyof T];
 
 export type LocationByType = {
   [K in LocationType]?: K extends keyof TypeLocationMap
-  ? Array<TypeLocationMap[K]>
-  : never;
+    ? Array<TypeLocationMap[K] & BaseTypeLocation>
+    : never;
 };
 
 export type TypeLocation = BaseTypeLocation & ValueOf<TypeLocationMap>;

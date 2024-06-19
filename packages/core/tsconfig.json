@@ -13,7 +13,7 @@
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
-    "target": "ES6",
+    "target": "ESNext",
     "module": "CommonJS",
     "types": [
       "vitest/importMeta",

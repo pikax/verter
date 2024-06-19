@@ -1,4 +1,4 @@
-import { retrieveNodeString } from "../helpers.js";
+import { getContextSource, retrieveNodeString } from "../helpers.js";
 import { LocationType, PluginOption } from "../types.js";
 
 import babel_types from "@babel/types";
@@ -21,7 +21,7 @@ export default {
   name: "Declaration",
 
   walk(node, context) {
-    const source = context.script?.loc.source;
+    const source = getContextSource(context);
     if (!source) return;
 
     if (!supportedTypes.has(node.type)) return;
