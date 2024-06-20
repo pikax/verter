@@ -354,7 +354,7 @@ export function processOptions(context: ParseScriptContext) {
 }
 
 // TODO move somewhere else
-function genericProcess(context: ParseScriptContext) {
+export function genericProcess(context: ParseScriptContext) {
   if (!context.generic) {
     return undefined;
   }

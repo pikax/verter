@@ -451,7 +451,7 @@ describe("processor options", () => {
         expect(result.content).toContain(
           "export function ___VERTER___BindingContext() { return {} }"
         );
-      });
+      }); 
 
       it("generic", () => {
         const result = process(
@@ -469,7 +469,7 @@ describe("processor options", () => {
 
     describe("js", () => {
       it("simple", () => {
-        const result = process(`<script >export default {}</script>`);
+        const result = process(`<script>export default {}</script>`);
 
         expect(result.content).toContain("const ___VERTER___default = {}");
         expect(result.content).toContain(
