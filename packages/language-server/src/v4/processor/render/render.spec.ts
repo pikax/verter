@@ -70,4 +70,29 @@ describe("processRender", () => {
       expect(result.content).toContain(`return <></>`);
     });
   });
+
+  describe("setup", () => {
+    it("should work with setup", () => {
+      const result = process(
+        `<template><div></div></template><script setup></script>`
+      );
+      expect(result.content).toMatchInlineSnapshot(`
+        "
+
+        export function ___VERTER___Render() {
+
+        const ___VERTER___Component = new (___VERTER___defineComponent(___VERTER___default))
+        const ___VERTER___BindingContextCTX = ___VERTER___BindingContext()
+        const ___VERTER___ctx = {
+            ...___VERTER___Component,
+            ...({} as ___VERTER___ShallowUnwrapRef<typeof ___VERTER___BindingContextCTX>),
+        }
+
+        return <>
+        <div></div>
+        </>
+        }"
+      `);
+    });
+  });
 });

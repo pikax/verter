@@ -59,6 +59,7 @@ export function processRender(context: ParseScriptContext) {
 
     const variables = {
       defineComponent: PrefixSTR("defineComponent"),
+      ShallowUnwrapRef: PrefixSTR("ShallowUnwrapRef"),
       component: PrefixSTR("Component"),
 
       ComponentOptions: PrefixSTR("Options"),
@@ -71,7 +72,7 @@ export function processRender(context: ParseScriptContext) {
     const imports = context.isSetup
       ? ``
       : `
-import { defineComponent as ${variables.defineComponent} } from "vue";
+import { defineComponent as ${variables.defineComponent}, ShallowUnwrapRef as ${variables.ShallowUnwrapRef} } from "vue";
 import { ${OptionsExportName} } from "./${relativeScriptPath}";
 `;
 
@@ -96,11 +97,9 @@ const ${BindingContextExportName}CTX = ${
         }()
 const ${accessors.ctx} = {
     ...${variables.component},
-    ...${
-      isAsync && false
-        ? `{} as typeof ${BindingContextExportName}CTX extends Promise<infer T> ? T : never`
-        : `${BindingContextExportName}CTX`
-    },
+    ...({} as ${
+      variables.ShallowUnwrapRef
+    }<typeof ${BindingContextExportName}CTX>),
 }
 `
       : `
