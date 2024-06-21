@@ -328,6 +328,8 @@ export function getTypescriptService(workspacePath: string) {
           return ts.ScriptKind.TSX;
         case ts.Extension.Json:
           return ts.ScriptKind.JSON;
+        case ".vue":
+          return ts.ScriptKind.Deferred;
         default:
           console.log("unknown", ext);
           return ts.ScriptKind.Unknown;

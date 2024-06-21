@@ -9,7 +9,7 @@ export {
   PrefixSTR,
 } from "./plugins/template/v2/transpile/transpile.js";
 
-export { VerterSFCBlock } from "./utils/sfc/index.js";
+export type { VerterSFCBlock } from "./utils/sfc/index.js";
 
 export { mergeFull } from "./mergers/full.js";
 

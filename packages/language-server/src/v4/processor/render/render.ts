@@ -16,7 +16,7 @@ import {
   OptionsExportName,
   genericProcess,
 } from "../options/index.js";
-import { getBlockFilename } from "../../../v3/processor/utils.js";
+import { getBlockFilename } from "../utils.js";
 
 export const FunctionExportName = PrefixSTR("Render");
 
@@ -149,6 +149,8 @@ const ${accessors.ctx} = {
   }
 
   return {
+    languageId: "tsx",
+
     filename,
 
     loc: {

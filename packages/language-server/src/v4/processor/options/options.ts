@@ -5,7 +5,6 @@ import {
   PrefixSTR,
 } from "@verter/core";
 import { parseSync, TsTypeAliasDeclaration } from "@swc/core";
-import { getBlockFilename } from "../../../v3/processor/utils";
 import {
   isFunctionType,
   TS_NODE_TYPES,
@@ -14,6 +13,7 @@ import {
 import { walk } from "vue/compiler-sfc";
 import { parse as acornParse } from "acorn-loose";
 import { offsetAt } from "../../../lib/documents/utils";
+import { getBlockFilename } from "../utils";
 
 export const OptionsExportName = PrefixSTR("ComponentOptions");
 export const BindingContextExportName = PrefixSTR("BindingContext");
@@ -342,6 +342,12 @@ export function processOptions(context: ParseScriptContext) {
   // s.append("const ____VERTER_COMP_OPTION__COMPILED = defineComponent({})");
 
   return {
+    languageId:
+      context.script.lang === "ts"
+        ? "typescript"
+        : context.script.lang === "tsx"
+        ? "tsx"
+        : "javascript",
     filename,
 
     loc: {

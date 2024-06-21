@@ -31,3 +31,24 @@ export function getBlockFilename(
   }
   return context.filename + ".TODO.tsx";
 }
+
+const possibleEndings = [
+  "vue.bundle.tsx",
+  "vue.render.tsx",
+  "vue.script.ts",
+  "vue.options.js",
+  "vue.options.jsx",
+  "vue.options.ts",
+  "vue.options.tsx",
+];
+export function isFileInVueBlock(uri: string) {
+  return possibleEndings.some((ending) => uri.endsWith(ending));
+}
+export function retrieveVueFileFromBlockUri(uri: string) {
+  for (const ending of possibleEndings) {
+    if (uri.endsWith(ending)) {
+      return uri.slice(0, -ending.length);
+    }
+  }
+  return uri;
+}

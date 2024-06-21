@@ -57,14 +57,14 @@ export function getTypescriptService(
       ...ts.sys,
 
       readDirectory(rootDir, extensions, excludes, includes, depth) {
-        return ts.sys.readDirectory(
+        return ts.sys.readDirectory(                        
           rootDir,
           [...extensions, ".vue"],
-          excludes,
+          excludes,        
           includes,
-          depth
+          depth      
         );
-      },
+      },     
 
       useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
     };

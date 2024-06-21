@@ -3,52 +3,403 @@ import {
   Position,
   Range,
   TextDocument,
+  TextDocumentContentChangeEvent,
 } from "vscode-languageserver-textdocument";
 
-import { ParseScriptContext } from "@verter/core";
+import {
+  createContext,
+  ParseScriptContext,
+  VerterSFCBlock,
+} from "@verter/core";
+import { ContextProcessor } from "../../processor/types";
+import { getBlockFilename } from "../../../v3/processor/utils";
+import { processRender } from "../../processor/render/render";
+import { processOptions } from "../../processor/options";
+import { generatedPositionFor, generatedRangeFor } from "../../utils";
+import {
+  pathToUri,
+  pathToVerterVirtual,
+  uriToPath,
+  uriToVerterVirtual,
+} from "../utils";
+
+type BlockId = "template" | "script" | "style";
+
+const processors = {
+  script: {
+    uri: (parent) => parent + ".script.ts",
+    process: processOptions,
+  },
+  template: {
+    uri: (parent) => parent + ".render.tsx",
+    process: processRender,
+  },
+  style: {
+    uri: (parent) => parent + ".style.css",
+    process: () => {
+      throw new Error("Not implemented");
+    },
+  },
+} satisfies Record<BlockId, ContextProcessor>;
+
+function getBlockId(block: VerterSFCBlock): BlockId | string {
+  switch (block.tag.type) {
+    case "template":
+      return "template";
+    case "script":
+      return "script";
+    case "style":
+      return "style";
+    default:
+      return block.tag.type;
+  }
+}
+
+function createDocumentFromBlock(block: VerterSFCBlock, doc: VueDocument) {
+  const blockId = getBlockId(block);
+  const processor = processors[blockId];
+  return new VueSubDocument(doc, processor);
+}
 
 export class VueDocument implements TextDocument {
-  //   static fromTextDocument(doc: TextDocument, shouldParse = false) {
-  //     const vuedoc = new VueDocument(
-  //       doc,
-  //       TextDocument.create(uriToVerterVirtual(doc.uri), "tsx", doc.version, "")
-  //     );
-  //     if (shouldParse) {
-  //       vuedoc.parse();
-  //     }
-  //     return vuedoc;
-  //   }
+  static fromFilepath(filepath: string, content?: string, shouldParse = false) {
+    return VueDocument.fromUri(pathToUri(filepath), content, shouldParse);
+  }
+  static fromUri(uri: string, content?: string, shouldParse = false) {
+    const doc = TextDocument.create(uri, "vue", -2, content ?? "");
+    return VueDocument.fromTextDocument(doc, shouldParse);
+  }
 
-  //   static create(uri: string, content: string, shouldParse = false) {
-  //     const doc = TextDocument.create(uri, "vue", -1, content);
-  //     return VueDocument.fromTextDocument(doc, shouldParse);
-  //   }
+  static fromTextDocument(doc: TextDocument, shouldParse = false) {
+    const vuedoc = new VueDocument(doc);
+    if (shouldParse) {
+      vuedoc.syncVersion();
+    }
+    return vuedoc;
+  }
 
-  //   private constructor(
-  //     private _doc: TextDocument,
-  //     private _compiledDoc: TextDocument
-  //   ) {
-  //     this.overrideDoc(this._doc);
-  //   }
+  private constructor(private _doc: TextDocument) {
+    // create default block, more can be added if needed
+    this.subDocuments.script = new VueSubDocument(this, processors.script);
+    this.subDocuments.template = new VueSubDocument(this, processors.template);
+  }
+
+  overrideDoc(doc: TextDocument) {
+    this._doc = doc;
+    this._lastVersion = -2;
+    if (this._context || this._doc.version >= 0) {
+      this.syncVersion(true);
+    }
+  }
+
+  override(text: string, version?: number) {
+    return this.update(
+      [
+        {
+          text,
+          range: {
+            start: this.positionAt(0),
+            end: this.positionAt(Number.MAX_SAFE_INTEGER),
+          },
+        },
+      ],
+      version ?? this.version + 1
+    );
+  }
+
+  update(changes: TextDocumentContentChangeEvent[], version: number) {
+    // todo maybe update subdocuments as well and only sync them when needed
+    TextDocument.update(this._doc, changes, version);
+
+    const changesForBlock: Record<
+      BlockId | string,
+      TextDocumentContentChangeEvent[]
+    > = {};
+
+    for (const change of changes) {
+      const blocks = this.getBlocksForChange(change);
+      for (const block of blocks) {
+        const id = getBlockId(block);
+        if (!changesForBlock[id]) {
+          changesForBlock[id] = [];
+        }
+        changesForBlock[id].push(change);
+      }
+    }
+    for (const [id, changes] of Object.entries(changesForBlock)) {
+      const subDoc = this.subDocuments[id];
+      if (subDoc) {
+        subDoc.update(changes, version);
+      }
+    }
+    return this._doc;
+  }
+
+  protected getBlocksForChange(change: TextDocumentContentChangeEvent) {
+    const range = "range" in change ? change.range : undefined;
+    // if there's no range, we need to update all blocks
+    if (!range || !("rangeLength" in change)) {
+      return this.context.blocks;
+    }
+    const blocks = this.context.blocks.filter((block) => {
+      const startOffset = this.offsetAt(range.start);
+      const endOffset = this.offsetAt(range.end);
+
+      const blockStart = block.tag.pos.open.start;
+      const blockEnd = block.tag.pos.close.end;
+
+      return startOffset < blockEnd && endOffset > blockStart;
+    });
+    return blocks;
+  }
+
+  protected getBlockForPosition(pos: Position) {
+    const offset = this.offsetAt(pos);
+    return this.context.blocks.find((block) => {
+      const blockStart = block.tag.pos.open.start;
+      const blockEnd = block.tag.pos.close.end;
+
+      return offset >= blockStart && offset <= blockEnd;
+    });
+  }
+
+  getDocumentForPosition(pos: Position) {
+    const block = this.getBlockForPosition(pos);
+
+    const id = getBlockId(block);
+    return this.subDocuments[id];
+  }
 
   languageId = "vue";
 
-  uri: string;
-  version: number;
-  lineCount: number;
+  get uri() {
+    return this._doc.uri;
+  }
+  get version() {
+    return this._doc.version;
+  }
+  get lineCount() {
+    return this._doc.lineCount;
+  }
+  private _lastVersion = -2;
+
+  subDocuments: Record<BlockId | string, VueSubDocument> = {};
+
+  get subDocumentPaths() {
+    return Object.values(this.subDocuments).map((x) => x.uri);
+  }
+
+  getTextFromFile(uri: string, range?: Range) {
+    if (uri === this.uri) {
+      return this._doc.getText(range);
+    }
+    return this.getDocument(uri)?.getText(range);
+  }
+
+  getDocument(uri: string): VueSubDocument | undefined {
+    if (uri === this.uri) {
+      // todo should return the bundle file
+    }
+
+    for (const doc of Object.values(this.subDocuments)) {
+      if (doc.uri === uri) {
+        return doc;
+      }
+    }
+
+    return undefined;
+  }
 
   getText(range?: Range): string {
-    throw new Error("Method not implemented.");
+    return this._doc.getText(range);
   }
   positionAt(offset: number): Position {
-    throw new Error("Method not implemented.");
+    return this._doc.positionAt(offset);
   }
   offsetAt(position: Position): number {
-    throw new Error("Method not implemented.");
+    return this._doc.offsetAt(position);
   }
 
   private _context: ParseScriptContext;
   get context(): ParseScriptContext {
+    this.syncVersion();
     return this._context;
+  }
+
+  protected syncVersion(syncAll = false) {
+    if (this._lastVersion === this.version) {
+      return;
+    }
+    this._lastVersion = this.version;
+
+    const context = createContext(
+      this.getText(),
+      uriToPath(this.uri),
+      false,
+      {}
+    );
+    this._context = context;
+
+    const blockIds: Array<BlockId | string> = [];
+    for (const block of context.blocks) {
+      const id = getBlockId(block);
+      blockIds.push(id);
+      let subDoc = this.subDocuments[id];
+      if (!subDoc) {
+        subDoc = createDocumentFromBlock(block, this);
+        this.subDocuments[id] = subDoc;
+      }
+
+      if (syncAll) {
+        subDoc.syncVersion();
+      }
+    }
+
+    // remove unknown blocks
+    const toRemove = Object.keys(this.subDocuments).filter(
+      (id) => blockIds.indexOf(id) === -1
+    );
+    for (const id of toRemove) {
+      delete this.subDocuments[id];
+    }
+  }
+}
+
+export class VueSubDocument implements TextDocument {
+  private _doc: TextDocument;
+  constructor(
+    private _parent: VueDocument,
+    private _processor: ContextProcessor
+  ) {
+    const processorFilename = _processor.uri(_parent.uri);
+
+    const virtualUri = uriToVerterVirtual(processorFilename);
+
+    this._doc = TextDocument.create(
+      virtualUri,
+      "ts",
+      -1,
+      "// PLACEHOLDER TO BE POPULATED BY VUE DOCUMENT\n"
+    );
+  }
+
+  get languageId() {
+    return this._lastProcessedResult?.languageId ?? this._doc.languageId;
+  }
+  get uri() {
+    if (this._lastProcessedResult?.filename) {
+      return pathToVerterVirtual(this._lastProcessedResult.filename);
+    }
+    return this._doc.uri;
+  }
+  get version() {
+    return this._doc.version;
+  }
+  get lineCount() {
+    return this._doc.lineCount;
+  }
+
+  private _sourceMapConsumer: SourceMapConsumer | undefined;
+
+  private _lastProcessedResult:
+    | ReturnType<ContextProcessor["process"]>
+    | undefined;
+
+  getText(range?: Range): string {
+    // this.syncVersion();
+    // debugger
+
+    return this._doc.getText(range);
+  }
+  positionAt(offset: number): Position {
+    return this._doc.positionAt(offset);
+  }
+  offsetAt(position: Position): number {
+    return this._doc.offsetAt(position);
+  }
+
+  toGeneratedPosition(pos: Position): Position {
+    return generatedPositionFor(this._sourceMapConsumer!, pos);
+  }
+  toGeneratedRange(range: Range): Range {
+    return generatedRangeFor(this._sourceMapConsumer!, range);
+  }
+
+  toGeneratedOffsetFromPosition(pos: Position): number {
+    const position = this.toGeneratedPosition(pos);
+    return this.offsetAt(position);
+  }
+
+  update(changes: TextDocumentContentChangeEvent[], version: number) {
+    if (!this._sourceMapConsumer) {
+      this.syncVersion();
+      return this._doc;
+    }
+
+    let shouldProcess = false;
+    for (const change of changes) {
+      // partialy update
+      if ("range" in change) {
+        const generatedRange = this.toGeneratedRange(change.range);
+
+        console.log("to update", generatedRange, this._doc.getText());
+        TextDocument.update(
+          this._doc,
+          [
+            {
+              range: generatedRange,
+              text: change.text,
+            },
+          ],
+          version
+        );
+
+        // todo there's must be a way to trigger another process
+        // because there might be a big change in the source that needs it
+        console.log(this._doc.getText());
+        shouldProcess = true;
+      } else {
+        shouldProcess = true;
+      }
+    }
+    if (shouldProcess) {
+      this.process();
+    }
+
+    return this._doc;
+  }
+
+  syncVersion() {
+    if (this.version === this._parent.version) {
+      return;
+    }
+    this.process();
+  }
+
+  process() {
+    try {
+      const { s } = (this._lastProcessedResult = this._processor.process(
+        this._parent.context
+      ));
+
+      const map = s.generateMap({ hires: true, includeContent: true });
+      this._sourceMapConsumer = new SourceMapConsumer(map as any);
+      TextDocument.update(
+        this._doc,
+        [
+          {
+            range: {
+              start: this._doc.positionAt(0),
+              end: this._doc.positionAt(Number.MAX_SAFE_INTEGER),
+            },
+            text: this._lastProcessedResult.content,
+          },
+        ],
+        this._doc.version
+      );
+    } catch (e) {
+      console.error(e);
+      debugger;
+    }
   }
 }

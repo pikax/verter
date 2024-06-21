@@ -1,0 +1,364 @@
+import type LSP from "vscode-languageserver-protocol";
+import ts, { sortAndDeduplicateDiagnostics } from "typescript";
+import {
+  isVerterVirtual,
+  isVueFile,
+  uriToPath,
+  uriToVerterVirtual,
+} from "../utils";
+import { DocumentManager, isVueDocument } from "./document.js";
+import fsPath from "path";
+import { urlToPath } from "../../../utils";
+import {
+  isFileInVueBlock,
+  retrieveVueFileFromBlockUri,
+} from "../../processor/utils";
+
+export class VerterManager {
+  //   workspaceFolders: string[];
+
+  /**
+   * A map of ts.LanguageService instances keyed by tsconfig folder.
+   */
+  readonly tsServices = new Map<string, ts.LanguageService>();
+  readonly documentRegistry = ts.createDocumentRegistry(
+    ts.sys.useCaseSensitiveFileNames
+  );
+
+  constructor(private _documentManager: DocumentManager) {
+    this._documentManager.onDocumentOpen((doc) => {
+      const uri = doc.uri;
+      const filepath = uriToPath(uri);
+      const parent = fsPath.dirname(filepath);
+      this.loadConfig(parent);
+    });
+  }
+
+  init(params: {
+    workspaceFolders?: Array<{ uri: LSP.URI; name: string }>;
+    rootUri: LSP.DocumentUri | null;
+  }) {
+    // this.workspaceFolders = params.workspaceFolders;
+
+    if (params.workspaceFolders) {
+      for (const workspace of params.workspaceFolders) {
+        const filepath = uriToPath(workspace.uri);
+
+        this.loadConfig(filepath);
+      }
+    }
+  }
+
+  loadConfig(folderPath: string, force = false) {
+    // TODO maybe we could support a config file to specify the tsconfig path
+    const configPath = ts.findConfigFile(folderPath, ts.sys.fileExists);
+    let tsService = this.tsServices.get(folderPath);
+    if (tsService && !force) {
+      return tsService;
+    }
+
+    let options = this.defaultOptions();
+
+    const configFolder = fsPath.dirname(configPath);
+    let finalConfig: ts.ParsedCommandLine | null = null;
+
+    if (configPath) {
+      const tsConfigStr = this._documentManager.readFile(configPath);
+
+      const parsedConfig = ts.parseConfigFileTextToJson(
+        configPath,
+        tsConfigStr
+      );
+
+      const parseConfigHost: ts.ParseConfigHost = {
+        useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+        fileExists: this._documentManager.fileExists,
+        readFile: this._documentManager.readFile,
+        readDirectory(root, extensions, excludes, includes, depth) {
+          return ts.sys.readDirectory(
+            root,
+            [...extensions, ".vue"],
+            excludes,
+            includes,
+            depth
+          );
+        },
+      };
+      finalConfig = ts.parseJsonConfigFileContent(
+        parsedConfig.config,
+        parseConfigHost,
+        configFolder
+      );
+
+      console.log("final ", finalConfig.options);
+      options = {
+        ...options,
+        ...finalConfig.options,
+        jsxImportSource: "vue",
+      };
+
+      finalConfig.fileNames.forEach((file) => {
+        this._documentManager.preloadDocument(file);
+      });
+
+      // TODO handle reference tsconfig
+      // finalConfig.projectReferences
+    }
+
+    console.log("config", configPath, options);
+
+    const moduleCache = ts.createModuleResolutionCache(
+      configFolder,
+      ts.sys.resolvePath,
+      options
+    );
+
+    const host: ts.LanguageServiceHost = Object.assign(
+      this.defaultServiceHost(moduleCache),
+      {
+        getCurrentDirectory: () => configFolder,
+        getCompilationSettings: () => options,
+
+        getScriptFileNames: () => {
+          const files = finalConfig.fileNames.flatMap((filename) => {
+            const doc = this._documentManager.files.get(filename);
+            if (isVueDocument(doc)) {
+              return [filename, ...doc.subDocumentPaths];
+            }
+            return filename;
+          });
+
+          return files;
+        },
+      }
+    );
+
+    const languageService = ts.createLanguageService(
+      host,
+      this.documentRegistry
+    );
+
+    this.tsServices.set(folderPath, languageService);
+    return languageService;
+  }
+
+  retrieveService(uri: string) {
+    const filepath = uriToPath(uri);
+    const parent = fsPath.dirname(filepath);
+    return this.loadConfig(parent);
+  }
+
+  protected defaultOptions(): ts.CompilerOptions {
+    return {
+      // jsx: ts.JsxEmit.Preserve,
+      //   allowJs: true,
+      //   noImplicitThis: false,
+      //   noImplicitReturns: false,
+      //   target: ts.ScriptTarget.ESNext,
+      //   module: ts.ModuleKind.ESNext,
+      //   alwaysStrict: true,
+      //   noImplicitAny: true,
+      jsx: ts.JsxEmit.Preserve,
+      target: ts.ScriptTarget.ESNext,
+      module: ts.ModuleKind.ESNext,
+      alwaysStrict: true,
+      noImplicitAny: true,
+      allowJs: true,
+      noImplicitThis: false,
+      noImplicitReturns: false,
+    };
+  }
+  protected defaultServiceHost(moduleCache: ts.ModuleResolutionCache) {
+    const manager = this;
+
+    return {
+      log: (message) => console.log("[TS]", message),
+      getDefaultLibFileName: ts.getDefaultLibFilePath,
+      getDirectories: ts.sys.getDirectories,
+      useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
+      getNewLine: () => ts.sys.newLine,
+      realpath: (filepath) => {
+        if (isVerterVirtual(filepath)) {
+          return uriToPath(filepath);
+        }
+        return ts.sys.realpath(filepath);
+      },
+
+      readDirectory: (root, extensions, excludes, includes, depth) => {
+        return ts.sys.readDirectory(
+          root,
+          [...extensions, ".vue"],
+          excludes,
+          includes,
+          depth
+        );
+      },
+      getScriptKind: (filename) => {
+        const ext = filename.slice(filename.lastIndexOf("."));
+        switch (ext.toLowerCase()) {
+          case ts.Extension.Js:
+            return ts.ScriptKind.JS;
+          case ts.Extension.Jsx:
+            return ts.ScriptKind.JSX;
+          case ".mts":
+          case ".cts":
+          case ts.Extension.Ts:
+            return ts.ScriptKind.TS;
+          case ts.Extension.Tsx:
+            return ts.ScriptKind.TSX;
+          case ts.Extension.Json:
+            return ts.ScriptKind.JSON;
+          case ".vue":
+            return ts.ScriptKind.TSX;
+          default:
+            console.log("unknown", ext);
+            return ts.ScriptKind.Unknown;
+        }
+      },
+      readFile: (filepath, encoding) => {
+        return this._documentManager.readFile(filepath, encoding);
+      },
+      fileExists: (filepath) => {
+        return this._documentManager.fileExists(filepath);
+      },
+      getScriptVersion: (fileName) => {
+        const snap = this._documentManager.getSnapshotIfExists(fileName);
+        return snap.version?.toString();
+      },
+      getScriptSnapshot: (fileName) => {
+        return this._documentManager.getSnapshotIfExists(fileName);
+      },
+
+      resolveModuleNameLiterals(
+        moduleLiterals,
+        containingFile,
+        redirectedReference,
+        options,
+        containingSourceFile,
+        reusedNames
+      ) {
+        // if (isVueFile(containingFile)) {
+        //   debugger;
+        // }
+        if (isVerterVirtual(containingFile)) {
+          containingFile = urlToPath(containingFile)!;
+        }
+        const modules = moduleLiterals.map((x) => {
+          const h = this;
+
+          // const h = ts.sys;
+
+          let moduleLoc = x.text;
+
+          // if (~x.text.indexOf("vue")) {
+          //   debugger;
+          // }
+
+          if (isFileInVueBlock(moduleLoc)) {
+            debugger;
+          }
+          if (moduleLoc.endsWith(".vue")) {
+            moduleLoc = x.text + ".render.tsx";
+          }
+
+          if (!containingFile) {
+            containingFile = x.parent.parent.getSourceFile().fileName;
+            if (isVerterVirtual(containingFile)) {
+              containingFile = uriToPath(
+                isFileInVueBlock(containingFile)
+                  ? retrieveVueFileFromBlockUri(containingFile)
+                  : containingFile
+              );
+            }
+            // console.log("containingFile", containingFile);
+          }
+
+          switch (options.moduleResolution) {
+            case ts.ModuleResolutionKind.Classic: {
+              return ts.resolveModuleName(
+                moduleLoc,
+                containingFile,
+                options,
+                h,
+                moduleCache,
+                redirectedReference
+              );
+            }
+            case ts.ModuleResolutionKind.NodeJs:
+            case ts.ModuleResolutionKind.Node10:
+            case ts.ModuleResolutionKind.Node16:
+            case ts.ModuleResolutionKind.NodeNext: {
+              return ts.nodeModuleNameResolver(
+                moduleLoc,
+                containingFile,
+                options,
+                h,
+                moduleCache,
+                redirectedReference
+              );
+            }
+            case ts.ModuleResolutionKind.Bundler:
+            default:
+              const r = ts.bundlerModuleNameResolver(
+                moduleLoc,
+                containingFile,
+                options,
+                h,
+                moduleCache,
+                redirectedReference
+              );
+
+              if (x.text.endsWith(".vue")) {
+                if (r.resolvedModule) {
+                  if (isFileInVueBlock(r.resolvedModule.resolvedFileName)) {
+                    // console.log(
+                    //   "up resolved",
+                    //   r,
+                    //   uriToVerterVirtual(
+                    //     r.resolvedModule.resolvedFileName.slice(0, -4)
+                    //   )
+                    // );
+
+                    const originalPath = retrieveVueFileFromBlockUri(
+                      r.resolvedModule.resolvedFileName
+                    );
+                    // @ts-expect-error
+                    r.resolvedModule.originalPath = originalPath;
+                    r.resolvedModule.resolvedFileName =
+                      uriToVerterVirtual(originalPath);
+                    // r.resolvedModule.resolvedFileName =
+                    //   uriToVerterVirtual(originalPath);
+                    r.resolvedModule.resolvedUsingTsExtension = false;
+
+                    // r.resolvedModule.resolvedFileName =
+                    //   r.resolvedModule.resolvedFileName.slice(0, -4);
+
+                    // r.resolvedModule.extension = ".vue";
+                  } else {
+                    debugger;
+                  }
+                } else {
+                  debugger;
+                }
+              }
+              // console.log("sss", r);
+              return r;
+          }
+        });
+
+        // TODO add debug flag
+        if (true) {
+          const emptyModules = modules
+            .map((x, i) => (!x.resolvedModule ? i : false))
+            .filter((x) => x !== false)
+            .map((x: number) => moduleLiterals[x].text);
+          if (emptyModules.length > 0) {
+            console.warn("Modules missing!", emptyModules);
+          }
+        }
+
+        return modules;
+      },
+    } satisfies Partial<ts.LanguageServiceHost>;
+  }
+}
