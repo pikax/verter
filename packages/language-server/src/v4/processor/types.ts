@@ -1,10 +1,10 @@
-import { ParseScriptContext } from "@verter/core";
+import { ParseContext } from "@verter/core";
 import { MagicString } from "vue/compiler-sfc";
 
 export type ContextProcessor = {
   uri: (parentUri: string) => string;
 
-  process(context: ParseScriptContext): {
+  process(context: ParseContext): {
     languageId: string;
     filename: string;
 

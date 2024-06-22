@@ -6,13 +6,8 @@ import {
   TextDocumentContentChangeEvent,
 } from "vscode-languageserver-textdocument";
 
-import {
-  createContext,
-  ParseScriptContext,
-  VerterSFCBlock,
-} from "@verter/core";
+import { createContext, ParseContext, VerterSFCBlock } from "@verter/core";
 import { ContextProcessor } from "../../processor/types";
-import { getBlockFilename } from "../../../v3/processor/utils";
 import { processRender } from "../../processor/render/render";
 import { processOptions } from "../../processor/options";
 import { generatedPositionFor, generatedRangeFor } from "../../utils";
@@ -220,8 +215,8 @@ export class VueDocument implements TextDocument {
     return this._doc.offsetAt(position);
   }
 
-  private _context: ParseScriptContext;
-  get context(): ParseScriptContext {
+  private _context: ParseContext;
+  get context(): ParseContext {
     this.syncVersion();
     return this._context;
   }
@@ -232,12 +227,7 @@ export class VueDocument implements TextDocument {
     }
     this._lastVersion = this.version;
 
-    const context = createContext(
-      this.getText(),
-      uriToPath(this.uri),
-      false,
-      {}
-    );
+    const context = createContext(this.getText(), uriToPath(this.uri), {});
     this._context = context;
 
     const blockIds: Array<BlockId | string> = [];
