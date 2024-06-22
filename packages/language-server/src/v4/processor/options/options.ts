@@ -174,7 +174,12 @@ export function processOptions(context: ParseScriptContext) {
               offset + (pos.start - parsedAst.offset) - decrement;
             const endIndex = offset + (pos.end - parsedAst.offset) - decrement;
 
-            s.move(startIndex, endIndex, 0);
+            try {
+              s.move(startIndex, endIndex, 0);
+            } catch (e) {
+              console.error(e);
+              debugger
+            }
             break;
           }
         }

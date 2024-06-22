@@ -106,36 +106,7 @@ export function startServer(options: LsConnectionOption = {}) {
     }
     try {
       const offset = doc.offsetAt(position);
-
-      //   const semanatic = tsService.getSemanticDiagnostics(doc.uri);
-      //   const definition = tsService.getTypeDefinitionAtPosition(doc.uri, offset);
-      //   const references = tsService.getReferencesAtPosition(doc.uri, offset);
-      //   const completion = tsService.getCompletionsAtPosition(doc.uri, offset, {
-      //     triggerCharacter:
-      //       params.context?.triggerCharacter === "@"
-      //         ? ""
-      //         : params.context?.triggerCharacter,
-
-      //     includeSymbol: true,
-      //     includeAutomaticOptionalChainCompletions: true,
-      //     jsxAttributeCompletionStyle: "auto",
-      //     importModuleSpecifierEnding: "auto",
-      //     disableSuggestions: true,
-      //   });
-
       const quickInfo = tsService.getQuickInfoAtPosition(doc.uri, offset);
-
-      // const text = doc.getText();
-      // const len = text.length;
-      // for (let i = 50; i < len; i++) {
-      //   const info = tsService.getQuickInfoAtPosition(doc.uri, i);
-
-      //   console.log("info", i, text.slice(i - 1, i + 1), info);
-      // }
-
-      //   if (!quickInfo) {
-      //     return undefined;
-      //   }
 
       return undefined;
     } catch (e) {

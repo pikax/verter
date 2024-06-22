@@ -10,9 +10,14 @@ export type BlockType =
 
 export function getBlockFilename(
   block: BlockType,
-  context: ParseScriptContext
+  context: ParseScriptContext,
+  asRelative = false
 ) {
-  return blockToFilename(block, context.filename, context.script?.lang);
+  const filename = asRelative
+    ? `./${context.filename.split("/").pop()}`
+    : context.filename;
+
+  return blockToFilename(block, filename, context.script?.lang);
 }
 
 export function blockToFilename(

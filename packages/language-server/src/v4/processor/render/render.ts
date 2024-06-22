@@ -23,12 +23,11 @@ export const FunctionExportName = PrefixSTR("Render");
 export function processRender(context: ParseScriptContext) {
   const accessors = getAccessors();
   const filename = getBlockFilename("render", context);
-  const optionsFilename = getBlockFilename("options", context);
+  const optionsFilename = getBlockFilename("options", context, true);
 
   //   const componentAccessor = PrefixSTR("Component");
   //   const defineComponent = PrefixSTR("defineComponent");
 
-  const relativeScriptPath = relative(context.filename, optionsFilename);
   const s = context.s.clone();
 
   const isAsync = context.isAsync;
@@ -73,7 +72,7 @@ export function processRender(context: ParseScriptContext) {
       ? ``
       : `
 import { defineComponent as ${variables.defineComponent}, ShallowUnwrapRef as ${variables.ShallowUnwrapRef} } from "vue";
-import { ${OptionsExportName} } from "./${relativeScriptPath}";
+import { ${OptionsExportName} } from "${optionsFilename}";
 `;
 
     const helpers = context.isSetup
