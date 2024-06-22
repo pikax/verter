@@ -3,6 +3,8 @@ import {
   ParseScriptContext,
   VerterSFCBlock,
   PrefixSTR,
+  ParseContext,
+  VerterASTBlock,
 } from "@verter/core";
 import { parseSync, TsTypeAliasDeclaration } from "@swc/core";
 import {
@@ -11,8 +13,6 @@ import {
   walkIdentifiers,
 } from "@vue/compiler-core";
 import { walk } from "vue/compiler-sfc";
-import { parse as acornParse } from "acorn-loose";
-import { offsetAt } from "../../../lib/documents/utils";
 import { getBlockFilename } from "../utils";
 
 export const OptionsExportName = PrefixSTR("ComponentOptions");
@@ -21,51 +21,13 @@ export const DefaultOptions = PrefixSTR("default");
 export const ComponentExport = PrefixSTR("Component");
 export const GenericOptions = PrefixSTR("GenericOptions");
 
-let prevSize = 0;
-function parseAst(content: string, isTypescript: boolean) {
-  try {
-    // for some reason each time parseSync is called the offset is not correct
-    const offset = prevSize;
-    prevSize += content.length + 1;
-
-    const ast = parseSync(content, {
-      syntax: isTypescript ? "typescript" : "ecmascript",
-      target: "esnext",
-      comments: false,
-    });
-
-    return {
-      ast,
-      offset,
-    };
-  } catch (e) {
-    try {
-      // try acorn loose and try
-      const ast = acornParse(content, { ecmaVersion: "latest" });
-
-      return {
-        ast,
-        offset: 0,
-      };
-    } catch {}
-
-    console.error(e);
-    return {
-      ast: {
-        body: [],
-      },
-      offset: prevSize,
-    };
-  }
-}
-
-export function processOptions(context: ParseScriptContext) {
+export function processOptions(context: ParseContext) {
   const filename = getBlockFilename("options", context);
   const s = context.s.clone();
 
   // remove unknown blocks
   const SUPPORTED_BLOCKS = new Set(["script"]);
-  const blocks: VerterSFCBlock[] = [];
+  const blocks: VerterASTBlock[] = [];
   for (const block of context.blocks) {
     if (SUPPORTED_BLOCKS.has(block.tag.type)) {
       blocks.push(block);
@@ -74,19 +36,16 @@ export function processOptions(context: ParseScriptContext) {
     }
   }
 
-  if (context.script) {
+  const scriptBlock =
+    blocks.find(
+      (x) => x.tag.type === "script" && x.block.setup === context.isSetup
+    ) ?? blocks.find((x) => x.tag.type === "script");
+
+  if (scriptBlock) {
     const isSetup = context.isSetup;
-    const isGeneric = !!context.generic;
-    const genericInfo = genericProcess(context);
-    const isTypescript = context.script.lang?.startsWith("ts") ?? false;
-
-    const mainBlock =
-      blocks.find(
-        (x) => x.tag.type === "script" && x.block.setup === isSetup
-      ) ?? blocks.find((x) => x.tag.type === "script");
-
-    const parsedAst = parseAst(mainBlock.block.content, isTypescript);
-    let isAsync = false;
+    const isAsync = context.isAsync;
+    const genericInfo = context.generic;
+    const isTypescript = scriptBlock.block.lang?.startsWith("ts") ?? false;
 
     const _bindings = new Set<string>();
 
@@ -96,6 +55,7 @@ export function processOptions(context: ParseScriptContext) {
         "MemberExpression",
         "KeyValueProperty",
         "MethodProperty",
+        "ExportDefaultDeclaration",
       ]);
 
       walk(node, {
@@ -125,39 +85,38 @@ export function processOptions(context: ParseScriptContext) {
       });
     }
 
-    populateBindings(parsedAst.ast);
+    // populateBindings(parsedAst.ast);
 
-    walk(parsedAst.ast, {
-      enter(node) {
-        if (isFunctionType(node)) {
-          this.skip();
-        }
+    // walk(parsedAst.ast, {
+    //   enter(node) {
+    //     if (isFunctionType(node)) {
+    //       this.skip();
+    //     }
 
-        if (node.type === "AwaitExpression") {
-          isAsync = true;
-          this.skip();
-        }
-      },
-    });
+    //     if (node.type === "AwaitExpression") {
+    //       isAsync = true;
+    //       this.skip();
+    //     }
+    //   },
+    // });
     // extra script blocks
     {
       for (const b of blocks) {
-        if (b === mainBlock) continue;
-        if (b.tag.type !== "script") continue;
-        const { ast } = parseAst(b.block.content, isTypescript);
-        populateBindings(ast);
+        // if (b === scriptBlock) continue;
+        if (!b.ast) continue;
+        populateBindings(b.ast);
       }
     }
 
     const bindings = Array.from(_bindings);
     // move imports and exports to top
-    {
-      for (const it of parsedAst.ast.body) {
-        switch (it.type) {
+    if (scriptBlock.ast) {
+      for (const it of scriptBlock.ast.body) {
+        switch (it.type as any) {
           case "ExportDefaultExpression":
           case "ExportDefaultDeclaration": {
             // if is options and generic do not move
-            if (!isSetup && isGeneric) continue;
+            if (!isSetup && genericInfo) continue;
           }
           case "ImportDeclaration":
           case "ExportAllDeclaration":
@@ -165,20 +124,14 @@ export function processOptions(context: ParseScriptContext) {
           case "ExportNamedDeclaration":
           case "TsNamespaceExportDeclaration":
           case "TsExportAssignment": {
-            const offset = mainBlock.block.loc.start.offset;
-
-            const decrement = !!it.span ? 1 : 0;
-            const pos = it.span ?? it;
-
-            const startIndex =
-              offset + (pos.start - parsedAst.offset) - decrement;
-            const endIndex = offset + (pos.end - parsedAst.offset) - decrement;
-
+            const offset = scriptBlock.block.loc.start.offset;
+            const startIndex = it.start + offset;
+            const endIndex = it.end + offset;
             try {
               s.move(startIndex, endIndex, 0);
             } catch (e) {
               console.error(e);
-              debugger
+              debugger;
             }
             break;
           }
@@ -194,23 +147,23 @@ export function processOptions(context: ParseScriptContext) {
       const postGeneric = `() {\n`;
 
       // remove close tag
-      s.remove(mainBlock.tag.pos.close.start, mainBlock.tag.pos.close.end);
+      s.remove(scriptBlock.tag.pos.close.start, scriptBlock.tag.pos.close.end);
 
-      const generic = context.generic;
+      const generic = genericInfo?.source;
       // generic information will be kept intact for the source-map
       if (typeof generic === "string") {
         // get <script ... >
         const tagContent = s.original.slice(
-          mainBlock.tag.pos.open.start,
-          mainBlock.tag.pos.open.end
+          scriptBlock.tag.pos.open.start,
+          scriptBlock.tag.pos.open.end
         );
 
         const genericIndex =
-          tagContent.indexOf(generic) + mainBlock.tag.pos.open.start;
+          tagContent.indexOf(generic) + scriptBlock.tag.pos.open.start;
 
         // replace before generic with `preGeneric`
         s.overwrite(
-          mainBlock.tag.pos.open.start,
+          scriptBlock.tag.pos.open.start,
           genericIndex,
           preGeneric + "<"
         );
@@ -218,13 +171,13 @@ export function processOptions(context: ParseScriptContext) {
         // replace after generic with `postGeneric`
         s.overwrite(
           genericIndex + generic.length,
-          context.script.loc.start.offset,
+          scriptBlock.block.loc.start.offset,
           ">" + postGeneric
         );
       } else {
         s.overwrite(
-          mainBlock.tag.pos.open.start,
-          mainBlock.tag.pos.open.end,
+          scriptBlock.tag.pos.open.start,
+          scriptBlock.tag.pos.open.end,
           preGeneric + postGeneric
         );
       }
@@ -235,7 +188,7 @@ export function processOptions(context: ParseScriptContext) {
 
       if (isTypescript) {
         s.appendRight(
-          mainBlock.block.loc.end.offset,
+          scriptBlock.block.loc.end.offset,
           `\nreturn {} as {${typeofBindings}\n}\n`
         );
       } else {
@@ -243,56 +196,59 @@ export function processOptions(context: ParseScriptContext) {
         // because when the variables are const the types are not inferred correctly
         // e.g. const a = 1; a is inferred as number but it should be inferred as 1
         s.prependRight(
-          mainBlock.tag.pos.open.start,
+          scriptBlock.tag.pos.open.start,
           `/**\n * @returns {{${typeofBindings}}} \n*/`
         );
 
         s.appendRight(
-          mainBlock.block.loc.end.offset,
+          scriptBlock.block.loc.end.offset,
           `\nreturn {\n${bindings.join(", ")}\n}\n`
         );
       }
 
-      s.appendRight(mainBlock.block.loc.end.offset, "\n}\n");
+      s.appendRight(scriptBlock.block.loc.end.offset, "\n}\n");
     } else {
       const exportIndex = s.original.indexOf("export default");
 
-      if (isGeneric) {
+      if (genericInfo) {
         const preGeneric = `\nexport function ${BindingContextExportName}`;
         const postGeneric = `() {\n`;
 
         // remove close tag
-        s.remove(mainBlock.tag.pos.close.start, mainBlock.tag.pos.close.end);
+        s.remove(
+          scriptBlock.tag.pos.close.start,
+          scriptBlock.tag.pos.close.end
+        );
 
-        const generic = context.generic;
+        const generic = context.generic?.source;
         // generic information will be kept intact for the source-map
         if (typeof generic === "string") {
           // get <script ... >
           const tagContent = s.original.slice(
-            mainBlock.tag.pos.open.start,
-            mainBlock.tag.pos.open.end
+            scriptBlock.tag.pos.open.start,
+            scriptBlock.tag.pos.open.end
           );
 
           const genericIndex =
-            tagContent.indexOf(generic) + mainBlock.tag.pos.open.start;
+            tagContent.indexOf(generic) + scriptBlock.tag.pos.open.start;
 
           // replace before generic with `preGeneric`
           s.overwrite(
-            mainBlock.tag.pos.open.start,
+            scriptBlock.tag.pos.open.start,
             genericIndex,
             preGeneric + "<"
           );
 
           // replace after generic with `postGeneric`
           s.overwrite(
-            genericIndex + generic.length,
-            context.script.loc.start.offset,
+            genericIndex + genericInfo.source.length,
+            scriptBlock.block.loc.start.offset,
             ">" + postGeneric
           );
         } else {
           s.overwrite(
-            mainBlock.tag.pos.open.start,
-            mainBlock.tag.pos.open.end,
+            scriptBlock.tag.pos.open.start,
+            scriptBlock.tag.pos.open.end,
             preGeneric + postGeneric
           );
         }
@@ -308,7 +264,7 @@ export function processOptions(context: ParseScriptContext) {
           );
         } else {
           s.appendRight(
-            mainBlock.block.loc.end.offset,
+            scriptBlock.block.loc.end.offset,
             `\nexport const ${OptionsExportName} = {}\n`
           );
         }
@@ -322,7 +278,7 @@ export function processOptions(context: ParseScriptContext) {
     // remove block tags
     blocks.forEach((block) => {
       // check if the block was already handled
-      if (block === mainBlock && (isSetup || isGeneric)) return;
+      if (block === scriptBlock && (isSetup || genericInfo)) return;
       s.remove(block.tag.pos.open.start, block.tag.pos.open.end);
 
       s.remove(block.tag.pos.close.start, block.tag.pos.close.end);
@@ -348,9 +304,9 @@ export function processOptions(context: ParseScriptContext) {
 
   return {
     languageId:
-      context.script.lang === "ts"
+      scriptBlock.block.lang === "ts"
         ? "typescript"
-        : context.script.lang === "tsx"
+        : scriptBlock.block.lang === "tsx"
         ? "tsx"
         : "javascript",
     filename,
@@ -361,113 +317,5 @@ export function processOptions(context: ParseScriptContext) {
 
     s,
     content: s.toString(),
-  };
-}
-
-// TODO move somewhere else
-export function genericProcess(context: ParseScriptContext) {
-  if (!context.generic) {
-    return undefined;
-  }
-  // const genericDeclaration = locations.generic[0];
-  // if (!genericDeclaration) return undefined;
-  const genericCode = `type __GENERIC__<${context.generic}> = {}`;
-
-  const {
-    ast: {
-      body: [genericNode],
-    },
-    offset,
-  } = parseAst(genericCode, true);
-
-  // TODO handle if the generic is broken, maybe with REGEX
-  if (!genericNode.typeParams) return undefined;
-
-  const params = (genericNode as TsTypeAliasDeclaration).typeParams?.parameters;
-
-  // const params =
-  //   (ast.body[0] as TsTypeAliasDeclaration)?.typeParameters?.params ?? [];
-
-  function retrieveNodeString(node: any, source: string) {
-    if (!node) return undefined;
-    return source.slice(
-      node.span.start - offset - 1,
-      node.span.end - offset - 1
-    );
-  }
-
-  const items = params.map((param, index) => ({
-    name: param.name.value,
-    content: retrieveNodeString(param, genericCode),
-    constraint: retrieveNodeString(param.constraint, genericCode),
-    default: retrieveNodeString(param.default, genericCode),
-    index,
-  }));
-
-  function getGenericComponentName(name: string) {
-    return "_VUE_TS__" + name;
-  }
-
-  function replaceComponentNameUsage(name: string, content: string) {
-    const regex = new RegExp(`\\b${name}\\b`, "g");
-    return content.replace(regex, getGenericComponentName(name));
-  }
-
-  const genericNames = items.map((x) => x.name);
-  const sanitisedNames = genericNames.map(sanitiseGenericNames);
-
-  function sanitiseGenericNames(content: string | null | undefined) {
-    if (!content) return content;
-    return genericNames
-      ? genericNames.reduce((prev, cur) => {
-          return replaceComponentNameUsage(cur, prev);
-        }, content)
-      : content;
-  }
-
-  const CompGeneric = items
-    .map((x) => {
-      const name = getGenericComponentName(x.name);
-      const constraint = sanitiseGenericNames(x.constraint);
-      const defaultType = sanitiseGenericNames(x.default);
-
-      return [
-        name,
-        constraint ? `extends ${constraint}` : undefined,
-        `= ${defaultType || "any"}`,
-      ]
-        .filter(Boolean)
-        .join(" ");
-    })
-    .join(", ");
-
-  const InstanceGeneric = items
-    .map((x) => {
-      const name = x.name;
-      const constraint = x.constraint || getGenericComponentName(x.name);
-      const defaultType = x.default || getGenericComponentName(x.name);
-
-      return [
-        name,
-        constraint ? `extends ${constraint}` : undefined,
-        `= ${defaultType || "any"}`,
-      ]
-        .filter(Boolean)
-        .join(" ");
-    })
-    .join(", ");
-
-  return {
-    /**
-     * this is to be used for the external component
-     */
-    component: CompGeneric,
-    /**
-     * This is to be a direct replace from user declaration
-     */
-    instance: InstanceGeneric,
-
-    genericNames,
-    sanitisedNames,
   };
 }

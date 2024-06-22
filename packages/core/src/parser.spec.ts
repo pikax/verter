@@ -1,4 +1,4 @@
-import { createContext, parseGenerics } from "./parser";
+import { createContext, parseGeneric } from "./parser";
 
 describe("parser", () => {
   describe("createContext", () => {
@@ -8,7 +8,6 @@ describe("parser", () => {
       );
       expect(context).toMatchObject({
         filename: "temp.vue",
-        id: "temp.vue",
         isSetup: false,
         isAsync: false,
         generic: undefined,
@@ -17,7 +16,7 @@ describe("parser", () => {
 
     it("should add empty script", () => {
       const context = createContext(`<template><div></div></template>`);
-      expect(context.script).toMatchObject({
+      expect(context.sfc.script).toMatchObject({
         content: "",
       });
       expect(context.s.toString()).toContain("<script></script>");
@@ -25,7 +24,12 @@ describe("parser", () => {
 
     it("should resolve the generic", () => {
       const context = createContext(`<script generic="T"></script>`);
-      expect(context.generic).toBe("T");
+      expect(context.generic).toMatchObject({
+        source: "T",
+        names: ["T"],
+        sanitisedNames: ["___VERTER___TS_T"],
+        declaration: "___VERTER___TS_T = any",
+      });
     });
 
     it("should resolve the script setup", () => {
@@ -35,13 +39,38 @@ describe("parser", () => {
 
     it("should handle multiple scripts", () => {
       const context = createContext(`<script></script><script setup></script>`);
-      expect(context.script).toMatchObject({
-        content: "",
-      });
+
       expect(context.isSetup).toBe(true);
-      expect(context.script).toBe(context.sfc.descriptor.scriptSetup);
     });
 
     it.todo("should pass options to the parser", () => {});
+
+    it("should be async", () => {
+      const context = createContext(
+        `<script setup>await Promise.resolve()</script>`
+      );
+      expect(context.isAsync).toBe(true);
+    });
+  });
+
+  describe("parseGeneric", () => {
+    it("should resolve generic", () => {
+      expect(parseGeneric('T extends "foo" | "bar"', "__TS__")).toMatchObject({
+        source: 'T extends "foo" | "bar"',
+        names: ["T"],
+
+        sanitisedNames: ["__TS__T"],
+
+        declaration: '__TS__T extends "foo" | "bar" = any',
+      });
+    });
+
+    it("should be undefined on empty string", () => {
+      expect(parseGeneric("", "__TS__")).toBeUndefined();
+    });
+
+    it("undefinde if attribute is not a string", () => {
+      expect(parseGeneric(true, "__TS__")).toBeUndefined();
+    });
   });
 });

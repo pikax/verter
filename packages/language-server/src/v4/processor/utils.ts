@@ -1,4 +1,4 @@
-import type { ParseScriptContext } from "@verter/core";
+import type { ParseContext, ParseScriptContext } from "@verter/core";
 
 export type BlockType =
   | "bundle"
@@ -10,14 +10,18 @@ export type BlockType =
 
 export function getBlockFilename(
   block: BlockType,
-  context: ParseScriptContext,
+  context: ParseContext,
   asRelative = false
 ) {
   const filename = asRelative
     ? `./${context.filename.split("/").pop()}`
     : context.filename;
 
-  return blockToFilename(block, filename, context.script?.lang);
+  return blockToFilename(
+    block,
+    filename,
+    (context.sfc.scriptSetup ?? context.sfc.script)?.lang
+  );
 }
 
 export function blockToFilename(

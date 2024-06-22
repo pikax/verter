@@ -27,7 +27,7 @@ export interface ParseScriptContext {
    * This will only be resolved when running plugin
    */
   isAsync: boolean;
-  generic?: string | undefined;
+  generic: string | undefined;
 
   sfc: SFCParseResult;
   script: SFCScriptBlock | null;

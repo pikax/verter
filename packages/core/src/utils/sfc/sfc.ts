@@ -206,3 +206,17 @@ export function extractBlocksFromDescriptor(
 
   return blocks;
 }
+export function findBlockLanguage(block: VerterSFCBlock) {
+  if (block.tag.type === "script") {
+    return block.block.attrs.lang?.toString() || "js";
+  }
+  if (block.tag.type === "template") {
+    return block.block.attrs.lang?.toString() || "html";
+  }
+  if (block.tag.type === "style") {
+    return block.block.attrs.lang?.toString() || "css";
+  }
+  // TODO maybe add some way to dynamically get the language
+  // for example for router
+  return block.block.attrs.lang?.toString() || block.tag.type;
+}

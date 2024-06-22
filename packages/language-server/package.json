@@ -22,6 +22,7 @@
     "@verter/language-shared": "workspace:^",
     "@vue/compiler-core": "^3.4.21",
     "acorn-loose": "^8.4.0",
+    "oxc-parser": "^0.15.0",
     "source-map-js": "^1.2.0",
     "sucrase": "^3.35.0",
     "typescript": "^5.4.5",
