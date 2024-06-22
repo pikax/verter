@@ -1,14 +1,13 @@
-import { ParseScriptContext, PrefixSTR, VerterSFCBlock } from "@verter/core";
+import { ParseContext, PrefixSTR } from "@verter/core";
 import { MagicString } from "vue/compiler-sfc";
 
 import {
-  DefaultOptions,
   BindingContextExportName,
   ComponentExport,
 } from "./../options/index.js";
 import { getBlockFilename } from "../utils";
 
-export function processBundle(context: ParseScriptContext) {
+export function processBundle(context: ParseContext) {
   const filename = context.filename + ".bundle.ts";
 
   const optionsFile = getBlockFilename("options", context, true);

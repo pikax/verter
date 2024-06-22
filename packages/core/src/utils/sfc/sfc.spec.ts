@@ -147,7 +147,10 @@ describe("Utils SFC", () => {
 
   describe("extractBlocksFromDescriptor", () => {
     function doExtract(source: string) {
-      const { descriptor } = parse(source);
+      const { descriptor } = parse(source, {
+        ignoreEmpty: false,
+        templateParseOptions: { parseMode: "sfc" },
+      });
       return extractBlocksFromDescriptor(descriptor);
     }
 
@@ -247,7 +250,7 @@ describe("Utils SFC", () => {
       expect(result).toMatchObject([
         {
           block: {
-            type: "empty",
+            type: "script",
           },
           tag: {
             type: "script",
@@ -428,6 +431,13 @@ describe("Utils SFC", () => {
           },
         },
       ]);
+    });
+
+    it("block inside comment", () => {
+      const source = `<!--<template></template>-->`;
+      const result = doExtract(source);
+
+      expect(result).toHaveLength(0);
     });
 
     // TODO fix resolving empty when there's `>`

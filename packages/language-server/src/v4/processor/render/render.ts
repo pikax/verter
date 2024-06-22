@@ -1,8 +1,10 @@
-import { MagicString } from "vue/compiler-sfc";
+import { MagicString, SFCTemplateBlock } from "vue/compiler-sfc";
 import {
+  ParseContext,
   type ParseScriptContext,
   PrefixSTR,
   TemplateBuilder,
+  VerterASTBlock,
   VerterSFCBlock,
   getAccessors,
 } from "@verter/core";
@@ -11,16 +13,17 @@ import { relative } from "path/posix";
 import {
   BindingContextExportName,
   DefaultOptions,
-  ComponentExport,
-  GenericOptions,
   OptionsExportName,
-  genericProcess,
 } from "../options/index.js";
 import { getBlockFilename } from "../utils.js";
+import {
+  transpileTemplate,
+  WalkResult,
+} from "@verter/core/dist/plugins/index.js";
 
 export const FunctionExportName = PrefixSTR("Render");
 
-export function processRender(context: ParseScriptContext) {
+export function processRender(context: ParseContext) {
   const accessors = getAccessors();
   const filename = getBlockFilename("render", context);
   const optionsFilename = getBlockFilename("options", context, true);
@@ -34,26 +37,29 @@ export function processRender(context: ParseScriptContext) {
 
   // remove unknown blocks
   const SUPPORTED_BLOCKS = new Set(["template"]);
-  const blocks: VerterSFCBlock[] = [];
+  const blocks: VerterASTBlock[] = [];
   for (const block of context.blocks) {
-    if (SUPPORTED_BLOCKS.has(block.tag.type)) {
+    if (SUPPORTED_BLOCKS.has(block.block.type)) {
       blocks.push(block);
     } else {
       s.remove(block.tag.pos.open.start, block.tag.pos.close.end);
     }
   }
 
-  const mainBlock = blocks[0];
+  const mainBlock = blocks[0] as
+    | (VerterASTBlock & { block: SFCTemplateBlock })
+    | undefined;
 
-  if (context.template === null || !mainBlock) {
+  if (!mainBlock || !mainBlock.block.ast) {
     s.append(`export function ${FunctionExportName}() { return <></> }`);
   } else {
     // const generic = context.generic ? `<${context.generic}>` : "";
-    const generic = genericProcess(context);
+    const generic = context.generic;
 
-    TemplateBuilder.process({
-      ...context,
-      s,
+    const declarations: WalkResult[] = [];
+
+    transpileTemplate(context.sfc.template.ast, s, {
+      declarations,
     });
 
     const variables = {
@@ -92,7 +98,7 @@ const ${variables.component} = new (${
 const ${BindingContextExportName}CTX = ${
           isAsync ? "await " : ""
         }${BindingContextExportName}${
-          context.generic ? generic.genericNames.join(",") : ""
+          context.generic ? generic.names.join(",") : ""
         }()
 const ${accessors.ctx} = {
     ...${variables.component},

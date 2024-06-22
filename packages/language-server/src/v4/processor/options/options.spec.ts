@@ -26,7 +26,7 @@ describe("processor options", () => {
   }
 
   function process(source: string, filename = "test.vue") {
-    const context = createContext(source, filename, false);
+    const context = createContext(source, filename);
     return processOptions(context);
   }
 
@@ -451,7 +451,7 @@ describe("processor options", () => {
         expect(result.content).toContain(
           "export function ___VERTER___BindingContext() { return {} }"
         );
-      }); 
+      });
 
       it("generic", () => {
         const result = process(

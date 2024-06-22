@@ -28,13 +28,11 @@ describe("processRender", () => {
     expect(result.content).toContain("export function ___VERTER___Render()");
   });
 
-  // TODO this is not correct, because the script is not typescript,
-  // it should not be valid
   it("should be generic", () => {
     const result = process(
       `<template><div></div></template><script generic="T"></script>`
     );
-    expect(result.content).toContain("export function ___VERTER___Render<T>()");
+    expect(result.content).toContain("export function ___VERTER___Render()");
   });
 
   it("should handle empty template", () => {

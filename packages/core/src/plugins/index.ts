@@ -30,3 +30,5 @@ export const defaultPlugins = [
 // export { Template };
 
 export { default as TemplateBuilder } from "./template/index.js";
+
+export { transpile as transpileTemplate } from "./template/v2/transpile/index.js";

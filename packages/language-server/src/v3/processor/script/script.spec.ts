@@ -1,21 +1,23 @@
-import { createContext } from '@verter/core'
-import { processScript } from './script.js'
+import { createContext } from "@verter/core";
+import { processScript } from "./script.js";
 
-describe('processScript', () => {
-  function process(source: string, filename = 'test.vue') {
-    const context = createContext(source, filename, true)
-    return processScript(context)
+describe("processScript", () => {
+  function process(source: string, filename = "test.vue") {
+    const context = createContext(source, filename);
+    return processScript(context);
   }
 
-  it('should return new file name', () => {
-    const result = process(`<template><div></div></template><script><script>`)
+  it("should return new file name", () => {
+    const result = process(`<template><div></div></template><script><script>`);
     expect(result).toMatchObject({
-      filename: 'test.vue.script.ts',
-    })
-  })
+      filename: "test.vue.script.ts",
+    });
+  });
 
-  it('should have the correct loc', () => {
-    const result = process(`<script>export default {}</script><template></template>`)
+  it("should have the correct loc", () => {
+    const result = process(
+      `<script>export default {}</script><template></template>`
+    );
     expect(result.loc).toMatchInlineSnapshot(`
           {
             "end": {
@@ -30,11 +32,11 @@ describe('processScript', () => {
               "offset": 8,
             },
           }
-        `)
-  })
+        `);
+  });
 
-  it('should return RenderContext', () => {
-    const result = process(`<script></script>`)
+  it("should return RenderContext", () => {
+    const result = process(`<script></script>`);
     expect(result.content).toMatchInlineSnapshot(`
           "import { ShallowUnwrapRef as __VERTER_ShallowUnwrapRef } from 'vue';
 
@@ -44,13 +46,11 @@ describe('processScript', () => {
           }
           type RenderContextType = ReturnType<typeof resolveRenderContext>;
           export declare function RenderContext(): __VERTER_ShallowUnwrapRef<RenderContextType>;"
-        `)
+        `);
+  });
 
-  })
-
-
-  it('should be generic', () => {
-    const result = process(`<script generic="T"></script>`)
+  it("should be generic", () => {
+    const result = process(`<script generic="T"></script>`);
     expect(result.content).toMatchInlineSnapshot(`
           "import { ShallowUnwrapRef as __VERTER_ShallowUnwrapRef } from 'vue';
 
@@ -60,11 +60,11 @@ describe('processScript', () => {
           }
           type RenderContextType<T> = ReturnType<typeof resolveRenderContext<T>>;
           export declare function RenderContext<T>(): __VERTER_ShallowUnwrapRef<RenderContextType<T>>;"
-        `)
-  })
+        `);
+  });
 
-  it('should handle empty script', () => {
-    const result = process(``)
+  it("should handle empty script", () => {
+    const result = process(``);
     expect(result.content).toMatchInlineSnapshot(`
           "import { ShallowUnwrapRef as __VERTER_ShallowUnwrapRef } from 'vue';
 
@@ -74,10 +74,10 @@ describe('processScript', () => {
           }
           type RenderContextType = ReturnType<typeof resolveRenderContext>;
           export declare function RenderContext(): __VERTER_ShallowUnwrapRef<RenderContextType>;"
-        `)
-  })
-  it('should handle no script', () => {
-    const result = process(``)
+        `);
+  });
+  it("should handle no script", () => {
+    const result = process(``);
     expect(result.content).toMatchInlineSnapshot(`
           "import { ShallowUnwrapRef as __VERTER_ShallowUnwrapRef } from 'vue';
 
@@ -87,12 +87,12 @@ describe('processScript', () => {
           }
           type RenderContextType = ReturnType<typeof resolveRenderContext>;
           export declare function RenderContext(): __VERTER_ShallowUnwrapRef<RenderContextType>;"
-        `)
-  })
+        `);
+  });
 
   // TODO handle multiple scripts
-  it.todo('should handle multiple scripts', () => {
-    const result = process(`<script setup></script><script></script>`)
+  it.todo("should handle multiple scripts", () => {
+    const result = process(`<script setup></script><script></script>`);
     expect(result.content).toMatchInlineSnapshot(`
           "
           export function resolveRenderContext() {
@@ -103,13 +103,12 @@ describe('processScript', () => {
           }
           type RenderContextType = ReturnType<typeof resolveRenderContext>;
           export declare const RenderContext: RenderContextType;"
-        `)
-  })
+        `);
+  });
 
-
-  describe('setup', () => {
-    it('should handle setup', () => {
-      const result = process(`<script setup></script>`)
+  describe("setup", () => {
+    it("should handle setup", () => {
+      const result = process(`<script setup></script>`);
       expect(result.content).toMatchInlineSnapshot(`
               "import { ShallowUnwrapRef as __VERTER_ShallowUnwrapRef } from 'vue';
 
@@ -119,11 +118,13 @@ describe('processScript', () => {
               }
               type RenderContextType = ReturnType<typeof resolveRenderContext>;
               export declare function RenderContext(): __VERTER_ShallowUnwrapRef<RenderContextType>;"
-            `)
-    })
+            `);
+    });
 
-    test('not move import', () => {
-      const result = process(`<script setup>import {ref} from 'vue'; const a = {}</script>`)
+    test("not move import", () => {
+      const result = process(
+        `<script setup>import {ref} from 'vue'; const a = {}</script>`
+      );
       expect(result.content).toMatchInlineSnapshot(`
               "import { ShallowUnwrapRef as __VERTER_ShallowUnwrapRef } from 'vue';
               import {ref} from 'vue';
@@ -133,10 +134,12 @@ describe('processScript', () => {
               }
               type RenderContextType = ReturnType<typeof resolveRenderContext>;
               export declare function RenderContext(): __VERTER_ShallowUnwrapRef<RenderContextType>;"
-            `)
-    })
-    test('move import', () => {
-      const result = process(`<script setup>const a = {};import {ref} from 'vue'; </script>`)
+            `);
+    });
+    test("move import", () => {
+      const result = process(
+        `<script setup>const a = {};import {ref} from 'vue'; </script>`
+      );
       expect(result.content).toMatchInlineSnapshot(`
               "import { ShallowUnwrapRef as __VERTER_ShallowUnwrapRef } from 'vue';
               import {ref} from 'vue';
@@ -146,11 +149,13 @@ describe('processScript', () => {
               }
               type RenderContextType = ReturnType<typeof resolveRenderContext>;
               export declare function RenderContext(): __VERTER_ShallowUnwrapRef<RenderContextType>;"
-            `)
-    })
+            `);
+    });
 
-    test('keep import order', () => {
-      const result = process(`<script setup>import 'a'; import 'b'; const a = {};import {ref} from 'vue';</script>`)
+    test("keep import order", () => {
+      const result = process(
+        `<script setup>import 'a'; import 'b'; const a = {};import {ref} from 'vue';</script>`
+      );
       expect(result.content).toMatchInlineSnapshot(`
               "import { ShallowUnwrapRef as __VERTER_ShallowUnwrapRef } from 'vue';
               import 'a';import 'b';import {ref} from 'vue';
@@ -160,11 +165,13 @@ describe('processScript', () => {
               }
               type RenderContextType = ReturnType<typeof resolveRenderContext>;
               export declare function RenderContext(): __VERTER_ShallowUnwrapRef<RenderContextType>;"
-            `)
-    })
+            `);
+    });
 
-    test('async', () => {
-      const result = process(`<script setup>import {ref} from 'vue'; const a = {}; await Promise.resolve()</script>`)
+    test("async", () => {
+      const result = process(
+        `<script setup>import {ref} from 'vue'; const a = {}; await Promise.resolve()</script>`
+      );
       expect(result.content).toMatchInlineSnapshot(`
               "import { ShallowUnwrapRef as __VERTER_ShallowUnwrapRef } from 'vue';
               import {ref} from 'vue';
@@ -174,11 +181,13 @@ describe('processScript', () => {
               }
               type RenderContextType = ReturnType<typeof resolveRenderContext> extends Promise<infer R> ? R : never;
               export declare function RenderContext(): __VERTER_ShallowUnwrapRef<RenderContextType>;"
-            `)
-    })
+            `);
+    });
 
-    test('generic async', () => {
-      const result = process(`<script setup generic="T" lang="ts">import {ref, Ref} from 'vue'; const a = ref() as Ref<T>; await Promise.resolve()</script>`)
+    test("generic async", () => {
+      const result = process(
+        `<script setup generic="T" lang="ts">import {ref, Ref} from 'vue'; const a = ref() as Ref<T>; await Promise.resolve()</script>`
+      );
       expect(result.content).toMatchInlineSnapshot(`
         "import { ShallowUnwrapRef as __VERTER_ShallowUnwrapRef } from 'vue';
         import {ref, Ref} from 'vue';
@@ -189,11 +198,13 @@ describe('processScript', () => {
         }
         type RenderContextType<T> = ReturnType<typeof resolveRenderContext<T>> extends Promise<infer R> ? R : never;
         export declare function RenderContext<T>(): __VERTER_ShallowUnwrapRef<RenderContextType<T>>;"
-      `)
-    })
+      `);
+    });
 
-    test('not expose import type', () => {
-      const result = process(`<script setup lang="ts">import { type Ref } from 'vue'; import type { Computed } from 'vue'; import { ref, type Test} from 'vue' </script>`);
+    test("not expose import type", () => {
+      const result = process(
+        `<script setup lang="ts">import { type Ref } from 'vue'; import type { Computed } from 'vue'; import { ref, type Test} from 'vue' </script>`
+      );
       expect(result.content).toMatchInlineSnapshot(`
               "import { ShallowUnwrapRef as __VERTER_ShallowUnwrapRef } from 'vue';
               import { type Ref } from 'vue';import type { Computed } from 'vue';import { ref, type Test} from 'vue'
@@ -203,7 +214,7 @@ describe('processScript', () => {
               }
               type RenderContextType = ReturnType<typeof resolveRenderContext>;
               export declare function RenderContext(): __VERTER_ShallowUnwrapRef<RenderContextType>;"
-            `)
-    })
-  })
-})
+            `);
+    });
+  });
+});
