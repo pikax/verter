@@ -71,7 +71,11 @@ export class DocumentManager {
             );
           }
         }
-        cached = TextDocument.create(uri, languageId, version, content);
+        if (isVueFile(filepath)) {
+          cached = VueDocument.fromFilepath(filepath, content);
+        } else {
+          cached = TextDocument.create(uri, languageId, version, content);
+        }
         this.files.set(filepath, cached);
         return cached;
       },
@@ -160,7 +164,7 @@ export class DocumentManager {
    * @param uri
    * @param text
    */
-  preloadDocument(filepath: string, text = undefined || "") {
+  preloadDocument(filepath: string, text?: string) {
     let doc: VueDocument | TextDocument = this.files.get(filepath);
     if (doc) {
       console.log("Document already exists", filepath);
@@ -198,8 +202,14 @@ export class DocumentManager {
 
   readFile(filepath: string, encoding: string = "utf-8") {
     let doc = this.files.get(filepath);
-    if (doc && doc.version > -2) {
-      return doc.getText();
+    if (doc) {
+      if (doc.version > -2) {
+        return doc.getText();
+      } else if (isVueDocument(doc)) {
+        const text = ts.sys.readFile(filepath, encoding);
+        doc.update([{ text }], 1);
+        return text;
+      }
     }
     doc = this._textDocuments.get(pathToUri(filepath));
     if (!doc) {
@@ -215,9 +225,14 @@ export class DocumentManager {
       }
     }
     if (doc) {
-      if (isVueFile(filepath)) {
-        doc = VueDocument.fromTextDocument(doc);
-      }
+      // not sure if this should happen
+      debugger;
+      // if (isVueDocument(doc)) {
+      //   if (doc && doc.version > -2) {
+      //     return doc.getText();
+      //   }
+      //   // doc = VueDocument.fromTextDocument(doc);
+      // }
       this.files.set(filepath, doc);
       return doc.getText();
     }
@@ -253,6 +268,8 @@ export class DocumentManager {
     const isVueBlock = isVueSubDocument(uri);
     const realFilepath = isVueBlock
       ? uriToPath(retrieveVueFileFromBlockUri(uri))
+      : isVerterVirtual(filename)
+      ? uriToPath(filename)
       : filename;
 
     let doc = this.files.get(realFilepath);
@@ -264,6 +281,7 @@ export class DocumentManager {
       try {
         snap.getText(0, 1000);
       } catch (e) {
+        
         console.error(e);
         debugger;
       }

@@ -75,6 +75,8 @@ export function getTypescriptService(
       workspacePath
     );
 
+    
+
     tsconfigOptions = {
       ...parsedConfig.options,
       // allowArbitraryExtensions: true,

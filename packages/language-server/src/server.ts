@@ -130,7 +130,7 @@ export function startServer(options: LsConnectionOption = {}) {
 
     subDoc.syncVersion();
     const offset = subDoc.toGeneratedOffsetFromPosition(params.position);
-    const tsService = manager.retrieveService(doc.uri);
+    const tsService = manager.getTsService(doc.uri);
 
     const locs = tsService.findRenameLocations(
       subDoc.uri,
@@ -171,7 +171,7 @@ export function startServer(options: LsConnectionOption = {}) {
     subDoc.syncVersion();
 
     const offset = subDoc.toGeneratedOffsetFromPosition(params.position);
-    const tsService = manager.retrieveService(doc.uri);
+    const tsService = manager.getTsService(doc.uri);
     try {
       {
         const program = tsService.getProgram();
@@ -238,7 +238,7 @@ export function startServer(options: LsConnectionOption = {}) {
       triggerCharacter: string | undefined;
     } = item.data ?? {};
 
-    const tsService = manager.retrieveService(data.virtualUrl);
+    const tsService = manager.getTsService(data.virtualUrl);
 
     const label = item.label.startsWith("@")
       ? `on${item.label[1].toLocaleUpperCase()}${item.label.slice(2)}`
@@ -267,7 +267,7 @@ export function startServer(options: LsConnectionOption = {}) {
     console.log("on hover", params);
     const uri = params.textDocument.uri;
 
-    const tsService = manager.retrieveService(uri);
+    const tsService = manager.getTsService(uri);
     if (!tsService) {
       return undefined;
     }
@@ -313,7 +313,7 @@ export function startServer(options: LsConnectionOption = {}) {
     if (!isVueDocument(document)) return;
 
     console.time("sendDiagnostics");
-    const tsService = manager.retrieveService(document.uri);
+    const tsService = manager.getTsService(document.uri);
     const diagnostics: Diagnostic[] = [];
 
     try {

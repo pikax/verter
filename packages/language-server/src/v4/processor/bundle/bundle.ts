@@ -21,8 +21,8 @@ export function processBundle(context: ParseContext) {
 
   s.append(
     `import { DefineComponent as ${ctx.DefineComponent} } from "vue";
-import { ${ComponentExport}, ${BindingContextExportName} } from "./${optionsFile}";
-import { ${FunctionExportName} } from "./${renderFile}";
+import { ${ComponentExport}, ${BindingContextExportName} } from "${optionsFile}";
+import { ${FunctionExportName} } from "${renderFile}";
 
 export default {}
 `

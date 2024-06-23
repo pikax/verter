@@ -51,6 +51,10 @@ export class VerterManager {
     }
   }
 
+  getTsService(uri: string) {
+    return this.loadConfig(uriToPath(uri));
+  }
+
   loadConfig(folderPath: string, force = false) {
     // TODO maybe we could support a config file to specify the tsconfig path
     const configPath = ts.findConfigFile(folderPath, ts.sys.fileExists);
@@ -97,7 +101,7 @@ export class VerterManager {
         ...options,
         ...finalConfig.options,
         jsxImportSource: "vue",
-        moduleResolution: ts.ModuleResolutionKind.NodeNext,
+        // moduleResolution: ts.ModuleResolutionKind.NodeNext,
       };
 
       finalConfig.fileNames.forEach((file) => {
@@ -197,7 +201,7 @@ export class VerterManager {
           case ts.Extension.Json:
             return ts.ScriptKind.JSON;
           case ".vue":
-            return ts.ScriptKind.TSX;
+            return ts.ScriptKind.Unknown;
           default:
             console.log("unknown", ext);
             return ts.ScriptKind.Unknown;
@@ -235,6 +239,13 @@ export class VerterManager {
           if (isVueFileModule) {
             moduleLoc = vueToBundle(moduleLoc);
           }
+          if (isVerterVirtual(containingFile)) {
+            containingFile = uriToPath(containingFile);
+          }
+
+          const betterContainingFile = isVueSubDocument(containingFile)
+            ? uriToPath(retrieveVueFileFromBlockUri(containingFile))
+            : containingFile;
 
           switch (options.moduleResolution) {
             case ts.ModuleResolutionKind.Classic: {
@@ -264,7 +275,7 @@ export class VerterManager {
             default:
               const r = ts.bundlerModuleNameResolver(
                 moduleLoc,
-                containingFile,
+                betterContainingFile || containingFile,
                 options,
                 h,
                 moduleCache,
@@ -272,8 +283,19 @@ export class VerterManager {
               );
 
               if (isVueFileModule) {
-              }
-              if (x.text.endsWith(".vue")) {
+                if (r.resolvedModule) {
+                  const originalPath = retrieveVueFileFromBlockUri(
+                    r.resolvedModule.resolvedFileName
+                  );
+                  // @ts-expect-error
+                  r.resolvedModule.originalPath = originalPath;
+                  r.resolvedModule.resolvedFileName =
+                    uriToVerterVirtual(originalPath);
+                  r.resolvedModule.resolvedUsingTsExtension = false;
+                } else {
+                  debugger;
+                }
+              } else if (x.text.endsWith(".vue")) {
                 if (r.resolvedModule) {
                   if (isVueSubDocument(r.resolvedModule.resolvedFileName)) {
                     // console.log(
@@ -325,7 +347,7 @@ export class VerterManager {
           }
         }
 
-        console.log("mmmmm", modules.length);
+        console.log("mmmmm", containingFile, modules.length);
 
         return modules;
       },

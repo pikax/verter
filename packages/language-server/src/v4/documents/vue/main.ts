@@ -22,6 +22,8 @@ import {
   uriToVerterVirtual,
 } from "../utils";
 import { processBundle } from "../../processor/bundle/bundle";
+import ts from "typescript";
+import { isVueSubDocument } from "../../processor/utils";
 
 type BlockId = "bundle" | "template" | "script" | "style";
 
@@ -172,6 +174,7 @@ export class VueDocument implements TextDocument {
   }
 
   protected getBlocksForChange(change: TextDocumentContentChangeEvent) {
+    if (!this.context) return [];
     const range = "range" in change ? change.range : undefined;
     // if there's no range, we need to update all blocks
     if (!range || !("rangeLength" in change)) {
@@ -226,15 +229,11 @@ export class VueDocument implements TextDocument {
   }
 
   getTextFromFile(uri: string, range?: Range) {
-    if (uri === this.uri) {
+    if (isVueSubDocument(uri)) {
+      return this.getDocument(uri)?.getText(range);
+    } else {
       return this._doc.getText(range);
     }
-    const r = this.getDocument(uri)?.getText(range);
-    if (!r) {
-      debugger;
-      this.getDocument(uri)?.getText(range);
-    }
-    return r;
   }
 
   getDocument(uri: string): VueSubDocument | undefined {
