@@ -7,10 +7,17 @@ import {
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import { VueDocument } from "../vue/index.js";
-import { isVerterVirtual, isVueFile, pathToUri, uriToPath } from "../utils.js";
+import {
+  isVerterVirtual,
+  isVueFile,
+  pathToUri,
+  uriToPath,
+  uriToVerterVirtual,
+} from "../utils.js";
 import ts from "typescript";
 import {
   isFileInVueBlock,
+  isVueSubDocument,
   retrieveVueFileFromBlockUri,
 } from "../../processor/utils.js";
 
@@ -84,9 +91,13 @@ export class DocumentManager {
   }
 
   private _onDocumentOpenCb = [] as Array<(doc: VueDocument) => void>;
+  private _onDocumentCloseCb = [] as Array<(doc: VueDocument) => void>;
 
   onDocumentOpen(callback: (doc: VueDocument) => void) {
     this._onDocumentOpenCb.push(callback);
+  }
+  onDocumentClose(callback: (doc: VueDocument) => void) {
+    this._onDocumentCloseCb.push(callback);
   }
 
   public listen(connection: Connection) {
@@ -106,6 +117,14 @@ export class DocumentManager {
 
     this._textDocuments.onDidChangeContent((e) => {
       if (e.document.languageId !== "vue") return;
+    });
+
+    this._textDocuments.onDidClose((e) => {
+      console.log("closed", e.document.uri);
+      const vueDoc = this.files.get(uriToPath(e.document.uri));
+      if (isVueDocument(vueDoc)) {
+        this._onDocumentCloseCb.forEach((cb) => cb(vueDoc));
+      }
     });
 
     return (this.#disposable = dispose);
@@ -141,14 +160,17 @@ export class DocumentManager {
    * @param uri
    * @param text
    */
-  preloadDocument(filepath: string, text = "") {
+  preloadDocument(filepath: string, text = undefined || "") {
     let doc: VueDocument | TextDocument = this.files.get(filepath);
     if (doc) {
       console.log("Document already exists", filepath);
       return doc;
     }
     if (isVueFile(filepath)) {
-      doc = VueDocument.fromFilepath(filepath, text);
+      doc = VueDocument.fromFilepath(
+        filepath,
+        text ?? (() => ts.sys.readFile(filepath, "utf-8"))
+      );
     } else {
       doc = TextDocument.create(filepath, "typescript", -2, text);
     }
@@ -159,7 +181,7 @@ export class DocumentManager {
   }
 
   fileExists(filepath: string) {
-    if (isFileInVueBlock(filepath)) {
+    if (isVueSubDocument(filepath)) {
       filepath = retrieveVueFileFromBlockUri(filepath);
     }
     if (this.files.has(filepath)) {
@@ -184,7 +206,11 @@ export class DocumentManager {
       doc = this.files.get(filepath);
       if (doc && doc.version === -2) {
         const text = ts.sys.readFile(filepath, encoding);
-        TextDocument.update(doc, [{ text }], 0);
+        if (isVueDocument(doc)) {
+          doc.update([{ text }], 0);
+        } else {
+          TextDocument.update(doc, [{ text }], 0);
+        }
         return text;
       }
     }
@@ -223,26 +249,52 @@ export class DocumentManager {
     //   console.log('isVerterVirtual', filename)
     // }
     const uri = isVerterVirtual(filename) ? filename : pathToUri(filename);
-    let doc = this.files.get(
-      isFileInVueBlock(uri)
-        ? uriToPath(retrieveVueFileFromBlockUri(uri))
-        : filename
-    );
+
+    const isVueBlock = isVueSubDocument(uri);
+    const realFilepath = isVueBlock
+      ? uriToPath(retrieveVueFileFromBlockUri(uri))
+      : filename;
+
+    let doc = this.files.get(realFilepath);
     if (!doc) {
       return undefined;
     }
     let snap = this.snapshots.get(uri);
     if (snap && snap.version === doc.version) {
+      try {
+        snap.getText(0, 1000);
+      } catch (e) {
+        console.error(e);
+        debugger;
+      }
       return snap;
     }
 
+    if (doc.version === -2) {
+      this.readFile(realFilepath);
+    }
+
+    // if (isVueBlock) {
+    //   const subDoc = (doc as VueDocument).getDocument(uriToVerterVirtual(uri));
+    //   subDoc.syncVersion();6
+    // }
+
     let content = isVueDocument(doc)
-      ? doc.getTextFromFile(uri)
+      ? doc.getTextFromFile(uriToVerterVirtual(uri))
       : this.readFile(filename);
 
+    // if (!content) {
+    //   debugger;
+    // }
     snap = Object.assign(ts.ScriptSnapshot.fromString(content), {
       version: doc.version,
     });
+    try {
+      snap.getText(0, 1000);
+    } catch (e) {
+      console.error(e);
+      debugger;
+    }
     this.snapshots.set(uri, snap);
     return snap;
   }

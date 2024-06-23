@@ -5,12 +5,14 @@ import {
   isVueFile,
   uriToPath,
   uriToVerterVirtual,
+  vueToBundle,
 } from "../utils";
 import { DocumentManager, isVueDocument } from "./document.js";
 import fsPath from "path";
 import { urlToPath } from "../../../utils";
 import {
   isFileInVueBlock,
+  isVueSubDocument,
   retrieveVueFileFromBlockUri,
 } from "../../processor/utils";
 
@@ -52,14 +54,14 @@ export class VerterManager {
   loadConfig(folderPath: string, force = false) {
     // TODO maybe we could support a config file to specify the tsconfig path
     const configPath = ts.findConfigFile(folderPath, ts.sys.fileExists);
-    let tsService = this.tsServices.get(folderPath);
+    const configFolder = fsPath.dirname(configPath);
+    let tsService = this.tsServices.get(configFolder);
     if (tsService && !force) {
       return tsService;
     }
 
     let options = this.defaultOptions();
 
-    const configFolder = fsPath.dirname(configPath);
     let finalConfig: ts.ParsedCommandLine | null = null;
 
     if (configPath) {
@@ -95,6 +97,7 @@ export class VerterManager {
         ...options,
         ...finalConfig.options,
         jsxImportSource: "vue",
+        moduleResolution: ts.ModuleResolutionKind.NodeNext,
       };
 
       finalConfig.fileNames.forEach((file) => {
@@ -107,71 +110,53 @@ export class VerterManager {
 
     console.log("config", configPath, options);
 
+    const matched = new Map<string, number>();
+
+    function debounce(func, delay) {
+      let timeoutId;
+
+      return function (...args) {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+
+        timeoutId = setTimeout(() => {
+          func.apply(this, args);
+        }, delay);
+      };
+    }
+
+    const log = debounce(() => {
+      Object.entries(matched)
+        .filter(([_, v]) => v > 1)
+        .forEach(([k, v]) => {
+          console.log("matched multiple times", k, v);
+        });
+      matched.clear();
+    }, 1000);
     const moduleCache = ts.createModuleResolutionCache(
       configFolder,
-      ts.sys.resolvePath,
+      (e) => {
+        // console.log("p", e);
+        // console.log("pp", ts.sys.resolvePath(e));
+
+        // return ts.sys.resolvePath(e);
+        const r = ts.sys.resolvePath(e);
+        let c = matched.get(r);
+        if (c === undefined) {
+          c = 0;
+        }
+        matched.set(r, c + 1);
+        log();
+
+        return r;
+      },
       options
     );
 
-    const host: ts.LanguageServiceHost = Object.assign(
-      this.defaultServiceHost(moduleCache),
-      {
-        getCurrentDirectory: () => configFolder,
-        getCompilationSettings: () => options,
+    const self = this;
 
-        getScriptFileNames: () => {
-          const files = finalConfig.fileNames.flatMap((filename) => {
-            const doc = this._documentManager.files.get(filename);
-            if (isVueDocument(doc)) {
-              return [filename, ...doc.subDocumentPaths];
-            }
-            return filename;
-          });
-
-          return files;
-        },
-      }
-    );
-
-    const languageService = ts.createLanguageService(
-      host,
-      this.documentRegistry
-    );
-
-    this.tsServices.set(folderPath, languageService);
-    return languageService;
-  }
-
-  retrieveService(uri: string) {
-    const filepath = uriToPath(uri);
-    const parent = fsPath.dirname(filepath);
-    return this.loadConfig(parent);
-  }
-
-  protected defaultOptions(): ts.CompilerOptions {
-    return {
-      // jsx: ts.JsxEmit.Preserve,
-      //   allowJs: true,
-      //   noImplicitThis: false,
-      //   noImplicitReturns: false,
-      //   target: ts.ScriptTarget.ESNext,
-      //   module: ts.ModuleKind.ESNext,
-      //   alwaysStrict: true,
-      //   noImplicitAny: true,
-      jsx: ts.JsxEmit.Preserve,
-      target: ts.ScriptTarget.ESNext,
-      module: ts.ModuleKind.ESNext,
-      alwaysStrict: true,
-      noImplicitAny: true,
-      allowJs: true,
-      noImplicitThis: false,
-      noImplicitReturns: false,
-    };
-  }
-  protected defaultServiceHost(moduleCache: ts.ModuleResolutionCache) {
-    const manager = this;
-
-    return {
+    const host = {
       log: (message) => console.log("[TS]", message),
       getDefaultLibFileName: ts.getDefaultLibFilePath,
       getDirectories: ts.sys.getDirectories,
@@ -180,6 +165,9 @@ export class VerterManager {
       realpath: (filepath) => {
         if (isVerterVirtual(filepath)) {
           return uriToPath(filepath);
+        }
+        if (filepath.indexOf(".vue") > 0) {
+          debugger;
         }
         return ts.sys.realpath(filepath);
       },
@@ -237,40 +225,15 @@ export class VerterManager {
         containingSourceFile,
         reusedNames
       ) {
-        // if (isVueFile(containingFile)) {
-        //   debugger;
-        // }
-        if (isVerterVirtual(containingFile)) {
-          containingFile = urlToPath(containingFile)!;
-        }
         const modules = moduleLiterals.map((x) => {
           const h = this;
 
-          // const h = ts.sys;
-
           let moduleLoc = x.text;
 
-          // if (~x.text.indexOf("vue")) {
-          //   debugger;
-          // }
+          const isVueFileModule = isVueFile(moduleLoc);
 
-          if (isFileInVueBlock(moduleLoc)) {
-            debugger;
-          }
-          if (moduleLoc.endsWith(".vue")) {
-            moduleLoc = x.text + ".render.tsx";
-          }
-
-          if (!containingFile) {
-            containingFile = x.parent.parent.getSourceFile().fileName;
-            if (isVerterVirtual(containingFile)) {
-              containingFile = uriToPath(
-                isFileInVueBlock(containingFile)
-                  ? retrieveVueFileFromBlockUri(containingFile)
-                  : containingFile
-              );
-            }
-            // console.log("containingFile", containingFile);
+          if (isVueFileModule) {
+            moduleLoc = vueToBundle(moduleLoc);
           }
 
           switch (options.moduleResolution) {
@@ -308,9 +271,11 @@ export class VerterManager {
                 redirectedReference
               );
 
+              if (isVueFileModule) {
+              }
               if (x.text.endsWith(".vue")) {
                 if (r.resolvedModule) {
-                  if (isFileInVueBlock(r.resolvedModule.resolvedFileName)) {
+                  if (isVueSubDocument(r.resolvedModule.resolvedFileName)) {
                     // console.log(
                     //   "up resolved",
                     //   r,
@@ -330,6 +295,8 @@ export class VerterManager {
                     //   uriToVerterVirtual(originalPath);
                     r.resolvedModule.resolvedUsingTsExtension = false;
 
+                    r.resolvedModule.extension = ".vue";
+
                     // r.resolvedModule.resolvedFileName =
                     //   r.resolvedModule.resolvedFileName.slice(0, -4);
 
@@ -347,18 +314,100 @@ export class VerterManager {
         });
 
         // TODO add debug flag
-        if (true) {
+        if (false) {
           const emptyModules = modules
             .map((x, i) => (!x.resolvedModule ? i : false))
             .filter((x) => x !== false)
             .map((x: number) => moduleLiterals[x].text);
+
           if (emptyModules.length > 0) {
             console.warn("Modules missing!", emptyModules);
           }
         }
 
+        console.log("mmmmm", modules.length);
+
         return modules;
       },
-    } satisfies Partial<ts.LanguageServiceHost>;
+      getCurrentDirectory: () => configFolder,
+      getCompilationSettings: () => options,
+
+      getScriptFileNames() {
+        const files = finalConfig.fileNames.flatMap((filename) => {
+          const doc = self._documentManager.files.get(filename);
+          if (isVueDocument(doc)) {
+            // return uriToVerterVirtual(doc.uri);
+            return [...doc.subDocumentPaths];
+            // return doc.bundleDoc.uri;
+          }
+          return filename;
+        });
+
+        return files;
+      },
+    } satisfies ts.LanguageServiceHost;
+
+    // const host: ts.LanguageServiceHost = Object.assign(
+    //   this.defaultServiceHost(moduleCache),
+    //   {
+    //     getCurrentDirectory: () => configFolder,
+    //     getCompilationSettings: () => options,
+
+    //     getScriptFileNames() {
+    //       const files = finalConfig.fileNames.flatMap((filename) => {
+    //         const doc = self._documentManager.files.get(filename);
+    //         if (isVueDocument(doc)) {
+    //           // return uriToVerterVirtual(doc.uri);
+    //           return [...doc.subDocumentPaths];
+    //           // return doc.bundleDoc.uri;
+    //         }
+    //         return filename;
+    //       });
+
+    //       return files;
+    //     },
+    //   }
+    // );
+
+    const languageService = ts.createLanguageService(
+      host,
+      // this.documentRegistry
+      ts.createDocumentRegistry(ts.sys.useCaseSensitiveFileNames)
+    );
+
+    this.tsServices.set(configFolder, languageService);
+    return languageService;
+  }
+
+  retrieveService(uri: string) {
+    const filepath = uriToPath(uri);
+    const parent = fsPath.dirname(filepath);
+    return this.loadConfig(parent);
+  }
+
+  protected defaultOptions(): ts.CompilerOptions {
+    return {
+      // jsx: ts.JsxEmit.Preserve,
+      //   allowJs: true,
+      //   noImplicitThis: false,
+      //   noImplicitReturns: false,
+      //   target: ts.ScriptTarget.ESNext,
+      //   module: ts.ModuleKind.ESNext,
+      //   alwaysStrict: true,
+      //   noImplicitAny: true,
+      jsx: ts.JsxEmit.Preserve,
+      // target: ts.ScriptTarget.ESNext,
+      // module: ts.ModuleKind.ESNext,
+      alwaysStrict: true,
+      noImplicitAny: true,
+      allowJs: true,
+      noImplicitThis: false,
+      noImplicitReturns: false,
+    };
+  }
+  protected defaultServiceHost(moduleCache: ts.ModuleResolutionCache) {
+    const manager = this;
+
+    return {} satisfies Partial<ts.LanguageServiceHost>;
   }
 }

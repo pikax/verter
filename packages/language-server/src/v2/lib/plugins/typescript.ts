@@ -57,14 +57,14 @@ export function getTypescriptService(
       ...ts.sys,
 
       readDirectory(rootDir, extensions, excludes, includes, depth) {
-        return ts.sys.readDirectory(                        
+        return ts.sys.readDirectory(
           rootDir,
           [...extensions, ".vue"],
-          excludes,        
+          excludes,
           includes,
-          depth      
+          depth
         );
-      },     
+      },
 
       useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
     };
@@ -108,8 +108,8 @@ export function getTypescriptService(
   const moduleCache = ts.createModuleResolutionCache(
     workspacePath,
     (e) => {
-      console.log("p", e);
-      console.log("pp", tsSystem.resolvePath(e));
+      // console.log("p", e);
+      // console.log("pp", tsSystem.resolvePath(e));
       return tsSystem.resolvePath(e);
       return e;
     },
@@ -322,6 +322,8 @@ export function getTypescriptService(
           console.warn("Modules missing!", emptyModules);
         }
       }
+
+      console.log("mmmm", modules.length);
 
       return modules;
     },

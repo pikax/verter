@@ -10,19 +10,28 @@ import { createContext, ParseContext, VerterSFCBlock } from "@verter/core";
 import { ContextProcessor } from "../../processor/types";
 import { processRender } from "../../processor/render/render";
 import { processOptions } from "../../processor/options";
-import { generatedPositionFor, generatedRangeFor } from "../../utils";
+import {
+  generatedPositionFor,
+  generatedRangeFor,
+  originalPositionFor,
+} from "../../utils";
 import {
   pathToUri,
   pathToVerterVirtual,
   uriToPath,
   uriToVerterVirtual,
 } from "../utils";
+import { processBundle } from "../../processor/bundle/bundle";
 
-type BlockId = "template" | "script" | "style";
+type BlockId = "bundle" | "template" | "script" | "style";
 
 const processors = {
+  bundle: {
+    uri: (parent) => parent + ".bundle.ts",
+    process: processBundle,
+  },
   script: {
-    uri: (parent) => parent + ".script.ts",
+    uri: (parent) => parent + ".options.ts",
     process: processOptions,
   },
   template: {
@@ -31,8 +40,12 @@ const processors = {
   },
   style: {
     uri: (parent) => parent + ".style.css",
-    process: () => {
-      throw new Error("Not implemented");
+    process: (context) => {
+      // throw new Error("Not implemented");
+      return {
+        s: context.s,
+        content: `/* TODO FIX THIS FILE! */\nexport default {}`,
+      } as any;
     },
   },
 } satisfies Record<BlockId, ContextProcessor>;
@@ -57,24 +70,52 @@ function createDocumentFromBlock(block: VerterSFCBlock, doc: VueDocument) {
 }
 
 export class VueDocument implements TextDocument {
-  static fromFilepath(filepath: string, content?: string, shouldParse = false) {
+  static fromFilepath(
+    filepath: string,
+    content: string | (() => string),
+    shouldParse = false
+  ) {
     return VueDocument.fromUri(pathToUri(filepath), content, shouldParse);
   }
-  static fromUri(uri: string, content?: string, shouldParse = false) {
-    const doc = TextDocument.create(uri, "vue", -2, content ?? "");
-    return VueDocument.fromTextDocument(doc, shouldParse);
+  static fromUri(
+    uri: string,
+    content: string | (() => string),
+    shouldParse = false
+  ) {
+    const isString = typeof content === "string";
+    const doc = TextDocument.create(
+      uri,
+      "vue",
+      -2,
+      isString ? content : "/* VERTER CONTENT NOT LOADED */\n"
+    );
+    return VueDocument.fromTextDocument(
+      doc,
+      shouldParse,
+      isString ? undefined : content
+    );
   }
 
-  static fromTextDocument(doc: TextDocument, shouldParse = false) {
-    const vuedoc = new VueDocument(doc);
+  static fromTextDocument(
+    doc: TextDocument,
+    shouldParse = false,
+    loadDocumentContent?: () => string
+  ) {
+    const vuedoc = new VueDocument(doc, loadDocumentContent);
     if (shouldParse) {
       vuedoc.syncVersion();
     }
     return vuedoc;
   }
 
-  private constructor(private _doc: TextDocument) {
-    // create default block, more can be added if needed
+  get bundleDoc() {
+    return this.subDocuments.bundle;
+  }
+  private constructor(
+    private _doc: TextDocument,
+    private _loadDocumentContent?: () => string
+  ) {
+    this.subDocuments.bundle = new VueSubDocument(this, processors.bundle);
     this.subDocuments.script = new VueSubDocument(this, processors.script);
     this.subDocuments.template = new VueSubDocument(this, processors.template);
   }
@@ -188,7 +229,12 @@ export class VueDocument implements TextDocument {
     if (uri === this.uri) {
       return this._doc.getText(range);
     }
-    return this.getDocument(uri)?.getText(range);
+    const r = this.getDocument(uri)?.getText(range);
+    if (!r) {
+      debugger;
+      this.getDocument(uri)?.getText(range);
+    }
+    return r;
   }
 
   getDocument(uri: string): VueSubDocument | undefined {
@@ -227,6 +273,12 @@ export class VueDocument implements TextDocument {
     }
     this._lastVersion = this.version;
 
+    if (this._loadDocumentContent) {
+      const text = this._loadDocumentContent();
+      this.update([{ text }], 1);
+      this._loadDocumentContent = undefined;
+    }
+
     const context = createContext(this.getText(), uriToPath(this.uri), {});
     this._context = context;
 
@@ -250,6 +302,7 @@ export class VueDocument implements TextDocument {
       (id) => blockIds.indexOf(id) === -1
     );
     for (const id of toRemove) {
+      if (id === "bundle") continue;
       delete this.subDocuments[id];
     }
   }
@@ -277,6 +330,9 @@ export class VueSubDocument implements TextDocument {
     return this._lastProcessedResult?.languageId ?? this._doc.languageId;
   }
   get uri() {
+    return uriToVerterVirtual(this._doc.uri);
+
+    // todo this should be the virtual uri
     if (this._lastProcessedResult?.filename) {
       return pathToVerterVirtual(this._lastProcessedResult.filename);
     }
@@ -296,7 +352,7 @@ export class VueSubDocument implements TextDocument {
     | undefined;
 
   getText(range?: Range): string {
-    // this.syncVersion();
+    this.syncVersion();
     // debugger
 
     return this._doc.getText(range);
@@ -320,47 +376,68 @@ export class VueSubDocument implements TextDocument {
     return this.offsetAt(position);
   }
 
+  toOriginalPosition(pos: Position): Position {
+    return originalPositionFor(this._sourceMapConsumer!, pos);
+  }
+  toOriginalOffset(offset: number): number {
+    const originalPosition = this.toOriginalPositionFromOffset(offset);
+    return this._parent.offsetAt(originalPosition);
+  }
+
+  toOriginalPositionFromOffset(offset: number): Position {
+    const position = this.positionAt(offset);
+    return this.toOriginalPosition(position);
+  }
+
   update(changes: TextDocumentContentChangeEvent[], version: number) {
     if (!this._sourceMapConsumer) {
       this.syncVersion();
       return this._doc;
     }
 
-    let shouldProcess = false;
-    for (const change of changes) {
-      // partialy update
-      if ("range" in change) {
-        const generatedRange = this.toGeneratedRange(change.range);
+    this.process();
 
-        console.log("to update", generatedRange, this._doc.getText());
-        TextDocument.update(
-          this._doc,
-          [
-            {
-              range: generatedRange,
-              text: change.text,
-            },
-          ],
-          version
-        );
+    // let shouldProcess = false;
+    // for (const change of changes) {
+    //   // partialy update
+    //   if ("range" in change) {
+    //     const generatedRange = this.toGeneratedRange(change.range);
 
-        // todo there's must be a way to trigger another process
-        // because there might be a big change in the source that needs it
-        console.log(this._doc.getText());
-        shouldProcess = true;
-      } else {
-        shouldProcess = true;
-      }
-    }
-    if (shouldProcess) {
-      this.process();
-    }
+    //     console.log("to update", generatedRange, this._doc.getText());
+    //     TextDocument.update(
+    //       this._doc,
+    //       [
+    //         {
+    //           range: generatedRange,
+    //           text: change.text,
+    //         },
+    //       ],
+    //       version
+    //     );
+
+    //     // todo there's must be a way to trigger another process
+    //     // because there might be a big change in the source that needs it
+    //     console.log(this._doc.getText());
+    //     shouldProcess = true;
+    //   } else {
+    //     shouldProcess = true;
+    //   }
+    // }
+    // if (shouldProcess) {
+    //   this.process();
+    // }
 
     return this._doc;
   }
 
   syncVersion() {
     if (this.version === this._parent.version) {
+      if (
+        this._lastProcessedResult.s.original !== this._parent.context.s.original
+      ) {
+        debugger;
+      }
+
       return;
     }
     this.process();

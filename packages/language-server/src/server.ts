@@ -1,7 +1,14 @@
 import { RequestType } from "@verter/language-shared";
-import ts, { parseIsolatedEntityName } from "typescript";
+import ts, {
+  parseIsolatedEntityName,
+  type Diagnostic as TSDiagnostic,
+  type DiagnosticWithLocation,
+  type GetCompletionsAtPositionOptions,
+} from "typescript";
 import {
+  CompletionTriggerKind,
   Connection,
+  Diagnostic,
   LocationLink,
   ProposedFeatures,
   Range,
@@ -16,6 +23,14 @@ import {
 } from "./v4/documents/manager/index.js";
 
 import fsPath from "path";
+import { VueDocument } from "./v4/documents/index.js";
+import { TextDocument } from "vscode-languageserver-textdocument";
+import {
+  formatQuickInfo,
+  itemToMarkdown,
+  mapCompletion,
+  mapDiagnostic,
+} from "./v4/helpers/typescript.js";
 
 export interface LsConnectionOption {
   /**
@@ -61,8 +76,25 @@ export function startServer(options: LsConnectionOption = {}) {
             includeText: false,
           },
         },
+        // Tell the client that the server supports code completion
+        completionProvider: {
+          // allCommitCharacters: true,
+          resolveProvider: true,
+          completionItem: {
+            labelDetailsSupport: true,
+          },
+          triggerCharacters: [".", "@", "<"],
+        },
+
         definitionProvider: true,
         hoverProvider: true,
+        diagnosticProvider: {
+          documentSelector: "*.vue",
+          interFileDependencies: true,
+          workspaceDiagnostics: false,
+        },
+        typeDefinitionProvider: true,
+        declarationProvider: true,
         workspace: {
           //   fileOperations: {},
           workspaceFolders: {
@@ -70,6 +102,7 @@ export function startServer(options: LsConnectionOption = {}) {
             changeNotifications: true,
           },
         },
+        renameProvider: true,
       },
     };
   });
@@ -78,6 +111,156 @@ export function startServer(options: LsConnectionOption = {}) {
     console.log("on definition", params);
 
     return undefined;
+  });
+
+  connection.onRenameRequest((params) => {
+    const doc = documentManager.getDocument(params.textDocument.uri);
+    if (!isVueDocument(doc)) {
+      return undefined;
+    }
+    const subDoc = doc.getDocumentForPosition(params.position);
+    if (!subDoc) {
+      console.warn(
+        "VERTER no document found for uri and position",
+        params.textDocument.uri,
+        params.position
+      );
+      return undefined;
+    }
+
+    subDoc.syncVersion();
+    const offset = subDoc.toGeneratedOffsetFromPosition(params.position);
+    const tsService = manager.retrieveService(doc.uri);
+
+    const locs = tsService.findRenameLocations(
+      subDoc.uri,
+      offset,
+      false,
+      false,
+      {
+        providePrefixAndSuffixTextForRename: true,
+      }
+    );
+
+    if (!locs) {
+      return undefined;
+    }
+    console.log("locs", locs.length);
+
+    // return locs.map((loc) => {
+    //   const range = subDoc.toOriginalRange(loc.textSpan);
+    //   return LocationLink.create(uriToPath(loc.fileName), range, range, range);
+    // });
+  });
+
+  connection.onCompletion((params) => {
+    const doc = documentManager.getDocument(params.textDocument.uri);
+    if (!isVueDocument(doc)) {
+      return undefined;
+    }
+    const subDoc = doc.getDocumentForPosition(params.position);
+    if (!subDoc) {
+      console.warn(
+        "VERTER no document found for uri and position",
+        params.textDocument.uri,
+        params.position
+      );
+      return undefined;
+    }
+
+    subDoc.syncVersion();
+
+    const offset = subDoc.toGeneratedOffsetFromPosition(params.position);
+    const tsService = manager.retrieveService(doc.uri);
+    try {
+      {
+        const program = tsService.getProgram();
+        const sourceFile = program?.getSourceFile(subDoc.uri);
+        const fullText = sourceFile.getFullText();
+        const text = sourceFile.getText();
+        console.log(
+          "starting completions",
+          sourceFile?.fileName,
+          sourceFile?.isDeclarationFile
+        );
+      }
+
+      const results = tsService.getCompletionsAtPosition(subDoc.uri, offset, {
+        triggerKind: params.context?.triggerKind,
+        triggerCharacter:
+          params.context?.triggerCharacter === "@"
+            ? ""
+            : params.context?.triggerCharacter,
+
+        // includeSymbol: true,
+        // includeAutomaticOptionalChainCompletions: true,
+        // jsxAttributeCompletionStyle: "auto",
+        // importModuleSpecifierEnding: "auto",
+        // disableSuggestions: true,
+      } as GetCompletionsAtPositionOptions);
+
+      if (results) {
+        return {
+          isIncomplete: results.isIncomplete,
+          items: results.entries.map((x) =>
+            mapCompletion(x, {
+              virtualUrl: subDoc.uri,
+              index: offset,
+              triggerKind: params.context?.triggerKind,
+              triggerCharacter: params.context?.triggerCharacter,
+            })
+          ),
+        };
+      } else {
+        const program = tsService.getProgram();
+        const sourceFile = program?.getSourceFile(subDoc.uri);
+        const fullText = sourceFile.getFullText();
+        const text = sourceFile.getText();
+        console.log(
+          "no completions",
+          sourceFile?.fileName,
+          sourceFile?.isDeclarationFile
+        );
+      }
+
+      return undefined;
+    } catch (e) {
+      console.error("completion error", e);
+      return undefined;
+    }
+  });
+
+  connection.onCompletionResolve((item) => {
+    const data: {
+      virtualUrl: string;
+      index: number;
+      triggerKind: CompletionTriggerKind | undefined;
+      triggerCharacter: string | undefined;
+    } = item.data ?? {};
+
+    const tsService = manager.retrieveService(data.virtualUrl);
+
+    const label = item.label.startsWith("@")
+      ? `on${item.label[1].toLocaleUpperCase()}${item.label.slice(2)}`
+      : item.label;
+
+    const details = tsService.getCompletionEntryDetails(
+      data.virtualUrl,
+      data.index,
+      label,
+      undefined,
+      undefined,
+      undefined,
+      undefined // item.data
+    );
+    if (!details) return item;
+
+    let displayDetail = ts.displayPartsToString(details.displayParts) + "\n";
+    item.detail = displayDetail;
+
+    item.documentation = itemToMarkdown(details);
+
+    return item;
   });
 
   connection.onHover((params) => {
@@ -94,26 +277,124 @@ export function startServer(options: LsConnectionOption = {}) {
       return undefined;
     }
 
-    let position = params.position;
-
-    if (isVueDocument(doc)) {
-      const subDoc = doc.getDocumentForPosition(params.position);
-      if (subDoc) {
-        doc = subDoc;
-        position = subDoc.toGeneratedPosition(params.position);
-      }
-    } else {
-    }
-    try {
-      const offset = doc.offsetAt(position);
-      const quickInfo = tsService.getQuickInfoAtPosition(doc.uri, offset);
-
+    if (!isVueDocument(doc)) {
       return undefined;
+    }
+    const subDoc = doc.getDocumentForPosition(params.position);
+    try {
+      const offset = subDoc.toGeneratedOffsetFromPosition(params.position);
+      const quickInfo = tsService.getQuickInfoAtPosition(subDoc.uri, offset);
+
+      if (!quickInfo) {
+        return undefined;
+      }
+      return formatQuickInfo(quickInfo, subDoc);
     } catch (e) {
       console.error("hover error", e);
       return undefined;
     }
   });
+
+  connection.onRequest("textDocument/diagnostic", async (params) => {
+    const doc = documentManager.getDocument(params.textDocument.uri);
+    if (doc) {
+      const diagnostics = await sendDiagnostics(doc);
+      return diagnostics;
+    }
+    // @ts-ignore
+    throw new Error(`No document found for URI ${params.textDocument.uri}`);
+  });
+
+  documentManager.onDocumentOpen((doc) => {
+    sendDiagnostics(doc);
+  });
+
+  async function sendDiagnostics(document: VueDocument | TextDocument) {
+    if (!isVueDocument(document)) return;
+
+    console.time("sendDiagnostics");
+    const tsService = manager.retrieveService(document.uri);
+    const diagnostics: Diagnostic[] = [];
+
+    try {
+      let lastSend = Date.now();
+      for (const subDocument of Object.values(document.subDocuments)) {
+        if (subDocument.uri.endsWith(".bundle.ts")) {
+          continue;
+        }
+
+        let syntacticDiagnostics: DiagnosticWithLocation[] = [];
+        let semanticDiagnostics: TSDiagnostic[] = [];
+        let suggestionDiagnostics: DiagnosticWithLocation[] = [];
+        const virtualUri = subDocument.uri;
+
+        try {
+          syntacticDiagnostics = tsService.getSyntacticDiagnostics(
+            subDocument.uri
+          );
+        } catch (e) {
+          console.error("syntacticDiagnostics", e);
+        }
+        try {
+          semanticDiagnostics = tsService.getSemanticDiagnostics(
+            subDocument.uri
+          );
+        } catch (e) {
+          console.error("semanticDiagnostics", e);
+        }
+        try {
+          suggestionDiagnostics = tsService.getSuggestionDiagnostics(
+            subDocument.uri
+          );
+        } catch (e) {
+          console.error("tsService.getSuggestionDiagnostics", e);
+        }
+
+        const allDiagnostics = [
+          ...syntacticDiagnostics,
+          ...semanticDiagnostics,
+          ...suggestionDiagnostics,
+        ]
+          .map((x) => mapDiagnostic(x, subDocument))
+          .filter(Boolean);
+
+        diagnostics.push(...allDiagnostics);
+        connection.sendDiagnostics({
+          uri: document.uri,
+          diagnostics,
+          version: document.version,
+        });
+        console.log(
+          "sendDiagnostics",
+          Date.now() - lastSend + "ms",
+          diagnostics.length,
+          subDocument.uri,
+          document.version
+        );
+
+        if (diagnostics.length === 0) {
+          const program = tsService.getProgram();
+          const sourceFile = program?.getSourceFile(subDocument.uri);
+          const fullText = sourceFile.getFullText();
+          const text = sourceFile.getText();
+
+          console.log(
+            "no diagnostics",
+            sourceFile?.fileName,
+            sourceFile?.isDeclarationFile
+          );
+        }
+        lastSend = Date.now();
+      }
+
+      return diagnostics;
+    } catch (e) {
+      console.error(e);
+      debugger;
+    } finally {
+      console.timeEnd("sendDiagnostics");
+    }
+  }
 
   connection.onRequest(RequestType.GetCompiledCode, (uri) => {
     return {

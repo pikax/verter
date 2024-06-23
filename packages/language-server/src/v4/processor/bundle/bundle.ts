@@ -5,12 +5,14 @@ import {
   BindingContextExportName,
   ComponentExport,
 } from "./../options/index.js";
+import { FunctionExportName } from "./../render/index.js";
 import { getBlockFilename } from "../utils";
 
 export function processBundle(context: ParseContext) {
   const filename = context.filename + ".bundle.ts";
 
   const optionsFile = getBlockFilename("options", context, true);
+  const renderFile = getBlockFilename("render", context, true);
   const s = new MagicString("");
 
   const ctx = {
@@ -20,6 +22,9 @@ export function processBundle(context: ParseContext) {
   s.append(
     `import { DefineComponent as ${ctx.DefineComponent} } from "vue";
 import { ${ComponentExport}, ${BindingContextExportName} } from "./${optionsFile}";
+import { ${FunctionExportName} } from "./${renderFile}";
+
+export default {}
 `
   );
 

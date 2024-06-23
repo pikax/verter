@@ -1,21 +1,24 @@
 import { URI } from "vscode-uri";
-import { isFileInVueBlock } from "../processor/utils.js";
+import { isFileInVueBlock, isVueSubDocument } from "../processor/utils.js";
 
 import fsPath from "path/posix";
 
 const virtualFileScheme = "verter-virtual";
 
 export function uriToVerterVirtual(uri: string) {
-  if (isVueFile(uri) || isFileInVueBlock(uri)) {
+  if (isVueFile(uri) || isVueSubDocument(uri)) {
     // return URI.file(uri).with({ scheme: virtualFileScheme }).toString();
     // URI.from({
     //   scheme: "file",
     // });
-    if (!uri.startsWith("file:///")) {
+    if (!uri.startsWith("file:///") && !uri.startsWith(virtualFileScheme)) {
       uri = pathToUri(uri);
-      console.warn("please use pathToVerterVirtual instead");
+      // TODO fix this warning
+      // console.warn("please use pathToVerterVirtual instead");
     }
-    uri = virtualFileScheme + uri.substring("file".length);
+    if (!uri.startsWith(virtualFileScheme)) {
+      uri = virtualFileScheme + uri.substring("file".length);
+    }
     return uri;
   }
   return uri;
@@ -27,6 +30,13 @@ export function isVerterVirtual(path: string) {
 
 export function isVueFile(uri: string): uri is `${string}.vue` {
   return uri.endsWith(".vue");
+}
+
+export function vueToBundle(uri: string) {
+  if (!isVueFile(uri)) {
+    return uri;
+  }
+  return uri + ".bundle.ts";
 }
 
 export function pathToUri(filepath: string) {

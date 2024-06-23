@@ -31,7 +31,7 @@ export function blockToFilename(
 ) {
   switch (block) {
     case "bundle":
-      return filename + ".bundle.tsx";
+      return filename + ".bundle.ts";
     case "render":
       return filename + ".render.tsx";
     case "script":
@@ -43,7 +43,8 @@ export function blockToFilename(
 }
 
 const possibleEndings = [
-  ".vue.bundle.tsx",
+  // bundle is not a block of vue, but the representation of the whole vue file
+  // ".vue.bundle.ts",
   ".vue.render.tsx",
   ".vue.script.ts",
   ".vue.options.js",
@@ -54,7 +55,15 @@ const possibleEndings = [
 export function isFileInVueBlock(uri: string) {
   return possibleEndings.some((ending) => uri.endsWith(ending));
 }
+
+export function isVueSubDocument(uri: string) {
+  return isFileInVueBlock(uri) || uri.endsWith(".vue.bundle.ts");
+}
+
 export function retrieveVueFileFromBlockUri(uri: string) {
+  if (uri.endsWith(".vue.bundle.ts")) {
+    return uri.slice(0, -".bundle.ts".length);
+  }
   for (const ending of possibleEndings) {
     if (uri.endsWith(ending)) {
       return uri.slice(0, -ending.length + 4);
