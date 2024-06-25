@@ -163,7 +163,8 @@ export function startServer(options: LsConnectionOption = {}) {
       return LocationLink.create(
         uriToPath(loc.fileName),
         range,
-        params.position
+        // TODO fix this
+        params.position as any
       );
     }) as any;
   });
@@ -415,7 +416,11 @@ export function startServer(options: LsConnectionOption = {}) {
     const doc = documentManager.getDocument(uri);
     if (doc) {
       if (isVueDocument(doc)) {
-        const code = doc.subDocuments.template.getText();
+        const code = [
+          doc.subDocuments.script.getText(),
+
+          doc.subDocuments.template.getText(),
+        ].join('\n\n\n//---\n\n')
 
         return {
           js: {

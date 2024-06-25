@@ -210,6 +210,23 @@ describe("processor options", () => {
         expectFindStringWithMap(`import { ref, Ref } from 'vue';`, result);
       });
 
+      describe("identifiers", () => {
+        it("object properties", () => {
+          const result = process(
+            `<script setup lang='ts'>const test = { a: 1, b: 1}</script>`
+          );
+
+          expect(result.content).toContain("{test: typeof test\n");
+        });
+        it('function params', ()=> {
+          const result = process(
+            `<script setup lang='ts'>function test(a: 1, b: 1) {}</script>`
+          );
+
+          expect(result.content).toContain("{test: typeof test\n");
+        })
+      });
+
       describe("invalid syntax", () => {
         it("should handle invalid syntax", () => {
           const result = process(

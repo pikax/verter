@@ -83,7 +83,9 @@ export function processRender(context: ParseContext) {
     };
 
     const imports = context.isSetup
-      ? ``
+      ? `import { defineComponent as ${variables.defineComponent}, ShallowUnwrapRef as ${variables.ShallowUnwrapRef} } from "vue";
+import { ${OptionsExportName}, ${BindingContextExportName} } from "${optionsFilename}"
+`
       : `
 import { defineComponent as ${variables.defineComponent}, ShallowUnwrapRef as ${variables.ShallowUnwrapRef} } from "vue";
 import { ${OptionsExportName} } from "${optionsFilename}";
@@ -102,14 +104,14 @@ declare function ${variables.ExtractInstance}<T>(o: T): T extends { new(): infer
       ? `
 const ${variables.component} = new (${
           variables.defineComponent
-        }(${DefaultOptions}))
+        }(${DefaultOptions}))()
 const ${BindingContextExportName}CTX = ${
           isAsync ? "await " : ""
         }${BindingContextExportName}${
           genericInfo ? genericInfo.names.join(",") : ""
         }()
 const ${accessors.ctx} = {
-    ...${variables.component},
+    //...${variables.component},
     ...({} as ${
       variables.ShallowUnwrapRef
     }<typeof ${BindingContextExportName}CTX>),

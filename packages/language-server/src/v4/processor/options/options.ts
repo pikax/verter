@@ -53,7 +53,9 @@ export function processOptions(context: ParseContext) {
       const InvalidParentsType = new Set([
         "CallExpression",
         "MemberExpression",
+        "ObjectExpression",
         "KeyValueProperty",
+        "FormalParameters",
         "MethodProperty",
         "ExportDefaultDeclaration",
       ]);
@@ -67,7 +69,7 @@ export function processOptions(context: ParseContext) {
           if (
             parent &&
             parent.type.startsWith("TS") &&
-            !TS_NODE_TYPES.includes(parent.type)
+            !TS_NODE_TYPES.includes(parent.type) 
           ) {
             return this.skip();
           }
@@ -207,6 +209,7 @@ export function processOptions(context: ParseContext) {
       }
 
       s.appendRight(scriptBlock.block.loc.end.offset, "\n}\n");
+
     } else {
       const exportIndex = s.original.indexOf("export default");
 
