@@ -245,24 +245,6 @@ export class DocumentManager {
   public getSnapshotIfExists(
     filename: string
   ): (ts.IScriptSnapshot & { version: number }) | undefined {
-    // if (isVerterVirtual(filename)) {
-    //   const vueDockPath = uriToPath(
-    //     isFileInVueBlock(filename)
-    //       ? retrieveVueFileFromBlockUri(filename)
-    //       : filename
-    //   );
-
-    //   const vueDoc = this.files.get(vueDockPath);
-    //   if (isVueDocument(vueDoc)) {
-    //     const doc = vueDoc.getDocument(filename);
-
-    //     return vueDoc.getSnapshot();
-    //   }
-    // }
-
-    // if (isVerterVirtual(filename)) {
-    //   console.log('isVerterVirtual', filename)
-    // }
     const uri = isVerterVirtual(filename) ? filename : pathToUri(filename);
 
     const isVueBlock = isVueSubDocument(uri);
@@ -274,6 +256,9 @@ export class DocumentManager {
 
     let doc = this.files.get(realFilepath);
     if (!doc) {
+      if (this.fileExists(realFilepath)) {
+        return this.getSnapshotIfExists(filename);
+      }
       return undefined;
     }
     let snap = this.snapshots.get(uri);
@@ -281,7 +266,6 @@ export class DocumentManager {
       try {
         snap.getText(0, 1000);
       } catch (e) {
-        
         console.error(e);
         debugger;
       }

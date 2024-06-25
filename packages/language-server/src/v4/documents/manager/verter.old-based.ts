@@ -93,6 +93,9 @@ export class VerterManager {
     // TODO double check these options
     const compilerOptions: ts.CompilerOptions = {
       ...config.options,
+      allowJs: true,
+      noImplicitThis: false,
+      noImplicitReturns: false,
       allowNonTsExtensions: true,
       jsx: ts.JsxEmit.Preserve,
       target: ts.ScriptTarget.ESNext,
@@ -103,7 +106,12 @@ export class VerterManager {
 
     const moduleCache = ts.createModuleResolutionCache(
       workspacePath,
-      (x) => ts.sys.resolvePath(x),
+      (x) => {
+        if (isVueSubDocument(x)) {
+          debugger;
+        }
+        return ts.sys.resolvePath(x);
+      },
       compilerOptions
     );
 
@@ -117,16 +125,20 @@ export class VerterManager {
       getDefaultLibFileName: ts.getDefaultLibFilePath,
 
       readFile: (filepath, encoding) => {
+        if (isVueSubDocument(filepath)) {
+          debugger;
+        }
         if (filepath.endsWith(".vue.tsx")) {
           const snap = this.documentManager.getSnapshotIfExists(filepath);
           return snap?.getText(0, snap.getLength());
         }
         if (isVerterVirtual(filepath)) {
-          filepath = urlToPath(filepath)!;
+          filepath = uriToPath(filepath)!;
         }
         if (filepath.endsWith(".vue") || filepath.endsWith(".vue.tsx")) {
           debugger;
         }
+
         try {
           return ts.sys.readFile(filepath, encoding);
         } catch (e) {
@@ -140,12 +152,32 @@ export class VerterManager {
         // if (d) {
         //   return true;
         // }
+        // if (isVueSubDocument(filepath)) {
+        //   debugger;
+        // }
+        if (isVerterVirtual(filepath)) {
+          filepath = uriToPath(filepath)!;
+        }
+
         if (filepath.endsWith(".vue.tsx")) {
-          return !!this.documentManager.getSnapshotIfExists(filepath);
+          const snap = this.documentManager.getSnapshotIfExists(filepath);
+
+          return !!snap;
         }
 
         if (isVerterVirtual(filepath)) {
-          return !!this.documentManager.getSnapshotIfExists(filepath);
+          const snap = this.documentManager.getSnapshotIfExists(filepath);
+
+          return !!snap;
+        }
+
+        if (isVueSubDocument(filepath)) {
+          const snap = this.documentManager.getSnapshotIfExists(filepath);
+
+          if (snap) return true;
+          const vuePath = retrieveVueFileFromBlockUri(filepath);
+
+          return ts.sys.fileExists(vuePath);
         }
 
         return ts.sys.fileExists(filepath);
@@ -238,8 +270,11 @@ export class VerterManager {
         reusedNames
       ) {
         // if (isVerterVirtual(containingFile)) {
-        //   containingFile = urlToPath(containingFile)!;
+        //   containingFile = uriToPath(containingFile)!;
         // }
+
+        if (containingSourceFile && reusedNames) {
+        }
         // if (isVerterVirtual(containingFile)) {
         //   containingFile = retrieveVueFileFromBlockUri(
         //     uriToPath(containingFile)!
@@ -299,7 +334,27 @@ export class VerterManager {
                 redirectedReference
               );
 
-              if (x.text.endsWith(".vue")) {
+              if (isVueFileModule) {
+                if (r.resolvedModule) {
+                  if (
+                    retrieveVueFileFromBlockUri(
+                      r.resolvedModule.resolvedFileName
+                    ) !==
+                    retrieveVueFileFromBlockUri(containingSourceFile.fileName)
+                  ) {
+                    const originalPath = containingSourceFile.fileName;
+                    // @ts-expect-error
+                    r.resolvedModule.originalPath = originalPath;
+                    r.resolvedModule.resolvedFileName =
+                      uriToVerterVirtual(originalPath);
+                  }
+                  r.resolvedModule.resolvedUsingTsExtension = false;
+                } else {
+                  debugger;
+                }
+              }
+
+              if (x.text.endsWith(".vue") && false) {
                 if (r.resolvedModule) {
                   if (isVueSubDocument(r.resolvedModule.resolvedFileName)) {
                     const originalPath = retrieveVueFileFromBlockUri(
@@ -353,7 +408,7 @@ export class VerterManager {
             .filter((x) => x !== false)
             .map((x: number) => moduleLiterals[x].text);
           if (emptyModules.length > 0) {
-            console.warn("Modules missing!", emptyModules);
+            console.warn("Modules missing!", containingFile, emptyModules);
           }
         }
 
@@ -366,6 +421,9 @@ export class VerterManager {
         if (filename.endsWith(".vue") || filename.endsWith(".vue.tsx")) {
           debugger;
           0;
+        }
+        if (isVueSubDocument(filename)) {
+          debugger;
         }
         return ts.sys.realpath?.(filename) ?? filename;
       },
@@ -397,7 +455,6 @@ export class VerterManager {
       ts.createDocumentRegistry(ts.sys.useCaseSensitiveFileNames)
       // ts.LanguageServiceMode.Semantic
     );
-    this.tsServices.set(tsconfigPath, languageService);
 
     return languageService;
   }

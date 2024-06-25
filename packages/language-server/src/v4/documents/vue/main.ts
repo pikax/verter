@@ -30,6 +30,7 @@ type BlockId = "bundle" | "template" | "script" | "style";
 const processors = {
   bundle: {
     uri: (parent) => parent + ".bundle.ts",
+    // uri: (parent) => parent + ".tsx",
     process: processBundle,
   },
   script: {
@@ -326,6 +327,7 @@ export class VueSubDocument implements TextDocument {
   }
 
   get languageId() {
+    return this._doc.languageId;
     return this._lastProcessedResult?.languageId ?? this._doc.languageId;
   }
   get uri() {
