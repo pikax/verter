@@ -27,6 +27,9 @@ export function processRender(context: ParseContext) {
   const accessors = getAccessors();
   const filename = getBlockFilename("render", context);
   const optionsFilename = getBlockFilename("options", context, true);
+  const genericInfo = context.generic;
+
+  let scriptBlock: VerterASTBlock | null = null;
 
   //   const componentAccessor = PrefixSTR("Component");
   //   const defineComponent = PrefixSTR("defineComponent");
@@ -38,11 +41,17 @@ export function processRender(context: ParseContext) {
   // remove unknown blocks
   const SUPPORTED_BLOCKS = new Set(["template"]);
   const blocks: VerterASTBlock[] = [];
+
   for (const block of context.blocks) {
     if (SUPPORTED_BLOCKS.has(block.block.type)) {
       blocks.push(block);
     } else {
-      s.remove(block.tag.pos.open.start, block.tag.pos.close.end);
+      // keep generic block
+      if (genericInfo && block.block.attrs.generic === genericInfo.source) {
+        scriptBlock = block;
+      } else {
+        s.remove(block.tag.pos.open.start, block.tag.pos.close.end);
+      }
     }
   }
 
@@ -54,7 +63,6 @@ export function processRender(context: ParseContext) {
     s.append(`export function ${FunctionExportName}() { return <></> }`);
   } else {
     // const generic = context.generic ? `<${context.generic}>` : "";
-    const generic = context.generic;
 
     const declarations: WalkResult[] = [];
 
@@ -98,7 +106,7 @@ const ${variables.component} = new (${
 const ${BindingContextExportName}CTX = ${
           isAsync ? "await " : ""
         }${BindingContextExportName}${
-          context.generic ? generic.names.join(",") : ""
+          genericInfo ? genericInfo.names.join(",") : ""
         }()
 const ${accessors.ctx} = {
     ...${variables.component},
@@ -116,13 +124,66 @@ const ${accessors.ctx} = {
 }
 `;
 
-    s.overwrite(
-      mainBlock.tag.pos.open.start,
-      mainBlock.tag.pos.open.end,
-      `export function ${isAsync ? "async " : ""}${FunctionExportName}${
-        context.generic ? `<${context.generic}>` : ""
-      }() {\n`
-    );
+    // we might not need to map it tbh
+    if (genericInfo) {
+      const preGeneric = `\nexport ${
+        isAsync ? "async " : ""
+      }function ${FunctionExportName}`;
+      const postGeneric = `() {\n`;
+
+      const generic = genericInfo?.source;
+      // generic information will be kept intact for the source-map
+      if (typeof generic === "string") {
+        // get <script ... >
+        const tagContent = s.original.slice(
+          scriptBlock.tag.pos.open.start,
+          scriptBlock.tag.pos.open.end
+        );
+
+        const genericIndex =
+          tagContent.indexOf(generic) + scriptBlock.tag.pos.open.start;
+
+        // replace before generic with `preGeneric`
+        s.overwrite(
+          scriptBlock.tag.pos.open.start,
+          genericIndex,
+          preGeneric + "<"
+        );
+
+        // replace after generic with `postGeneric`
+        s.overwrite(
+          genericIndex + generic.length,
+          scriptBlock.block.loc.start.offset,
+          ">" + postGeneric
+        );
+      } else {
+        s.overwrite(
+          scriptBlock.tag.pos.open.start,
+          scriptBlock.tag.pos.open.end,
+          preGeneric + postGeneric
+        );
+      }
+
+      s.remove(
+        scriptBlock.block.loc.start.offset,
+        scriptBlock.tag.pos.close.end
+      );
+
+      s.move(
+        scriptBlock.tag.pos.open.start,
+        scriptBlock.tag.pos.open.end,
+        mainBlock.tag.pos.open.start
+      );
+
+      s.overwrite(mainBlock.tag.pos.open.start, mainBlock.tag.pos.open.end, "");
+    } else {
+      s.overwrite(
+        mainBlock.tag.pos.open.start,
+        mainBlock.tag.pos.open.end,
+        `export function ${isAsync ? "async " : ""}${FunctionExportName}() {\n`
+      );
+    }
+
     s.overwrite(
       mainBlock.tag.pos.close.start,
       mainBlock.tag.pos.close.end,
@@ -134,23 +195,6 @@ const ${accessors.ctx} = {
 
     s.prepend(helpers + "\n");
     s.prepend(imports + "\n");
-
-    // const prependContent = [
-    //   `import { ${BindingContextExportName} } from './${relativeScriptPath}'`,
-    //   `export function ${FunctionExportName}${
-    //     context.generic ? `<${context.generic}>` : ""
-    //   }() {`,
-    //   `const ${accessors.ctx} = {
-    //     ...{} as (${DefaultOptions}),
-    //     ...${BindingContextExportName}${
-    //     context.generic ? generic.genericNames.join(", ") : ""
-    //   }(),`,
-    //   "return <>",
-    //   "",
-    // ];
-    // const cc = prependContent.join("\n");
-
-    // console.log("prependContent", prependContent);
   }
 
   return {

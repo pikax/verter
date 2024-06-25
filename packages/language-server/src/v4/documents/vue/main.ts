@@ -14,6 +14,7 @@ import {
   generatedPositionFor,
   generatedRangeFor,
   originalPositionFor,
+  originalRangeFor,
 } from "../../utils";
 import {
   pathToUri,
@@ -203,6 +204,8 @@ export class VueDocument implements TextDocument {
     });
   }
 
+  // TODO this should return many blocks
+  // the check should be done if the block has the position when getting with the map
   getDocumentForPosition(pos: Position) {
     const block = this.getBlockForPosition(pos);
 
@@ -388,6 +391,10 @@ export class VueSubDocument implements TextDocument {
   toOriginalPositionFromOffset(offset: number): Position {
     const position = this.positionAt(offset);
     return this.toOriginalPosition(position);
+  }
+
+  toOriginalRange(range: Range): Range {
+    return originalRangeFor(this._sourceMapConsumer!, range);
   }
 
   update(changes: TextDocumentContentChangeEvent[], version: number) {

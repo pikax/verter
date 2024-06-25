@@ -310,6 +310,10 @@ export class DocumentManager {
   }
 
   public getDocument(uri: string): VueDocument | TextDocument | undefined {
+    if (isVueSubDocument(uri)) {
+      const realFilepath = uriToPath(retrieveVueFileFromBlockUri(uri));
+      return this.getDocument(realFilepath);
+    }
     const filepath = uriToPath(uri);
     return this.files.get(filepath);
   }

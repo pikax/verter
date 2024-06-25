@@ -1,3 +1,7 @@
+import {
+  expectFindStringWithMap,
+  testSourceMaps,
+} from "../../../utils.test-utils";
 import { processRender, FunctionExportName } from "./render";
 import { createContext } from "@verter/core";
 
@@ -30,9 +34,30 @@ describe("processRender", () => {
 
   it("should be generic", () => {
     const result = process(
-      `<template><div></div></template><script generic="T"></script>`
+      `<template><div></div></template><script lang="ts" generic="T"></script>`
     );
-    expect(result.content).toContain("export function ___VERTER___Render()");
+    expect(result.content).toContain("export function ___VERTER___Render<T>()");
+  });
+
+  it("should be generic complex", () => {
+    const result = process(
+      `<template><div></div></template><script lang="ts" generic="T extends 'foo' | 'bar'"></script>`
+    );
+    expect(result.content).toContain(
+      "export function ___VERTER___Render<T extends 'foo' | 'bar'>()"
+    );
+  });
+
+  it("should map the generic correctly", () => {
+    const result = process(
+      `<template><div></div></template><script lang="ts" generic="T extends 'foo' | 'bar'"></script>`
+    );
+    expect(result.content).toContain(
+      "export function ___VERTER___Render<T extends 'foo' | 'bar'>()"
+    );
+
+    // might not need a map
+    expectFindStringWithMap("T extends 'foo' | 'bar'", result);
   });
 
   it("should handle empty template", () => {

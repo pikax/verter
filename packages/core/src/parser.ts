@@ -167,7 +167,7 @@ export function createContext(
     if (generic !== null) return generic;
     const block = blocks.find(
       (x) =>
-        x.block === parsed.descriptor.scriptSetup || parsed.descriptor.script
+        x.block === (parsed.descriptor.scriptSetup || parsed.descriptor.script)
     );
     generic = parseGeneric(block.block.attrs.generic);
     return generic;

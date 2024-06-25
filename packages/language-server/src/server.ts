@@ -147,10 +147,25 @@ export function startServer(options: LsConnectionOption = {}) {
     }
     console.log("locs", locs.length);
 
-    // return locs.map((loc) => {
-    //   const range = subDoc.toOriginalRange(loc.textSpan);
-    //   return LocationLink.create(uriToPath(loc.fileName), range, range, range);
-    // });
+    return locs.map((loc) => {
+      const range = subDoc.toOriginalRange({
+        start: subDoc.toOriginalPositionFromOffset(loc.textSpan.start),
+        end: subDoc.toOriginalPositionFromOffset(
+          loc.textSpan.start + loc.textSpan.length
+        ),
+      });
+
+      const locDoc = documentManager.getDocument(loc.fileName);
+      if (locDoc && isVueDocument(locDoc)) {
+        return LocationLink.create(uriToPath(locDoc.uri), range, range, range);
+      }
+
+      return LocationLink.create(
+        uriToPath(loc.fileName),
+        range,
+        params.position
+      );
+    }) as any;
   });
 
   connection.onCompletion((params) => {
