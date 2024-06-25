@@ -428,7 +428,6 @@ describe("tranpiler element", () => {
       expect(result).toMatchInlineSnapshot(`"<div test-prop="hello"/>"`);
     });
   });
-  (";#");
   describe("directives", () => {
     describe("binding", () => {
       it("props w/:", () => {
@@ -564,6 +563,12 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(
           `"<div name={___VERTER___ctx.props} />"`
         );
+      });
+
+      it("v-bind : without name", () => {
+        const { result } = transpile(`<div : />`);
+
+        expect(result).toMatchInlineSnapshot(`"<div {} />"`);
       });
 
       it("v-bind :short", () => {
@@ -794,6 +799,12 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(
           `"<span onBack={(...args)=>___VERTER___eventCb(args,($event)=>___VERTER___ctx.navigateToSession($event))}/>"`
         );
+      });
+
+      it("empty @", () => {
+        const { result } = transpile(`<span @></span>`);
+
+        expect(result).toMatchInlineSnapshot(`"<span on></span>"`);
       });
     });
 

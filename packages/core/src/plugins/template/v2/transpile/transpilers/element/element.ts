@@ -720,13 +720,19 @@ function processProp(
         );
         s.overwrite(prop.exp.loc.end.offset, prop.exp.loc.end.offset + 1, "}");
       } else if (prop.rawName.startsWith(":")) {
-        s.remove(prop.loc.start.offset, prop.loc.start.offset + 1);
-        // short sugar syntax
-        s.prependLeft(prop.loc.start.offset + 1, `${sanitisedName}={`);
-        s.prependLeft(prop.loc.end.offset, "}");
+        if (prop.arg) {
+          s.remove(prop.loc.start.offset, prop.loc.start.offset + 1);
+          // short sugar syntax
+          s.prependLeft(prop.loc.start.offset + 1, `${sanitisedName}={`);
+          s.prependLeft(prop.loc.end.offset, "}");
 
-        // append ctx to name
-        appendCtx(prop.arg, context);
+          // append ctx to name
+          appendCtx(prop.arg, context);
+        } else {
+          // this handles the empty bind ":"
+          s.overwrite(prop.loc.start.offset, prop.loc.start.offset + 1, "{");
+          s.appendRight(prop.loc.start.offset + 1, "}");
+        }
       }
 
       if (prop.rawName.startsWith(":") && prop.exp) {
@@ -747,7 +753,7 @@ function processProp(
       break;
     }
     case "on": {
-      const name = prop.arg ? processExpression(prop.arg, context) : undefined;
+      const name = prop.arg ? processExpression(prop.arg, context) : "";
       const sanitisedName = capitalize(
         name ? sanitiseAttributeName(name, context) : name
       );
@@ -760,7 +766,12 @@ function processProp(
         );
       }
 
-      s.overwrite(prop.loc.start.offset, prop.loc.start.offset + 1, "on");
+      if (name) {
+        s.overwrite(prop.loc.start.offset, prop.loc.start.offset + 1, "on");
+      } else {
+        s.remove(prop.loc.start.offset, prop.loc.start.offset + 1);
+        s.appendRight(prop.loc.start.offset + 1, "on");
+      }
 
       // add callback
 

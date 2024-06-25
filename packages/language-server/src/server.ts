@@ -335,25 +335,25 @@ export function startServer(options: LsConnectionOption = {}) {
         } catch (e) {
           console.error("syntacticDiagnostics", e);
         }
-        // try {
-        //   semanticDiagnostics = tsService.getSemanticDiagnostics(
-        //     subDocument.uri
-        //   );
-        // } catch (e) {
-        //   console.error("semanticDiagnostics", e);
-        // }
-        // try {
-        //   suggestionDiagnostics = tsService.getSuggestionDiagnostics(
-        //     subDocument.uri
-        //   );
-        // } catch (e) {
-        //   console.error("tsService.getSuggestionDiagnostics", e);
-        // }
+        try {
+          semanticDiagnostics = tsService.getSemanticDiagnostics(
+            subDocument.uri
+          );
+        } catch (e) {
+          console.error("semanticDiagnostics", e);
+        }
+        try {
+          suggestionDiagnostics = tsService.getSuggestionDiagnostics(
+            subDocument.uri
+          );
+        } catch (e) {
+          console.error("tsService.getSuggestionDiagnostics", e);
+        }
 
         const allDiagnostics = [
           ...syntacticDiagnostics,
-          // ...semanticDiagnostics,
-          // ...suggestionDiagnostics,
+          ...semanticDiagnostics,
+          ...suggestionDiagnostics,
         ]
           .map((x) => mapDiagnostic(x, subDocument))
           .filter(Boolean);
@@ -397,6 +397,24 @@ export function startServer(options: LsConnectionOption = {}) {
   }
 
   connection.onRequest(RequestType.GetCompiledCode, (uri) => {
+    const doc = documentManager.getDocument(uri);
+    if (doc) {
+      if (isVueDocument(doc)) {
+        const code = doc.subDocuments.template.getText();
+
+        return {
+          js: {
+            code,
+            map: "",
+          },
+          css: {
+            code: "",
+            map: "",
+          },
+        };
+      }
+    }
+
     return {
       js: {
         code: "",
