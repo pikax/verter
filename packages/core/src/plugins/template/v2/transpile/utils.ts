@@ -90,7 +90,7 @@ export function withNarrowCondition(
     .join("\n");
 }
 
-const isLiteralWhitelisted = /*#__PURE__*/ makeMap("true,false,null,this,___VERTER___BindingContext");
+const isLiteralWhitelisted = /*#__PURE__*/ makeMap("true,false,null,this,");
 export function appendCtx(
   node: ExpressionNode | babel_types.Expression | string,
   context: TranspileContext,
@@ -192,7 +192,7 @@ export function processExpression(
         const ast = exp.ast;
         walkIdentifiers(ast, (id, parent) => {
           const extraPrepend =
-            parent.type === "ObjectProperty" && parent.shorthand
+            parent?.type === "ObjectProperty" && parent.shorthand
               ? `${id.name}:`
               : "";
 

@@ -416,16 +416,26 @@ export function startServer(options: LsConnectionOption = {}) {
     const doc = documentManager.getDocument(uri);
     if (doc) {
       if (isVueDocument(doc)) {
-        const code = [
-          doc.subDocuments.script.getText(),
+        const s = doc.preview();
+        // const code = [
+        //   doc.subDocuments.script.getText(),
 
-          doc.subDocuments.template.getText(),
-        ].join("\n\n\n//---\n\n");
+        //   doc.subDocuments.template.getText(),
+        // ].join("\n\n\n//---\n\n");
+
+        // s.indent("\n\n\n//---\n\n\n");
 
         return {
           js: {
-            code,
-            map: "",
+            code: s.toString(),
+            map: s
+              .generateMap({
+                file: "preview.tsx",
+                source: uriToPath(uri),
+                includeContent: true,
+                hires: true,
+              })
+              .toString(),
           },
           css: {
             code: "",

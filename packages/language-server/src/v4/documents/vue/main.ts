@@ -26,6 +26,9 @@ import { processBundle } from "../../processor/bundle/bundle";
 import ts from "typescript";
 import { isVueSubDocument } from "../../processor/utils";
 
+import { Bundle as MagicStringBundle } from "magic-string";
+import { MagicString } from "vue/compiler-sfc";
+
 type BlockId = "bundle" | "template" | "script" | "style";
 
 const processors = {
@@ -230,6 +233,20 @@ export class VueDocument implements TextDocument {
 
   get subDocumentPaths() {
     return Object.values(this.subDocuments).map((x) => x.uri);
+  }
+
+  preview() {
+    const bundle = new MagicStringBundle();
+    for (const doc of Object.values(this.subDocuments)) {
+      bundle.append("// start: " + doc.uri + "\n\n");
+      bundle.addSource({
+        filename: doc.uri,
+        content: new MagicString(doc.getText()),
+      });
+      bundle.append("// end: " + doc.uri + "\n\n");
+    }
+
+    return bundle;
   }
 
   getTextFromFile(uri: string, range?: Range) {

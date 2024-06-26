@@ -133,11 +133,13 @@ export function processOptions(context: ParseContext) {
             // check if is any defineMacros
 
             for (const [macro, name] of vueMacros) {
+              // @ts-expect-error
               const expresion = checkForSetupMethodCalls(macro, it);
               if (expresion) {
                 foundMacros.add(macro);
                 if (it.type === "VariableDeclaration") {
                   if (it.declarations[0].type === "VariableDeclarator") {
+                    // @ts-expect-error
                     macroOverride.set(macro, it.declarations[0].id.name);
                   } else {
                     // this is probably a destructuring
@@ -403,6 +405,7 @@ export function checkForSetupMethodCalls(name: string, statement: Statement) {
     if (
       statement.expression.type === "CallExpression" &&
       "name" in statement.expression.callee &&
+      // @ts-expect-error
       statement.expression.callee.name === name
     ) {
       return statement.expression;
@@ -417,6 +420,7 @@ export function checkForSetupMethodCalls(name: string, statement: Statement) {
       if (
         declaration?.init?.type === "CallExpression" &&
         "name" in declaration.init.callee &&
+        // @ts-expect-error
         declaration.init.callee.name === name
       ) {
         return declaration.init;
