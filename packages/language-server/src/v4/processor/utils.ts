@@ -37,7 +37,7 @@ export function blockToFilename(
     case "script":
       return filename + ".script.ts";
     case "options":
-      return filename + ".options." + (lang ?? "js");
+      return filename + ".options." + (lang?.replace("js", "ts") ?? "ts");
   }
   return filename + ".TODO.tsx";
 }

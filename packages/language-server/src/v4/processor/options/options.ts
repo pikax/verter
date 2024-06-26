@@ -6,7 +6,7 @@ import {
   ParseContext,
   VerterASTBlock,
 } from "@verter/core";
-import { parseSync, TsTypeAliasDeclaration } from "@swc/core";
+import { parseSync, Statement, TsTypeAliasDeclaration } from "@swc/core";
 import {
   isFunctionType,
   TS_NODE_TYPES,
@@ -69,7 +69,7 @@ export function processOptions(context: ParseContext) {
           if (
             parent &&
             parent.type.startsWith("TS") &&
-            !TS_NODE_TYPES.includes(parent.type) 
+            !TS_NODE_TYPES.includes(parent.type)
           ) {
             return this.skip();
           }
@@ -110,11 +110,58 @@ export function processOptions(context: ParseContext) {
       }
     }
 
+    const vueMacros = [
+      ["defineProps", PrefixSTR("props")],
+      ["withDefaults", PrefixSTR("props")],
+      ["defineEmits", PrefixSTR("emits")],
+      ["defineSlots", PrefixSTR("slots")],
+    ];
+    const foundMacros = new Set<string>();
+    // overrides the macro name with the variable name
+    const macroOverride = new Map<string, string>();
+
     const bindings = Array.from(_bindings);
     // move imports and exports to top
     if (scriptBlock.ast) {
       for (const it of scriptBlock.ast.body) {
         switch (it.type as any) {
+          case "VariableDeclaration":
+          case "ExpressionStatement": {
+            if (!isSetup) {
+              continue;
+            }
+            // check if is any defineMacros
+
+            for (const [macro, name] of vueMacros) {
+              const expresion = checkForSetupMethodCalls(macro, it);
+              if (expresion) {
+                foundMacros.add(macro);
+                if (it.type === "VariableDeclaration") {
+                  if (it.declarations[0].type === "VariableDeclarator") {
+                    macroOverride.set(macro, it.declarations[0].id.name);
+                  } else {
+                    // this is probably a destructuring
+                  }
+                } else {
+                  s.appendRight(
+                    it.start + scriptBlock.block.loc.start.offset,
+                    `const ${name} = `
+                  );
+                }
+                break;
+              }
+              console.log("sss", expresion);
+            }
+
+            break;
+            // vueMacros.forEach(([macro, prefix]) => {
+            //   const expresion = checkForSetupMethodCalls(macro, it);
+            //   if (expresion) {
+            //     foundMacros.add(macro);
+            //   }
+            //   console.log("sss", expresion);
+            // });
+          }
           case "ExportDefaultExpression":
           case "ExportDefaultDeclaration": {
             // if is options and generic do not move
@@ -140,6 +187,23 @@ export function processOptions(context: ParseContext) {
         }
       }
     }
+
+    // const extraBinding = Array.from(foundMacros.values())
+    //   .map((x) => macroOverride.get(x) ?? vueMacros.find(([n]) => n === x)[1])
+    //   .join(" & ");
+
+    const propMacro =
+      foundMacros.has("defineProps") || foundMacros.has("withDefaults");
+    const propsBinding = propMacro
+      ? `${
+          macroOverride.get("defineProps") ?? macroOverride.get("withDefaults")
+            ? `typeof ${
+                macroOverride.get("defineProps") ??
+                macroOverride.get("withDefaults")
+              }`
+            : "typeof " + vueMacros.find(([n]) => n === "defineProps")[1]
+        }`
+      : "";
 
     // do work for <script ... >
     if (isSetup) {
@@ -191,7 +255,9 @@ export function processOptions(context: ParseContext) {
       if (isTypescript) {
         s.appendRight(
           scriptBlock.block.loc.end.offset,
-          `\nreturn {} as {${typeofBindings}\n}\n`
+          `\nreturn {} as {${typeofBindings}\n} ${
+            propsBinding ? `& ${propsBinding}` : ""
+          }\n`
         );
       } else {
         // if not typescript we need to the types in JSDoc to make sure the types are correct
@@ -209,7 +275,6 @@ export function processOptions(context: ParseContext) {
       }
 
       s.appendRight(scriptBlock.block.loc.end.offset, "\n}\n");
-
     } else {
       const exportIndex = s.original.indexOf("export default");
 
@@ -278,6 +343,8 @@ export function processOptions(context: ParseContext) {
       }
     }
 
+    let hasDefaultExport = false;
+
     // remove block tags
     blocks.forEach((block) => {
       // check if the block was already handled
@@ -288,6 +355,7 @@ export function processOptions(context: ParseContext) {
 
       const defaultExport = block.block.loc.source.indexOf("export default");
       if (defaultExport >= 0) {
+        hasDefaultExport = true;
         const start = block.block.loc.start.offset + defaultExport;
         s.update(
           start,
@@ -301,6 +369,13 @@ export function processOptions(context: ParseContext) {
         );
       }
     });
+    if (!hasDefaultExport) {
+      s.append(`export const ${DefaultOptions} = {};\n`);
+    }
+  }
+
+  if (!scriptBlock.block.lang?.startsWith("ts")) {
+    s.prepend("// @ts-nocheck\n");
   }
 
   // s.append("const ____VERTER_COMP_OPTION__COMPILED = defineComponent({})");
@@ -321,4 +396,32 @@ export function processOptions(context: ParseContext) {
     s,
     content: s.toString(),
   };
+}
+
+export function checkForSetupMethodCalls(name: string, statement: Statement) {
+  if (statement.type === "ExpressionStatement") {
+    if (
+      statement.expression.type === "CallExpression" &&
+      "name" in statement.expression.callee &&
+      statement.expression.callee.name === name
+    ) {
+      return statement.expression;
+    }
+  } else if (
+    statement.type === "VariableDeclaration" &&
+    statement.declarations &&
+    statement.declarations.length
+  ) {
+    for (let d = 0; d < statement.declarations.length; d++) {
+      const declaration = statement.declarations[d];
+      if (
+        declaration?.init?.type === "CallExpression" &&
+        "name" in declaration.init.callee &&
+        declaration.init.callee.name === name
+      ) {
+        return declaration.init;
+      }
+    }
+  }
+  return null;
 }

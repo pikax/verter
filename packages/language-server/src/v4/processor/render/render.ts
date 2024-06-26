@@ -82,13 +82,23 @@ export function processRender(context: ParseContext) {
       ExtractInstance: PrefixSTR("ExtractInstance"),
     };
 
+    const vueImports: Array<[string, string, boolean?]> = [
+      ["renderList", accessors.renderList],
+      ["normalizeClass", accessors.normalizeClass],
+      ["normalizeStyle", accessors.normalizeStyle],
+      ["defineComponent", variables.defineComponent],
+      ["ShallowUnwrapRef", variables.ShallowUnwrapRef, true],
+    ];
+
     const imports = context.isSetup
-      ? `import { defineComponent as ${variables.defineComponent}, ShallowUnwrapRef as ${variables.ShallowUnwrapRef} } from "vue";
-import { ${OptionsExportName}, ${BindingContextExportName} } from "${optionsFilename}"
+      ? `import { ${vueImports.map(
+          ([i, n, t]) => `${t ? "type " : ""}${i} as ${n}`
+        )} } from "vue";
+import { ${OptionsExportName}, ${BindingContextExportName}, ${DefaultOptions} } from "${optionsFilename}"
 `
       : `
 import { defineComponent as ${variables.defineComponent}, ShallowUnwrapRef as ${variables.ShallowUnwrapRef} } from "vue";
-import { ${OptionsExportName} } from "${optionsFilename}";
+import { ${OptionsExportName}, ${DefaultOptions} } from "${optionsFilename}";
 `;
 
     const helpers = context.isSetup
@@ -108,10 +118,10 @@ const ${variables.component} = new (${
 const ${BindingContextExportName}CTX = ${
           isAsync ? "await " : ""
         }${BindingContextExportName}${
-          genericInfo ? genericInfo.names.join(",") : ""
+          genericInfo ? `<${genericInfo.names.join(",")}>` : ""
         }()
 const ${accessors.ctx} = {
-    //...${variables.component},
+    ...${variables.component},
     ...({} as ${
       variables.ShallowUnwrapRef
     }<typeof ${BindingContextExportName}CTX>),

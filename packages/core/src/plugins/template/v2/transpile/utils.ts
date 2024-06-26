@@ -90,7 +90,7 @@ export function withNarrowCondition(
     .join("\n");
 }
 
-const isLiteralWhitelisted = /*#__PURE__*/ makeMap("true,false,null,this");
+const isLiteralWhitelisted = /*#__PURE__*/ makeMap("true,false,null,this,___VERTER___BindingContext");
 export function appendCtx(
   node: ExpressionNode | babel_types.Expression | string,
   context: TranspileContext,

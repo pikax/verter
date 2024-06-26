@@ -324,13 +324,13 @@ export function startServer(options: LsConnectionOption = {}) {
   documentManager.onDocumentOpen((doc) => {
     sendDiagnostics(doc);
   });
-  const tsService = manager.getTsService(process.cwd());
 
   async function sendDiagnostics(document: VueDocument | TextDocument) {
     if (!isVueDocument(document)) return;
 
     console.time("sendDiagnostics");
     const diagnostics: Diagnostic[] = [];
+    const tsService = manager.getTsService(document.uri);
 
     try {
       let lastSend = Date.now();
@@ -420,7 +420,7 @@ export function startServer(options: LsConnectionOption = {}) {
           doc.subDocuments.script.getText(),
 
           doc.subDocuments.template.getText(),
-        ].join('\n\n\n//---\n\n')
+        ].join("\n\n\n//---\n\n");
 
         return {
           js: {

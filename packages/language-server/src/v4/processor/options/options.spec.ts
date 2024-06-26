@@ -18,8 +18,12 @@ describe("processor options", () => {
         `<script${lang ? ` lang="${lang}"` : ""}>export default {};</script>`
       );
       expect(result).toMatchObject({
-        filename: "test.vue.options." + (lang || "js"),
+        filename: "test.vue.options." + (lang?.replace("js", "ts") || "ts"),
       });
+
+      if (lang.startsWith("js")) {
+        expect(result.content).toContain("// @ts-nocheck");
+      }
     });
   });
 
@@ -132,6 +136,10 @@ describe("processor options", () => {
           "export function ___VERTER___BindingContext() {"
         );
 
+        expect(result.content).toContain(
+          `export const ___VERTER___default = {};`
+        );
+
         expectFindStringWithMap("const a = ref();", result);
         expectFindStringWithMap(`import { ref, Ref } from 'vue';`, result);
       });
@@ -189,7 +197,7 @@ describe("processor options", () => {
           const a = ref();
           await Promise.resolve()
           return {} as {ref: typeof ref, Ref: typeof Ref, a: typeof a
-          }
+          } 
 
           }
           const ___VERTER___default = { specialOptions: true }"
@@ -218,13 +226,45 @@ describe("processor options", () => {
 
           expect(result.content).toContain("{test: typeof test\n");
         });
-        it('function params', ()=> {
+        it("function params", () => {
           const result = process(
             `<script setup lang='ts'>function test(a: 1, b: 1) {}</script>`
           );
 
           expect(result.content).toContain("{test: typeof test\n");
-        })
+        });
+
+        it("defineProps", () => {
+          const result = process(
+            `<script setup lang='ts'>defineProps({ a: String })</script>`
+          );
+          expect(result.content).toContain("{\n} & typeof ___VERTER___props");
+        });
+
+        it("defineProps with default", () => {
+          const result = process(
+            `<script setup lang='ts'>withDefaults(defineProps({ a: String }), {a: '1'})</script>`
+          );
+          expect(result.content).toContain("{\n} & typeof ___VERTER___props");
+        });
+
+        it("defineProps with default + variable", () => {
+          const result = process(
+            `<script setup lang='ts'>const props = withDefaults(defineProps({ a: String }), {a: '1'})</script>`
+          );
+          expect(result.content).toContain(
+            "{props: typeof props\n} & typeof props"
+          );
+        });
+
+        it("props with variable assigned", () => {
+          const result = process(
+            `<script setup lang='ts'>const props = defineProps({ a: String });</script>`
+          );
+          expect(result.content).toContain(
+            "{props: typeof props\n} & typeof props"
+          );
+        });
       });
 
       describe("invalid syntax", () => {
@@ -244,21 +284,6 @@ describe("processor options", () => {
         const result = process(
           `<script setup>import { ref } from 'vue';\nconst a = ref();</script><template><div>test</div></template>`
         );
-
-        expect(result.content).toMatchInlineSnapshot(`
-          "import { ref } from 'vue';/**
-           * @returns {{ref: typeof ref, a: typeof a}} 
-          */
-          export function ___VERTER___BindingContext() {
-
-          const a = ref();
-          return {
-          ref, a
-          }
-
-          }
-          "
-        `);
 
         expect(result.content).toContain(`const a = ref();`);
         expect(result.content).toContain(
