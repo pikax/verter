@@ -184,13 +184,6 @@ export function processOptions(context: ParseContext) {
             }
 
             break;
-            // vueMacros.forEach(([macro, prefix]) => {
-            //   const expresion = checkForSetupMethodCalls(macro, it);
-            //   if (expresion) {
-            //     foundMacros.add(macro);
-            //   }
-            //   console.log("sss", expresion);
-            // });
           }
           case "ExportDefaultExpression":
           case "ExportDefaultDeclaration": {
@@ -218,10 +211,6 @@ export function processOptions(context: ParseContext) {
         }
       }
     }
-
-    // const extraBinding = Array.from(foundMacros.values())
-    //   .map((x) => macroOverride.get(x) ?? vueMacros.find(([n]) => n === x)[1])
-    //   .join(" & ");
 
     const propMacro =
       foundMacros.has("defineProps") || foundMacros.has("withDefaults");

@@ -95,11 +95,22 @@ export default createTranspiler(NodeTypes.ELEMENT, {
       } else if (!isWebComponent) {
         const endTagIndex =
           node.loc.start.offset + node.loc.source.lastIndexOf(node.tag);
-        if (tag !== node.tag) {
-          context.s.overwrite(endTagIndex, endTagIndex + node.tag.length, tag);
-        }
-        if (node.tagType === ElementTypes.COMPONENT && context.accessors.comp) {
-          context.s.appendLeft(endTagIndex, context.accessors.comp + ".");
+
+        // check if the component has a closing tag, otherwise we don't need to update
+        if (endTagIndex > node.loc.start.offset + 1) {
+          if (tag !== node.tag) {
+            context.s.overwrite(
+              endTagIndex,
+              endTagIndex + node.tag.length,
+              tag
+            );
+          }
+          if (
+            node.tagType === ElementTypes.COMPONENT &&
+            context.accessors.comp
+          ) {
+            context.s.appendLeft(endTagIndex, context.accessors.comp + ".");
+          }
         }
       }
     }

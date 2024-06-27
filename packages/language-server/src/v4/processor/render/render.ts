@@ -121,6 +121,13 @@ const ${accessors.ctx} = {
     ...({} as ${
       variables.ShallowUnwrapRef
     }<typeof ${BindingContextExportName}CTX>),
+
+const ${accessors.comp} =  {
+  //...({} as ExtractRenderComponents<typeof ___VERTER___ctx>),
+  ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+  ...___VERTER___ctx
+}
+  
 }
 `
       : `
@@ -129,6 +136,12 @@ const ${variables.component} = ${variables.ExtractInstance}(${variables.Componen
 
 const ${accessors.ctx} = {
     ...${variables.component},
+}
+
+const ${accessors.comp} =  {
+  //...({} as ExtractRenderComponents<typeof ___VERTER___ctx>),
+  ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+  ...___VERTER___ctx
 }
 `;
 

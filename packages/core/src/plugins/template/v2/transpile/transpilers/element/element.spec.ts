@@ -1585,4 +1585,11 @@ describe("tranpiler element", () => {
       });
     });
   });
+
+  describe("partial", () => {
+    test("<d", () => {
+      const { result } = transpile("<d");
+      expect(result).toMatchInlineSnapshot(`"<___VERTER___comp.d"`);
+    });
+  });
 });

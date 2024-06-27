@@ -73,7 +73,7 @@ function getBlockId(block: VerterSFCBlock): BlockId | string {
 function createDocumentFromBlock(block: VerterSFCBlock, doc: VueDocument) {
   const blockId = getBlockId(block);
   const processor = processors[blockId];
-  return new VueSubDocument(doc, processor);
+  return new VueSubDocument(doc, processor, blockId as BlockId);
 }
 
 export class VueDocument implements TextDocument {
@@ -122,9 +122,21 @@ export class VueDocument implements TextDocument {
     private _doc: TextDocument,
     private _loadDocumentContent?: () => string
   ) {
-    this.subDocuments.bundle = new VueSubDocument(this, processors.bundle);
-    this.subDocuments.script = new VueSubDocument(this, processors.script);
-    this.subDocuments.template = new VueSubDocument(this, processors.template);
+    this.subDocuments.bundle = new VueSubDocument(
+      this,
+      processors.bundle,
+      "bundle"
+    );
+    this.subDocuments.script = new VueSubDocument(
+      this,
+      processors.script,
+      "script"
+    );
+    this.subDocuments.template = new VueSubDocument(
+      this,
+      processors.template,
+      "template"
+    );
   }
 
   overrideDoc(doc: TextDocument) {
@@ -333,7 +345,8 @@ export class VueSubDocument implements TextDocument {
   private _doc: TextDocument;
   constructor(
     private _parent: VueDocument,
-    private _processor: ContextProcessor
+    private _processor: ContextProcessor,
+    private _blockId: BlockId
   ) {
     const processorFilename = _processor.uri(_parent.uri);
 
@@ -345,6 +358,10 @@ export class VueSubDocument implements TextDocument {
       -1,
       "// PLACEHOLDER TO BE POPULATED BY VUE DOCUMENT\n"
     );
+  }
+
+  get blockId() {
+    return this._blockId;
   }
 
   get languageId() {
@@ -375,10 +392,13 @@ export class VueSubDocument implements TextDocument {
 
   getText(range?: Range): string {
     this.syncVersion();
-    // debugger
-
     return this._doc.getText(range);
   }
+
+  getOriginalText(): string {
+    return this._lastProcessedResult?.s.original;
+  }
+
   positionAt(offset: number): Position {
     return this._doc.positionAt(offset);
   }

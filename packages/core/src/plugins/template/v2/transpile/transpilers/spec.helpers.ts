@@ -9,7 +9,7 @@ export function fromTranspiler<T extends NodeTypes>(
   plugins = [] as TranspilerPlugin[],
   options: Omit<TranspileOptions, "plugins"> = {}
 ) {
-  const source = `<template>${content}</template>`;
+  const source = `<template>\n${content}\n</template>`;
 
   const sfc = sfcParse(source);
 
@@ -33,7 +33,7 @@ export function fromTranspiler<T extends NodeTypes>(
 
     original: s.original.slice(contentIndex, contentIndex + content.length),
     // result: s.snip(contentIndex, contentIndex + content.length).toString(),
-    result: s.toString().slice("<template>".length, -"</template>".length),
+    result: s.toString().slice("<template>\n".length, -"\n</template>".length),
 
     // .snip(prop.exp.loc.start.offset - 1, prop.exp.loc.end.offset + 1)
     // .slice(1, -1)

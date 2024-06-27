@@ -201,19 +201,42 @@ export function startServer(options: LsConnectionOption = {}) {
         );
       }
 
-      const results = tsService.getCompletionsAtPosition(subDoc.uri, offset, {
+      if (params.context.triggerKind === CompletionTriggerKind.Invoked) {
+        const text = doc.getText();
+        const originalOffset = doc.offsetAt(params.position);
+        // const text = subDoc.getOriginalText();
+        const char = text[originalOffset - 1];
+        const aroundStr = text.slice(originalOffset - 10, originalOffset + 10);
+
+        console.log("char", char, aroundStr);
+      }
+
+      let results = tsService.getCompletionsAtPosition(subDoc.uri, offset, {
         triggerKind: params.context?.triggerKind,
         triggerCharacter:
           params.context?.triggerCharacter === "@"
             ? ""
             : params.context?.triggerCharacter,
 
-        // includeSymbol: true,
-        // includeAutomaticOptionalChainCompletions: true,
-        // jsxAttributeCompletionStyle: "auto",
-        // importModuleSpecifierEnding: "auto",
-        // disableSuggestions: true,
+        includeSymbol: true,
+        includeAutomaticOptionalChainCompletions: true,
+        jsxAttributeCompletionStyle: "auto",
+        importModuleSpecifierEnding: "auto",
+        disableSuggestions: true,
       } as GetCompletionsAtPositionOptions);
+
+      // if (!results) {
+      //   if (subDoc.blockId === "template") {
+      //     // this is in template, most likely caused by outside a component
+      //     results = tsService.getCompletionsAtPosition(subDoc.uri, offset, {
+      //       triggerKind: CompletionTriggerKind.TriggerCharacter,
+      //       triggerCharacter: "<",
+      //       includeSymbols: true,
+      //     } as GetCompletionsAtPositionOptions);
+
+      //     console.log("got results", results.entries.length);
+      //   }
+      // }
 
       if (results) {
         return {

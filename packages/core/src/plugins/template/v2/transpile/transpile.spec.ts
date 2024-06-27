@@ -26,14 +26,14 @@ describe("transpile", () => {
     it("root", () => {
       const { result } = doTranspile("");
 
-      expect(result).toMatchInlineSnapshot(`"<></>"`);
+      expect(result).toMatchInlineSnapshot(`"<template></template>"`);
     });
 
     it("Hello vue", () => {
       const source = `<div>Hello vue</div>`;
       const { result } = doTranspile(source);
 
-      expect(result).toMatchInlineSnapshot(`"<><div>{ "Hello vue" }</div></>"`);
+      expect(result).toMatchInlineSnapshot(`"<template><div>{ "Hello vue" }</div></template>"`);
     });
 
     it("component self closing", () => {
@@ -42,7 +42,7 @@ describe("transpile", () => {
       const { result } = doTranspile(source);
 
       expect(result).toMatchInlineSnapshot(
-        `"<><___VERTER___comp.MyComponent/></>"`
+        `"<template><___VERTER___comp.MyComponent/></template>"`
       );
     });
 
@@ -51,7 +51,13 @@ describe("transpile", () => {
 
       const { result } = doTranspile(source);
 
-      expect(result).toMatchInlineSnapshot(`"<>{/* this is comment */}</>"`);
+      expect(result).toMatchInlineSnapshot(`"<template>{/* this is comment */}</template>"`);
+    });
+
+    it("partial", () => {
+      const source = `<div> < </div>`;
+      const { result } = doTranspile(source);
+      expect(result).toMatchInlineSnapshot(`"<template><div> < </div></template>"`);
     });
 
     it("v-if with expression", () => {
@@ -66,13 +72,13 @@ describe("transpile", () => {
           </div>`);
 
       expect(result).toMatchInlineSnapshot(`
-        "<>{ ()=> {if((() => {
+        "<template>{ ()=> {if((() => {
                     let ii = '0';
                     return ii === ii
-                  })()){<div >{ " t4est " }</div>}
+                  })()){<div >{ "t4est" }</div>}
                   else{
-        <div >{ " else " }</div>
-        }}}</>"
+        <div >{ "else" }</div>
+        }}}</template>"
       `);
     });
   });
