@@ -10,11 +10,7 @@ import {
 } from "@verter/core";
 import { relative } from "path/posix";
 
-import {
-  BindingContextExportName,
-  DefaultOptions,
-  OptionsExportName,
-} from "../options/index.js";
+import { BindingContextExportName, DefaultOptions } from "../options/index.js";
 import { getBlockFilename } from "../utils.js";
 import {
   transpileTemplate,
@@ -94,11 +90,11 @@ export function processRender(context: ParseContext) {
       ? `import { ${vueImports.map(
           ([i, n, t]) => `${t ? "type " : ""}${i} as ${n}`
         )} } from "vue";
-import { ${OptionsExportName}, ${BindingContextExportName}, ${DefaultOptions} } from "${optionsFilename}"
+import { ${BindingContextExportName}, ${DefaultOptions} } from "${optionsFilename}"
 `
       : `
 import { defineComponent as ${variables.defineComponent}, ShallowUnwrapRef as ${variables.ShallowUnwrapRef} } from "vue";
-import { ${OptionsExportName}, ${DefaultOptions} } from "${optionsFilename}";
+import { ${DefaultOptions} } from "${optionsFilename}";
 `;
 
     const helpers = context.isSetup
@@ -128,7 +124,7 @@ const ${accessors.ctx} = {
 }
 `
       : `
-const ${variables.ComponentOptions} = ${variables.isConstructor}(${OptionsExportName}) ? ${OptionsExportName} : ${variables.defineComponent}(${OptionsExportName});
+const ${variables.ComponentOptions} = ${variables.isConstructor}(${DefaultOptions}) ? ${DefaultOptions} : ${variables.defineComponent}(${DefaultOptions});
 const ${variables.component} = ${variables.ExtractInstance}(${variables.ComponentOptions})
 
 const ${accessors.ctx} = {

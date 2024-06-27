@@ -301,6 +301,7 @@ export class VueDocument implements TextDocument {
 
     const context = createContext(this.getText(), uriToPath(this.uri), {});
     this._context = context;
+    console.log("created context ", context.filename);
 
     const blockIds: Array<BlockId | string> = [];
     for (const block of context.blocks) {

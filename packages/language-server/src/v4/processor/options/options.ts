@@ -5,15 +5,22 @@ import {
   PrefixSTR,
   ParseContext,
   VerterASTBlock,
+  type TypeLocationImport,
+  LocationType,
 } from "@verter/core";
-import { parseSync, Statement, TsTypeAliasDeclaration } from "@swc/core";
+import {
+  ModuleDeclaration,
+  parseSync,
+  Statement,
+  TsTypeAliasDeclaration,
+} from "@swc/core";
 import {
   isFunctionType,
   TS_NODE_TYPES,
   walkIdentifiers,
 } from "@vue/compiler-core";
 import { walk } from "vue/compiler-sfc";
-import { getBlockFilename } from "../utils";
+import { getBlockFilename, importsLocationsToString } from "../utils";
 
 export const OptionsExportName = PrefixSTR("ComponentOptions");
 export const BindingContextExportName = PrefixSTR("BindingContext");
@@ -24,6 +31,8 @@ export const GenericOptions = PrefixSTR("GenericOptions");
 export function processOptions(context: ParseContext) {
   const filename = getBlockFilename("options", context);
   const s = context.s.clone();
+
+  const imports: TypeLocationImport[] = [];
 
   // remove unknown blocks
   const SUPPORTED_BLOCKS = new Set(["script"]);
@@ -115,10 +124,29 @@ export function processOptions(context: ParseContext) {
       ["withDefaults", PrefixSTR("props")],
       ["defineEmits", PrefixSTR("emits")],
       ["defineSlots", PrefixSTR("slots")],
+      // TODO defineOptions
     ];
     const foundMacros = new Set<string>();
     // overrides the macro name with the variable name
     const macroOverride = new Map<string, string>();
+
+    let defaultExportNode: Statement | null = null;
+    let hasDefaultExportObject = false;
+    let defaultExportBlock: VerterASTBlock | null = null;
+
+    // TODO fix node type
+    function processDefaultExport(node: any, block: VerterASTBlock) {
+      switch (node.type as any) {
+        case "ExportDefaultExpression":
+        case "ExportDefaultDeclaration": {
+          defaultExportBlock = block;
+          defaultExportNode = node;
+          if (node.declaration.type === "ObjectExpression") {
+            hasDefaultExportObject = true;
+          }
+        }
+      }
+    }
 
     const bindings = Array.from(_bindings);
     // move imports and exports to top
@@ -166,6 +194,7 @@ export function processOptions(context: ParseContext) {
           }
           case "ExportDefaultExpression":
           case "ExportDefaultDeclaration": {
+            processDefaultExport(it, scriptBlock);
             // if is options and generic do not move
             if (!isSetup && genericInfo) continue;
           }
@@ -345,8 +374,6 @@ export function processOptions(context: ParseContext) {
       }
     }
 
-    let hasDefaultExport = false;
-
     // remove block tags
     blocks.forEach((block) => {
       // check if the block was already handled
@@ -357,23 +384,55 @@ export function processOptions(context: ParseContext) {
 
       const defaultExport = block.block.loc.source.indexOf("export default");
       if (defaultExport >= 0) {
-        hasDefaultExport = true;
         const start = block.block.loc.start.offset + defaultExport;
         s.update(
           start,
           start + "export default".length,
-          `const ${DefaultOptions} =`
+          `export const ${DefaultOptions} =`
         );
-      } else {
-        s.prependRight(
-          block.block.loc.start.offset,
-          `const ${DefaultOptions} = {}\n`
-        );
+        if (block.ast) {
+          block.ast.body.forEach((it) => processDefaultExport(it, block));
+        }
       }
     });
-    if (!hasDefaultExport) {
-      s.append(`export const ${DefaultOptions} = {};\n`);
+
+    if (hasDefaultExportObject || !defaultExportNode) {
+      imports.push({
+        type: LocationType.Import,
+        from: "vue",
+        items: [
+          {
+            name: "defineComponent",
+            alias: PrefixSTR("defineComponent"),
+          },
+        ],
+      });
     }
+    // wrap the export default in defineComponent
+    if (hasDefaultExportObject) {
+      // @ts-expect-error not the correct type
+      const declarationNode = defaultExportNode.declaration as Statement;
+      const start =
+        // @ts-expect-error
+        declarationNode.start + defaultExportBlock.block.loc.start.offset;
+      const end =
+        // @ts-expect-error
+        declarationNode.end + defaultExportBlock.block.loc.start.offset;
+
+      s.prependLeft(start, `${PrefixSTR("defineComponent")}(`);
+      s.prependRight(end, `)`);
+    } else if (!defaultExportNode) {
+      s.append(
+        `export const ${DefaultOptions} = ${PrefixSTR(
+          "defineComponent"
+        )}({});\n`
+      );
+    }
+  }
+
+  const importsString = importsLocationsToString(imports);
+  if (importsString) {
+    s.prepend(importsString + "\n");
   }
 
   if (!scriptBlock.block.lang?.startsWith("ts")) {

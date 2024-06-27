@@ -1,4 +1,9 @@
-import type { ParseContext, ParseScriptContext } from "@verter/core";
+import type {
+  ParseContext,
+  ParseScriptContext,
+  TypeLocationImport,
+} from "@verter/core";
+import { ImportItem } from "@verter/core/dist/plugins";
 
 export type BlockType =
   | "bundle"
@@ -70,4 +75,50 @@ export function retrieveVueFileFromBlockUri(uri: string) {
     }
   }
   return uri;
+}
+
+export function importsLocationsToString(items: TypeLocationImport[]) {
+  const grouped: Record<string, ImportItem[]> = {};
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+
+    if (!grouped[item.from]) {
+      grouped[item.from] = [];
+    }
+
+    const list = grouped[item.from];
+
+    if (item.asType) {
+      // convert pure types to imports
+      list.push(...item.items.map((i) => ({ ...i, type: true })));
+    } else {
+      list.push(...item.items);
+    }
+  }
+
+  const imports: string[] = [];
+  for (const [key, value] of Object.entries(grouped)) {
+    const added = new Set<string>();
+    const toAdd: ImportItem[] = [];
+    for (const item of value) {
+      const name = item.alias ?? item.name;
+      // ignore duplicates
+      if (added.has(name)) {
+        continue;
+      }
+      toAdd.push(item);
+      added.add(name);
+    }
+    imports.push(
+      `import { ${toAdd
+        .map(
+          (i) =>
+            (i.type ? `type ${i.name}` : "") +
+            i.name +
+            (i.alias ? ` as ${i.alias}` : "")
+        )
+        .join(", ")} } from "${key}";`
+    );
+  }
+  return imports.join("\n");
 }

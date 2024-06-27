@@ -1,6 +1,11 @@
 export * from "./builder.js";
 
-export type { ParseScriptContext, LocationByType } from "./plugins/index.js";
+export type {
+  ParseScriptContext,
+  LocationByType,
+  TypeLocationImport,
+  ImportItem,
+} from "./plugins/index.js";
 export { LocationType } from "./plugins/index.js";
 export { TemplateBuilder, getAccessors } from "./plugins/index.js";
 

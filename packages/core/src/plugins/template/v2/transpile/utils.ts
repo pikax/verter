@@ -145,7 +145,7 @@ export function appendCtx(
         ? node.content
         : node.identifiers[0];
     if (!content) {
-      debugger;
+      console.log('no content', node)
     }
 
     start = node.loc.start.offset;

@@ -137,7 +137,7 @@ describe("processor options", () => {
         );
 
         expect(result.content).toContain(
-          `export const ___VERTER___default = {};`
+          `export const ___VERTER___default = ___VERTER___defineComponent({});`
         );
 
         expectFindStringWithMap("const a = ref();", result);
@@ -190,25 +190,12 @@ describe("processor options", () => {
           `<script setup lang="ts">import { ref, Ref } from 'vue';\nconst a = ref();\nawait Promise.resolve()</script><script lang="ts">export default { specialOptions: true }</script><template><div>test</div></template>`
         );
 
-        expect(result.content).toMatchInlineSnapshot(`
-          "import { ref, Ref } from 'vue';
-          export async function ___VERTER___BindingContext() {
-
-          const a = ref();
-          await Promise.resolve()
-          return {} as {ref: typeof ref, Ref: typeof Ref, a: typeof a
-          } 
-
-          }
-          const ___VERTER___default = { specialOptions: true }"
-        `);
-
         expect(result.content).toContain(`const a = ref();`);
         expect(result.content).toContain(
           "export async function ___VERTER___BindingContext() {"
         );
         expect(result.content).toContain(
-          "const ___VERTER___default = { specialOptions: true }"
+          "export const ___VERTER___default = ___VERTER___defineComponent({ specialOptions: true })"
         );
         expect(result.content).not.toContain(
           "export default { specialOptions: true }"
@@ -323,7 +310,7 @@ describe("processor options", () => {
           "export async function ___VERTER___BindingContext() {"
         );
         expect(result.content).toContain(
-          "const ___VERTER___default = { specialOptions: true }"
+          "export const ___VERTER___default = ___VERTER___defineComponent({ specialOptions: true })"
         );
         expect(result.content).not.toContain(`__VERTER__isDefineComponent`);
         expect(result.content).not.toContain(
@@ -369,7 +356,7 @@ describe("processor options", () => {
       it("simple", () => {
         const result = process(`<script lang="ts">export default {}</script>`);
 
-        expect(result.content).toContain("const ___VERTER___default = {}");
+        expect(result.content).toContain("export const ___VERTER___default = ___VERTER___defineComponent({})");
         expect(result.content).toContain(
           "export function ___VERTER___BindingContext() { return {} }"
         );
@@ -384,7 +371,7 @@ describe("processor options", () => {
           "export function ___VERTER___BindingContext<T>() {"
         );
         expect(result.content).toContain(
-          "return { data(){ return { a: {} as T }}}"
+          "return ___VERTER___defineComponent({ data(){ return { a: {} as T }}})"
         );
       });
     });
@@ -393,9 +380,52 @@ describe("processor options", () => {
       it("simple", () => {
         const result = process(`<script>export default {}</script>`);
 
-        expect(result.content).toContain("const ___VERTER___default = {}");
+        expect(result.content).toContain(
+          'import { defineComponent as ___VERTER___defineComponent } from "vue";'
+        );
+        expect(result.content).toContain(
+          "const ___VERTER___default = ___VERTER___defineComponent({})"
+        );
         expect(result.content).toContain(
           "export function ___VERTER___BindingContext() { return {} }"
+        );
+      });
+
+      it("empty", () => {
+        const result = process(`<template><div></div></template>`);
+
+        expect(result.content).toContain(
+          'import { defineComponent as ___VERTER___defineComponent } from "vue";'
+        );
+        expect(result.content).toContain(
+          "const ___VERTER___default = ___VERTER___defineComponent({})"
+        );
+        expect(result.content).toContain(
+          "export function ___VERTER___BindingContext() { return {} }"
+        );
+      });
+
+      it("with defineComponent", () => {
+        const result = process(
+          `<script>export default defineComponent({name: 'test'})</script>`
+        );
+        expect(result.content).toContain(
+          "export const ___VERTER___default = defineComponent({name: 'test'})"
+        );
+      });
+
+      it("not change if is a variable", () => {
+        const result = process(
+          `<script>
+const Comp = defineComponent({name: 'test'})
+export default Comp;</script>`
+        );
+        expect(result.content).toContain(
+          "const Comp = defineComponent({name: 'test'})"
+        );
+
+        expect(result.content).toContain(
+          "export const ___VERTER___default = Comp"
         );
       });
     });
