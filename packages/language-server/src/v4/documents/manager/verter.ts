@@ -137,20 +137,25 @@ export function getTypescriptService(
     tsconfigOptions = {
       ...parsedConfig.options,
       // allowArbitraryExtensions: true,
-      allowJs: true,
-      noImplicitAny: false,
-      noImplicitThis: false,
-      noImplicitReturns: false,
+      // allowJs: true,
+      // noImplicitAny: false,
+      // noImplicitThis: false,
+      // noImplicitReturns: false,
     };
+    // this is quite damaging for types I reckon
+    // when the jsxImportSource is set to vue
+    // it will prevent the v-slots patch from working
+    delete tsconfigOptions.jsxImportSource;
   }
 
   const compilerOptions: ts.CompilerOptions = {
     ...tsconfigOptions,
     jsx: ts.JsxEmit.Preserve,
     target: ts.ScriptTarget.ESNext,
-    module: ts.ModuleKind.ESNext,
-    alwaysStrict: true,
-    noImplicitAny: true,
+    module: ts.ModuleKind.NodeNext,
+    // jsxFactory: "vue",
+    // alwaysStrict: true,
+    // noImplicitAny: true,
   };
 
   const tsSystem = ts.sys;

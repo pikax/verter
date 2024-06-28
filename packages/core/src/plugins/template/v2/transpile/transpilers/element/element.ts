@@ -137,8 +137,8 @@ export default createTranspiler(NodeTypes.ELEMENT, {
             tagBlockEnd,
             withNarrowCondition(
               [
-                " v-slot={(ComponentInstance)=>{",
-                "const $slots = ComponentInstance.$slots;",
+                ` v-slot={(${context.accessors.componentInstance}): any=>{`,
+                `const $slots = ${context.accessors.componentInstance}.$slots;`,
               ],
               context
             )

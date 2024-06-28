@@ -57,6 +57,11 @@ export type TranspileContext = {
      * helper to call events
      */
     eventCb: string;
+
+    /**
+     * Used as the accessor for v-slot usages
+     */
+    componentInstance: string;
   };
 
   conditions: {

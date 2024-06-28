@@ -76,6 +76,8 @@ export function processRender(context: ParseContext) {
       isConstructor: PrefixSTR("isConstructor"),
       UnionToIntersection: PrefixSTR("UnionToIntersection"),
       ExtractInstance: PrefixSTR("ExtractInstance"),
+
+      GlobalComponents: PrefixSTR("GlobalComponents"),
     };
 
     const vueImports: Array<[string, string, boolean?]> = [
@@ -84,17 +86,28 @@ export function processRender(context: ParseContext) {
       ["normalizeStyle", accessors.normalizeStyle],
       ["defineComponent", variables.defineComponent],
       ["ShallowUnwrapRef", variables.ShallowUnwrapRef, true],
+      ["GlobalComponents", variables.GlobalComponents, true],
     ];
 
+    const globalPatch = getGlobalComponentsStr();
     const imports = context.isSetup
-      ? `import { ${vueImports.map(
+      ? `
+import 'vue/jsx';
+import { ${vueImports.map(
           ([i, n, t]) => `${t ? "type " : ""}${i} as ${n}`
         )} } from "vue";
-import { ${BindingContextExportName}, ${DefaultOptions} } from "${optionsFilename}"
+import { ${BindingContextExportName}, ${DefaultOptions} } from "${optionsFilename}";
+
+${globalPatch}
 `
-      : `
-import { defineComponent as ${variables.defineComponent}, ShallowUnwrapRef as ${variables.ShallowUnwrapRef} } from "vue";
+      : `import 'vue/jsx';
+// import { defineComponent as ${variables.defineComponent}, ShallowUnwrapRef as ${variables.ShallowUnwrapRef} } from "vue";
+import { ${vueImports.map(
+          ([i, n, t]) => `${t ? "type " : ""}${i} as ${n}`
+        )} } from "vue";
 import { ${DefaultOptions} } from "${optionsFilename}";
+
+${globalPatch}
 `;
 
     const helpers = context.isSetup
@@ -139,6 +152,7 @@ const ${accessors.ctx} = {
 const ${accessors.comp} =  {
   //...({} as ExtractRenderComponents<typeof ___VERTER___ctx>),
   ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+  ...({} as ${variables.GlobalComponents}),
   ...___VERTER___ctx
 }
 `
@@ -153,6 +167,7 @@ const ${accessors.ctx} = {
 const ${accessors.comp} =  {
   //...({} as ExtractRenderComponents<typeof ___VERTER___ctx>),
   ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+  ...({} as ${variables.GlobalComponents}),
   ...___VERTER___ctx
 }
 `;
@@ -242,4 +257,47 @@ const ${accessors.comp} =  {
     s,
     content: s.toString(),
   };
+}
+
+function getGlobalComponentsStr() {
+  const toImport = [
+    "Suspense",
+    "KeepAlive",
+    "Transition",
+    "TransitionGroup",
+    "Teleport",
+  ].map((x) => [x, PrefixSTR(x)]);
+  //   return toImport
+  //     .map(([i, n]) => `import { ${i} as ${n} } from "vue";`)
+  //     .join("\n");
+  const importStr = `import type {${toImport.map(
+    ([name, prefix]) => `${name} as ${prefix}`
+  )} } from "vue";`;
+
+  const globalDeclaration = `declare module 'vue' {
+  interface GlobalComponents {
+${toImport.map(([name, prefix]) => `${name}: typeof ${prefix};`).join("\n")}
+  }
+
+  interface HTMLAttributes {
+    'v-slot'?: {
+      default: () => JSX.Element
+    }
+  }
+}
+
+// patching elements
+declare global {
+  namespace JSX {
+    export interface IntrinsicClassAttributes<T> {
+      'v-slot'?: (T extends { $slots: infer S } ? S : undefined) | ((c: T) => T extends { $slots: infer S } ? S : undefined)
+    }
+  }
+}
+  
+declare function ___VERTER_renderSlot<T extends Array<any>>(slot: (...args: T) => any, cb: (...cb: T) => any): void;
+declare function ___VERTER___template(): JSX.Element;
+`;
+
+  return `${importStr}\n${globalDeclaration}`;
 }

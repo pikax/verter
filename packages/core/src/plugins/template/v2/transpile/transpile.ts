@@ -29,6 +29,7 @@ const DefaultAccessors = {
   normalizeStyle: PrefixSTR("normalizeStyle", DEFAULT_PREFIX),
   renderList: PrefixSTR("renderList", DEFAULT_PREFIX),
   eventCb: PrefixSTR("eventCb", DEFAULT_PREFIX),
+  componentInstance: PrefixSTR("componentInstance", DEFAULT_PREFIX),
 };
 
 export function getAccessors(
@@ -46,6 +47,7 @@ export function getAccessors(
         normalizeStyle: PrefixSTR("normalizeStyle", prefix),
         renderList: PrefixSTR("renderList", prefix),
         eventCb: PrefixSTR("eventCb", prefix),
+        componentInstance: PrefixSTR("componentInstance", prefix),
       };
 }
 
