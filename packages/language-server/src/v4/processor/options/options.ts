@@ -267,9 +267,9 @@ export function processOptions(context: ParseContext) {
         const extraBindings = [propsBinding, emitMacro].filter(Boolean);
         s.appendRight(
           scriptBlock.block.loc.end.offset,
-          `\nreturn {} as {${typeofBindings}\n} ${
+          `\nreturn /*##___VERTER_BINDING_RETURN___##*/{} as {${typeofBindings}\n} ${
             extraBindings.length > 0 ? `& ${extraBindings.join(" & ")}` : ""
-          }\n`
+          } /*/##___VERTER_BINDING_RETURN___##*/\n`
         );
       } else {
         // if not typescript we need to the types in JSDoc to make sure the types are correct
@@ -282,7 +282,9 @@ export function processOptions(context: ParseContext) {
 
         s.appendRight(
           scriptBlock.block.loc.end.offset,
-          `\nreturn {\n${bindings.join(", ")}\n}\n`
+          `\nreturn /*##___VERTER_BINDING_RETURN___##*/{\n${bindings.join(
+            ", "
+          )}\n}/*/##___VERTER_BINDING_RETURN___##*/\n`
         );
       }
 
@@ -350,7 +352,7 @@ export function processOptions(context: ParseContext) {
         }
 
         s.append(
-          `\nexport function ${BindingContextExportName}() { return {} }\n`
+          `\nexport function ${BindingContextExportName}() { return /*##___VERTER_BINDING_RETURN___##*/{}/*##/___VERTER_BINDING_RETURN___##*/ }\n`
         );
       }
     }
@@ -416,11 +418,13 @@ export function processOptions(context: ParseContext) {
     s.prepend(importsString + "\n");
   }
 
-  if (!scriptBlock.block.lang?.startsWith("ts")) {
-    s.prepend("// @ts-nocheck\n");
-  }
+  // if (!scriptBlock.block.lang?.startsWith("ts")) {
+  //   s.prepend("// @ts-nocheck\n");
+  // }
 
   // s.append("const ____VERTER_COMP_OPTION__COMPILED = defineComponent({})");
+
+  const content = s.toString();
 
   return {
     languageId:
@@ -436,7 +440,11 @@ export function processOptions(context: ParseContext) {
     },
 
     s,
-    content: s.toString(),
+    content,
+    bindingReturn: {
+      start: content.indexOf("/*##___VERTER_BINDING_RETURN___##*/"),
+      end: content.indexOf("/*/##___VERTER_BINDING_RETURN___##*/"),
+    },
   };
 }
 

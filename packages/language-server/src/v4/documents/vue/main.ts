@@ -17,6 +17,7 @@ import {
   originalRangeFor,
 } from "../../utils";
 import {
+  isVerterVirtual,
   pathToUri,
   pathToVerterVirtual,
   uriToPath,
@@ -38,7 +39,7 @@ const processors = {
     process: processBundle,
   },
   script: {
-    uri: (parent) => parent + ".options.ts",
+    uri: (parent) => parent + ".options.js",
     process: processOptions,
   },
   template: {
@@ -52,6 +53,7 @@ const processors = {
       return {
         s: context.s,
         content: `/* TODO FIX THIS FILE! */\nexport default {}`,
+        filename: context.filename + ".wip.style.css",
       } as any;
     },
   },
@@ -263,17 +265,27 @@ export class VueDocument implements TextDocument {
 
   getTextFromFile(uri: string, range?: Range) {
     if (isVueSubDocument(uri)) {
-      return this.getDocument(uri)?.getText(range);
+      let subDoc = this.getDocument(uri);
+
+      return subDoc.getText(range);
     } else {
       return this._doc.getText(range);
     }
   }
 
   getDocument(uri: string): VueSubDocument | undefined {
+    if (!isVerterVirtual(uri)) {
+      uri = uriToVerterVirtual(uri);
+    }
+
     if (uri === this.uri) {
       // todo should return the bundle file
     }
 
+    // TODO probably check if the URI is part of this parent
+    if (uri.endsWith(".options.ts") || uri.endsWith(".options.js")) {
+      return this.subDocuments.script;
+    }
     for (const doc of Object.values(this.subDocuments)) {
       if (doc.uri === uri) {
         return doc;
@@ -354,7 +366,7 @@ export class VueSubDocument implements TextDocument {
 
     this._doc = TextDocument.create(
       virtualUri,
-      "ts",
+      processorFilename.endsWith(".tsx") ? "tsx" : "typescript",
       -1,
       "// PLACEHOLDER TO BE POPULATED BY VUE DOCUMENT\n"
     );
@@ -364,17 +376,27 @@ export class VueSubDocument implements TextDocument {
     return this._blockId;
   }
 
+  get extension() {
+    switch (this.languageId) {
+      case "javascript":
+        return ".js";
+      case "jsx":
+        return ".jsx";
+      case "typescript":
+        return ".ts";
+      case "tsx":
+        return ".tsx";
+      case "css":
+        return ".css";
+    }
+
+    return ".verter.unknown";
+  }
   get languageId() {
     return this._doc.languageId;
-    return this._lastProcessedResult?.languageId ?? this._doc.languageId;
   }
   get uri() {
-    return uriToVerterVirtual(this._doc.uri);
-
     // todo this should be the virtual uri
-    if (this._lastProcessedResult?.filename) {
-      return pathToVerterVirtual(this._lastProcessedResult.filename);
-    }
     return this._doc.uri;
   }
   get version() {
@@ -389,6 +411,18 @@ export class VueSubDocument implements TextDocument {
   private _lastProcessedResult:
     | ReturnType<ContextProcessor["process"]>
     | undefined;
+
+  isInsideBindingReturn(offset: number) {
+    if ("bindingReturn" in this._lastProcessedResult) {
+      return (
+        // @ts-expect-error TODO type
+        this._lastProcessedResult.bindingReturn.start <= offset &&
+        // @ts-expect-error TODO type
+        this._lastProcessedResult.bindingReturn.end >= offset
+      );
+    }
+    return false;
+  }
 
   getText(range?: Range): string {
     this.syncVersion();
@@ -491,25 +525,37 @@ export class VueSubDocument implements TextDocument {
 
   process() {
     try {
-      const { s } = (this._lastProcessedResult = this._processor.process(
-        this._parent.context
-      ));
+      const { s, filename, languageId, content } = (this._lastProcessedResult =
+        this._processor.process(this._parent.context));
 
       const map = s.generateMap({ hires: true, includeContent: true });
       this._sourceMapConsumer = new SourceMapConsumer(map as any);
-      TextDocument.update(
-        this._doc,
-        [
-          {
-            range: {
-              start: this._doc.positionAt(0),
-              end: this._doc.positionAt(Number.MAX_SAFE_INTEGER),
+
+      const uri = pathToVerterVirtual(filename);
+
+      // if the language changes we need to update
+      if (languageId !== this._doc.languageId) {
+        this._doc = TextDocument.create(
+          uri,
+          languageId,
+          this._doc.version + 1,
+          content
+        );
+      } else {
+        TextDocument.update(
+          this._doc,
+          [
+            {
+              range: {
+                start: this._doc.positionAt(0),
+                end: this._doc.positionAt(Number.MAX_SAFE_INTEGER),
+              },
+              text: this._lastProcessedResult.content,
             },
-            text: this._lastProcessedResult.content,
-          },
-        ],
-        this._doc.version
-      );
+          ],
+          this._doc.version
+        );
+      }
     } catch (e) {
       console.error(e);
       debugger;

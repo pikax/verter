@@ -3,13 +3,18 @@ import {
   CompletionItem,
   CompletionItemKind,
   CompletionTriggerKind,
+  Definition,
+  DefinitionLink,
   type Diagnostic,
   DiagnosticSeverity,
   DiagnosticTag,
   InsertTextFormat,
+  Location,
   Range,
 } from "vscode-languageserver/node";
 import { VueSubDocument } from "../documents";
+import { DocumentManager, isVueDocument } from "../documents/manager";
+import { pathToUri } from "../documents/utils";
 
 export function mapCompletion(
   tsCompletion: ts.CompletionEntry,
@@ -38,6 +43,72 @@ export function mapCompletion(
   // todo add extra or process completion
 
   return item;
+}
+
+export function mapReferenceToLocation(
+  entry: ts.ReferenceEntry,
+  documentManager: DocumentManager
+): Location {
+  const filename = entry.originalFileName ?? entry.fileName;
+
+  const doc = documentManager.getDocument(filename);
+
+  let span = Range.create(
+    doc.positionAt(entry.textSpan.start),
+    doc.positionAt(entry.textSpan.start + entry.textSpan.length)
+  );
+
+  if (isVueDocument(doc)) {
+    const subDoc = doc.getDocument(filename);
+
+    span = mapTextSpanToRange(entry.textSpan, subDoc);
+  }
+
+  return Location.create(pathToUri(doc.uri), span);
+}
+
+export function mapDefinitionInfo(
+  info: ts.DefinitionInfo,
+  documentManager: DocumentManager
+): (DefinitionLink & { key: string }) | undefined {
+  const filename = info.fileName;
+
+  const doc = documentManager.getDocument(filename);
+
+  let contextRange = info.contextSpan
+    ? Range.create(
+        doc.positionAt(info.contextSpan.start),
+        doc.positionAt(info.contextSpan.start + info.contextSpan.length)
+      )
+    : undefined;
+
+  let textSpan = Range.create(
+    doc.positionAt(info.textSpan.start),
+    doc.positionAt(info.textSpan.start + info.textSpan.length)
+  );
+
+  if (isVueDocument(doc)) {
+    const subDoc = doc.getDocument(filename);
+
+    if (info.contextSpan) {
+      contextRange = mapTextSpanToRange(info.contextSpan, subDoc);
+    }
+
+    textSpan = mapTextSpanToRange(info.textSpan, subDoc);
+  }
+  if (!textSpan || !contextRange) {
+    return undefined;
+  }
+  const targetUri = pathToUri(doc.uri);
+
+  return {
+    key: `${targetUri}:${textSpan.start.line}:${textSpan.start.character}`,
+
+    targetUri,
+    targetRange: textSpan,
+    targetSelectionRange: contextRange ?? textSpan,
+    originSelectionRange: contextRange ?? textSpan,
+  };
 }
 
 export function itemToMarkdown(item: ts.CompletionEntryDetails | ts.QuickInfo) {
@@ -145,7 +216,7 @@ function mapTextSpanToRange(
 ): Range | undefined {
   const start = document.toOriginalPositionFromOffset(span.start);
   const end = document.toOriginalPositionFromOffset(span.start + span.length);
-  if (start.line - 1 || end.line - 1) {
+  if (start.line === -1 || end.line === -1) {
     return undefined;
   }
   return Range.create(start, end);

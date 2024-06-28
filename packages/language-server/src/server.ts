@@ -29,7 +29,9 @@ import {
   formatQuickInfo,
   itemToMarkdown,
   mapCompletion,
+  mapDefinitionInfo,
   mapDiagnostic,
+  mapReferenceToLocation,
 } from "./v4/helpers/typescript.js";
 
 export interface LsConnectionOption {
@@ -93,6 +95,7 @@ export function startServer(options: LsConnectionOption = {}) {
           interFileDependencies: true,
           workspaceDiagnostics: false,
         },
+        referencesProvider: true,
         typeDefinitionProvider: true,
         declarationProvider: true,
         workspace: {
@@ -302,6 +305,137 @@ export function startServer(options: LsConnectionOption = {}) {
     return item;
   });
 
+  connection.onReferences((params) => {
+    const uri = params.textDocument.uri;
+
+    const tsService = manager.getTsService(uri);
+    if (!tsService) {
+      return undefined;
+    }
+
+    let doc = documentManager.getDocument(uri);
+    if (!doc) {
+      return undefined;
+    }
+
+    if (!isVueDocument(doc)) {
+      return undefined;
+    }
+
+    const subDoc = doc.getDocumentForPosition(params.position);
+    const offset = subDoc.toGeneratedOffsetFromPosition(params.position);
+    const references = tsService.getReferencesAtPosition(subDoc.uri, offset);
+    if (!references) return undefined;
+    return references.map((x) => mapReferenceToLocation(x, documentManager));
+  });
+
+  connection.onTypeDefinition((params) => {
+    const uri = params.textDocument.uri;
+    const tsService = manager.getTsService(uri);
+    if (!tsService) {
+      return undefined;
+    }
+    let doc = documentManager.getDocument(uri);
+    if (!doc) {
+      return undefined;
+    }
+
+    if (!isVueDocument(doc)) {
+      return undefined;
+    }
+
+    const subDoc = doc.getDocumentForPosition(params.position);
+    const offset = subDoc.toGeneratedOffsetFromPosition(params.position);
+
+    const definition = tsService.getTypeDefinitionAtPosition(
+      subDoc.uri,
+      offset
+    );
+    if (!definition) {
+      return null;
+    }
+
+    return definition.map((x) => mapDefinitionInfo(x, documentManager));
+  });
+
+  connection.onDefinition((params) => {
+    const uri = params.textDocument.uri;
+    const tsService = manager.getTsService(uri);
+    if (!tsService) {
+      return undefined;
+    }
+    let doc = documentManager.getDocument(uri);
+    if (!doc) {
+      return undefined;
+    }
+
+    if (!isVueDocument(doc)) {
+      return undefined;
+    }
+
+    const subDoc = doc.getDocumentForPosition(params.position);
+    const offset = subDoc.toGeneratedOffsetFromPosition(params.position);
+
+    const definition = tsService.getDefinitionAtPosition(subDoc.uri, offset);
+    if (!definition) {
+      return null;
+    }
+
+    const toReturn: LocationLink[] = [];
+    const visited = new Set<string>();
+
+    for (const def of definition) {
+      /**
+       * On the template if we CTRL+CLICK on a variable, it
+       * will return the definition for the BindingContext return position
+       * but we want the declaration of the variable, so we redirect to it
+       */
+      if (
+        subDoc.blockId === "template" &&
+        def.fileName.endsWith(".options.ts")
+      ) {
+        const optionsDoc = doc.getDocument(def.fileName);
+        if (!optionsDoc) {
+          console.warn("not in the vue file?? ", def.fileName, doc.uri);
+          continue;
+        }
+        if (optionsDoc.isInsideBindingReturn(def.textSpan.start)) {
+          const properDefinitions = tsService.getDefinitionAtPosition(
+            optionsDoc.uri,
+            // if contextSpan it's mostlikely pointing to the typeof return
+            def.contextSpan
+              ? def.contextSpan.start + def.contextSpan.length - 2
+              : def.textSpan.start
+          );
+
+          for (const properDef of properDefinitions) {
+            const definition = mapDefinitionInfo(properDef, documentManager);
+            if (!definition) {
+              continue;
+            }
+            if (visited.has(definition.key)) {
+              continue;
+            }
+            visited.add(definition.key);
+            toReturn.push(definition);
+          }
+        }
+      }
+
+      const definition = mapDefinitionInfo(def, documentManager);
+      if (!definition) {
+        continue;
+      }
+      if (visited.has(definition.key)) {
+        continue;
+      }
+      visited.add(definition.key);
+      toReturn.push(definition);
+    }
+
+    return toReturn;
+  });
+
   connection.onHover((params) => {
     console.log("on hover", params);
     const uri = params.textDocument.uri;
@@ -358,7 +492,7 @@ export function startServer(options: LsConnectionOption = {}) {
     try {
       let lastSend = Date.now();
       for (const subDocument of Object.values(document.subDocuments)) {
-        if (!subDocument.uri.endsWith(".bundle.ts")) {
+        if (subDocument.uri.endsWith(".bundle.ts")) {
           continue;
         }
 
@@ -410,19 +544,6 @@ export function startServer(options: LsConnectionOption = {}) {
           subDocument.uri,
           document.version
         );
-
-        if (diagnostics.length === 0) {
-          const program = tsService.getProgram();
-          const sourceFile = program?.getSourceFile(subDocument.uri);
-          const fullText = sourceFile.getFullText();
-          const text = sourceFile.getText();
-
-          console.log(
-            "no diagnostics",
-            sourceFile?.fileName,
-            sourceFile?.isDeclarationFile
-          );
-        }
         lastSend = Date.now();
       }
 

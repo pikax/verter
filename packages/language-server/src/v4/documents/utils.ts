@@ -40,6 +40,9 @@ export function vueToBundle(uri: string) {
 }
 
 export function pathToUri(filepath: string) {
+  if (filepath.startsWith("file:///")) {
+    return filepath;
+  }
   return URI.file(filepath).toString();
 }
 export function pathToVerterVirtual(filepath: string) {

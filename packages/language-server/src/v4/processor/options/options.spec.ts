@@ -440,7 +440,7 @@ describe("processor options", () => {
           "export const ___VERTER___default = ___VERTER___defineComponent({})"
         );
         expect(result.content).toContain(
-          "export function ___VERTER___BindingContext() { return {} }"
+          "export function ___VERTER___BindingContext() { return /*##___VERTER_BINDING_RETURN___##*/{}/*##/___VERTER_BINDING_RETURN___##*/ }"
         );
       });
 
@@ -469,7 +469,7 @@ describe("processor options", () => {
           "const ___VERTER___default = ___VERTER___defineComponent({})"
         );
         expect(result.content).toContain(
-          "export function ___VERTER___BindingContext() { return {} }"
+          "export function ___VERTER___BindingContext() { return /*##___VERTER_BINDING_RETURN___##*/{}/*##/___VERTER_BINDING_RETURN___##*/ }"
         );
       });
 
@@ -483,7 +483,7 @@ describe("processor options", () => {
           "const ___VERTER___default = ___VERTER___defineComponent({})"
         );
         expect(result.content).toContain(
-          "export function ___VERTER___BindingContext() { return {} }"
+          "export function ___VERTER___BindingContext() { return /*##___VERTER_BINDING_RETURN___##*/{}/*##/___VERTER_BINDING_RETURN___##*/ }"
         );
       });
 

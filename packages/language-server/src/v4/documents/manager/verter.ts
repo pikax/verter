@@ -193,7 +193,8 @@ export function getTypescriptService(
         filepath = urlToPath(filepath)!;
       }
       if (filepath.endsWith(".vue") || filepath.endsWith(".vue.bundle.ts")) {
-        debugger;6
+        debugger;
+        6;
       }
       try {
         return ts.sys.readFile(filepath, encoding);
@@ -228,7 +229,13 @@ export function getTypescriptService(
       );
     },
     getScriptKind: (fileName: string) => {
-      const ext = fileName.slice(fileName.lastIndexOf("."));
+      let ext = fileName.slice(fileName.lastIndexOf("."));
+      if (fileName.endsWith(".vue.options.ts")) {
+        const doc = documentManager.getDocument(fileName);
+        if (isVueDocument(doc)) {
+          ext = doc.getDocument(fileName).extension;
+        }
+      }
       switch (ext.toLowerCase()) {
         case ts.Extension.Js:
           return ts.ScriptKind.JS;
