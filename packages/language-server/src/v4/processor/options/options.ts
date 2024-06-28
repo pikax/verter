@@ -96,24 +96,9 @@ export function processOptions(context: ParseContext) {
       });
     }
 
-    // populateBindings(parsedAst.ast);
-
-    // walk(parsedAst.ast, {
-    //   enter(node) {
-    //     if (isFunctionType(node)) {
-    //       this.skip();
-    //     }
-
-    //     if (node.type === "AwaitExpression") {
-    //       isAsync = true;
-    //       this.skip();
-    //     }
-    //   },
-    // });
     // extra script blocks
     {
       for (const b of blocks) {
-        // if (b === scriptBlock) continue;
         if (!b.ast) continue;
         populateBindings(b.ast);
       }
@@ -215,14 +200,20 @@ export function processOptions(context: ParseContext) {
     const propMacro =
       foundMacros.has("defineProps") || foundMacros.has("withDefaults");
     const propsBinding = propMacro
-      ? `${
-          macroOverride.get("defineProps") ?? macroOverride.get("withDefaults")
-            ? `typeof ${
-                macroOverride.get("defineProps") ??
-                macroOverride.get("withDefaults")
-              }`
-            : "typeof " + vueMacros.find(([n]) => n === "defineProps")[1]
-        }`
+      ? setupMacroReturn(
+          "defineProps",
+          macroOverride.get("defineProps") ??
+            macroOverride.get("withDefaults") ??
+            vueMacros.find(([n]) => n === "defineProps")[1]
+        )
+      : "";
+
+    const emitMacro = foundMacros.has("defineEmits")
+      ? setupMacroReturn(
+          "defineEmits",
+          macroOverride.get("defineEmits") ??
+            vueMacros.find(([n]) => n === "defineEmits")[1]
+        )
       : "";
 
     // do work for <script ... >
@@ -273,10 +264,11 @@ export function processOptions(context: ParseContext) {
         .join(", ");
 
       if (isTypescript) {
+        const extraBindings = [propsBinding, emitMacro].filter(Boolean);
         s.appendRight(
           scriptBlock.block.loc.end.offset,
           `\nreturn {} as {${typeofBindings}\n} ${
-            propsBinding ? `& ${propsBinding}` : ""
+            extraBindings.length > 0 ? `& ${extraBindings.join(" & ")}` : ""
           }\n`
         );
       } else {
@@ -476,4 +468,27 @@ export function checkForSetupMethodCalls(name: string, statement: Statement) {
     }
   }
   return null;
+}
+
+type VueSetupMacros =
+  | "defineProps"
+  | "withDefaults"
+  | "defineEmits"
+  | "defineSlots"
+  | "defineOptions";
+
+function setupMacroReturn(macro: VueSetupMacros, name: string) {
+  switch (macro) {
+    case "defineProps":
+    case "withDefaults":
+      return `typeof ${name}`;
+    case "defineEmits":
+      return `{ $emit: typeof ${name} }`;
+    case "defineSlots":
+      return `{ $slots: typeof ${name} }`;
+    case "defineOptions":
+      // TODO implement, not sure what to return here
+      return "";
+    // return `typeof ${name}`;
+  }
 }

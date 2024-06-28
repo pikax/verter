@@ -205,6 +205,86 @@ describe("processor options", () => {
         expectFindStringWithMap(`import { ref, Ref } from 'vue';`, result);
       });
 
+      describe("return BindingContext", () => {
+        describe("props", () => {
+          it("not have props", () => {
+            const result = process(
+              `<script setup lang='ts'>const test = { a: 1, b: 1}</script>`
+            );
+
+            expect(result.content).toContain("{test: typeof test\n}");
+            expect(result.content).not.toContain("} & typeof");
+          });
+
+          it("should have props variable", () => {
+            const result = process(
+              `<script setup lang='ts'>const bespokProps = defineProps({});\nconst test = { a: 1, b: 1}</script>`
+            );
+
+            expect(result.content).toContain(
+              "{bespokProps: typeof bespokProps, test: typeof test\n} & typeof bespokProps"
+            );
+          });
+
+          it("should add implicitly add a variable to props", () => {
+            const result = process(
+              `<script setup lang='ts'>defineProps({});\nconst test = { a: 1, b: 1}</script>`
+            );
+
+            expect(result.content).toContain(
+              "{test: typeof test\n} & typeof ___VERTER___props"
+            );
+          });
+        });
+
+        describe("emits", () => {
+          it("not have emits", () => {
+            const result = process(
+              `<script setup lang='ts'>const test = { a: 1, b: 1}</script>`
+            );
+
+            expect(result.content).toContain("{test: typeof test\n}");
+            expect(result.content).not.toContain("} & typeof");
+          });
+
+          it("should have emits variable", () => {
+            const result = process(
+              `<script setup lang='ts'>const bespokeEmits = defineEmits([]);\nconst test = { a: 1, b: 1}</script>`
+            );
+
+            expect(result.content).toContain(
+              "{bespokeEmits: typeof bespokeEmits, test: typeof test\n} & { $emit: typeof bespokeEmits }"
+            );
+          });
+
+          it("should add implicitly add a variable to emits", () => {
+            const result = process(
+              `<script setup lang='ts'>defineEmits([]);\nconst test = { a: 1, b: 1}</script>`
+            );
+
+            expect(result.content).toContain(
+              "{test: typeof test\n} & { $emit: typeof ___VERTER___emits }"
+            );
+          });
+        });
+
+        describe.todo("slots", () => {
+          it.todo("not have slots", () => {});
+
+          it.todo("should have slots variable", () => {});
+
+          it.todo("should add implicitly add a variable to slots", () => {});
+        });
+
+        describe.todo("expose", () => {
+          it.todo("TODO");
+        });
+
+        describe.todo("model", () => {
+          it.todo("TODO");
+        });
+      });
+
       describe("identifiers", () => {
         it("object properties", () => {
           const result = process(
@@ -356,7 +436,9 @@ describe("processor options", () => {
       it("simple", () => {
         const result = process(`<script lang="ts">export default {}</script>`);
 
-        expect(result.content).toContain("export const ___VERTER___default = ___VERTER___defineComponent({})");
+        expect(result.content).toContain(
+          "export const ___VERTER___default = ___VERTER___defineComponent({})"
+        );
         expect(result.content).toContain(
           "export function ___VERTER___BindingContext() { return {} }"
         );

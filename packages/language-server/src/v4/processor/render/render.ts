@@ -98,19 +98,31 @@ import { ${DefaultOptions} } from "${optionsFilename}";
 `;
 
     const helpers = context.isSetup
-      ? ``
+      ? `
+      
+// Helper to retrieve slots definitions
+declare function ___VERTER_extract_Slots<CompSlots>(comp: { new(): { $slots: CompSlots } }, slots?: undefined): CompSlots;
+declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string, any> = {}>(comp: { new(): { $slots: CompSlots } }, slots: Slots): Slots;
+
+declare function ___VERTER___SLOT_CALLBACK<T>(slot: (...args: T[]) => any): (cb: ((...args: T[]) => any))=>void;
+declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event: TArgs[0],) => any>(event: TArgs, cb: R): R;`
       : `
 declare function ${variables.isConstructor}<T extends { new(): Record<string, any> }>(o: T | unknown): true;
 type ${variables.UnionToIntersection}<U> =
   (U extends any ? (x: U) => void : never) extends ((x: infer I) => void) ? I : never;
 declare function ${variables.ExtractInstance}<T>(o: T): T extends { new(): infer P } ? P : never;
+
+// Helper to retrieve slots definitions
+declare function ___VERTER_extract_Slots<CompSlots>(comp: { new(): { $slots: CompSlots } }, slots?: undefined): CompSlots;
+declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string, any> = {}>(comp: { new(): { $slots: CompSlots } }, slots: Slots): Slots;
+
+declare function ___VERTER___SLOT_CALLBACK<T>(slot: (...args: T[]) => any): (cb: ((...args: T[]) => any))=>void;
+declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event: TArgs[0],) => any>(event: TArgs, cb: R): R;
 `;
 
     const contextContent = context.isSetup
       ? `
-const ${variables.component} = new (${
-          variables.defineComponent
-        }(${DefaultOptions}))()
+const ${variables.component} = new ${DefaultOptions}()
 const ${BindingContextExportName}CTX = ${
           isAsync ? "await " : ""
         }${BindingContextExportName}${
@@ -131,7 +143,7 @@ const ${accessors.comp} =  {
 }
 `
       : `
-const ${variables.ComponentOptions} = ${variables.isConstructor}(${DefaultOptions}) ? ${DefaultOptions} : ${variables.defineComponent}(${DefaultOptions});
+const ${variables.ComponentOptions} = ${DefaultOptions};
 const ${variables.component} = ${variables.ExtractInstance}(${variables.ComponentOptions})
 
 const ${accessors.ctx} = {
