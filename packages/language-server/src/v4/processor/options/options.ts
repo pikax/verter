@@ -67,11 +67,17 @@ export function processOptions(context: ParseContext) {
         "FormalParameters",
         "MethodProperty",
         "ExportDefaultDeclaration",
+        "FunctionBody",
+        "BlockStatement",
+        "ForStatement",
       ]);
 
       walk(node, {
         enter(node, parent) {
-          if (InvalidParentsType.has(node.type)) {
+          if (
+            InvalidParentsType.has(node.type) ||
+            node.type.endsWith("Statement")
+          ) {
             this.skip();
             return;
           }

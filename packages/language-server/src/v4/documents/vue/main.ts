@@ -24,7 +24,6 @@ import {
   uriToVerterVirtual,
 } from "../utils";
 import { processBundle } from "../../processor/bundle/bundle";
-import ts from "typescript";
 import { isVueSubDocument } from "../../processor/utils";
 
 import { Bundle as MagicStringBundle } from "magic-string";
@@ -39,7 +38,7 @@ const processors = {
     process: processBundle,
   },
   script: {
-    uri: (parent) => parent + ".options.js",
+    uri: (parent) => parent + ".options.ts",
     process: processOptions,
   },
   template: {
@@ -269,7 +268,8 @@ export class VueDocument implements TextDocument {
 
       return subDoc.getText(range);
     } else {
-      return this._doc.getText(range);
+      return this.bundleDoc.getText(range);
+      // return this._doc.getText(range);
     }
   }
 
@@ -278,8 +278,8 @@ export class VueDocument implements TextDocument {
       uri = uriToVerterVirtual(uri);
     }
 
-    if (uri === this.uri) {
-      // todo should return the bundle file
+    if (uri.endsWith(".vue")) {
+      return this.bundleDoc;
     }
 
     // TODO probably check if the URI is part of this parent

@@ -18,12 +18,8 @@ describe("processor options", () => {
         `<script${lang ? ` lang="${lang}"` : ""}>export default {};</script>`
       );
       expect(result).toMatchObject({
-        filename: "test.vue.options." + (lang?.replace("js", "ts") || "ts"),
+        filename: "test.vue.options." + (lang?.replace("js", "ts") || "js"),
       });
-
-      if (lang.startsWith("js")) {
-        expect(result.content).toContain("// @ts-nocheck");
-      }
     });
   });
 
@@ -300,6 +296,13 @@ describe("processor options", () => {
 
           expect(result.content).toContain("{test: typeof test\n");
         });
+        it("function typed params", () => {
+          const result = process(
+            `<script setup lang='ts'>function test(a: number, b: string): number | undefined {}</script>`
+          );
+
+          expect(result.content).toContain("{test: typeof test\n");
+        });
 
         it("defineProps", () => {
           const result = process(
@@ -331,6 +334,42 @@ describe("processor options", () => {
           expect(result.content).toContain(
             "{props: typeof props\n} & typeof props"
           );
+        });
+
+        test("generic", () => {
+          const result = process(
+            `<script setup lang="ts" generic="T">const a = ref() as Ref<T>;\nfunction test(i: number): T {}</script>`
+          );
+
+          expect(result.content).toContain("{a: typeof a, test: typeof test\n");
+        });
+
+        test("function body", () => {
+          const result = process(
+            `<script setup lang="ts">const a = ref();\nfunction test(index) { if(index) {};  return a.value; }</script>`
+          );
+
+          expect(result.content).toContain("{a: typeof a, test: typeof test\n");
+        });
+
+        test("if statement", () => {
+          const result = process(
+            `<script setup lang="ts">if(true) { let a = ref() }</script>`
+          );
+
+          expect(result.content).toContain("as {\n} ");
+        });
+        test("while", () => {
+          const result = process(
+            `<script setup lang="ts">while(true) { let a = ref() }</script>`
+          );
+          expect(result.content).toContain("as {\n} ");
+        });
+        test("for", () => {
+          const result = process(
+            `<script setup lang="ts">for(let i = 0; i < 10; i++) { let a = ref() }</script>`
+          );
+          expect(result.content).toContain("as {\n} ");
         });
       });
 

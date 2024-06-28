@@ -254,6 +254,9 @@ export function getTypescriptService(
           return ts.ScriptKind.TSX;
         case ts.Extension.Json:
           return ts.ScriptKind.JSON;
+        case ".vue": {
+          return ts.ScriptKind.TS;
+        }
         default:
           console.log("unknown", ext);
           return ts.ScriptKind.Unknown;
@@ -392,8 +395,12 @@ export function getTypescriptService(
                   );
                   // @ts-expect-error
                   r.resolvedModule.originalPath = originalPath;
-                  r.resolvedModule.resolvedFileName =
-                    uriToVerterVirtual(originalPath);
+                  r.resolvedModule.resolvedFileName = uriToVerterVirtual(
+                    r.resolvedModule.resolvedFileName
+                  );
+
+                  // r.resolvedModule.resolvedFileName =
+                  //   uriToVerterVirtual(originalPath);
                   r.resolvedModule.resolvedUsingTsExtension = false;
 
                   // r.resolvedModule.resolvedFileName =

@@ -24,7 +24,9 @@ export function processBundle(context: ParseContext) {
 // import { ${ComponentExport}, ${BindingContextExportName} } from "${optionsFile}";
 // import { ${FunctionExportName} } from "${renderFile}";
 
-export default {}
+export default {
+test: 1
+}
 `
   );
 
