@@ -105,9 +105,8 @@ export function mapDefinitionInfo(
     key: `${targetUri}:${textSpan.start.line}:${textSpan.start.character}`,
 
     targetUri,
-    targetRange: textSpan,
-    targetSelectionRange: contextRange ?? textSpan,
-    originSelectionRange: contextRange ?? textSpan,
+    targetRange: contextRange ?? textSpan,
+    targetSelectionRange: textSpan,
   };
 }
 
