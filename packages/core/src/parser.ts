@@ -9,6 +9,10 @@ import {
   parse,
   walk,
 } from "@vue/compiler-sfc";
+import {
+  walk as templateWalk,
+  VerterNode,
+} from "./plugins/template/v2/walk/index.js";
 import { defaultPlugins, ParseScriptContext, PluginOption } from "./plugins";
 import { pluginsToLocations } from "./utils/plugin";
 import {
@@ -19,8 +23,14 @@ import {
 
 import oxc from "oxc-parser";
 import acorn from "acorn-loose";
-import { isFunctionType } from "@vue/compiler-core";
+import {
+  isFunctionType,
+  NodeTypes,
+  walkIdentifiers,
+  Node,
+} from "@vue/compiler-core";
 import { PrefixSTR } from "./plugins/template/v2/transpile";
+import { Identifier, Node as BabelNode, is } from "@babel/types";
 
 type AST = ReturnType<typeof acorn.parse>;
 
@@ -30,6 +40,15 @@ export type VerterASTBlock = VerterSFCBlock & {
    * @returns `AST` or `false` if not a valid block to parse
    */
   readonly ast: AST | false;
+};
+
+export type VerterIdentifier = {
+  loc: {
+    start: number;
+    end: number;
+  };
+  node: Identifier | Node;
+  content: string;
 };
 
 export type ParseContext = {
@@ -51,6 +70,8 @@ export type ParseContext = {
   blocks: VerterASTBlock[];
 
   generic: GenericInfo | undefined;
+
+  templateIdentifiers: VerterIdentifier[];
 };
 
 function parseASTFallback(source: string) {
@@ -173,6 +194,141 @@ export function createContext(
     return generic;
   }
 
+  let identifiers: VerterIdentifier[] | null = null;
+  function resolveTemplateIdentifiers() {
+    if (identifiers !== null) return identifiers;
+    if (!parsed.descriptor.template?.ast) {
+      return (identifiers = []);
+    }
+    identifiers = [];
+    templateWalk(
+      parsed.descriptor.template.ast,
+      {
+        enter(item, _, context) {
+          const foundIdentifiers: string[] = [];
+
+          function processNodeAst(node: VerterNode) {
+            if ("ast" in node && node.ast) {
+              const ast = node.ast as BabelNode;
+              walkIdentifiers(ast, (n) => {
+                const start = node.loc.start.offset - ast.start + n.start;
+                const len = n.end - n.start;
+                const content = node.content.slice(
+                  n.start - ast.start,
+                  n.end - ast.start
+                );
+
+                if (context.ignoredIdentifers.has(content)) return;
+
+                identifiers.push({
+                  loc: {
+                    start,
+                    end: start + len,
+                  },
+                  content,
+                  node,
+                });
+              });
+              return true;
+            }
+            return false;
+          }
+
+          function processNode(
+            node: VerterNode,
+            add = true,
+            isArgumentNode = false
+          ) {
+            if (!node) return;
+            switch (node.type) {
+              case NodeTypes.SIMPLE_EXPRESSION: {
+                if (node.isStatic) return;
+                if (!processNodeAst(node)) {
+                  const start = isArgumentNode
+                    ? node.loc.start.offset + 1
+                    : node.loc.start.offset;
+                  const end = isArgumentNode
+                    ? node.loc.end.offset - 1
+                    : node.loc.end.offset;
+                  const content = node.content;
+                  const identifier = {
+                    loc: {
+                      start,
+                      end,
+                    },
+                    content,
+                    node: node,
+                  };
+                  if (add) {
+                    identifiers.push(identifier);
+                  }
+                  return identifier;
+                }
+                break;
+              }
+              case NodeTypes.INTERPOLATION: {
+                if (!processNodeAst(node.content)) {
+                  identifiers.push({
+                    loc: {
+                      start: node.content.loc.start.offset,
+                      end: node.content.loc.end.offset,
+                    },
+                    // @ts-expect-error not the correct type
+                    content: node.content.content as string,
+                    node: node.content,
+                  });
+                }
+                break;
+              }
+              case NodeTypes.ELEMENT: {
+                for (const prop of node.props) {
+                  if (
+                    prop.name === "for" &&
+                    "forParseResult" in prop &&
+                    prop.forParseResult
+                  ) {
+                    const value = processNode(prop.forParseResult.value, false);
+                    const key = processNode(prop.forParseResult.key, false);
+                    const index = processNode(prop.forParseResult.index, false);
+                    processNode(prop.forParseResult.source);
+
+                    foundIdentifiers.push(
+                      ...[value?.content, key?.content, index?.content].filter(Boolean)
+                    );
+                    // prop.forParseResult.;
+                  } else {
+                    if (prop.type === NodeTypes.DIRECTIVE) {
+                      processNode(prop.arg, true, true);
+                      processNode(prop.exp);
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          processNode(item);
+          // }
+          // if (node.type === "Identifier") {
+          //   identifiers.push(node);
+          // }
+
+          return {
+            ignoredIdentifers: new Set([
+              ...context.ignoredIdentifers.values(),
+              ...foundIdentifiers,
+            ]),
+          };
+        },
+      },
+      {
+        ignoredIdentifers: new Set(["$event"]),
+      }
+    );
+
+    return identifiers;
+  }
+
   const context = {
     filename,
     source,
@@ -187,6 +343,10 @@ export function createContext(
     },
     get generic() {
       return resolveGeneric();
+    },
+
+    get templateIdentifiers() {
+      return resolveTemplateIdentifiers();
     },
   } satisfies ParseContext;
   return context;
