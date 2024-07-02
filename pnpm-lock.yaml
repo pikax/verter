@@ -33,7 +33,7 @@ importers:
   packages/compiler-plugin:
     dependencies:
       '@verter/core':
-        specifier: workspace:^
+        specifier: '*'
         version: link:../core
       typescript:
         specifier: ^5.4.5
@@ -109,7 +109,7 @@ importers:
   packages/example:
     dependencies:
       '@verter/typescript-plugin':
-        specifier: workspace:^
+        specifier: '*'
         version: link:../typescript-plugin
       typescript:
         specifier: ^5.4.5
@@ -121,10 +121,10 @@ importers:
   packages/language-server:
     dependencies:
       '@verter/core':
-        specifier: workspace:^
+        specifier: '*'
         version: link:../core
       '@verter/language-shared':
-        specifier: workspace:^
+        specifier: '*'
         version: link:../language-shared
       source-map-js:
         specifier: ^1.2.0
@@ -170,7 +170,7 @@ importers:
   packages/typescript-plugin:
     dependencies:
       '@verter/core':
-        specifier: workspace:^
+        specifier: '*'
         version: link:../core
       vue:
         specifier: ^3.4.21
@@ -192,13 +192,13 @@ importers:
         specifier: ^1.88.0
         version: 1.88.0
       '@verter/language-server':
-        specifier: workspace:^
+        specifier: '*'
         version: link:../language-server
       '@verter/language-shared':
-        specifier: workspace:^
+        specifier: '*'
         version: link:../language-shared
       '@verter/typescript-plugin':
-        specifier: workspace:^
+        specifier: '*'
         version: link:../typescript-plugin
       brace-expansion:
         specifier: ^4.0.0

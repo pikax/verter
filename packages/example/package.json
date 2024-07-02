@@ -11,7 +11,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@verter/typescript-plugin": "workspace:^",
+    "@verter/typescript-plugin": "*",
     "typescript": "^5.4.5",
     "vue": "^3.4.21"
   }

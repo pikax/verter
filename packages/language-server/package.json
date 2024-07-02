@@ -17,8 +17,8 @@
     "node": ">=14.0.0"
   },
   "dependencies": {
-    "@verter/core": "workspace:^",
-    "@verter/language-shared": "workspace:^",
+    "@verter/core": "*",
+    "@verter/language-shared": "*",
     "source-map-js": "^1.2.0",
     "typescript": "^5.4.5",
     "vscode-languageserver": "^9.0.1",

@@ -11,7 +11,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@verter/core": "workspace:^",
+    "@verter/core": "*",
     "typescript": "^5.4.5"
   }
 }

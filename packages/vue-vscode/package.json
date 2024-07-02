@@ -24,9 +24,9 @@
   "dependencies": {
     "@types/lodash": "^4.17.0",
     "@types/vscode": "^1.88.0",
-    "@verter/language-server": "workspace:^",
-    "@verter/language-shared": "workspace:^",
-    "@verter/typescript-plugin": "workspace:^",
+    "@verter/language-server": "*",
+    "@verter/language-shared": "*",
+    "@verter/typescript-plugin": "*",
     "brace-expansion": "^4.0.0",
     "lodash": "^4.17.21",
     "minimatch": "^9.0.4",
@@ -45,7 +45,7 @@
     "node_modules"
   ],
   "vsce": {
-    "dependencies": false,
+    "dependencies": true,
     "yarn": false
   },
   "engines": {
