@@ -410,7 +410,8 @@ export function processOptions(context: ParseContext) {
         }
 
         s.append(
-          `\nexport function ${BindingContextExportName}() { return /*##___VERTER_BINDING_RETURN___##*/{}/*##/___VERTER_BINDING_RETURN___##*/ }\n`
+          `\nexport function ${BindingContextExportName}() { return /*##___VERTER_BINDING_RETURN___##*/{}/*##/___VERTER_BINDING_RETURN___##*/ }\n
+export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_RETURN___##*/{}/*##/___VERTER_FULL_BINDING_RETURN___##*/ }\n`
         );
       }
     }
