@@ -86,6 +86,7 @@ export function processOptions(context: ParseContext) {
         "FunctionDeclaration",
         "ClassDeclaration",
         "TsTypeAliasDeclaration",
+        "ExpressionStatement",
       ]);
 
       const importTypes = new Set([
@@ -188,10 +189,19 @@ export function processOptions(context: ParseContext) {
                   } else {
                     // this is probably a destructuring
                   }
+
+                  _declarationBindings.push(
+                    scriptBlock.block.loc.source.slice(it.start, it.end)
+                  );
                 } else {
                   s.appendRight(
                     it.start + scriptBlock.block.loc.start.offset,
                     `const ${name} = `
+                  );
+
+                  _declarationBindings.push(
+                    `const ${name} = ` +
+                      scriptBlock.block.loc.source.slice(it.start, it.end)
                   );
                 }
                 break;
@@ -308,19 +318,30 @@ export function processOptions(context: ParseContext) {
           } /*/##___VERTER_BINDING_RETURN___##*/\n`
         );
       } else {
+        const extraBindings = [propsBinding, emitMacro].filter(Boolean);
+
         // if not typescript we need to the types in JSDoc to make sure the types are correct
         // because when the variables are const the types are not inferred correctly
         // e.g. const a = 1; a is inferred as number but it should be inferred as 1
         s.prependRight(
           scriptBlock.tag.pos.open.start,
-          `/**\n * @returns {{${typeofBindings}}} \n*/`
+          `/**\n * @returns {{${typeofBindings}}${
+            extraBindings.length > 0 ? `& ${extraBindings.join(" & ")}` : ""
+          }} \n*/`
         );
 
         s.appendRight(
           scriptBlock.block.loc.end.offset,
           `\nreturn /*##___VERTER_BINDING_RETURN___##*/{\n${bindings.join(
             ", "
-          )}\n}/*/##___VERTER_BINDING_RETURN__z_##*/\n`
+          )}${
+            extraBindings.length > 0
+              ? ",\n..." +
+                extraBindings
+                  .map((x) => x.replace("typeof ", ""))
+                  .join(",\n...")
+              : ""
+          }\n}/*/##___VERTER_BINDING_RETURN___##*/\n`
         );
       }
 
@@ -351,7 +372,13 @@ export function processOptions(context: ParseContext) {
   ${_declarationBindings.join("\n")}\n
   return /*##___VERTER_FULL_BINDING_RETURN___##*/{\n${Array.from(_bindings)
     .filter((x) => !_importBindings.includes(x))
-    .join(", ")}\n}/*/##___VERTER_FULL_BINDING_RETURN___##*/ }\n`);
+    .join(", ")}${
+          // TODO ADD OTHER MACROS
+          ", " +
+          PropsPropertyName +
+          ":" +
+          (propsBinding ?? "").replace("typeof", "")
+        }\n}/*/##___VERTER_FULL_BINDING_RETURN___##*/ }\n`);
       }
     } else {
       const exportIndex = s.original.indexOf("export default");

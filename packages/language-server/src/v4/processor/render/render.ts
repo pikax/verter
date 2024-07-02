@@ -1,4 +1,10 @@
-import { MagicString, SFCTemplateBlock } from "vue/compiler-sfc";
+import {
+  extractIdentifiers,
+  MagicString,
+  SFCTemplateBlock,
+  walk,
+  walkIdentifiers,
+} from "vue/compiler-sfc";
 import {
   ParseContext,
   type ParseScriptContext,
@@ -38,6 +44,8 @@ export function processRender(context: ParseContext) {
 
   const isAsync = context.isAsync;
 
+  const importIdentifiers = new Set<string>();
+
   // remove unknown blocks
   const SUPPORTED_BLOCKS = new Set(["template"]);
   const blocks: VerterASTBlock[] = [];
@@ -50,7 +58,49 @@ export function processRender(context: ParseContext) {
       if (genericInfo && block.block.attrs.generic === genericInfo.source) {
         scriptBlock = block;
       } else {
-        s.remove(block.tag.pos.open.start, block.tag.pos.close.end);
+        // s.update(block.tag.pos.open.start, block.tag.pos.close.end, "", {
+        //   overwrite: true,
+        // });
+        if (block.ast) {
+          for (const it of block.ast.body) {
+            switch (it.type as any) {
+              case "ImportDeclaration": { // case "TsExportAssignment": // case "TsNamespaceExportDeclaration": // case "ExportNamedDeclaration": // case "ExportDeclaration": // case "ExportAllDeclaration":
+                const offset = block.block.loc.start.offset;
+                const startIndex = it.start + offset;
+                const endIndex = it.end + offset;
+
+                walkIdentifiers(
+                  // @ts-expect-error
+                  it,
+                  (n) => {
+                    if (n) {
+                      importIdentifiers.add(n.name);
+                    }
+                  },
+                  true
+                );
+
+                try {
+                  s.move(startIndex, endIndex, 0);
+                } catch (e) {
+                  console.error(e);
+                  debugger;
+                }
+                break;
+              }
+              default: {
+                const offset = block.block.loc.start.offset;
+                const startIndex = it.start + offset;
+                const endIndex = it.end + offset;
+                s.remove(startIndex, endIndex);
+              }
+            }
+          }
+          s.remove(block.tag.pos.open.start, block.tag.pos.open.end);
+          s.remove(block.tag.pos.close.start, block.tag.pos.close.end);
+        } else {
+          s.remove(block.block.loc.start.offset, block.block.loc.end.offset);
+        }
       }
     }
   }
@@ -169,6 +219,11 @@ const ${FullContextExportName}CTX = ${
         }();
 const ${accessors.ctx} = {
     ...${variables.component},
+    ${
+      importIdentifiers.size > 0
+        ? Array.from(importIdentifiers.values()).join(", ") + ","
+        : ""
+    }
     ...({} as ${
       variables.ShallowUnwrapRef
     }<typeof ${FullContextExportName}CTX>),
@@ -191,6 +246,7 @@ const ${variables.component} = ${variables.ExtractInstance}(${variables.Componen
 
 const ${accessors.ctx} = {
     ...${variables.component},
+    // TODO handle components
 }
 
 const ${accessors.comp} =  {

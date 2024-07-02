@@ -138,7 +138,7 @@ export function getTypescriptService(
     tsconfigOptions = {
       ...parsedConfig.options,
       // allowArbitraryExtensions: true,
-      // allowJs: true,
+      allowJs: true,
       // noImplicitAny: false,
       // noImplicitThis: false,
       // noImplicitReturns: false,
@@ -151,6 +151,7 @@ export function getTypescriptService(
 
   const compilerOptions: ts.CompilerOptions = {
     ...tsconfigOptions,
+    allowJs: true,
     jsx: ts.JsxEmit.Preserve,
     target: ts.ScriptTarget.ESNext,
     module: ts.ModuleKind.NodeNext,
