@@ -29,6 +29,9 @@ export const DefaultOptions = PrefixSTR("default");
 export const ComponentExport = PrefixSTR("Component");
 export const GenericOptions = PrefixSTR("GenericOptions");
 
+export const ResolveProps = PrefixSTR("resolveProps");
+export const PropsPropertyName = PrefixSTR("props");
+
 export function processOptions(context: ParseContext) {
   const filename = getBlockFilename("options", context);
   const s = context.s.clone();
@@ -51,12 +54,11 @@ export function processOptions(context: ParseContext) {
       (x) => x.tag.type === "script" && x.block.setup === context.isSetup
     ) ?? blocks.find((x) => x.tag.type === "script");
 
+  const isSetup = context.isSetup;
+  const isAsync = context.isAsync;
+  const genericInfo = context.generic;
+  const isTypescript = scriptBlock.block.lang?.startsWith("ts") ?? false;
   if (scriptBlock) {
-    const isSetup = context.isSetup;
-    const isAsync = context.isAsync;
-    const genericInfo = context.generic;
-    const isTypescript = scriptBlock.block.lang?.startsWith("ts") ?? false;
-
     const _bindings = new Set<string>();
     /**
      * contains all the declarations used
@@ -318,11 +320,13 @@ export function processOptions(context: ParseContext) {
           scriptBlock.block.loc.end.offset,
           `\nreturn /*##___VERTER_BINDING_RETURN___##*/{\n${bindings.join(
             ", "
-          )}\n}/*/##___VERTER_BINDING_RETURN___##*/\n`
+          )}\n}/*/##___VERTER_BINDING_RETURN__z_##*/\n`
         );
       }
 
       s.appendRight(scriptBlock.block.loc.end.offset, "\n}\n");
+
+      const propType = PropsPropertyName + " : " + (propsBinding || "{}");
 
       if (isTypescript) {
         s.append(
@@ -333,13 +337,15 @@ export function processOptions(context: ParseContext) {
  return /*##___VERTER_FULL_BINDING_RETURN___##*/{} as {${Array.from(_bindings)
    .filter((x) => !_importBindings.includes(x))
    .map((x) => `${x}: typeof ${x}`)
-   .join(", ")}\n}/*##/___VERTER_FULL_BINDING_RETURN___##*/ }\n`
+   .join(
+     ", "
+   )}\n} & { ${propType} }/*##/___VERTER_FULL_BINDING_RETURN___##*/ }\n`
         );
       } else {
         s.append(`\n/**\n * @returns {{${Array.from(_bindings)
           .filter((x) => !_importBindings.includes(x))
           .map((x) => `${x}: typeof ${x}`)
-          .join(", ")}}} \n*/\nexport ${
+          .join(", ")}, ${propType}}} \n*/\nexport ${
           isAsync ? "async" : ""
         } function ${FullContextExportName}(){
   ${_declarationBindings.join("\n")}\n
@@ -476,6 +482,19 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
   if (importsString) {
     s.prepend(importsString + "\n");
   }
+
+  s.append(`\nexport ${isAsync ? "async " : ""}function ${ResolveProps}${
+    genericInfo ? `<${genericInfo.source}>` : ""
+  }() {
+   return ${
+     isSetup
+       ? `${isAsync ? "await " : ""}(${FullContextExportName}${
+           genericInfo ? `<${genericInfo.names.join(",")}>` : ""
+         }()).${PropsPropertyName}`
+       : `new ${DefaultOptions}().$props`
+   };
+}
+`);
 
   // if (!scriptBlock.block.lang?.startsWith("ts")) {
   //   s.prepend("// @ts-nocheck\n");

@@ -2,7 +2,7 @@ import { ParseContext, PrefixSTR } from "@verter/core";
 import { MagicString } from "vue/compiler-sfc";
 
 import {
-  BindingContextExportName,
+  ResolveProps,
   ComponentExport,
   DefaultOptions,
 } from "./../options/index.js";
@@ -23,13 +23,15 @@ export function processBundle(context: ParseContext) {
 
   s.append(
     `import { DefineComponent as ${ctx.DefineComponent} } from "vue";
-import { ${DefaultOptions}, ${BindingContextExportName} } from "${optionsFile}";
+import { ${DefaultOptions}, ${ResolveProps} } from "${optionsFile}";
 // import { ${FunctionExportName} } from "${renderFile}";
 
-declare const Comp : typeof ${DefaultOptions} & { new(): { 
-  $props: {
-  ReturnType<typeof ${BindingContextExportName}>['props'];
-}
+declare const Comp : typeof ${DefaultOptions} & { new${
+      generic ? `<${generic.declaration}>` : ""
+    }(): { 
+  $props: ReturnType<typeof ${ResolveProps}${
+      generic ? `<${generic.sanitisedNames.join(",")}>` : ""
+    }>;
 } };
 export default Comp;
 `
