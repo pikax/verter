@@ -28,6 +28,7 @@ import {
   NodeTypes,
   walkIdentifiers,
   Node,
+  ElementTypes,
 } from "@vue/compiler-core";
 import { PrefixSTR } from "./plugins/template/v2/transpile";
 import { Identifier, Node as BabelNode, is } from "@babel/types";
@@ -49,6 +50,8 @@ export type VerterIdentifier = {
   };
   node: Identifier | Node;
   content: string;
+
+  type: "binding" | "component";
 };
 
 export type ParseContext = {
@@ -207,29 +210,48 @@ export function createContext(
         enter(item, _, context) {
           const foundIdentifiers: string[] = [];
 
-          function processNodeAst(node: VerterNode) {
+          function processNodeAst(node: VerterNode, add = true) {
             if ("ast" in node && node.ast) {
+              const toReturn: VerterIdentifier[] = [];
               const ast = node.ast as BabelNode;
-              walkIdentifiers(ast, (n) => {
-                const start = node.loc.start.offset - ast.start + n.start;
-                const len = n.end - n.start;
-                const content = node.content.slice(
-                  n.start - ast.start,
-                  n.end - ast.start
-                );
+              walkIdentifiers(
+                ast,
+                (n, prent, parentStack, isReference, isLocal) => {
+                  if (!isReference || (add && isLocal)) return;
+                  const offset = ast.start || 1;
+                  const start = node.loc.start.offset - offset + n.start;
+                  const len = n.end - n.start;
+                  const content = node.content.slice(
+                    n.start - offset,
+                    n.start - offset + len
+                  );
 
-                if (context.ignoredIdentifers.has(content)) return;
+                  if (context.ignoredIdentifers.has(content)) return;
+                  const identifier = {
+                    loc: {
+                      start,
+                      end: start + len,
+                    },
+                    content,
+                    node,
+                    type: "binding",
+                  };
 
-                identifiers.push({
-                  loc: {
-                    start,
-                    end: start + len,
-                  },
-                  content,
-                  node,
-                });
-              });
-              return true;
+                  if (add) {
+                    // @ts-expect-error todo type
+                    identifiers.push(identifier);
+                  } else {
+                    // @ts-expect-error todo type
+                    toReturn.push(identifier);
+                  }
+                },
+                true
+              );
+
+              if (add) {
+                return true;
+              }
+              return toReturn;
             }
             return false;
           }
@@ -258,8 +280,10 @@ export function createContext(
                     },
                     content,
                     node: node,
+                    type: "binding",
                   };
                   if (add) {
+                    // @ts-expect-error todo type
                     identifiers.push(identifier);
                   }
                   return identifier;
@@ -267,6 +291,7 @@ export function createContext(
                 break;
               }
               case NodeTypes.INTERPOLATION: {
+                // @ts-expect-error todo type
                 if (!processNodeAst(node.content)) {
                   identifiers.push({
                     loc: {
@@ -276,29 +301,58 @@ export function createContext(
                     // @ts-expect-error not the correct type
                     content: node.content.content as string,
                     node: node.content,
+                    type: "binding",
                   });
                 }
                 break;
               }
               case NodeTypes.ELEMENT: {
+                if (node.tagType === ElementTypes.COMPONENT) {
+                  identifiers.push({
+                    loc: {
+                      start: node.loc.start.offset + 1,
+                      end: node.loc.start.offset + 1 + node.tag.length,
+                    },
+                    content: node.tag,
+                    node,
+                    type: "component",
+                  } as VerterIdentifier);
+                }
+
                 for (const prop of node.props) {
                   if (
                     prop.name === "for" &&
                     "forParseResult" in prop &&
                     prop.forParseResult
                   ) {
+                    // @ts-expect-error todo type
                     const value = processNode(prop.forParseResult.value, false);
+                    // @ts-expect-error todo type
                     const key = processNode(prop.forParseResult.key, false);
+                    // @ts-expect-error todo type
                     const index = processNode(prop.forParseResult.index, false);
+                    // @ts-expect-error todo type
                     processNode(prop.forParseResult.source);
 
                     foundIdentifiers.push(
-                      ...[value?.content, key?.content, index?.content].filter(Boolean)
+                      ...[value?.content, key?.content, index?.content].filter(
+                        Boolean
+                      )
                     );
                     // prop.forParseResult.;
+                    // @ts-expect-error todo type
+                  } else if (prop.rawName === "v-slot") {
+                    // @ts-expect-error todo type
+                    const found = processNodeAst(prop.exp, false);
+                    if (found) {
+                    // @ts-expect-error todo type
+                      foundIdentifiers.push(...found.map((x) => x.content));
+                    }
                   } else {
                     if (prop.type === NodeTypes.DIRECTIVE) {
+                      // @ts-expect-error todo type
                       processNode(prop.arg, true, true);
+                      // @ts-expect-error todo type
                       processNode(prop.exp);
                     }
                   }

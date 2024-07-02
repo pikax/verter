@@ -466,6 +466,64 @@ describe("parser", () => {
             },
           ]);
         });
+
+        test("v-slot", () => {
+          const source =
+            '<template><MyComponent v-slot="{ foo }">{{ foo.bar }}</MyComponent></template>';
+          const context = createContext(source);
+
+          expect(
+            context.templateIdentifiers.filter((x) => x.type === "binding")
+          ).toHaveLength(0);
+        });
+      });
+
+      describe("components", () => {
+        test("component", () => {
+          const source = "<template><MyComponent  /></template>";
+          const context = createContext(source);
+          const identifierMatch = ["MyComponent"];
+
+          const identifiers = context.templateIdentifiers.map((i) =>
+            source.slice(i.loc.start, i.loc.end)
+          );
+          expect(identifiers).toEqual(identifierMatch);
+          expect(context.templateIdentifiers).toMatchObject([
+            {
+              loc: {
+                start: 11,
+                end: 22,
+              },
+              content: "MyComponent",
+              node: {
+                tag: "MyComponent",
+              },
+            },
+          ]);
+        });
+        test("component with v-slot", () => {
+          const source =
+            '<template><MyComponent v-slot="{ foo }">{{ foo.bar }}</MyComponent></template>';
+          const context = createContext(source);
+          const identifierMatch = ["MyComponent"];
+
+          const identifiers = context.templateIdentifiers.map((i) =>
+            source.slice(i.loc.start, i.loc.end)
+          );
+          expect(identifiers).toEqual(identifierMatch);
+          expect(context.templateIdentifiers).toMatchObject([
+            {
+              loc: {
+                start: 11,
+                end: 22,
+              },
+              content: "MyComponent",
+              node: {
+                tag: "MyComponent",
+              },
+            },
+          ]);
+        });
       });
     });
   });

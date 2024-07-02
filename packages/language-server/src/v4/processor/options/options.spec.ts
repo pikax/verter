@@ -217,8 +217,10 @@ describe("processor options", () => {
               `<script setup lang='ts'>const bespokProps = defineProps({});\nconst test = { a: 1, b: 1}</script>`
             );
 
+            expect(result.content).toContain("} & typeof bespokProps");
+
             expect(result.content).toContain(
-              "{bespokProps: typeof bespokProps, test: typeof test\n} & typeof bespokProps"
+              "{bespokProps: typeof bespokProps, test: typeof test\n}"
             );
           });
 
@@ -227,9 +229,8 @@ describe("processor options", () => {
               `<script setup lang='ts'>defineProps({});\nconst test = { a: 1, b: 1}</script>`
             );
 
-            expect(result.content).toContain(
-              "{test: typeof test\n} & typeof ___VERTER___props"
-            );
+            expect(result.content).toContain("{test: typeof test\n}");
+            expect(result.content).toContain("} & typeof ___VERTER___props");
           });
         });
 
@@ -249,7 +250,10 @@ describe("processor options", () => {
             );
 
             expect(result.content).toContain(
-              "{bespokeEmits: typeof bespokeEmits, test: typeof test\n} & { $emit: typeof bespokeEmits }"
+              "{bespokeEmits: typeof bespokeEmits, test: typeof test\n}"
+            );
+            expect(result.content).toContain(
+              "} & { $emit: typeof bespokeEmits }"
             );
           });
 
@@ -258,8 +262,9 @@ describe("processor options", () => {
               `<script setup lang='ts'>defineEmits([]);\nconst test = { a: 1, b: 1}</script>`
             );
 
+            expect(result.content).toContain("{test: typeof test\n}");
             expect(result.content).toContain(
-              "{test: typeof test\n} & { $emit: typeof ___VERTER___emits }"
+              "} & { $emit: typeof ___VERTER___emits }"
             );
           });
         });
@@ -322,18 +327,17 @@ describe("processor options", () => {
           const result = process(
             `<script setup lang='ts'>const props = withDefaults(defineProps({ a: String }), {a: '1'})</script>`
           );
-          expect(result.content).toContain(
-            "{props: typeof props\n} & typeof props"
-          );
+          expect(result.content).toContain("{props: typeof props\n}");
+
+          expect(result.content).toContain("} & typeof props");
         });
 
         it("props with variable assigned", () => {
           const result = process(
             `<script setup lang='ts'>const props = defineProps({ a: String });</script>`
           );
-          expect(result.content).toContain(
-            "{props: typeof props\n} & typeof props"
-          );
+          expect(result.content).toContain("{props: typeof props\n}");
+          expect(result.content).toContain("} & typeof props");
         });
 
         test("generic", () => {
@@ -371,6 +375,15 @@ describe("processor options", () => {
           );
           expect(result.content).toContain("as {\n} ");
         });
+
+        test("only expose used bindings on the template", () => {
+          const result = process(
+            `<script setup lang="ts">const a = ref(); const b = ref();</script><template>{{a}}</template>`
+          );
+          expect(result.content).toContain("{a: typeof a\n}");
+          // this should be FULL_CONTEXT
+          expect(result.content).toContain("{a: typeof a, b: typeof b\n}");
+        });
       });
 
       describe("invalid syntax", () => {
@@ -380,7 +393,7 @@ describe("processor options", () => {
           );
 
           expect(result.content).toContain(`const a = `);
-          expect(result.content).toContain("ref: typeof ref, a: typeof a");
+          expect(result.content).toContain("a: typeof a");
           expectFindStringWithMap("const a = ", result);
         });
       });
@@ -464,7 +477,7 @@ describe("processor options", () => {
         );
 
         expect(result.content).toContain(`const a = `);
-        expect(result.content).toContain("ref: typeof ref, a: typeof a");
+        expect(result.content).toContain("a: typeof a");
         expectFindStringWithMap("const a = ", result);
       });
     });

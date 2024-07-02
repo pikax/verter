@@ -24,6 +24,7 @@ import { getBlockFilename, importsLocationsToString } from "../utils";
 
 export const OptionsExportName = PrefixSTR("ComponentOptions");
 export const BindingContextExportName = PrefixSTR("BindingContext");
+export const FullContextExportName = PrefixSTR("FullContext");
 export const DefaultOptions = PrefixSTR("default");
 export const ComponentExport = PrefixSTR("Component");
 export const GenericOptions = PrefixSTR("GenericOptions");
@@ -57,8 +58,14 @@ export function processOptions(context: ParseContext) {
     const isTypescript = scriptBlock.block.lang?.startsWith("ts") ?? false;
 
     const _bindings = new Set<string>();
+    /**
+     * contains all the declarations used
+     */
+    const _declarationBindings: string[] = [];
 
-    function populateBindings(node: any) {
+    const _importBindings: string[] = [];
+
+    function populateBindings(node: any, source = "") {
       const InvalidParentsType = new Set([
         "CallExpression",
         "MemberExpression",
@@ -70,6 +77,19 @@ export function processOptions(context: ParseContext) {
         "FunctionBody",
         "BlockStatement",
         "ForStatement",
+      ]);
+
+      const declarationTypes = new Set([
+        "VariableDeclaration",
+        "FunctionDeclaration",
+        "ClassDeclaration",
+        "TsTypeAliasDeclaration",
+      ]);
+
+      const importTypes = new Set([
+        "ImportSpecifier",
+        "ImportDefaultSpecifier",
+        "ImportNamespaceSpecifier",
       ]);
 
       walk(node, {
@@ -89,7 +109,11 @@ export function processOptions(context: ParseContext) {
             return this.skip();
           }
 
-          if (node.type === "Identifier") {
+          if (declarationTypes.has(node.type)) {
+            _declarationBindings.push(source.slice(node.start, node.end));
+          } else if (importTypes.has(node.type)) {
+            _importBindings.push(source.slice(node.start, node.end));
+          } else if (node.type === "Identifier") {
             const pos = node.span ?? node;
             // invalid node, skip
             if (pos.start === pos.end) {
@@ -106,7 +130,7 @@ export function processOptions(context: ParseContext) {
     {
       for (const b of blocks) {
         if (!b.ast) continue;
-        populateBindings(b.ast);
+        populateBindings(b.ast, b.block.loc.source);
       }
     }
 
@@ -139,7 +163,6 @@ export function processOptions(context: ParseContext) {
       }
     }
 
-    const bindings = Array.from(_bindings);
     // move imports and exports to top
     if (scriptBlock.ast) {
       for (const it of scriptBlock.ast.body) {
@@ -171,7 +194,6 @@ export function processOptions(context: ParseContext) {
                 }
                 break;
               }
-              console.log("sss", expresion);
             }
 
             break;
@@ -265,6 +287,12 @@ export function processOptions(context: ParseContext) {
         );
       }
 
+      const templateIdentifiers = new Set(
+        context.templateIdentifiers.map((x) => x.content)
+      );
+      const bindings = Array.from(_bindings).filter((x) =>
+        templateIdentifiers.has(x)
+      );
       const typeofBindings = bindings
         .map((x) => `${x}: typeof ${x}`)
         .join(", ");
@@ -295,6 +323,30 @@ export function processOptions(context: ParseContext) {
       }
 
       s.appendRight(scriptBlock.block.loc.end.offset, "\n}\n");
+
+      if (isTypescript) {
+        s.append(
+          `export ${isAsync ? "async" : ""} function ${FullContextExportName}${
+            genericInfo ? `<${genericInfo.source}>` : ""
+          }() {
+ ${_declarationBindings.join("\n")}\n
+ return /*##___VERTER_FULL_BINDING_RETURN___##*/{} as {${Array.from(_bindings)
+   .filter((x) => !_importBindings.includes(x))
+   .map((x) => `${x}: typeof ${x}`)
+   .join(", ")}\n}/*##/___VERTER_FULL_BINDING_RETURN___##*/ }\n`
+        );
+      } else {
+        s.append(`\n/**\n * @returns {{${Array.from(_bindings)
+          .filter((x) => !_importBindings.includes(x))
+          .map((x) => `${x}: typeof ${x}`)
+          .join(", ")}}} \n*/\nexport ${
+          isAsync ? "async" : ""
+        } function ${FullContextExportName}(){
+  ${_declarationBindings.join("\n")}\n
+  return /*##___VERTER_FULL_BINDING_RETURN___##*/{\n${Array.from(_bindings)
+    .filter((x) => !_importBindings.includes(x))
+    .join(", ")}\n}/*/##___VERTER_FULL_BINDING_RETURN___##*/ }\n`);
+      }
     } else {
       const exportIndex = s.original.indexOf("export default");
 

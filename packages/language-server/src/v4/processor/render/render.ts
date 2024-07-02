@@ -10,7 +10,11 @@ import {
 } from "@verter/core";
 import { relative } from "path/posix";
 
-import { BindingContextExportName, DefaultOptions } from "../options/index.js";
+import {
+  BindingContextExportName,
+  FullContextExportName,
+  DefaultOptions,
+} from "../options/index.js";
 import { getBlockFilename } from "../utils.js";
 import {
   transpileTemplate,
@@ -111,7 +115,7 @@ import 'vue/jsx';
 import { ${vueImports.map(
           ([i, n, t]) => `${t ? "type " : ""}${i} as ${n}`
         )} } from "vue";
-import { ${BindingContextExportName}, ${DefaultOptions} } from "${optionsFilename}";
+import { ${BindingContextExportName}, ${FullContextExportName}, ${DefaultOptions} } from "${optionsFilename}";
 
 ${globalPatch}
 `
@@ -157,9 +161,17 @@ const ${BindingContextExportName}CTX = ${
           isAsync ? "await " : ""
         }${BindingContextExportName}${
           genericInfo ? `<${genericInfo.names.join(",")}>` : ""
-        }()
+        }();
+const ${FullContextExportName}CTX = ${
+          isAsync ? "await " : ""
+        }${FullContextExportName}${
+          genericInfo ? `<${genericInfo.names.join(",")}>` : ""
+        }();
 const ${accessors.ctx} = {
     ...${variables.component},
+    ...({} as ${
+      variables.ShallowUnwrapRef
+    }<typeof ${FullContextExportName}CTX>),
     ...({} as ${
       variables.ShallowUnwrapRef
     }<typeof ${BindingContextExportName}CTX>),
