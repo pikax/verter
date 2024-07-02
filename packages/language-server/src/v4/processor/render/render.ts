@@ -78,6 +78,13 @@ export function processRender(context: ParseContext) {
       ExtractInstance: PrefixSTR("ExtractInstance"),
 
       GlobalComponents: PrefixSTR("GlobalComponents"),
+      ComponentPublicInstance: PrefixSTR("ComponentPublicInstance"),
+      IntrinsicElementAttributes: PrefixSTR("IntrinsicElementAttributes"),
+      VueComponent: PrefixSTR("VueComponent"),
+      Ref: PrefixSTR("Ref"),
+
+      ExtractRenderComponents: PrefixSTR("ExtractRenderComponents"),
+      ExtractComponent: PrefixSTR("ExtractComponent"),
     };
 
     const vueImports: Array<[string, string, boolean?]> = [
@@ -87,9 +94,17 @@ export function processRender(context: ParseContext) {
       ["defineComponent", variables.defineComponent],
       ["ShallowUnwrapRef", variables.ShallowUnwrapRef, true],
       ["GlobalComponents", variables.GlobalComponents, true],
+      ["ComponentPublicInstance", variables.ComponentPublicInstance, true],
+      ["Ref", variables.Ref, true],
+      [
+        "IntrinsicElementAttributes",
+        variables.IntrinsicElementAttributes,
+        true,
+      ],
+      ["Component", variables.VueComponent, true],
     ];
 
-    const globalPatch = getGlobalComponentsStr();
+    const globalPatch = getGlobalComponentsStr(variables);
     const imports = context.isSetup
       ? `
 import 'vue/jsx';
@@ -101,7 +116,9 @@ import { ${BindingContextExportName}, ${DefaultOptions} } from "${optionsFilenam
 ${globalPatch}
 `
       : `import 'vue/jsx';
-// import { defineComponent as ${variables.defineComponent}, ShallowUnwrapRef as ${variables.ShallowUnwrapRef} } from "vue";
+// import { defineComponent as ${
+          variables.defineComponent
+        }, ShallowUnwrapRef as ${variables.ShallowUnwrapRef} } from "vue";
 import { ${vueImports.map(
           ([i, n, t]) => `${t ? "type " : ""}${i} as ${n}`
         )} } from "vue";
@@ -150,10 +167,10 @@ const ${accessors.ctx} = {
 
 
 const ${accessors.comp} =  {
-  //...({} as ExtractRenderComponents<typeof ___VERTER___ctx>),
-  ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
-  ...({} as ${variables.GlobalComponents}),
-  ...___VERTER___ctx
+  // ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+  ...({} as ${variables.ExtractRenderComponents}<typeof ___VERTER___ctx>),
+  // ...({} as ${variables.GlobalComponents}),
+  // ...___VERTER___ctx
 }
 `
       : `
@@ -165,10 +182,10 @@ const ${accessors.ctx} = {
 }
 
 const ${accessors.comp} =  {
-  //...({} as ExtractRenderComponents<typeof ___VERTER___ctx>),
-  ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
-  ...({} as ${variables.GlobalComponents}),
-  ...___VERTER___ctx
+  // ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+  ...({} as ${variables.ExtractRenderComponents}<typeof ___VERTER___ctx>),
+  // ...({} as ${variables.GlobalComponents}),
+  // ...___VERTER___ctx
 }
 `;
 
@@ -259,7 +276,18 @@ const ${accessors.comp} =  {
   };
 }
 
-function getGlobalComponentsStr() {
+function getGlobalComponentsStr(
+  variables: Record<
+    | "Ref"
+    | "ExtractComponent"
+    | "VueComponent"
+    | "IntrinsicElementAttributes"
+    | "ExtractRenderComponents"
+    | "ComponentPublicInstance"
+    | "GlobalComponents",
+    string
+  >
+) {
   const toImport = [
     "Suspense",
     "KeepAlive",
@@ -297,7 +325,38 @@ declare global {
   
 declare function ___VERTER_renderSlot<T extends Array<any>>(slot: (...args: T) => any, cb: (...cb: T) => any): void;
 declare function ___VERTER___template(): JSX.Element;
+
+type ___VERTER___OmitNever<T> = {
+    [K in keyof T as T[K] extends never ? never : K]: T[K];
+};
+
+type ${variables.ExtractComponent}<T> = T extends ${variables.Ref}<infer V>
+  ? ${variables.ExtractComponent}<V>
+  : T extends ${variables.VueComponent}<infer Props>
+  ? T & { new(): { $props: Props } }
+  : T extends keyof ${variables.IntrinsicElementAttributes}
+  ? { new (): { $props: ${variables.IntrinsicElementAttributes}[T] } }
+  : never;
+
+type ${variables.ExtractRenderComponents}<T> = ___VERTER___OmitNever<{
+  [K in keyof Omit<T, keyof ${variables.ComponentPublicInstance}>]: ${
+    variables.ExtractComponent
+  }<T[K]>;
+}> & ${variables.GlobalComponents} & {};
 `;
+
+  // type ExtractComponent<T> = T extends Ref<infer V>
+  // ? ExtractComponent<V>
+  // : T extends Component
+  // ? T
+  // : T extends keyof IntrinsicElementAttributes
+  // ? { new (): { $props: IntrinsicElementAttributes[T] } }
+  // : never;
+
+  // type ExtractRenderComponents<T> = OmitNever<{
+  //   [K in keyof Omit<T, keyof ComponentPublicInstance>]: ExtractComponent<T[K]>;
+  // }> &
+  //   GlobalComponents & {};
 
   return `${importStr}\n${globalDeclaration}`;
 }

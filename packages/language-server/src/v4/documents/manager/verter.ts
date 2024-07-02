@@ -67,7 +67,7 @@ export class VerterManager {
         this.folderToTsConfigMap.set(folderOrPath, tsconfigPath);
       } else {
         // tsconfig should have resolved by now
-        debugger;
+        tsconfigPath = process.cwd();
       }
     }
 
@@ -97,8 +97,9 @@ export function getTypescriptService(
 
   let parsedConfig: ts.ParsedCommandLine | null = null;
   const configFile = fsPath.resolve(workspacePath, "./tsconfig.json");
+  const tsconfigFileExists = ts.sys.fileExists(configFile);
 
-  if (ts.sys.fileExists(configFile)) {
+  if (tsconfigFileExists) {
     // // TODO watch the config file
     // ts.sys.watchFile!(configFile, (f) => {});
 
@@ -286,7 +287,9 @@ export function getTypescriptService(
       //     parsedConfig.fileNames;
       //   }
 
-      const files = parsedConfig?.fileNames ?? [];
+      const files = tsconfigFileExists
+        ? parsedConfig?.fileNames ?? []
+        : Array.from(documentManager.files.values()).map((x) => x.uri);
 
       const map =
         files.flatMap((x) => {
@@ -295,7 +298,6 @@ export function getTypescriptService(
           if (!doc) {
             doc = documentManager.preloadDocument(x);
           }
-
           if (isVueDocument(doc)) {
             return doc.subDocumentPaths;
           }

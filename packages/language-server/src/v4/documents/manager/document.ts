@@ -165,6 +165,9 @@ export class DocumentManager {
    * @param text
    */
   preloadDocument(filepath: string, text?: string) {
+    if (filepath.startsWith("file://")) {
+      filepath = uriToPath(filepath);
+    }
     let doc: VueDocument | TextDocument = this.files.get(filepath);
     if (doc) {
       console.log("Document already exists", filepath);
@@ -224,6 +227,8 @@ export class DocumentManager {
         return text;
       }
     }
+    // this happens if the documents is not preloaded, not having
+    // tsconfig.json might cause this
     if (doc) {
       // not sure if this should happen
       debugger;

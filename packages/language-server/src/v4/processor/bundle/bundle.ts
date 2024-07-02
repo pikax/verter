@@ -4,6 +4,7 @@ import { MagicString } from "vue/compiler-sfc";
 import {
   BindingContextExportName,
   ComponentExport,
+  DefaultOptions,
 } from "./../options/index.js";
 import { FunctionExportName } from "./../render/index.js";
 import { getBlockFilename } from "../utils";
@@ -18,15 +19,19 @@ export function processBundle(context: ParseContext) {
   const ctx = {
     DefineComponent: PrefixSTR("DefineComponent"),
   };
+  const generic = context.generic;
 
   s.append(
     `import { DefineComponent as ${ctx.DefineComponent} } from "vue";
-// import { ${ComponentExport}, ${BindingContextExportName} } from "${optionsFile}";
+import { ${DefaultOptions}, ${BindingContextExportName} } from "${optionsFile}";
 // import { ${FunctionExportName} } from "${renderFile}";
 
-export default {
-test: 1
+declare const Comp : typeof ${DefaultOptions} & { new(): { 
+  $props: {
+  ReturnType<typeof ${BindingContextExportName}>['props'];
 }
+} };
+export default Comp;
 `
   );
 
