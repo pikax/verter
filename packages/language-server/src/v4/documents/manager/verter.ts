@@ -139,9 +139,9 @@ export function getTypescriptService(
       ...parsedConfig.options,
       // allowArbitraryExtensions: true,
       allowJs: true,
-      // noImplicitAny: false,
-      // noImplicitThis: false,
-      // noImplicitReturns: false,
+      noImplicitAny: false,
+      noImplicitThis: false,
+      noImplicitReturns: false,
     };
     // this is quite damaging for types I reckon
     // when the jsxImportSource is set to vue
@@ -156,8 +156,8 @@ export function getTypescriptService(
     target: ts.ScriptTarget.ESNext,
     module: ts.ModuleKind.NodeNext,
     // jsxFactory: "vue",
-    // alwaysStrict: true,
-    // noImplicitAny: true,
+    alwaysStrict: true,
+    noImplicitAny: true,
   };
 
   const tsSystem = ts.sys;

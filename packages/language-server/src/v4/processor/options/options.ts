@@ -515,7 +515,7 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
   }() {
    return ${
      isSetup
-       ? `${isAsync ? "await " : ""}(${FullContextExportName}${
+       ? `(${isAsync ? "await " : ""}${FullContextExportName}${
            genericInfo ? `<${genericInfo.names.join(",")}>` : ""
          }()).${PropsPropertyName}`
        : `new ${DefaultOptions}().$props`

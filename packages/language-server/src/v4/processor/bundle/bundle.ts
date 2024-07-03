@@ -20,6 +20,7 @@ export function processBundle(context: ParseContext) {
     DefineComponent: PrefixSTR("DefineComponent"),
   };
   const generic = context.generic;
+  const isAsync = context.isAsync;
 
   s.append(
     `import { DefineComponent as ${ctx.DefineComponent} } from "vue";
@@ -31,7 +32,9 @@ declare const Comp : typeof ${DefaultOptions} & { new${
     }(): { 
   $props: ReturnType<typeof ${ResolveProps}${
       generic ? `<${generic.sanitisedNames.join(",")}>` : ""
-    }>;
+    }> extends ${isAsync ? "Promise<" : ""}infer P${
+      isAsync ? ">" : ""
+    } ? P extends P & 1 ? {} : P : never;
 } };
 export default Comp;
 `
