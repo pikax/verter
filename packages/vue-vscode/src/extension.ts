@@ -32,7 +32,7 @@ export function activate(context: ExtensionContext) {
   if (workspace.textDocuments.some((doc) => doc.languageId === "vue")) {
     commands.executeCommand(
       "_typescript.configurePlugin",
-      "@verter/typescript-plugin",
+      require.resolve("@verter/typescript-plugin"),
       {
         enable: true,
       }
