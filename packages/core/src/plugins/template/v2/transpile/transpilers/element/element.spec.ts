@@ -1,12 +1,14 @@
+import { TranspileOptions } from "../../transpile";
 import { fromTranspiler } from "../spec.helpers";
 import Element from "./";
 
 describe("tranpiler element", () => {
   function transpile(
     source: string,
-    options?: {
-      webComponents: string[];
-    }
+    // options?: {
+    //   webComponents: string[];
+    // }
+    options?: Omit<TranspileOptions, "plugins">
   ) {
     return fromTranspiler(Element, source, [], options);
   }
@@ -737,6 +739,21 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(
           `"<span checkForSomething={\`foo=\${___VERTER___ctx.bar}\`}></span>"`
         );
+      });
+
+      it("should not append if is ignoredIdentifier", () => {
+        const { result } = transpile(`<span :item="item"/>`, {
+          ignoredIdentifiers: ["item"],
+        });
+
+        expect(result).toMatchInlineSnapshot(`"<span item={item}/>"`);
+      });
+      it("should not append if is ignoredIdentifier followed by a dot", () => {
+        const { result } = transpile(`<span :item="item."/>`, {
+          ignoredIdentifiers: ["item"],
+        });
+
+        expect(result).toMatchInlineSnapshot(`"<span item={item.}/>"`);
       });
 
       describe("class & style merge", () => {

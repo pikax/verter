@@ -153,10 +153,14 @@ export function appendCtx(
   }
   const accessor = context.accessors.ctx;
 
+  const sanitisedContent = content.startsWith("$")
+    ? content
+    : content.replace(/\W+/g, "");
+
   if (
-    isGloballyAllowed(content) ||
-    isLiteralWhitelisted(content) ||
-    ~context.ignoredIdentifiers.indexOf(content) ||
+    isGloballyAllowed(sanitisedContent) ||
+    isLiteralWhitelisted(sanitisedContent) ||
+    ~context.ignoredIdentifiers.indexOf(sanitisedContent) ||
     !accessor
   ) {
     return content;
