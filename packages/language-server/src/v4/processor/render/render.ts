@@ -313,7 +313,7 @@ const ${accessors.comp} =  {
       s.overwrite(
         mainBlock.tag.pos.open.start,
         mainBlock.tag.pos.open.end,
-        `export function ${isAsync ? "async " : ""}${FunctionExportName}() {\n`
+        `export ${isAsync ? "async " : ""}function ${FunctionExportName}() {\n`
       );
     }
 

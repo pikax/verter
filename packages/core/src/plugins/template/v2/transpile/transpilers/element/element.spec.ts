@@ -59,8 +59,8 @@ describe("tranpiler element", () => {
           `<my-component><span>{{text}}</span></my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
           <span>{{text}}</span>
@@ -75,12 +75,12 @@ describe("tranpiler element", () => {
           `<my-component><my-span>{{text}}</my-span></my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
-          <___VERTER___comp.MySpan v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          <___VERTER___comp.MySpan v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
           {{text}}
@@ -98,8 +98,8 @@ describe("tranpiler element", () => {
           `<my-component><template #default/></my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
           <___VERTER___template />
@@ -114,8 +114,8 @@ describe("tranpiler element", () => {
           `<my-component><template v-slot/></my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
           <___VERTER___template />
           })}
@@ -128,8 +128,8 @@ describe("tranpiler element", () => {
           `<my-component><template v-slot:name/></my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.name)(()=>{
           <___VERTER___template />
           })}
@@ -143,8 +143,8 @@ describe("tranpiler element", () => {
           `<my-component><template #[bar]/></my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots[___VERTER___ctx.bar])(()=>{
 
           <___VERTER___template />
@@ -159,8 +159,8 @@ describe("tranpiler element", () => {
           `<my-component><template v-slot:[bar]/></my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots[___VERTER___ctx.bar])(()=>{
           <___VERTER___template />
           })}
@@ -174,8 +174,8 @@ describe("tranpiler element", () => {
           `<my-component><template #default="props"/></my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)((props)=>{
           <___VERTER___template />
           })}
@@ -189,8 +189,8 @@ describe("tranpiler element", () => {
           `<my-component><template v-slot="props"/></my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)((props)=>{
           <___VERTER___template />
           })}
@@ -203,8 +203,8 @@ describe("tranpiler element", () => {
           `<my-component><template v-slot:name="props"/></my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.name)((props)=>{
           <___VERTER___template />
           })}
@@ -218,8 +218,8 @@ describe("tranpiler element", () => {
           `<my-component><template #[bar]="props"/></my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots[___VERTER___ctx.bar])((props)=>{
           <___VERTER___template />
           })}
@@ -233,8 +233,8 @@ describe("tranpiler element", () => {
           `<my-component><template v-slot:[bar]="props"/></my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots[___VERTER___ctx.bar])((props)=>{
           <___VERTER___template />
           })}
@@ -246,16 +246,16 @@ describe("tranpiler element", () => {
       it("with slot comment", () => {
         const { result } = transpile(
           `<my-component>
-          <!-- test -->
+          <!-- NOTE COMMENT HANDLED BY Comment Transpiler -->
           <template #default/>
         </my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
-          <!-- test -->
+          <!-- NOTE COMMENT HANDLED BY Comment Transpiler -->
                     <___VERTER___template />
           })}
 
@@ -273,8 +273,8 @@ describe("tranpiler element", () => {
           </my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.header)(()=>{
 
           <___VERTER___template />
@@ -299,8 +299,8 @@ describe("tranpiler element", () => {
         </my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
 
@@ -325,8 +325,8 @@ describe("tranpiler element", () => {
         </my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
 
@@ -347,19 +347,19 @@ describe("tranpiler element", () => {
         const { result } = transpile(
           `<my-component>
           <span>{{test}}</span>
-          <!-- test -->
+          <!-- NOTE COMMENTS ARE HANDLED BY Comment Transpiler -->
           <template #default/>
         </my-component>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComponent v-slot={(ComponentInstance)=>{
-          const $slots = ComponentInstance.$slots;
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
 
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
-          <!-- test -->
+          <!-- NOTE COMMENTS ARE HANDLED BY Comment Transpiler -->
                     <___VERTER___template />
           })}
           <span>{{test}}</span>
@@ -369,6 +369,72 @@ describe("tranpiler element", () => {
                     
                     
                   </___VERTER___comp.MyComponent>"
+        `);
+      });
+
+      it("default + condition", () => {
+        const { result } = transpile(`<Test>
+  <template v-if="true">
+    <div />
+  </template>
+</Test>`);
+        expect(result).toMatchInlineSnapshot(`
+          "<___VERTER___comp.Test v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+
+          { ()=> {if(true){<___VERTER___template >
+              <div />
+            </___VERTER___template>}}}
+          })}
+
+          }}>
+            
+          </___VERTER___comp.Test>"
+        `);
+      });
+
+      it("named + condition", () => {
+        const { result } = transpile(`<Test>
+<template v-if="true" #test>
+  <div />
+</template>
+</Test>`);
+        expect(result).toMatchInlineSnapshot(`
+          "<___VERTER___comp.Test v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
+          {___VERTER___SLOT_CALLBACK($slots.test)(()=>{
+
+          { ()=> {if(true){<___VERTER___template  >
+            <div />
+          </___VERTER___template>}}}
+          })}
+
+          }}>
+
+          </___VERTER___comp.Test>"
+        `);
+      });
+
+      it("should wrap slot names", () => {
+        const { result } = transpile(`<Test>
+          <template v-if="true" #test-name>
+            <div />
+          </template>
+        </Test>`);
+        expect(result).toMatchInlineSnapshot(`
+          "<___VERTER___comp.Test v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
+          {___VERTER___SLOT_CALLBACK($slots['test-name'])(()=>{
+
+          { ()=> {if(true){<___VERTER___template  >
+                      <div />
+                    </___VERTER___template>}}}
+          })}
+
+          }}>
+                    
+                  </___VERTER___comp.Test>"
         `);
       });
     });

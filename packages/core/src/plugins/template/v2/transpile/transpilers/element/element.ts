@@ -69,52 +69,7 @@ export default createTranspiler(NodeTypes.ELEMENT, {
       }
     }
 
-    return {
-      ...context,
-      ...overrideContext,
-    };
-  },
-  leave(node, parent, context, parentContext) {
-    const tag = resolveTag(node, context);
-
-    const isWebComponent =
-      node.tagType === ElementTypes.COMPONENT &&
-      checkWebComponent(node.tag, tag, context);
-    // update the endTag
-    if (!node.isSelfClosing) {
-      if (node.tagType === ElementTypes.SLOT) {
-        const endTagIndex =
-          node.loc.start.offset + node.loc.source.lastIndexOf(node.tag);
-        if (tag !== node.tag) {
-          context.s.overwrite(
-            endTagIndex,
-            endTagIndex + node.tag.length,
-            "RENDER_SLOT"
-          );
-        }
-      } else if (!isWebComponent) {
-        const endTagIndex =
-          node.loc.start.offset + node.loc.source.lastIndexOf(node.tag);
-
-        // check if the component has a closing tag, otherwise we don't need to update
-        if (endTagIndex > node.loc.start.offset + 1) {
-          if (tag !== node.tag) {
-            context.s.overwrite(
-              endTagIndex,
-              endTagIndex + node.tag.length,
-              tag
-            );
-          }
-          if (
-            node.tagType === ElementTypes.COMPONENT &&
-            context.accessors.comp
-          ) {
-            context.s.appendLeft(endTagIndex, context.accessors.comp + ".");
-          }
-        }
-      }
-    }
-
+    // SLOT HANDLING
     switch (node.tagType) {
       case ElementTypes.COMPONENT: {
         if (isWebComponent || node.children.length === 0) break;
@@ -133,7 +88,7 @@ export default createTranspiler(NodeTypes.ELEMENT, {
         } else {
           const slots = retrieveSlotNamed(node);
 
-          context.s.prependLeft(
+          s.prependLeft(
             tagBlockEnd,
             withNarrowCondition(
               [
@@ -145,6 +100,8 @@ export default createTranspiler(NodeTypes.ELEMENT, {
           );
 
           const orphans: TemplateChildNode[] = [];
+          const slotsEnd: number[] = [];
+
           for (const slot in slots) {
             const definition = slots[slot];
             if (!definition.templateNode) {
@@ -152,19 +109,71 @@ export default createTranspiler(NodeTypes.ELEMENT, {
               continue;
             }
 
-            renderSlot(
+            const slotEnd = renderSlot(
               context,
               tagBlockEnd,
               definition.items,
               parentContext,
               definition.templateNode
             );
+            slotsEnd.push(slotEnd);
           }
 
           if (orphans.length) {
-            renderSlot(context, tagBlockEnd, orphans, parentContext);
+            const slotEnd = renderSlot(
+              context,
+              tagBlockEnd,
+              orphans,
+              parentContext
+            );
+            slotsEnd.push(slotEnd);
           }
-          context.s.appendRight(tagBlockEnd, "\n}}");
+          s.appendRight(tagBlockEnd, "\n}}");
+          // @ts-expect-error
+          parentContext.slotsEnd = slotsEnd;
+        }
+      }
+    }
+
+    return {
+      ...context,
+      ...overrideContext,
+    };
+  },
+  leave(node, parent, context, parentContext) {
+    const { s } = context;
+    const tag = resolveTag(node, context);
+
+    const isWebComponent =
+      node.tagType === ElementTypes.COMPONENT &&
+      checkWebComponent(node.tag, tag, context);
+    // update the endTag
+    if (!node.isSelfClosing) {
+      if (node.tagType === ElementTypes.SLOT) {
+        const endTagIndex =
+          node.loc.start.offset + node.loc.source.lastIndexOf(node.tag);
+        if (tag !== node.tag) {
+          s.overwrite(
+            endTagIndex,
+            endTagIndex + node.tag.length,
+            "RENDER_SLOT"
+          );
+        }
+      } else if (!isWebComponent) {
+        const endTagIndex =
+          node.loc.start.offset + node.loc.source.lastIndexOf(node.tag);
+
+        // check if the component has a closing tag, otherwise we don't need to update
+        if (endTagIndex > node.loc.start.offset + 1) {
+          if (tag !== node.tag) {
+            s.overwrite(endTagIndex, endTagIndex + node.tag.length, tag);
+          }
+          if (
+            node.tagType === ElementTypes.COMPONENT &&
+            context.accessors.comp
+          ) {
+            s.appendLeft(endTagIndex, context.accessors.comp + ".");
+          }
         }
       }
     }
@@ -174,7 +183,7 @@ export default createTranspiler(NodeTypes.ELEMENT, {
       !parentContext.conditionBlock &&
       !parentContext.for
     ) {
-      context.s.prependLeft(node.loc.end.offset, "}}");
+      s.prependLeft(node.loc.end.offset, "}}");
     }
     // if we are in a condition block and are the last element close the block
     if (
@@ -182,8 +191,17 @@ export default createTranspiler(NodeTypes.ELEMENT, {
       "children" in parent &&
       parent.children.at(-1) === node
     ) {
-      context.s.appendLeft(node.loc.end.offset, "}}");
+      s.appendLeft(node.loc.end.offset, "}}");
     }
+
+    if (parentContext.slotsEnd?.length) {
+      for (const slotEnd of parentContext.slotsEnd) {
+        closeSlot(context, slotEnd);
+      }
+    }
+    // if (parentContext.orphansEnd) {
+    //   closeSlot(context, parentContext.orphansEnd);
+    // }
   },
 });
 
@@ -408,6 +426,8 @@ function renderSlot(
     }
 
     if (slotProp.rawName.startsWith("#")) {
+      const shouldWrapName =
+        slotProp.rawName.indexOf("-") >= 0 && slotProp.rawName[1] !== "[";
       s.overwrite(
         slotProp.loc.start.offset,
         slotProp.loc.start.offset + 1,
@@ -439,6 +459,11 @@ function renderSlot(
 
       s.move(slotProp.loc.start.offset, slotProp.loc.end.offset, insertAt);
 
+      // s.prependRight(
+      //   slotProp.loc.end.offset,
+      //   `)${slotProp.exp ? " " : `(()=>{\n${narrowCondition}`}`
+      // );
+      
       s.prependLeft(
         slotProp.loc.end.offset,
         `)${slotProp.exp ? " " : `(()=>{\n${narrowCondition}`}`
@@ -494,7 +519,14 @@ function renderSlot(
 
   s.move(start, end, insertAt);
 
-  context.s.appendLeft(end, `\n})}\n`);
+  // context.s.appendRight(end, `\n})}\n`);
+
+  return end;
+}
+
+function closeSlot(context: TranspileContext, end: number) {
+  const { s } = context;
+  s.appendLeft(end, `\n})}\n`);
 }
 
 function sanitiseAttributeName(name: string, context: TranspileContext) {
