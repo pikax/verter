@@ -22,6 +22,7 @@ import {
   DefaultOptions,
   SlotsPropertyName,
   ResolveSlots,
+  PropsPropertyName,
 } from "../options/index.js";
 import { getBlockFilename } from "../utils.js";
 import {
@@ -234,6 +235,11 @@ const ${accessors.ctx} = {
         ? Array.from(importIdentifiers.values()).join(", ") + ","
         : ""
     }
+
+    ...({} as ${
+      variables.ShallowUnwrapRef
+    }<Omit<typeof ${BindingContextExportName}CTX.${PropsPropertyName}, keyof typeof ${BindingContextExportName}CTX>>),
+
     ...({} as ${
       variables.ShallowUnwrapRef
     }<typeof ${FullContextExportName}CTX>),
