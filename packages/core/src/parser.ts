@@ -86,9 +86,11 @@ export function parseAST(
   source: string,
   sourceFilename: string = "index.ts"
 ): AST {
+  // handling non-ascii characters gives some odd nodes position in the AST
+  const normaliseSource = source.replace(/[^\x00-\x7F]/g, "*");
   let ast: AST;
   try {
-    const result = oxc.parseSync(source, {
+    const result = oxc.parseSync(normaliseSource, {
       sourceFilename,
     });
 
@@ -101,7 +103,7 @@ export function parseAST(
     }
   } catch (e) {
     console.error("oxc parser failed", e);
-    ast = parseASTFallback(source);
+    ast = parseASTFallback(normaliseSource);
   }
 
   return ast;
@@ -345,7 +347,7 @@ export function createContext(
                     // @ts-expect-error todo type
                     const found = processNodeAst(prop.exp, false);
                     if (found) {
-                    // @ts-expect-error todo type
+                      // @ts-expect-error todo type
                       foundIdentifiers.push(...found.map((x) => x.content));
                     }
                   } else {

@@ -201,6 +201,17 @@ describe("processor options", () => {
         expectFindStringWithMap(`import { ref, Ref } from 'vue';`, result);
       });
 
+      it("chinese characters on FullContent", () => {
+        const source = `<script setup lang="ts">const a = '你好'; const b = 'test'</script>`;
+        const result = process(source);
+
+        expect(
+          result.content.slice(
+            result.content.indexOf("___VERTER___FullContext() {")
+          )
+        ).toContain(`const a = '你好';\nconst b = 'test'`);
+      });
+
       describe("return BindingContext", () => {
         describe("props", () => {
           it("not have props", () => {
@@ -462,7 +473,7 @@ describe("processor options", () => {
         expect(result.content).toContain(`const msg = '';`);
 
         expect(result.content).toContain(
-          "@returns {{msg: typeof msg, a: typeof a}}"
+          "@returns {{msg: typeof msg, a: typeof a, ___VERTER___props : {}}}"
         );
 
         expectFindStringWithMap("export const a = 1;", result);

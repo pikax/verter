@@ -1,3 +1,4 @@
+import { Program } from "@babel/types";
 import { createContext, parseGeneric } from "./parser";
 
 describe("parser", () => {
@@ -524,6 +525,70 @@ describe("parser", () => {
             },
           ]);
         });
+      });
+    });
+
+    describe("AST", () => {
+      it("should return the AST", () => {
+        const context = createContext(`<script>const foo = 'bar';</script>`);
+        expect(context.blocks[0].ast).toBeDefined();
+      });
+
+      it("should return the correct node poisition", () => {
+        const context = createContext(
+          `<script>const foo = 'bar'; const bar ="foo"</script>`
+        );
+        const script = context.blocks[0];
+        const ast = script.ast as Program;
+        expect(ast).not.toBeFalsy();
+
+        const offset = script.block.loc.start.offset;
+
+        expect(ast.body[0].start).toBe(0);
+        expect(ast.body[0].end).toBe(18);
+        expect(
+          context.source.slice(
+            offset + ast.body[0].start,
+            offset + ast.body[0].end
+          )
+        ).toBe(`const foo = 'bar';`);
+
+        expect(ast.body[1].start).toBe(19);
+        expect(ast.body[1].end).toBe(35);
+        expect(
+          context.source.slice(
+            offset + ast.body[1].start,
+            offset + ast.body[1].end
+          )
+        ).toBe(`const bar ="foo"`);
+      });
+      it("should return the correct position with non-ascii characters", () => {
+        const context = createContext(
+          `<script>const foo = '威威威'; const bar ="foo"</script>`
+        );
+        const script = context.blocks[0];
+        const ast = script.ast as Program;
+        expect(ast).not.toBeFalsy();
+
+        const offset = script.block.loc.start.offset;
+
+        expect(ast.body[0].start).toBe(0);
+        expect(ast.body[0].end).toBe(18);
+        expect(
+          context.source.slice(
+            offset + ast.body[0].start,
+            offset + ast.body[0].end
+          )
+        ).toBe(`const foo = '威威威';`);
+
+        expect(ast.body[1].start).toBe(19);
+        expect(ast.body[1].end).toBe(35);
+        expect(
+          context.source.slice(
+            offset + ast.body[1].start,
+            offset + ast.body[1].end
+          )
+        ).toBe(`const bar ="foo"`);
       });
     });
   });
