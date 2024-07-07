@@ -322,10 +322,10 @@ export function processOptions(context: ParseContext) {
         .join(", ");
 
       if (isTypescript) {
-        // const extraBindings = [propsBinding, emitBinding].filter(Boolean);
+        const extraBindings = [propsBinding, emitBinding].filter(Boolean);
         s.appendRight(
           scriptBlock.block.loc.end.offset,
-          `\nreturn /*##___VERTER_BINDING_RETURN___##*/{} as {${typeofBindings}\n} /*/##___VERTER_BINDING_RETURN___##*/\n`
+          `\nreturn /*##___VERTER_BINDING_RETURN___##*/{} as {${typeofBindings}\n} & ${extraBindings.join(' & ')} /*/##___VERTER_BINDING_RETURN___##*/\n`
         );
       } else {
         const extraBindings = [propsBinding, emitBinding].filter(Boolean);

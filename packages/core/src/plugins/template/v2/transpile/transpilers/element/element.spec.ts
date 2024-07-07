@@ -397,7 +397,7 @@ describe("tranpiler element", () => {
           const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
 
-          { ()=> {if(true){<___VERTER___template >
+          { (): any => {if(true){<___VERTER___template >
               <div />
             </___VERTER___template>}}}
           })}
@@ -419,7 +419,7 @@ describe("tranpiler element", () => {
           const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.test)(()=>{
 
-          { ()=> {if(true){<___VERTER___template  >
+          { (): any => {if(true){<___VERTER___template  >
             <div />
           </___VERTER___template>}}}
           })}
@@ -441,7 +441,7 @@ describe("tranpiler element", () => {
           const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots['test-name'])(()=>{
 
-          { ()=> {if(true){<___VERTER___template  >
+          { (): any => {if(true){<___VERTER___template  >
                       <div />
                     </___VERTER___template>}}}
           })}
@@ -462,7 +462,7 @@ describe("tranpiler element", () => {
           "<___VERTER___comp.Test v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots['test-name'])(({ foo })=>{
-          { ()=> {if(true){<___VERTER___template  >
+          { (): any => {if(true){<___VERTER___template  >
                       <div />
                     </___VERTER___template>}}}
           })}
@@ -1037,7 +1037,7 @@ describe("tranpiler element", () => {
         );
 
         expect(result).toMatchInlineSnapshot(`
-          "{ ()=> {if(___VERTER___ctx.items > 5){{___VERTER___renderList(___VERTER___ctx.items,i   =>{ 
+          "{ (): any => {if(___VERTER___ctx.items > 5){{___VERTER___renderList(___VERTER___ctx.items,i   =>{ 
           if(!(___VERTER___ctx.items > 5)) { return; } <li  ></li>})}}}}"
         `);
       });
@@ -1073,7 +1073,7 @@ describe("tranpiler element", () => {
         const { result } = transpile(`<li v-if="n > 5"></li>`);
 
         expect(result).toMatchInlineSnapshot(
-          `"{ ()=> {if(___VERTER___ctx.n > 5){<li ></li>}}}"`
+          `"{ (): any => {if(___VERTER___ctx.n > 5){<li ></li>}}}"`
         );
       });
 
@@ -1083,7 +1083,7 @@ describe("tranpiler element", () => {
         );
         expect(result).toMatchInlineSnapshot(
           `
-          "{ ()=> {if(___VERTER___ctx.n > 5){<li  id="if"></li>}else{
+          "{ (): any => {if(___VERTER___ctx.n > 5){<li  id="if"></li>}else{
           <li  id="else"></li>
           }}}"
         `
@@ -1096,7 +1096,7 @@ describe("tranpiler element", () => {
         );
         expect(result).toMatchInlineSnapshot(
           `
-          "{ ()=> {if(___VERTER___ctx.n > 5){<___VERTER___comp.Comp  id="if"></___VERTER___comp.Comp>}else{
+          "{ (): any => {if(___VERTER___ctx.n > 5){<___VERTER___comp.Comp  id="if"></___VERTER___comp.Comp>}else{
           <___VERTER___comp.Comp  id="else"></___VERTER___comp.Comp>
           }}}"
         `
@@ -1108,7 +1108,7 @@ describe("tranpiler element", () => {
           `<li v-if="n > 5"></li><li v-else-if="n > 3"></li>`
         );
         expect(result).toMatchInlineSnapshot(
-          `"{ ()=> {if(___VERTER___ctx.n > 5){<li ></li>}else if(___VERTER___ctx.n > 3){<li ></li>}}}"`
+          `"{ (): any => {if(___VERTER___ctx.n > 5){<li ></li>}else if(___VERTER___ctx.n > 3){<li ></li>}}}"`
         );
       });
 
@@ -1116,7 +1116,7 @@ describe("tranpiler element", () => {
         const { result } = transpile(`<div v-if="getData.length > 0"> </div>`);
 
         expect(result).toMatchInlineSnapshot(
-          `"{ ()=> {if(___VERTER___ctx.getData.length > 0){<div > </div>}}}"`
+          `"{ (): any => {if(___VERTER___ctx.getData.length > 0){<div > </div>}}}"`
         );
       });
 
@@ -1132,7 +1132,7 @@ describe("tranpiler element", () => {
 
         expect(result).toMatchInlineSnapshot(`
           "
-                          { ()=> {if(___VERTER___ctx.n === 1){<li ></li>}
+                          { (): any => {if(___VERTER___ctx.n === 1){<li ></li>}
                           else if(___VERTER___ctx.n === 1){<li ></li>}
                           else if(___VERTER___ctx.n === 1){<li ></li>}
                           else if(___VERTER___ctx.n === 1){<li ></li>}
@@ -1167,7 +1167,7 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "
                   <div class="flex flex-row items-center pb-2.5">
-                  { ()=> {if(___VERTER___ctx.props.item.content.content.type === 3){<img
+                  { (): any => {if(___VERTER___ctx.props.item.content.content.type === 3){<img
                     
                     class="mr-2 h-9 w-9 select-none"
                     src="@/assets/exchangeorder-icon.svg"
@@ -1177,7 +1177,7 @@ describe("tranpiler element", () => {
                     class="mr-2 h-9 w-9 select-none"
                     src="@/assets/rechargeorder-icon.svg"
                   />}}}
-                  { ()=> {if(___VERTER___ctx.props.item.content.content.type === 3){<span >发送兑换订单</span>}
+                  { (): any => {if(___VERTER___ctx.props.item.content.content.type === 3){<span >发送兑换订单</span>}
                   else if(___VERTER___ctx.props.item.content.content.type === 2){<span 
                     >发送充值订单</span
                   >}}}
@@ -1309,7 +1309,7 @@ describe("tranpiler element", () => {
         );
         expect(result).toMatchInlineSnapshot(
           `
-          "{ ()=> {if(___VERTER___ctx.n === true){<li  key={___VERTER___ctx.n}></li>}else{
+          "{ (): any => {if(___VERTER___ctx.n === true){<li  key={___VERTER___ctx.n}></li>}else{
           <li  key={___VERTER___ctx.n}/>
           }}}"
         `
@@ -1325,7 +1325,7 @@ describe("tranpiler element", () => {
           // NOTE the resulted snapshot should give an error with typescript in the correct environment
           expect(result).toMatchInlineSnapshot(
             `
-            "{ ()=> {if(___VERTER___ctx.n.n.n === true){<li  onClick={()=> !(___VERTER___ctx.n.n.n === true) ? undefined : ___VERTER___ctx.n.n.n === false ? 1 : undefined}></li>}else{
+            "{ (): any => {if(___VERTER___ctx.n.n.n === true){<li  onClick={()=> !(___VERTER___ctx.n.n.n === true) ? undefined : ___VERTER___ctx.n.n.n === false ? 1 : undefined}></li>}else{
             <li  onClick={()=> ___VERTER___ctx.n.n.n === true ? undefined : ___VERTER___ctx.n.n.n === true ? 1 : undefined}/>
             }}}"
           `
@@ -1339,7 +1339,7 @@ describe("tranpiler element", () => {
           // NOTE the resulted snapshot should give an error with typescript in the correct environment
           expect(result).toMatchInlineSnapshot(
             `
-            "{ ()=> {if(___VERTER___ctx.n.n.n === true){<li  onClick={()=> { if(!(___VERTER___ctx.n.n.n === true)) { return; } return  ___VERTER___ctx.n.n.n === false ? 1 : undefined }} ></li>}else{
+            "{ (): any => {if(___VERTER___ctx.n.n.n === true){<li  onClick={()=> { if(!(___VERTER___ctx.n.n.n === true)) { return; } return  ___VERTER___ctx.n.n.n === false ? 1 : undefined }} ></li>}else{
             <li  onClick={()=>{ if(___VERTER___ctx.n.n.n === true) { return; } return ___VERTER___ctx.n.n.n === true ? 1 : undefined}}/>
             }}}"
           `
@@ -1354,7 +1354,7 @@ describe("tranpiler element", () => {
           // NOTE the resulted snapshot should give an error with typescript in the correct environment
           expect(result).toMatchInlineSnapshot(
             `
-            "{ ()=> {if(___VERTER___ctx.n.n.n === true){<li  onClick={function() { if(!(___VERTER___ctx.n.n.n === true)) { return; } return  ___VERTER___ctx.n.n.n === false ? 1 : undefined } }></li>}else{
+            "{ (): any => {if(___VERTER___ctx.n.n.n === true){<li  onClick={function() { if(!(___VERTER___ctx.n.n.n === true)) { return; } return  ___VERTER___ctx.n.n.n === false ? 1 : undefined } }></li>}else{
             <li  onClick={function(){ if(___VERTER___ctx.n.n.n === true) { return; } return ___VERTER___ctx.n.n.n === true ? 1 : undefined}}/>
             }}}"
           `
@@ -1386,7 +1386,7 @@ describe("tranpiler element", () => {
           // NOTE the resulted snapshot should give an error with typescript in the correct environment
           expect(result).toMatchInlineSnapshot(
             `
-            "{ ()=> {if(___VERTER___ctx.r.n === false){{___VERTER___renderList(___VERTER___ctx.r.items,item   =>{ 
+            "{ (): any => {if(___VERTER___ctx.r.n === false){{___VERTER___renderList(___VERTER___ctx.r.items,item   =>{ 
             if(!(___VERTER___ctx.r.n === false)) { return; } <div   key={___VERTER___ctx.r.n === true ? 1 : false}></div>})}}}}"
           `
           );
@@ -1486,7 +1486,7 @@ describe("tranpiler element", () => {
       it("with v-if", () => {
         const { result } = transpile(`<slot v-if="false"/>`);
         expect(result).toMatchInlineSnapshot(`
-          "{ ()=> {if(false){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          "{ (): any => {if(false){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
           return <RENDER_SLOT />}}}"
         `);
       });
@@ -1564,7 +1564,7 @@ describe("tranpiler element", () => {
       it("with v-if", () => {
         const { result } = transpile(`<slot v-if="false">{{ 'hello' }}</slot>`);
         expect(result).toMatchInlineSnapshot(`
-          "{ ()=> {if(false){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          "{ (): any => {if(false){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
           return <RENDER_SLOT >{{ 'hello' }}</RENDER_SLOT>}}}"
         `);
       });
@@ -1584,7 +1584,7 @@ describe("tranpiler element", () => {
   <slot :tab="item" />
 </slot>`);
         expect(result).toMatchInlineSnapshot(`
-          "{ ()=> {if(___VERTER___ctx.disableDrag){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[___VERTER___ctx.selected]);
+          "{ (): any => {if(___VERTER___ctx.disableDrag){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[___VERTER___ctx.selected]);
           return <RENDER_SLOT  >
             {()=>{
 
@@ -1600,7 +1600,7 @@ describe("tranpiler element", () => {
   <slot :tab="item" />
 </slot>`);
         expect(result).toMatchInlineSnapshot(`
-          "{ ()=> {if(___VERTER___ctx.disableDrag){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[___VERTER___ctx.selected as T]);
+          "{ (): any => {if(___VERTER___ctx.disableDrag){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[___VERTER___ctx.selected as T]);
           return <RENDER_SLOT  >
             {()=>{
 
@@ -1672,7 +1672,7 @@ describe("tranpiler element", () => {
 
           <___VERTER___template >
                    <div></div>
-                  { ()=> {if(___VERTER___ctx.foo.n){<div >
+                  { (): any => {if(___VERTER___ctx.foo.n){<div >
                     {{foo.n}}
                   </div>}}}
                   <___VERTER___comp.Comp></___VERTER___comp.Comp>
@@ -1717,7 +1717,7 @@ describe("tranpiler element", () => {
           const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot["bar"]);
           return <RENDER_SLOT >
                 <div>
-                    { ()=> {if(true){<div > bar </div>}
+                    { (): any => {if(true){<div > bar </div>}
                     else{
           const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot["title"]);
           return <RENDER_SLOT  >
@@ -1737,7 +1737,7 @@ describe("tranpiler element", () => {
           const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
           return <RENDER_SLOT />}}
             </div>
-            { ()=> {if(___VERTER___ctx.noFoo){<___VERTER___template  />}
+            { (): any => {if(___VERTER___ctx.noFoo){<___VERTER___template  />}
             else{
           <div >
              Foo
