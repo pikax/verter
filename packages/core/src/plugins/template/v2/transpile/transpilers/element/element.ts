@@ -425,13 +425,20 @@ function renderSlot(
       processExpression(slotProp.arg, context);
     }
 
+    const shouldWrapName = slotProp.rawName.startsWith("#")
+      ? slotProp.rawName.indexOf("-") >= 0 && slotProp.rawName[1] !== "["
+      : slotProp.arg && "content" in slotProp.arg
+      ? slotProp.arg.content.indexOf("-") >= 0 &&
+        slotProp.arg.content[1] !== "["
+      : false;
+    slotProp.rawName.indexOf("-") >= 0 && slotProp.rawName[1] !== "[";
     if (slotProp.rawName.startsWith("#")) {
-      const shouldWrapName =
-        slotProp.rawName.indexOf("-") >= 0 && slotProp.rawName[1] !== "[";
       s.overwrite(
         slotProp.loc.start.offset,
         slotProp.loc.start.offset + 1,
-        `$slots${slotProp.rawName[1] === "[" ? "" : "."}`
+        `$slots${
+          slotProp.rawName[1] === "[" ? "" : shouldWrapName ? "['" : "."
+        }`
       );
 
       s.appendRight(slotProp.loc.start.offset, prepend);
@@ -440,7 +447,9 @@ function renderSlot(
 
       s.prependLeft(
         slotProp.loc.end.offset,
-        `)${slotProp.exp ? " " : `(()=>{\n${narrowCondition}\n`}`
+        `${shouldWrapName ? "']" : ""})${
+          slotProp.exp ? " " : `(()=>{\n${narrowCondition}\n`
+        }`
       );
     } else {
       // v-slot:
@@ -451,6 +460,8 @@ function renderSlot(
           slotProp.arg
             ? slotProp.rawName["v-slot".length + 1] === "["
               ? ""
+              : shouldWrapName
+              ? "['"
               : "."
             : ".default"
         }`
@@ -459,14 +470,11 @@ function renderSlot(
 
       s.move(slotProp.loc.start.offset, slotProp.loc.end.offset, insertAt);
 
-      // s.prependRight(
-      //   slotProp.loc.end.offset,
-      //   `)${slotProp.exp ? " " : `(()=>{\n${narrowCondition}`}`
-      // );
-      
       s.prependLeft(
         slotProp.loc.end.offset,
-        `)${slotProp.exp ? " " : `(()=>{\n${narrowCondition}`}`
+        `${shouldWrapName ? "']" : ""})${
+          slotProp.exp ? " " : `(()=>{\n${narrowCondition}`
+        }`
       );
     }
     if (slotProp.exp) {
@@ -474,7 +482,7 @@ function renderSlot(
       s.overwrite(
         slotProp.exp.loc.start.offset - 2,
         slotProp.exp.loc.start.offset - 1,
-        ")("
+        `${shouldWrapName ? "']" : ""})(`
       );
 
       // replace delimeters with ( )

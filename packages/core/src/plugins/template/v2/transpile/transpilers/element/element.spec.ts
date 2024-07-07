@@ -212,6 +212,20 @@ describe("tranpiler element", () => {
           }}></___VERTER___comp.MyComponent>"
         `);
       });
+      it("with v-slot snake name", () => {
+        const { result } = transpile(
+          `<my-component><template v-slot:name-foo="props"/></my-component>`
+        );
+        expect(result).toMatchInlineSnapshot(`
+          "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
+          {___VERTER___SLOT_CALLBACK($slots['name-foo'])((props)=>{
+          <___VERTER___template />
+          })}
+
+          }}></___VERTER___comp.MyComponent>"
+        `);
+      });
 
       it("dynamic # name=props", () => {
         const { result } = transpile(
@@ -427,6 +441,27 @@ describe("tranpiler element", () => {
           const $slots = ___VERTER___componentInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots['test-name'])(()=>{
 
+          { ()=> {if(true){<___VERTER___template  >
+                      <div />
+                    </___VERTER___template>}}}
+          })}
+
+          }}>
+                    
+                  </___VERTER___comp.Test>"
+        `);
+      });
+
+      it("should wrap slot names with props", () => {
+        const { result } = transpile(`<Test>
+          <template v-if="true" #test-name="{ foo }">
+            <div />
+          </template>
+        </Test>`);
+        expect(result).toMatchInlineSnapshot(`
+          "<___VERTER___comp.Test v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
+          {___VERTER___SLOT_CALLBACK($slots['test-name'])(({ foo })=>{
           { ()=> {if(true){<___VERTER___template  >
                       <div />
                     </___VERTER___template>}}}
