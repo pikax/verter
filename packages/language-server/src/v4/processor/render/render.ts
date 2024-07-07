@@ -20,6 +20,8 @@ import {
   BindingContextExportName,
   FullContextExportName,
   DefaultOptions,
+  SlotsPropertyName,
+  ResolveSlots,
 } from "../options/index.js";
 import { getBlockFilename } from "../utils.js";
 import {
@@ -64,7 +66,8 @@ export function processRender(context: ParseContext) {
         if (block.ast) {
           for (const it of block.ast.body) {
             switch (it.type as any) {
-              case "ImportDeclaration": { // case "TsExportAssignment": // case "TsNamespaceExportDeclaration": // case "ExportNamedDeclaration": // case "ExportDeclaration": // case "ExportAllDeclaration":
+              case "ImportDeclaration": {
+                // case "TsExportAssignment": // case "TsNamespaceExportDeclaration": // case "ExportNamedDeclaration": // case "ExportDeclaration": // case "ExportAllDeclaration":
                 const offset = block.block.loc.start.offset;
                 const startIndex = it.start + offset;
                 const endIndex = it.end + offset;
@@ -165,7 +168,7 @@ import 'vue/jsx';
 import { ${vueImports.map(
           ([i, n, t]) => `${t ? "type " : ""}${i} as ${n}`
         )} } from "vue";
-import { ${BindingContextExportName}, ${FullContextExportName}, ${DefaultOptions} } from "${optionsFilename}";
+import { ${BindingContextExportName}, ${FullContextExportName}, ${DefaultOptions}, ${ResolveSlots}} from "${optionsFilename}";
 
 ${globalPatch}
 `
@@ -188,8 +191,9 @@ ${globalPatch}
 declare function ___VERTER_extract_Slots<CompSlots>(comp: { new(): { $slots: CompSlots } }, slots?: undefined): CompSlots;
 declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string, any> = {}>(comp: { new(): { $slots: CompSlots } }, slots: Slots): Slots;
 
-declare function ___VERTER___SLOT_CALLBACK<T>(slot: (...args: T[]) => any): (cb: ((...args: T[]) => any))=>void;
-declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event: TArgs[0],) => any>(event: TArgs, cb: R): R;`
+declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb: ((...args: T[]) => any))=>void;
+declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event: TArgs[0],) => any>(event: TArgs, cb: R): R;
+declare function ___VERTER___AssertAny<T>(o: T): T extends T & 0 ? never : T;`
       : `
 declare function ${variables.isConstructor}<T extends { new(): Record<string, any> }>(o: T | unknown): true;
 type ${variables.UnionToIntersection}<U> =
@@ -200,8 +204,9 @@ declare function ${variables.ExtractInstance}<T>(o: T): T extends { new(): infer
 declare function ___VERTER_extract_Slots<CompSlots>(comp: { new(): { $slots: CompSlots } }, slots?: undefined): CompSlots;
 declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string, any> = {}>(comp: { new(): { $slots: CompSlots } }, slots: Slots): Slots;
 
-declare function ___VERTER___SLOT_CALLBACK<T>(slot: (...args: T[]) => any): (cb: ((...args: T[]) => any))=>void;
+declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb: ((...args: T[]) => any))=>void;
 declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event: TArgs[0],) => any>(event: TArgs, cb: R): R;
+declare function ___VERTER___AssertAny<T>(o: T): T extends T & 0 ? never : T;
 `;
 
     const contextContent = context.isSetup
@@ -217,6 +222,11 @@ const ${FullContextExportName}CTX = ${
         }${FullContextExportName}${
           genericInfo ? `<${genericInfo.names.join(",")}>` : ""
         }();
+
+
+const ${accessors.slot} = ${ResolveSlots}${
+          genericInfo ? `<${genericInfo.names.join(",")}>` : ""
+        }();
 const ${accessors.ctx} = {
     ...${variables.component},
     ${
@@ -230,7 +240,10 @@ const ${accessors.ctx} = {
     ...({} as ${
       variables.ShallowUnwrapRef
     }<typeof ${BindingContextExportName}CTX>),
+
+    $slots: ${accessors.slot},
 };
+
 
 
 const ${accessors.comp} =  {
@@ -248,6 +261,8 @@ const ${accessors.ctx} = {
     ...${variables.component},
     // TODO handle components
 }
+
+const ${accessors.slot} = ${variables.component}.$slots;
 
 const ${accessors.comp} =  {
   // ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),

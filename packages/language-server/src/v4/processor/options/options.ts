@@ -30,7 +30,11 @@ export const ComponentExport = PrefixSTR("Component");
 export const GenericOptions = PrefixSTR("GenericOptions");
 
 export const ResolveProps = PrefixSTR("resolveProps");
+export const ResolveEmits = PrefixSTR("resolveEmits");
+export const ResolveSlots = PrefixSTR("resolveSlots");
 export const PropsPropertyName = PrefixSTR("props");
+export const EmitsPropertyName = PrefixSTR("emits");
+export const SlotsPropertyName = PrefixSTR("slots");
 
 export function processOptions(context: ParseContext) {
   const filename = getBlockFilename("options", context);
@@ -138,10 +142,10 @@ export function processOptions(context: ParseContext) {
     }
 
     const vueMacros = [
-      ["defineProps", PrefixSTR("props")],
-      ["withDefaults", PrefixSTR("props")],
-      ["defineEmits", PrefixSTR("emits")],
-      ["defineSlots", PrefixSTR("slots")],
+      ["defineProps", PropsPropertyName],
+      ["withDefaults", PropsPropertyName],
+      ["defineEmits", EmitsPropertyName],
+      ["defineSlots", SlotsPropertyName],
       // TODO defineOptions
     ];
     const foundMacros = new Set<string>();
@@ -248,13 +252,21 @@ export function processOptions(context: ParseContext) {
         )
       : "";
 
-    const emitMacro = foundMacros.has("defineEmits")
+    const emitBinding = foundMacros.has("defineEmits")
       ? setupMacroReturn(
           "defineEmits",
           macroOverride.get("defineEmits") ??
             vueMacros.find(([n]) => n === "defineEmits")[1]
         )
       : "";
+
+    // const slotsBinding = foundMacros.has("defineSlots")
+    //   ? setupMacroReturn(
+    //       "defineSlots",
+    //       macroOverride.get("defineSlots") ??
+    //         vueMacros.find(([n]) => n === "defineSlots")[1]
+    //     )
+    //   : "";
 
     // do work for <script ... >
     if (isSetup) {
@@ -310,15 +322,13 @@ export function processOptions(context: ParseContext) {
         .join(", ");
 
       if (isTypescript) {
-        const extraBindings = [propsBinding, emitMacro].filter(Boolean);
+        // const extraBindings = [propsBinding, emitBinding].filter(Boolean);
         s.appendRight(
           scriptBlock.block.loc.end.offset,
-          `\nreturn /*##___VERTER_BINDING_RETURN___##*/{} as {${typeofBindings}\n} ${
-            extraBindings.length > 0 ? `& ${extraBindings.join(" & ")}` : ""
-          } /*/##___VERTER_BINDING_RETURN___##*/\n`
+          `\nreturn /*##___VERTER_BINDING_RETURN___##*/{} as {${typeofBindings}\n} /*/##___VERTER_BINDING_RETURN___##*/\n`
         );
       } else {
-        const extraBindings = [propsBinding, emitMacro].filter(Boolean);
+        const extraBindings = [propsBinding, emitBinding].filter(Boolean);
 
         // if not typescript we need to the types in JSDoc to make sure the types are correct
         // because when the variables are const the types are not inferred correctly
@@ -348,6 +358,16 @@ export function processOptions(context: ParseContext) {
       s.appendRight(scriptBlock.block.loc.end.offset, "\n}\n");
 
       const propType = PropsPropertyName + " : " + (propsBinding || "{}");
+      const emitType = EmitsPropertyName + " : " + (emitBinding || "{}");
+      const slotsType =
+        SlotsPropertyName +
+        " : " +
+        (setupBindingReturn(
+          macroOverride.get("defineSlots") ??
+            vueMacros.find(([n]) => n === "defineSlots")[1]
+        ) || "{}");
+
+      const extraTypes = [propType, emitType, slotsType].filter(Boolean);
 
       if (isTypescript) {
         s.append(
@@ -360,13 +380,13 @@ export function processOptions(context: ParseContext) {
    .map((x) => `${x}: typeof ${x}`)
    .join(
      ", "
-   )}\n} & { ${propType} }/*##/___VERTER_FULL_BINDING_RETURN___##*/ }\n`
+   )}\n} & { ${extraTypes} }/*##/___VERTER_FULL_BINDING_RETURN___##*/ }\n`
         );
       } else {
         s.append(`\n/**\n * @returns {{${Array.from(_bindings)
           .filter((x) => !_importBindings.includes(x))
           .map((x) => `${x}: typeof ${x}`)
-          .join(", ")}, ${propType}}} \n*/\nexport ${
+          .join(", ")}, ${extraTypes}}} \n*/\nexport ${
           isAsync ? "async" : ""
         } function ${FullContextExportName}(){
   ${_declarationBindings.join("\n")}\n
@@ -510,18 +530,39 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
     s.prepend(importsString + "\n");
   }
 
-  s.append(`\nexport ${isAsync ? "async " : ""}function ${ResolveProps}${
-    genericInfo ? `<${genericInfo.source}>` : ""
-  }() {
-   return ${
-     isSetup
-       ? `(${isAsync ? "await " : ""}${FullContextExportName}${
-           genericInfo ? `<${genericInfo.names.join(",")}>` : ""
-         }()).${PropsPropertyName}`
-       : `new ${DefaultOptions}().$props`
-   };
-}
-`);
+  const resolveExports = [
+    [ResolveProps, PropsPropertyName, "$props"],
+    [ResolveEmits, EmitsPropertyName, "$emit"],
+    [ResolveSlots, SlotsPropertyName, "$slots"],
+  ];
+
+  for (const [resolveName, propertyName, optionsAccessor] of resolveExports) {
+    s.append(`\nexport ${isAsync ? "async " : ""}function ${resolveName}${
+      genericInfo ? `<${genericInfo.source}>` : ""
+    }() {
+     return ${
+       isSetup
+         ? `(${isAsync ? "await " : ""}${FullContextExportName}${
+             genericInfo ? `<${genericInfo.names.join(",")}>` : ""
+           }()).${propertyName}`
+         : `new ${DefaultOptions}().${optionsAccessor}`
+     };
+  }
+  `);
+  }
+
+  //   s.append(`\nexport ${isAsync ? "async " : ""}function ${ResolveProps}${
+  //     genericInfo ? `<${genericInfo.source}>` : ""
+  //   }() {
+  //    return ${
+  //      isSetup
+  //        ? `(${isAsync ? "await " : ""}${FullContextExportName}${
+  //            genericInfo ? `<${genericInfo.names.join(",")}>` : ""
+  //          }()).${PropsPropertyName}`
+  //        : `new ${DefaultOptions}().$props`
+  //    };
+  // }
+  // `);
 
   // if (!scriptBlock.block.lang?.startsWith("ts")) {
   //   s.prepend("// @ts-nocheck\n");
@@ -589,6 +630,11 @@ type VueSetupMacros =
   | "defineEmits"
   | "defineSlots"
   | "defineOptions";
+
+function setupBindingReturn(name: string) {
+  if (!name) return "";
+  return `typeof ${name}`;
+}
 
 function setupMacroReturn(macro: VueSetupMacros, name: string) {
   switch (macro) {

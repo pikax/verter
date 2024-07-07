@@ -198,6 +198,8 @@ export default createTranspiler(NodeTypes.ELEMENT, {
       for (const slotEnd of parentContext.slotsEnd) {
         closeSlot(context, slotEnd);
       }
+      // clear slotsEnd to prevent from being resolved multiple times
+      parentContext.slotsEnd.length = 0;
     }
     // if (parentContext.orphansEnd) {
     //   closeSlot(context, parentContext.orphansEnd);
@@ -702,7 +704,7 @@ function processProps(
     // wrap if
     context.s.prependRight(
       conditionDirective.loc.start.offset,
-      withNarrowCondition("{ ()=> {", context)
+      withNarrowCondition("{ (): any => {", context)
     );
 
     parentContext.inConditionBlock = true;

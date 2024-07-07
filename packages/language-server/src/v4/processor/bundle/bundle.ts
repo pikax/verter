@@ -5,6 +5,7 @@ import {
   ResolveProps,
   ComponentExport,
   DefaultOptions,
+  ResolveSlots,
 } from "./../options/index.js";
 import { FunctionExportName } from "./../render/index.js";
 import { getBlockFilename } from "../utils";
@@ -24,13 +25,18 @@ export function processBundle(context: ParseContext) {
 
   s.append(
     `import { DefineComponent as ${ctx.DefineComponent} } from "vue";
-import { ${DefaultOptions}, ${ResolveProps} } from "${optionsFile}";
+import { ${DefaultOptions}, ${ResolveProps}, ${ResolveSlots} } from "${optionsFile}";
 // import { ${FunctionExportName} } from "${renderFile}";
 
 declare const Comp : typeof ${DefaultOptions} & { new${
       generic ? `<${generic.declaration}>` : ""
     }(): { 
   $props: ReturnType<typeof ${ResolveProps}${
+      generic ? `<${generic.sanitisedNames.join(",")}>` : ""
+    }> extends ${isAsync ? "Promise<" : ""}infer P${
+      isAsync ? ">" : ""
+    } ? P extends P & 1 ? {} : P : never;
+  $slots: ReturnType<typeof ${ResolveSlots}${
       generic ? `<${generic.sanitisedNames.join(",")}>` : ""
     }> extends ${isAsync ? "Promise<" : ""}infer P${
       isAsync ? ">" : ""
