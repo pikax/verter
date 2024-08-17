@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev-extension": "pnpm --filter @verter/language-server --filter @verter/vue-vscode watch",
+    "build": "pnpm --filter @verter/core --filter @verter/language-shared --filter @verter/language-server --filter verter-vscode --filter @verter/typescript-plugin build",
+    "watch": "pnpm --filter @verter/core --filter @verter/language-shared --filter @verter/language-server --filter verter-vscode --filter @verter/typescript-plugin watch",
+    "dev-extension": "pnpm --filter @verter/language-server --filter verter-vscode watch",
     "update-all": "pnpm up -r -i -L"
   },
   "keywords": [],

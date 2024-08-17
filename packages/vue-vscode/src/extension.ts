@@ -203,7 +203,52 @@ function addCompilePreviewCommand(
 
   context.subscriptions.push(
     commands.registerTextEditorCommand(
-      "veter.showCompiledCodeToSide",
+      "verter.showCompiledCodeToSide",
+      async (editor) => {
+        if (editor?.document?.languageId !== "vue") {
+          window.showInformationMessage("Not a Vue file");
+          return;
+        }
+
+        window.withProgress(
+          { location: ProgressLocation.Window, title: "Compiling..." },
+          async () => {
+            // Open a new preview window for the compiled code
+            return await window.showTextDocument(
+              CompiledCodeContentProvider.previewWindowUri,
+              {
+                preview: true,
+                viewColumn: ViewColumn.Beside,
+                // TODO add selection to the window, it needs to be resolved
+                // selection: editor.selection,
+              }
+            );
+          }
+        );
+      }
+    )
+  );
+}
+function addWriteVirtualFilesCommand(
+  getClient: GetClient,
+  context: ExtensionContext
+) {
+  const compiledCodeContentProvider = new CompiledCodeContentProvider(
+    getClient
+  );
+
+  context.subscriptions.push(
+    // Register the content provider for "vue-compiled://" files
+    workspace.registerTextDocumentContentProvider(
+      CompiledCodeContentProvider.scheme,
+      compiledCodeContentProvider
+    ),
+    compiledCodeContentProvider
+  );
+
+  context.subscriptions.push(
+    commands.registerTextEditorCommand(
+      "verter.writeVirtualFiles",
       async (editor) => {
         if (editor?.document?.languageId !== "vue") {
           window.showInformationMessage("Not a Vue file");

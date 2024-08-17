@@ -32,9 +32,16 @@ export const GenericOptions = PrefixSTR("GenericOptions");
 export const ResolveProps = PrefixSTR("resolveProps");
 export const ResolveEmits = PrefixSTR("resolveEmits");
 export const ResolveSlots = PrefixSTR("resolveSlots");
+export const ResolveModels = PrefixSTR("resolveModels");
 export const PropsPropertyName = PrefixSTR("props");
 export const EmitsPropertyName = PrefixSTR("emits");
 export const SlotsPropertyName = PrefixSTR("slots");
+export const ModelsPropertyName = PrefixSTR("models");
+
+// const DefineProps = PrefixSTR("DefineProps");
+// const LooseRequired = PrefixSTR("LooseRequired");
+
+const PartialUndefined = PrefixSTR("PartialUndefined");
 
 export function processOptions(context: ParseContext) {
   const filename = getBlockFilename("options", context);
@@ -362,17 +369,17 @@ export function processOptions(context: ParseContext) {
 
       s.appendRight(scriptBlock.block.loc.end.offset, "\n}\n");
 
-      const propType = PropsPropertyName + " : " + (propsBinding || "{}");
-      const emitType = EmitsPropertyName + " : " + (emitBinding || "{}");
-      const slotsType =
-        SlotsPropertyName +
-        " : " +
-        (setupBindingReturn(
-          macroOverride.get("defineSlots") ??
-            vueMacros.find(([n]) => n === "defineSlots")[1]
-        ) || "{}");
+      // const propType = PropsPropertyName + " : " + (propsBinding || "{}");
+      // const emitType = EmitsPropertyName + " : " + (emitBinding || "{}");
+      // const slotsType =
+      //   SlotsPropertyName +
+      //   " : " +
+      //   (setupBindingReturn(
+      //     macroOverride.get("defineSlots") ??
+      //       vueMacros.find(([n]) => n === "defineSlots")[1]
+      //   ) || "{}");
 
-      const extraTypes = [propType, emitType, slotsType].filter(Boolean);
+      // const extraTypes = [propType, emitType, slotsType].filter(Boolean);
 
       if (isTypescript) {
         s.append(
@@ -383,15 +390,13 @@ export function processOptions(context: ParseContext) {
  return /*##___VERTER_FULL_BINDING_RETURN___##*/{} as {${Array.from(_bindings)
    .filter((x) => !_importBindings.includes(x))
    .map((x) => `${x}: typeof ${x}`)
-   .join(
-     ", "
-   )}\n} & { ${extraTypes} }/*##/___VERTER_FULL_BINDING_RETURN___##*/ }\n`
+   .join(", ")}\n}/*##/___VERTER_FULL_BINDING_RETURN___##*/ }\n`
         );
       } else {
         s.append(`\n/**\n * @returns {{${Array.from(_bindings)
           .filter((x) => !_importBindings.includes(x))
           .map((x) => `${x}: typeof ${x}`)
-          .join(", ")}, ${extraTypes}}} \n*/\nexport ${
+          .join(", ")}}} \n*/\nexport ${
           isAsync ? "async" : ""
         } function ${FullContextExportName}(){
   ${_declarationBindings.join("\n")}\n
@@ -539,20 +544,26 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
     [ResolveProps, PropsPropertyName, "$props"],
     [ResolveEmits, EmitsPropertyName, "$emit"],
     [ResolveSlots, SlotsPropertyName, "$slots"],
+    [ResolveModels, ModelsPropertyName, undefined],
   ];
 
   for (const [resolveName, propertyName, optionsAccessor] of resolveExports) {
-    s.append(`\nexport ${isAsync ? "async " : ""}function ${resolveName}${
+    s.append(`\nexport declare ${
+      isAsync ? "async " : ""
+    }function ${resolveName}${
       genericInfo ? `<${genericInfo.source}>` : ""
-    }() {
-     return ${
-       isSetup
-         ? `(${isAsync ? "await " : ""}${FullContextExportName}${
-             genericInfo ? `<${genericInfo.names.join(",")}>` : ""
-           }()).${propertyName}`
-         : `new ${DefaultOptions}().${optionsAccessor}`
-     };
-  }
+    }(): ${
+      isSetup
+        ? `ReturnType<typeof ${BindingContextExportName}${
+            genericInfo ? `<${genericInfo.names.join(",")}>` : ""
+          }> extends ${isAsync ? "Promise<" : ""}{ ${propertyName}: infer P }${
+            isAsync ? ">" : ""
+          } ? P extends P & 1 ? {} : P : {};`
+        : // check if has options accessor
+        optionsAccessor
+        ? `InstanceType<typeof DefaultOptions>['${optionsAccessor}']`
+        : ""
+    } 
   `);
   }
 

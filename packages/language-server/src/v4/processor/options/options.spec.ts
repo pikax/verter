@@ -280,6 +280,46 @@ describe("processor options", () => {
           });
         });
 
+        describe.only("models", () => {
+          it("have resolveModels", () => {
+            const result = process(`<script setup lang='ts'></script>`);
+
+            expect(result.content).toContain("resolveModels():");
+          });
+
+          it("TODO", () => {
+            const result = process(
+              `<script setup lang='ts'>defineModel()</script>`
+            );
+
+            expect(result.content).toMatchInlineSnapshot(`
+              "import { defineComponent as ___VERTER___defineComponent } from "vue";
+
+              export function ___VERTER___BindingContext() {
+              defineModel()
+              return /*##___VERTER_BINDING_RETURN___##*/{} as {
+              } &  /*/##___VERTER_BINDING_RETURN___##*/
+
+              }
+              export  function ___VERTER___FullContext() {
+               
+
+               return /*##___VERTER_FULL_BINDING_RETURN___##*/{} as {
+              }/*##/___VERTER_FULL_BINDING_RETURN___##*/ }
+              export const ___VERTER___default = ___VERTER___defineComponent({});
+
+              export declare function ___VERTER___resolveProps(): ReturnType<typeof ___VERTER___BindingContext> extends { ___VERTER___props: infer P } ? P extends P & 1 ? {} : P : {}; 
+                
+              export declare function ___VERTER___resolveEmits(): ReturnType<typeof ___VERTER___BindingContext> extends { ___VERTER___emits: infer P } ? P extends P & 1 ? {} : P : {}; 
+                
+              export declare function ___VERTER___resolveSlots(): ReturnType<typeof ___VERTER___BindingContext> extends { ___VERTER___slots: infer P } ? P extends P & 1 ? {} : P : {}; 
+                
+              export declare function ___VERTER___resolveModels(): ReturnType<typeof ___VERTER___BindingContext> extends { ___VERTER___models: infer P } ? P extends P & 1 ? {} : P : {}; 
+                "
+            `);
+          });
+        });
+
         describe.todo("slots", () => {
           it.todo("not have slots", () => {});
 

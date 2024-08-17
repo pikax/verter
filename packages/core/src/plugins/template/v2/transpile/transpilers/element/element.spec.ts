@@ -919,6 +919,16 @@ describe("tranpiler element", () => {
         );
       });
 
+      // it.only("event @update:modelValue", () => {
+      //   const { result } = transpile(
+      //     `<span @update:modelValue="navigateToSession($event)"/>`
+      //   );
+
+      //   expect(result).toMatchInlineSnapshot(
+      //     `"<span "onUpdate:modelValue"={(...args)=>___VERTER___eventCb(args,($event)=>___VERTER___ctx.navigateToSession($event))}/>"`
+      //   );
+      // });
+
       it("empty @", () => {
         const { result } = transpile(`<span @></span>`);
 

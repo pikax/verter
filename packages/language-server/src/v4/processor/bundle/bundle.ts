@@ -24,9 +24,18 @@ export function processBundle(context: ParseContext) {
   const isAsync = context.isAsync;
 
   s.append(
-    `import { DefineComponent as ${ctx.DefineComponent} } from "vue";
+    `import { DefineComponent as ${ctx.DefineComponent}, DefineProps } from "vue";
 import { ${DefaultOptions}, ${ResolveProps}, ${ResolveSlots} } from "${optionsFile}";
 // import { ${FunctionExportName} } from "${renderFile}";
+
+type PartialUndefined<T> = {
+  [P in keyof T]: undefined extends T[P] ? P : never;
+}[keyof T] extends infer U extends keyof T
+  ? Omit<T, U> & Partial<Pick<T, U>>
+  : T;
+
+type ProcessProps<T> = T extends DefineProps<infer U, infer BKeys> ? PartialUndefined<U> : T;
+
 
 declare const Comp : typeof ${DefaultOptions} & { new${
       generic ? `<${generic.declaration}>` : ""
@@ -35,13 +44,15 @@ declare const Comp : typeof ${DefaultOptions} & { new${
       generic ? `<${generic.sanitisedNames.join(",")}>` : ""
     }> extends ${isAsync ? "Promise<" : ""}infer P${
       isAsync ? ">" : ""
-    } ? P extends P & 1 ? {} : P : never;
+    } ? P extends P & 1 ? {} : ProcessProps<P> : never;
   $slots: ReturnType<typeof ${ResolveSlots}${
       generic ? `<${generic.sanitisedNames.join(",")}>` : ""
     }> extends ${isAsync ? "Promise<" : ""}infer P${
       isAsync ? ">" : ""
     } ? P extends P & 1 ? {} : P : never;
 } };
+
+
 export default Comp;
 `
   );

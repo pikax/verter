@@ -201,8 +201,12 @@
         "title": "Verter: Restart Language Server"
       },
       {
-        "command": "veter.showCompiledCodeToSide",
+        "command": "verter.showCompiledCodeToSide",
         "title": "Verter: Show compiled Code to Side"
+      },
+      {
+        "command": "verter.writeVirtualFiles",
+        "title": "Verter: Write Virtual Files for File"
       }
     ]
   }

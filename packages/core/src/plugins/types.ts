@@ -183,6 +183,19 @@ export interface TypeLocationProps {
   }[];
 }
 
+export interface TypeLocationModel {
+  type: LocationType.Model;
+  node: _babel_types.CallExpression;
+  // always the `defineModel` expression
+  expression: _babel_types.Expression;
+
+  varName?: string;
+
+  content?: string;
+
+  modelName: string;
+}
+
 export interface TypeLocationGeneric {
   type: LocationType.Generic;
   node: _babel_types.TSTypeParameterDeclaration;
@@ -249,7 +262,7 @@ export type TypeLocationMap = {
   [LocationType.Props]: TypeLocationProps;
   [LocationType.Slots]: TypeLocationSlots;
   [LocationType.Options]: BaseTypeLocation;
-  [LocationType.Model]: BaseTypeLocation;
+  [LocationType.Model]: TypeLocationModel;
   [LocationType.Expose]: BaseTypeLocation;
   [LocationType.Export]: TypeLocationExport;
   [LocationType.Generic]: TypeLocationGeneric;
