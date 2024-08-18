@@ -1,6 +1,6 @@
 import { compileScript, parse } from "@vue/compiler-sfc";
 import { LocationType } from "../../types.js";
-import ModelsPlugin, { getModelVarName } from "./models.js";
+import ModelsPlugin from "./models.js";
 
 describe("Props plugin", () => {
   it("sanitise value", () => {

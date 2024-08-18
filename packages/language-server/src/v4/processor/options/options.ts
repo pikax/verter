@@ -148,16 +148,23 @@ export function processOptions(context: ParseContext) {
       }
     }
 
-    const vueMacros = [
+    const vueMacros: Array<
+      [macro: string, overrideName: string, multiple?: boolean]
+    > = [
       ["defineProps", PropsPropertyName],
       ["withDefaults", PropsPropertyName],
       ["defineEmits", EmitsPropertyName],
       ["defineSlots", SlotsPropertyName],
+
+      ["defineModel", ModelsPropertyName, true],
       // TODO defineOptions
     ];
     const foundMacros = new Set<string>();
     // overrides the macro name with the variable name
-    const macroOverride = new Map<string, string>();
+    const macroOverride = new Map<
+      string,
+      string | Array<string | [varName: string, modelName: string]>
+    >();
 
     let defaultExportNode: Statement | null = null;
     let hasDefaultExportObject = false;
@@ -188,7 +195,7 @@ export function processOptions(context: ParseContext) {
             }
             // check if is any defineMacros
 
-            for (const [macro, name] of vueMacros) {
+            for (const [macro, name, multiple] of vueMacros) {
               // @ts-expect-error
               const expresion = checkForSetupMethodCalls(macro, it);
               if (expresion) {
@@ -196,7 +203,31 @@ export function processOptions(context: ParseContext) {
                 if (it.type === "VariableDeclaration") {
                   if (it.declarations[0].type === "VariableDeclarator") {
                     // @ts-expect-error
-                    macroOverride.set(macro, it.declarations[0].id.name);
+                    const name = it.declarations[0].id.name;
+                    const modelName =
+                      macro === "defineModel"
+                        ? // @ts-expect-error
+                          it.declarations[0].init.arguments[0]?.type ===
+                          "StringLiteral"
+                          ? // @ts-expect-error
+                            it.declarations[0].init.arguments[0].value
+                          : undefined
+                        : undefined;
+
+                    if (multiple) {
+                      let l = macroOverride.get(macro);
+                      if (!l || !Array.isArray(l)) {
+                        l = [];
+                        macroOverride.set(macro, l);
+                      }
+                      if (modelName) {
+                        l.push([name, modelName]);
+                      } else {
+                        l.push(name);
+                      }
+                    } else {
+                      macroOverride.set(macro, name);
+                    }
                   } else {
                     // this is probably a destructuring
                   }
@@ -205,15 +236,40 @@ export function processOptions(context: ParseContext) {
                     scriptBlock.block.loc.source.slice(it.start, it.end)
                   );
                 } else {
+                  // resolves the varName
+                  const varName = multiple
+                    ? `${name}_${
+                        // @ts-expect-error
+                        it.declarations?.[0]?.init.arguments[0]?.type ===
+                        "StringLiteral" // @ts-expect-error
+                          ? it.declarations[0].init.arguments[0].value
+                          : "modelValue"
+                      }`
+                    : name;
+
                   s.appendRight(
                     it.start + scriptBlock.block.loc.start.offset,
-                    `const ${name} = `
+                    `const ${varName} = `
                   );
 
                   _declarationBindings.push(
-                    `const ${name} = ` +
+                    `const ${varName} = ` +
                       scriptBlock.block.loc.source.slice(it.start, it.end)
                   );
+
+                  // expose as model
+                  if (multiple) {
+                    if (multiple) {
+                      let l = macroOverride.get(macro);
+                      if (!l || !Array.isArray(l)) {
+                        l = [];
+                        macroOverride.set(macro, l);
+                      }
+                      l.push(varName);
+                    } else {
+                      macroOverride.set(macro, varName);
+                    }
+                  }
                 }
                 break;
               }
@@ -253,8 +309,8 @@ export function processOptions(context: ParseContext) {
     const propsBinding = propMacro
       ? setupMacroReturn(
           "defineProps",
-          macroOverride.get("defineProps") ??
-            macroOverride.get("withDefaults") ??
+          (macroOverride.get("defineProps") as string) ??
+            (macroOverride.get("withDefaults") as string) ??
             vueMacros.find(([n]) => n === "defineProps")[1]
         )
       : "";
@@ -262,8 +318,16 @@ export function processOptions(context: ParseContext) {
     const emitBinding = foundMacros.has("defineEmits")
       ? setupMacroReturn(
           "defineEmits",
-          macroOverride.get("defineEmits") ??
+          (macroOverride.get("defineEmits") as string) ??
             vueMacros.find(([n]) => n === "defineEmits")[1]
+        )
+      : "";
+
+    const modelsBinding = foundMacros.has("defineModel")
+      ? setupMacroReturn(
+          "defineModel",
+          (macroOverride.get("defineModel") as string) ??
+            vueMacros.find(([n]) => n === "defineModel")[1]
         )
       : "";
 
@@ -332,6 +396,7 @@ export function processOptions(context: ParseContext) {
         const extraBindings = [
           propsBinding && `{ ${PropsPropertyName}: ${propsBinding} }`,
           emitBinding && `{ ${EmitsPropertyName}: ${emitBinding} }`,
+          modelsBinding && `{ ${ModelsPropertyName}: ${modelsBinding} }`,
         ].filter(Boolean);
         s.appendRight(
           scriptBlock.block.loc.end.offset,
@@ -539,33 +604,106 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
   if (importsString) {
     s.prepend(importsString + "\n");
   }
+  const generic = genericInfo ? `<${genericInfo.names.join(",")}>` : "";
 
   const resolveExports = [
-    [ResolveProps, PropsPropertyName, "$props"],
-    [ResolveEmits, EmitsPropertyName, "$emit"],
+    [
+      ResolveProps,
+      PropsPropertyName,
+      "$props",
+      `ModelToProps<ReturnType<typeof ${ResolveModels}${generic}>>
+    & EmitMapToProps<OverloadParameters<ReturnType<typeof ${ResolveEmits}${generic}>>>;`,
+    ],
+    [
+      ResolveEmits,
+      EmitsPropertyName,
+      "$emit",
+      `UnionToIntersection<ModelToEmits<ReturnType<typeof ${ResolveModels}${generic}>>>`,
+    ],
     [ResolveSlots, SlotsPropertyName, "$slots"],
     [ResolveModels, ModelsPropertyName, undefined],
   ];
 
-  for (const [resolveName, propertyName, optionsAccessor] of resolveExports) {
+  for (const [
+    resolveName,
+    propertyName,
+    optionsAccessor,
+    extraBindings,
+  ] of resolveExports) {
     s.append(`\nexport declare ${
       isAsync ? "async " : ""
     }function ${resolveName}${
       genericInfo ? `<${genericInfo.source}>` : ""
-    }(): ${
+    }(): ${extraBindings ? "(" : ""} ${
       isSetup
-        ? `ReturnType<typeof ${BindingContextExportName}${
-            genericInfo ? `<${genericInfo.names.join(",")}>` : ""
-          }> extends ${isAsync ? "Promise<" : ""}{ ${propertyName}: infer P }${
+        ? `ReturnType<typeof ${BindingContextExportName}${generic}> extends ${
+            isAsync ? "Promise<" : ""
+          }{ ${propertyName}: infer P }${
             isAsync ? ">" : ""
-          } ? P extends P & 1 ? {} : P : {};`
+          } ? P extends P & 1 ? {} : P : {}`
         : // check if has options accessor
         optionsAccessor
         ? `InstanceType<typeof DefaultOptions>['${optionsAccessor}']`
         : ""
-    } 
+    } ${extraBindings ? `) & ${extraBindings}` : ""}
   `);
   }
+
+  // TODO append ___VERTER___ to prevent types from leaking
+  s.append(`
+/**
+ * Utility for extracting the parameters from a function overload (for typed emits)
+ * https://github.com/microsoft/TypeScript/issues/32164#issuecomment-1146737709
+ */
+export type OverloadParameters<T extends (...args: any[]) => any> = Parameters<
+    OverloadUnion<T>
+>
+
+type OverloadProps<TOverload> = Pick<TOverload, keyof TOverload>
+
+type OverloadUnionRecursive<
+    TOverload,
+    TPartialOverload = unknown,
+> = TOverload extends (...args: infer TArgs) => infer TReturn
+    ? TPartialOverload extends TOverload
+    ? never
+    :
+    | OverloadUnionRecursive<
+        TPartialOverload & TOverload,
+        TPartialOverload &
+        ((...args: TArgs) => TReturn) &
+        OverloadProps<TOverload>
+    >
+    | ((...args: TArgs) => TReturn)
+    : never
+
+type OverloadUnion<TOverload extends (...args: any[]) => any> = Exclude<
+    OverloadUnionRecursive<(() => never) & TOverload>,
+    TOverload extends () => never ? never : () => never
+>
+
+export type UnionToIntersection<U> = (
+    U extends any ? (k: U) => void : never
+) extends (k: infer I) => void
+    ? I
+    : never
+    
+    
+export type EmitMapToProps<T> = [T] extends [[string, any]] ? {
+    [K in T[0]as \`on\${Capitalize<K>}\`]?: (e: Extract<T, [K, any]>[1]) => void
+} : {}
+
+
+type ModelToProps<T> = {
+  [K in keyof T]: T[K] extends ModelRef<infer C> ? C : null
+}
+
+type ModelToEmits<T> = {
+    [K in keyof T]: (event: \`update:\${K & string}\`, arg: T[K] extends ModelRef<infer C> ? C : unknown) => any
+}[keyof T]
+
+import { ModelRef } from 'vue'
+    `);
 
   //   s.append(`\nexport ${isAsync ? "async " : ""}function ${ResolveProps}${
   //     genericInfo ? `<${genericInfo.source}>` : ""
@@ -645,14 +783,18 @@ type VueSetupMacros =
   | "withDefaults"
   | "defineEmits"
   | "defineSlots"
-  | "defineOptions";
+  | "defineOptions"
+  | "defineModel";
 
 function setupBindingReturn(name: string) {
   if (!name) return "";
   return `typeof ${name}`;
 }
 
-function setupMacroReturn(macro: VueSetupMacros, name: string) {
+function setupMacroReturn(
+  macro: VueSetupMacros,
+  name: string | Array<string | [varName: string, modelName: string]>
+) {
   switch (macro) {
     case "defineProps":
     case "withDefaults":
@@ -661,6 +803,15 @@ function setupMacroReturn(macro: VueSetupMacros, name: string) {
       return `{ $emit: typeof ${name} }`;
     case "defineSlots":
       return `{ $slots: typeof ${name} }`;
+
+    case "defineModel":
+      if (!Array.isArray(name)) {
+        return `{ }`;
+      }
+
+      return `{ ${name.map((x) =>
+        Array.isArray(x) ? `${x[1]}: typeof ${x[0]}` : `modelValue: typeof ${x}`
+      )} }`;
     case "defineOptions":
       // TODO implement, not sure what to return here
       return "";

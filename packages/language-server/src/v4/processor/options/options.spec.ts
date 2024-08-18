@@ -296,13 +296,13 @@ describe("processor options", () => {
               "import { defineComponent as ___VERTER___defineComponent } from "vue";
 
               export function ___VERTER___BindingContext() {
-              defineModel()
+              const ___VERTER___models_modelValue = defineModel()
               return /*##___VERTER_BINDING_RETURN___##*/{} as {
-              } &  /*/##___VERTER_BINDING_RETURN___##*/
+              } & { ___VERTER___models: { modelValue: typeof ___VERTER___models_modelValue } } /*/##___VERTER_BINDING_RETURN___##*/
 
               }
               export  function ___VERTER___FullContext() {
-               
+               const ___VERTER___models_modelValue = defineModel()
 
                return /*##___VERTER_FULL_BINDING_RETURN___##*/{} as {
               }/*##/___VERTER_FULL_BINDING_RETURN___##*/ }
