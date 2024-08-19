@@ -706,7 +706,7 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
   s.append(
     `\nexport declare ${isAsync ? "async " : ""}function ${ResolveExtraProps}${
       genericInfo ? `<${genericInfo.source}>` : ""
-    }(): MakeOptionalIfUndefined<ModelToProps<ReturnType<typeof ${ResolveModels}${generic}>>>
+    }(): ModelToProps<ReturnType<typeof ${ResolveModels}${generic}>>
     & EmitMapToProps<OverloadParameters<ReturnType<typeof ${ResolveEmits}${generic}>>>;`
   );
 
@@ -756,11 +756,11 @@ export type EmitMapToProps<T> = [T] extends [[string, any]] ? {
 
 
 type ModelToProps<T> = {
-  [K in keyof T]: T[K] extends ModelRef<infer C> ? C : null
+  [K in keyof T]: T[K] extends ModelRef<infer C> ? C : T[K] extends ModelRef<infer C> | undefined ? C | undefined : null
 }
 
 type ModelToEmits<T> = {
-    [K in keyof T]: (event: \`update:\${K & string}\`, arg: T[K] extends ModelRef<infer C> ? C : unknown) => any
+    [K in keyof T]-?: (event: \`update:\${K & string}\`, arg: T[K] extends ModelRef<infer C> ? C : T[K] extends ModelRef<infer C> | undefined ? C | undefined : unknown) => any
 }[keyof T]
 
 type MakeOptionalIfUndefined<T> = {
@@ -876,7 +876,9 @@ function setupMacroReturn(
       }
 
       return `{ ${name.map((x) =>
-        Array.isArray(x) ? `${x[1]}: typeof ${x[0]}` : `modelValue: typeof ${x}`
+        Array.isArray(x)
+          ? `${x[1]}?: typeof ${x[0]}`
+          : `modelValue?: typeof ${x}`
       )} }`;
     case "defineOptions":
       // TODO implement, not sure what to return here

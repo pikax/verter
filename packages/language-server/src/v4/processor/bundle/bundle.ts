@@ -43,13 +43,13 @@ type ProcessProps<T> = T extends DefineProps<infer U, infer BKeys> ? PartialUnde
 declare const Comp : typeof ${DefaultOptions} & { new${
       generic ? `<${generic.declaration}>` : ""
     }(): { 
-  $props: ReturnType<typeof ${ResolveProps}${
+  $props: (ProcessProps<ReturnType<typeof ${ResolveProps}${
       generic ? `<${generic.sanitisedNames.join(",")}>` : ""
-    }> extends ${isAsync ? "Promise<" : ""}infer P${
-      isAsync ? ">" : ""
-    } ? P extends P & 1 ? {} : ProcessProps<P> & ReturnType<typeof ${ResolveExtraProps}${
+    }>${
+      isAsync ? " extends Promise<infer P> ? P : {}" : ""
+    }>) & ReturnType<typeof ${ResolveExtraProps}${
       generic ? `<${generic.sanitisedNames.join(",")}>` : ""
-    }> : never;
+    }> ;
   $slots: ReturnType<typeof ${ResolveSlots}${
       generic ? `<${generic.sanitisedNames.join(",")}>` : ""
     }> extends ${isAsync ? "Promise<" : ""}infer P${

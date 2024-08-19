@@ -199,6 +199,16 @@ export function processRender(context: ParseContext) {
         ].filter(Boolean) as Array<string>)
       : [];
 
+    // variables exposed by verter
+    const verterVariables = [
+      PrefixSTR("props"),
+      PrefixSTR("emits"),
+      PrefixSTR("slots"),
+      PrefixSTR("models"),
+    ];
+
+    const ignoredExposed = [...verterVariables, ...macrosVariables];
+
     const globalPatch = getGlobalComponentsStr(variables);
     const imports = context.isSetup
       ? `
@@ -276,32 +286,35 @@ const ${accessors.ctx} = {
 
 
     // expose props access directly
-    ...({} as ${
-      variables.ShallowUnwrapRef
-    }<Omit<typeof ${BindingContextExportName}CTX.${PropsPropertyName}, keyof typeof ${BindingContextExportName}CTX>>),
+    ...({} as Omit<typeof ${BindingContextExportName}CTX.${PropsPropertyName}, keyof typeof ${BindingContextExportName}CTX>),
 
 
     ...({} as ${
       variables.ShallowUnwrapRef
     }<Omit<typeof ${FullContextExportName}CTX, ${
-          macrosVariables.length
-            ? macrosVariables.map((x) => `"${x}"`).join(" | ")
+          ignoredExposed.length
+            ? ignoredExposed.map((x) => `"${x}"`).join(" | ")
             : ""
         }>>),
     ...({} as ${
       variables.ShallowUnwrapRef
     }<Omit<typeof ${BindingContextExportName}CTX, ${
-          macrosVariables.length
-            ? macrosVariables.map((x) => `"${x}"`).join(" | ")
+          ignoredExposed.length
+            ? ignoredExposed.map((x) => `"${x}"`).join(" | ")
             : ""
         }>>),
 
-    // Do not shallowUnwrap macros
+        ${
+          macrosVariables.length > 0
+            ? `// Do not shallowUnwrap macros
     ...({} as Pick<typeof ${BindingContextExportName}CTX, ${
-          macrosVariables.length
-            ? macrosVariables.map((x) => `"${x}"`).join(" | ")
+                macrosVariables.length
+                  ? macrosVariables.map((x) => `"${x}"`).join(" | ")
+                  : ""
+              }>),`
             : ""
-        }>),
+        }
+   
 
     $slots: ${accessors.slot},
 };
