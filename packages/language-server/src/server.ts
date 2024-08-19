@@ -398,6 +398,7 @@ export function startServer(options: LsConnectionOption = {}) {
         }
         visited.add(definition.key);
         toReturn.push(definition);
+        toReturn.push(definition);
         continue;
       }
 
@@ -507,6 +508,11 @@ export function startServer(options: LsConnectionOption = {}) {
 
     try {
       let lastSend = Date.now();
+
+      const subTsDocs = Object.values(document.subDocuments)
+        .filter((x) => !x.uri.endsWith(".bundle.ts"))
+        .map((x) => tsService.getProgram().getSourceFile(x.uri));
+
       for (const subDocument of Object.values(document.subDocuments)) {
         if (subDocument.uri.endsWith(".bundle.ts")) {
           continue;
@@ -542,12 +548,36 @@ export function startServer(options: LsConnectionOption = {}) {
         const allDiagnostics = [
           ...syntacticDiagnostics,
           ...semanticDiagnostics,
-          ...suggestionDiagnostics,
+          ...suggestionDiagnostics.filter((x) => {
+            // check for unused suggestion
+            if (x.code === 6133) {
+              // retrieve the name from the message
+              // cannot use the source.slice(x.start, x.start+x.length)
+              // because it might contain import { type Reference }...
+              const referenceName = x.messageText
+                .toString()
+                .match(/^'(\w+)'\s/)[1];
+
+              const usedDocs = subTsDocs.filter((x) =>
+                // @ts-expect-error internal untyped?
+                x.classifiableNames.has(referenceName)
+              );
+
+              if (usedDocs.length > 0) {
+                return usedDocs.every(
+                  // @ts-expect-error internal untyped?
+                  (x) => !x.locals.get(referenceName)?.isReferenced
+                );
+              }
+            }
+            return true;
+          }),
         ]
           .map((x) => mapDiagnostic(x, subDocument))
           .filter(Boolean);
 
         diagnostics.push(...allDiagnostics);
+
         connection.sendDiagnostics({
           uri: document.uri,
           diagnostics,
