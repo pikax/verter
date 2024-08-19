@@ -88,7 +88,7 @@ export default createTranspiler(NodeTypes.ELEMENT, {
         } else {
           const slots = retrieveSlotNamed(node);
 
-          s.prependLeft(
+          s.appendLeft(
             tagBlockEnd,
             withNarrowCondition(
               [

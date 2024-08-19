@@ -756,6 +756,27 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`"<span item={item.}/>"`);
       });
 
+      it("bug: short binding at the end with slots", () => {
+        const { result } = transpile(
+          `<Comp :item>
+            <div>Test</div>
+          </Comp>`
+        );
+
+        expect(result).toMatchInlineSnapshot(`
+          "<___VERTER___comp.Comp item={___VERTER___ctx.item} v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+
+          <div>Test</div>
+          })}
+
+          }}>
+                      
+                    </___VERTER___comp.Comp>"
+        `);
+      });
+
       describe("class & style merge", () => {
         it("should do class merge", () => {
           const { result } = transpile(
@@ -886,7 +907,11 @@ describe("tranpiler element", () => {
         const { result } = transpile(`<span @back="navigateToSession(null)"/>`);
 
         expect(result).toMatchInlineSnapshot(
-          `"<span onBack={(...args)=>___VERTER___eventCb(args,()=>___VERTER___ctx.navigateToSession(null))}/>"`
+          `
+          "<span onBack={// @ts-ignore prevent "args" being considered any[]
+          (...args)=>
+          ___VERTER___eventCb(args,()=>___VERTER___ctx.navigateToSession(null))}/>"
+        `
         );
       });
       it('should camelCase "on" event listeners', () => {
@@ -895,7 +920,11 @@ describe("tranpiler element", () => {
         );
 
         expect(result).toMatchInlineSnapshot(
-          `"<span onCheckForSomething={(...args)=>___VERTER___eventCb(args,()=>___VERTER___ctx.test)}></span>"`
+          `
+          "<span onCheckForSomething={// @ts-ignore prevent "args" being considered any[]
+          (...args)=>
+          ___VERTER___eventCb(args,()=>___VERTER___ctx.test)}></span>"
+        `
         );
       });
 
@@ -905,7 +934,11 @@ describe("tranpiler element", () => {
         );
 
         expect(result).toMatchInlineSnapshot(
-          `"<span onCheckForSomething={(...args)=>___VERTER___eventCb(args,e=> { ___VERTER___ctx.foo = e })}></span>"`
+          `
+          "<span onCheckForSomething={// @ts-ignore prevent "args" being considered any[]
+          (...args)=>
+          ___VERTER___eventCb(args,e=> { ___VERTER___ctx.foo = e })}></span>"
+        `
         );
       });
 
@@ -915,7 +948,11 @@ describe("tranpiler element", () => {
         );
 
         expect(result).toMatchInlineSnapshot(
-          `"<span onBack={(...args)=>___VERTER___eventCb(args,($event)=>___VERTER___ctx.navigateToSession($event))}/>"`
+          `
+          "<span onBack={// @ts-ignore prevent "args" being considered any[]
+          (...args)=>
+          ___VERTER___eventCb(args,($event)=>___VERTER___ctx.navigateToSession($event))}/>"
+        `
         );
       });
 
