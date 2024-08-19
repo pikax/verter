@@ -707,7 +707,7 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
     `\nexport declare ${isAsync ? "async " : ""}function ${ResolveExtraProps}${
       genericInfo ? `<${genericInfo.source}>` : ""
     }(): ModelToProps<ReturnType<typeof ${ResolveModels}${generic}>>
-    & EmitMapToProps<OverloadParameters<ReturnType<typeof ${ResolveEmits}${generic}>>>;`
+    & UnionToIntersection<EmitMapToProps<OverloadParameters<ReturnType<typeof ${ResolveEmits}${generic}>>>>;`
   );
 
   // TODO append ___VERTER___ to prevent types from leaking
@@ -750,10 +750,12 @@ export type UnionToIntersection<U> = (
     : never
     
     
-export type EmitMapToProps<T> = [T] extends [[string, any]] ? {
-    [K in T[0]as \`on\${Capitalize<K>}\`]?: (e: Extract<T, [K, any]>[1]) => void
-} : {}
-
+type EmitMapToProps<T extends [event: string, ...args: any[]]> = T extends [
+    infer E extends string,
+    ...infer A
+]
+    ? { [K in \`on\${Capitalize<E>}\`]?: (...args: A) => void }
+    : never;
 
 type ModelToProps<T> = {
   [K in keyof T]: T[K] extends ModelRef<infer C> ? C : T[K] extends ModelRef<infer C> | undefined ? C | undefined : null
@@ -866,9 +868,9 @@ function setupMacroReturn(
     case "withDefaults":
       return `typeof ${name}`;
     case "defineEmits":
-      return `{ $emit: typeof ${name} }`;
+      return `typeof ${name}`;
     case "defineSlots":
-      return `{ $slots: typeof ${name} }`;
+      return `typeof ${name}`;
 
     case "defineModel":
       if (!Array.isArray(name)) {

@@ -376,13 +376,16 @@ export function startServer(options: LsConnectionOption = {}) {
     const subDoc = doc.getDocumentForPosition(params.position);
     const offset = subDoc.toGeneratedOffsetFromPosition(params.position);
 
-    const definition = tsService.getDefinitionAtPosition(subDoc.uri, offset);
+    const definition = tsService
+      .getDefinitionAtPosition(subDoc.uri, offset)
+      .filter((x) => x.fileName.endsWith(".vue.bundle.ts"));
     if (!definition) {
       return null;
     }
 
     const toReturn: LocationLink[] = [];
     const visited = new Set<string>();
+
 
     for (const def of definition) {
       // if the documents are different return to .vue file
@@ -511,7 +514,8 @@ export function startServer(options: LsConnectionOption = {}) {
 
       const subTsDocs = Object.values(document.subDocuments)
         .filter((x) => !x.uri.endsWith(".bundle.ts"))
-        .map((x) => tsService.getProgram().getSourceFile(x.uri));
+        .map((x) => tsService.getProgram().getSourceFile(x.uri))
+        .filter(Boolean);
 
       for (const subDocument of Object.values(document.subDocuments)) {
         if (subDocument.uri.endsWith(".bundle.ts")) {
@@ -560,7 +564,7 @@ export function startServer(options: LsConnectionOption = {}) {
 
               const usedDocs = subTsDocs.filter((x) =>
                 // @ts-expect-error internal untyped?
-                x.classifiableNames.has(referenceName)
+                x?.classifiableNames.has(referenceName)
               );
 
               if (usedDocs.length > 0) {

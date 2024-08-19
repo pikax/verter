@@ -16,6 +16,7 @@ import {
 import { VueSubDocument } from "../documents";
 import { DocumentManager, isVueDocument } from "../documents/manager";
 import { pathToUri } from "../documents/utils";
+import { DEFAULT_PREFIX } from "@verter/core";
 
 export function mapCompletion(
   tsCompletion: ts.CompletionEntry,
@@ -138,6 +139,11 @@ export function mapDiagnostic(
 ): Diagnostic | undefined {
   const range = mapTextSpanToRange(diagnostic, document);
   if (!range) {
+    return;
+  }
+
+  // ignore all ___VERTER___ errors
+  if (diagnostic.messageText?.toString().indexOf(DEFAULT_PREFIX) >= 0) {
     return;
   }
 
