@@ -491,7 +491,7 @@ type ___VERTER___OmitNever<T> = {
 type ${variables.ExtractComponent}<T> = T extends ${variables.Ref}<infer V>
   ? ${variables.ExtractComponent}<V>
   : T extends ${variables.VueComponent}<infer Props>
-  ? T & { new(): { $props: Props } }
+  ? T & { new(): { $props: Props & import('vue').VNode['props'] } }
   : T extends keyof ${variables.IntrinsicElementAttributes}
   ? { new (): { $props: ${variables.IntrinsicElementAttributes}[T] } }
   : never;

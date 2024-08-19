@@ -841,7 +841,9 @@ function processProp(
             .indexOf("$event") >= 0;
         s.prependLeft(
           exp.loc.start.offset,
-          `(...args)=>${context.accessors.eventCb}(args,${
+          `// @ts-ignore prevent "args" being considered any[]\n(...args)=>\n${
+            context.accessors.eventCb
+          }(args,${
             !exp.ast || !isFunctionType(exp.ast)
               ? `(${has$event ? "$event" : ""})=>`
               : ""
