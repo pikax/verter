@@ -385,6 +385,15 @@ export function startServer(options: LsConnectionOption = {}) {
     const visited = new Set<string>();
 
     for (const def of definition) {
+      // if the documents are different return to .vue file
+      const d = documentManager.getDocument(def.fileName);
+
+      if (d.uri !== subDoc.uri) {
+        const definition = mapDefinitionInfo(def, documentManager);
+        toReturn.push(definition);
+        continue;
+      }
+
       /**
        * On the template if we CTRL+CLICK on a variable, it
        * will return the definition for the BindingContext return position

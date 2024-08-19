@@ -10,6 +10,7 @@ import {
   DiagnosticTag,
   InsertTextFormat,
   Location,
+  Position,
   Range,
 } from "vscode-languageserver/node";
 import { VueSubDocument } from "../documents";
@@ -96,8 +97,8 @@ export function mapDefinitionInfo(
 
     textSpan = mapTextSpanToRange(info.textSpan, subDoc);
   }
-  if (!textSpan || !contextRange) {
-    return undefined;
+  if (!textSpan) {
+    textSpan = Range.create(Position.create(0, 0), Position.create(0, 0));
   }
   const targetUri = pathToUri(doc.uri);
 
