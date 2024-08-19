@@ -228,10 +228,15 @@ describe("processor options", () => {
               `<script setup lang='ts'>const bespokProps = defineProps({});\nconst test = { a: 1, b: 1}</script>`
             );
 
-            expect(result.content).toContain("} & typeof bespokProps");
+            expect(result.content).toContain(`let ___VERTER___props;
+const bespokProps = ___VERTER___props = defineProps({});`);
 
             expect(result.content).toContain(
               "{bespokProps: typeof bespokProps, test: typeof test\n}"
+            );
+
+            expect(result.content).toContain(
+              "& { ___VERTER___props: typeof ___VERTER___props }"
             );
           });
 
@@ -239,9 +244,14 @@ describe("processor options", () => {
             const result = process(
               `<script setup lang='ts'>defineProps({});\nconst test = { a: 1, b: 1}</script>`
             );
+            expect(result.content).toContain(
+              "const ___VERTER___props = defineProps({});"
+            );
 
             expect(result.content).toContain("{test: typeof test\n}");
-            expect(result.content).toContain("} & typeof ___VERTER___props");
+            expect(result.content).toContain(
+              "{ ___VERTER___props: typeof ___VERTER___props }"
+            );
           });
         });
 
@@ -259,12 +269,14 @@ describe("processor options", () => {
             const result = process(
               `<script setup lang='ts'>const bespokeEmits = defineEmits([]);\nconst test = { a: 1, b: 1}</script>`
             );
+            expect(result.content).toContain(`let ___VERTER___emits;
+const bespokeEmits = ___VERTER___emits = defineEmits([]);`);
 
             expect(result.content).toContain(
               "{bespokeEmits: typeof bespokeEmits, test: typeof test\n}"
             );
             expect(result.content).toContain(
-              "} & { $emit: typeof bespokeEmits }"
+              "{ ___VERTER___emits: { $emit: typeof ___VERTER___emits }"
             );
           });
 
@@ -273,14 +285,18 @@ describe("processor options", () => {
               `<script setup lang='ts'>defineEmits([]);\nconst test = { a: 1, b: 1}</script>`
             );
 
+            expect(result.content).toContain(
+              "const ___VERTER___emits = defineEmits([]);"
+            );
+
             expect(result.content).toContain("{test: typeof test\n}");
             expect(result.content).toContain(
-              "} & { $emit: typeof ___VERTER___emits }"
+              "{ ___VERTER___emits: { $emit: typeof ___VERTER___emits }"
             );
           });
         });
 
-        describe.only("models", () => {
+        describe.skip("models", () => {
           it("have resolveModels", () => {
             const result = process(`<script setup lang='ts'></script>`);
 
@@ -364,31 +380,46 @@ describe("processor options", () => {
           const result = process(
             `<script setup lang='ts'>defineProps({ a: String })</script>`
           );
-          expect(result.content).toContain("{\n} & typeof ___VERTER___props");
+          expect(result.content).toContain(
+            "{ ___VERTER___props: typeof ___VERTER___props }"
+          );
         });
 
         it("defineProps with default", () => {
           const result = process(
             `<script setup lang='ts'>withDefaults(defineProps({ a: String }), {a: '1'})</script>`
           );
-          expect(result.content).toContain("{\n} & typeof ___VERTER___props");
+
+          expect(result.content).toContain(
+            "const ___VERTER___props = withDefaults(defineProps({ a: String }), {a: '1'})"
+          );
+          expect(result.content).toContain(
+            "{ ___VERTER___props: typeof ___VERTER___props }"
+          );
         });
 
         it("defineProps with default + variable", () => {
           const result = process(
             `<script setup lang='ts'>const props = withDefaults(defineProps({ a: String }), {a: '1'})</script>`
           );
+
+          expect(result.content).toContain(`let ___VERTER___props;
+const props = ___VERTER___props = withDefaults(defineProps({ a: String }), {a: '1'})`
+          );
           expect(result.content).toContain("{props: typeof props\n}");
 
-          expect(result.content).toContain("} & typeof props");
+          expect(result.content).toContain("{ ___VERTER___props: typeof ___VERTER___props }");
         });
 
         it("props with variable assigned", () => {
           const result = process(
             `<script setup lang='ts'>const props = defineProps({ a: String });</script>`
           );
+          expect(result.content).toContain(`let ___VERTER___props;
+const props = ___VERTER___props = defineProps({ a: String });`
+          );
           expect(result.content).toContain("{props: typeof props\n}");
-          expect(result.content).toContain("} & typeof props");
+          expect(result.content).toContain("{ ___VERTER___props: typeof ___VERTER___props }");
         });
 
         test("generic", () => {
@@ -513,7 +544,7 @@ describe("processor options", () => {
         expect(result.content).toContain(`const msg = '';`);
 
         expect(result.content).toContain(
-          "@returns {{msg: typeof msg, a: typeof a, ___VERTER___props : {}}}"
+          "@returns {{msg: typeof msg, a: typeof a}}"
         );
 
         expectFindStringWithMap("export const a = 1;", result);

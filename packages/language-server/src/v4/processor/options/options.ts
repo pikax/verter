@@ -70,6 +70,24 @@ export function processOptions(context: ParseContext) {
   const isAsync = context.isAsync;
   const genericInfo = context.generic;
   const isTypescript = scriptBlock.block.lang?.startsWith("ts") ?? false;
+
+  const foundMacros = new Set<VueSetupMacros>();
+
+  // overrides the macro name with the variable name
+  const macroOverride = new Map<
+    string,
+    string | Array<string | [varName: string, modelName: string]>
+  >();
+
+  const macroVariableName = new Map<VueSetupMacros, string>();
+
+  // @ts-expect-error
+  context.foundMacros = foundMacros;
+  // @ts-expect-error
+  context.macroOverride = macroOverride;
+  // @ts-expect-error
+  context.macroVariableName = macroVariableName;
+
   if (scriptBlock) {
     const _bindings = new Set<string>();
     /**
@@ -150,7 +168,7 @@ export function processOptions(context: ParseContext) {
     }
 
     const vueMacros: Array<
-      [macro: string, overrideName: string, multiple?: boolean]
+      [macro: VueSetupMacros, overrideName: string, multiple?: boolean]
     > = [
       ["defineProps", PropsPropertyName],
       ["withDefaults", PropsPropertyName],
@@ -160,12 +178,6 @@ export function processOptions(context: ParseContext) {
       ["defineModel", ModelsPropertyName, true],
       // TODO defineOptions
     ];
-    const foundMacros = new Set<string>();
-    // overrides the macro name with the variable name
-    const macroOverride = new Map<
-      string,
-      string | Array<string | [varName: string, modelName: string]>
-    >();
 
     let defaultExportNode: Statement | null = null;
     let hasDefaultExportObject = false;
@@ -196,7 +208,7 @@ export function processOptions(context: ParseContext) {
             }
             // check if is any defineMacros
 
-            for (const [macro, name, multiple] of vueMacros) {
+            for (const [macro, verterName, multiple] of vueMacros) {
               // @ts-expect-error
               const expresion = checkForSetupMethodCalls(macro, it);
               if (expresion) {
@@ -226,12 +238,37 @@ export function processOptions(context: ParseContext) {
                       } else {
                         l.push(name);
                       }
+
+                      s.appendLeft(
+                        it.declarations[0].init.start +
+                          scriptBlock.block.loc.start.offset,
+                        verterName + " = "
+                      );
                     } else {
-                      macroOverride.set(macro, name);
+                      s.appendLeft(
+                        it.declarations[0].init.start +
+                          scriptBlock.block.loc.start.offset,
+                        verterName + " = "
+                      );
+                      macroOverride.set(macro, verterName);
+
+                      macroVariableName.set(macro, name);
                     }
                   } else {
                     // this is probably a destructuring
                   }
+                  // append ___VERTER__ variable before the definition
+                  /*
+                    eg: const props = defineProps({})
+
+                    res: let ___VERTER__props;
+                         const props = ___VERTER__props = defineProps({})
+                  */
+
+                  s.appendRight(
+                    it.start + scriptBlock.block.loc.start.offset,
+                    `let ${verterName};\n`
+                  );
 
                   _declarationBindings.push(
                     scriptBlock.block.loc.source.slice(it.start, it.end)
@@ -239,14 +276,14 @@ export function processOptions(context: ParseContext) {
                 } else {
                   // resolves the varName
                   const varName = multiple
-                    ? `${name}_${
+                    ? `${verterName}_${
                         // @ts-expect-error
                         it.declarations?.[0]?.init.arguments[0]?.type ===
                         "StringLiteral" // @ts-expect-error
                           ? it.declarations[0].init.arguments[0].value
                           : "modelValue"
                       }`
-                    : name;
+                    : verterName;
 
                   s.appendRight(
                     it.start + scriptBlock.block.loc.start.offset,
@@ -608,18 +645,38 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
   const generic = genericInfo ? `<${genericInfo.names.join(",")}>` : "";
 
   const resolveExports = [
-    [ResolveProps, PropsPropertyName, "$props"],
     [
+      foundMacros.has("defineProps") || foundMacros.has("withDefaults"),
+      ResolveProps,
+      PropsPropertyName,
+      "$props",
+    ],
+    [
+      foundMacros.has("defineEmits"),
       ResolveEmits,
       EmitsPropertyName,
       "$emit",
       `UnionToIntersection<ModelToEmits<ReturnType<typeof ${ResolveModels}${generic}>>>`,
     ],
-    [ResolveSlots, SlotsPropertyName, "$slots"],
-    [ResolveModels, ModelsPropertyName, undefined],
-  ];
+    [foundMacros.has("defineSlots"), ResolveSlots, SlotsPropertyName, "$slots"],
+    [
+      foundMacros.has("defineModel"),
+      ResolveModels,
+      ModelsPropertyName,
+      undefined,
+    ],
+  ] as Array<
+    [
+      hasDeclaration: boolean,
+      resolveName: string,
+      propertyName: string,
+      optionsAccessor: string,
+      extraBindings: string | undefined
+    ]
+  >;
 
   for (const [
+    hasDeclaration,
     resolveName,
     propertyName,
     optionsAccessor,
@@ -631,11 +688,13 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
       genericInfo ? `<${genericInfo.source}>` : ""
     }(): ${extraBindings ? "(" : ""} ${
       isSetup
-        ? `ReturnType<typeof ${BindingContextExportName}${generic}> extends ${
-            isAsync ? "Promise<" : ""
-          }{ ${propertyName}: infer P }${
-            isAsync ? ">" : ""
-          } ? P extends P & 1 ? {} : P : {}`
+        ? hasDeclaration
+          ? `ReturnType<typeof ${BindingContextExportName}${generic}>${
+              isAsync
+                ? ` extends Promise<{ ${propertyName}: infer P } ? P : {}`
+                : `['${propertyName}']`
+            }`
+          : `{}`
         : // check if has options accessor
         optionsAccessor
         ? `InstanceType<typeof DefaultOptions>['${optionsAccessor}']`
@@ -785,7 +844,7 @@ export function checkForSetupMethodCalls(name: string, statement: Statement) {
   return null;
 }
 
-type VueSetupMacros =
+export type VueSetupMacros =
   | "defineProps"
   | "withDefaults"
   | "defineEmits"

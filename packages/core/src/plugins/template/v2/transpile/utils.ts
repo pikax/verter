@@ -162,6 +162,8 @@ export function appendCtx(
     isLiteralWhitelisted(sanitisedContent) ||
     ~context.ignoredIdentifiers.indexOf(sanitisedContent) ||
     !accessor
+    // shortcut to prevent ___VERTER___ from being set to context
+    // || sanitisedContent.startsWith("___VERTER___")
   ) {
     return content;
   }

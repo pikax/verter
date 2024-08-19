@@ -23,6 +23,8 @@ import {
   SlotsPropertyName,
   ResolveSlots,
   PropsPropertyName,
+  ResolveProps,
+  VueSetupMacros,
 } from "../options/index.js";
 import { getBlockFilename } from "../utils.js";
 import {
@@ -162,6 +164,41 @@ export function processRender(context: ParseContext) {
       ["Component", variables.VueComponent, true],
     ];
 
+    /*
+     ${
+      // @ts-expect-error
+      context.macroVariableName?.has("defineProps") ||
+      // @ts-expect-error
+      context.macroVariableName?.has("withDefaults")
+        ? // use the original props, ShallowUnwrap them will break generics
+
+          `${
+            // @ts-expect-error
+            context.macroVariableName.get("defineProps") ||
+            // @ts-expect-error
+            context.macroVariableName.get("withDefaults")
+          } : {} as ReturnType<typeof ${
+            isAsync ? "await " : ""
+          }${ResolveProps}${
+            genericInfo ? `<${genericInfo.names.join(",")}>` : ""
+          }>,`
+        : ""
+    }
+    */
+
+    const macroVariableName: Map<VueSetupMacros, string> | undefined =
+      // @ts-expect-error
+      context.macroVariableName;
+
+    const macrosVariables = macroVariableName
+      ? ([
+          macroVariableName.get("defineProps") ||
+            macroVariableName.get("withDefaults"),
+          macroVariableName.get("defineEmits"),
+          macroVariableName.get("defineSlots"),
+        ].filter(Boolean) as Array<string>)
+      : [];
+
     const globalPatch = getGlobalComponentsStr(variables);
     const imports = context.isSetup
       ? `
@@ -225,6 +262,7 @@ const ${FullContextExportName}CTX = ${
         }();
 
 
+
 const ${accessors.slot} = ${ResolveSlots}${
           genericInfo ? `<${genericInfo.names.join(",")}>` : ""
         }();
@@ -236,16 +274,34 @@ const ${accessors.ctx} = {
         : ""
     }
 
+
+    // expose props access directly
     ...({} as ${
       variables.ShallowUnwrapRef
     }<Omit<typeof ${BindingContextExportName}CTX.${PropsPropertyName}, keyof typeof ${BindingContextExportName}CTX>>),
 
+
     ...({} as ${
       variables.ShallowUnwrapRef
-    }<typeof ${FullContextExportName}CTX>),
+    }<Omit<typeof ${FullContextExportName}CTX, ${
+          macrosVariables.length
+            ? macrosVariables.map((x) => `"${x}"`).join(" | ")
+            : ""
+        }>>),
     ...({} as ${
       variables.ShallowUnwrapRef
-    }<typeof ${BindingContextExportName}CTX>),
+    }<Omit<typeof ${BindingContextExportName}CTX, ${
+          macrosVariables.length
+            ? macrosVariables.map((x) => `"${x}"`).join(" | ")
+            : ""
+        }>>),
+
+    // Do not shallowUnwrap macros
+    ...({} as Pick<typeof ${BindingContextExportName}CTX, ${
+          macrosVariables.length
+            ? macrosVariables.map((x) => `"${x}"`).join(" | ")
+            : ""
+        }>),
 
     $slots: ${accessors.slot},
 };
