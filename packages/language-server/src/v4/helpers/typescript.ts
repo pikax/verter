@@ -70,7 +70,8 @@ export function mapReferenceToLocation(
 
 export function mapDefinitionInfo(
   info: ts.DefinitionInfo,
-  documentManager: DocumentManager
+  documentManager: DocumentManager,
+  fallback = false
 ): (DefinitionLink & { key: string }) | undefined {
   const filename = info.fileName;
 
@@ -98,6 +99,7 @@ export function mapDefinitionInfo(
     textSpan = mapTextSpanToRange(info.textSpan, subDoc);
   }
   if (!textSpan) {
+    if (!fallback) return undefined;
     textSpan = Range.create(Position.create(0, 0), Position.create(0, 0));
   }
   const targetUri = pathToUri(doc.uri);

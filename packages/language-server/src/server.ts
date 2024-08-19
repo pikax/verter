@@ -388,8 +388,15 @@ export function startServer(options: LsConnectionOption = {}) {
       // if the documents are different return to .vue file
       const d = documentManager.getDocument(def.fileName);
 
-      if (d.uri !== subDoc.uri) {
-        const definition = mapDefinitionInfo(def, documentManager);
+      if (d.uri !== doc.uri) {
+        const definition = mapDefinitionInfo(def, documentManager, true);
+        if (!definition) {
+          continue;
+        }
+        if (visited.has(definition.key)) {
+          continue;
+        }
+        visited.add(definition.key);
         toReturn.push(definition);
         continue;
       }

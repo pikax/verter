@@ -438,9 +438,9 @@ export function processOptions(context: ParseContext) {
         ].filter(Boolean);
         s.appendRight(
           scriptBlock.block.loc.end.offset,
-          `\nreturn /*##___VERTER_BINDING_RETURN___##*/{} as {${typeofBindings}\n} & ${extraBindings.join(
-            " & "
-          )} /*/##___VERTER_BINDING_RETURN___##*/\n`
+          `\nreturn /*##___VERTER_BINDING_RETURN___##*/{} as {${typeofBindings}\n}${
+            extraBindings.length > 0 ? " & " + extraBindings.join(" & ") : ""
+          } /*/##___VERTER_BINDING_RETURN___##*/\n`
         );
       } else {
         const extraBindings = [propsBinding, emitBinding].filter(Boolean);
