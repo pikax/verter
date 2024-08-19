@@ -30,6 +30,7 @@ export const ComponentExport = PrefixSTR("Component");
 export const GenericOptions = PrefixSTR("GenericOptions");
 
 export const ResolveProps = PrefixSTR("resolveProps");
+export const ResolveExtraProps = PrefixSTR("resolveExtraProps");
 export const ResolveEmits = PrefixSTR("resolveEmits");
 export const ResolveSlots = PrefixSTR("resolveSlots");
 export const ResolveModels = PrefixSTR("resolveModels");
@@ -607,13 +608,7 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
   const generic = genericInfo ? `<${genericInfo.names.join(",")}>` : "";
 
   const resolveExports = [
-    [
-      ResolveProps,
-      PropsPropertyName,
-      "$props",
-      `ModelToProps<ReturnType<typeof ${ResolveModels}${generic}>>
-    & EmitMapToProps<OverloadParameters<ReturnType<typeof ${ResolveEmits}${generic}>>>;`,
-    ],
+    [ResolveProps, PropsPropertyName, "$props"],
     [
       ResolveEmits,
       EmitsPropertyName,
@@ -648,6 +643,13 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
     } ${extraBindings ? `) & ${extraBindings}` : ""}
   `);
   }
+  // ResolveExtraProps
+  s.append(
+    `\nexport declare ${isAsync ? "async " : ""}function ${ResolveExtraProps}${
+      genericInfo ? `<${genericInfo.source}>` : ""
+    }(): MakeOptionalIfUndefined<ModelToProps<ReturnType<typeof ${ResolveModels}${generic}>>>
+    & EmitMapToProps<OverloadParameters<ReturnType<typeof ${ResolveEmits}${generic}>>>;`
+  );
 
   // TODO append ___VERTER___ to prevent types from leaking
   s.append(`
@@ -701,6 +703,11 @@ type ModelToProps<T> = {
 type ModelToEmits<T> = {
     [K in keyof T]: (event: \`update:\${K & string}\`, arg: T[K] extends ModelRef<infer C> ? C : unknown) => any
 }[keyof T]
+
+type MakeOptionalIfUndefined<T> = {
+    [K in keyof T as undefined extends T[K] ? K : never]?: T[K];
+} extends infer Optional ? Omit<T, keyof Optional> & Optional
+    : {}
 
 import { ModelRef } from 'vue'
     `);

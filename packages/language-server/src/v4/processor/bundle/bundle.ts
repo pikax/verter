@@ -6,6 +6,7 @@ import {
   ComponentExport,
   DefaultOptions,
   ResolveSlots,
+  ResolveExtraProps,
 } from "./../options/index.js";
 import { FunctionExportName } from "./../render/index.js";
 import { getBlockFilename } from "../utils";
@@ -24,8 +25,10 @@ export function processBundle(context: ParseContext) {
   const isAsync = context.isAsync;
 
   s.append(
-    `import { DefineComponent as ${ctx.DefineComponent}, DefineProps } from "vue";
-import { ${DefaultOptions}, ${ResolveProps}, ${ResolveSlots} } from "${optionsFile}";
+    `import { DefineComponent as ${
+      ctx.DefineComponent
+    }, DefineProps } from "vue";
+import { ${DefaultOptions}, ${ResolveProps}, ${ResolveSlots}, ${ResolveExtraProps} } from "${optionsFile}";
 // import { ${FunctionExportName} } from "${renderFile}";
 
 type PartialUndefined<T> = {
@@ -44,7 +47,9 @@ declare const Comp : typeof ${DefaultOptions} & { new${
       generic ? `<${generic.sanitisedNames.join(",")}>` : ""
     }> extends ${isAsync ? "Promise<" : ""}infer P${
       isAsync ? ">" : ""
-    } ? P extends P & 1 ? {} : ProcessProps<P> : never;
+    } ? P extends P & 1 ? {} : ProcessProps<P> & ReturnType<typeof ${ResolveExtraProps}${
+      generic ? `<${generic.sanitisedNames.join(",")}>` : ""
+    }> : never;
   $slots: ReturnType<typeof ${ResolveSlots}${
       generic ? `<${generic.sanitisedNames.join(",")}>` : ""
     }> extends ${isAsync ? "Promise<" : ""}infer P${
