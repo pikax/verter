@@ -63,10 +63,10 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
           <span>{{text}}</span>
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -79,17 +79,17 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
           <___VERTER___comp.MySpan v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
           {{text}}
-          })}
+          </>})}
 
           }}></___VERTER___comp.MySpan>
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -102,10 +102,10 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{<>
 
           <___VERTER___template />
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -118,9 +118,9 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{<>
           <___VERTER___template />
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -132,9 +132,9 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.name)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.name)(()=>{<>
           <___VERTER___template />
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -147,10 +147,10 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots[___VERTER___ctx.bar])(()=>{
+          {___VERTER___SLOT_CALLBACK($slots[___VERTER___ctx.bar])(()=>{<>
 
           <___VERTER___template />
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -163,9 +163,9 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots[___VERTER___ctx.bar])(()=>{
+          {___VERTER___SLOT_CALLBACK($slots[___VERTER___ctx.bar])(()=>{<>
           <___VERTER___template />
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -178,9 +178,9 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)((props)=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)((props)=>{ <> 
           <___VERTER___template />
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -193,9 +193,9 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)((props)=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)((props)=>{ <> 
           <___VERTER___template />
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -207,9 +207,9 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.name)((props)=>{
+          {___VERTER___SLOT_CALLBACK($slots.name)((props)=>{ <> 
           <___VERTER___template />
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -221,9 +221,9 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots['name-foo'])((props)=>{
+          {___VERTER___SLOT_CALLBACK($slots['name-foo'])((props)=>{ <> 
           <___VERTER___template />
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -236,9 +236,9 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots[___VERTER___ctx.bar])((props)=>{
+          {___VERTER___SLOT_CALLBACK($slots[___VERTER___ctx.bar])((props)=>{ <> 
           <___VERTER___template />
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -251,9 +251,9 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots[___VERTER___ctx.bar])((props)=>{
+          {___VERTER___SLOT_CALLBACK($slots[___VERTER___ctx.bar])((props)=>{ <> 
           <___VERTER___template />
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComponent>"
         `);
@@ -269,11 +269,11 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{<>
 
           <!-- NOTE COMMENT HANDLED BY Comment Transpiler -->
                     <___VERTER___template />
-          })}
+          </>})}
 
           }}>
                     
@@ -291,15 +291,15 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.header)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.header)(()=>{<>
 
           <___VERTER___template />
-          })}
+          </>})}
 
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{<>
 
           <___VERTER___template />
-          })}
+          </>})}
 
           }}>
                       
@@ -317,15 +317,15 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
 
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{<>
 
           <___VERTER___template />
-          })}
+          </>})}
           <span>{{test}}</span>
-          })}
+          </>})}
 
           }}>
                     
@@ -343,15 +343,15 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
 
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{<>
 
           <___VERTER___template />
-          })}
+          </>})}
           <span>{{test}}</span>
-          })}
+          </>})}
 
           }}>
                     
@@ -370,16 +370,16 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComponent v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
 
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{<>
 
           <!-- NOTE COMMENTS ARE HANDLED BY Comment Transpiler -->
                     <___VERTER___template />
-          })}
+          </>})}
           <span>{{test}}</span>
-          })}
+          </>})}
 
           }}>
                     
@@ -397,12 +397,12 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.Test v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
           { (): any => {if(true){<___VERTER___template >
               <div />
             </___VERTER___template>}}}
-          })}
+          </>})}
 
           }}>
             
@@ -419,12 +419,12 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.Test v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.test)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.test)(()=>{<>
 
           { (): any => {if(true){<___VERTER___template  >
             <div />
           </___VERTER___template>}}}
-          })}
+          </>})}
 
           }}>
 
@@ -441,12 +441,12 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.Test v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots['test-name'])(()=>{
+          {___VERTER___SLOT_CALLBACK($slots['test-name'])(()=>{<>
 
           { (): any => {if(true){<___VERTER___template  >
                       <div />
                     </___VERTER___template>}}}
-          })}
+          </>})}
 
           }}>
                     
@@ -463,11 +463,11 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.Test v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots['test-name'])(({ foo })=>{
+          {___VERTER___SLOT_CALLBACK($slots['test-name'])(({ foo })=>{ <> 
           { (): any => {if(true){<___VERTER___template  >
                       <div />
                     </___VERTER___template>}}}
-          })}
+          </>})}
 
           }}>
                     
@@ -766,10 +766,10 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.Comp item={___VERTER___ctx.item} v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
           <div>Test</div>
-          })}
+          </>})}
 
           }}>
                       
@@ -1570,13 +1570,13 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComp v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
           {()=>{
 
           const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
           return <RENDER_SLOT/>}}
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComp>"
         `);
@@ -1702,7 +1702,7 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComp v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
           {()=>{
 
@@ -1713,7 +1713,7 @@ describe("tranpiler element", () => {
           const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
           return <RENDER_SLOT {...___VERTER___ctx.p} />}}
           </RENDER_SLOT>}}
-          })}
+          </>})}
 
           }}></___VERTER___comp.MyComp>"
         `);
@@ -1732,7 +1732,7 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "<___VERTER___comp.MyComp v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.foo)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.foo)(()=>{<>
 
           <___VERTER___template >
                    <div></div>
@@ -1741,7 +1741,7 @@ describe("tranpiler element", () => {
                   </div>}}}
                   <___VERTER___comp.Comp></___VERTER___comp.Comp>
                 </___VERTER___template>
-          })}
+          </>})}
 
           }}>
                 
@@ -1774,7 +1774,7 @@ describe("tranpiler element", () => {
           "<div>
             <___VERTER___comp.Foo v-slot={(___VERTER___componentInstance): any=>{
           const $slots = ___VERTER___componentInstance.$slots;
-          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
           {()=>{
 
@@ -1790,7 +1790,7 @@ describe("tranpiler element", () => {
           }}}
                 </div>
               </RENDER_SLOT>}}
-          })}
+          </>})}
 
           }}>
               
@@ -1817,7 +1817,9 @@ describe("tranpiler element", () => {
   describe("partial", () => {
     test("<d", () => {
       const { result } = transpile("<d");
-      expect(result).toMatchInlineSnapshot(`"<___VERTER___comp.d"`);
+      expect(result).toMatchInlineSnapshot(`
+          "<___VERTER___comp.d"
+        `);
     });
   });
 });

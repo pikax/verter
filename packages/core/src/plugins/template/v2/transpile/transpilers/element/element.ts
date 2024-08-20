@@ -450,7 +450,7 @@ function renderSlot(
       s.prependLeft(
         slotProp.loc.end.offset,
         `${shouldWrapName ? "']" : ""})${
-          slotProp.exp ? " " : `(()=>{\n${narrowCondition}\n`
+          slotProp.exp ? " " : `(()=>{<>\n${narrowCondition}\n`
         }`
       );
     } else {
@@ -475,7 +475,7 @@ function renderSlot(
       s.prependLeft(
         slotProp.loc.end.offset,
         `${shouldWrapName ? "']" : ""})${
-          slotProp.exp ? " " : `(()=>{\n${narrowCondition}`
+          slotProp.exp ? " " : `(()=>{<>\n${narrowCondition}`
         }`
       );
     }
@@ -499,14 +499,14 @@ function renderSlot(
         ")"
       );
 
-      s.appendLeft(slotProp.exp.loc.end.offset + 1, `=>{\n${narrowCondition}`);
+      s.appendLeft(slotProp.exp.loc.end.offset + 1, `=>{ <> \n${narrowCondition}`);
     }
   } else {
     context.s.appendLeft(
       insertAt,
       [
         "",
-        `{${context.accessors.slotCallback}($slots.default)(()=>{`,
+        `{${context.accessors.slotCallback}($slots.default)(()=>{ <>`,
         narrowCondition,
         "",
       ].join("\n")
@@ -536,7 +536,7 @@ function renderSlot(
 
 function closeSlot(context: TranspileContext, end: number) {
   const { s } = context;
-  s.appendLeft(end, `\n})}\n`);
+  s.appendLeft(end, `\n</>})}\n`);
 }
 
 function sanitiseAttributeName(name: string, context: TranspileContext) {
