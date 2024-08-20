@@ -474,6 +474,42 @@ describe("tranpiler element", () => {
                   </___VERTER___comp.Test>"
         `);
       });
+
+      it("parent empty v-slot", () => {
+        const { result } = transpile(`<Test v-slot>
+          <div> {{ submit }} </div>
+        </Test>`);
+        expect(result).toMatchInlineSnapshot(`
+          "<___VERTER___comp.Test v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
+          {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
+
+          <div> {{ submit }} </div>
+          </>})}
+
+          }}>
+                    
+                  </___VERTER___comp.Test>"
+        `);
+      });
+
+      it("parent v-slot", () => {
+        const { result } =
+          transpile(`<Test v-slot="{submit, named: test, deep: { layer: { obj }}}">
+          <div> {{ submit + randomProps }} </div>
+        </Test>`);
+        expect(result).toMatchInlineSnapshot(`
+          "<___VERTER___comp.Test v-slot={(___VERTER___componentInstance): any=>{
+          const $slots = ___VERTER___componentInstance.$slots;
+          {___VERTER___SLOT_CALLBACK($slots.default)(({submit, named: test, deep: { layer: { obj }}})=>{ <> 
+          <div> {{ submit + randomProps }} </div>
+          </>})}
+
+          }}>
+                    
+                  </___VERTER___comp.Test>"
+        `);
+      });
     });
   });
 

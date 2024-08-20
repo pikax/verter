@@ -432,13 +432,13 @@ export function processOptions(context: ParseContext) {
         )
       : "";
 
-    // const slotsBinding = foundMacros.has("defineSlots")
-    //   ? setupMacroReturn(
-    //       "defineSlots",
-    //       macroOverride.get("defineSlots") ??
-    //         vueMacros.find(([n]) => n === "defineSlots")[1]
-    //     )
-    //   : "";
+    const slotsBinding = foundMacros.has("defineSlots")
+      ? setupMacroReturn(
+          "defineSlots",
+          macroOverride.get("defineSlots") ??
+            vueMacros.find(([n]) => n === "defineSlots")[1]
+        )
+      : "";
 
     // do work for <script ... >
     if (isSetup) {
@@ -499,6 +499,7 @@ export function processOptions(context: ParseContext) {
           withDefaultsBinding &&
             `{ ${WithDefaultsPropsPropertyName}: ${withDefaultsBinding} }`,
           emitBinding && `{ ${EmitsPropertyName}: ${emitBinding} }`,
+          slotsBinding && `{ ${SlotsPropertyName}: ${slotsBinding} }`,
           modelsBinding && `{ ${ModelsPropertyName}: ${modelsBinding} }`,
         ].filter(Boolean);
         s.appendRight(

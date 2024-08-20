@@ -9,6 +9,7 @@ import {
   AttributeNode,
   ElementNode,
   isFunctionType,
+  walkIdentifiers,
 } from "@vue/compiler-core";
 import {
   appendCtx,
@@ -82,22 +83,75 @@ export default createTranspiler(NodeTypes.ELEMENT, {
 
         const slotDirective = node.props.find(
           (x) => x.type === NodeTypes.DIRECTIVE && x.name === "slot"
-        );
+        ) as DirectiveNode | undefined;
 
-        if (slotDirective) {
+        if (slotDirective?.exp) {
+          const positionIndex = slotDirective.exp.loc.end.offset;
+
+          const slots = retrieveSlotNamed(node);
+          const orphans: TemplateChildNode[] = [];
+          const slotsEnd: number[] = [];
+
+          for (const slot in slots) {
+            const definition = slots[slot];
+            if (!definition.templateNode) {
+              orphans.push(...definition.items);
+              continue;
+            }
+
+            const slotEnd = renderSlot(
+              overrideContext,
+              positionIndex,
+              definition.items,
+              parentContext,
+              definition.templateNode
+            );
+            slotsEnd.push(slotEnd);
+          }
+
+          if (orphans.length) {
+            const slotEnd = renderSlot(
+              overrideContext,
+              positionIndex,
+              orphans,
+              parentContext,
+              slotDirective
+            );
+            slotsEnd.push(slotEnd);
+          }
+          s.appendRight(positionIndex, "\n}}");
+          // @ts-expect-error
+          parentContext.slotsEnd = slotsEnd;
+
+          console.log("slots", slots);
         } else {
           const slots = retrieveSlotNamed(node);
 
-          s.appendLeft(
-            tagBlockEnd,
-            withNarrowCondition(
-              [
-                ` v-slot={(${context.accessors.componentInstance}): any=>{`,
-                `const $slots = ${context.accessors.componentInstance}.$slots;`,
-              ],
-              context
-            )
-          );
+          const positionIndex = slotDirective?.loc.end.offset || tagBlockEnd;
+
+          if (slotDirective) {
+            s.appendLeft(
+              positionIndex,
+              withNarrowCondition(
+                [
+                  `={(${context.accessors.componentInstance}): any=>{`,
+                  `const $slots = ${context.accessors.componentInstance}.$slots;`,
+                ],
+                context
+              )
+            );
+          } else {
+            s.appendLeft(
+              positionIndex,
+              withNarrowCondition(
+                [
+                  ` v-slot={(${context.accessors.componentInstance}): any=>{`,
+                  `const $slots = ${context.accessors.componentInstance}.$slots;`,
+                ],
+                context
+              )
+            );
+          }
 
           const orphans: TemplateChildNode[] = [];
           const slotsEnd: number[] = [];
@@ -111,7 +165,7 @@ export default createTranspiler(NodeTypes.ELEMENT, {
 
             const slotEnd = renderSlot(
               context,
-              tagBlockEnd,
+              positionIndex,
               definition.items,
               parentContext,
               definition.templateNode
@@ -122,13 +176,13 @@ export default createTranspiler(NodeTypes.ELEMENT, {
           if (orphans.length) {
             const slotEnd = renderSlot(
               context,
-              tagBlockEnd,
+              positionIndex,
               orphans,
               parentContext
             );
             slotsEnd.push(slotEnd);
           }
-          s.appendRight(tagBlockEnd, "\n}}");
+          s.appendRight(positionIndex, "\n}}");
           // @ts-expect-error
           parentContext.slotsEnd = slotsEnd;
         }
@@ -397,7 +451,7 @@ function renderSlot(
   insertAt: number,
   items: TemplateChildNode[],
   parentContext: Record<string, any>,
-  template?: TemplateNode | null
+  template?: TemplateNode | DirectiveNode | null
 ) {
   const { s } = context;
 
@@ -413,7 +467,42 @@ function renderSlot(
       : context,
     true
   );
-  if (template) {
+  if (template?.type === NodeTypes.DIRECTIVE) {
+    // processExpression(template.exp, context, true, false);
+
+    const identifiers = new Set<string>();
+    if (template.exp.ast) {
+      walkIdentifiers(
+        template.exp.ast,
+        (id, parent, _, isReference, isLocal) => {
+          if (id.type === "Identifier" && isReference && isLocal) {
+            identifiers.add(id.name);
+          }
+        },
+        true
+      );
+    }
+    context.ignoredIdentifiers = [
+      ...context.ignoredIdentifiers,
+      ...identifiers,
+    ];
+    const slotProp = template;
+
+    // remove delimiters
+    s.remove(slotProp.exp.loc.start.offset - 1, slotProp.exp.loc.start.offset);
+    s.remove(slotProp.exp.loc.end.offset, slotProp.exp.loc.end.offset + 1);
+
+    s.appendLeft(
+      slotProp.exp.loc.start.offset,
+      [
+        `{(${context.accessors.componentInstance}): any=>{`,
+        `const $slots = ${context.accessors.componentInstance}.$slots;`,
+        `{${context.accessors.slotCallback}($slots.default)((`,
+      ].join("\n")
+    );
+
+    s.appendLeft(slotProp.exp.loc.end.offset, `)=>{ <> \n${narrowCondition}`);
+  } else if (template) {
     const slotProp = getSlotProp(template);
     if (!slotProp) {
       // TODO log error
@@ -470,7 +559,13 @@ function renderSlot(
       );
       s.appendRight(slotProp.loc.start.offset, prepend);
 
-      s.move(slotProp.loc.start.offset, slotProp.loc.end.offset, insertAt);
+      // prevent moving inside
+      if (
+        insertAt < slotProp.loc.start.offset ||
+        insertAt > slotProp.loc.end.offset
+      ) {
+        s.move(slotProp.loc.start.offset, slotProp.loc.end.offset, insertAt);
+      }
 
       s.prependLeft(
         slotProp.loc.end.offset,
@@ -499,7 +594,10 @@ function renderSlot(
         ")"
       );
 
-      s.appendLeft(slotProp.exp.loc.end.offset + 1, `=>{ <> \n${narrowCondition}`);
+      s.appendLeft(
+        slotProp.exp.loc.end.offset + 1,
+        `=>{ <> \n${narrowCondition}`
+      );
     }
   } else {
     context.s.appendLeft(
@@ -515,18 +613,22 @@ function renderSlot(
 
   const start = Math.min(
     ...items.map((x) => x.loc.start.offset),
-    template?.loc.start.offset ?? Number.MAX_VALUE
+    template?.type === NodeTypes.DIRECTIVE
+      ? Number.MAX_VALUE
+      : template?.loc.start.offset ?? Number.MAX_VALUE
   );
   const end = Math.max(
     ...items.map((x) => x.loc.end.offset),
-    template?.loc.end.offset ?? Number.MIN_VALUE
+    template?.type === NodeTypes.DIRECTIVE
+      ? Number.MIN_VALUE
+      : template?.loc.end.offset ?? Number.MIN_VALUE
   );
 
   if (start === end) {
     console.warn("NOT expected slots to be the same!!!");
     return;
   }
-
+  // prevent moving inside
   s.move(start, end, insertAt);
 
   // context.s.appendRight(end, `\n})}\n`);
@@ -673,12 +775,18 @@ function processProps(
 
         break;
       }
+
+      case "slot": {
+        break;
+      }
+
       case "class": {
         toNormalise.classes.push(prop);
         break;
       }
       case "style": {
         toNormalise.styles.push(prop);
+        break;
       }
     }
   }
