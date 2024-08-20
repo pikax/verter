@@ -123,9 +123,6 @@ importers:
 
   packages/language-server:
     dependencies:
-      '@swc/core':
-        specifier: ^1.6.3
-        version: 1.6.3
       '@verter/core':
         specifier: workspace:^
         version: link:../core
@@ -2247,12 +2244,15 @@ snapshots:
       '@swc/core-win32-arm64-msvc': 1.6.3
       '@swc/core-win32-ia32-msvc': 1.6.3
       '@swc/core-win32-x64-msvc': 1.6.3
+    optional: true
 
-  '@swc/counter@0.1.3': {}
+  '@swc/counter@0.1.3':
+    optional: true
 
   '@swc/types@0.1.8':
     dependencies:
       '@swc/counter': 0.1.3
+    optional: true
 
   '@tsconfig/node10@1.0.9': {}
 

@@ -25,6 +25,8 @@ import {
   PropsPropertyName,
   ResolveProps,
   VueSetupMacros,
+  ResolveRenderProps,
+  ResolveEmits,
 } from "../options/index.js";
 import { getBlockFilename } from "../utils.js";
 import {
@@ -202,6 +204,7 @@ export function processRender(context: ParseContext) {
     // variables exposed by verter
     const verterVariables = [
       PrefixSTR("props"),
+      PrefixSTR("withDefaultsProps"),
       PrefixSTR("emits"),
       PrefixSTR("slots"),
       PrefixSTR("models"),
@@ -216,7 +219,7 @@ import 'vue/jsx';
 import { ${vueImports.map(
           ([i, n, t]) => `${t ? "type " : ""}${i} as ${n}`
         )} } from "vue";
-import { ${BindingContextExportName}, ${FullContextExportName}, ${DefaultOptions}, ${ResolveSlots}} from "${optionsFilename}";
+import { ${BindingContextExportName}, ${FullContextExportName}, ${DefaultOptions}, ${ResolveSlots}, ${ResolveRenderProps}, ${ResolveEmits}} from "${optionsFilename}";
 
 ${globalPatch}
 `
@@ -271,6 +274,15 @@ const ${FullContextExportName}CTX = ${
           genericInfo ? `<${genericInfo.names.join(",")}>` : ""
         }();
 
+const ${ResolveRenderProps}CTX = ${
+          isAsync ? "await " : ""
+        }${ResolveRenderProps}${
+          genericInfo ? `<${genericInfo.names.join(",")}>` : ""
+        }();
+
+const ${ResolveEmits}CTX = ${isAsync ? "await " : ""}${ResolveEmits}${
+          genericInfo ? `<${genericInfo.names.join(",")}>` : ""
+        }();
 
 
 const ${accessors.slot} = ${ResolveSlots}${
@@ -286,12 +298,12 @@ const ${accessors.ctx} = {
 
 
     // expose props access directly
-    ...({} as Omit<typeof ${BindingContextExportName}CTX.${PropsPropertyName}, keyof typeof ${BindingContextExportName}CTX>),
+    ...({} as Omit<typeof ${ResolveRenderProps}CTX, keyof typeof ${BindingContextExportName}CTX>),
 
 
-    ...({} as ${
-      variables.ShallowUnwrapRef
-    }<Omit<typeof ${FullContextExportName}CTX, ${
+   ...({} as ${
+     variables.ShallowUnwrapRef
+   }<Omit<typeof ${FullContextExportName}CTX, ${
           ignoredExposed.length
             ? ignoredExposed.map((x) => `"${x}"`).join(" | ")
             : ""
@@ -316,6 +328,8 @@ const ${accessors.ctx} = {
         }
    
 
+    $props: { ...${variables.component}.$props, ...${ResolveRenderProps}CTX },
+    $emit: ${ResolveEmits}CTX,
     $slots: ${accessors.slot},
 };
 

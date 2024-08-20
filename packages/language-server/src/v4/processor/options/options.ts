@@ -8,12 +8,8 @@ import {
   type TypeLocationImport,
   LocationType,
 } from "@verter/core";
-import {
-  ModuleDeclaration,
-  parseSync,
-  Statement,
-  TsTypeAliasDeclaration,
-} from "@swc/core";
+
+import type { Statement } from "@babel/types";
 import {
   isFunctionType,
   TS_NODE_TYPES,
@@ -29,12 +25,15 @@ export const DefaultOptions = PrefixSTR("default");
 export const ComponentExport = PrefixSTR("Component");
 export const GenericOptions = PrefixSTR("GenericOptions");
 
+export const ResolveRenderProps = PrefixSTR("resolveRenderProps");
 export const ResolveProps = PrefixSTR("resolveProps");
 export const ResolveExtraProps = PrefixSTR("resolveExtraProps");
 export const ResolveEmits = PrefixSTR("resolveEmits");
 export const ResolveSlots = PrefixSTR("resolveSlots");
 export const ResolveModels = PrefixSTR("resolveModels");
+
 export const PropsPropertyName = PrefixSTR("props");
+export const WithDefaultsPropsPropertyName = PrefixSTR("withDefaultsProps");
 export const EmitsPropertyName = PrefixSTR("emits");
 export const SlotsPropertyName = PrefixSTR("slots");
 export const ModelsPropertyName = PrefixSTR("models");
@@ -171,7 +170,7 @@ export function processOptions(context: ParseContext) {
       [macro: VueSetupMacros, overrideName: string, multiple?: boolean]
     > = [
       ["defineProps", PropsPropertyName],
-      ["withDefaults", PropsPropertyName],
+      // ["withDefaults", PropsPropertyName],
       ["defineEmits", EmitsPropertyName],
       ["defineSlots", SlotsPropertyName],
 
@@ -313,6 +312,65 @@ export function processOptions(context: ParseContext) {
               }
             }
 
+            const withDefaultsExpresion = checkForSetupMethodCalls(
+              "withDefaults",
+              it as Statement
+            );
+            if (withDefaultsExpresion) {
+              foundMacros.add("withDefaults");
+
+              const offset = scriptBlock.block.loc.start.offset;
+
+              // create variables before the possible declaration
+              s.appendRight(
+                it.start + offset,
+                `let ${[PropsPropertyName, WithDefaultsPropsPropertyName].join(
+                  ","
+                )};\n`
+              );
+
+              s.appendRight(
+                withDefaultsExpresion.start + offset,
+                `${WithDefaultsPropsPropertyName} = `
+              );
+
+              const definePropsExpression = withDefaultsExpresion.arguments[0];
+              if (
+                definePropsExpression.type === "CallExpression" &&
+                definePropsExpression.callee.type === "Identifier" &&
+                definePropsExpression.callee.name === "defineProps"
+              ) {
+                foundMacros.add("defineProps");
+                s.appendRight(
+                  definePropsExpression.start + offset,
+                  `${PropsPropertyName} = `
+                );
+              }
+
+              if (it.type === "VariableDeclaration") {
+                if (
+                  it.declarations[0].type === "VariableDeclarator" &&
+                  it.declarations[0].id.type === "Identifier"
+                ) {
+                  const name = it.declarations[0].id.name;
+                  macroOverride.set("withDefaults", name);
+                }
+              }
+
+              // if (expresion.type === "VariableDeclaration") {
+              //   if (expresion.declarations[0].type === "VariableDeclarator") {
+              //   } else {
+              //     // this is probably a destructuring
+              //   }
+
+              //   _declarationBindings.push(
+              //     scriptBlock.block.loc.source.slice(expresion.start, expresion.end)
+              //   );
+              // } else {
+
+              // }
+            }
+
             break;
           }
           case "ExportDefaultExpression":
@@ -342,14 +400,19 @@ export function processOptions(context: ParseContext) {
       }
     }
 
-    const propMacro =
-      foundMacros.has("defineProps") || foundMacros.has("withDefaults");
-    const propsBinding = propMacro
+    const propsBinding = foundMacros.has("defineProps")
       ? setupMacroReturn(
           "defineProps",
           (macroOverride.get("defineProps") as string) ??
-            (macroOverride.get("withDefaults") as string) ??
             vueMacros.find(([n]) => n === "defineProps")[1]
+        )
+      : "";
+
+    const withDefaultsBinding = foundMacros.has("withDefaults")
+      ? setupMacroReturn(
+          "withDefaults",
+          (macroOverride.get("withDefaults") as string) ??
+            WithDefaultsPropsPropertyName
         )
       : "";
 
@@ -433,6 +496,8 @@ export function processOptions(context: ParseContext) {
       if (isTypescript) {
         const extraBindings = [
           propsBinding && `{ ${PropsPropertyName}: ${propsBinding} }`,
+          withDefaultsBinding &&
+            `{ ${WithDefaultsPropsPropertyName}: ${withDefaultsBinding} }`,
           emitBinding && `{ ${EmitsPropertyName}: ${emitBinding} }`,
           modelsBinding && `{ ${ModelsPropertyName}: ${modelsBinding} }`,
         ].filter(Boolean);
@@ -621,10 +686,8 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
       // @ts-expect-error not the correct type
       const declarationNode = defaultExportNode.declaration as Statement;
       const start =
-        // @ts-expect-error
         declarationNode.start + defaultExportBlock.block.loc.start.offset;
       const end =
-        // @ts-expect-error
         declarationNode.end + defaultExportBlock.block.loc.start.offset;
 
       s.prependLeft(start, `${PrefixSTR("defineComponent")}(`);
@@ -646,9 +709,19 @@ export function ${FullContextExportName}() { return /*##___VERTER_FULL_BINDING_R
 
   const resolveExports = [
     [
-      foundMacros.has("defineProps") || foundMacros.has("withDefaults"),
+      foundMacros.has("withDefaults") || foundMacros.has("defineProps"),
+      ResolveRenderProps,
+      foundMacros.has("withDefaults")
+        ? WithDefaultsPropsPropertyName
+        : PropsPropertyName,
+      "$props",
+    ],
+    [
+      foundMacros.has("withDefaults") || foundMacros.has("defineProps"),
       ResolveProps,
-      PropsPropertyName,
+      foundMacros.has("defineProps")
+        ? PropsPropertyName
+        : WithDefaultsPropsPropertyName,
       "$props",
     ],
     [
@@ -750,7 +823,7 @@ export type UnionToIntersection<U> = (
     : never
     
     
-type EmitMapToProps<T extends [event: string, ...args: any[]]> = T extends [
+type EmitMapToProps<T> = T extends [
     infer E extends string,
     ...infer A
 ]
@@ -761,7 +834,7 @@ type ModelToProps<T> = {
   [K in keyof T]: T[K] extends ModelRef<infer C> ? C : T[K] extends ModelRef<infer C> | undefined ? C | undefined : null
 }
 
-type ModelToEmits<T> = {
+type ModelToEmits<T> = {} extends T ? () => any : {
     [K in keyof T]-?: (event: \`update:\${K & string}\`, arg: T[K] extends ModelRef<infer C> ? C : T[K] extends ModelRef<infer C> | undefined ? C | undefined : unknown) => any
 }[keyof T]
 
@@ -821,7 +894,6 @@ export function checkForSetupMethodCalls(name: string, statement: Statement) {
     if (
       statement.expression.type === "CallExpression" &&
       "name" in statement.expression.callee &&
-      // @ts-expect-error
       statement.expression.callee.name === name
     ) {
       return statement.expression;
@@ -836,7 +908,6 @@ export function checkForSetupMethodCalls(name: string, statement: Statement) {
       if (
         declaration?.init?.type === "CallExpression" &&
         "name" in declaration.init.callee &&
-        // @ts-expect-error
         declaration.init.callee.name === name
       ) {
         return declaration.init;

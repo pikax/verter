@@ -376,16 +376,14 @@ export function startServer(options: LsConnectionOption = {}) {
     const subDoc = doc.getDocumentForPosition(params.position);
     const offset = subDoc.toGeneratedOffsetFromPosition(params.position);
 
-    const definition = tsService
-      .getDefinitionAtPosition(subDoc.uri, offset)
-      .filter((x) => x.fileName.endsWith(".vue.bundle.ts"));
+    const definition = tsService.getDefinitionAtPosition(subDoc.uri, offset);
+    // .filter((x) => !x.fileName.endsWith(".vue.bundle.ts"));
     if (!definition) {
       return null;
     }
 
     const toReturn: LocationLink[] = [];
     const visited = new Set<string>();
-
 
     for (const def of definition) {
       // if the documents are different return to .vue file
@@ -400,7 +398,6 @@ export function startServer(options: LsConnectionOption = {}) {
           continue;
         }
         visited.add(definition.key);
-        toReturn.push(definition);
         toReturn.push(definition);
         continue;
       }

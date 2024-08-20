@@ -17,7 +17,6 @@
     "node": ">=14.0.0"
   },
   "dependencies": {
-    "@swc/core": "^1.6.3",
     "@verter/core": "workspace:^",
     "@verter/language-shared": "workspace:^",
     "@vue/compiler-core": "^3.4.21",
