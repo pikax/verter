@@ -47,9 +47,11 @@ export function retrieveNodeString(
 }
 
 export function getContextSource(context: ParseScriptContext) {
-  const script = context.isSetup
-    ? context.sfc.descriptor.scriptSetup
-    : context.sfc.descriptor.script;
+  const script =
+    context.script ??
+    (context.isSetup
+      ? context.sfc.descriptor.scriptSetup
+      : context.sfc.descriptor.script);
 
   return script.loc.source;
 }

@@ -1,6 +1,5 @@
-import { LocationType, PluginOption, WalkResult } from "../types.js";
+import { LocationType, PluginOption } from "../types.js";
 import { transpile, TranspileOptions } from "./v2/transpile/index.js";
-
 
 export default {
   name: "Template",
@@ -15,7 +14,10 @@ export default {
 
     const declarations = options.declarations ?? [];
     try {
-      const { accessors } = transpile(ast, context.s, { ...options, declarations });
+      const { accessors } = transpile(ast, context.s, {
+        ...options,
+        declarations,
+      });
 
       declarations.push({
         type: LocationType.Import,

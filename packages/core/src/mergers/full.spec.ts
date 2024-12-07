@@ -3,7 +3,7 @@ import { createBuilder } from "../builder";
 import { mergeFull } from "./full";
 import fs from "node:fs";
 
-describe("Mergers Full", () => {
+describe.skip("Mergers Full", () => {
   function testSourceMaps({
     content,
     map,

@@ -72,7 +72,7 @@ describe("transpile", () => {
           </div>`);
 
       expect(result).toMatchInlineSnapshot(`
-        "<template>{ ()=> {if((() => {
+        "<template>{ (): any => {if((() => {
                     let ii = '0';
                     return ii === ii
                   })()){<div >{ "t4est" }</div>}

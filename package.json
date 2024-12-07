@@ -14,7 +14,7 @@
   "author": "",
   "license": "ISC",
   "pnpmX": {
-    "patchedDependencies": {
+    "`patchedDependencies": {
       "@vue/runtime-core@3.4.13": "patches/@vue__runtime-core@3.4.13.patch",
       "@vue/shared@3.4.13": "patches/@vue__shared@3.4.13.patch"
     }
