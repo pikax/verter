@@ -28,12 +28,12 @@ export type TranspileContext = {
 
     /**
      * Override the accessor for slot
-     * @default "___VERTER___slot"
+     * @default "___VERTER___ctx.$slots"
      */
     slot: string;
 
     /**
-     * Override the accessor for slot
+     * Override the accessor for template
      * @default "___VERTER___template"
      */
     template: string;
@@ -47,6 +47,13 @@ export type TranspileContext = {
      * ```
      */
     slotCallback: string;
+
+    /**
+     * Used to convert slot declaration into render Component
+     *
+     * @default "___VERTER___SLOT_TO_COMPONENT"
+     */
+    slotToComponent: string;
 
     normalizeClass: string;
     normalizeStyle: string;

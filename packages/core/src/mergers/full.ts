@@ -212,6 +212,8 @@ export type ___VERTER__DeclareComponent<
   // commenting the function ahead because it does not play nicely with generics :(
   // declare function ___VERTER___AssertAny<T>(o: T extends T & 0 ? never : T): T extends T & 0 ? never : T
   declare function ___VERTER___AssertAny<T>(o: T): T extends T & 0 ? never : T
+declare function ___VERTER___SLOT_TO_COMPONENT<T>(o: T): T extends T & 0 ? never : [T] extends [{ [K in string]: {} }] ? (arg: T) => JSX.Element : [T] extends [(...args: infer A) => any] ? (scope: A[0]) => JSX.Element : T;
+
 
   declare function ___VERTER___PATCH_TYPE<T>(options: T): T
   declare function ___VERTER___PATCH_TYPE<T, Props, Data extends Record<string, any>, Emits, Slots extends Record<PropertyKey, any>>(options: T, props: Props, data?: Data, emits?: Emits, slots?: Slots)

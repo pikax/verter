@@ -244,7 +244,9 @@ declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string,
 
 declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb: ((...args: T[]) => any))=>void;
 declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event: TArgs[0],) => any>(event: TArgs, cb: R): R;
-declare function ___VERTER___AssertAny<T>(o: T): T extends T & 0 ? never : T;`
+declare function ___VERTER___AssertAny<T>(o: T): T extends T & 0 ? never : T;
+declare function ___VERTER___SLOT_TO_COMPONENT<T>(o: T): T extends T & 0 ? never : [T] extends [{ [K in string]: {} }] ? (arg: T) => JSX.Element : [T] extends [(...args: infer A) => any] ? (scope: A[0]) => JSX.Element : T;
+`
       : `
 declare function ${variables.isConstructor}<T extends { new(): Record<string, any> }>(o: T | unknown): true;
 type ${variables.UnionToIntersection}<U> =
@@ -258,6 +260,7 @@ declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string,
 declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb: ((...args: T[]) => any))=>void;
 declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event: TArgs[0],) => any>(event: TArgs, cb: R): R;
 declare function ___VERTER___AssertAny<T>(o: T): T extends T & 0 ? never : T;
+declare function ___VERTER___SLOT_TO_COMPONENT<T>(o: T): T extends T & 0 ? never : [T] extends [{ [K in string]: {} }] ? (arg: T) => JSX.Element : [T] extends [(...args: infer A) => any] ? (scope: A[0]) => JSX.Element : T;
 `;
 
     const contextContent = context.isSetup
@@ -284,10 +287,6 @@ const ${ResolveEmits}CTX = ${isAsync ? "await " : ""}${ResolveEmits}${
           genericInfo ? `<${genericInfo.names.join(",")}>` : ""
         }();
 
-
-const ${accessors.slot} = ${ResolveSlots}${
-          genericInfo ? `<${genericInfo.names.join(",")}>` : ""
-        }();
 const ${accessors.ctx} = {
     ...${variables.component},
     ${
@@ -330,7 +329,9 @@ const ${accessors.ctx} = {
 
     $props: { ...${variables.component}.$props, ...${ResolveRenderProps}CTX },
     $emit: ${ResolveEmits}CTX,
-    $slots: ${accessors.slot},
+    $slots: ${ResolveSlots}${
+          genericInfo ? `<${genericInfo.names.join(",")}>` : ""
+        }(),
 };
 
 

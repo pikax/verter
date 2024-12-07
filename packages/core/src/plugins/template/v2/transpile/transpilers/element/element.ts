@@ -277,12 +277,12 @@ function processSlot(
   if (parentContext.conditionBlock) {
     s.prependLeft(
       node.loc.start.offset + 1,
-      `const RENDER_SLOT = ___VERTER___AssertAny(${context.accessors.slot}`
+      `const RENDER_SLOT = ${context.accessors.slotToComponent}(${context.accessors.slot}`
     );
   } else if (parentContext.for) {
     s.prependLeft(
       node.loc.start.offset + 1,
-      `const RENDER_SLOT = ___VERTER___AssertAny(${context.accessors.slot}`
+      `const RENDER_SLOT = ${context.accessors.slotToComponent}(${context.accessors.slot}`
     );
   } else {
     // append { ()=>
@@ -302,7 +302,7 @@ function processSlot(
             : context,
           true
         ),
-        `const RENDER_SLOT = ___VERTER___AssertAny(${context.accessors.slot}`,
+        `const RENDER_SLOT = ${context.accessors.slotToComponent}(${context.accessors.slot}`,
       ].join("\n")
     );
   }
