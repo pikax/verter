@@ -122,8 +122,6 @@ export default createTranspiler(NodeTypes.ELEMENT, {
           s.appendRight(positionIndex, "\n}}");
           // @ts-expect-error
           parentContext.slotsEnd = slotsEnd;
-
-          console.log("slots", slots);
         } else {
           const slots = retrieveSlotNamed(node);
 
@@ -292,7 +290,18 @@ function processSlot(
       node.loc.start.offset + 1,
       [
         "{()=>{",
-        generateNarrowCondition(context, true),
+        generateNarrowCondition(
+          parentContext.conditions?.length > 0
+            ? {
+                ...context,
+                conditions: {
+                  ...context.conditions,
+                  ifs: [...context.conditions.ifs, ...parentContext.conditions],
+                },
+              }
+            : context,
+          true
+        ),
         `const RENDER_SLOT = ___VERTER___AssertAny(${context.accessors.slot}`,
       ].join("\n")
     );
@@ -461,7 +470,7 @@ function renderSlot(
           ...context,
           conditions: {
             ...context.conditions,
-            elses: [...context.conditions.elses, ...parentContext.conditions],
+            ifs: [...context.conditions.ifs, ...parentContext.conditions],
           },
         }
       : context,
@@ -819,7 +828,11 @@ function processProps(
   }
 
   if (parentContext.conditions) {
-    parentContext.conditions.push(...conditions);
+    if (conditionDirective?.name?.startsWith("else")) {
+      parentContext.conditions = parentContext.conditions.map((x) => `(!${x})`);
+    } else {
+      parentContext.conditions.push(...conditions);
+    }
   } else {
     parentContext.conditions = conditions;
   }

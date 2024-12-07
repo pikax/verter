@@ -1591,6 +1591,52 @@ describe("tranpiler element", () => {
         `);
       });
 
+      it("with parent v-if", () => {
+        const { result } = transpile(`<div v-if="false"> <slot /> </div>`);
+        expect(result).toMatchInlineSnapshot(`
+          "{ (): any => {if(false){<div > {()=>{
+          if(!(false)) { return; } 
+          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          return <RENDER_SLOT />}} </div>}}}"
+        `);
+      });
+
+      it("with parent v-else", () => {
+        const { result } = transpile(
+          `<div v-if="false"> <slot /> </div><div v-else> <slot/> </div>`
+        );
+        expect(result).toMatchInlineSnapshot(`
+          "{ (): any => {if(false){<div > {()=>{
+          if(!(false)) { return; } 
+          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          return <RENDER_SLOT />}} </div>}else{
+          <div > {()=>{
+          if(!((!false))) { return; } 
+          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          return <RENDER_SLOT/>}} </div>
+          }}}"
+        `);
+      });
+      it("with parent v-else-if", () => {
+        const { result } = transpile(
+          `<div v-if="disableDrag"> <slot /> </div><div v-else-if="!disableDrag"> <slot/> </div><div v-else> <slot/> </div>`
+        );
+        expect(result).toMatchInlineSnapshot(`
+          "{ (): any => {if(___VERTER___ctx.disableDrag){<div > {()=>{
+          if(!(___VERTER___ctx.disableDrag)) { return; } 
+          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          return <RENDER_SLOT />}} </div>}else if(!___VERTER___ctx.disableDrag){<div > {()=>{
+          if(!((!___VERTER___ctx.disableDrag))) { return; } 
+          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          return <RENDER_SLOT/>}} </div>}else{
+          <div > {()=>{
+          if(!((!(!___VERTER___ctx.disableDrag)))) { return; } 
+          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          return <RENDER_SLOT/>}} </div>
+          }}}"
+        `);
+      });
+
       it("with v-for", () => {
         const { result } = transpile(
           `<slot v-for="name in $slots" :name="name"/>`
@@ -1687,7 +1733,7 @@ describe("tranpiler element", () => {
           "{ (): any => {if(___VERTER___ctx.disableDrag){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[___VERTER___ctx.selected]);
           return <RENDER_SLOT  >
             {()=>{
-
+          if(!(___VERTER___ctx.disableDrag)) { return; } 
           const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
           return <RENDER_SLOT tab={___VERTER___ctx.item} />}}
           </RENDER_SLOT>}}}"
@@ -1703,7 +1749,7 @@ describe("tranpiler element", () => {
           "{ (): any => {if(___VERTER___ctx.disableDrag){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[___VERTER___ctx.selected as T]);
           return <RENDER_SLOT  >
             {()=>{
-
+          if(!(___VERTER___ctx.disableDrag)) { return; } 
           const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
           return <RENDER_SLOT tab={___VERTER___ctx.item} />}}
           </RENDER_SLOT>}}}"

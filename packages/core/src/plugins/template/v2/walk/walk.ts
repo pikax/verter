@@ -55,7 +55,12 @@ export function walk<Context>(
     );
     const overrideContext = returnedContext || context;
 
-    const childContext = {} as Record<string, any>;
+    const childContext = {
+      conditions:
+        parentContext.conditions?.length > 0
+          ? [...parentContext.conditions]
+          : [],
+    } as Record<string, any>;
 
     if ("children" in node) {
       for (let i = 0; i < node.children.length; i++) {
