@@ -1548,7 +1548,7 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "{()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT/>}}"
         `);
       });
@@ -1558,7 +1558,7 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "{()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot["test"]);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots["test"]);
           return <RENDER_SLOT />}}"
         `);
       });
@@ -1568,7 +1568,7 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "{()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[___VERTER___ctx.test]);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots[___VERTER___ctx.test]);
           return <RENDER_SLOT />}}"
         `);
       });
@@ -1576,17 +1576,17 @@ describe("tranpiler element", () => {
       it("with v-bind should be default", () => {
         const { result } = transpile(`<slot :[msg]="test"/>`);
         expect(result).toMatchInlineSnapshot(`
-          "{()=>{
+        "{()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
-          return <RENDER_SLOT [___VERTER___ctx.msg]={___VERTER___ctx.test}/>}}"
-        `);
+        const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
+        return <RENDER_SLOT [___VERTER___ctx.msg]={___VERTER___ctx.test}/>}}"
+      `);
       });
 
       it("with v-if", () => {
         const { result } = transpile(`<slot v-if="false"/>`);
         expect(result).toMatchInlineSnapshot(`
-          "{ (): any => {if(false){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          "{ (): any => {if(false){const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT />}}}"
         `);
       });
@@ -1596,7 +1596,7 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "{ (): any => {if(false){<div > {()=>{
           if(!(false)) { return; } 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT />}} </div>}}}"
         `);
       });
@@ -1608,11 +1608,11 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "{ (): any => {if(false){<div > {()=>{
           if(!(false)) { return; } 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT />}} </div>}else{
           <div > {()=>{
           if(!((!false))) { return; } 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT/>}} </div>
           }}}"
         `);
@@ -1624,14 +1624,14 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "{ (): any => {if(___VERTER___ctx.disableDrag){<div > {()=>{
           if(!(___VERTER___ctx.disableDrag)) { return; } 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT />}} </div>}else if(!___VERTER___ctx.disableDrag){<div > {()=>{
           if(!((!___VERTER___ctx.disableDrag))) { return; } 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT/>}} </div>}else{
           <div > {()=>{
           if(!((!(!___VERTER___ctx.disableDrag)))) { return; } 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT/>}} </div>
           }}}"
         `);
@@ -1642,7 +1642,7 @@ describe("tranpiler element", () => {
           `<slot v-for="name in $slots" :name="name"/>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "{___VERTER___renderList(___VERTER___ctx.$slots,name   =>{ const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[name]);
+          "{___VERTER___renderList(___VERTER___ctx.$slots,name   =>{ const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots[name]);
           return <RENDER_SLOT  />})}"
         `);
       });
@@ -1656,7 +1656,7 @@ describe("tranpiler element", () => {
 
           {()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT/>}}
           </>})}
 
@@ -1670,7 +1670,7 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "{()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT>{{ 'hello' }}</RENDER_SLOT>}}"
         `);
       });
@@ -1680,7 +1680,7 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "{()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot["test"]);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots["test"]);
           return <RENDER_SLOT >{{ 'hello' }}</RENDER_SLOT>}}"
         `);
       });
@@ -1690,7 +1690,7 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "{()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[___VERTER___ctx.test]);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots[___VERTER___ctx.test]);
           return <RENDER_SLOT >{{ 'hello' }}</RENDER_SLOT>}}"
         `);
       });
@@ -1702,7 +1702,7 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "{()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT [___VERTER___ctx.msg]={___VERTER___ctx.test}>{{ 'hello' }}</RENDER_SLOT>}}"
         `);
       });
@@ -1710,7 +1710,7 @@ describe("tranpiler element", () => {
       it("with v-if", () => {
         const { result } = transpile(`<slot v-if="false">{{ 'hello' }}</slot>`);
         expect(result).toMatchInlineSnapshot(`
-          "{ (): any => {if(false){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          "{ (): any => {if(false){const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT >{{ 'hello' }}</RENDER_SLOT>}}}"
         `);
       });
@@ -1720,7 +1720,7 @@ describe("tranpiler element", () => {
           `<slot v-for="name in $slots" :name="name">{{ 'hello' }}</slot>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "{___VERTER___renderList(___VERTER___ctx.$slots,name   =>{ const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[name]);
+          "{___VERTER___renderList(___VERTER___ctx.$slots,name   =>{ const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots[name]);
           return <RENDER_SLOT  >{{ 'hello' }}</RENDER_SLOT>})}"
         `);
       });
@@ -1730,11 +1730,11 @@ describe("tranpiler element", () => {
   <slot :tab="item" />
 </slot>`);
         expect(result).toMatchInlineSnapshot(`
-          "{ (): any => {if(___VERTER___ctx.disableDrag){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[___VERTER___ctx.selected]);
+          "{ (): any => {if(___VERTER___ctx.disableDrag){const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots[___VERTER___ctx.selected]);
           return <RENDER_SLOT  >
             {()=>{
           if(!(___VERTER___ctx.disableDrag)) { return; } 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT tab={___VERTER___ctx.item} />}}
           </RENDER_SLOT>}}}"
         `);
@@ -1746,11 +1746,11 @@ describe("tranpiler element", () => {
   <slot :tab="item" />
 </slot>`);
         expect(result).toMatchInlineSnapshot(`
-          "{ (): any => {if(___VERTER___ctx.disableDrag){const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[___VERTER___ctx.selected as T]);
+          "{ (): any => {if(___VERTER___ctx.disableDrag){const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots[___VERTER___ctx.selected as T]);
           return <RENDER_SLOT  >
             {()=>{
           if(!(___VERTER___ctx.disableDrag)) { return; } 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT tab={___VERTER___ctx.item} />}}
           </RENDER_SLOT>}}}"
         `);
@@ -1765,11 +1765,11 @@ describe("tranpiler element", () => {
         expect(result).toMatchInlineSnapshot(`
           "{()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[\`page-\${___VERTER___ctx.p?.name || ___VERTER___ctx.p}\`]);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots[\`page-\${___VERTER___ctx.p?.name || ___VERTER___ctx.p}\`]);
           return <RENDER_SLOT  page={___VERTER___ctx.p}>
           {()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT {...___VERTER___ctx.p} />}}
           </RENDER_SLOT>}}"
         `);
@@ -1788,11 +1788,11 @@ describe("tranpiler element", () => {
 
           {()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot[\`page-\${___VERTER___ctx.p?.name || ___VERTER___ctx.p}\`]);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots[\`page-\${___VERTER___ctx.p?.name || ___VERTER___ctx.p}\`]);
           return <RENDER_SLOT  page={___VERTER___ctx.p}>
           {()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT {...___VERTER___ctx.p} />}}
           </RENDER_SLOT>}}
           </>})}
@@ -1860,12 +1860,12 @@ describe("tranpiler element", () => {
 
           {()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot["bar"]);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots["bar"]);
           return <RENDER_SLOT >
                 <div>
                     { (): any => {if(true){<div > bar </div>}
                     else{
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot["title"]);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots["title"]);
           return <RENDER_SLOT  >
                       <div> baz title </div>
                     </RENDER_SLOT>
@@ -1880,7 +1880,7 @@ describe("tranpiler element", () => {
             <div>
               {()=>{
 
-          const RENDER_SLOT = ___VERTER___AssertAny(___VERTER___slot.default);
+          const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
           return <RENDER_SLOT />}}
             </div>
             { (): any => {if(___VERTER___ctx.noFoo){<___VERTER___template  />}
