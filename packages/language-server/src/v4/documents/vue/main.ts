@@ -558,7 +558,7 @@ export class VueSubDocument implements TextDocument {
       }
     } catch (e) {
       console.error(e);
-      debugger;
+  debugger;
     }
   }
 }

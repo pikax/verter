@@ -21,11 +21,11 @@ import {
 import { TranspileContext } from "../../types.js";
 import { VerterNode } from "../../../walk/index.js";
 import { camelize, capitalize } from "@vue/shared";
-import { LocationType } from "../../../../../types.js";
+import { ElementType, LocationType } from "../../../../../types.js";
 
 export default createTranspiler(NodeTypes.ELEMENT, {
   enter(node, parent, context, parentContext) {
-    const { s } = context;
+    const { s, declarations } = context;
 
     const tagOffset = node.loc.source.indexOf(node.tag, 0);
     const tag = resolveTag(node, context);
@@ -187,6 +187,43 @@ export default createTranspiler(NodeTypes.ELEMENT, {
       }
     }
 
+    // declartion
+    const directives = node.props.filter((x) => x.type === NodeTypes.DIRECTIVE);
+
+    const refProp = node.props.find((x) => x.name === "ref");
+
+    declarations.push({
+      type: LocationType.Element,
+      // TODO fix this type
+      node: node as ElementNode as any,
+      tag,
+      elementType:
+        tag === "component"
+          ? ElementType.dynamic
+          : getElementType(node, isWebComponent),
+
+      multiple:
+        !!directives.find((x) => x.name === "for") || parentContext.inFor,
+      conditional:
+        !!directives.find(
+          (x) => x.name === "if" || x.name === "else" || x.name === "else-if"
+        ) || parentContext.conditions?.length > 0,
+
+      ref:
+        !refProp || refProp.type === NodeTypes.DIRECTIVE
+          ? undefined
+          : refProp.value.content,
+      refExp:
+        !refProp || refProp.type === NodeTypes.ATTRIBUTE
+          ? undefined
+          : refProp.exp,
+
+      props: node.props.reduce((p, c) => {
+        p[c.name] = c;
+        return p;
+      }, {}),
+    });
+
     return {
       ...context,
       ...overrideContext,
@@ -258,6 +295,26 @@ export default createTranspiler(NodeTypes.ELEMENT, {
     // }
   },
 });
+
+function getElementType(node: ElementNode, isWebComponent: boolean) {
+  if (isWebComponent) {
+    return ElementType.webcomponent;
+  }
+  switch (node.tagType) {
+    case ElementTypes.COMPONENT: {
+      return ElementType.component;
+    }
+    case ElementTypes.ELEMENT: {
+      return ElementType.native;
+    }
+    case ElementTypes.SLOT: {
+      return ElementType.slot;
+    }
+    case ElementTypes.TEMPLATE: {
+      return ElementType.template;
+    }
+  }
+}
 
 function processSlot(
   node: VerterNode & { type: NodeTypes.ELEMENT; tagType: ElementTypes.SLOT },

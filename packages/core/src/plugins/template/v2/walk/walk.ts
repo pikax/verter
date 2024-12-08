@@ -60,6 +60,7 @@ export function walk<Context>(
         parentContext.conditions?.length > 0
           ? [...parentContext.conditions]
           : [],
+      inFor: !!parentContext.for || !!parentContext.inFor,
     } as Record<string, any>;
 
     if ("children" in node) {

@@ -1,3 +1,4 @@
+import { ElementType, LocationType } from "../../../../../types";
 import { TranspileOptions } from "../../transpile";
 import { fromTranspiler } from "../spec.helpers";
 import Element from "./";
@@ -1903,5 +1904,145 @@ describe("tranpiler element", () => {
           "<___VERTER___comp.d"
         `);
     });
+  });
+
+  describe("declarations", () => {
+    test("simple", () => {
+      const { declarations } = transpile("<div>{{test}}</div>");
+
+      expect(declarations).toMatchObject([
+        {
+          type: LocationType.Element,
+          tag: "div",
+          elementType: ElementType.native,
+
+          multiple: false,
+          conditional: false,
+          ref: undefined,
+          refExp: undefined,
+
+          props: {},
+        },
+      ]);
+    });
+
+    describe("multiple", () => {
+      test("element", () => {
+        const { declarations } = transpile(
+          "<div v-for='i in 5'>{{test}}</div>"
+        );
+
+        expect(declarations).toMatchObject([
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: true,
+            conditional: false,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {},
+          },
+        ]);
+      });
+      test("parent", () => {
+        const { declarations } = transpile(
+          "<div  v-for='i in 5'><div>{{test}}</div></div>"
+        );
+
+        expect(declarations).toMatchObject([
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: true,
+            conditional: false,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {},
+          },
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: true,
+            conditional: false,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {},
+          },
+        ]);
+      });
+      test("gran-parent", () => {
+        const { declarations } = transpile(
+          "<div v-for='i in 5'><div><div>{{test}}</div></div></div>"
+        );
+
+        expect(declarations).toMatchObject([
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: true,
+            conditional: false,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {},
+          },
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: true,
+            conditional: false,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {},
+          },
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: true,
+            conditional: false,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {},
+          },
+        ]);
+      });
+    });
+
+    describe("conditional", () => {
+      test("v-if", () => {});
+      test("v-else", () => {});
+      test("v-else-if", () => {});
+
+      describe("parent", () => {
+        test("v-if", () => {});
+        test("v-else", () => {});
+        test("v-else-if", () => {});
+      });
+
+      describe("gran", () => {
+        test("v-if", () => {});
+        test("v-else", () => {});
+        test("v-else-if", () => {});
+      });
+    });
+
+    test("");
   });
 });

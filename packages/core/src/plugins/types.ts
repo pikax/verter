@@ -5,7 +5,13 @@ import {
   SFCTemplateBlock,
 } from "@vue/compiler-sfc";
 import type * as _babel_types from "@babel/types";
-import { RootNode } from "@vue/compiler-core";
+import {
+  AttributeNode,
+  DirectiveNode,
+  ElementNode,
+  ExpressionNode,
+  RootNode,
+} from "@vue/compiler-core";
 import { VerterSFCBlock } from "../utils/sfc";
 
 // TODO move somewhere else
@@ -78,6 +84,9 @@ export const enum LocationType {
   Declaration = "declaration",
   Import = "import",
   Export = "export",
+
+  // template element
+  Element = "element",
 }
 
 export interface ImportItem {
@@ -255,6 +264,64 @@ export interface TypeLocationSlots {
   }[];
 }
 
+export enum ElementType {
+  native = "native",
+  component = "component",
+  slot = "slot",
+  template = "template",
+  dynamic = "dynamic",
+  webcomponent = "webcomponent",
+}
+export interface TypeLocationElement {
+  type: LocationType.Element;
+
+  node: ElementNode;
+
+  /**
+   * Component tag
+   */
+  tag: string;
+
+  elementType: ElementType;
+
+  /**
+   * If v-for is present
+   */
+  multiple: boolean;
+
+  /**
+   * If in a condition either parent or itself
+   */
+  conditional: boolean;
+
+  /**
+   * Ref when is a string
+   */
+  ref?: string;
+  /**
+   * Ref expression
+   */
+  refExp?: ExpressionNode;
+
+  // props: Record<
+  //   string,
+  //   {
+  //     node: DirectiveNode | AttributeNode;
+
+  //     /**
+  //      * Normalised name, if is an event it will always start with on*
+  //      * name will be normalised to CamelCase
+  //      */
+  //     name: string;
+
+  //     value?: string;
+  //     exp?: ExpressionNode;
+  //     arg?: ExpressionNode;
+  //   }
+  // >;
+  props: Record<string, AttributeNode | DirectiveNode>;
+}
+
 export type TypeLocationMap = {
   [LocationType.Declaration]: TypeLocationDeclaration;
   [LocationType.Import]: TypeLocationImport;
@@ -267,12 +334,15 @@ export type TypeLocationMap = {
   [LocationType.Export]: TypeLocationExport;
   [LocationType.Generic]: TypeLocationGeneric;
   [LocationType.Template]: TypeLocationTemplate;
+  [LocationType.Element]: TypeLocationElement;
 };
 export type ValueOf<T> = T[keyof T];
 
 export type LocationByType = {
   [K in LocationType]?: K extends keyof TypeLocationMap
-    ? Array<TypeLocationMap[K] & BaseTypeLocation>
+    ? Array<
+        TypeLocationMap[K] & Omit<BaseTypeLocation, keyof TypeLocationMap[K]>
+      >
     : never;
 };
 

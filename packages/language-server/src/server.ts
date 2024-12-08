@@ -195,8 +195,8 @@ export function startServer(options: LsConnectionOption = {}) {
       {
         const program = tsService.getProgram();
         const sourceFile = program?.getSourceFile(subDoc.uri);
-        const fullText = sourceFile.getFullText();
-        const text = sourceFile.getText();
+        // const fullText = sourceFile.getFullText();
+        // const text = sourceFile.getText();
         console.log(
           "starting completions",
           sourceFile?.fileName,

@@ -44,5 +44,7 @@ export function fromTranspiler<T extends NodeTypes>(
 
     // .snip(prop.exp.loc.start.offset - 1, prop.exp.loc.end.offset + 1)
     // .slice(1, -1)
+
+    declarations: c.declarations,
   };
 }
