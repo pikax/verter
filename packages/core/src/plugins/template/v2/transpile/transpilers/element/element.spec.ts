@@ -2026,23 +2026,769 @@ describe("tranpiler element", () => {
     });
 
     describe("conditional", () => {
-      test("v-if", () => {});
-      test("v-else", () => {});
-      test("v-else-if", () => {});
+      test("v-if", () => {
+        const { declarations } = transpile("<div v-if='true'>{{test}}</div>");
+
+        expect(declarations).toMatchObject([
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: false,
+            conditional: true,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {
+              if: expect.objectContaining({ name: "if", rawName: "v-if" }),
+            },
+          },
+        ]);
+      });
+      test("v-else", () => {
+        const { declarations } = transpile(
+          "<div v-if='true'>{{test}}</div><div v-else>{{test}}</div>"
+        );
+
+        expect(declarations).toMatchObject([
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: false,
+            conditional: true,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {
+              if: expect.objectContaining({ name: "if", rawName: "v-if" }),
+            },
+          },
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: false,
+            conditional: true,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {
+              else: expect.objectContaining({
+                name: "else",
+                rawName: "v-else",
+              }),
+            },
+          },
+        ]);
+      });
+      test("v-else-if", () => {
+        const { declarations } = transpile(
+          "<div v-if='true'>{{test}}</div><div v-else-if='false'>{{test}}</div>"
+        );
+
+        expect(declarations).toMatchObject([
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: false,
+            conditional: true,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {
+              if: expect.objectContaining({ name: "if", rawName: "v-if" }),
+            },
+          },
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: false,
+            conditional: true,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {
+              "else-if": expect.objectContaining({
+                name: "else-if",
+                rawName: "v-else-if",
+              }),
+            },
+          },
+        ]);
+      });
+
+      test("v-else-if + else", () => {
+        const { declarations } = transpile(
+          "<div v-if='true'>{{test}}</div><div v-else-if='false'>{{test}}</div><div v-else>{{test}}</div>"
+        );
+
+        expect(declarations).toMatchObject([
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: false,
+            conditional: true,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {
+              if: expect.objectContaining({ name: "if", rawName: "v-if" }),
+            },
+          },
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: false,
+            conditional: true,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {
+              "else-if": expect.objectContaining({
+                name: "else-if",
+                rawName: "v-else-if",
+              }),
+            },
+          },
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: false,
+            conditional: true,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {
+              else: expect.objectContaining({
+                name: "else",
+                rawName: "v-else",
+              }),
+            },
+          },
+        ]);
+      });
 
       describe("parent", () => {
-        test("v-if", () => {});
-        test("v-else", () => {});
-        test("v-else-if", () => {});
+        test("v-if", () => {
+          const { declarations } = transpile(
+            "<div v-if='true'><div>{{test}}</div></div>"
+          );
+
+          expect(declarations).toMatchObject([
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                if: expect.objectContaining({ name: "if", rawName: "v-if" }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+          ]);
+        });
+        test("v-else", () => {
+          const { declarations } = transpile(
+            "<div v-if='true'><div>{{test}}</div></div><div v-else><div>{{test}}</div></div>"
+          );
+
+          expect(declarations).toMatchObject([
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                if: expect.objectContaining({ name: "if", rawName: "v-if" }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                else: expect.objectContaining({
+                  name: "else",
+                  rawName: "v-else",
+                }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+          ]);
+        });
+        test("v-else-if", () => {
+          const { declarations } = transpile(
+            "<div v-if='true'><div>{{test}}</div></div><div v-else-if='false'><div>{{test}}</div></div>"
+          );
+
+          expect(declarations).toMatchObject([
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                if: expect.objectContaining({ name: "if", rawName: "v-if" }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                "else-if": expect.objectContaining({
+                  name: "else-if",
+                  rawName: "v-else-if",
+                }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+          ]);
+        });
+        test("v-else-if + else", () => {
+          const { declarations } = transpile(
+            "<div v-if='true'><div>{{test}}</div></div><div v-else-if='false'><div>{{test}}</div></div><div v-else><div>{{test}}</div></div>"
+          );
+
+          expect(declarations).toMatchObject([
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                if: expect.objectContaining({ name: "if", rawName: "v-if" }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                "else-if": expect.objectContaining({
+                  name: "else-if",
+                  rawName: "v-else-if",
+                }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                else: expect.objectContaining({
+                  name: "else",
+                  rawName: "v-else",
+                }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+          ]);
+        });
       });
 
       describe("gran", () => {
-        test("v-if", () => {});
-        test("v-else", () => {});
-        test("v-else-if", () => {});
+        test("v-if", () => {
+          const { declarations } = transpile(
+            "<div v-if='true'><div><div>{{test}}</div></div></div>"
+          );
+
+          expect(declarations).toMatchObject([
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                if: expect.objectContaining({ name: "if", rawName: "v-if" }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+          ]);
+        });
+        test("v-else", () => {
+          const { declarations } = transpile(
+            "<div v-if='true'><div><div>{{test}}</div></div></div><div v-else><div><div>{{test}}</div></div></div>"
+          );
+
+          expect(declarations).toMatchObject([
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                if: expect.objectContaining({ name: "if", rawName: "v-if" }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                else: expect.objectContaining({
+                  name: "else",
+                  rawName: "v-else",
+                }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+          ]);
+        });
+        test("v-else-if", () => {
+          const { declarations } = transpile(
+            "<div v-if='true'><div><div>{{test}}</div></div></div><div v-else-if='false'><div><div>{{test}}</div></div></div>"
+          );
+
+          expect(declarations).toMatchObject([
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                if: expect.objectContaining({ name: "if", rawName: "v-if" }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                "else-if": expect.objectContaining({
+                  name: "else-if",
+                  rawName: "v-else-if",
+                }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+          ]);
+        });
+        test("v-else-if + else", () => {
+          const { declarations } = transpile(
+            "<div v-if='true'><div><div>{{test}}</div></div></div><div v-else-if='false'><div><div>{{test}}</div></div></div><div v-else><div><div>{{test}}</div></div></div>"
+          );
+
+          expect(declarations).toMatchObject([
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                if: expect.objectContaining({ name: "if", rawName: "v-if" }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                "else-if": expect.objectContaining({
+                  name: "else-if",
+                  rawName: "v-else-if",
+                }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {
+                else: expect.objectContaining({
+                  name: "else",
+                  rawName: "v-else",
+                }),
+              },
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+            {
+              type: LocationType.Element,
+              tag: "div",
+              elementType: ElementType.native,
+
+              multiple: false,
+              conditional: true,
+              ref: undefined,
+              refExp: undefined,
+
+              props: {},
+            },
+          ]);
+        });
       });
     });
 
-    test("");
+    // TODO add more tests
   });
 });
