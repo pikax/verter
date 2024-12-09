@@ -220,19 +220,16 @@ export function createContext(
                 ast,
                 (n, prent, parentStack, isReference, isLocal) => {
                   if (!isReference || (add && isLocal)) return;
-                  const offset = ast.start || 1;
-                  const start = node.loc.start.offset - offset + n.start;
+                  const start = node.loc.start.offset - 1 + n.loc.start.index;
                   const len = n.end - n.start;
-                  const content = node.content.slice(
-                    n.start - offset,
-                    n.start - offset + len
-                  );
+                  const end = start + len;
+                  const content = n.name;
 
                   if (context.ignoredIdentifers.has(content)) return;
                   const identifier = {
                     loc: {
                       start,
-                      end: start + len,
+                      end,
                     },
                     content,
                     node,

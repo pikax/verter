@@ -351,6 +351,33 @@ const bespokeEmits = ___VERTER___emits = defineEmits([]);`);
         describe.todo("model", () => {
           it.todo("TODO");
         });
+
+        describe("usage", () => {
+          test.only("usage in style", () => {
+            const source = `<script setup lang="ts">
+let brokenStyle = false;
+</script>
+<template>
+  <div
+    :style="
+      1 > 0
+        ? brokenStyle
+          ? \`transform: translate(\${brokenStyle}px, 0);\`
+          : ''
+        : undefined
+    "
+  ></div>
+</template>`;
+            const result = process(source);
+            expect(
+              result.content.slice(
+                result.content.indexOf("/*##___VERTER_BINDING_RETURN___##*/"),
+                result.content.indexOf("/*/##___VERTER_BINDING_RETURN___##*/")
+              )
+            ).toContain("{brokenStyle: typeof brokenStyle\n}");
+            expect(result.content).not.toContain("} & typeof");
+          });
+        });
       });
 
       describe("identifiers", () => {
@@ -404,11 +431,12 @@ const bespokeEmits = ___VERTER___emits = defineEmits([]);`);
           );
 
           expect(result.content).toContain(`let ___VERTER___props;
-const props = ___VERTER___props = withDefaults(defineProps({ a: String }), {a: '1'})`
-          );
+const props = ___VERTER___props = withDefaults(defineProps({ a: String }), {a: '1'})`);
           expect(result.content).toContain("{props: typeof props\n}");
 
-          expect(result.content).toContain("{ ___VERTER___props: typeof ___VERTER___props }");
+          expect(result.content).toContain(
+            "{ ___VERTER___props: typeof ___VERTER___props }"
+          );
         });
 
         it("props with variable assigned", () => {
@@ -416,10 +444,11 @@ const props = ___VERTER___props = withDefaults(defineProps({ a: String }), {a: '
             `<script setup lang='ts'>const props = defineProps({ a: String });</script>`
           );
           expect(result.content).toContain(`let ___VERTER___props;
-const props = ___VERTER___props = defineProps({ a: String });`
-          );
+const props = ___VERTER___props = defineProps({ a: String });`);
           expect(result.content).toContain("{props: typeof props\n}");
-          expect(result.content).toContain("{ ___VERTER___props: typeof ___VERTER___props }");
+          expect(result.content).toContain(
+            "{ ___VERTER___props: typeof ___VERTER___props }"
+          );
         });
 
         test("generic", () => {

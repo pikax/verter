@@ -526,6 +526,90 @@ describe("parser", () => {
           ]);
         });
       });
+
+      describe("props", () => {
+        describe("directive", () => {
+          test("simple", () => {
+            const context = createContext(
+              `<template><div :style="test"></template>`
+            );
+            expect(context.templateIdentifiers).toMatchObject([
+              {
+                loc: {
+                  start: 23,
+                  end: 27,
+                },
+                content: "test",
+                node: {
+                  content: "test",
+                },
+              },
+            ]);
+          });
+
+          test("multiline", () => {
+            const context = createContext(
+              `<template><div :style="\ntest"></template>`
+            );
+            expect(context.templateIdentifiers).toMatchObject([
+              {
+                loc: {
+                  start: 24,
+                  end: 28,
+                },
+                content: "test",
+                node: {
+                  content: "\ntest",
+                },
+              },
+            ]);
+          });
+
+          test("multiline with condition", () => {
+            const context = createContext(
+              `<template><div
+  :style="
+    1 > 0
+      ? test
+        ? \`transform: translate(\${test}px, 0);\`
+        : ''
+      : undefined
+  "
+></div></template>`
+            );
+
+            for (const identifier of context.templateIdentifiers) {
+              expect(identifier.content).toMatch(
+                context.source.slice(identifier.loc.start, identifier.loc.end)
+              );
+            }
+
+            expect(context.templateIdentifiers).toMatchObject([
+              {
+                loc: {
+                  start: 44,
+                  end: 48,
+                },
+                content: "test",
+              },
+              {
+                loc: {
+                  start: 83,
+                  end: 87,
+                },
+                content: "test",
+              },
+              {
+                loc: {
+                  start: 118,
+                  end: 127,
+                },
+                content: "undefined",
+              },
+            ]);
+          });
+        });
+      });
     });
 
     describe("AST", () => {
