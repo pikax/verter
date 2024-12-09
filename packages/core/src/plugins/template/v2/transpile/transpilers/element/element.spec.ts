@@ -1926,6 +1926,89 @@ describe("tranpiler element", () => {
       ]);
     });
 
+    describe("props", () => {
+      test("attributes", () => {
+        const { declarations } = transpile("<div class='test'>{{test}}</div>");
+
+        expect(declarations).toMatchObject([
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: false,
+            conditional: false,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {
+              class: {
+                value: {
+                  content: "test",
+                },
+              },
+            },
+          },
+        ]);
+      });
+
+      test("directive", () => {
+        const { declarations } = transpile("<div :class='test'>{{test}}</div>");
+
+        expect(declarations).toMatchObject([
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: false,
+            conditional: false,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {
+              class: {
+                arg: {
+                  content: "class",
+                },
+                exp: {
+                  content: "test",
+                },
+              },
+            },
+          },
+        ]);
+      });
+
+      test("event", () => {
+        const { declarations } = transpile("<div @class='test'>{{test}}</div>");
+
+        expect(declarations).toMatchObject([
+          {
+            type: LocationType.Element,
+            tag: "div",
+            elementType: ElementType.native,
+
+            multiple: false,
+            conditional: false,
+            ref: undefined,
+            refExp: undefined,
+
+            props: {
+              onClass: {
+                arg: {
+                  content: "class",
+                },
+                exp: {
+                  content: "test",
+                },
+              },
+            },
+          },
+        ]);
+      });
+    });
+
     describe("multiple", () => {
       test("element", () => {
         const { declarations } = transpile(

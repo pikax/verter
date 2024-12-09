@@ -303,22 +303,6 @@ export interface TypeLocationElement {
    */
   refExp?: ExpressionNode;
 
-  // props: Record<
-  //   string,
-  //   {
-  //     node: DirectiveNode | AttributeNode;
-
-  //     /**
-  //      * Normalised name, if is an event it will always start with on*
-  //      * name will be normalised to CamelCase
-  //      */
-  //     name: string;
-
-  //     value?: string;
-  //     exp?: ExpressionNode;
-  //     arg?: ExpressionNode;
-  //   }
-  // >;
   props: Record<string, AttributeNode | DirectiveNode>;
 }
 

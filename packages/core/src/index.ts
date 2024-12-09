@@ -18,4 +18,4 @@ export type { VerterSFCBlock } from "./utils/sfc/index.js";
 
 export { mergeFull } from "./mergers/full.js";
 
-export * from "./parser.js";
+export * from "./parser";

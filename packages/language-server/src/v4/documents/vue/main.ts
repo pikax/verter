@@ -225,6 +225,10 @@ export class VueDocument implements TextDocument {
   getDocumentForPosition(pos: Position) {
     const block = this.getBlockForPosition(pos);
 
+    if (!block) {
+      return null;
+    }
+
     const id = getBlockId(block);
     return this.subDocuments[id];
   }
@@ -558,7 +562,7 @@ export class VueSubDocument implements TextDocument {
       }
     } catch (e) {
       console.error(e);
-  debugger;
+      debugger;
     }
   }
 }

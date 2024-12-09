@@ -12,14 +12,21 @@ import {
 import {
   walk as templateWalk,
   VerterNode,
-} from "./plugins/template/v2/walk/index.js";
-import { defaultPlugins, ParseScriptContext, PluginOption } from "./plugins";
-import { pluginsToLocations } from "./utils/plugin";
+} from "./../plugins/template/v2/walk/index.js";
+import {
+  defaultPlugins,
+  ParseScriptContext,
+  PluginOption,
+  TypeLocation,
+  TypeLocationElement,
+  WalkResult,
+} from "./../plugins";
+import { pluginsToLocations } from "./../utils/plugin";
 import {
   extractBlocksFromDescriptor,
   findBlockLanguage,
   VerterSFCBlock,
-} from "./utils/sfc";
+} from "./../utils/sfc";
 
 import oxc from "oxc-parser";
 import acorn from "acorn-loose";
@@ -30,8 +37,8 @@ import {
   Node,
   ElementTypes,
 } from "@vue/compiler-core";
-import { PrefixSTR } from "./plugins/template/v2/transpile";
-import { Identifier, Node as BabelNode, is } from "@babel/types";
+import { PrefixSTR } from "./../plugins/template/v2/transpile";
+import { Identifier, Node as BabelNode } from "@babel/types";
 
 type AST = ReturnType<typeof acorn.parse>;
 
@@ -75,6 +82,8 @@ export type ParseContext = {
   generic: GenericInfo | undefined;
 
   templateIdentifiers: VerterIdentifier[];
+
+  locations: TypeLocation[];
 };
 
 function parseASTFallback(source: string) {
@@ -390,6 +399,8 @@ export function createContext(
 
     s: new MagicString(source),
     sfc: parsed.descriptor,
+
+    locations: [],
 
     get isAsync() {
       return resolveIsAsync();

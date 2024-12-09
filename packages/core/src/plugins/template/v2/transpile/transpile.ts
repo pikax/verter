@@ -74,7 +74,7 @@ export function transpile(
     {
       s,
       accessors: getAccessors(prefix),
-      declarations: [],
+      declarations: options.declarations ?? [],
       conditions: {
         ifs: [],
         elses: [],
@@ -89,6 +89,9 @@ export function transpile(
     context,
     {
       clone: false,
+      arrayMerge(target, source) {
+        return source ?? target;
+      },
     }
   );
 

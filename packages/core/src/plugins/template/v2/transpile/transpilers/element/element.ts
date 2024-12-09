@@ -190,7 +190,20 @@ export default createTranspiler(NodeTypes.ELEMENT, {
     // declartion
     const directives = node.props.filter((x) => x.type === NodeTypes.DIRECTIVE);
 
-    const refProp = node.props.find((x) => x.name === "ref");
+    const props = node.props.reduce((p, c) => {
+      const name =
+        c.type === NodeTypes.ATTRIBUTE || c.name === "slot"
+          ? c.name
+          : c.arg && c.arg.type == NodeTypes.SIMPLE_EXPRESSION
+          ? c.name === "on"
+            ? "on" + capitalize(c.arg.content)
+            : c.arg.content
+          : c.name;
+      p[name] = c;
+      return p;
+    }, {});
+
+    const refProp = props["ref"];
 
     declarations.push({
       type: LocationType.Element,
@@ -218,10 +231,7 @@ export default createTranspiler(NodeTypes.ELEMENT, {
           ? undefined
           : refProp.exp,
 
-      props: node.props.reduce((p, c) => {
-        p[c.name] = c;
-        return p;
-      }, {}),
+      props,
     });
 
     return {

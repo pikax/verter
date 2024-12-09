@@ -43,7 +43,6 @@ export function processRender(context: ParseContext) {
   const genericInfo = context.generic;
 
   let scriptBlock: VerterASTBlock | null = null;
-
   //   const componentAccessor = PrefixSTR("Component");
   //   const defineComponent = PrefixSTR("defineComponent");
 
@@ -122,10 +121,8 @@ export function processRender(context: ParseContext) {
   } else {
     // const generic = context.generic ? `<${context.generic}>` : "";
 
-    const declarations: WalkResult[] = [];
-
     transpileTemplate(context.sfc.template.ast, s, {
-      declarations,
+      declarations: context.locations,
     });
 
     const variables = {
@@ -443,6 +440,8 @@ const ${accessors.comp} =  {
     loc: {
       source: s.original,
     },
+
+    locations: context.locations,
 
     s,
     content: s.toString(),
