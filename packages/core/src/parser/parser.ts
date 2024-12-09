@@ -29,7 +29,7 @@ import {
 } from "./../utils/sfc";
 
 import oxc from "oxc-parser";
-import acorn from "acorn-loose";
+import { parse as acornParse } from "acorn-loose";
 import {
   isFunctionType,
   NodeTypes,
@@ -40,7 +40,7 @@ import {
 import { PrefixSTR } from "./../plugins/template/v2/transpile";
 import { Identifier, Node as BabelNode } from "@babel/types";
 
-type AST = ReturnType<typeof acorn.parse>;
+type AST = oxc.ParseResult["program"] | ReturnType<typeof acornParse>;
 
 export type VerterASTBlock = VerterSFCBlock & {
   /**
@@ -87,7 +87,7 @@ export type ParseContext = {
 };
 
 function parseASTFallback(source: string) {
-  const ast = acorn.parse(source, { ecmaVersion: "latest" });
+  const ast = acornParse(source, { ecmaVersion: "latest" });
   return ast;
 }
 
@@ -99,16 +99,18 @@ export function parseAST(
   const normaliseSource = source.replace(/[^\x00-\x7F]/g, "*");
   let ast: AST;
   try {
-    const result = oxc.parseSync(normaliseSource, {
-      sourceFilename,
-    });
+    const result = oxc.parseSync(sourceFilename, normaliseSource);
 
     if (result.errors.length) {
       // fallback to acorn parser if oxc parser failed
       // because acorn-loose is more lenient in handling errors
       throw result.errors;
     } else {
-      ast = JSON.parse(result.program);
+      if (typeof result.program === "string") {
+        ast = JSON.parse(result.program);
+      } else {
+        ast = result.program;
+      }
     }
   } catch (e) {
     console.error("oxc parser failed", e);
@@ -491,9 +493,10 @@ export function parseGeneric(source: string | true, prefix = PrefixSTR("TS_")) {
   } = parseAST(genericCode, "generic.ts");
 
   // TODO handle if generic is invalid, maybe do a parse with REGEX
-  if (!("typeParameters" in genericNode) || !genericNode.typeParameters)
+  if (!("typeParameters" in genericNode) || !genericNode.typeParameters) {
+    // todo parse with acorn
     return undefined;
-  // @ts-expect-error not the correct type
+  }
   const params = genericNode.typeParameters?.params || [];
 
   function retrieveNodeString(node: any, source: string) {

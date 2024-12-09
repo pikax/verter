@@ -13,10 +13,10 @@
   },
   "dependencies": {
     "@verter/core": "workspace:^",
-    "vue": "^3.4.21"
+    "vue": "^3.5.13"
   },
   "devDependencies": {
-    "typescript": "^5.4.5",
-    "vite": "^5.2.8"
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
   }
 }

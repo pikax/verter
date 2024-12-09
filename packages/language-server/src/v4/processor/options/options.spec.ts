@@ -212,6 +212,16 @@ describe("processor options", () => {
         ).toContain(`const a = '你好';\nconst b = 'test'`);
       });
 
+      it.only("should move type : correctly", () => {
+        const source = `<script setup lang="ts">let test: boolean = false;</script>`;
+        const result = process(source);
+
+        const first = result.content.indexOf("let test: boolean = false;");
+        const last = result.content.lastIndexOf("let test: boolean = false;");
+
+        expect(first).not.toBe(last);
+      });
+
       describe("return BindingContext", () => {
         describe("props", () => {
           it("not have props", () => {
@@ -353,7 +363,7 @@ const bespokeEmits = ___VERTER___emits = defineEmits([]);`);
         });
 
         describe("usage", () => {
-          test.only("usage in style", () => {
+          test("usage in style", () => {
             const source = `<script setup lang="ts">
 let brokenStyle = false;
 </script>

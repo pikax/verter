@@ -60,5 +60,9 @@ describe("declaration plugin", () => {
 
       expect(r).toBeUndefined();
     });
+
+    it('support for typescript type', ()=> {
+      
+    })
   });
 });
