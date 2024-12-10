@@ -34,6 +34,8 @@ import {
   mapReferenceToLocation,
 } from "./v4/helpers/typescript.js";
 
+import { getCSSLanguageService } from "vscode-css-languageservice";
+
 export interface LsConnectionOption {
   /**
    * The connection to use. If not provided, a new connection will be created.
@@ -471,8 +473,18 @@ export function startServer(options: LsConnectionOption = {}) {
       return undefined;
     }
     const subDoc = doc.getDocumentForPosition(params.position);
+
+    if (subDoc.blockId === "style") {
+      const service = manager.getCSSService(uri);
+
+      const pos = subDoc.toGeneratedPosition(params.position);
+      const parsed = service.parseStylesheet(subDoc);
+      const hoverRes = service.doHover(subDoc, pos, parsed);
+      return hoverRes;
+    }
     try {
       const offset = subDoc.toGeneratedOffsetFromPosition(params.position);
+
       const quickInfo = tsService.getQuickInfoAtPosition(subDoc.uri, offset);
 
       if (!quickInfo) {

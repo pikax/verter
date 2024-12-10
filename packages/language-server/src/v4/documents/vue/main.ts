@@ -48,10 +48,21 @@ const processors = {
   style: {
     uri: (parent) => parent + ".style.css",
     process: (context) => {
+      const s = context.s.clone();
+
+      const block = context.blocks.find((x) => x.tag.type === "style")?.block;
+
+      if (block) {
+        s.remove(block.loc.end.offset, s.original.length);
+        s.remove(0, block.loc.start.offset);
+      }
       // throw new Error("Not implemented");
       return {
-        s: context.s,
-        content: `/* TODO FIX THIS FILE! */\nexport default {}`,
+        s,
+        languageId: "css",
+        // todo this is incorrect, a SFC can have multiple syles
+        content: s.toString() || "/* TEMP */",
+        // content: `/* TODO FIX THIS FILE! */\nexport default {}`,
         filename: context.filename + ".wip.style.css",
       } as any;
     },
@@ -74,7 +85,7 @@ function getBlockId(block: VerterSFCBlock): BlockId | string {
 function createDocumentFromBlock(block: VerterSFCBlock, doc: VueDocument) {
   const blockId = getBlockId(block);
   const processor = processors[blockId];
-  return new VueSubDocument(doc, processor, blockId as BlockId);
+  return new VueSubDocument(doc, processor, blockId);
 }
 
 export class VueDocument implements TextDocument {
@@ -362,22 +373,35 @@ export class VueSubDocument implements TextDocument {
   constructor(
     private _parent: VueDocument,
     private _processor: ContextProcessor,
-    private _blockId: BlockId
+    private _blockId: string,
+    initialContent?: string
   ) {
     const processorFilename = _processor.uri(_parent.uri);
 
     const virtualUri = uriToVerterVirtual(processorFilename);
 
-    this._doc = TextDocument.create(
-      virtualUri,
-      processorFilename.endsWith(".tsx") ? "tsx" : "typescript",
-      -1,
-      "// PLACEHOLDER TO BE POPULATED BY VUE DOCUMENT\n"
-    );
+    if (_blockId === "style") {
+      // TODO improve this
+      this._doc = TextDocument.create(
+        virtualUri,
+        "css",
+        -1,
+        // "// PLACEHOLDER TO BE POPULATED BY VUE DOCUMENT\n"
+        initialContent || "// PLACEHOLDER TO BE POPULATED BY VUE DOCUMENT\n"
+      );
+    } else {
+      this._doc = TextDocument.create(
+        virtualUri,
+        processorFilename.endsWith(".tsx") ? "tsx" : "typescript",
+        -1,
+        initialContent || "// PLACEHOLDER TO BE POPULATED BY VUE DOCUMENT\n"
+      );
+    }
   }
 
   get blockId() {
     return this._blockId;
+    // return getBlockId(this._block);
   }
 
   get extension() {

@@ -34,6 +34,13 @@ describe("processor options", () => {
     `);
   });
 
+  test("remove <style> block", () => {
+    const result = process(
+      `<script>export default {}</script><template><div></div></template><style>supa-random-key</style>`
+    );
+    expect(result.content).not.toContain("supa-random-key");
+  });
+
   describe.skip("compile export", () => {
     test("script", () => {
       const result = process(`<script>export default {}</script>`);
@@ -210,16 +217,6 @@ describe("processor options", () => {
             result.content.indexOf("___VERTER___FullContext() {")
           )
         ).toContain(`const a = '你好';\nconst b = 'test'`);
-      });
-
-      it.only("should move type : correctly", () => {
-        const source = `<script setup lang="ts">let test: boolean = false;</script>`;
-        const result = process(source);
-
-        const first = result.content.indexOf("let test: boolean = false;");
-        const last = result.content.lastIndexOf("let test: boolean = false;");
-
-        expect(first).not.toBe(last);
       });
 
       describe("return BindingContext", () => {

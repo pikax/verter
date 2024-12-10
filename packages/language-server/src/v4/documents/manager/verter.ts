@@ -15,6 +15,10 @@ import {
   isVueSubDocument,
   retrieveVueFileFromBlockUri,
 } from "../../processor/utils";
+import {
+  getCSSLanguageService,
+  getSCSSLanguageService,
+} from "vscode-css-languageservice";
 
 export class VerterManager {
   /**
@@ -50,6 +54,11 @@ export class VerterManager {
     }
   }
 
+  getCSSService(folderOrPath: string) {
+    const service = getCSSLanguageService();
+
+    return service;
+  }
   getTsService(folderOrPath: string) {
     let folder = folderOrPath;
     let tsconfigPath = this.folderToTsConfigMap.get(folder);
