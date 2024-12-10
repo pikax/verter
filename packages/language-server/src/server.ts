@@ -6,9 +6,11 @@ import ts, {
   type GetCompletionsAtPositionOptions,
 } from "typescript";
 import {
+  CompletionItemKind,
   CompletionTriggerKind,
   Connection,
   Diagnostic,
+  InsertTextFormat,
   LocationLink,
   ProposedFeatures,
   Range,
@@ -191,6 +193,97 @@ export function startServer(options: LsConnectionOption = {}) {
 
     subDoc.syncVersion();
 
+    if (subDoc.blockId === "style") {
+      const service = manager.getCSSService(doc.uri);
+      const pos = subDoc.toGeneratedPosition(params.position);
+      const parsed = service.parseStylesheet(subDoc);
+      const completions = service.doComplete(subDoc, pos, parsed);
+      console.log("css completions", completions.items.length);
+
+      // NOTE maybe we could not do the mapping here, maybe we
+      // could replace the other content with space, for example everything
+      // before <script> and after </script> could be replaced with spaces but
+      // keeping newlines
+
+      // TODO: map the completions to the original document
+
+      const items = completions.items.map((x) => {
+        return {
+          ...x,
+          textEdit:
+            "range" in x.textEdit
+              ? {
+                  newText: x.textEdit.newText,
+                  range: subDoc.toOriginalRange(x.textEdit.range),
+                }
+              : {
+                  newText: x.textEdit.newText,
+                  insert: subDoc.toOriginalRange(x.textEdit.insert),
+                  replace: subDoc.toOriginalRange(x.textEdit.replace),
+                },
+        };
+      });
+
+      const cssProp = items.find(
+        (x) => x.kind === CompletionItemKind.Function && x.label === "var()"
+      );
+      if (cssProp) {
+        items.push({
+          ...cssProp,
+          label: "v-bind()",
+          kind: CompletionItemKind.Function,
+          insertTextFormat: InsertTextFormat.Snippet, // Use snippet format for dynamic arguments
+          insertText: "v-bind(${1|foo,bar,baz|})", // Add options as a snippet
+          textEdit: {
+            newText: "v-bind(${1|foo,bar,baz|})", // Ensure the snippet matches the insert text
+            insert: cssProp.textEdit.insert,
+            replace: cssProp.textEdit.replace,
+          },
+          documentation: {
+            kind: "markdown",
+            value: "A Vue directive for binding dynamic values.\n\nArguments:\n- `foo`: Description of foo.\n- `bar`: Description of bar.\n- `baz`: Description of baz.",
+          },
+        });
+      }
+// TODO
+//   // Add suggestions for arguments when typing inside v-bind()
+//   const positionBeforeCursor = subDoc.off
+//   const inVBindArgument = positionBeforeCursor.match(/v-bind\(\s*$/) || positionBeforeCursor.match(/v-bind\([^)]*$/);
+
+//   if (inVBindArgument) {
+//     items.push(
+//       {
+//         label: "foo",
+//         kind: CompletionItemKind.Variable,
+//         insertText: "foo",
+//         detail: "v-bind argument",
+//         documentation: "Binds the `foo` value.",
+//       },
+//       {
+//         label: "bar",
+//         kind: CompletionItemKind.Variable,
+//         insertText: "bar",
+//         detail: "v-bind argument",
+//         documentation: "Binds the `bar` value.",
+//       },
+//       {
+//         label: "baz",
+//         kind: CompletionItemKind.Variable,
+//         insertText: "baz",
+//         detail: "v-bind argument",
+//         documentation: "Binds the `baz` value.",
+//       }
+//     );
+//   }
+// }
+
+
+      return {
+        ...completions,
+        items,
+      };
+    }
+
     const offset = subDoc.toGeneratedOffsetFromPosition(params.position);
     const tsService = manager.getTsService(doc.uri);
     try {
@@ -275,6 +368,9 @@ export function startServer(options: LsConnectionOption = {}) {
   });
 
   connection.onCompletionResolve((item) => {
+    if (!item.data) {
+      return item;
+    }
     const data: {
       virtualUrl: string;
       index: number;
@@ -517,17 +613,21 @@ export function startServer(options: LsConnectionOption = {}) {
     console.time("sendDiagnostics");
     const diagnostics: Diagnostic[] = [];
     const tsService = manager.getTsService(document.uri);
+    const cssService = manager.getCSSService(document.uri);
 
     try {
       let lastSend = Date.now();
 
       const subTsDocs = Object.values(document.subDocuments)
-        .filter((x) => !x.uri.endsWith(".bundle.ts"))
+        .filter((x) => !x.uri.endsWith(".bundle.ts") && x.blockId !== "style")
         .map((x) => tsService.getProgram().getSourceFile(x.uri))
         .filter(Boolean);
 
       for (const subDocument of Object.values(document.subDocuments)) {
-        if (subDocument.uri.endsWith(".bundle.ts")) {
+        if (
+          subDocument.uri.endsWith(".bundle.ts") ||
+          subDocument.blockId === "style"
+        ) {
           continue;
         }
 
@@ -591,11 +691,8 @@ export function startServer(options: LsConnectionOption = {}) {
 
         diagnostics.push(...allDiagnostics);
 
-        connection.sendDiagnostics({
-          uri: document.uri,
-          diagnostics,
-          version: document.version,
-        });
+        lastSend = Date.now();
+
         console.log(
           "sendDiagnostics",
           Date.now() - lastSend + "ms",
@@ -603,9 +700,22 @@ export function startServer(options: LsConnectionOption = {}) {
           subDocument.uri,
           document.version
         );
-        lastSend = Date.now();
       }
 
+      const cssFile = document.subDocuments.style;
+      if (cssFile) {
+        const cssDiagnostics = cssService.doValidation(
+          cssFile,
+          cssService.parseStylesheet(cssFile)
+        );
+        diagnostics.push(...cssDiagnostics);
+      }
+
+      connection.sendDiagnostics({
+        uri: document.uri,
+        diagnostics,
+        version: document.version,
+      });
       return diagnostics;
     } catch (e) {
       console.error(e);

@@ -53,6 +53,7 @@ const processors = {
       const block = context.blocks.find((x) => x.tag.type === "style")?.block;
 
       if (block) {
+
         s.remove(block.loc.end.offset, s.original.length);
         s.remove(0, block.loc.start.offset);
       }

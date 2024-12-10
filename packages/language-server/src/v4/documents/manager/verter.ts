@@ -55,7 +55,134 @@ export class VerterManager {
   }
 
   getCSSService(folderOrPath: string) {
-    const service = getCSSLanguageService();
+    /*const service = getCSSLanguageService({
+      customDataProviders: [
+        {
+          
+          
+          provideProperties: () => {
+            return [
+              {
+                name: 'v-bind', // Define `v-bind` as a CSS property
+                description: 'Custom Vue directive for binding values in CSS.',
+                values: [
+                  {
+                    name: 'foo',
+                    description: 'Binds the "foo" value.',
+                  },
+                  {
+                    name: 'bar',
+                    description: 'Binds the "bar" value.',
+                  },
+                  {
+                    name: 'baz',
+                    description: 'Binds the "baz" value.',
+                  },
+                ],
+              },
+            ];
+            return [
+              {
+                // provide v-bind function with the possible values to call to be foo, bar and baz
+                // usage should be width: v-bind(foo)
+
+                name: "v-bind",
+                description: "v-bind supa dupa",
+                syntax: "v-bind(foo)",
+                values: [
+                  {
+                    name: "foo",
+                    description: "foo",
+                  },
+                  {
+                    name: "bar",
+                    description: "bar",
+                  },
+                  {
+                    name: "baz",
+                    description: "baz",
+                  },
+                ]
+
+              }
+            ];
+          },
+          provideAtDirectives: () => {
+            return [];
+          },
+          providePseudoClasses: () => {
+            return [];
+          },
+          providePseudoElements: () => {
+            return [];
+          },
+        }
+      ]
+    });*/
+
+
+// Define a custom data provider
+const customDataProvider = {
+  provideFunctions() {
+    return [
+      {
+        name: 'v-bind', // Define `v-bind` as a function
+        description: 'Custom Vue directive for binding dynamic values in CSS.',
+        parameters: [
+          {
+            name: 'value',
+            description: 'The dynamic value to bind.',
+          },
+        ],
+      },
+    ];
+  },
+  provideValues() {
+    return [
+      {
+        name: 'foo',
+        description: 'Binds the "foo" value.',
+      },
+      {
+        name: 'bar',
+        description: 'Binds the "bar" value.',
+      },
+      {
+        name: 'baz',
+        description: 'Binds the "baz" value.',
+      },
+    ];
+  },
+
+  provideProperties(){
+    return [
+      // {
+      //   name: 'v-bind',
+      //   description: 'Custom Vue directive for dynamic CSS bindings.',
+      //   values: [
+      //     { name: 'foo', description: 'Bind the "foo" value' },
+      //     { name: 'bar', description: 'Bind the "bar" value' },
+      //     { name: 'baz', description: 'Bind the "baz" value' },
+      //   ],
+      // },
+    ];
+    return []
+  },
+  provideAtDirectives: () => {
+    return [];
+  },
+  providePseudoClasses: () => {
+    return [];
+  },
+  providePseudoElements: () => {
+    return [];
+  },
+};
+
+// Initialize the CSS language service with the custom data provider
+const service = getCSSLanguageService({
+  customDataProviders: [customDataProvider as any],
+});
 
     return service;
   }
