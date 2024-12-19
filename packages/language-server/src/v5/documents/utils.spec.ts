@@ -45,6 +45,7 @@ class MockTextDocument implements TextDocument {
 
 class MockVueDocument extends VueDocument {
   constructor(uri: string, text: string) {
+    // @ts-expect-error
     super(uri, text);
   }
 }
@@ -256,6 +257,11 @@ describe("document utils", () => {
     it("should not modify a non-filesystem scheme beyond returning it as-is", () => {
       const uri = "data:text/plain;base64,SGVsbG8=";
       expect(uriToPath(uri)).toBe(uri);
+    });
+
+    it("should retrieve the vue document from sub", () => {
+      const uri = "verter-virtual:///some/path.vue._VERTER_.bundle.js";
+      expect(uriToPath(uri)).toBe("/some/path.vue");
     });
   });
 });

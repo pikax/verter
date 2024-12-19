@@ -29,7 +29,7 @@ export function pathToVerterVirtual(filepath: string) {
   return uriToVerterVirtual(pathToUri(filepath));
 }
 
-const VueSubDocRegex = /(?:\.vue)\._VERTER_\.(\w+)\.(\w{2,4})$/;
+const VueSubDocRegex = /(?:\.vue)(\._VERTER_\.\w+\.\w{2,4})$/;
 export function isVueSubDocument(uri: string) {
   return VueSubDocRegex.test(uri);
 }
@@ -49,9 +49,16 @@ export function uriToVerterVirtual(uri: string) {
 }
 
 export function uriToPath(uri: string) {
-  const url = URI.parse(uri);
-
-  if (url.scheme !== "file" && url.scheme !== VerterVirtualFileScheme) {
+  let url = URI.parse(uri);
+  if (url.scheme === VerterVirtualFileScheme) {
+    const match = uri.match(VueSubDocRegex);
+    if (match) {
+      // url = URI.parse(uri.replace(match[1], ""));
+      url = URI.parse(
+        uri.replace(match[1], "").replace(VerterVirtualFileScheme, "file")
+      );
+    }
+  } else if (url.scheme !== "file" && url.scheme !== VerterVirtualFileScheme) {
     return uri;
   }
   // normalise path separators for windows
