@@ -8,8 +8,8 @@ import { createContext, ParseContext } from "@verter/core";
 import { uriToPath } from "../../utils";
 
 export class VueDocument extends VerterDocument {
-  static create(uri: string, version: number, content: string) {
-    return new VueDocument(uri, version, content);
+  static create(uri: string, content: string, version?: number) {
+    return new VueDocument(uri, version ?? -1, content);
   }
 
   /**

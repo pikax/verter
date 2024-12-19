@@ -34,6 +34,9 @@ export function isVueSubDocument(uri: string) {
 }
 
 export function createSubDocument(uri: string, ending: string) {
+  if (!uri.endsWith(".vue")) {
+    throw new Error("URI is not a Vue file:" + uri);
+  }
   return `${uri}._VERTER_.${ending}`;
 }
 

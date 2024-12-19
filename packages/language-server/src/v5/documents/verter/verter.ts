@@ -6,6 +6,15 @@ import {
 } from "vscode-languageserver-textdocument";
 
 export class VerterDocument implements TextDocument {
+  static create(
+    uri: string,
+    languageId: string,
+    content: string,
+    version?: number
+  ) {
+    return new VerterDocument(uri, languageId, version ?? -1, content);
+  }
+
   get uri() {
     return this.doc.uri;
   }
