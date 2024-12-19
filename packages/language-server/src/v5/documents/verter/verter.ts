@@ -40,7 +40,7 @@ export class VerterDocument implements TextDocument {
     return this.doc.offsetAt(position);
   }
 
-  override(content: string, version?: number) {
+  update(content: string, version?: number) {
     const d = this.doc;
 
     this.doc = TextDocument.update(

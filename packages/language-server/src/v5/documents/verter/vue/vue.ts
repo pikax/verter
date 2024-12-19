@@ -3,81 +3,35 @@ import {
   Range,
   TextDocument,
 } from "vscode-languageserver-textdocument";
+import { VerterDocument } from "../verter";
+import { createContext, ParseContext } from "@verter/core";
+import { uriToPath } from "../../utils";
 
-export class VueDocument implements TextDocument {
-  //   static fromFilepath(
-  //     filepath: string,
-  //     content: string | (() => string),
-  //     shouldParse = false
-  //   ) {
-  //     return VueDocument.fromUri(pathToUri(filepath), content, shouldParse);
-  //   }
-  //   static fromUri(
-  //     uri: string,
-  //     content: string | (() => string),
-  //     shouldParse = false
-  //   ) {
-  //     const isString = typeof content === "string";
-  //     const doc = TextDocument.create(
-  //       uri,
-  //       "vue",
-  //       -2,
-  //       isString ? content : "/* VERTER CONTENT NOT LOADED */\n"
-  //     );
-  //     return VueDocument.fromTextDocument(
-  //       doc,
-  //       shouldParse,
-  //       isString ? undefined : content
-  //     );
-  //   }
-
-  //   static fromTextDocument(
-  //     doc: TextDocument,
-  //     shouldParse = false,
-  //     loadDocumentContent?: () => string
-  //   ) {
-  //     const vuedoc = new VueDocument(doc, loadDocumentContent);
-  //     if (shouldParse) {
-  //       vuedoc.syncVersion();
-  //     }
-  //     return vuedoc;
-  //   }
-
-  //   get bundleDoc() {
-  //     return this.subDocuments.bundle;
-  //   }
-  //   private constructor(
-  //     private _doc: TextDocument,
-  //     private _loadDocumentContent?: () => string
-  //   ) {
-  //     this.subDocuments.bundle = new VueSubDocument(
-  //       this,
-  //       processors.bundle,
-  //       "bundle"
-  //     );
-  //     this.subDocuments.script = new VueSubDocument(
-  //       this,
-  //       processors.script,
-  //       "script"
-  //     );
-  //     this.subDocuments.template = new VueSubDocument(
-  //       this,
-  //       processors.template,
-  //       "template"
-  //     );
-  //   }
-
-  uri: string;
-  languageId: string;
-  version: number;
-  getText(range?: Range): string {
-    throw new Error("Method not implemented.");
+export class VueDocument extends VerterDocument {
+  static create(uri: string, version: number, content: string) {
+    return new VueDocument(uri, version, content);
   }
-  positionAt(offset: number): Position {
-    throw new Error("Method not implemented.");
+
+  /**
+   * trigger document updates
+   */
+  private _dirty = false;
+
+  private _context: ParseContext | null = null;
+  get context() {
+    return (
+      this._context ??
+      (this._context = createContext(this.getText(), uriToPath(this.uri)))
+    );
   }
-  offsetAt(position: Position): number {
-    throw new Error("Method not implemented.");
+
+  protected constructor(uri: string, version: number, content: string) {
+    super(uri, "vue", version, content);
   }
-  lineCount: number;
+
+  update(content: string, version?: number): void {
+    this._dirty = true;
+    this._context = null;
+    super.update(content, version);
+  }
 }

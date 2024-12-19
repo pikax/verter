@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { URI } from "vscode-uri";
 import { TextDocument } from "vscode-languageserver-textdocument";
-import { VueDocument } from "./vue/index.js";
+import { VueDocument } from "./verter/index.js";
 
 import {
   isVueDocument,
@@ -12,7 +12,6 @@ import {
   isVueSubDocument,
   uriToVerterVirtual,
   uriToPath,
-  VerterVirtualFileScheme,
 } from "./utils.js";
 
 class MockTextDocument implements TextDocument {

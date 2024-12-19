@@ -1,12 +1,11 @@
 import { URI } from "vscode-uri";
 import { TextDocument } from "vscode-languageserver-textdocument";
-import { VueDocument } from "./vue/index.js";
+import { VueDocument } from "./verter/index.js";
 
 export const VerterVirtualFileScheme = "verter-virtual";
 
 export function isVueDocument(doc: TextDocument): doc is VueDocument {
   return doc instanceof VueDocument;
-  return doc.languageId === "vue";
 }
 
 export function isVerterVirtual(
@@ -32,6 +31,10 @@ export function pathToVerterVirtual(filepath: string) {
 const VueSubDocRegex = /(?:\.vue)(\._VERTER_\.\w+\.\w{2,4})$/;
 export function isVueSubDocument(uri: string) {
   return VueSubDocRegex.test(uri);
+}
+
+export function createSubDocument(uri: string, ending: string) {
+  return `${uri}._VERTER_.${ending}`;
 }
 
 export function uriToVerterVirtual(uri: string) {
