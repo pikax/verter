@@ -6,15 +6,6 @@ import {
 } from "vscode-languageserver-textdocument";
 
 export class VerterDocument implements TextDocument {
-  static create(
-    uri: string,
-    languageId: string,
-    content: string,
-    version?: number
-  ) {
-    return new VerterDocument(uri, languageId, version ?? -1, content);
-  }
-
   get uri() {
     return this.doc.uri;
   }
@@ -28,7 +19,13 @@ export class VerterDocument implements TextDocument {
     return this.doc.lineCount;
   }
 
-  protected doc: TextDocument;
+  private _doc: TextDocument;
+  protected get doc() {
+    return this._doc;
+  }
+  protected set doc(v: TextDocument) {
+    this._doc = v;
+  }
 
   protected constructor(
     _uri: string,

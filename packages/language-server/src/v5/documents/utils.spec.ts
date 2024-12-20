@@ -16,6 +16,26 @@ import {
   VerterVirtualFileScheme,
 } from "./utils.js";
 
+// Create a subclass to access protected constructor
+class TestVerterDocument extends VerterDocument {
+  static create(
+    uri: string,
+    languageId: string,
+    content: string,
+    version?: number
+  ) {
+    return new VerterDocument(uri, languageId, version ?? -1, content);
+  }
+  constructor(
+    uri: string,
+    languageId: string,
+    version: number,
+    content: string
+  ) {
+    super(uri, languageId, version, content);
+  }
+}
+
 describe("document utils", () => {
   describe("isVueDocument", () => {
     it("should return true if the document is an instance of VueDocument", () => {
@@ -27,7 +47,7 @@ describe("document utils", () => {
     });
 
     it("should return false if the document is not a VueDocument", () => {
-      const doc = VerterDocument.create(
+      const doc = TestVerterDocument.create(
         "file:///some/other.txt",
         "plaintext",
         "just text"
@@ -36,7 +56,7 @@ describe("document utils", () => {
     });
 
     it("should not return true if a non-VueDocument has languageId='vue'", () => {
-      const doc = VerterDocument.create(
+      const doc = TestVerterDocument.create(
         "file:///some/fake.vue",
         "vue",
         "<template></template>"
