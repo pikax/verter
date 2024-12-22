@@ -4,6 +4,8 @@ import { VerterDocument } from "./verter.js";
 
 // Create a subclass to access protected constructor
 class TestVerterDocument extends VerterDocument {
+  getDocFn: Function = vi.fn();
+
   constructor(
     uri: string,
     languageId: string,
@@ -11,6 +13,11 @@ class TestVerterDocument extends VerterDocument {
     content: string
   ) {
     super(uri, languageId, version, content);
+  }
+
+  get doc() {
+    this.getDocFn();
+    return super.doc;
   }
 }
 
@@ -34,6 +41,16 @@ It has three lines.`;
       expect(doc.version).toBe(version);
       // There are 3 lines in the content
       expect(doc.lineCount).toBe(3);
+    });
+
+    describe("doc accessors", () => {
+      it("should update the doc in the constructor", () => {
+        expect(doc.getDocFn).not.toHaveBeenCalled();
+      });
+      it("it should call on update", () => {
+        doc.update("test");
+        expect(doc.getDocFn).toHaveBeenCalledOnce();
+      });
     });
   });
 

@@ -23,9 +23,6 @@ export class VerterDocument implements TextDocument {
   protected get doc() {
     return this._doc;
   }
-  protected set doc(v: TextDocument) {
-    this._doc = v;
-  }
 
   protected constructor(
     _uri: string,
@@ -33,7 +30,7 @@ export class VerterDocument implements TextDocument {
     _version: number,
     _content: string
   ) {
-    this.doc = TextDocument.create(_uri, _languageId, _version, _content);
+    this._doc = TextDocument.create(_uri, _languageId, _version, _content);
   }
 
   getText(range?: Range): string {
@@ -48,8 +45,7 @@ export class VerterDocument implements TextDocument {
 
   update(content: string, version?: number) {
     const d = this.doc;
-
-    this.doc = TextDocument.update(
+    TextDocument.update(
       d,
       [
         {
@@ -60,7 +56,7 @@ export class VerterDocument implements TextDocument {
           },
         },
       ],
-      version ?? this.version + 1
+      version ?? d.version + 1
     );
   }
 

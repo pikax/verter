@@ -1,4 +1,4 @@
-import { SourceMapConsumer, Position as SourcePosition } from "source-map-js";
+import { SourceMapConsumer } from "source-map-js";
 
 import {
   Position as DocumentPosition,
