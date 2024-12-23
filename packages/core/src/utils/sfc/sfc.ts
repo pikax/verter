@@ -1,4 +1,4 @@
-import type { SFCDescriptor, SFCBlock } from "@vue/compiler-sfc";
+import type { SFCDescriptor, SFCBlock, MagicString } from "@vue/compiler-sfc";
 
 export type BlockPosition = {
   start: number;
@@ -132,13 +132,18 @@ export function extractBlocksFromDescriptor(
     const endTagOffset = block.loc.end.offset;
     const nextOffsetEnd = sfcBlocks[i + 1]?.loc.start.offset ?? source.length;
 
+    // let tagInit = cleanHTMLComments(
+    //   source.slice(initTagOffset, initTagOffsetEnd)
+    // );
+
     const tagInit = source.slice(initTagOffset, initTagOffsetEnd);
 
-    const tagMatch = tagInit.matchAll(BLOCK_TAG_REGEX).next()
+    const cleanTag = cleanHTMLComments(tagInit);
+
+    const tagMatch = cleanTag.matchAll(BLOCK_TAG_REGEX).next()
       .value as RegExpMatchArray;
 
-    const hasClosingTagOnContent =
-      tagInit.lastIndexOf(">") < tagInit.length - 1;
+    const hasClosingTagOnContent = cleanTag.indexOf(">") < cleanTag.length - 1;
 
     const tag = tagMatch.groups.tag;
     // const content = tagInit.slice(tag.length+ 1, -1)// tagMatch.groups.content
@@ -146,10 +151,13 @@ export function extractBlocksFromDescriptor(
       //   tagMatch.groups.content.length >= tagInit.length - "<script>".length
       // if there's many `>`
       hasClosingTagOnContent
-        ? tagInit.slice(tag.length + 1, -1)
+        ? cleanTag.slice(tag.length + 1, -1)
         : tagMatch.groups.content;
 
-    const tagStartIndex = tagMatch.index + initTagOffset;
+    const tagStartIndex =
+      tagInit !== cleanTag
+        ? tagInit.indexOf(cleanTag) + initTagOffset
+        : tagMatch.index + initTagOffset;
 
     const startTagPos: BlockPosition = {
       start: tagStartIndex,
@@ -207,16 +215,47 @@ export function extractBlocksFromDescriptor(
   return blocks;
 }
 export function findBlockLanguage(block: VerterSFCBlock) {
+  const langAttr = block.block.attrs.lang;
+  const lang = langAttr === true ? undefined : langAttr?.toString();
+
   if (block.tag.type === "script") {
-    return block.block.attrs.lang?.toString() || "js";
+    return lang || "js";
   }
   if (block.tag.type === "template") {
-    return block.block.attrs.lang?.toString() || "html";
+    return lang || "html";
   }
   if (block.tag.type === "style") {
-    return block.block.attrs.lang?.toString() || "css";
+    return lang || "css";
   }
   // TODO maybe add some way to dynamically get the language
   // for example for router
-  return block.block.attrs.lang?.toString() || block.tag.type;
+  return lang || block.tag.type;
+}
+
+export function keepBlocks(
+  allBlocks: VerterSFCBlock[],
+  keepBlocks: string[],
+  s: MagicString
+) {
+  // remove unknown blocks
+  const toKeep = new Set(keepBlocks);
+  const blocks = [] as VerterSFCBlock[];
+  for (const block of allBlocks) {
+    if (toKeep.has(block.tag.type)) {
+      blocks.push(block);
+    } else {
+      s.remove(block.tag.pos.open.start, block.tag.pos.close.end);
+    }
+  }
+  return blocks;
+}
+
+export function removeBlockTag(block: VerterSFCBlock, s: MagicString) {
+  s.remove(block.tag.pos.open.start, block.tag.pos.open.end);
+  s.remove(block.tag.pos.close.start, block.tag.pos.close.end);
+}
+
+const REGEX_HTML_COMMENT = /<!--.*-->/gm;
+export function cleanHTMLComments(content: string) {
+  return content.replaceAll(REGEX_HTML_COMMENT, "").trimStart();
 }
