@@ -1,5 +1,5 @@
 import { Program } from "@babel/types";
-import { createContext, parseGeneric } from "./parser";
+import { createContext, parseGeneric } from "./index.js";
 
 describe("parser", () => {
   describe("createContext", () => {

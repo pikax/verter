@@ -21,8 +21,8 @@
     "@verter/language-shared": "workspace:^",
     "@vue/compiler-core": "^3.5.13",
     "acorn-loose": "^8.4.0",
-    "magic-string": "^0.30.14",
-    "oxc-parser": "^0.39.0",
+    "magic-string": "^0.30.17",
+    "oxc-parser": "^0.43.0",
     "source-map-js": "^1.2.1",
     "sucrase": "^3.35.0",
     "typescript": "^5.7.2",
@@ -34,7 +34,7 @@
   },
   "devDependencies": {
     "@babel/types": "^7.26.3",
-    "vite": "^6.0.3",
+    "vite": "^6.0.5",
     "vitest": "^2.1.8",
     "vue": "^3.5.13"
   }

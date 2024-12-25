@@ -17,7 +17,8 @@
     "module": "CommonJS",
     "types": [
       "vitest/importMeta",
-      "vitest/globals"
+      "vitest/globals",
+      "vite/client"
     ],
     "jsx": "preserve",
     "preserveConstEnums": true

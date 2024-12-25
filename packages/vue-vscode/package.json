@@ -23,7 +23,7 @@
   "license": "MIT",
   "dependencies": {
     "@types/lodash": "^4.17.13",
-    "@types/vscode": "^1.95.0",
+    "@types/vscode": "^1.96.0",
     "@verter/language-server": "workspace:^",
     "@verter/language-shared": "workspace:^",
     "@verter/typescript-plugin": "workspace:^",
@@ -38,7 +38,7 @@
   "devDependencies": {
     "@vscode/vsce": "^3.2.1",
     "typescript": "^5.7.2",
-    "vite": "^6.0.3"
+    "vite": "^6.0.5"
   },
   "files": [
     "dist",

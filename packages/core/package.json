@@ -29,20 +29,23 @@
     "@vue/compiler-core": "^3.5.13",
     "@vue/compiler-sfc": "^3.5.13",
     "@vue/shared": "^3.5.13",
+    "acorn": "^8.14.0",
     "acorn-loose": "^8.4.0",
+    "acorn-typescript": "^1.4.13",
     "deepmerge": "^4.3.1",
     "glob": "^11.0.0",
-    "oxc-parser": "^0.39.0",
+    "oxc-parser": "^0.43.0",
     "source-map-js": "^1.2.1",
     "typescript": "^5.7.2"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "2.1.8",
     "@vue/compiler-dom": "^3.5.13",
     "@vue/runtime-core": "^3.5.13",
     "@vue/runtime-dom": "^3.5.13",
     "fs-extra": "^11.2.0",
-    "vite": "^6.0.3",
-    "vite-plugin-dts": "^4.3.0",
+    "vite": "^6.0.5",
+    "vite-plugin-dts": "^4.4.0",
     "vitest": "^2.1.8",
     "vue": "^3.5.13"
   }
