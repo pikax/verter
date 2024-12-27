@@ -270,6 +270,23 @@ describe("parser script", () => {
       });
     });
 
+    test("class without Identifier id", () => {
+      const source = `class {}`;
+      const result = parse(source);
+
+      expect(result.declarations).toMatchObject([
+        {
+          content: "class {}",
+          name: "",
+          node: {
+            type: "ClassDeclaration",
+            start: 0,
+            end: 8,
+          },
+        },
+      ]);
+    });
+
     describe("deconstructor", () => {
       test("object", () => {
         const source = `const { a, b } = foo`;
@@ -287,7 +304,7 @@ describe("parser script", () => {
                 end: 20,
               },
               node: {
-                type: "Property",
+                type: "BindingProperty",
                 start: 8,
                 end: 9,
               },
@@ -302,7 +319,7 @@ describe("parser script", () => {
                 end: 20,
               },
               node: {
-                type: "Property",
+                type: "BindingProperty",
                 start: 11,
                 end: 12,
               },
@@ -326,7 +343,7 @@ describe("parser script", () => {
                 end: 28,
               },
               node: {
-                type: "Property",
+                type: "BindingProperty",
                 start: 8,
                 end: 9,
               },
@@ -365,7 +382,7 @@ describe("parser script", () => {
                 end: 24,
               },
               node: {
-                type: "Property",
+                type: "BindingProperty",
                 start: 8,
                 end: 13,
               },
@@ -380,13 +397,76 @@ describe("parser script", () => {
                 end: 24,
               },
               node: {
-                type: "Property",
+                type: "BindingProperty",
                 start: 15,
                 end: 16,
               },
             },
           ],
         });
+      });
+
+      test("object assignment deep", () => {
+        const source = `const { a : { c: { d = 1} } , b } = foo`;
+        const result = parse(source);
+
+        expect(result).toMatchObject({
+          declarations: [
+            {
+              content: "d = 1",
+              name: "d",
+              parent: {
+                type: "VariableDeclaration",
+                kind: "const",
+                start: 0,
+                end: 39,
+              },
+              node: {
+                type: "BindingProperty",
+                start: 19,
+                end: 24,
+              },
+            },
+            {
+              content: "b",
+              name: "b",
+              parent: {
+                type: "VariableDeclaration",
+                kind: "const",
+                start: 0,
+                end: 39,
+              },
+              node: {
+                type: "BindingProperty",
+                start: 30,
+                end: 31,
+              },
+            },
+          ],
+        });
+      });
+
+      test("object pattern with identical key and value", () => {
+        const source = `const { a } = foo;`;
+        const result = parse(source);
+
+        expect(result.declarations).toMatchObject([
+          {
+            content: "a",
+            name: "a",
+            parent: {
+              type: "VariableDeclaration",
+              kind: "const",
+              start: 0,
+              end: 18,
+            },
+            node: {
+              type: "BindingProperty",
+              start: 8,
+              end: 9,
+            },
+          },
+        ]);
       });
 
       test("object deep", () => {
@@ -405,7 +485,7 @@ describe("parser script", () => {
                 end: 40,
               },
               node: {
-                type: "Property",
+                type: "BindingProperty",
                 start: 22,
                 end: 25,
               },
@@ -420,7 +500,7 @@ describe("parser script", () => {
                 end: 40,
               },
               node: {
-                type: "Property",
+                type: "BindingProperty",
                 start: 31,
                 end: 32,
               },
@@ -444,7 +524,7 @@ describe("parser script", () => {
                 end: 35,
               },
               node: {
-                type: "Property",
+                type: "BindingProperty",
                 start: 14,
                 end: 22,
               },
@@ -459,7 +539,7 @@ describe("parser script", () => {
                 end: 35,
               },
               node: {
-                type: "Property",
+                type: "BindingProperty",
                 start: 26,
                 end: 27,
               },
@@ -546,6 +626,29 @@ describe("parser script", () => {
             },
           ],
         });
+      });
+
+      test("assignment pattern with no right items", () => {
+        const source = `const [a = undefined] = foo;`;
+        const result = parse(source);
+
+        expect(result.declarations).toMatchObject([
+          {
+            content: "a = undefined",
+            name: "a",
+            parent: {
+              type: "VariableDeclaration",
+              kind: "const",
+              start: 0,
+              end: 28,
+            },
+            node: {
+              type: "AssignmentPattern",
+              start: 7,
+              end: 20,
+            },
+          },
+        ]);
       });
 
       test("array rest", () => {
@@ -644,7 +747,7 @@ describe("parser script", () => {
                 end: 35,
               },
               node: {
-                type: "Property",
+                type: "BindingProperty",
                 start: 17,
                 end: 20,
               },
@@ -683,7 +786,7 @@ describe("parser script", () => {
                 end: 30,
               },
               node: {
-                type: "Property",
+                type: "BindingProperty",
                 start: 9,
                 end: 17,
               },
@@ -721,7 +824,56 @@ describe("parser script", () => {
               node: {
                 type: "TSTypeAliasDeclaration",
                 start: 0,
-                end: 30,
+                end: 27,
+              },
+            },
+          ],
+        });
+      });
+      test("declare var", () => {
+        const source = `declare var x: number = 10`;
+        const result = parse(source);
+
+        expect(result).toMatchObject({
+          declarations: [
+            {
+              content: "x: number = 10",
+              name: "x",
+              parent: {
+                type: "VariableDeclaration",
+                kind: "var",
+                start: 0,
+                end: 26,
+              },
+              node: {
+                type: "VariableDeclarator",
+                start: 12,
+                end: 26,
+              },
+            },
+          ],
+        });
+      });
+
+      test("var as number", () => {
+        const source = `var x = 10 as number`;
+        const result = parse(source);
+
+        expect(result).toMatchObject({
+          declarations: [
+            {
+              content: "x = 10 as number",
+              name: "x",
+              parent: {
+                type: "VariableDeclaration",
+                kind: "var",
+                start: 0,
+                end: 20,
+              },
+              node: {
+                type: "VariableDeclarator",
+                start: 4,
+                end: 20,
               },
             },
           ],
@@ -731,7 +883,7 @@ describe("parser script", () => {
   });
 
   describe("imports", () => {
-    it.todo("should parse imports", () => {
+    it("should parse imports", () => {
       const source = `import { a, b } from 'foo';`;
       const result = parse(source);
 
@@ -743,12 +895,12 @@ describe("parser script", () => {
             parent: {
               type: "ImportDeclaration",
               start: 0,
-              end: 26,
+              end: 27,
             },
             node: {
               type: "ImportSpecifier",
-              start: 7,
-              end: 8,
+              start: 9,
+              end: 10,
             },
           },
           {
@@ -757,15 +909,525 @@ describe("parser script", () => {
             parent: {
               type: "ImportDeclaration",
               start: 0,
-              end: 26,
+              end: 27,
             },
             node: {
               type: "ImportSpecifier",
-              start: 10,
-              end: 11,
+              start: 12,
+              end: 13,
             },
           },
         ],
+      });
+    });
+
+    it("default", () => {
+      const source = `import Foo from 'foo';`;
+      const result = parse(source);
+
+      expect(result).toMatchObject({
+        imports: [
+          {
+            content: "Foo",
+            name: "Foo",
+            parent: {
+              type: "ImportDeclaration",
+              start: 0,
+              end: 22,
+            },
+            node: {
+              type: "ImportDefaultSpecifier",
+              start: 7,
+              end: 10,
+            },
+          },
+        ],
+      });
+    });
+
+    it("* as Name", () => {
+      const source = `import * as Foo from 'foo';`;
+      const result = parse(source);
+
+      expect(result).toMatchObject({
+        imports: [
+          {
+            content: "* as Foo",
+            name: "Foo",
+            parent: {
+              type: "ImportDeclaration",
+              start: 0,
+              end: 27,
+            },
+            node: {
+              type: "ImportNamespaceSpecifier",
+              start: 7,
+              end: 15,
+            },
+          },
+        ],
+      });
+    });
+
+    it("imports with name", () => {
+      const source = `import { a as c, b } from 'foo';`;
+      const result = parse(source);
+
+      expect(result).toMatchObject({
+        imports: [
+          {
+            content: "a as c",
+            name: "c",
+            parent: {
+              type: "ImportDeclaration",
+              start: 0,
+              end: 32,
+            },
+            node: {
+              type: "ImportSpecifier",
+              start: 9,
+              end: 15,
+            },
+          },
+          {
+            content: "b",
+            name: "b",
+            parent: {
+              type: "ImportDeclaration",
+              start: 0,
+              end: 32,
+            },
+            node: {
+              type: "ImportSpecifier",
+              start: 17,
+              end: 18,
+            },
+          },
+        ],
+      });
+    });
+
+    it("type imports", () => {
+      const source = `import type { a, b } from 'foo';`;
+      const result = parse(source);
+
+      expect(result).toMatchObject({
+        imports: [
+          {
+            content: "a",
+            name: "a",
+            parent: {
+              type: "ImportDeclaration",
+              start: 0,
+              end: 32,
+              importKind: "type",
+            },
+            node: {
+              type: "ImportSpecifier",
+              start: 14,
+              end: 15,
+            },
+          },
+          {
+            content: "b",
+            name: "b",
+            parent: {
+              type: "ImportDeclaration",
+              start: 0,
+              end: 32,
+              importKind: "type",
+            },
+            node: {
+              type: "ImportSpecifier",
+              start: 17,
+              end: 18,
+            },
+          },
+        ],
+      });
+    });
+
+    it("type default", () => {
+      const source = `import type Foo from 'foo';`;
+      const result = parse(source);
+
+      expect(result).toMatchObject({
+        imports: [
+          {
+            content: "Foo",
+            name: "Foo",
+            parent: {
+              type: "ImportDeclaration",
+              start: 0,
+              end: 27,
+              importKind: "type",
+            },
+            node: {
+              type: "ImportDefaultSpecifier",
+              start: 12,
+              end: 15,
+            },
+          },
+        ],
+      });
+    });
+
+    it("mixed type", () => {
+      const source = `import { type a, b } from 'foo';`;
+      const result = parse(source);
+
+      expect(result).toMatchObject({
+        imports: [
+          {
+            content: "type a",
+            name: "a",
+            parent: {
+              type: "ImportDeclaration",
+              start: 0,
+              end: 32,
+            },
+            node: {
+              type: "ImportSpecifier",
+              start: 9,
+              end: 15,
+              importKind: "type",
+            },
+          },
+          {
+            content: "b",
+            name: "b",
+            parent: {
+              type: "ImportDeclaration",
+              start: 0,
+              end: 32,
+            },
+            node: {
+              type: "ImportSpecifier",
+              start: 17,
+              end: 18,
+            },
+          },
+        ],
+      });
+    });
+
+    test("mixed import types", () => {
+      const source = `import Foo, { type Bar, Baz } from "foo";`;
+      const result = parse(source);
+
+      expect(result.imports).toMatchObject([
+        {
+          content: "Foo",
+          name: "Foo",
+          node: {
+            type: "ImportDefaultSpecifier",
+            start: 7,
+            end: 10,
+          },
+        },
+        {
+          content: "type Bar",
+          name: "Bar",
+          node: {
+            type: "ImportSpecifier",
+            start: 14,
+            end: 22,
+            importKind: "type",
+          },
+        },
+        {
+          content: "Baz",
+          name: "Baz",
+          node: {
+            type: "ImportSpecifier",
+            start: 24,
+            end: 27,
+          },
+        },
+      ]);
+    });
+  });
+
+  describe("calls", () => {
+    it("simple call", () => {
+      const source = `defineProps()`;
+      const result = parse(source);
+
+      expect(result).toMatchObject({
+        calls: [
+          {
+            content: "defineProps()",
+            name: "defineProps",
+            node: {
+              type: "CallExpression",
+              start: 0,
+              end: 13,
+            },
+          },
+        ],
+      });
+    });
+  });
+
+  describe("exports", () => {
+    it("simple", () => {
+      const source = `export const a = 1;`;
+      const result = parse(source);
+
+      expect(result).toMatchObject({
+        exports: [
+          {
+            content: "a = 1",
+            name: "a",
+            default: false,
+            parent: {
+              type: "ExportNamedDeclaration",
+              start: 0,
+              end: 19,
+            },
+            node: {
+              type: "VariableDeclarator",
+              start: 13,
+              end: 18,
+            },
+          },
+        ],
+      });
+    });
+
+    it("type", () => {
+      const source = `export type { a, b } from 'foo';`;
+      const result = parse(source);
+      expect(result).toMatchObject({
+        exports: [
+          {
+            content: "a",
+            name: "a",
+            default: false,
+            parent: {
+              type: "ExportNamedDeclaration",
+              start: 0,
+              end: 32,
+            },
+            node: {
+              type: "ExportSpecifier",
+              start: 14,
+              end: 15,
+            },
+          },
+          {
+            content: "b",
+            name: "b",
+            default: false,
+            parent: {
+              type: "ExportNamedDeclaration",
+              start: 0,
+              end: 32,
+            },
+            node: {
+              type: "ExportSpecifier",
+              start: 17,
+              end: 18,
+            },
+          },
+        ],
+      });
+    });
+
+    it("export * from", () => {
+      const source = `export * from 'foo'`;
+      const result = parse(source);
+
+      expect(result).toMatchObject({
+        exports: [
+          {
+            content: "export * from 'foo'",
+            name: "*",
+            default: false,
+            node: {
+              type: "ExportAllDeclaration",
+              start: 0,
+              end: 19,
+            },
+          },
+        ],
+      });
+    });
+
+    describe("default", () => {
+      it("function", () => {
+        const source = `export default function foo() {}`;
+        const result = parse(source);
+
+        expect(result).toMatchObject({
+          exports: [
+            {
+              content: "function foo() {}",
+              name: "default",
+              default: true,
+              parent: {
+                type: "ExportDefaultDeclaration",
+                start: 0,
+                end: 32,
+              },
+              node: {
+                type: "FunctionDeclaration",
+                start: 15,
+                end: 32,
+              },
+            },
+          ],
+        });
+      });
+
+      it("expression", () => {
+        const source = `export default foo`;
+        const result = parse(source);
+
+        expect(result).toMatchObject({
+          exports: [
+            {
+              content: "foo",
+              name: "default",
+              default: true,
+              parent: {
+                type: "ExportDefaultDeclaration",
+                start: 0,
+                end: 18,
+              },
+              node: {
+                type: "Identifier",
+                start: 15,
+                end: 18,
+              },
+            },
+          ],
+        });
+      });
+
+      it("expression (object)", () => {
+        const source = `export default { foo }`;
+        const result = parse(source);
+
+        expect(result).toMatchObject({
+          exports: [
+            {
+              content: "{ foo }",
+              name: "default",
+              default: true,
+              parent: {
+                type: "ExportDefaultDeclaration",
+                start: 0,
+                end: 22,
+              },
+              node: {
+                type: "ObjectExpression",
+                start: 15,
+                end: 22,
+              },
+            },
+          ],
+        });
+      });
+
+      it("expression (array)", () => {
+        const source = `export default [ foo ]`;
+        const result = parse(source);
+
+        expect(result).toMatchObject({
+          exports: [
+            {
+              content: "[ foo ]",
+              name: "default",
+              default: true,
+              parent: {
+                type: "ExportDefaultDeclaration",
+                start: 0,
+                end: 22,
+              },
+              node: {
+                type: "ArrayExpression",
+                start: 15,
+                end: 22,
+              },
+            },
+          ],
+        });
+      });
+
+      it("expression (arrow function)", () => {
+        const source = `export default () => {}`;
+        const result = parse(source);
+
+        expect(result).toMatchObject({
+          exports: [
+            {
+              content: "() => {}",
+              name: "default",
+              default: true,
+              parent: {
+                type: "ExportDefaultDeclaration",
+                start: 0,
+                end: 23,
+              },
+              node: {
+                type: "ArrowFunctionExpression",
+                start: 15,
+                end: 23,
+              },
+            },
+          ],
+        });
+      });
+
+      it("expression (class)", () => {
+        const source = `export default class Foo {}`;
+        const result = parse(source);
+
+        expect(result).toMatchObject({
+          exports: [
+            {
+              content: "class Foo {}",
+              name: "default",
+              default: true,
+              parent: {
+                type: "ExportDefaultDeclaration",
+                start: 0,
+                end: 27,
+              },
+              node: {
+                type: "ClassDeclaration",
+                start: 15,
+                end: 27,
+              },
+            },
+          ],
+        });
+      });
+
+      it("expression (expression)", () => {
+        const source = `export default foo()`;
+        const result = parse(source);
+
+        expect(result).toMatchObject({
+          exports: [
+            {
+              content: "foo()",
+              name: "default",
+              default: true,
+              parent: {
+                type: "ExportDefaultDeclaration",
+                start: 0,
+                end: 20,
+              },
+              node: {
+                type: "CallExpression",
+                start: 15,
+                end: 20,
+              },
+            },
+          ],
+        });
       });
     });
   });

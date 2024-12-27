@@ -1,5 +1,4 @@
-import type { VerterAST } from "../ast/index.js";
-import type { Statement, ModuleDeclaration } from "acorn";
+import type { VerterAST, Statement, ModuleDeclaration } from "../ast/index.js";
 
 export function shallowWalk(
   root: VerterAST,

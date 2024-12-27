@@ -7,13 +7,13 @@ import {
   sanitisePosition,
   parseAcorn,
   parseBabel,
-  parseAcornLooseTS,
 } from "./ast.js";
 import { parseAsync } from "oxc-parser";
 import { MagicString, walk } from "@vue/compiler-sfc";
 import { isFunctionType } from "@vue/compiler-core";
 
 const validFiles = Object.entries(
+  // @ts-expect-error not the correct flag on the tsconfig
   import.meta.glob("./__bench__/*.ts", {
     query: "?raw",
     eager: true,
@@ -42,10 +42,6 @@ describe("ast bench", () => {
       parseAcornLoose(file);
     });
 
-    bench("acornLooseTS", () => {
-      parseAcornLooseTS(file);
-    });
-
     bench("acorn", () => {
       parseAcorn(file);
     });
@@ -72,9 +68,6 @@ describe("ast bench", () => {
 
     bench("acornLoose", () => {
       Object.values(validFiles).map((x) => parseAcornLoose(x));
-    });
-    bench("acornLooseTS", () => {
-      Object.values(validFiles).map((x) => parseAcornLooseTS(x));
     });
 
     bench("acorn", () => {
@@ -134,14 +127,6 @@ describe("ast bench", () => {
           makeChanges(s, parsed);
         });
 
-        bench("acornLooseTSA + magicstring", () => {
-          const parsed = parseAcornLooseTS(source);
-
-          const s = new MagicString(source);
-
-          makeChanges(s, parsed);
-        });
-
         bench("babel + magicstring", () => {
           const parsed = parseBabel(source);
 
@@ -191,15 +176,6 @@ describe("ast bench", () => {
       bench("acornLoose + magicstring", () => {
         sources.map((source) => {
           const parsed = parseAcornLoose(source);
-
-          const s = new MagicString(source);
-
-          makeChanges(s, parsed);
-        });
-      });
-      bench("acornLooseTS + magicstring", () => {
-        sources.map((source) => {
-          const parsed = parseAcornLooseTS(source);
 
           const s = new MagicString(source);
 
