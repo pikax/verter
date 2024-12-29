@@ -910,8 +910,8 @@ describe("parser template slots", () => {
         });
       });
 
-      it("v-slot='{foo}'", () => {
-        const { result } = parse(`<div v-slot='{foo}'></div>`);
+      it("#='{foo}'", () => {
+        const { result } = parse(`<div #='{foo}'></div>`);
 
         expect(result).toMatchObject({
           slot: {
@@ -932,7 +932,7 @@ describe("parser template slots", () => {
               node: {
                 type: NodeTypes.DIRECTIVE,
                 name: "slot",
-                rawName: "v-slot",
+                rawName: "#",
               },
             },
           },
@@ -1043,8 +1043,8 @@ describe("parser template slots", () => {
         });
       });
 
-      it("v-slot='{foo:bar}'", () => {
-        const { result } = parse(`<div v-slot='{foo:bar}'></div>`);
+      it("#='{foo:bar}'", () => {
+        const { result } = parse(`<div #='{foo:bar}'></div>`);
 
         expect(result).toMatchObject({
           slot: {
@@ -1065,7 +1065,7 @@ describe("parser template slots", () => {
               node: {
                 type: NodeTypes.DIRECTIVE,
                 name: "slot",
-                rawName: "v-slot",
+                rawName: "#",
               },
             },
           },
