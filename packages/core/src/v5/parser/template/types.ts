@@ -22,6 +22,7 @@ export const enum TemplateTypes {
   SlotRender = "SlotRender",
   SlotDeclaration = "SlotDeclaration",
   Condition = "Condition",
+  Loop = "Loop",
 }
 
 export type TemplateComment = {
@@ -160,4 +161,12 @@ export type TemplateCondition = {
   parent: VerterNode;
 
   context: Record<string, any>;
+};
+
+export type TemplateLoop = {
+  type: TemplateTypes.Loop;
+  node: DirectiveNode & Required<Pick<DirectiveNode, "forParseResult">>;
+
+  element: VerterNode;
+  parent: VerterNode;
 };

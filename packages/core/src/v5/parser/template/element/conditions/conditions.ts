@@ -58,7 +58,6 @@ export function handleConditions<T extends ConditionsContext>(
     items,
 
     condition,
-
     context,
   };
 }
