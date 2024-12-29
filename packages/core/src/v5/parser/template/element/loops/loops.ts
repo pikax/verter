@@ -4,7 +4,6 @@ import { TemplateLoop, TemplateTypes } from "../../types";
 import { retrieveBindings } from "../../utils";
 
 export type LoopsContext = {
-  //   conditions: TemplateCondition[];
   ignoredIdentifiers: string[];
 };
 export function handleLoopProp<T extends LoopsContext>(

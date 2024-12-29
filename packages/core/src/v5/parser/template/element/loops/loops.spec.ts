@@ -1,6 +1,6 @@
 import { parse as parseSFC } from "@vue/compiler-sfc";
 import { LoopsContext, handleLoopProp } from "./loops";
-import { ElementNode, ElementTypes, NodeTypes } from "@vue/compiler-core";
+import { NodeTypes } from "@vue/compiler-core";
 import { TemplateTypes } from "../../types.js";
 
 describe("parser template element loops", () => {
