@@ -18,7 +18,9 @@ export const enum TemplateTypes {
 
   Directive = "Directive",
 
-  Slot = "Slot",
+  Template = "Template",
+  SlotRender = "SlotRender",
+  SlotDeclaration = "SlotDeclaration",
   Condition = "Condition",
 }
 
@@ -55,6 +57,8 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
             loc: Node["loc"] & babel_types.Node["loc"];
           });
 
+      name: undefined;
+
       /**
        * Expression value
        */
@@ -69,6 +73,8 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
        * if the name is invalid
        */
       invalid: true;
+
+      ignore: false;
     }
 );
 
@@ -108,10 +114,11 @@ export type TemplateDirective = {
   arg: null | TemplateBinding[];
   exp: null | TemplateBinding[];
   context: Record<string, any>;
+  static: false;
 };
 
 export type TemplateSlot = {
-  type: TemplateTypes.Slot;
+  type: TemplateTypes.SlotDeclaration;
 } & (
   | {
       node: DirectiveNode;
@@ -127,6 +134,20 @@ export type TemplateSlot = {
       props: null | string | TemplateProp[];
 
       parent: null;
+    }
+);
+
+export type TemplateRenderSlot = {
+  type: TemplateTypes.SlotRender;
+} & (
+  | {
+      prop: TemplateProp | TemplateDirective;
+      parent: VerterNode;
+
+      name: null | string | TemplateBinding[];
+    }
+  | {
+      prop: null;
     }
 );
 

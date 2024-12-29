@@ -1,12 +1,19 @@
-import { ElementTypes, NodeTypes } from "@vue/compiler-core";
+import { DirectiveNode, ElementTypes, NodeTypes } from "@vue/compiler-core";
 import { VerterNode } from "../../../walk";
-import { TemplateSlot, TemplateTypes } from "../../types";
-import { propToTemplateProp } from "../props";
+import {
+  TemplateBinding,
+  TemplateDirective,
+  TemplateProp,
+  TemplateRenderSlot,
+  TemplateSlot,
+  TemplateTypes,
+} from "../../types";
+import { handleProps, propToTemplateProp } from "../props";
 
 export type SlotsContext = {
   ignoredIdentifiers: string[];
 };
-export function handleSlot<T extends SlotsContext>(
+export function handleSlotDeclaration<T extends SlotsContext>(
   node: VerterNode,
   parentContext: SlotsContext
 ): {
@@ -23,28 +30,18 @@ export function handleSlot<T extends SlotsContext>(
 
   const items = [];
 
-  let nameProp = null;
+  const propItems = handleProps(node, parentContext);
+  const props: TemplateProp[] = propItems.filter(
+    (x) => x.type === TemplateTypes.Prop
+  );
 
-  {
-    const prop = node.props.find((prop) =>
-      prop.type === NodeTypes.DIRECTIVE
-        ? prop.arg.type === NodeTypes.SIMPLE_EXPRESSION &&
-          prop.arg.isStatic &&
-          prop.arg.content === "name"
-        : prop.name === "name"
-    );
-    if (prop) {
-      nameProp = propToTemplateProp(prop, parentContext);
-    }
-  }
-
-  const [name = null, ...nameBindings] = nameProp || [];
+  const name = propItems.find((prop) => prop.name === "name") ?? null;
 
   const slot: TemplateSlot = {
-    type: TemplateTypes.Slot,
+    type: TemplateTypes.SlotDeclaration,
     node,
     name,
-    props: null,
+    props,
     parent: null,
   };
 
@@ -55,12 +52,71 @@ export function handleSlot<T extends SlotsContext>(
 
   items.push(slot);
 
-  items.push(...nameBindings);
+  items.push(...propItems);
 
   return {
     slot,
 
     context,
     items,
+  };
+}
+
+export function handleSlotProp<T extends SlotsContext>(
+  node: VerterNode,
+  parent: VerterNode,
+  parentContext: T
+): {
+  context: T;
+  slot: TemplateRenderSlot;
+  items: any[];
+} {
+  if (node.type !== NodeTypes.ELEMENT) {
+    return null;
+  }
+
+  const propDirective = node.props.find(
+    (x) => x.type === NodeTypes.DIRECTIVE && x.name === "slot"
+  ) as DirectiveNode | undefined;
+
+  if (!propDirective) {
+    return null;
+  }
+
+  const [prop] = propToTemplateProp(propDirective, parentContext) as [
+    TemplateDirective
+  ];
+
+  const context = {
+    ...parentContext,
+    ignoredIdentifiers: [
+      ...parentContext.ignoredIdentifiers,
+      ...(prop.exp?.map((x) => x.type === TemplateTypes.Binding && x.name) ??
+        []),
+    ],
+  };
+
+  const slot: TemplateRenderSlot = {
+    type: TemplateTypes.SlotRender,
+    prop,
+    parent,
+    name: prop.arg,
+  };
+
+  const items: any[] = [slot];
+
+  if (prop.type === TemplateTypes.Directive) {
+    if (prop.arg && prop.arg.length) {
+      const b = prop.arg.filter(
+        (x) => x.type === TemplateTypes.Binding && !x.ignore
+      );
+      items.push(...b);
+    }
+  }
+
+  return {
+    slot,
+    items,
+    context,
   };
 }

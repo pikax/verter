@@ -1,7 +1,12 @@
 import { NodeTypes } from "@vue/compiler-core";
 import type { AttributeNode, DirectiveNode } from "@vue/compiler-core";
 import { VerterNode } from "../../../walk";
-import { TemplateTypes } from "../../types";
+import {
+  TemplateBinding,
+  TemplateDirective,
+  TemplateProp,
+  TemplateTypes,
+} from "../../types";
 import { retrieveBindings } from "../../utils";
 
 export type PropsContext = {
@@ -105,10 +110,10 @@ export function handleProps(node: VerterNode, context: PropsContext) {
   return items;
 }
 
-export function propToTemplateProp(
-  prop: AttributeNode | DirectiveNode,
+export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
+  prop: T,
   context: PropsContext
-) {
+): [TemplateProp | TemplateDirective, ...TemplateBinding[]] {
   if (prop.type === NodeTypes.ATTRIBUTE) {
     return [
       {
