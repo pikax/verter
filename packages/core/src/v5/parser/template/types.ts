@@ -1,13 +1,142 @@
-import { Node } from "@vue/compiler-core";
-import * as babel_types from "@babel/types";
+import type {
+  Node,
+  CommentNode,
+  AttributeNode,
+  DirectiveNode,
+  ElementNode,
+  ExpressionNode,
+} from "@vue/compiler-core";
+import type * as babel_types from "@babel/types";
+import { VerterNode } from "../walk";
 
-export type TemplateBinding = {
-  node:
-    | Node
-    | (Omit<babel_types.Node, "loc"> & {
-        loc: Node["loc"] & babel_types.Node["loc"];
-      });
+export const enum TemplateTypes {
+  Binding = "Binding",
+  Comment = "Comment",
+  Text = "Text",
+  Prop = "Prop",
+  Element = "Element",
+
+  Directive = "Directive",
+
+  Slot = "Slot",
+  Condition = "Condition",
+}
+
+export type TemplateComment = {
+  type: TemplateTypes.Comment;
+  content: string;
+  node: CommentNode;
+};
+
+export type TemplateText = {
+  type: TemplateTypes.Text;
+  content: string;
+  node: Node;
+};
+
+export type TemplateBinding = { type: TemplateTypes.Binding } & (
+  | {
+      node:
+        | Node
+        | (Omit<babel_types.Node, "loc"> & {
+            loc: Node["loc"] & babel_types.Node["loc"];
+          });
+      name: string;
+
+      /**
+       * if this is a local binding, passed by ignoreBindings
+       */
+      ignore: boolean;
+    }
+  | {
+      node:
+        | Node
+        | (Omit<babel_types.Node, "loc"> & {
+            loc: Node["loc"] & babel_types.Node["loc"];
+          });
+
+      /**
+       * Expression value
+       */
+      value: string;
+      /**
+       * ignored identifiers for this node
+       */
+      context: {
+        ignoredIdentifiers: string[];
+      } & Record<string, any>;
+      /**
+       * if the name is invalid
+       */
+      invalid: true;
+    }
+);
+
+export type TemplateProp = { type: TemplateTypes.Prop } & (
+  | {
+      node: AttributeNode;
+      name: string;
+
+      value: string | null;
+      static: true;
+    }
+  | {
+      node: DirectiveNode;
+      event: boolean;
+
+      name: null | TemplateBinding[];
+      value: null | TemplateBinding[];
+
+      static: false;
+      context: Record<string, any>;
+    }
+  | {
+      // used to merge styles and classes
+      node: null;
+      name: string;
+
+      props: TemplateProp[];
+    }
+);
+
+export type TemplateDirective = {
+  type: TemplateTypes.Directive;
+  node: DirectiveNode;
+
   name: string;
 
-  ignore: boolean;
+  arg: null | TemplateBinding[];
+  exp: null | TemplateBinding[];
+  context: Record<string, any>;
+};
+
+export type TemplateSlot = {
+  type: TemplateTypes.Slot;
+} & (
+  | {
+      node: DirectiveNode;
+      name: null | string | TemplateBinding[];
+
+      props: null;
+      parent: ElementNode;
+    }
+  | {
+      node: ElementNode;
+
+      name: TemplateBinding[];
+      props: null | string | TemplateProp[];
+
+      parent: null;
+    }
+);
+
+export type TemplateCondition = {
+  type: TemplateTypes.Condition;
+  node: DirectiveNode;
+
+  bindings: TemplateBinding[];
+  element: ElementNode;
+  parent: VerterNode;
+
+  context: Record<string, any>;
 };

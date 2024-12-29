@@ -5,19 +5,25 @@ import type {
 } from "@vue/compiler-core";
 import { NodeTypes } from "@vue/compiler-core";
 import { templateWalk, type TemplateWalkContext } from "../walk/index.js";
-import { type CommmentResult, handleComment } from "./comment/comment.js";
-import { TemplateBinding } from "./types.js";
+import { handleComment } from "./comment/comment.js";
+import type {
+  TemplateBinding,
+  TemplateText,
+  TemplateComment,
+} from "./types.js";
+import { handleInterpolation } from "./interpolation/interpolation.js";
 
 export type ParsedTemplateResult = {
   root: RootNode;
-  comments: CommmentResult[];
+  comments: TemplateComment[];
   bindings: TemplateBinding[];
-  text: [];
+  text: TemplateText[];
   elements: [];
 };
 
 export function parseTemplate(ast: RootNode, source: string) {
-  const comments: CommmentResult[] = [];
+  const comments: TemplateComment[] = [];
+  const bindings: TemplateBinding[] = [];
 
   templateWalk(
     ast,
@@ -32,6 +38,13 @@ export function parseTemplate(ast: RootNode, source: string) {
             break;
           }
           case NodeTypes.INTERPOLATION: {
+            const b = handleInterpolation(node, context);
+            if (b) {
+              bindings.push(...b);
+            }
+            break;
+          }
+          case NodeTypes.ELEMENT: {
             break;
           }
         }

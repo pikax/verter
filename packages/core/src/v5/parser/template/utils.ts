@@ -1,0 +1,107 @@
+import { NodeTypes, type ExpressionNode } from "@vue/compiler-core";
+import { TemplateTypes, type TemplateBinding } from "./types.js";
+import { walk } from "@vue/compiler-sfc";
+import * as babel_types from "@babel/types";
+import { patchBabelNodeLoc } from "../../utils/node/node.js";
+
+export function retrieveBindings(
+  exp: ExpressionNode,
+  context: {
+    ignoredIdentifiers: string[];
+  }
+): TemplateBinding[] {
+  const bindings: TemplateBinding[] = [];
+
+  if (exp.type !== NodeTypes.SIMPLE_EXPRESSION) {
+    return bindings;
+  }
+  if (exp.isStatic || exp.ast === null) {
+    const name = exp.content;
+    bindings.push({
+      type: TemplateTypes.Binding,
+      node: exp,
+      name,
+      ignore: context.ignoredIdentifiers.includes(name) || exp.isStatic,
+    });
+  } else if (exp.ast) {
+    walk(exp.ast, {
+      enter(n: babel_types.Node, parent: babel_types.Node) {
+        const ignoredIdentifiers: string[] =
+          // @ts-expect-error
+          (n._ignoredIdentifiers = [
+            // @ts-expect-error
+            ...(parent?._ignoredIdentifiers || context.ignoredIdentifiers),
+          ]);
+
+        switch (n.type) {
+          case "FunctionDeclaration":
+          case "FunctionExpression": {
+            if (n.id) {
+              ignoredIdentifiers.push(n.id.name);
+            }
+          }
+          case "ArrowFunctionExpression": {
+            n.params.forEach((param) => {
+              if (param.type === "Identifier") {
+                ignoredIdentifiers.push(param.name);
+              }
+            });
+            break;
+          }
+          case "Identifier": {
+            const name = n.name;
+            if (
+              ("property" in parent && parent.property === n) ||
+              ("key" in parent && parent.key === n)
+            ) {
+              this.skip();
+              return;
+            }
+            // if (
+            //   (parent.type === "OptionalMemberExpression" &&
+            //     parent.property === n) ||
+            //   (parent.type === "MemberExpression" && parent.property === n) ||
+            //   (parent.type === "ObjectProperty" && parent.key === n) ||
+            //   (parent.type === "ClassMethod" && parent.key === n)
+            // ) {
+            //   this.skip();
+            //   return;
+            // }
+            const pNode = patchBabelNodeLoc(n, exp);
+
+            bindings.push({
+              type: TemplateTypes.Binding,
+              node: pNode,
+              name,
+              ignore: ignoredIdentifiers.includes(name),
+            });
+            break;
+          }
+          default: {
+            if ("id" in n) {
+              if (n.id?.type === "Identifier") {
+                ignoredIdentifiers.push(n.id.name);
+              }
+            }
+          }
+        }
+      },
+
+      leave(n: babel_types.Node) {
+        // @ts-expect-error
+        delete n._ignoredIdentifiers;
+      },
+    });
+  } else {
+    bindings.push({
+      type: TemplateTypes.Binding,
+      node: exp,
+      context,
+
+      value: exp.content,
+      invalid: true,
+    });
+  }
+
+  return bindings;
+}

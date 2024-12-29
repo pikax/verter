@@ -1,6 +1,6 @@
 import { InterpolationNode, NodeTypes } from "@vue/compiler-core";
 import { handleInterpolation, InterpolationContext } from "./index";
-import { parse as parseSFC } from "@vue/compiler-sfc";
+import { parse as parseSFC, compileTemplate } from "@vue/compiler-sfc";
 
 describe("parser template interpolation", () => {
   function interpolate(
@@ -9,7 +9,7 @@ describe("parser template interpolation", () => {
   ) {
     const source = `<template>${content}</template>`;
 
-    const sfc = parseSFC(source, { templateParseOptions: {} });
+    const sfc = parseSFC(source, {});
 
     const template = sfc.descriptor.template;
     const ast = template ? template.ast : null;
@@ -319,5 +319,162 @@ describe("parser template interpolation", () => {
     const { result } = interpolate(`{{ 'test' }}`);
 
     expect(result).toHaveLength(0);
+  });
+
+  it("{{ temp + foo + }} - invalid input", () => {
+    const { result, source } = interpolate(`{{ temp + foo + }}`);
+
+    expect(result).toMatchObject([
+      {
+        value: "temp + foo +",
+        invalid: true,
+      },
+    ]);
+
+    for (const node of result) {
+      expect(
+        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
+      ).toBe(node.node.loc.source);
+    }
+  });
+
+  it("{{ temp as Foo +  }}", () => {
+    const { result, source } = interpolate(`{{ temp as Foo + }}`);
+
+    expect(result).toMatchObject([
+      {
+        value: "temp as Foo +",
+        invalid: true,
+      },
+    ]);
+
+    for (const node of result) {
+      expect(
+        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
+      ).toBe(node.node.loc.source);
+    }
+  });
+
+  it("{{ foo(baz + 1, { key: kuz }) }}", () => {
+    const { result, source } = interpolate(`{{ foo(baz + 1, { key: kuz }) }}`);
+
+    expect(result).toMatchObject([
+      {
+        name: "foo",
+        ignore: false,
+      },
+      {
+        name: "baz",
+        ignore: false,
+      },
+      {
+        name: "kuz",
+        ignore: false,
+      },
+    ]);
+
+    for (const node of result) {
+      expect(
+        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
+      ).toBe(node.node.loc.source);
+    }
+  });
+
+  it("should ignore params arrow function", () => {
+    const { result, source } = interpolate(
+      `{{ ((ar)=> { ar.toString()})(1) }}`
+    );
+
+    expect(result).toMatchObject([
+      {
+        name: "ar",
+        ignore: true,
+      },
+      {
+        name: "ar",
+        ignore: true,
+      },
+    ]);
+
+    for (const node of result) {
+      expect(
+        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
+      ).toBe(node.node.loc.source);
+    }
+  });
+  it("should ignore params function", () => {
+    const { result, source } = interpolate(
+      `{{ (function (ar) { ar.toString()})(1) }}`
+    );
+
+    expect(result).toMatchObject([
+      {
+        name: "ar",
+        ignore: true,
+      },
+      {
+        name: "ar",
+        ignore: true,
+      },
+    ]);
+
+    for (const node of result) {
+      expect(
+        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
+      ).toBe(node.node.loc.source);
+    }
+  });
+  it("should ignore params function named", () => {
+    const { result, source } = interpolate(
+      `{{ (function foo(ar) { ar.toString(); foo();})(1) }}`
+    );
+
+    expect(result).toMatchObject([
+      {
+        name: "foo",
+        ignore: true,
+      },
+      {
+        name: "ar",
+        ignore: true,
+      },
+      {
+        name: "ar",
+        ignore: true,
+      },
+      {
+        name: "foo",
+        ignore: true,
+      },
+    ]);
+
+    for (const node of result) {
+      expect(
+        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
+      ).toBe(node.node.loc.source);
+    }
+  });
+
+  it("ignore class", () => {
+    const { result, source } = interpolate(
+      `{{ (class foo { constructor() { this.toString(); new foo(); } }) }}`
+    );
+
+    expect(result).toMatchObject([
+      {
+        name: "foo",
+        ignore: true,
+      },
+      {
+        name: "foo",
+        ignore: true,
+      },
+    ]);
+
+    for (const node of result) {
+      expect(
+        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
+      ).toBe(node.node.loc.source);
+    }
   });
 });

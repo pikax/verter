@@ -1,2 +1,2 @@
-export { parseAST } from "./ast.js";
+export { parseAST, parseAcornLoose } from "./ast.js";
 export type * from "./types.js";
