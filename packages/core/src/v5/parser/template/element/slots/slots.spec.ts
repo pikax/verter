@@ -18,7 +18,7 @@ describe("parser template slots", () => {
       const sfc = parseSFC(source, {});
 
       const template = sfc.descriptor.template;
-      const ast = template ? template.ast : null;
+      const ast = template?.ast!;
 
       const result = handleSlotDeclaration(ast.children[0] as any, context);
 

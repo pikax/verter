@@ -1,7 +1,6 @@
 import { DirectiveNode, ElementTypes, NodeTypes } from "@vue/compiler-core";
 import { VerterNode } from "../../../walk";
 import {
-  TemplateBinding,
   TemplateDirective,
   TemplateProp,
   TemplateRenderSlot,
@@ -20,7 +19,7 @@ export function handleSlotDeclaration<T extends SlotsContext>(
   context: T;
   slot: TemplateSlot;
   items: any[];
-} {
+} | null {
   if (node.type !== NodeTypes.ELEMENT) {
     return null;
   }
@@ -30,12 +29,15 @@ export function handleSlotDeclaration<T extends SlotsContext>(
 
   const items = [];
 
-  const propItems = handleProps(node, parentContext);
-  const props: TemplateProp[] = propItems.filter(
+  const propItems = handleProps(node, parentContext) ?? [];
+  const props = propItems.filter(
     (x) => x.type === TemplateTypes.Prop
-  );
+  ) as TemplateProp[];
 
-  const name = propItems.find((prop) => prop.name === "name") ?? null;
+  const name =
+    (propItems.find((prop) => prop.name === "name") as
+      | TemplateProp
+      | undefined) ?? null;
 
   const slot: TemplateSlot = {
     type: TemplateTypes.SlotDeclaration,
@@ -70,7 +72,7 @@ export function handleSlotProp<T extends SlotsContext>(
   context: T;
   slot: TemplateRenderSlot;
   items: any[];
-} {
+} | null {
   if (node.type !== NodeTypes.ELEMENT) {
     return null;
   }
@@ -107,6 +109,7 @@ export function handleSlotProp<T extends SlotsContext>(
 
   if (prop.type === TemplateTypes.Directive) {
     if (prop.arg && prop.arg.length) {
+      // if there's any bindings
       const b = prop.arg.filter(
         (x) => x.type === TemplateTypes.Binding && !x.ignore
       );

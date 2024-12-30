@@ -5,6 +5,7 @@ import { retrieveBindings } from "../../utils";
 
 export type LoopsContext = {
   ignoredIdentifiers: string[];
+  inFor: boolean;
 };
 export function handleLoopProp<T extends LoopsContext>(
   node: VerterNode,
@@ -44,15 +45,26 @@ export function handleLoopProp<T extends LoopsContext>(
 
   const items = [];
 
-  const context = {
-    ...parentContext,
-    ignoredIdentifiers: [
-      ...parentContext.ignoredIdentifiers,
-      ...valueBindings.map((x) => x.name),
-      ...keyBindings.map((x) => x.name),
-      ...indexBindings.map((x) => x.name),
-    ],
-  };
+  const toAddIgnoredIdentifiers = [
+    ...valueBindings.map((x) => x.name),
+    ...keyBindings.map((x) => x.name),
+    ...indexBindings.map((x) => x.name),
+  ];
+
+  const context =
+    toAddIgnoredIdentifiers.length > 0
+      ? {
+          ...parentContext,
+          ignoredIdentifiers: [
+            ...parentContext.ignoredIdentifiers,
+            ...toAddIgnoredIdentifiers,
+          ],
+          inFor: true,
+        }
+      : {
+          ...parentContext,
+          inFor: true,
+        };
 
   const loop: TemplateLoop = {
     type: TemplateTypes.Loop,

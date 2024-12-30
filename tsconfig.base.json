@@ -14,6 +14,7 @@
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
     "jsx": "preserve",
+    "strict": true
 
     // "paths": {
     //   "@verter/core/*": ["packages/core/src/*"],

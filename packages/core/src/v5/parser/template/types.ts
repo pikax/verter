@@ -131,7 +131,7 @@ export type TemplateSlot = {
   | {
       node: ElementNode;
 
-      name: TemplateBinding[];
+      name: TemplateProp | null;
       props: null | string | TemplateProp[];
 
       parent: null;
@@ -169,4 +169,20 @@ export type TemplateLoop = {
 
   element: VerterNode;
   parent: VerterNode;
+};
+
+export type TemplateElement = {
+  type: TemplateTypes.Element;
+
+  tag: string;
+
+  node: ElementNode;
+  parent: VerterNode;
+
+  ref: TemplateProp | null;
+  props: TemplateProp[] | null;
+
+  condition: TemplateCondition | null;
+  loop: TemplateLoop | null;
+  slot: TemplateSlot | null;
 };
