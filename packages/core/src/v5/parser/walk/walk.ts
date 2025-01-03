@@ -7,6 +7,7 @@ import type {
 } from "@vue/compiler-core";
 import type { VerterAST, Statement, ModuleDeclaration } from "../ast/index.js";
 import { isObject } from "@vue/shared";
+import { TemplateCondition } from "../template/types.js";
 
 export function shallowWalk(
   root: VerterAST,
@@ -23,7 +24,7 @@ export type VerterNode = Exclude<
 >;
 
 export type TemplateWalkContext = {
-  conditions: string[];
+  conditions: TemplateCondition[];
   inFor: boolean;
   ignoredIdentifiers: string[];
 };
@@ -31,7 +32,7 @@ export type TemplateWalkContext = {
 export type WalkOptions<Context extends TemplateWalkContext> = {
   enter?: (
     node: VerterNode,
-    parent: VerterNode,
+    parent: VerterNode | null,
     context: Context,
     /**
      * Same for siblings
@@ -40,7 +41,7 @@ export type WalkOptions<Context extends TemplateWalkContext> = {
   ) => Context | void;
   leave?: (
     node: VerterNode,
-    parent: VerterNode,
+    parent: VerterNode | null,
     context: Context,
     /**
      * Same for siblings
@@ -55,8 +56,8 @@ export function templateWalk<Context extends TemplateWalkContext>(
   context: Context
 ) {
   function visit(
-    node: VerterNode | null | undefined,
-    parent: VerterNode | null | undefined,
+    node: VerterNode | null,
+    parent: VerterNode | null,
     context: Context,
     parentContext: Record<string, any>
   ) {

@@ -155,17 +155,19 @@ export function parseScript(ast: VerterAST, source: string) {
         break;
       }
       case "ImportDeclaration": {
-        for (let i = 0; i < node.specifiers.length; i++) {
-          const n = node.specifiers[i];
-          switch (n.type) {
-            case "ImportSpecifier":
-            case "ImportDefaultSpecifier":
-            case "ImportNamespaceSpecifier": {
-              const name = n.local.name;
-              const content = source.slice(n.start, n.end);
-              const item = { node: n, content, name, parent: node };
-              imports.push(item);
-              break;
+        if (node.specifiers) {
+          for (let i = 0; i < node.specifiers.length; i++) {
+            const n = node.specifiers[i];
+            switch (n.type) {
+              case "ImportSpecifier":
+              case "ImportDefaultSpecifier":
+              case "ImportNamespaceSpecifier": {
+                const name = n.local.name;
+                const content = source.slice(n.start, n.end);
+                const item = { node: n, content, name, parent: node };
+                imports.push(item);
+                break;
+              }
             }
           }
         }
@@ -337,7 +339,9 @@ function* processPattern<T extends VerterASTNode, P extends VerterASTNode>(
     case "ArrayPattern": {
       for (let i = 0; i < node.elements.length; i++) {
         const el = node.elements[i];
-        yield* processPattern(el, source, parent, el);
+        if (el) {
+          yield* processPattern(el, source, parent, el);
+        }
       }
       break;
     }

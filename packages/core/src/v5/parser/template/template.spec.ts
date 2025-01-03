@@ -1,5 +1,6 @@
 import { parseTemplate } from "./index.js";
 import { parse as parseSFC } from "@vue/compiler-sfc";
+import { templateItemsToMap } from "./utils.js";
 
 describe("parser template", () => {
   function parse(content: string) {
@@ -8,7 +9,12 @@ describe("parser template", () => {
 
     const template = sfc.descriptor.template;
     const ast = template ? template.ast : null;
-    return parseTemplate(ast, source);
+    const r = parseTemplate(ast!, source);
+
+    return {
+      ...r,
+      ...templateItemsToMap(r.items),
+    };
   }
 
   it("should parse template", () => {
@@ -21,7 +27,7 @@ describe("parser template", () => {
       const result = parse("<!-- comment -->");
 
       expect(result).toMatchObject({
-        comments: [
+        Comment: [
           {
             content: " comment ",
             node: {
@@ -34,7 +40,7 @@ describe("parser template", () => {
         ],
       });
 
-      const [comment] = result.comments;
+      const [comment] = result.Comment;
 
       expect(
         result.source.slice(
@@ -48,7 +54,7 @@ describe("parser template", () => {
       const result = parse(`<div> <!-- comment --> </div>`);
 
       expect(result).toMatchObject({
-        comments: [
+        Comment: [
           {
             content: " comment ",
             node: {
@@ -61,7 +67,7 @@ describe("parser template", () => {
         ],
       });
 
-      const [comment] = result.comments;
+      const [comment] = result.Comment;
 
       expect(
         result.source.slice(
@@ -77,7 +83,7 @@ describe("parser template", () => {
       );
 
       expect(result).toMatchObject({
-        comments: [
+        Comment: [
           {
             content: " comment ",
             node: {
@@ -99,7 +105,7 @@ describe("parser template", () => {
         ],
       });
 
-      const [comment, commentDeep] = result.comments;
+      const [comment, commentDeep] = result.Comment;
 
       expect(
         result.source.slice(
@@ -114,6 +120,165 @@ describe("parser template", () => {
           commentDeep.node.loc.end.offset
         )
       ).toBe(commentDeep.node.loc.source);
+    });
+  });
+
+  describe("element", () => {
+    it("<div></div>", () => {
+      const result = parse(`<div></div>`);
+
+      expect(result).toMatchObject({
+        Element: [
+          {
+            type: "Element",
+            tag: "div",
+          },
+        ],
+      });
+    });
+
+    it("<div><div>test</div></div>", () => {
+      const result = parse(`<div><div>test</div></div>`);
+
+      expect(result).toMatchObject({
+        Element: [
+          {
+            type: "Element",
+            tag: "div",
+          },
+          {
+            type: "Element",
+            tag: "div",
+          },
+        ],
+        Text: [
+          {
+            type: "Text",
+            content: "test",
+          },
+        ],
+      });
+    });
+
+    it('<div v-if="hello === false"> <div> {{ hello }}</div></div>', () => {
+      const result = parse(
+        `<div v-if="hello === false"> <div> {{ hello }}</div></div>`
+      );
+
+      expect(result).toMatchObject({
+        Element: [
+          {
+            type: "Element",
+            tag: "div",
+
+            condition: {
+              type: "Condition",
+              bindings: [
+                {
+                  type: "Binding",
+                  name: "hello",
+                },
+              ],
+            },
+            context: {
+              conditions: [
+                {
+                  type: "Condition",
+                  bindings: [
+                    {
+                      type: "Binding",
+                      name: "hello",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+          {
+            type: "Element",
+            tag: "div",
+            context: {
+              conditions: [
+                {
+                  type: "Condition",
+                  bindings: [
+                    {
+                      type: "Binding",
+                      name: "hello",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+        Condition: [
+          {
+            type: "Condition",
+            node: {
+              name: "if",
+            },
+          },
+        ],
+        Binding: [
+          {
+            type: "Binding",
+            name: "hello",
+          },
+          {
+            type: "Binding",
+            name: "hello",
+          },
+        ],
+      });
+    });
+
+    it('<div v-for="item in items"> <div> {{ item }}</div></div>', () => {
+      const result = parse(
+        `<div v-for="item in items"> <div> {{ item }}</div></div>`
+      );
+
+      expect(result).toMatchObject({
+        Element: [
+          {
+            type: "Element",
+            tag: "div",
+
+            loop: {
+              type: "Loop",
+              node: {
+                name: "for",
+              },
+            },
+            context: {
+              inFor: true,
+            },
+          },
+          {
+            type: "Element",
+            tag: "div",
+            loop: null,
+            context: {
+              inFor: true,
+            },
+          },
+        ],
+        Loop: [
+          {
+            type: "Loop",
+            node: {
+              name: "for",
+            },
+            element: {
+              props: [
+                {
+                  name: "for",
+                },
+              ],
+            },
+          },
+        ],
+      });
     });
   });
 });

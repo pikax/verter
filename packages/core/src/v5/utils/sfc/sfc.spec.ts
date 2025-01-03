@@ -153,10 +153,12 @@ describe("Utils SFC", () => {
 
   describe("extractBlocksFromDescriptor", () => {
     function doExtract(source: string) {
-      const { descriptor } = parse(source, {
+      const { descriptor, ...rest } = parse(source, {
         ignoreEmpty: false,
         templateParseOptions: { parseMode: "sfc" },
       });
+
+      console.log("ddd", rest);
       return extractBlocksFromDescriptor(descriptor);
     }
 
@@ -578,6 +580,17 @@ foo
       expect(result).toHaveLength(2);
       expect(result.map((x) => x.tag.type)).toEqual(["script", "template"]);
     });
+
+    it("should only extract 2 script blocks", () => {
+      const source = `
+        <script>console.log('foo')</script>
+        <script setup>console.log('bar')</script>
+        <script>console.log('baz')</script>
+      `;
+      const result = doExtract(source);
+      expect(result).toHaveLength(2);
+      expect(result.map((x) => x.tag.type)).toEqual(["script", "script"]);
+    });
   });
 
   describe("findBlockLanguage", () => {
@@ -604,7 +617,7 @@ foo
     it("should return 'html' for <template> without lang", () => {
       const block = getFirstBlock(`<template><div>Hello</div></template>`);
       const lang = findBlockLanguage(block);
-      expect(lang).toBe("html");
+      expect(lang).toBe("vue");
     });
 
     it("should return 'pug' if <template lang='pug'>", () => {

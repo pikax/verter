@@ -1,9 +1,26 @@
-import { MagicString, type SFCParseOptions, parse } from "@vue/compiler-sfc";
+import {
+  MagicString,
+  type SFCParseOptions,
+  SFCTemplateBlock,
+  parse,
+} from "@vue/compiler-sfc";
 import {
   cleanHTMLComments,
   extractBlocksFromDescriptor,
   findBlockLanguage,
+  VerterSFCBlock,
 } from "../utils/index.js";
+import { parseScript } from "./script/script.js";
+import { parseAST } from "./ast/ast.js";
+import { parseTemplate } from "./template/template.js";
+import {
+  ParsedBlock,
+  ParsedBlockScript,
+  ParsedBlockTemplate,
+  ParsedBlockUnknown,
+} from "./types.js";
+
+// import { parseScript } from "./script/index.js";
 
 export type ParserResult = {
   filename: string;
@@ -11,11 +28,10 @@ export type ParserResult = {
   s: MagicString;
 
   isAsync: boolean;
-  generic: GenericInfo | undefined;
+  // generic: GenericInfo | undefined;
+  generic: string | undefined;
 
-  imports: any[];
-
-  bindings: any[];
+  blocks: ParsedBlock[];
 };
 
 export type VerterParserOptions = SFCParseOptions & {
@@ -79,7 +95,7 @@ export type GenericInfo = {
   declaration: string;
 };
 
-const AST_LANGUAGES = new Set(["ts", "tsx", "js", "jsx"]);
+const JS_AST_LANGUAGES = new Set(["ts", "tsx", "js", "jsx"]);
 
 export function parser(
   source: string,
@@ -100,10 +116,8 @@ export function parser(
   }
 
   const s = new MagicString(source);
-  const generic = undefined;
-  const isAsync = false;
-  const imports = [];
-  const bindings = [];
+  let generic: string | undefined = undefined;
+  let isAsync = false;
 
   const sfcParse = parse(source, {
     ...options,
@@ -116,12 +130,56 @@ export function parser(
     },
   });
 
-  const descriptorBlocks = extractBlocksFromDescriptor(sfcParse.descriptor).map(
-    (x) => {
-      const languageId = findBlockLanguage(x);
-      // const ast = AST_LANGUAGES.has(languageId) ? ;
+  const blocks = extractBlocksFromDescriptor(sfcParse.descriptor).map((x) => {
+    const languageId = findBlockLanguage(x);
+    switch (languageId) {
+      case "vue":
+        const ast = parseTemplate(
+          (x.block as SFCTemplateBlock).ast!,
+          x.block.content
+        );
+
+        return {
+          type: "template",
+          lang: languageId,
+          block: x,
+          result: ast,
+        } as ParsedBlockTemplate;
+      case "ts":
+      case "tsx": {
+        if (
+          x.block.attrs.generic &&
+          typeof x.block.attrs.generic === "string"
+        ) {
+          generic = x.block.attrs.generic;
+        }
+      }
+      case "js":
+      case "jsx": {
+        const ast = parseAST(x.block.content, filename);
+
+        const r = parseScript(ast, x.block.content);
+        isAsync = r.isAsync;
+
+        return {
+          type: "script",
+          lang: languageId,
+          block: x,
+          result: r,
+          isMain:
+            x.block ===
+            (sfcParse.descriptor.scriptSetup || sfcParse.descriptor.script),
+        } as ParsedBlockScript;
+      }
+      default:
+        return {
+          type: x.tag.type,
+          lang: languageId,
+          block: x,
+          result: null,
+        } as ParsedBlockUnknown;
     }
-  );
+  });
 
   return {
     filename,
@@ -130,7 +188,6 @@ export function parser(
     generic,
     isAsync,
 
-    imports,
-    bindings,
+    blocks,
   };
 }

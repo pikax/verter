@@ -1,4 +1,38 @@
+import { SFCBlock, SFCScriptBlock, SFCTemplateBlock } from "@vue/compiler-sfc";
+import { VerterSFCBlock } from "../utils";
+import { ParsedTemplateResult } from "./template";
+import { ParseScriptResult } from "./script";
+
 export interface VerterParseContext {
   filename: string;
   source: string;
 }
+
+export interface ParsedBlockTemplate {
+  type: "template";
+  lang: "vue";
+
+  block: VerterSFCBlock<SFCTemplateBlock>;
+  result: ParsedTemplateResult;
+}
+
+export interface ParsedBlockScript {
+  type: "script";
+  lang: "js" | "jsx" | "ts" | "tsx";
+
+  isMain: boolean;
+  block: VerterSFCBlock<SFCScriptBlock>;
+  result: ParseScriptResult;
+}
+
+export interface ParsedBlockUnknown {
+  type: string;
+  lang: string;
+  block: VerterSFCBlock<SFCBlock>;
+  result: null;
+}
+
+export type ParsedBlock =
+  | ParsedBlockTemplate
+  | ParsedBlockScript
+  | ParsedBlockUnknown;

@@ -1,5 +1,18 @@
 import { NodeTypes, type ExpressionNode } from "@vue/compiler-core";
-import { TemplateTypes, type TemplateBinding } from "./types.js";
+import {
+  TemplateComment,
+  TemplateCondition,
+  TemplateDirective,
+  TemplateElement,
+  TemplateItem,
+  TemplateLoop,
+  TemplateProp,
+  TemplateRenderSlot,
+  TemplateSlot,
+  TemplateText,
+  TemplateTypes,
+  type TemplateBinding,
+} from "./types.js";
 import { walk } from "@vue/compiler-sfc";
 import * as babel_types from "@babel/types";
 import { patchBabelNodeLoc } from "../../utils/node/node.js";
@@ -100,8 +113,33 @@ export function retrieveBindings(
 
       value: exp.content,
       invalid: true,
+      ignore: false,
+      name: undefined,
     });
   }
 
   return bindings;
+}
+
+export function templateItemsToMap(items: TemplateItem[]): {
+  [K in TemplateTypes]: Array<TemplateItem & { type: K }>;
+} {
+  const map = {
+    [TemplateTypes.Condition]: [] as Array<TemplateCondition>,
+    [TemplateTypes.Loop]: [] as Array<TemplateLoop>,
+    [TemplateTypes.Element]: [] as Array<TemplateElement>,
+    [TemplateTypes.Prop]: [] as Array<TemplateProp>,
+    [TemplateTypes.Binding]: [] as Array<TemplateBinding>,
+    [TemplateTypes.SlotRender]: [] as Array<TemplateRenderSlot>,
+    [TemplateTypes.SlotDeclaration]: [] as Array<TemplateSlot>,
+    [TemplateTypes.Comment]: [] as Array<TemplateComment>,
+    [TemplateTypes.Text]: [] as Array<TemplateText>,
+    [TemplateTypes.Directive]: [] as Array<TemplateDirective>,
+  };
+
+  for (const item of items) {
+    map[item.type].push(item as any);
+  }
+
+  return map;
 }

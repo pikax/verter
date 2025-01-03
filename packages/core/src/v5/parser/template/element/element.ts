@@ -1,19 +1,19 @@
 import { ElementNode, NodeTypes } from "@vue/compiler-core";
 import { handleConditions } from "./conditions";
-import { TemplateCondition, TemplateTypes, TemplateElement } from "../types";
+import {
+  TemplateCondition,
+  TemplateTypes,
+  TemplateElement,
+  ElementContext,
+} from "../types";
 import { handleLoopProp } from "./loops";
 import { handleProps } from "./props";
 import { handleSlotDeclaration } from "./slots";
-
-export type ElementContext = {
-  conditions: TemplateCondition[];
-  inFor: boolean;
-  ignoredIdentifiers: string[];
-};
+import { VerterNode } from "../../walk";
 
 export function handleElement(
-  node: ElementNode,
-  parent: ElementNode,
+  node: VerterNode,
+  parent: VerterNode,
   parentContext: ElementContext
 ) {
   if (node.type !== NodeTypes.ELEMENT) {
@@ -44,12 +44,16 @@ export function handleElement(
     node,
     parent,
 
+    // @ts-expect-error
     ref: props?.find((x) => x.name === "ref") ?? null,
+    // @ts-expect-error
     props: props ?? [],
 
     condition: conditions?.condition ?? null,
     loop: loop?.loop ?? null,
     slot: slot?.slot ?? null,
+
+    context,
   };
 
   const items = [

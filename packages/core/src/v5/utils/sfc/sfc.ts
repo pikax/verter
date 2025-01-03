@@ -1,12 +1,30 @@
-import type { SFCDescriptor, SFCBlock, MagicString } from "@vue/compiler-sfc";
+import type {
+  SFCDescriptor,
+  SFCBlock,
+  MagicString,
+  SFCTemplateBlock,
+  SFCScriptBlock,
+  SFCStyleBlock,
+} from "@vue/compiler-sfc";
 
 export type BlockPosition = {
   start: number;
   end: number;
 };
 
-export interface VerterSFCBlock {
-  block: SFCBlock & { setup?: boolean };
+// export type SFCInvalidBlock = SFCBlock & {
+//   type: "invalid";
+// };
+
+export interface VerterSFCBlock<
+  T extends SFCBlock =
+    | SFCTemplateBlock
+    | SFCScriptBlock
+    | SFCStyleBlock
+    | SFCBlock
+    // | SFCInvalidBlock
+> {
+  block: T;
 
   tag: {
     type: string;
@@ -58,7 +76,7 @@ export function catchEmptyBlocks(descriptor: SFCDescriptor): SFCBlock[] {
     descriptor.script,
     descriptor.scriptSetup,
   ]
-    .filter(Boolean)
+    .filter<SFCBlock>((x) => !!x)
     .map((x) => ({
       start: x.loc.start.offset,
       end: x.loc.end.offset,
@@ -116,7 +134,7 @@ export function extractBlocksFromDescriptor(
     ...descriptor.customBlocks,
     // ...catchEmptyBlocks(descriptor),
   ]
-    .filter(Boolean)
+    .filter<SFCBlock>((x) => !!x)
     .sort((a, b) => {
       return a.loc.start.offset - b.loc.start.offset;
     });
@@ -215,6 +233,61 @@ export function extractBlocksFromDescriptor(
     }
   }
 
+  // {
+  //   const remaining = blocks.reduce((acc, x) => {
+  //     const start = x.tag.pos.open.start;
+  //     const end = x.tag.pos.close.end;
+
+  //     const before = acc.slice(0, start);
+  //     const after = acc.slice(end);
+
+  //     return before + " ".repeat(end - start) + after;
+  //   }, source);
+
+  //   const trimmed = remaining.trim();
+  //   if (trimmed.length > 0) {
+  //     const startOffset = source.indexOf(trimmed);
+
+  //     blocks.push({
+  //       block: {
+  //         type: "invalid",
+  //         attrs: {},
+  //         content: remaining.trim(),
+  //         loc: {
+  //           start: {
+  //             offset: startOffset,
+  //             line: 0,
+  //             column: 0,
+  //           },
+  //           end: {
+  //             offset: startOffset + trimmed.length,
+  //             line: 0,
+  //             column: 0,
+  //           },
+  //           source: remaining,
+  //         },
+  //       },
+  //       tag: {
+  //         content: "",
+  //         type: "invalid",
+  //         pos: {
+  //           close: {
+  //             start: startOffset,
+  //             end: startOffset + trimmed.length,
+  //           },
+  //           open: {
+  //             start: startOffset,
+  //             end: startOffset + trimmed.length,
+  //           },
+  //           content: {
+  //             start: startOffset,
+  //             end: startOffset + trimmed.length,
+  //           },
+  //         },
+  //       },
+  //     });
+  //   }
+  // }
   return blocks;
 }
 export function findBlockLanguage(block: VerterSFCBlock) {
@@ -225,7 +298,7 @@ export function findBlockLanguage(block: VerterSFCBlock) {
     return lang || "js";
   }
   if (block.tag.type === "template") {
-    return lang || "html";
+    return lang || "vue";
   }
   if (block.tag.type === "style") {
     return lang || "css";

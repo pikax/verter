@@ -18,7 +18,7 @@ export const enum TemplateTypes {
 
   Directive = "Directive",
 
-  Template = "Template",
+  // Template = "Template",
   SlotRender = "SlotRender",
   SlotDeclaration = "SlotDeclaration",
   Condition = "Condition",
@@ -185,4 +185,24 @@ export type TemplateElement = {
   condition: TemplateCondition | null;
   loop: TemplateLoop | null;
   slot: TemplateSlot | null;
+
+  context: ElementContext;
+};
+
+export type TemplateItem =
+  | TemplateComment
+  | TemplateText
+  | TemplateBinding
+  | TemplateProp
+  | TemplateDirective
+  | TemplateSlot
+  | TemplateRenderSlot
+  | TemplateCondition
+  | TemplateLoop
+  | TemplateElement;
+
+export type ElementContext = {
+  conditions: TemplateCondition[];
+  inFor: boolean;
+  ignoredIdentifiers: string[];
 };
