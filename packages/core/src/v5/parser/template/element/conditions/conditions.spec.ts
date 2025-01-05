@@ -20,9 +20,9 @@ describe("parser template conditions", () => {
     const sfc = parseSFC(source, {});
 
     const template = sfc.descriptor.template;
-    const ast = template ? template.ast : null;
+    const ast = template?.ast!;
 
-    const result = handleConditions(ast.children[0] as any, ast, context);
+    const result = handleConditions(ast!.children[0] as any, ast!, context);
 
     return {
       source,

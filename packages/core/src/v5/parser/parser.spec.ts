@@ -188,7 +188,7 @@ describe("parser", () => {
         ]);
       });
 
-      it.only("more than 2 scripts should have the last", () => {
+      it("more than 2 scripts should have the last", () => {
         const source = `<script></script><script setup>const a = {}</script><script>const b = {}</script>`;
         const parsed = parser(source);
 

@@ -12,7 +12,7 @@ describe("parser template interpolation", () => {
     const sfc = parseSFC(source, {});
 
     const template = sfc.descriptor.template;
-    const ast = template ? template.ast : null;
+    const ast = template?.ast!;
 
     const result = handleInterpolation(ast.children[0] as any, context);
 
@@ -35,12 +35,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "temp",
         ignore: false,
       },
     ]);
 
-    const [n] = result;
+    const [_, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -53,12 +56,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "temp",
         ignore: true,
       },
     ]);
 
-    const [n] = result;
+    const [_, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -70,12 +76,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "temp",
         ignore: false,
       },
     ]);
 
-    const [n] = result;
+    const [_, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -87,12 +96,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "temp",
         ignore: false,
       },
     ]);
 
-    const [n] = result;
+    const [_, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -104,6 +116,9 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "temp",
         ignore: false,
       },
@@ -113,6 +128,7 @@ describe("parser template interpolation", () => {
       },
     ]);
 
+    // @ts-expect-error
     for (const node of result) {
       expect(
         source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
@@ -127,6 +143,9 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "temp",
         ignore: true,
       },
@@ -136,6 +155,7 @@ describe("parser template interpolation", () => {
       },
     ]);
 
+    // @ts-expect-error
     for (const node of result) {
       expect(
         source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
@@ -148,12 +168,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "temp",
         ignore: false,
       },
     ]);
 
-    const [n] = result;
+    const [_, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -165,12 +188,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "temp",
         ignore: false,
       },
     ]);
 
-    const [n] = result;
+    const [_, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -182,12 +208,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "temp",
         ignore: false,
       },
     ]);
 
-    const [n] = result;
+    const [_, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -199,12 +228,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "temp",
         ignore: false,
       },
     ]);
 
-    const [n] = result;
+    const [_, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -215,12 +247,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "temp",
         ignore: false,
       },
     ]);
 
-    const [n] = result;
+    const [_, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -230,7 +265,11 @@ describe("parser template interpolation", () => {
   it("{{ 'test' }}", () => {
     const { result } = interpolate(`{{ 'test' }}`);
 
-    expect(result).toHaveLength(0);
+    expect(result).toMatchObject([
+      {
+        type: "Interpolation",
+      },
+    ]);
   });
 
   it("{{ [ Foo ] }}", () => {
@@ -238,12 +277,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "Foo",
         ignore: false,
       },
     ]);
 
-    const [n] = result;
+    const [_, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -255,12 +297,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "Foo",
         ignore: false,
       },
     ]);
 
-    const [n] = result;
+    const [_, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -272,6 +317,9 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "temp",
         ignore: false,
       },
@@ -281,6 +329,7 @@ describe("parser template interpolation", () => {
       },
     ]);
 
+    // @ts-expect-error
     for (const node of result) {
       expect(
         source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
@@ -295,6 +344,9 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "isActive",
         ignore: false,
       },
@@ -308,6 +360,7 @@ describe("parser template interpolation", () => {
       },
     ]);
 
+    // @ts-expect-error
     for (const node of result) {
       expect(
         source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
@@ -318,7 +371,11 @@ describe("parser template interpolation", () => {
   it("{{ 'test' }}", () => {
     const { result } = interpolate(`{{ 'test' }}`);
 
-    expect(result).toHaveLength(0);
+    expect(result).toMatchObject([
+      {
+        type: "Interpolation",
+      },
+    ]);
   });
 
   it("{{ temp + foo + }} - invalid input", () => {
@@ -326,11 +383,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         value: "temp + foo +",
         invalid: true,
       },
     ]);
 
+    // @ts-expect-error
     for (const node of result) {
       expect(
         source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
@@ -343,11 +404,15 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         value: "temp as Foo +",
         invalid: true,
       },
     ]);
 
+    // @ts-expect-error
     for (const node of result) {
       expect(
         source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
@@ -359,6 +424,9 @@ describe("parser template interpolation", () => {
     const { result, source } = interpolate(`{{ foo(baz + 1, { key: kuz }) }}`);
 
     expect(result).toMatchObject([
+      {
+        type: "Interpolation",
+      },
       {
         name: "foo",
         ignore: false,
@@ -373,6 +441,7 @@ describe("parser template interpolation", () => {
       },
     ]);
 
+    // @ts-expect-error
     for (const node of result) {
       expect(
         source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
@@ -387,6 +456,9 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "ar",
         ignore: true,
       },
@@ -396,6 +468,7 @@ describe("parser template interpolation", () => {
       },
     ]);
 
+    // @ts-expect-error
     for (const node of result) {
       expect(
         source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
@@ -409,6 +482,9 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "ar",
         ignore: true,
       },
@@ -418,6 +494,7 @@ describe("parser template interpolation", () => {
       },
     ]);
 
+    // @ts-expect-error
     for (const node of result) {
       expect(
         source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
@@ -431,6 +508,9 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "foo",
         ignore: true,
       },
@@ -448,6 +528,7 @@ describe("parser template interpolation", () => {
       },
     ]);
 
+    // @ts-expect-error
     for (const node of result) {
       expect(
         source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
@@ -462,6 +543,9 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
+        type: "Interpolation",
+      },
+      {
         name: "foo",
         ignore: true,
       },
@@ -471,6 +555,7 @@ describe("parser template interpolation", () => {
       },
     ]);
 
+    // @ts-expect-error
     for (const node of result) {
       expect(
         source.slice(node.node.loc.start.offset, node.node.loc.end.offset)

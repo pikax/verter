@@ -5,6 +5,7 @@ import {
   TemplateDirective,
   TemplateElement,
   TemplateItem,
+  TemplateItemByType,
   TemplateLoop,
   TemplateProp,
   TemplateRenderSlot,
@@ -34,6 +35,7 @@ export function retrieveBindings(
       type: TemplateTypes.Binding,
       node: exp,
       name,
+      parent: null,
       ignore: context.ignoredIdentifiers.includes(name) || exp.isStatic,
     });
   } else if (exp.ast) {
@@ -86,6 +88,8 @@ export function retrieveBindings(
               type: TemplateTypes.Binding,
               node: pNode,
               name,
+              parent,
+
               ignore: ignoredIdentifiers.includes(name),
             });
             break;
@@ -115,16 +119,15 @@ export function retrieveBindings(
       invalid: true,
       ignore: false,
       name: undefined,
+      parent: null,
     });
   }
 
   return bindings;
 }
 
-export function templateItemsToMap(items: TemplateItem[]): {
-  [K in TemplateTypes]: Array<TemplateItem & { type: K }>;
-} {
-  const map = {
+export function createTemplateTypeMap() {
+  return {
     [TemplateTypes.Condition]: [] as Array<TemplateCondition>,
     [TemplateTypes.Loop]: [] as Array<TemplateLoop>,
     [TemplateTypes.Element]: [] as Array<TemplateElement>,
@@ -135,7 +138,13 @@ export function templateItemsToMap(items: TemplateItem[]): {
     [TemplateTypes.Comment]: [] as Array<TemplateComment>,
     [TemplateTypes.Text]: [] as Array<TemplateText>,
     [TemplateTypes.Directive]: [] as Array<TemplateDirective>,
+  } satisfies {
+    [K in TemplateTypes]: Array<TemplateItemByType[K]>;
   };
+}
+
+export function templateItemsToMap(items: TemplateItem[]) {
+  const map = createTemplateTypeMap();
 
   for (const item of items) {
     map[item.type].push(item as any);

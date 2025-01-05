@@ -815,7 +815,7 @@ foo
       const block = blocks.find((b) => b.tag.type === "template");
       const s = new MagicString(source);
 
-      removeBlockTag(block, s);
+      removeBlockTag(block!, s);
       const transformed = s.toString().trim();
 
       // We want only the <div>Hello</div> lines, no <template> or </template>

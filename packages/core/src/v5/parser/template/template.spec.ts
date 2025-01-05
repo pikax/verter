@@ -8,7 +8,7 @@ describe("parser template", () => {
     const sfc = parseSFC(source, { templateParseOptions: {} });
 
     const template = sfc.descriptor.template;
-    const ast = template ? template.ast : null;
+    const ast = template?.ast!;
     const r = parseTemplate(ast!, source);
 
     return {
@@ -276,6 +276,56 @@ describe("parser template", () => {
                 },
               ],
             },
+          },
+        ],
+      });
+    });
+  });
+
+  // pug is not supported
+  describe.skip("pug", () => {
+    function parse(content: string) {
+      const source = `<template lang="pug">\n${content}</template>`;
+      const sfc = parseSFC(source, { templateParseOptions: {} });
+
+      const template = sfc.descriptor.template;
+      const ast = template?.ast!;
+      const r = parseTemplate(ast!, source);
+
+      return {
+        ...r,
+        ...templateItemsToMap(r.items),
+      };
+    }
+    it("should parse pug", () => {
+      const result = parse("p {{ msg }}");
+
+      expect(result).toMatchObject({
+        Element: [
+          {
+            type: "Element",
+            tag: "div",
+          },
+        ],
+      });
+    });
+
+    it("should parse pug with comments", () => {
+      const result = parse("// comment\ndiv");
+
+      expect(result).toMatchObject({
+        Comment: [
+          {
+            content: " comment",
+            node: {
+              content: " comment",
+            },
+          },
+        ],
+        Element: [
+          {
+            type: "Element",
+            tag: "div",
           },
         ],
       });

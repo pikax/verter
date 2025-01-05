@@ -49,7 +49,9 @@ export function handleConditions<T extends ConditionsContext>(
     conditions: [...parentContext.conditions, condition],
   };
 
-  bindings.push(...retrieveBindings(prop.exp, context));
+  if (prop.exp) {
+    bindings.push(...retrieveBindings(prop.exp, context));
+  }
 
   items.push(condition);
   items.push(...bindings);

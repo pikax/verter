@@ -1,5 +1,9 @@
 import { type InterpolationNode, NodeTypes } from "@vue/compiler-core";
-import { TemplateBinding } from "../types";
+import {
+  TemplateBinding,
+  TemplateInterpolation,
+  TemplateTypes,
+} from "../types";
 
 import { retrieveBindings } from "../utils";
 
@@ -9,9 +13,18 @@ export type InterpolationContext = {
 
 export function handleInterpolation<
   Context extends InterpolationContext = InterpolationContext
->(node: InterpolationNode, context: Context): TemplateBinding[] | null {
+>(
+  node: InterpolationNode,
+  context: Context
+): [TemplateInterpolation, ...TemplateBinding[]] | null {
   if (node.type !== NodeTypes.INTERPOLATION) {
     return null;
   }
-  return retrieveBindings(node.content, context);
+
+  const interpolation = {
+    type: TemplateTypes.Interpolation,
+    node,
+  } as TemplateInterpolation;
+
+  return [interpolation, ...retrieveBindings(node.content, context)];
 }

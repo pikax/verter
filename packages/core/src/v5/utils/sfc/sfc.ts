@@ -22,7 +22,7 @@ export interface VerterSFCBlock<
     | SFCScriptBlock
     | SFCStyleBlock
     | SFCBlock
-    // | SFCInvalidBlock
+  // | SFCInvalidBlock
 > {
   block: T;
 
@@ -188,13 +188,12 @@ export function extractBlocksFromDescriptor(
     };
 
     const tagEnd = source.slice(endTagOffset, nextOffsetEnd);
-    const tagEndMatch = tagEnd.matchAll(BLOCK_END_TAG_REGEX).next()
-      .value as RegExpMatchArray;
-    const tagCloseIndex = endTagOffset + tagEndMatch.index;
+    const tagEndMatch = tagEnd.matchAll(BLOCK_END_TAG_REGEX).next().value;
+    const tagCloseIndex = endTagOffset + (tagEndMatch?.index ?? 0);
 
     const endTagPos: BlockPosition = {
       start: tagCloseIndex,
-      end: tagCloseIndex + tagEndMatch[0].length,
+      end: tagCloseIndex + (tagEndMatch?.[0].length ?? 0),
     };
 
     const contentStartIndex = tagStartIndex + `<${tag}`.length;
@@ -232,62 +231,6 @@ export function extractBlocksFromDescriptor(
       }
     }
   }
-
-  // {
-  //   const remaining = blocks.reduce((acc, x) => {
-  //     const start = x.tag.pos.open.start;
-  //     const end = x.tag.pos.close.end;
-
-  //     const before = acc.slice(0, start);
-  //     const after = acc.slice(end);
-
-  //     return before + " ".repeat(end - start) + after;
-  //   }, source);
-
-  //   const trimmed = remaining.trim();
-  //   if (trimmed.length > 0) {
-  //     const startOffset = source.indexOf(trimmed);
-
-  //     blocks.push({
-  //       block: {
-  //         type: "invalid",
-  //         attrs: {},
-  //         content: remaining.trim(),
-  //         loc: {
-  //           start: {
-  //             offset: startOffset,
-  //             line: 0,
-  //             column: 0,
-  //           },
-  //           end: {
-  //             offset: startOffset + trimmed.length,
-  //             line: 0,
-  //             column: 0,
-  //           },
-  //           source: remaining,
-  //         },
-  //       },
-  //       tag: {
-  //         content: "",
-  //         type: "invalid",
-  //         pos: {
-  //           close: {
-  //             start: startOffset,
-  //             end: startOffset + trimmed.length,
-  //           },
-  //           open: {
-  //             start: startOffset,
-  //             end: startOffset + trimmed.length,
-  //           },
-  //           content: {
-  //             start: startOffset,
-  //             end: startOffset + trimmed.length,
-  //           },
-  //         },
-  //       },
-  //     });
-  //   }
-  // }
   return blocks;
 }
 export function findBlockLanguage(block: VerterSFCBlock) {

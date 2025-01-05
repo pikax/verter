@@ -26,13 +26,14 @@ import { handleText } from "./text/text.js";
 
 export type ParsedTemplateResult = {
   root: RootNode;
-  comments: TemplateComment[];
-  bindings: TemplateBinding[];
-  text: TemplateText[];
-  elements: [];
+  source: string;
+  items: TemplateItem[];
 };
 
-export function parseTemplate(ast: RootNode, source: string) {
+export function parseTemplate(
+  ast: RootNode,
+  source: string
+): ParsedTemplateResult {
   const items: TemplateItem[] = [];
 
   templateWalk(

@@ -6,14 +6,14 @@ import { TemplateTypes } from "../../types.js";
 describe("parser template element loops", () => {
   function parse(
     content: string,
-    context: LoopsContext = { ignoredIdentifiers: [] }
+    context: LoopsContext = { ignoredIdentifiers: [], inFor: false }
   ) {
     const source = `<template>${content}</template>`;
 
     const sfc = parseSFC(source, {});
 
     const template = sfc.descriptor.template;
-    const ast = template ? template.ast : null;
+    const ast = template?.ast!;
 
     const result = handleLoopProp(ast.children[0] as any, ast, context);
 

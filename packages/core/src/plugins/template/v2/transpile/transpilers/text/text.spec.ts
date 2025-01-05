@@ -25,4 +25,9 @@ describe("text element", () => {
     const { result } = transpile(`2 < 1`);
     expect(result).toMatchInlineSnapshot(`"{ "2 < 1" }"`);
   });
+
+  it('should escape " in text', () => {
+    const { result } = transpile(`"`);
+    expect(result).toMatchInlineSnapshot(`"{ "\\"" }"`);
+  });
 });

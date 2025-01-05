@@ -17,7 +17,7 @@ describe("parser template element props", () => {
     const sfc = parseSFC(source, {});
 
     const template = sfc.descriptor.template;
-    const ast = template ? template.ast : null;
+    const ast = template?.ast!;
 
     const result = handleProps(ast.children[0] as any, context);
 
@@ -1455,7 +1455,7 @@ describe("parser template element props", () => {
           },
         ]);
 
-        for (const { props } of result) {
+        for (const { props } of result as any) {
           expectMapping(props, source);
         }
       });
@@ -1538,7 +1538,7 @@ describe("parser template element props", () => {
           },
         ]);
 
-        for (const { props } of result) {
+        for (const { props } of result as any) {
           expectMapping(props, source);
         }
       });

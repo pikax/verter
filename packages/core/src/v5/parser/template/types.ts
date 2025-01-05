@@ -5,6 +5,7 @@ import type {
   DirectiveNode,
   ElementNode,
   ExpressionNode,
+  InterpolationNode,
 } from "@vue/compiler-core";
 import type * as babel_types from "@babel/types";
 import { VerterNode } from "../walk";
@@ -13,6 +14,7 @@ export const enum TemplateTypes {
   Binding = "Binding",
   Comment = "Comment",
   Text = "Text",
+  Interpolation = "Interpolation",
   Prop = "Prop",
   Element = "Element",
 
@@ -31,6 +33,12 @@ export type TemplateComment = {
   node: CommentNode;
 };
 
+export type TemplateInterpolation = {
+  type: TemplateTypes.Interpolation;
+  content: string;
+  node: InterpolationNode;
+};
+
 export type TemplateText = {
   type: TemplateTypes.Text;
   content: string;
@@ -46,6 +54,8 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
           });
       name: string;
 
+      parent: babel_types.Node | null;
+
       /**
        * if this is a local binding, passed by ignoreBindings
        */
@@ -59,6 +69,8 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
           });
 
       name: undefined;
+
+      parent: null;
 
       /**
        * Expression value
@@ -189,6 +201,20 @@ export type TemplateElement = {
   context: ElementContext;
 };
 
+export type TemplateItemByType = {
+  [TemplateTypes.Binding]: TemplateBinding;
+  [TemplateTypes.Comment]: TemplateComment;
+  [TemplateTypes.Interpolation]: TemplateInterpolation;
+  [TemplateTypes.Text]: TemplateText;
+  [TemplateTypes.Prop]: TemplateProp;
+  [TemplateTypes.Element]: TemplateElement;
+  [TemplateTypes.Directive]: TemplateDirective;
+  [TemplateTypes.SlotDeclaration]: TemplateSlot;
+  [TemplateTypes.SlotRender]: TemplateRenderSlot;
+  [TemplateTypes.Condition]: TemplateCondition;
+  [TemplateTypes.Loop]: TemplateLoop;
+};
+
 export type TemplateItem =
   | TemplateComment
   | TemplateText
@@ -199,6 +225,7 @@ export type TemplateItem =
   | TemplateRenderSlot
   | TemplateCondition
   | TemplateLoop
+  | TemplateInterpolation
   | TemplateElement;
 
 export type ElementContext = {
