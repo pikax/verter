@@ -31,6 +31,15 @@ function overrideCamelCase(
 
 export const PropPlugin = {
   name: "VerterProp",
+  used: {
+    normalizeStyle: false,
+    normalizeClass: false,
+  },
+  pre(){
+    this.used.normalizeStyle = false;
+    this.used.normalizeClass = false;
+  },
+
   transformProp(prop, s, ctx) {
     if (prop.node === null) {
       const normaliseAccessor = ctx.retrieveAccessor(
@@ -46,6 +55,10 @@ export const PropPlugin = {
 
       if (!firstDirective) {
         return;
+      }
+
+      if(this.used[normaliseAccessor] === false){
+        this.used[normaliseAccessor] = true;
       }
 
       // update and handle the directive binding
@@ -169,13 +182,5 @@ export const PropPlugin = {
         s.appendLeft(node.loc.end.offset, `={${camelize(nameBinding.name)}}`);
       }
     }
-
-    console.log("pp", prop);
-    // // convert : to v-bind:
-    // s.overwrite(
-    //   prop.node.loc.start.offset,
-    //   prop.node.loc.start.offset + 1,
-    //   "v-bind:"
-    // );
   },
 } as TemplatePlugin;

@@ -17,6 +17,20 @@ export type TemplatePlugin = ProcessPlugin<TemplateItem> & {
   ) => void;
 };
 
+// type TransformPlugin = {
+//     [K in `transform${TemplateTypes}`]?: (
+//     item: K extends `transform${infer C extends TemplateTypes}`
+//       ? TemplateItemByType[C]
+//       : TemplateItem,
+//     s: MagicString,
+//     context: TemplateContext
+//   ) => void;
+// }
+
+// export interface TemplatePlugin extends ProcessPlugin<TemplateItem>,  TransformPlugin{
+ 
+// }
+
 export type TemplateAccessors =
   | "renderList"
   | "normalizeClass"

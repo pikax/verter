@@ -185,14 +185,5 @@ describe("process template plugins prop", () => {
       );
     });
 
-    // this should be tested elsewhere because it requires the BindingPlugin to be available
-    it.skip("with bindings", () => {
-      const { result } = parse(
-        `<div :style="{ color: 'red' }" class="color: green" :class="{ color: 'red', test, super: foo }" />`
-      );
-      expect(result).toMatchInlineSnapshot(
-        `"<div style={___VERTER___normalizeStyle([{ color: 'red' }])}  class={___VERTER___normalizeClass([{ color: 'red', test, super: foo },"color: green"])} />"`
-      );
-    });
   });
 });
