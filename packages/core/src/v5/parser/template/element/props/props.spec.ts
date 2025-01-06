@@ -905,6 +905,12 @@ describe("parser template element props", () => {
             ignore: true,
           },
           {
+            type: TemplateTypes.Function,
+            node: {
+              type: "ArrowFunctionExpression",
+            },
+          },
+          {
             type: TemplateTypes.Binding,
             name: "name",
             ignore: false,
@@ -944,6 +950,12 @@ describe("parser template element props", () => {
             type: TemplateTypes.Binding,
             name: "name",
             ignore: true,
+          },
+          {
+            type: TemplateTypes.Function,
+            node: {
+              type: "ArrowFunctionExpression",
+            },
           },
           {
             type: TemplateTypes.Binding,
@@ -1041,6 +1053,12 @@ describe("parser template element props", () => {
             type: TemplateTypes.Binding,
             name: "check-for-something",
             ignore: true,
+          },
+          {
+            type: TemplateTypes.Function,
+            node: {
+              type: "ArrowFunctionExpression",
+            },
           },
           {
             type: TemplateTypes.Binding,

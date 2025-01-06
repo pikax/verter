@@ -1,5 +1,5 @@
 import { MagicString } from "@vue/compiler-sfc";
-import { TemplatePlugin } from "../../template";
+import { declareTemplatePlugin, TemplatePlugin } from "../../template";
 import {
   CAMELIZE,
   DirectiveNode,
@@ -29,22 +29,22 @@ function overrideCamelCase(
   }
 }
 
-export const PropPlugin = {
+export const PropPlugin = declareTemplatePlugin({
   name: "VerterProp",
   used: {
     normalizeStyle: false,
     normalizeClass: false,
   },
-  pre(){
+  pre() {
     this.used.normalizeStyle = false;
     this.used.normalizeClass = false;
   },
 
   transformProp(prop, s, ctx) {
     if (prop.node === null) {
-      const normaliseAccessor = ctx.retrieveAccessor(
-        prop.name === "style" ? "normalizeStyle" : "normalizeClass"
-      );
+      const accessorType =
+        prop.name === "style" ? "normalizeStyle" : "normalizeClass";
+      const normaliseAccessor = ctx.retrieveAccessor(accessorType);
 
       const nodes = prop.props.map((x) => x.node).filter((x) => x !== null);
 
@@ -57,8 +57,8 @@ export const PropPlugin = {
         return;
       }
 
-      if(this.used[normaliseAccessor] === false){
-        this.used[normaliseAccessor] = true;
+      if (this.used[accessorType] === false) {
+        this.used[accessorType] = true;
       }
 
       // update and handle the directive binding
@@ -183,4 +183,4 @@ export const PropPlugin = {
       }
     }
   },
-} as TemplatePlugin;
+});

@@ -46,9 +46,15 @@ export function handleLoopProp<T extends LoopsContext>(
   const items = [];
 
   const toAddIgnoredIdentifiers = [
-    ...valueBindings.map((x) => x.name),
-    ...keyBindings.map((x) => x.name),
-    ...indexBindings.map((x) => x.name),
+    ...valueBindings
+      .filter((x) => x.type === TemplateTypes.Binding)
+      .map((x) => x.name),
+    ...keyBindings
+      .filter((x) => x.type === TemplateTypes.Binding)
+      .map((x) => x.name),
+    ...indexBindings
+      .filter((x) => x.type === TemplateTypes.Binding)
+      .map((x) => x.name),
   ];
 
   const context =

@@ -30,6 +30,12 @@ export type ParsedTemplateResult = {
   items: TemplateItem[];
 };
 
+export type ParseTemplateContext = {
+  conditions: TemplateCondition[];
+  inFor: boolean;
+  ignoredIdentifiers: string[];
+};
+
 export function parseTemplate(
   ast: RootNode,
   source: string
@@ -87,10 +93,10 @@ export function parseTemplate(
       },
     },
     {
-      conditions: [] as TemplateCondition[],
-      inFor: false as boolean,
-      ignoredIdentifiers: [] as string[],
-    }
+      conditions: [],
+      inFor: false,
+      ignoredIdentifiers: [],
+    } as ParseTemplateContext
   );
 
   return {

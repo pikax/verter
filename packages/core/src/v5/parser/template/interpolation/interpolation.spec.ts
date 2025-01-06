@@ -1,6 +1,7 @@
 import { InterpolationNode, NodeTypes } from "@vue/compiler-core";
 import { handleInterpolation, InterpolationContext } from "./index";
 import { parse as parseSFC, compileTemplate } from "@vue/compiler-sfc";
+import { TemplateTypes } from "../types";
 
 describe("parser template interpolation", () => {
   function interpolate(
@@ -230,13 +231,20 @@ describe("parser template interpolation", () => {
       {
         type: "Interpolation",
       },
+
+      {
+        type: TemplateTypes.Function,
+        node: {
+          type: "ArrowFunctionExpression",
+        },
+      },
       {
         name: "temp",
         ignore: false,
       },
     ]);
 
-    const [_, n] = result as any;
+    const [_, __, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -250,12 +258,18 @@ describe("parser template interpolation", () => {
         type: "Interpolation",
       },
       {
+        type: TemplateTypes.Function,
+        node: {
+          type: "ArrowFunctionExpression",
+        },
+      },
+      {
         name: "temp",
         ignore: false,
       },
     ]);
 
-    const [_, n] = result as any;
+    const [_, __, n] = result as any;
 
     expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
       n.node.loc.source
@@ -459,6 +473,12 @@ describe("parser template interpolation", () => {
         type: "Interpolation",
       },
       {
+        type: TemplateTypes.Function,
+        node: {
+          type: "ArrowFunctionExpression",
+        },
+      },
+      {
         name: "ar",
         ignore: true,
       },
@@ -485,6 +505,12 @@ describe("parser template interpolation", () => {
         type: "Interpolation",
       },
       {
+        type: TemplateTypes.Function,
+        node: {
+          type: "FunctionExpression",
+        },
+      },
+      {
         name: "ar",
         ignore: true,
       },
@@ -509,6 +535,12 @@ describe("parser template interpolation", () => {
     expect(result).toMatchObject([
       {
         type: "Interpolation",
+      },
+      {
+        type: TemplateTypes.Function,
+        node: {
+          type: "FunctionExpression",
+        },
       },
       {
         name: "foo",
@@ -549,6 +581,7 @@ describe("parser template interpolation", () => {
         name: "foo",
         ignore: true,
       },
+
       {
         name: "foo",
         ignore: true,

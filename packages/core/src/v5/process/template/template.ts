@@ -28,7 +28,7 @@ export type TemplatePlugin = ProcessPlugin<TemplateItem> & {
 // }
 
 // export interface TemplatePlugin extends ProcessPlugin<TemplateItem>,  TransformPlugin{
- 
+
 // }
 
 export type TemplateAccessors =
@@ -46,6 +46,10 @@ export type TemplateContext = ProcessContext & {
 
   retrieveAccessor: (name: TemplateAccessors) => string;
 };
+
+export function declareTemplatePlugin<T extends TemplatePlugin>(plugin: T) {
+  return plugin;
+}
 
 export function processTemplate(
   items: TemplateItem[],
@@ -85,6 +89,7 @@ export function processTemplate(
     [TemplateTypes.Comment]: [],
     [TemplateTypes.Text]: [],
     [TemplateTypes.Directive]: [],
+    [TemplateTypes.Function]: [],
   } as {
     [K in TemplateTypes]: Array<
       (
@@ -118,24 +123,24 @@ export function processTemplate(
         if (typeof value !== "function") continue;
         switch (key) {
           case "pre": {
-            prePlugins.push(value as any);
+            prePlugins.push(value.bind(x) as any);
             break;
           }
           case "post": {
-            postPlugins.push(value as any);
+            postPlugins.push(value.bind(x) as any);
             break;
           }
 
           case "transform": {
             PLUGIN_TYPES.forEach((type) => {
-              pluginsByType[type].push(value as any);
+              pluginsByType[type].push(value.bind(x) as any);
             });
             break;
           }
           default: {
             if (key.startsWith("transform")) {
               const type = key.slice(9) as TemplateTypes;
-              pluginsByType[type].push(value as any);
+              pluginsByType[type].push(value.bind(x) as any);
             }
           }
         }

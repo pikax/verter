@@ -4,6 +4,7 @@ import { VerterNode } from "../../../walk";
 import {
   TemplateBinding,
   TemplateDirective,
+  TemplateFunction,
   TemplateProp,
   TemplateTypes,
 } from "../../types";
@@ -113,7 +114,10 @@ export function handleProps(node: VerterNode, context: PropsContext) {
 export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
   prop: T,
   context: PropsContext
-): [TemplateProp | TemplateDirective, ...TemplateBinding[]] {
+): [
+  TemplateProp | TemplateDirective,
+  ...Array<TemplateBinding | TemplateFunction>
+] {
   if (prop.type === NodeTypes.ATTRIBUTE) {
     return [
       {
@@ -132,8 +136,12 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
       {
         type: TemplateTypes.Prop,
         node: prop,
-        name: prop.arg ? nameBinding : null,
-        value: prop.exp ? valueBinding : null,
+        name: prop.arg
+          ? nameBinding.filter((x) => x.type === TemplateTypes.Binding)
+          : null,
+        value: prop.exp
+          ? valueBinding.filter((x) => x.type === TemplateTypes.Binding)
+          : null,
         static: false,
 
         event: prop.name === "on",
@@ -151,8 +159,12 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
         type: TemplateTypes.Directive,
         node: prop,
         name: prop.name,
-        arg: prop.arg ? nameBinding : null,
-        exp: prop.exp ? valueBinding : null,
+        arg: prop.arg
+          ? nameBinding.filter((x) => x.type === TemplateTypes.Binding)
+          : null,
+        exp: prop.exp
+          ? valueBinding.filter((x) => x.type === TemplateTypes.Binding)
+          : null,
         static: false,
         context,
       },

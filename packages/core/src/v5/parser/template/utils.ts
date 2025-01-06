@@ -4,6 +4,8 @@ import {
   TemplateCondition,
   TemplateDirective,
   TemplateElement,
+  TemplateFunction,
+  TemplateInterpolation,
   TemplateItem,
   TemplateItemByType,
   TemplateLoop,
@@ -23,8 +25,8 @@ export function retrieveBindings(
   context: {
     ignoredIdentifiers: string[];
   }
-): TemplateBinding[] {
-  const bindings: TemplateBinding[] = [];
+): Array<TemplateBinding | TemplateFunction> {
+  const bindings: Array<TemplateBinding | TemplateFunction> = [];
 
   if (exp.type !== NodeTypes.SIMPLE_EXPRESSION) {
     return bindings;
@@ -60,6 +62,13 @@ export function retrieveBindings(
               if (param.type === "Identifier") {
                 ignoredIdentifiers.push(param.name);
               }
+            });
+
+            const pN = patchBabelNodeLoc(n, exp);
+            bindings.push({
+              type: TemplateTypes.Function,
+              node: pN,
+              context,
             });
             break;
           }
@@ -138,6 +147,8 @@ export function createTemplateTypeMap() {
     [TemplateTypes.Comment]: [] as Array<TemplateComment>,
     [TemplateTypes.Text]: [] as Array<TemplateText>,
     [TemplateTypes.Directive]: [] as Array<TemplateDirective>,
+    [TemplateTypes.Interpolation]: [] as Array<TemplateInterpolation>,
+    [TemplateTypes.Function]: [] as Array<TemplateFunction>,
   } satisfies {
     [K in TemplateTypes]: Array<TemplateItemByType[K]>;
   };

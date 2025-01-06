@@ -1,12 +1,21 @@
 import { Node, Position } from "@vue/compiler-core";
 import * as babel_types from "@babel/types";
-export function patchBabelNodeLoc(node: babel_types.Node, templateNode: Node) {
+export function patchBabelNodeLoc<T extends babel_types.Node>(
+  node: T,
+  templateNode: Node
+) {
   if (node.loc) {
     patchBabelPosition(node.loc.start, templateNode.loc.start);
     patchBabelPosition(node.loc.end, templateNode.loc.start);
 
     // @ts-expect-error not part of loc
-    node.loc.source = node.loc.identifierName;
+    node.loc.source =
+      node.loc.identifierName ??
+      // @ts-expect-error not part of loc
+      templateNode.content.slice(
+        node.loc.start.index - 1,
+        node.loc.end.index - 1
+      );
   }
 
   return node as babel_types.Node & {

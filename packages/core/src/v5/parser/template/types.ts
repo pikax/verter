@@ -25,6 +25,8 @@ export const enum TemplateTypes {
   SlotDeclaration = "SlotDeclaration",
   Condition = "Condition",
   Loop = "Loop",
+
+  Function = "Function",
 }
 
 export type TemplateComment = {
@@ -43,6 +45,23 @@ export type TemplateText = {
   type: TemplateTypes.Text;
   content: string;
   node: Node;
+};
+
+export type TemplateFunction = {
+  type: TemplateTypes.Function;
+  // node: (
+  //   | babel_types.FunctionDeclaration
+  //   | babel_types.ArrowFunctionExpression
+  //   | babel_types.FunctionExpression
+  // ) & {
+  //   loc: Node["loc"] & babel_types.Node["loc"];
+  // };
+  node:
+    | Omit<babel_types.Node, "loc"> & {
+        loc: Node["loc"] & babel_types.Node["loc"];
+      };
+
+  context: Record<string, any>;
 };
 
 export type TemplateBinding = { type: TemplateTypes.Binding } & (
@@ -213,6 +232,7 @@ export type TemplateItemByType = {
   [TemplateTypes.SlotRender]: TemplateRenderSlot;
   [TemplateTypes.Condition]: TemplateCondition;
   [TemplateTypes.Loop]: TemplateLoop;
+  [TemplateTypes.Function]: TemplateFunction;
 };
 
 export type TemplateItem =
@@ -226,7 +246,8 @@ export type TemplateItem =
   | TemplateCondition
   | TemplateLoop
   | TemplateInterpolation
-  | TemplateElement;
+  | TemplateElement
+  | TemplateFunction;
 
 export type ElementContext = {
   conditions: TemplateCondition[];

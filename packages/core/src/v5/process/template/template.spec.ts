@@ -49,32 +49,41 @@ describe("process template", () => {
     });
   });
 
-  
-  it.skip("slot with v-if", () => {
-    const { result } = parse(`<slot v-if="false"/>`);
-    expect(result).toMatchInlineSnapshot(`
+  describe("conditionals", () => {
+    it.only("v-if", () => {
+      const { result } = parse(
+        `<div v-if="typeof test === 'string'" :test="()=>test" />`
+      );
+      expect(result).toMatchInlineSnapshot(
+        `"{typeof test === 'string'?<div test={()=>test} />:undefined}"`
+      );
+    });
+  });
+
+  describe("slot", () => {
+    it.skip("slot with v-if", () => {
+      const { result } = parse(`<slot v-if="false"/>`);
+      expect(result).toMatchInlineSnapshot(`
       "{ (): any => {if(false){const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
       return <RENDER_SLOT />}}}"
     `);
-  });
+    });
 
-
-  it.skip("slot with parent v-if", () => {
-    const { result } = parse(`<div v-if="false"> <slot /> </div>`);
-    expect(result).toMatchInlineSnapshot(`
+    it.skip("slot with parent v-if", () => {
+      const { result } = parse(`<div v-if="false"> <slot /> </div>`);
+      expect(result).toMatchInlineSnapshot(`
       "{ (): any => {if(false){<div > {()=>{
       if(!(false)) { return; } 
       const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
       return <RENDER_SLOT />}} </div>}}}"
     `);
-  });
+    });
 
-
-  it.skip("slot with parent v-else", () => {
-    const { result } = parse(
-      `<div v-if="false"> <slot /> </div><div v-else> <slot/> </div>`
-    );
-    expect(result).toMatchInlineSnapshot(`
+    it.skip("slot with parent v-else", () => {
+      const { result } = parse(
+        `<div v-if="false"> <slot /> </div><div v-else> <slot/> </div>`
+      );
+      expect(result).toMatchInlineSnapshot(`
       "{ (): any => {if(false){<div > {()=>{
       if(!(false)) { return; } 
       const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
@@ -85,12 +94,12 @@ describe("process template", () => {
       return <RENDER_SLOT/>}} </div>
       }}}"
     `);
-  });
-  it.skip("slot with parent v-else-if", () => {
-    const { result } = parse(
-      `<div v-if="disableDrag"> <slot /> </div><div v-else-if="!disableDrag"> <slot/> </div><div v-else> <slot/> </div>`
-    );
-    expect(result).toMatchInlineSnapshot(`
+    });
+    it.skip("slot with parent v-else-if", () => {
+      const { result } = parse(
+        `<div v-if="disableDrag"> <slot /> </div><div v-else-if="!disableDrag"> <slot/> </div><div v-else> <slot/> </div>`
+      );
+      expect(result).toMatchInlineSnapshot(`
       "{ (): any => {if(___VERTER___ctx.disableDrag){<div > {()=>{
       if(!(___VERTER___ctx.disableDrag)) { return; } 
       const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
@@ -104,16 +113,14 @@ describe("process template", () => {
       return <RENDER_SLOT/>}} </div>
       }}}"
     `);
-  });
+    });
 
-  it.skip("slot with v-for", () => {
-    const { result } = parse(
-      `<slot v-for="name in $slots" :name="name"/>`
-    );
-    expect(result).toMatchInlineSnapshot(`
+    it.skip("slot with v-for", () => {
+      const { result } = parse(`<slot v-for="name in $slots" :name="name"/>`);
+      expect(result).toMatchInlineSnapshot(`
       "{___VERTER___renderList(___VERTER___ctx.$slots,name   =>{ const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots[name]);
       return <RENDER_SLOT  />})}"
     `);
+    });
   });
-
 });
