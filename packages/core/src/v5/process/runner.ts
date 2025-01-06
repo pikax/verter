@@ -21,6 +21,8 @@ export function runPlugins(
     [TemplateTypes.Comment]: [],
     [TemplateTypes.Text]: [],
     [TemplateTypes.Directive]: [],
+    [TemplateTypes.Interpolation]: [],
+    [TemplateTypes.Function]: [],
   } as {
     [K in TemplateTypes]: Array<
       (item: TemplateItemByType[K], context: ProcessContext) => void
