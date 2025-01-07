@@ -12,6 +12,13 @@ import { handleProps, propToTemplateProp } from "../props";
 export type SlotsContext = {
   ignoredIdentifiers: string[];
 };
+
+/**
+ * Handles slot declaration <slot/>
+ * @param node
+ * @param parentContext
+ * @returns
+ */
 export function handleSlotDeclaration<T extends SlotsContext>(
   node: VerterNode,
   parentContext: SlotsContext
@@ -35,9 +42,9 @@ export function handleSlotDeclaration<T extends SlotsContext>(
   ) as TemplateProp[];
 
   const name =
-    (propItems.find((prop) => prop.name === "name") as
-      | TemplateProp
-      | undefined) ?? null;
+    (propItems.find(
+      (prop) => prop.type === TemplateTypes.Binding && prop.name === "name"
+    ) as TemplateProp | undefined) ?? null;
 
   const slot: TemplateSlot = {
     type: TemplateTypes.SlotDeclaration,
@@ -64,6 +71,13 @@ export function handleSlotDeclaration<T extends SlotsContext>(
   };
 }
 
+/**
+ * Handles v-slot directive
+ * @param node
+ * @param parent
+ * @param parentContext
+ * @returns
+ */
 export function handleSlotProp<T extends SlotsContext>(
   node: VerterNode,
   parent: VerterNode,
@@ -102,6 +116,7 @@ export function handleSlotProp<T extends SlotsContext>(
     type: TemplateTypes.SlotRender,
     prop,
     parent,
+    element: node,
     name: prop.arg,
   };
 

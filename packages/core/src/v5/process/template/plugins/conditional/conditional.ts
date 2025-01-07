@@ -29,13 +29,13 @@ export const ConditionalPlugin = declareTemplatePlugin({
     );
 
     // // remove v-
-    // s.remove(node.loc.start.offset, node.loc.start.offset + 2);
+    s.remove(node.loc.start.offset, node.loc.start.offset + 2);
 
-    s.overwrite(
-      node.loc.start.offset,
-      node.loc.start.offset + rawName.length,
-      "{"
-    );
+    // s.overwrite(
+    //   node.loc.start.offset,
+    //   node.loc.start.offset + rawName.length,
+    //   "{"
+    // );
 
     if (node.exp) {
       // remove =
@@ -50,7 +50,8 @@ export const ConditionalPlugin = declareTemplatePlugin({
         node.exp.loc.start.offset,
         "("
       );
-      s.overwrite(node.exp.loc.end.offset, node.exp.loc.end.offset + 1, ")?");
+      s.overwrite(node.exp.loc.end.offset, node.exp.loc.end.offset + 1, "){");
+      // s.overwrite(node.exp.loc.end.offset, node.exp.loc.end.offset + 1, ")?");
 
       // remove delimiters
       //   s.remove(node.exp.loc.start.offset - 1, node.exp.loc.start.offset);
@@ -58,8 +59,10 @@ export const ConditionalPlugin = declareTemplatePlugin({
 
       //   s.overwrite(node.exp.loc.end.offset, node.exp.loc.end.offset + 1, "?");
     } else {
-        
-    //   s.prependLeft(node.loc.end.offset, ": undefined");
+      //   s.prependLeft(node.loc.end.offset, ": undefined");
+
+      // add {  after else
+      s.prependLeft(node.loc.start.offset + rawName.length, "{");
     }
 
     // switch (node.name) {
@@ -78,7 +81,7 @@ export const ConditionalPlugin = declareTemplatePlugin({
     //     break;
     // }
 
-    s.prependLeft(element.loc.end.offset, ": undefined}");
+    s.prependLeft(element.loc.end.offset, "}");
   },
 
   transformProp(item, s, ctx) {

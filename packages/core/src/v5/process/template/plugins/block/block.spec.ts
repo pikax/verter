@@ -1,9 +1,8 @@
 import { parser } from "../../../../parser";
 import { ParsedBlockTemplate } from "../../../../parser/types";
 import { processTemplate, TemplateContext } from "../../template";
-import { BindingPlugin } from "../binding";
+import { MagicString } from "@vue/compiler-sfc";
 import { BlockPlugin } from "./index";
-import { MagicString, parse as parseSFC } from "@vue/compiler-sfc";
 
 describe("process template plugins narrow", () => {
   function parse(content: string, options: Partial<TemplateContext> = {}) {
@@ -57,7 +56,7 @@ describe("process template plugins narrow", () => {
       expect(result).toMatchInlineSnapshot(
         `
         "{()=>{<div v-if="typeof test === string" :test="()=>test" />
-                <div v-else :test="()=>test" />}}"
+                  <div v-else :test="()=>test" />}}"
       `
       );
     });
@@ -71,8 +70,25 @@ describe("process template plugins narrow", () => {
       expect(result).toMatchInlineSnapshot(
         `
         "{()=>{<div v-if="typeof test === string" :test="()=>test" />
-                <div v-else-if="typeof test === number" :test="()=>test" />
-                <div v-else :test="()=>test" />}}"
+                  <div v-else-if="typeof test === number" :test="()=>test" />
+                  <div v-else :test="()=>test" />}}"
+      `
+      );
+    });
+
+    it("v-if v-else-if v-else with if", () => {
+      const { result } = parse(
+        `<div v-if="typeof test === string" :test="()=>test" />
+          <div v-else-if="typeof test === number" :test="()=>test" />
+          <div v-else :test="()=>test" />
+          <div v-if="typeof test === string" :test="()=>test" />`
+      );
+      expect(result).toMatchInlineSnapshot(
+        `
+        "{()=>{<div v-if="typeof test === string" :test="()=>test" />
+                  <div v-else-if="typeof test === number" :test="()=>test" />
+                  <div v-else :test="()=>test" />
+                  <div v-if="typeof test === string" :test="()=>test" />}}"
       `
       );
     });
@@ -99,12 +115,18 @@ describe("process template plugins narrow", () => {
   });
 
   describe("slot", () => {
+    it("v-slot simple", () => {
+      const { result } = parse(`<div v-slot><span>test</span></div>`);
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{<div v-slot><span>test</span></div>}}"`
+      );
+    });
     it("v-slot", () => {
       const { result } = parse(
         `<div v-slot="item" :test="()=>test"><span>test</span></div>`
       );
       expect(result).toMatchInlineSnapshot(
-        `"<div :test="()=>test">{()=>{<span>test</span>}}</div>"`
+        `"{()=>{<div v-slot="item" :test="()=>test"><span>test</span></div>}}"`
       );
     });
 
@@ -113,13 +135,15 @@ describe("process template plugins narrow", () => {
         `<div v-slot="item" v-if="item" :test="()=>test"><span>test</span></div>`
       );
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{<div :test="()=>test">{()=>{<span>test</span>}}</div>}}"`
+        `"{()=>{<div v-slot="item" v-if="item" :test="()=>test"><span>test</span></div>}}"`
       );
     });
 
     it("<template #slot>", () => {
       const { result } = parse(`<template #slot><span>test</span></template>`);
-      expect(result).toMatchInlineSnapshot(`"{()=>{<span>test</span>}}"`);
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{<template #slot><span>test</span></template>}}"`
+      );
     });
   });
 

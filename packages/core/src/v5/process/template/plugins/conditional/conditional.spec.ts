@@ -43,19 +43,22 @@ describe("process template plugins conditional", () => {
       `<div v-if="typeof test === 'string'" :test="()=>test" />`
     );
     expect(result).toMatchInlineSnapshot(
-      `"{(typeof test === 'string')?<div  :test="()=>test" />: undefined}"`
+      `"if(typeof test === 'string'){<div  :test="()=>test" />}"`
     );
   });
 
-  it.only("v-if v-else", () => {
+  it("v-if v-else", () => {
     const { result } = parse(
       `<div v-if="typeof test === 'string'" :test="()=>test" />
         <div v-else :test="()=>test" />`
     );
-    expect(result).toMatchInlineSnapshot(`"<div v-else test={()=>test} />"`);
+    expect(result).toMatchInlineSnapshot(`
+      "if(typeof test === 'string'){<div  :test="()=>test" />}
+              else{<div  :test="()=>test" />}"
+    `);
   });
 
-  it("v-if narrow prop", () => {
+  it.only("v-if narrow prop", () => {
     const { result } = parse(
       `<div v-if="typeof test === 'string'" :test="()=>test" />`
     );

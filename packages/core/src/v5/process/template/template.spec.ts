@@ -55,7 +55,7 @@ describe("process template", () => {
         `<div v-if="typeof test === 'string'" :test="()=>test" />`
       );
       expect(result).toMatchInlineSnapshot(
-        `"{typeof test === 'string'?<div test={()=>test} />:undefined}"`
+        `"if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}"`
       );
     });
   });

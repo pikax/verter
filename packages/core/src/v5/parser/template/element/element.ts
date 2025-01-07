@@ -8,7 +8,7 @@ import {
 } from "../types";
 import { handleLoopProp } from "./loops";
 import { handleProps } from "./props";
-import { handleSlotDeclaration } from "./slots";
+import { handleSlotDeclaration, handleSlotProp } from "./slots";
 import { VerterNode } from "../../walk";
 
 export function handleElement(
@@ -37,6 +37,8 @@ export function handleElement(
     propBindings?.filter((x) => x.type === TemplateTypes.Prop) ?? [];
   const slot = handleSlotDeclaration(node, context);
 
+  const propSlot = handleSlotProp(node, parent, context);
+
   const element: TemplateElement = {
     type: TemplateTypes.Element,
     tag: node.tag,
@@ -51,7 +53,7 @@ export function handleElement(
 
     condition: conditions?.condition ?? null,
     loop: loop?.loop ?? null,
-    slot: slot?.slot ?? null,
+    slot: slot?.slot ?? propSlot?.slot ?? null,
 
     context,
   };
@@ -62,6 +64,7 @@ export function handleElement(
     element,
     ...(propBindings ?? []),
     ...(slot?.items ?? []),
+    ...(propSlot?.items ?? []),
   ];
 
   return {

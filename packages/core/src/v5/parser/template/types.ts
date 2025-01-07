@@ -171,17 +171,13 @@ export type TemplateSlot = {
 
 export type TemplateRenderSlot = {
   type: TemplateTypes.SlotRender;
-} & (
-  | {
-      prop: TemplateProp | TemplateDirective;
-      parent: VerterNode;
+} & {
+  prop: TemplateProp | TemplateDirective;
+  parent: VerterNode;
+  element: VerterNode;
 
-      name: null | string | TemplateBinding[];
-    }
-  | {
-      prop: null;
-    }
-);
+  name: null | string | TemplateBinding[];
+};
 
 export type TemplateCondition = {
   type: TemplateTypes.Condition;
@@ -215,7 +211,7 @@ export type TemplateElement = {
 
   condition: TemplateCondition | null;
   loop: TemplateLoop | null;
-  slot: TemplateSlot | null;
+  slot: TemplateSlot | TemplateRenderSlot | null;
 
   context: ElementContext;
 };
