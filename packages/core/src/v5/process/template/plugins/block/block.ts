@@ -23,7 +23,7 @@ export const BlockPlugin = declareTemplatePlugin({
       const first = block.shift()!;
       const last = block.pop() ?? first;
 
-      s.prependRight(first.loc.start.offset, "{()=>{");
+      s.prependLeft(first.loc.start.offset, "{()=>{");
       s.prependLeft(last.loc.end.offset, "}}");
     }
   },

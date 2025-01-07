@@ -1,4 +1,8 @@
-import { NodeTypes, type ExpressionNode } from "@vue/compiler-core";
+import {
+  DirectiveNode,
+  NodeTypes,
+  type ExpressionNode,
+} from "@vue/compiler-core";
 import {
   TemplateComment,
   TemplateCondition,
@@ -24,7 +28,8 @@ export function retrieveBindings(
   exp: ExpressionNode,
   context: {
     ignoredIdentifiers: string[];
-  }
+  },
+  directive: null | DirectiveNode = null
 ): Array<TemplateBinding | TemplateFunction> {
   const bindings: Array<TemplateBinding | TemplateFunction> = [];
 
@@ -39,6 +44,7 @@ export function retrieveBindings(
       name,
       parent: null,
       ignore: context.ignoredIdentifiers.includes(name) || exp.isStatic,
+      directive,
     });
   } else if (exp.ast) {
     walk(exp.ast, {
@@ -65,9 +71,11 @@ export function retrieveBindings(
             });
 
             const pN = patchBabelNodeLoc(n, exp);
+            const bN = patchBabelNodeLoc(n.body, exp);
             bindings.push({
               type: TemplateTypes.Function,
               node: pN,
+              body: bN,
               context,
             });
             break;

@@ -10,5 +10,6 @@ export const DefaultPlugins = [
     Plugins.CommentPlugin,
     Plugins.TextPlugin,
     Plugins.SlotPlugin,
-    Plugins.ConditionalPlugin
+    Plugins.ConditionalPlugin,
+    Plugins.BlockPlugin,
 ]

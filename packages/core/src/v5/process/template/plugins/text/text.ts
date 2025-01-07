@@ -13,7 +13,12 @@ export const TextPlugin = {
     }
 
     // should replace " with \"
-    s.replace(/\"/g, '\\"');
+
+    for (let i = 0; i < content.length; i++) {
+      if (content[i] === '"') {
+        s.overwrite(item.node.loc.start.offset + i, item.node.loc.start.offset + i + 1, '\\"');
+      }
+    }
 
     s.appendRight(item.node.loc.start.offset, '{ "');
     s.appendLeft(item.node.loc.end.offset, '" }');

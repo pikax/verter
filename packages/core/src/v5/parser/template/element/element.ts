@@ -63,8 +63,7 @@ export function handleElement(
     ...(loop?.items ?? []),
     element,
     ...(propBindings ?? []),
-    ...(slot?.items ?? []),
-    ...(propSlot?.items ?? []),
+    ...[slot?.slot, propSlot?.slot].filter((x) => x),
   ];
 
   return {

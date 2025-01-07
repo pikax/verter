@@ -45,6 +45,12 @@ export type TemplateContext = ProcessContext & {
   camelWhitelistAttributes: (name: string) => boolean;
 
   retrieveAccessor: (name: TemplateAccessors) => string;
+
+  narrow?:
+    | boolean
+    | {
+        functions: boolean;
+      };
 };
 
 export function declareTemplatePlugin<T extends TemplatePlugin>(plugin: T) {
@@ -154,6 +160,10 @@ export function processTemplate(
   for (const item of items) {
     for (const plugin of pluginsByType[item.type]) {
       plugin(item as any, s, context);
+
+      if(true) {
+        console.log("item", item);
+      }
     }
   }
 

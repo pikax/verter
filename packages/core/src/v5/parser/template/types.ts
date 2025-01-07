@@ -61,6 +61,11 @@ export type TemplateFunction = {
         loc: Node["loc"] & babel_types.Node["loc"];
       };
 
+  body:
+    | Omit<babel_types.Node, "loc"> & {
+        loc: Node["loc"] & babel_types.Node["loc"];
+      };
+
   context: Record<string, any>;
 };
 
@@ -79,6 +84,8 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
        * if this is a local binding, passed by ignoreBindings
        */
       ignore: boolean;
+
+      // directive: null | DirectiveNode;
     }
   | {
       node:
@@ -107,6 +114,8 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
       invalid: true;
 
       ignore: false;
+
+      // directive?: null;
     }
 );
 
@@ -188,6 +197,8 @@ export type TemplateCondition = {
   parent: VerterNode;
 
   context: Record<string, any>;
+
+  siblings: TemplateCondition[];
 };
 
 export type TemplateLoop = {

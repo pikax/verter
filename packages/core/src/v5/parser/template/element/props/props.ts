@@ -129,7 +129,9 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
       },
     ];
   } else if (prop.name === "bind" || prop.name === "on") {
-    const nameBinding = prop.arg ? retrieveBindings(prop.arg, context) : [];
+    const nameBinding = prop.arg
+      ? retrieveBindings(prop.arg, context, prop)
+      : [];
     const valueBinding = prop.exp ? retrieveBindings(prop.exp, context) : [];
 
     return [

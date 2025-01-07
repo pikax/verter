@@ -1,25 +1,59 @@
-import { NodeTypes } from "@vue/compiler-core";
+import { CommentNode, NodeTypes } from "@vue/compiler-core";
 import {
   TemplateCondition,
   TemplateTypes,
 } from "../../../../parser/template/types";
 import { declareTemplatePlugin } from "../../template";
 import { ParseTemplateContext } from "../../../../parser/template";
+import type * as babel_types from "@babel/types";
+import { MagicString } from "@vue/compiler-sfc";
 
 export const ConditionalPlugin = declareTemplatePlugin({
   name: "VerterConditional",
 
   narrows: [] as {
     index: number;
-    condition: TemplateCondition[];
+    inBlock: boolean;
+    conditions: TemplateCondition[];
+    // conditions: string[];
   }[],
 
-  transformCondition(item, s, ctx) {
-    console.log("sss", item);
+  pre() {
+    this.narrows.length = 0;
+  },
 
+  transformCondition(item, s, ctx) {
     const element = item.element;
     const node = item.node;
     const rawName = node.rawName!;
+
+    // Move comments to after the element contition narrow and
+    // before the element condition
+    // to respect top comments such as @ts-expect-any
+    {
+      const siblings = "children" in item.parent ? item.parent.children : [];
+      if (siblings[0] !== element) {
+        // if the element has previous siblings
+        // we want to move the comments to after the narrow block
+        const comments: CommentNode[] = [];
+        for (let i = 0; i < siblings.length; i++) {
+          const e = siblings[i];
+          if (element === e) {
+            break;
+          }
+          if (e.type === NodeTypes.COMMENT) {
+            comments.push(e);
+          } else {
+            comments.length = 0;
+          }
+        }
+
+        if (comments.length) {
+          const from = Math.min(...comments.map((x) => x.loc.start.offset));
+          s.move(from, element.loc.start.offset - 1, element.loc.start.offset);
+        }
+      }
+    }
 
     // move v-* to the beginning of the element
     s.move(
@@ -27,6 +61,11 @@ export const ConditionalPlugin = declareTemplatePlugin({
       node.loc.end.offset,
       element.loc.start.offset
     );
+
+    if (node.name === "else-if") {
+      // replace '-' with ' '
+      s.overwrite(node.loc.start.offset + 6, node.loc.start.offset + 7, " ");
+    }
 
     // // remove v-
     s.remove(node.loc.start.offset, node.loc.start.offset + 2);
@@ -38,6 +77,11 @@ export const ConditionalPlugin = declareTemplatePlugin({
     // );
 
     if (node.exp) {
+      // this.conditions.set(
+      //   node,
+      //   s.slice(node.exp.loc.start.offset, node.exp.loc.end.offset).toString()
+      // );
+
       // remove =
       s.remove(
         node.loc.start.offset + rawName.length,
@@ -64,32 +108,41 @@ export const ConditionalPlugin = declareTemplatePlugin({
       // add {  after else
       s.prependLeft(node.loc.start.offset + rawName.length, "{");
     }
-
-    // switch (node.name) {
-    //   case "if":
-    //     // remove v-if
-    //     // s.remove(node.loc.start.offset, node.loc.end.offset);
-
-    //     break;
-    //   case "else-if":
-    //     // remove v-else-if
-    //     s.remove(node.loc.start.offset, node.loc.end.offset);
-    //     break;
-    //   case "else":
-    //     // remove v-else
-    //     s.remove(node.loc.start.offset, node.loc.end.offset);
-    //     break;
-    // }
-
     s.prependLeft(element.loc.end.offset, "}");
+
+    // narrow conditions
+    if (ctx.narrow !== false) {
+      if (item.context.conditions.length > 0) {
+        const condition = generateBlockCondition(item.context.conditions, s);
+        s.prependLeft(element.loc.start.offset, condition);
+      }
+    }
   },
 
-  transformProp(item, s, ctx) {
+  // transform(item, s, ctx) {
+  //   if (item.type !== TemplateTypes.Function) {
+  //     return;
+  //   }
+  //   console.log("item", item);
+
+  //   const context = item.context as ParseTemplateContext;
+  //   if (context.conditions.length === 0) {
+  //     return;
+  //   }
+
+  //   const conditions = context.conditions;
+  //   const node = item.node;
+
+  //   conditions.map((x) =>
+  //     s.slice(x.node.loc.start.offset, x.node.loc.end.offset).toString()
+  //   );
+  // },
+
+  transformFunction(item, s, ctx) {
     if (
-      item.node === null ||
-      item.node.type !== NodeTypes.DIRECTIVE ||
-      !item.node.exp ||
-      !("context" in item)
+      ctx.narrow === undefined ||
+      ctx.narrow === false ||
+      (ctx.narrow !== true && !ctx.narrow.functions)
     ) {
       return;
     }
@@ -98,23 +151,70 @@ export const ConditionalPlugin = declareTemplatePlugin({
     if (context.conditions.length === 0) {
       return;
     }
-
+    const conditions = context.conditions;
     const node = item.node;
 
-    // this.narrows.push({
-    //   index: item.index,
-    //   condition: {
-    //     element: item.element,
-    //     node: item.node,
-    //   },
-    // });
+    const inBlock = node.type.indexOf("Arrow") === -1;
+    s.prependRight(
+      item.body.loc.start.offset,
+      inBlock
+        ? generateBlockCondition(conditions, s)
+        : generateTernaryCondition(conditions, s)
+    );
   },
-
-  //   transform(item, s, ctx) {
-  //     if (item.type === TemplateTypes.Condition) {
-  //       return;
-  //       //   this.transformCondition(item, s, ctx);
-  //     }
-
-  //   },
 });
+
+function generateBlockCondition(
+  conditions: TemplateCondition[],
+  s: MagicString
+) {
+  const text = generateConditionText(conditions, s);
+  return `if(!(${text})) return;`;
+}
+
+function generateTernaryCondition(
+  conditions: TemplateCondition[],
+  s: MagicString
+) {
+  const text = generateConditionText(conditions, s);
+  return `!(${text})? undefined :`;
+}
+
+function generateConditionText(
+  conditions: TemplateCondition[],
+  s: MagicString
+): string {
+  const siblings = conditions
+    .map((x) => x.siblings)
+    .flat()
+    .filter((x) => x);
+
+  let negations = "";
+  if (siblings.length > 0) {
+    const st = generateConditionText(siblings, s);
+    if (st) {
+      negations = `!(${st})`;
+    }
+  }
+
+  const positive = conditions
+    .map((x) =>
+      s.slice(x.node.loc.start.offset, x.node.loc.end.offset).toString()
+    )
+    .filter((x) => x)
+    .map((x) => {
+      const ending = x.endsWith("{") ? -1 : x.length;
+
+      if (x.startsWith("if")) {
+        x = x.slice(2, ending);
+      } else if (x.startsWith("else if")) {
+        x = x.slice(7, ending);
+      } else if (x.startsWith("else")) {
+        x = x.slice(4, ending);
+      }
+      return x;
+    })
+    .join(" && ");
+
+  return [negations, positive].filter((x) => x).join(" && ");
+}

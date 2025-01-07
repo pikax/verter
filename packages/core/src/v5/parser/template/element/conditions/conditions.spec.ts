@@ -159,4 +159,176 @@ describe("parser template conditions", () => {
       },
     });
   });
+
+  describe("multiple", () => {
+    function parse(
+      content: string,
+      context: ConditionsContext = {
+        ignoredIdentifiers: [],
+        conditions: [],
+      }
+    ) {
+      const source = `<template>${content}</template>`;
+
+      const sfc = parseSFC(source, {});
+
+      const template = sfc.descriptor.template;
+      const ast = template?.ast!;
+
+      const results = ast!.children.map((x) =>
+        handleConditions(x as any, ast!, context)
+      );
+
+      return {
+        source,
+        results,
+
+        items: results.flatMap((x) => x?.items),
+      };
+    }
+    it("v-if v-else", () => {
+      const { items } = parse(
+        `<div v-if="true" />
+          <div v-else />`
+      );
+
+      expect(items).toMatchObject([
+        {
+          type: TemplateTypes.Condition,
+          node: {
+            name: "if",
+          },
+          siblings: [],
+        },
+        {
+          type: TemplateTypes.Binding,
+          name: "true",
+        },
+        {
+          type: TemplateTypes.Condition,
+          node: {
+            name: "else",
+          },
+          siblings: [
+            {
+              type: TemplateTypes.Condition,
+              node: {
+                name: "if",
+              },
+              siblings: [],
+            },
+          ],
+        },
+      ]);
+    });
+    it("v-if v-else-if", () => {
+      const { items } = parse(
+        `<div v-if="true" />
+          <div v-else-if="true" />`
+      );
+
+      expect(items).toMatchObject([
+        {
+          type: TemplateTypes.Condition,
+          node: {
+            name: "if",
+          },
+          siblings: [],
+        },
+        {
+          type: TemplateTypes.Binding,
+          name: "true",
+        },
+        {
+          type: TemplateTypes.Condition,
+          node: {
+            name: "else-if",
+          },
+          siblings: [
+            {
+              type: TemplateTypes.Condition,
+              node: {
+                name: "if",
+              },
+              siblings: [],
+            },
+          ],
+        },
+        {
+          type: TemplateTypes.Binding,
+          name: "true",
+        },
+      ]);
+    });
+    it("v-if v-else-if v-else", () => {
+      const { items } = parse(
+        `<div v-if="true" />
+          <div v-else-if="false" />
+          <div v-else />`
+      );
+
+      expect(items).toMatchObject([
+        {
+          type: TemplateTypes.Condition,
+          node: {
+            name: "if",
+          },
+          siblings: [],
+        },
+        {
+          type: TemplateTypes.Binding,
+          name: "true",
+        },
+        {
+          type: TemplateTypes.Condition,
+          node: {
+            name: "else-if",
+          },
+          siblings: [
+            {
+              type: TemplateTypes.Condition,
+              node: {
+                name: "if",
+              },
+              siblings: [],
+            },
+          ],
+        },
+        {
+          type: TemplateTypes.Binding,
+          name: "false",
+        },
+        {
+          type: TemplateTypes.Condition,
+          node: {
+            name: "else",
+          },
+          siblings: [
+            {
+              type: TemplateTypes.Condition,
+              node: {
+                name: "if",
+              },
+              siblings: [],
+            },
+            {
+              type: TemplateTypes.Condition,
+              node: {
+                name: "else-if",
+              },
+              siblings: [
+                {
+                  type: TemplateTypes.Condition,
+                  node: {
+                    name: "if",
+                  },
+                  siblings: [],
+                },
+              ],
+            },
+          ],
+        },
+      ]);
+    });
+  });
 });

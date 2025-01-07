@@ -84,6 +84,16 @@ describe("process template plugins prop", () => {
         `"<div testCamelCase={'test-camel'} />"`
       );
     });
+
+    it(':[msg]="msg"', () => {
+      const { result } = parse(`<div :[msg]="msg" />`);
+      expect(result).toMatchInlineSnapshot(`"<div {...{[msg]:msg}} />"`);
+    });
+
+    it('v-bind:[msg]="msg"', () => {
+      const { result } = parse(`<div v-bind:[msg]="msg" />`);
+      expect(result).toMatchInlineSnapshot(`"<div {...{[msg]:msg}} />"`);
+    });
   });
 
   describe("events", () => {
@@ -184,6 +194,5 @@ describe("process template plugins prop", () => {
         `"<div v-if="test" style={___VERTER___normalizeStyle([{ color: 'red' },"color: blue"])} foo={foo}  class={___VERTER___normalizeClass([{ color: 'red' },"color"])} onTest={onTest}  test={test} />"`
       );
     });
-
   });
 });

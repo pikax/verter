@@ -22,8 +22,8 @@ describe("process template plugins narrow", () => {
         // clean template tag
         {
           post: (s) => {
-            s.remove(0, "<template>".length);
-            s.remove(source.length - "</template>".length, source.length);
+            s.update(0, "<template>".length, "");
+            s.update(source.length - "</template>".length, source.length, "");
           },
         },
       ],

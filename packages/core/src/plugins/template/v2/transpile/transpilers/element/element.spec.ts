@@ -814,6 +814,7 @@ describe("tranpiler element", () => {
         `);
       });
 
+
       describe("class & style merge", () => {
         it("should do class merge", () => {
           const { result } = transpile(

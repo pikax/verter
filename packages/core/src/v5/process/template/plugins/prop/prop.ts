@@ -41,6 +41,7 @@ export const PropPlugin = declareTemplatePlugin({
   },
 
   transformProp(prop, s, ctx) {
+    // mergers aka style & class
     if (prop.node === null) {
       const accessorType =
         prop.name === "style" ? "normalizeStyle" : "normalizeClass";
@@ -136,7 +137,6 @@ export const PropPlugin = declareTemplatePlugin({
       }
     } else {
       // directive
-
       const [nameBinding] = prop.name ?? [];
       // handle camelCase
       if (nameBinding?.ignore === true) {
@@ -170,16 +170,38 @@ export const PropPlugin = declareTemplatePlugin({
         s.overwrite(node.loc.start.offset, node.loc.start.offset + 1, "on");
       }
 
-      // append { and } to value
-      if (node.exp) {
-        s.overwrite(
-          node.exp.loc.start.offset - 1,
-          node.exp.loc.start.offset,
-          "{"
-        );
-        s.overwrite(node.exp.loc.end.offset, node.exp.loc.end.offset + 1, "}");
-      } else if (nameBinding?.ignore === true) {
-        s.appendLeft(node.loc.end.offset, `={${camelize(nameBinding.name)}}`);
+      // handle dynamic bindings
+      if (node.arg?.loc.source.startsWith("[")) {
+        // add {...{
+        s.prependRight(node.arg.loc.start.offset, "{...{");
+        if (node.exp) {
+          // replace ={ to :
+          s.overwrite(
+            node.exp.loc.start.offset - 2,
+            node.exp.loc.start.offset,
+            ":"
+          );
+
+          // remove last "
+          s.remove(node.exp.loc.end.offset, node.exp.loc.end.offset + 1);
+        }
+        s.prependLeft(node.loc.end.offset, "}}");
+      } else {
+        // append { and } to value
+        if (node.exp) {
+          s.overwrite(
+            node.exp.loc.start.offset - 1,
+            node.exp.loc.start.offset,
+            "{"
+          );
+          s.overwrite(
+            node.exp.loc.end.offset,
+            node.exp.loc.end.offset + 1,
+            "}"
+          );
+        } else if (nameBinding?.ignore === true) {
+          s.appendLeft(node.loc.end.offset, `={${camelize(nameBinding.name)}}`);
+        }
       }
     }
   },

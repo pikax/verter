@@ -42,9 +42,15 @@ export function handleSlotDeclaration<T extends SlotsContext>(
   ) as TemplateProp[];
 
   const name =
-    (propItems.find(
-      (prop) => prop.type === TemplateTypes.Binding && prop.name === "name"
-    ) as TemplateProp | undefined) ?? null;
+    (propItems.find((prop) => (prop as any).name === "name") as
+      | TemplateProp
+      | undefined) ?? null;
+  // const name =
+  //   (props.find((prop) => prop.name === "name") as TemplateProp | undefined) ??
+  //   propItems.find(
+  //     (x) => x.type === TemplateTypes.Binding && x.name === "name"
+  //   ) ??
+  //   null;
 
   const slot: TemplateSlot = {
     type: TemplateTypes.SlotDeclaration,

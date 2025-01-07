@@ -4,6 +4,7 @@ import { processTemplate, TemplateContext } from "../../template";
 import { BindingPlugin } from "../binding";
 import { MagicString, parse as parseSFC } from "@vue/compiler-sfc";
 import { SlotPlugin } from "./index";
+import { PropPlugin } from "../prop";
 
 describe("process template plugins slot", () => {
   function parse(content: string, options: Partial<TemplateContext> = {}) {
@@ -19,7 +20,9 @@ describe("process template plugins slot", () => {
     const r = processTemplate(
       templateBlock.result.items,
       [
+        BindingPlugin,
         SlotPlugin,
+        PropPlugin,
         // clean template tag
         {
           post: (s) => {
@@ -42,31 +45,30 @@ describe("process template plugins slot", () => {
   describe("declaration", () => {
     it("<slot/>", () => {
       const { result } = parse(`<slot/>`);
-      expect(result).toMatchInlineSnapshot(`"<slot />"`);
+      expect(result).toMatchInlineSnapshot(`"<slot/>"`);
     });
     it('<slot name="test" />', () => {
       const { result } = parse(`<slot name="test" />`);
-      expect(result).toMatchInlineSnapshot(`"<slot name={\\"test\\"} />"`);
+      expect(result).toMatchInlineSnapshot(`"<slot name={"test"} />"`);
     });
 
     it(`<slot :name="test"/>`, () => {
       const { result } = parse(`<slot :name="test"/>`);
       expect(result).toMatchInlineSnapshot(
-        `"<slot :name={___VERTER___ctx.test} />"`
-      );
+      `"<slot name={___VERTER___ctx.test}/>"`);
     });
 
     it(`<slot :[msg]="test"/>`, () => {
       const { result } = parse(`<slot :[msg]="test"/>`);
       expect(result).toMatchInlineSnapshot(
-        `"<slot :[___VERTER___ctx.msg]={___VERTER___ctx.test} />"`
+        `"<slot {...{[___VERTER___ctx.msg]:___VERTER___ctx.test}}/>"`
       );
     });
   });
 
-//   describe("render", () => {
+  //   describe("render", () => {
 
-//   })
+  //   })
 
   /*
   describe("slot", () => {

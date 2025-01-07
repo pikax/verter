@@ -22,8 +22,9 @@ describe("process template", () => {
         // clean template tag
         {
           post: (s) => {
-            s.remove(0, "<template>".length);
-            s.remove(source.length - "</template>".length, source.length);
+            s.update(0, "<template>".length, "");
+            // s.remove(0, "<template>".length);
+            s.update(source.length - "</template>".length, source.length, "");
           },
         },
       ],
@@ -50,13 +51,28 @@ describe("process template", () => {
   });
 
   describe("conditionals", () => {
-    it.only("v-if", () => {
+    it("v-if", () => {
       const { result } = parse(
         `<div v-if="typeof test === 'string'" :test="()=>test" />`
       );
       expect(result).toMatchInlineSnapshot(
-        `"if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}"`
+        `"{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}}}"`
       );
+    });
+
+    it.only("v-if > v-if & expect error", () => {
+      const { result } = parse(
+        `<div v-if="test === 'app'"> 
+          <!-- @ts-expect-error no overlap -->
+          <div v-if="test === 'foo'"> Error </div>
+        </div>`
+      );
+      expect(result).toMatchInlineSnapshot(`
+        "{()=>{if(___VERTER___ctx.test === 'app'){<div > 
+                   {()=>{if(!((___VERTER___ctx.test === 'app'))) return;/* @ts-expect-error no overlap */
+                 if(___VERTER___ctx.test === 'foo'){<div >{ " Error " }</div>}}}
+                </div>}}}"
+      `);
     });
   });
 

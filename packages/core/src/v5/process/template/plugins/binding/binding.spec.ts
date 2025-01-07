@@ -80,6 +80,19 @@ describe("process template plugins binding", () => {
       `"<div :test="(e: ___VERTER___ctx.Argument)=> e + ___VERTER___ctx.test" />"`
     );
   });
+  test(':[msg]="msg"', () => {
+    const { result } = parse(`<div :[msg]="msg" />`);
+    expect(result).toMatchInlineSnapshot(
+      `"<div :[___VERTER___ctx.msg]="___VERTER___ctx.msg" />"`
+    );
+  });
+
+  test(':[msg]="msg"', () => {
+    const { result } = parse(`<div v-bind:[msg]="msg" />`);
+    expect(result).toMatchInlineSnapshot(
+      `"<div v-bind:[___VERTER___ctx.msg]="___VERTER___ctx.msg" />"`
+    );
+  });
 
   describe("nested", () => {
     test("{{ { test } }}", () => {
@@ -92,6 +105,27 @@ describe("process template plugins binding", () => {
     test("{{ [ test ] }}", () => {
       const { result } = parse(`{{ [ test ] }}`);
       expect(result).toMatchInlineSnapshot(`"{{ [ ___VERTER___ctx.test ] }}"`);
+    });
+  });
+
+  describe("array", () => {
+    test("array", () => {
+      const { result } = parse(`{{ [test] }}`);
+      expect(result).toMatchInlineSnapshot(`"{{ [___VERTER___ctx.test] }}"`);
+    });
+
+    test("array with object", () => {
+      const { result } = parse(`{{ [test, { test }] }}`);
+      expect(result).toMatchInlineSnapshot(
+        `"{{ [___VERTER___ctx.test, { test: ___VERTER___ctx.test }] }}"`
+      );
+    });
+
+    test("array with object and array", () => {
+      const { result } = parse(`{{ [test, { test }, [test]] }}`);
+      expect(result).toMatchInlineSnapshot(
+        `"{{ [___VERTER___ctx.test, { test: ___VERTER___ctx.test }, [___VERTER___ctx.test]] }}"`
+      );
     });
   });
 });
