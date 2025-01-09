@@ -106,6 +106,7 @@ export function retrieveBindings(
               node: pNode,
               name,
               parent,
+              directive:null,
 
               ignore: ignoredIdentifiers.includes(name),
             });

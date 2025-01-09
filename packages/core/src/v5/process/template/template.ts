@@ -68,7 +68,7 @@ export type TemplateContext = ProcessContext & {
     type?: "prepend" | "append";
     direction?: "left" | "right";
 
-    move?: TemplateCondition | null;
+    condition?: TemplateCondition | null;
   }>;
 };
 

@@ -39,6 +39,8 @@ declare global {
 export const SlotPlugin = declareTemplatePlugin({
   name: "VerterSlot",
 
+  processedParent: new Set<ElementNode>(),
+
   // slots: new Set<ElementNode>(),
   // pre() {
   //   this.slots.clear();
@@ -89,6 +91,9 @@ export const SlotPlugin = declareTemplatePlugin({
     parent: ElementNode,
     ctx: TemplateContext
   ) {
+    if (this.processedParent.has(parent)) return;
+    this.processedParent.add(parent);
+
     const slotInstance = ctx.retrieveAccessor("slotInstance");
     const children = parent.children;
     const element = slot.element as ElementNode;
@@ -120,23 +125,12 @@ export const SlotPlugin = declareTemplatePlugin({
     s.prependLeft(pos, ` v-slot={(${slotInstance})=>{`);
 
     if (ctx.toNarrow && slot.context.conditions.length > 0) {
-      // const condition = element.props.find(
-      //   (x) =>
-      //     x.name === "v-if" || x.name === "v-else-if" || x.name === "v-else"
-      // );
-
       ctx.toNarrow.push({
         index: pos,
         inBlock: true,
         conditions: slot.context.conditions,
         type: "append",
-        move: slot.condition,
-        // move: condition
-        //   ? {
-        //       type: TemplateTypes.Condition,
-
-        //     }
-        //   : null,
+        condition: slot.condition,
       });
     }
 
@@ -327,25 +321,73 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
           s.overwrite(start, end, `$slots`);
           // s.overwrite(start, end, `${slotRender}(${slotInstance}`);
           if (prop.node.arg) {
-            s.prependLeft(end, `,`);
+            // s.prependLeft(end, `,`);
 
             if (
               prop.node.arg.type === NodeTypes.SIMPLE_EXPRESSION &&
               prop.node.arg.isStatic
             ) {
-              s.prependRight(prop.node.arg.loc.start.offset, '"');
-              s.prependLeft(prop.node.arg.loc.end.offset, '"');
+              s.prependLeft(end, ".");
+              // s.prependRight(prop.node.arg.loc.start.offset, '');
+              // s.prependLeft(prop.node.arg.loc.end.offset, '"');
             } else {
-              s.remove(
-                prop.node.arg.loc.start.offset,
-                prop.node.arg.loc.start.offset + 1
-              );
-              s.remove(
-                prop.node.arg.loc.end.offset - 1,
-                prop.node.arg.loc.end.offset
-              );
+              // s.remove(
+              //   prop.node.arg.loc.start.offset,
+              //   prop.node.arg.loc.start.offset + 1
+              // );
+              // s.remove(
+              //   prop.node.arg.loc.end.offset - 1,
+              //   prop.node.arg.loc.end.offset
+              // );
             }
           }
+
+          if (prop.node.exp) {
+            //todo
+
+            // update = to )
+            s.overwrite(
+              prop.node.exp.loc.start.offset - 2,
+              prop.node.exp.loc.start.offset -1,
+              ")"
+            );
+
+            s.prependLeft(prop.node.exp.loc.start.offset - 1, "(");
+
+            // update delimiters " to (
+            s.overwrite(
+              prop.node.exp.loc.start.offset - 1,
+              prop.node.exp.loc.start.offset,
+              "("
+            );
+            s.overwrite(
+              prop.node.exp.loc.end.offset,
+              prop.node.exp.loc.end.offset + 1,
+              ")"
+            );
+            s.prependLeft(prop.node.exp.loc.end.offset +1, "=>{");
+
+            // s.remove(
+            //   prop.node.exp.loc.start.offset - 2,
+            //   prop.node.exp.loc.start.offset -1
+            // );
+            // s.prependLeft(prop.node.exp.loc.start.offset-1, ")");
+          } else {
+            s.appendLeft(tagEnd, `)(()=>{`);
+          }
+
+          // s.appendLeft(tagEnd, `)=>{`);
+
+          ctx.toNarrow?.push({
+            index: prop.node.exp ? prop.node.exp.loc.end.offset +1 : tagEnd,
+            inBlock: true,
+            conditions: slot.context.conditions,
+            type: "append",
+            // empty condition because we need the current slot condition to also apply if present
+            condition: null,
+          });
+
+          s.prependLeft(node.loc.end.offset, "});");
         } else {
           // todo?
           debugger;

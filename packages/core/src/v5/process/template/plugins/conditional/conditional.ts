@@ -26,7 +26,7 @@ export const ConditionalPlugin = declareTemplatePlugin({
   post(s, ctx) {
     if (!ctx.toNarrow) return;
     for (const narrow of ctx.toNarrow) {
-      const conditions = narrow.conditions.filter((x) => x !== narrow.move);
+      const conditions = narrow.conditions.filter((x) => x !== narrow.condition);
       if (conditions.length > 0) {
         const condition = narrow.inBlock
           ? generateBlockCondition(conditions, s)
@@ -46,13 +46,6 @@ export const ConditionalPlugin = declareTemplatePlugin({
           }
         }
       }
-      if (narrow.move) {
-        // s.move(
-        //   narrow.move.node.loc.start.offset,
-        //   narrow.move.node.loc.end.offset,
-        //   narrow.index
-        // );
-      }
     }
   },
 
@@ -61,13 +54,9 @@ export const ConditionalPlugin = declareTemplatePlugin({
     const node = item.node;
     const rawName = node.rawName!;
 
+
     // slot render have special conditions and places where the v-if should be placed
-    if (
-      element.tag === "template" &&
-      element.props.find((x) => x.name === "slot")
-    ) {
-      return;
-    }
+    const canMove = !(element.tag === "template" && element.props.find((x) => x.name === "slot"));
 
     // Move comments to after the element contition narrow and
     // before the element condition
@@ -97,12 +86,14 @@ export const ConditionalPlugin = declareTemplatePlugin({
       }
     }
 
+    if(canMove) {
     // move v-* to the beginning of the element
     s.move(
       node.loc.start.offset,
       node.loc.end.offset,
       element.loc.start.offset
     );
+  }
 
     if (node.name === "else-if") {
       // replace '-' with ' '

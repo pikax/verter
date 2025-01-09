@@ -94,6 +94,12 @@ describe("process template plugins binding", () => {
     );
   });
 
+  test("v-slot:[msg]", () => {
+    const { result } = parse(`<div v-slot:[msg] />`);
+    expect(result).toMatchInlineSnapshot(
+      `"<div v-slot:[___VERTER___ctx.msg] />"`
+    );
+  });
   describe("nested", () => {
     test("{{ { test } }}", () => {
       const { result } = parse(`{{ { test } }}`);
