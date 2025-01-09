@@ -17,7 +17,7 @@ export type ProcessContext = {
   blocks: ParsedBlock[];
 };
 
-export type ProcessPlugin<T> = {
+export type ProcessPlugin<T, C extends ProcessContext> = {
   name?: string;
 
   enforce?: "pre" | "post";
@@ -28,8 +28,8 @@ export type ProcessPlugin<T> = {
    * @param context
    * @returns
    */
-  transform?: (item: T, s: MagicString, context: ProcessContext) => void;
+  transform?: (item: T, s: MagicString, context: C) => void;
 
-  post?: (s: MagicString, context: ProcessContext) => void;
-  pre?: (s: MagicString, context: ProcessContext) => void;
+  post?: (s: MagicString, context: C) => void;
+  pre?: (s: MagicString, context: C) => void;
 };

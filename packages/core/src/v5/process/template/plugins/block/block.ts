@@ -29,6 +29,13 @@ export const BlockPlugin = declareTemplatePlugin({
   },
 
   transformCondition(item) {
+    // slot render have special conditions and places where the v-if should be placed
+    if (
+      item.element.tag === "template" &&
+      item.element.props.find((x) => x.name === "slot")
+    ) {
+      return;
+    }
     this.addItem(item.element, item.parent);
   },
 
@@ -41,12 +48,12 @@ export const BlockPlugin = declareTemplatePlugin({
   },
 
   transformSlotRender(item) {
-    this.addItem(item.element, item.parent);
+    // this.addItem(item.element, item.parent);
   },
 
   transformElement(item) {
-    if (item.tag === "template") {
-      this.addItem(item.node, item.parent);
-    }
+    // if (item.tag === "template") {
+    //   this.addItem(item.node, item.parent);
+    // }
   },
 });

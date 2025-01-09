@@ -1,5 +1,6 @@
 import { MagicString } from "@vue/compiler-sfc";
 import {
+  TemplateCondition,
   TemplateItem,
   TemplateItemByType,
   TemplateTypes,
@@ -7,7 +8,7 @@ import {
 import { defaultPrefix } from "../utils";
 import { ProcessContext, ProcessPlugin } from "./../types";
 
-export type TemplatePlugin = ProcessPlugin<TemplateItem> & {
+export type TemplatePlugin = ProcessPlugin<TemplateItem, TemplateContext> & {
   [K in `transform${TemplateTypes}`]?: (
     item: K extends `transform${infer C extends TemplateTypes}`
       ? TemplateItemByType[C]
@@ -37,8 +38,14 @@ export type TemplateAccessors =
   | "normalizeStyle"
   | "COMPONENT_CTX"
   | "ctx"
+  // aka $slots
   | "$slot"
-  | "slotComponent";
+  // slotToComponent, const slotComponent = ctx.$slots.default;
+  | "slotComponent"
+  // instance from v-slot=
+  | "slotInstance"
+  // slotRender, slotRender(ctx.$slots.default, (slotProps)=> [...])
+  | "slotRender";
 export type TemplateContext = ProcessContext & {
   prefix: (str: string) => string;
   isCustomElement: (tag: string) => boolean;
@@ -52,6 +59,17 @@ export type TemplateContext = ProcessContext & {
     | {
         functions: boolean;
       };
+
+  toNarrow?: Array<{
+    index: number;
+    inBlock: boolean;
+    conditions: TemplateItemByType[TemplateTypes.Condition][];
+
+    type?: "prepend" | "append";
+    direction?: "left" | "right";
+
+    move?: TemplateCondition | null;
+  }>;
 };
 
 export function declareTemplatePlugin<T extends TemplatePlugin>(plugin: T) {

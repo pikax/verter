@@ -11,21 +11,63 @@ import { MagicString } from "@vue/compiler-sfc";
 export const ConditionalPlugin = declareTemplatePlugin({
   name: "VerterConditional",
 
-  narrows: [] as {
-    index: number;
-    inBlock: boolean;
-    conditions: TemplateCondition[];
-    // conditions: string[];
-  }[],
+  // narrows: [] as {
+  //   index: number;
+  //   inBlock: boolean;
+  //   conditions: TemplateCondition[];
+  // }[],
 
-  pre() {
-    this.narrows.length = 0;
+  pre(_, ctx) {
+    //   this.narrows.length = 0;
+
+    ctx.toNarrow = [];
+  },
+
+  post(s, ctx) {
+    if (!ctx.toNarrow) return;
+    for (const narrow of ctx.toNarrow) {
+      const conditions = narrow.conditions.filter((x) => x !== narrow.move);
+      if (conditions.length > 0) {
+        const condition = narrow.inBlock
+          ? generateBlockCondition(conditions, s)
+          : generateTernaryCondition(conditions, s);
+
+        if (narrow.type === "append") {
+          if (narrow.direction === "right") {
+            s.appendRight(narrow.index, condition);
+          } else {
+            s.appendLeft(narrow.index, condition);
+          }
+        } else {
+          if (narrow.direction === "right") {
+            s.prependRight(narrow.index, condition);
+          } else {
+            s.prependLeft(narrow.index, condition);
+          }
+        }
+      }
+      if (narrow.move) {
+        // s.move(
+        //   narrow.move.node.loc.start.offset,
+        //   narrow.move.node.loc.end.offset,
+        //   narrow.index
+        // );
+      }
+    }
   },
 
   transformCondition(item, s, ctx) {
     const element = item.element;
     const node = item.node;
     const rawName = node.rawName!;
+
+    // slot render have special conditions and places where the v-if should be placed
+    if (
+      element.tag === "template" &&
+      element.props.find((x) => x.name === "slot")
+    ) {
+      return;
+    }
 
     // Move comments to after the element contition narrow and
     // before the element condition

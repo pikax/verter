@@ -45,27 +45,27 @@ describe("process template plugins slot", () => {
     it("<slot/>", () => {
       const { result } = parse(`<slot/>`);
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{const ___VERTER___slotComponent =___VERTER___$slot.default;<___VERTER___slotComponent/>}}"`
+        `"{()=>{const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent/>}}"`
       );
     });
     it('<slot name="test" />', () => {
       const { result } = parse(`<slot name="test"/>`);
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{const ___VERTER___slotComponent =___VERTER___$slot["test"];<___VERTER___slotComponent />}}"`
+        `"{()=>{const ___VERTER___slotComponent=___VERTER___$slot["test"];<___VERTER___slotComponent />}}"`
       );
     });
 
     it(`<slot :name="test"/>`, () => {
       const { result } = parse(`<slot :name="test"/>`);
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{const ___VERTER___slotComponent =___VERTER___$slot[___VERTER___ctx.test];<___VERTER___slotComponent />}}"`
+        `"{()=>{const ___VERTER___slotComponent=___VERTER___$slot[___VERTER___ctx.test];<___VERTER___slotComponent />}}"`
       );
     });
 
     it(`<slot :[msg]="test"/>`, () => {
       const { result } = parse(`<slot :[msg]="test"/>`);
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{const ___VERTER___slotComponent =___VERTER___$slot.default;<___VERTER___slotComponent {...{[___VERTER___ctx.msg]:___VERTER___ctx.test}}/>}}"`
+        `"{()=>{const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent {...{[___VERTER___ctx.msg]:___VERTER___ctx.test}}/>}}"`
       );
     });
 
@@ -73,20 +73,140 @@ describe("process template plugins slot", () => {
       const { result } = parse(
         `<slot :[msg]="test" :name="name" v-bind:onTest="()=> callMe()" @bind="bind"/>`
       );
-      expect(result).toMatchInlineSnapshot(`"{()=>{const ___VERTER___slotComponent =___VERTER___$slot[___VERTER___ctx.name];<___VERTER___slotComponent {...{[___VERTER___ctx.msg]:___VERTER___ctx.test}}  onTest={()=> ___VERTER___ctx.callMe()} onBind={___VERTER___ctx.bind}/>}}"`);
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{const ___VERTER___slotComponent=___VERTER___$slot[___VERTER___ctx.name];<___VERTER___slotComponent {...{[___VERTER___ctx.msg]:___VERTER___ctx.test}}  onTest={()=> ___VERTER___ctx.callMe()} onBind={___VERTER___ctx.bind}/>}}"`
+      );
     });
 
     it('<slot v-if="false"/>', () => {
       const { result } = parse(`<slot v-if="test === 'app'"/>`);
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{if(___VERTER___ctx.test === 'app'){const ___VERTER___slotComponent =___VERTER___$slot.default;<___VERTER___slotComponent/>}}"`
+        `"{()=>{if(___VERTER___ctx.test === 'app'){const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent />}}}"`
+      );
+    });
+
+    it.skip('<slot v-for="name in names" :name="name"/>', () => {
+      const { result } = parse(`<slot v-for="name in names" :name="name"/>`);
+      expect(result).toMatchInlineSnapshot(
+        `"{___VERTER___renderList(___VERTER___ctx.names,name   =>{ const ___VERTER___slotComponent=___VERTER___$slot[name];<___VERTER___slotComponent  />})}"`
       );
     });
   });
 
-  //   describe("render", () => {
+  describe("render", () => {
+    describe("element", () => {
+      it.skip("template v-slot:foo", () => {
+        const { result } = parse(
+          `<div><template v-slot:foo><span>1</span></template></div>`
+        );
 
-  //   })
+        expect(result).toMatchInlineSnapshot(
+          `"<div v-slot={(___VERTER___slotInstance)=>{const ___VERTER___$slot=___VERTER___slotInstance.$slots;___VERTER___SLOT_CALLBACK(___VERTER___$slot.foo)(()=>{<span>1</span>})}}></div>"`
+        );
+      });
+
+      it('template v-if="foo" v-slot:foo', () => {
+        const { result } = parse(
+          `<div><template v-if="foo" v-slot:foo><span>1</span></template></div>`
+        );
+
+        expect(result).toMatchInlineSnapshot(
+          `"<div v-slot={(___VERTER___slotInstance)=>{if(___VERTER___ctx.foo){const ___VERTER___$slot=___VERTER___slotInstance.$slots;___VERTER___SLOT_CALLBACK(___VERTER___$slot.foo)(()=>{<span>1</span>})}}}></div>"`
+        );
+      });
+
+      it.only("conditional", () => {
+        const { result } = parse(
+          `<div>
+            <template v-if="foo === 'test'" v-slot:foo><span>1</span></template>
+            <template v-else-if="foo === 'app'" v-slot:app><span>1</span></template>
+            <template v-else-if="foo === 'baz'" v-slot:baz><span>1</span></template>
+            <template v-else v-slot:bar><span>1</span></template>
+          </div>`
+        );
+        expect(result).toMatchInlineSnapshot(`
+          "<div v-slot={(___VERTER___slotInstance)=>{
+                       v-if="___VERTER___ctx.foo === 'test'" ___VERTER___slotRender(___VERTER___slotInstance.$slots,"foo"<template><span>{ "1" }</span></template v-slot={(___VERTER___slotInstance)=>{
+                       v-else-if="___VERTER___ctx.foo === 'app'" ___VERTER___slotRender(___VERTER___slotInstance.$slots,"app"<template><span>{ "1" }</span></template>
+                       v-else-if="___VERTER___ctx.foo === 'baz'" ___VERTER___slotRender(___VERTER___slotInstance.$slots,"baz"<template><span>{ "1" }</span></template>
+                      }}> v-else ___VERTER___slotRender(___VERTER___slotInstance.$slots,"bar"<template><span>{ "1" }</span></template>
+                    }}></div>"
+        `);
+      });
+
+      it("template #foo", () => {
+        const { result } = parse(
+          `<div><template #foo><span>1</span></template></div>`
+        );
+
+        expect(result).toMatchInlineSnapshot(
+          `"<div v-slot={(___VERTER___slotInstance)=>{const ___VERTER___$slot=___VERTER___slotInstance.$slots;___VERTER___SLOT_CALLBACK(___VERTER___$slot.foo)(()=>{<span>1</span>})}}></div>"`
+        );
+      });
+
+      it('template v-slot:foo="obj"', () => {
+        const { result } = parse(
+          `<div><template v-slot:foo="obj"><span>1</span></template></div>`
+        );
+
+        expect(result).toMatchInlineSnapshot(
+          `"<div v-slot={(___VERTER___slotInstance)=>{const ___VERTER___$slot=___VERTER___slotInstance.$slots;___VERTER___SLOT_CALLBACK(___VERTER___$slot.foo)((obj)=>{<span>1</span>})}}></div>"`
+        );
+      });
+      it('template #foo="obj"', () => {
+        const { result } = parse(
+          `<div><template #foo="obj"><span>1</span></template></div>`
+        );
+
+        expect(result).toMatchInlineSnapshot(
+          `"<div v-slot={(___VERTER___slotInstance)=>{const ___VERTER___$slot=___VERTER___slotInstance.$slots;___VERTER___SLOT_CALLBACK(___VERTER___$slot.foo)((obj)=>{<span>1</span>})}}></div>"`
+        );
+      });
+
+      it('template v-slot:foo="{bar}"', () => {
+        const { result } = parse(
+          `<div><template v-slot:foo="{bar}"><span>1</span></template></div>`
+        );
+
+        expect(result).toMatchInlineSnapshot(
+          `"<div v-slot={(___VERTER___slotInstance)=>{const ___VERTER___$slot=___VERTER___slotInstance.$slots;___VERTER___SLOT_CALLBACK(___VERTER___$slot.foo)(({bar})=>{<span>1</span>})}}></div>"`
+        );
+      });
+      it('template #foo="{bar}"', () => {
+        const { result } = parse(
+          `<div><template #foo="{bar}"><span>1</span></template></div>`
+        );
+
+        expect(result).toMatchInlineSnapshot(
+          `"<div v-slot={(___VERTER___slotInstance)=>{const ___VERTER___$slot=___VERTER___slotInstance.$slots;___VERTER___SLOT_CALLBACK(___VERTER___$slot.foo)(({bar})=>{<span>1</span>})}}></div>"`
+        );
+      });
+
+      it.skip("template v-slot:[foo]", () => {
+        const { result } = parse(
+          `<div><template v-slot:[foo]><span>1</span></template></div>`
+        );
+        expect(result).toMatchInlineSnapshot(
+          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots,foo<template><span>{ "1" }</span></template>}}></div>"`
+        );
+      });
+      it("template #[foo]", () => {
+        const { result } = parse(
+          `<div><template v-slot:[foo]><span>1</span></template></div>`
+        );
+        expect(result).toMatchInlineSnapshot(
+          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots,foo<template><span>{ "1" }</span></template>}}></div>"`
+        );
+      });
+    });
+
+    it('Comp v-slot="{foo}"', () => {
+      const { result } = parse(`<Comp v-slot="{foo}">{{foo}}</Comp>`);
+      expect(result).toMatchInlineSnapshot(
+        `"<Comp v-slot={(___VERTER___slotInstance)=>{const ___VERTER___$slot=___VERTER___slotInstance.$slots;___VERTER___SLOT_CALLBACK(___VERTER___$slot.default)(({foo})=>{foo})}}></Comp>"`
+      );
+    });
+  });
 
   /*
   describe("slot", () => {
@@ -198,8 +318,8 @@ describe("process template plugins slot", () => {
       it("element + slot", () => {
         const { result } = transpile(`<my-comp><slot/></my-comp>`);
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComp v-slot={(___VERTER___componentInstance): any=>{
-          const $slots = ___VERTER___componentInstance.$slots;
+          "<___VERTER___comp.MyComp v-slot={(___VERTER___slotInstance): any=>{
+          const $slots = ___VERTER___slotInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
           {()=>{
@@ -330,8 +450,8 @@ describe("process template plugins slot", () => {
             "</slot></my-comp>"
         );
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComp v-slot={(___VERTER___componentInstance): any=>{
-          const $slots = ___VERTER___componentInstance.$slots;
+          "<___VERTER___comp.MyComp v-slot={(___VERTER___slotInstance): any=>{
+          const $slots = ___VERTER___slotInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
           {()=>{
@@ -360,8 +480,8 @@ describe("process template plugins slot", () => {
       </template>
       </MyComp>`);
         expect(result).toMatchInlineSnapshot(`
-          "<___VERTER___comp.MyComp v-slot={(___VERTER___componentInstance): any=>{
-          const $slots = ___VERTER___componentInstance.$slots;
+          "<___VERTER___comp.MyComp v-slot={(___VERTER___slotInstance): any=>{
+          const $slots = ___VERTER___slotInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.foo)(()=>{<>
 
           <___VERTER___template >
@@ -402,8 +522,8 @@ describe("process template plugins slot", () => {
 `);
         expect(result).toMatchInlineSnapshot(`
           "<div>
-            <___VERTER___comp.Foo v-slot={(___VERTER___componentInstance): any=>{
-          const $slots = ___VERTER___componentInstance.$slots;
+            <___VERTER___comp.Foo v-slot={(___VERTER___slotInstance): any=>{
+          const $slots = ___VERTER___slotInstance.$slots;
           {___VERTER___SLOT_CALLBACK($slots.default)(()=>{ <>
 
           {()=>{

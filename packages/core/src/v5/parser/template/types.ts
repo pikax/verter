@@ -85,7 +85,7 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
        */
       ignore: boolean;
 
-      // directive: null | DirectiveNode;
+      directive: null | DirectiveNode;
     }
   | {
       node:
@@ -163,7 +163,7 @@ export type TemplateSlot = {
 } & (
   | {
       node: DirectiveNode;
-      name: null | string | TemplateBinding[];
+      name: null | TemplateBinding;
 
       props: null;
       parent: ElementNode;
@@ -182,10 +182,13 @@ export type TemplateRenderSlot = {
   type: TemplateTypes.SlotRender;
 } & {
   prop: TemplateProp | TemplateDirective;
-  parent: VerterNode;
+  parent: ElementNode | null;
   element: VerterNode;
 
   name: null | string | TemplateBinding[];
+  context: Record<string, any>;
+
+  condition: TemplateCondition | null;
 };
 
 export type TemplateCondition = {

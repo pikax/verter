@@ -1,8 +1,149 @@
-import { DirectiveNode, NodeTypes } from "@vue/compiler-core";
-import { TemplatePlugin } from "../../template";
+import {
+  AttributeNode,
+  DirectiveNode,
+  ElementNode,
+  NodeTypes,
+} from "@vue/compiler-core";
+import {
+  declareTemplatePlugin,
+  TemplatePlugin,
+  TemplateContext,
+} from "../../template";
+import {
+  TemplateProp,
+  TemplateTypes,
+  TemplateRenderSlot,
+} from "../../../../parser/template/types";
+import { MagicString } from "@vue/compiler-sfc";
 
-export const SlotPlugin = {
+/**
+ * Patch types
+ * 
+// patching HTML Elements
+declare module 'vue' {
+    interface HTMLAttributes {
+        'v-slot'?: (c: {$slots: { default: ()=> any[]}})=>void
+    }
+}
+
+// patching elements
+declare global {
+    namespace JSX {
+        export interface IntrinsicClassAttributes<T> {
+            'v-slot'?: (T extends { $slots: infer S } ? S : undefined) | ((c: T) => T extends { $slots: infer S } ? S : undefined)
+        }
+    }
+}
+ */
+
+export const SlotPlugin = declareTemplatePlugin({
   name: "VerterSlot",
+
+  // slots: new Set<ElementNode>(),
+  // pre() {
+  //   this.slots.clear();
+  // },
+  // post(s, ctx) {
+  //   const slotInstance = ctx.retrieveAccessor("slotInstance");
+  //   // const $slots = ctx.retrieveAccessor("$slot");
+
+  //   // move children to v-slot and initialise $slots
+  //   for (const element of this.slots) {
+  //     const children = element.children;
+
+  //     const first = children.shift();
+  //     // nothing to do if there's no children
+  //     if (!first) {
+  //       break;
+  //     }
+  //     const last = children.pop() ?? first;
+
+  //     const pos =
+  //       element.loc.start.offset +
+  //       element.loc.source
+  //         .slice(0, first.loc.start.offset - element.loc.start.offset)
+  //         .lastIndexOf(">");
+
+  //     const endPos =
+  //       element.loc.source
+  //         .slice(last.loc.end.offset - element.loc.start.offset)
+  //         .indexOf("<") + last.loc.end.offset;
+
+  //     if (pos === -1 || pos >= first.loc.start.offset) {
+  //       console.log("should not happen");
+  //       continue;
+  //     }
+
+  //     // TODO narrow
+  //     s.prependLeft(pos, ` v-slot={(${slotInstance})=>{`);
+
+  //     s.move(pos + 1, endPos, pos);
+
+  //     s.prependRight(pos, "}}");
+  //   }
+  // },
+
+  handleSlotRender(
+    slot: TemplateRenderSlot,
+    s: MagicString,
+    parent: ElementNode,
+    ctx: TemplateContext
+  ) {
+    const slotInstance = ctx.retrieveAccessor("slotInstance");
+    const children = parent.children;
+    const element = slot.element as ElementNode;
+
+    const first = children.shift();
+    // nothing to do if there's no children
+    if (!first) {
+      return;
+    }
+    const last = children.pop() ?? first;
+
+    const pos =
+      parent.loc.start.offset +
+      parent.loc.source
+        .slice(0, first.loc.start.offset - parent.loc.start.offset)
+        .lastIndexOf(">");
+
+    const endPos =
+      parent.loc.source
+        .slice(last.loc.end.offset - parent.loc.start.offset)
+        .indexOf("<") + last.loc.end.offset;
+
+    if (pos === -1 || pos >= first.loc.start.offset) {
+      console.log("should not happen");
+      debugger;
+      return;
+    }
+
+    s.prependLeft(pos, ` v-slot={(${slotInstance})=>{`);
+
+    if (ctx.toNarrow && slot.context.conditions.length > 0) {
+      // const condition = element.props.find(
+      //   (x) =>
+      //     x.name === "v-if" || x.name === "v-else-if" || x.name === "v-else"
+      // );
+
+      ctx.toNarrow.push({
+        index: pos,
+        inBlock: true,
+        conditions: slot.context.conditions,
+        type: "append",
+        move: slot.condition,
+        // move: condition
+        //   ? {
+        //       type: TemplateTypes.Condition,
+
+        //     }
+        //   : null,
+      });
+    }
+
+    s.move(pos + 1, endPos, pos);
+
+    s.prependRight(pos, "}}");
+  },
 
   /**
      * 
@@ -35,103 +176,188 @@ const $slots = PatchSlots(c.$slots);
     const node = item.node;
 
     if (node.type === NodeTypes.ELEMENT) {
-      //<slot>
+      // <slot>
 
-      // move tag to before <
-      s.move(
+      // rename tag to be renderSlot
+      s.overwrite(
         node.loc.start.offset + 1,
-        node.loc.start.offset + 1 + node.tag.length,
-        node.loc.start.offset
+        node.loc.start.offset + 5,
+        renderSlot
       );
 
-      // handle name
+      s.prependRight(node.loc.start.offset + 1, `<`);
+
+      // this is where it will be added
+      // we insert everything after '<' because it causes
+      // issues with v-if and v-for handling
+      // since '<' can be added again and is not important
+      // for intellisense
+      const insertIndex = node.loc.start.offset + 1;
+
+      s.prependRight(insertIndex, ";");
+
       if (item.name) {
-        //remove name=""
-        const nameNode = item.name.node!;
-        if ("nameLoc" in nameNode) {
-          // move name to the beginning
-          s.move(
-            nameNode.loc.start.offset,
-            nameNode.loc.end.offset,
-            node.loc.start.offset
-          );
+        if (!Array.isArray(item.name) && item.name.node) {
+          // if(item.name.type === TemplateTypes.Binding) {
 
-          if (nameNode.value) {
-            s.overwrite(
-              nameNode.nameLoc.start.offset,
-              nameNode.value.loc.start.offset + 1,
-              '["'
+          // }
+
+          if (item.name.node.type === NodeTypes.ATTRIBUTE) {
+            const prop = item.name.node as AttributeNode;
+            // move name
+            s.move(prop.loc.start.offset, prop.loc.end.offset, insertIndex);
+
+            if (prop.value) {
+              s.overwrite(
+                prop.nameLoc.start.offset,
+                prop.value.loc.start.offset + 1,
+                '["'
+              );
+
+              s.overwrite(
+                prop.value.loc.end.offset - 1,
+                prop.value.loc.end.offset,
+                '"]'
+              );
+            }
+          } else if ("directive" in item.name && item.name.directive) {
+            const directive = item.name.directive;
+            // move name to the beginning
+            s.move(
+              directive.loc.start.offset,
+              directive.loc.end.offset,
+              insertIndex
             );
 
-            s.overwrite(
-              nameNode.value.loc.end.offset - 1,
-              nameNode.value.loc.end.offset,
-              '"]'
-            );
+            if (directive.arg) {
+              s.remove(
+                directive.arg.loc.start.offset,
+                directive.arg.loc.end.offset
+              );
+            }
+
+            if (directive.exp) {
+              s.overwrite(
+                directive.exp.loc.start.offset - 2,
+                directive.exp.loc.start.offset,
+                "["
+              );
+              s.overwrite(
+                directive.exp.loc.end.offset,
+                directive.exp.loc.end.offset + 1,
+                "]"
+              );
+            }
           }
-        } else if ("directive" in item.name && item.name.directive) {
-          const directive = item.name.directive as DirectiveNode;
-
-          // move name to the beginning
-          s.move(
-            directive.loc.start.offset,
-            directive.loc.end.offset,
-            node.loc.start.offset
-          );
-          // s.move(
-          //   node.loc.start.offset + 5,
-          //   directive.loc.start.offset,
-          //   directive.loc.end.offset
-          // );
-
-          if (directive.arg) {
-            s.remove(
-              directive.arg.loc.start.offset,
-              directive.arg.loc.end.offset
-            );
-          }
-
-          if (directive.exp) {
-            s.overwrite(
-              directive.exp.loc.start.offset - 2,
-              directive.exp.loc.start.offset,
-              "["
-            );
-            s.overwrite(
-              directive.exp.loc.end.offset,
-              directive.exp.loc.end.offset + 1,
-              "]"
-            );
-          }
-
-          //   if (directive.exp) {
-          //     s.remove(
-          //       directive.loc.start.offset,
-          //       directive.exp.loc.start.offset
-          //     );
-          //   } else {
-          //   }
-
-          //   s.remove(directive.loc.start.offset, directive.loc.end.offset);
         }
       } else {
-        s.prependLeft(node.loc.start.offset + node.tag.length + 1, `.default`);
+        // default slot
+        s.prependLeft(insertIndex, `.default`);
       }
 
-      // rename slot to $slot
-      s.prependRight(node.loc.start.offset + 1, $slots.slice(0, -4));
+      s.prependLeft(insertIndex, `const ${renderSlot}=${$slots}`);
 
-      // add at the end of the slot;
-      s.prependRight(node.loc.start.offset, ";");
+      // s.prependRight(insertIndex, "<");
 
-      // add const renderSlot = at the beginning
-      s.prependLeft(node.loc.start.offset, `const ${renderSlot} =`);
-
-      //replace the tag with the newly added renderSlot
-      s.prependLeft(node.loc.start.offset + 1, renderSlot);
+      s.update(node.loc.start.offset, node.loc.start.offset + 1, "");
     } else {
       // v-slot
     }
   },
-  transformSlotRender(slot, s, ctx) {},
-} as TemplatePlugin;
+
+  /**
+   *
+   *
+   * slotRender aka ___VERTER___SLOT_CALLBACK
+declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb: ((...args: T[]) => any))=>void;
+
+
+<div v-slot={(ci):any=>{
+  const $slots = ci.$slots;
+  ___VERTER___SLOT_CALLBACK($slots.default)(({})=>{
+    return <div></div>
+  })
+}}
+   * @param slot
+   * @param s
+   * @param ctx
+   */
+  transformSlotRender(slot, s, ctx) {
+    // const $slots = ctx.retrieveAccessor("$slot");
+    const slotRender = ctx.retrieveAccessor("slotRender");
+    const slotInstance = ctx.retrieveAccessor("slotInstance");
+
+    // <template v-slot
+    if (slot.parent) {
+      // this.slots.add(slot.parent);
+      this.handleSlotRender(slot, s, slot.parent, ctx);
+
+      const node = slot.element;
+      if (node.type === NodeTypes.ELEMENT) {
+        const insertIndex = node.loc.start.offset + 1;
+
+        // remove `<` we will be adding this later
+        s.update(node.loc.start.offset, node.loc.start.offset + 1, "");
+
+        const tagEnd = node.isSelfClosing
+          ? node.loc.end.offset - 2
+          : node.loc.source
+              .slice(
+                0,
+                (node.children[0]?.loc.start.offset ??
+                  node.loc.end.offset - "</template>".length) -
+                  node.loc.start.offset
+              )
+              .lastIndexOf(">") + node.loc.start.offset;
+
+        // move props to after `<`
+        s.move(node.loc.start.offset + "<template".length, tagEnd, insertIndex);
+
+        const prop = slot.prop;
+
+        if (prop.type === TemplateTypes.Directive) {
+          // replace v-slot or # with ___VERTER___$slot
+          const start = prop.node.loc.start.offset;
+          const end =
+            start + (prop.node.rawName?.startsWith("v-slot:") ? 7 : 1);
+
+          // s.overwrite(start, end, slotRender);
+
+          s.prependLeft(start, `${slotRender}(${slotInstance}.`);
+          s.overwrite(start, end, `$slots`);
+          // s.overwrite(start, end, `${slotRender}(${slotInstance}`);
+          if (prop.node.arg) {
+            s.prependLeft(end, `,`);
+
+            if (
+              prop.node.arg.type === NodeTypes.SIMPLE_EXPRESSION &&
+              prop.node.arg.isStatic
+            ) {
+              s.prependRight(prop.node.arg.loc.start.offset, '"');
+              s.prependLeft(prop.node.arg.loc.end.offset, '"');
+            } else {
+              s.remove(
+                prop.node.arg.loc.start.offset,
+                prop.node.arg.loc.start.offset + 1
+              );
+              s.remove(
+                prop.node.arg.loc.end.offset - 1,
+                prop.node.arg.loc.end.offset
+              );
+            }
+          }
+        } else {
+          // todo?
+          debugger;
+        }
+
+        s.prependRight(node.loc.start.offset + 1, "<");
+      } else {
+        // todo
+        debugger;
+      }
+    } else {
+      // <Comp v-slot="slot">
+    }
+  },
+});

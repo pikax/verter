@@ -37,7 +37,7 @@ export function handleElement(
     propBindings?.filter((x) => x.type === TemplateTypes.Prop) ?? [];
   const slot = handleSlotDeclaration(node, parent, context);
 
-  const propSlot = handleSlotProp(node, parent, context);
+  const propSlot = handleSlotProp(node, parent, context, conditions?.condition);
 
   const element: TemplateElement = {
     type: TemplateTypes.Element,

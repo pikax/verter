@@ -6,6 +6,7 @@ import {
 } from "@vue/compiler-core";
 import { VerterNode } from "../../../walk";
 import {
+  TemplateCondition,
   TemplateDirective,
   TemplateProp,
   TemplateRenderSlot,
@@ -93,7 +94,8 @@ export function handleSlotDeclaration<T extends SlotsContext>(
 export function handleSlotProp<T extends SlotsContext>(
   node: VerterNode,
   parent: VerterNode,
-  parentContext: T
+  parentContext: T,
+  condition?: TemplateCondition
 ): {
   context: T;
   slot: TemplateRenderSlot;
@@ -127,9 +129,14 @@ export function handleSlotProp<T extends SlotsContext>(
   const slot: TemplateRenderSlot = {
     type: TemplateTypes.SlotRender,
     prop,
-    parent,
+    parent:
+      node.type === NodeTypes.ELEMENT && node.tag !== "template"
+        ? null
+        : (parent as ElementNode),
     element: node,
     name: prop.arg,
+    context,
+    condition: condition ?? null,
   };
 
   const items: any[] = [slot];
