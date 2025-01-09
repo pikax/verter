@@ -1,4 +1,9 @@
-import { DirectiveNode, ElementTypes, NodeTypes } from "@vue/compiler-core";
+import {
+  DirectiveNode,
+  ElementNode,
+  ElementTypes,
+  NodeTypes,
+} from "@vue/compiler-core";
 import { VerterNode } from "../../../walk";
 import {
   TemplateDirective,
@@ -21,6 +26,7 @@ export type SlotsContext = {
  */
 export function handleSlotDeclaration<T extends SlotsContext>(
   node: VerterNode,
+  parent: ElementNode,
   parentContext: SlotsContext
 ): {
   context: T;
@@ -57,7 +63,7 @@ export function handleSlotDeclaration<T extends SlotsContext>(
     node,
     name,
     props,
-    parent: null,
+    parent,
   };
 
   const context = {

@@ -36,8 +36,9 @@ export type TemplateAccessors =
   | "normalizeClass"
   | "normalizeStyle"
   | "COMPONENT_CTX"
-  | "ctx";
-
+  | "ctx"
+  | "$slot"
+  | "slotComponent";
 export type TemplateContext = ProcessContext & {
   prefix: (str: string) => string;
   isCustomElement: (tag: string) => boolean;
@@ -84,18 +85,18 @@ export function processTemplate(
   const s = context.s.clone();
 
   const pluginsByType = {
-    [TemplateTypes.Condition]: [],
+    [TemplateTypes.SlotDeclaration]: [],
     [TemplateTypes.Loop]: [],
     [TemplateTypes.Element]: [],
     [TemplateTypes.Prop]: [],
     [TemplateTypes.Binding]: [],
     [TemplateTypes.Interpolation]: [],
     [TemplateTypes.SlotRender]: [],
-    [TemplateTypes.SlotDeclaration]: [],
     [TemplateTypes.Comment]: [],
     [TemplateTypes.Text]: [],
     [TemplateTypes.Directive]: [],
     [TemplateTypes.Function]: [],
+    [TemplateTypes.Condition]: [],
   } as {
     [K in TemplateTypes]: Array<
       (
@@ -160,10 +161,6 @@ export function processTemplate(
   for (const item of items) {
     for (const plugin of pluginsByType[item.type]) {
       plugin(item as any, s, context);
-
-      if(true) {
-        console.log("item", item);
-      }
     }
   }
 

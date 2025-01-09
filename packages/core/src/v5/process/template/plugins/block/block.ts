@@ -37,8 +37,7 @@ export const BlockPlugin = declareTemplatePlugin({
   },
 
   transformSlotDeclaration(item) {
-    console.log(item);
-    debugger;
+    this.addItem(item.node, item.parent);
   },
 
   transformSlotRender(item) {

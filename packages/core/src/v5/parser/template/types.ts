@@ -174,7 +174,7 @@ export type TemplateSlot = {
       name: TemplateProp | null;
       props: null | string | TemplateProp[];
 
-      parent: null;
+      parent: ElementNode;
     }
 );
 

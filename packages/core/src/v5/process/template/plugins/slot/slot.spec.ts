@@ -5,6 +5,7 @@ import { BindingPlugin } from "../binding";
 import { MagicString, parse as parseSFC } from "@vue/compiler-sfc";
 import { SlotPlugin } from "./index";
 import { PropPlugin } from "../prop";
+import { DefaultPlugins } from "../..";
 
 describe("process template plugins slot", () => {
   function parse(content: string, options: Partial<TemplateContext> = {}) {
@@ -20,14 +21,12 @@ describe("process template plugins slot", () => {
     const r = processTemplate(
       templateBlock.result.items,
       [
-        BindingPlugin,
-        SlotPlugin,
-        PropPlugin,
+        ...DefaultPlugins,
         // clean template tag
         {
           post: (s) => {
-            s.remove(0, "<template>".length);
-            s.remove(source.length - "</template>".length, source.length);
+            s.update(0, "<template>".length, "");
+            s.update(source.length - "</template>".length, source.length, "");
           },
         },
       ],
@@ -45,23 +44,42 @@ describe("process template plugins slot", () => {
   describe("declaration", () => {
     it("<slot/>", () => {
       const { result } = parse(`<slot/>`);
-      expect(result).toMatchInlineSnapshot(`"<slot/>"`);
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{const ___VERTER___slotComponent =___VERTER___$slot.default;<___VERTER___slotComponent/>}}"`
+      );
     });
     it('<slot name="test" />', () => {
-      const { result } = parse(`<slot name="test" />`);
-      expect(result).toMatchInlineSnapshot(`"<slot name={"test"} />"`);
+      const { result } = parse(`<slot name="test"/>`);
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{const ___VERTER___slotComponent =___VERTER___$slot["test"];<___VERTER___slotComponent />}}"`
+      );
     });
 
     it(`<slot :name="test"/>`, () => {
       const { result } = parse(`<slot :name="test"/>`);
       expect(result).toMatchInlineSnapshot(
-      `"<slot name={___VERTER___ctx.test}/>"`);
+        `"{()=>{const ___VERTER___slotComponent =___VERTER___$slot[___VERTER___ctx.test];<___VERTER___slotComponent />}}"`
+      );
     });
 
     it(`<slot :[msg]="test"/>`, () => {
       const { result } = parse(`<slot :[msg]="test"/>`);
       expect(result).toMatchInlineSnapshot(
-        `"<slot {...{[___VERTER___ctx.msg]:___VERTER___ctx.test}}/>"`
+        `"{()=>{const ___VERTER___slotComponent =___VERTER___$slot.default;<___VERTER___slotComponent {...{[___VERTER___ctx.msg]:___VERTER___ctx.test}}/>}}"`
+      );
+    });
+
+    it("with props", () => {
+      const { result } = parse(
+        `<slot :[msg]="test" :name="name" v-bind:onTest="()=> callMe()" @bind="bind"/>`
+      );
+      expect(result).toMatchInlineSnapshot(`"{()=>{const ___VERTER___slotComponent =___VERTER___$slot[___VERTER___ctx.name];<___VERTER___slotComponent {...{[___VERTER___ctx.msg]:___VERTER___ctx.test}}  onTest={()=> ___VERTER___ctx.callMe()} onBind={___VERTER___ctx.bind}/>}}"`);
+    });
+
+    it('<slot v-if="false"/>', () => {
+      const { result } = parse(`<slot v-if="test === 'app'"/>`);
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{if(___VERTER___ctx.test === 'app'){const ___VERTER___slotComponent =___VERTER___$slot.default;<___VERTER___slotComponent/>}}"`
       );
     });
   });

@@ -1,7 +1,7 @@
 import { parser } from "../../../../parser";
 import { ParsedBlockTemplate } from "../../../../parser/types";
 import { processTemplate, TemplateContext } from "../../template";
-import { MagicString, parse as parseSFC } from "@vue/compiler-sfc";
+import { MagicString } from "@vue/compiler-sfc";
 import { ConditionalPlugin } from "./index";
 import { BlockPlugin } from "../block";
 
@@ -43,7 +43,9 @@ describe("process template plugins conditional", () => {
 
   it("v-if", () => {
     const { result } = parse(`<div v-if="typeof test === 'string'" />`);
-    expect(result).toMatchInlineSnapshot(`"{()=>{if(typeof test === 'string'){<div  />}}}"`);
+    expect(result).toMatchInlineSnapshot(
+      `"{()=>{if(typeof test === 'string'){<div  />}}}"`
+    );
   });
 
   it("v-if v-else-if", () => {
@@ -73,21 +75,27 @@ describe("process template plugins conditional", () => {
       const { result } = parse(
         `<div v-if="typeof test === 'string'" :test="()=>test" />`
       );
-      expect(result).toMatchInlineSnapshot(`"{()=>{if(typeof test === 'string'){<div  :test="()=>!((typeof test === 'string'))? undefined :test" />}}}"`);
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{if(typeof test === 'string'){<div  :test="()=>!((typeof test === 'string'))? undefined :test" />}}}"`
+      );
     });
 
     it("v-else-if", () => {
       const { result } = parse(
         `<div v-if="typeof test === 'object'"></div><div v-else-if="typeof test === 'string'" :test="()=>test" />`
       );
-      expect(result).toMatchInlineSnapshot(`"{()=>{if(typeof test === 'object'){<div ></div>}else if(typeof test === 'string'){<div  :test="()=>!(!((typeof test === 'object')) && (typeof test === 'string'))? undefined :test" />}}}"`);
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{if(typeof test === 'object'){<div ></div>}else if(typeof test === 'string'){<div  :test="()=>!(!((typeof test === 'object')) && (typeof test === 'string'))? undefined :test" />}}}"`
+      );
     });
 
     it("v-else", () => {
       const { result } = parse(
         `<div v-if="typeof test === 'object'"></div><div v-else :test="()=>test" />`
       );
-      expect(result).toMatchInlineSnapshot(`"{()=>{if(typeof test === 'object'){<div ></div>}else{<div  :test="()=>!(!((typeof test === 'object')))? undefined :test" />}}}"`);
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{if(typeof test === 'object'){<div ></div>}else{<div  :test="()=>!(!((typeof test === 'object')))? undefined :test" />}}}"`
+      );
     });
 
     it("v-if v-else-if v-else", () => {
