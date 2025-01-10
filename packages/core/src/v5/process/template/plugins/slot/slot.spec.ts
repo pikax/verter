@@ -88,7 +88,8 @@ describe("process template plugins slot", () => {
     it("with parent v-if", () => {
       const { result } = parse(`<div v-if="test === 'app'"> <slot /> </div>`);
       expect(result).toMatchInlineSnapshot(
-      `"{()=>{if(___VERTER___ctx.test === 'app'){<div > {()=>{const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent />}} </div>}}}"`);
+        `"{()=>{if(___VERTER___ctx.test === 'app'){<div > {()=>{const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent />}} </div>}}}"`
+      );
     });
 
     it.skip('<slot v-for="name in names" :name="name"/>', () => {
@@ -397,6 +398,44 @@ describe("process template plugins slot", () => {
           `"{()=>{if(___VERTER___ctx.test === 'app'){<Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></Comp>}}}"`
         );
       });
+    });
+  });
+
+  describe("bugs", () => {
+    // TODO fix this issue
+    it.skip("oo", () => {
+      const { result } =
+        parse(`<tabled-content-row :value="item.phones.find((x) => x.primary)">
+      <template #label>
+        <span>{{ i18n.contact.form.info.phones.label }}</span>
+        <h-pill v-if="item.phones.length > 1">
+          {{ ts("contact.form.info.phones.more", [item.phones.length - 1]) }}
+        </h-pill>
+      </template>
+      <template #default="{ value, type }">
+        <div v-if="value">
+          <a :href="\`tel:\${value}\`"> {{ value }}</a> <span> ({{ type }})</span>
+        </div>
+        <span v-else>—</span>
+      </template>
+    </tabled-content-row>`);
+
+    expect(result).toMatchInlineSnapshot(`
+      "<tabled-content-row v-slot={(___VERTER___slotInstance)=>{
+             ___VERTER___slotRender(___VERTER___slotInstance.$slots.label)(()=>{<template>
+              <span>{ ___VERTER___ctx.i18n.contact.form.info.phones.label }</span>
+              {()=>{if(___VERTER___ctx.item.phones.length > 1){<h-pill >
+                { ___VERTER___ctx.ts("contact.form.info.phones.more", [___VERTER___ctx.item.phones.length - 1]) }
+              </h-pill>}}}
+            </template>});
+             ___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({ value, type })=>{<template>
+              {()=>{if(value){<div >
+                <a href={\`tel:\${value}\`}> { value }</a> <span> {"("}{ type }{")"}</span>
+              </div>}
+              else{<span >{"—"}</span>}}}
+            </template>});
+          }} value={___VERTER___ctx.item.phones.find((x) => x.primary)}></tabled-content-row>"
+    `)
     });
   });
 

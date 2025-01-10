@@ -156,20 +156,11 @@ export const SlotPlugin = declareTemplatePlugin({
 
       if (!parent.tag) {
         // TODO mark error, this is because the parent is the AST Root
+        throw new Error("Parent tag is missing");
         return;
       }
 
       pos = parent.loc.start.offset + parent.tag.length + 1;
-      // tagEnd =
-      //   parent.loc.start.offset +
-      //   parent.loc.source
-      //     .slice(0, first.loc.start.offset - parent.loc.start.offset)
-      //     .lastIndexOf(">");
-
-      // endTagPos =
-      //   parent.loc.source
-      //     .slice(last.loc.end.offset - parent.loc.start.offset)
-      //     .indexOf("<") + last.loc.end.offset;
 
       if (pos === -1 || pos >= first.loc.start.offset) {
         console.log("should not happen");
@@ -182,15 +173,6 @@ export const SlotPlugin = declareTemplatePlugin({
     s.prependLeft(pos, ` v-slot={(${slotInstance})=>{`);
 
     if (ctx.doNarrow && slot.context.conditions.length > 0) {
-      // ctx.toNarrow.push({
-      //   index: pos,
-      //   inBlock: true,
-      //   conditions: slot.context.conditions,
-      //   type: "append",
-      //   // direction: "right",
-      //   condition: slot.condition,
-      // });
-
       ctx.doNarrow(
         {
           index: pos,
@@ -398,30 +380,14 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
           const end =
             start + (prop.node.rawName?.startsWith("v-slot:") ? 7 : 1);
 
-          // s.overwrite(start, end, slotRender);
-
           s.prependLeft(start, `${slotRender}(${slotInstance}.`);
           s.overwrite(start, end, `$slots`);
-          // s.overwrite(start, end, `${slotRender}(${slotInstance}`);
           if (prop.node.arg) {
-            // s.prependLeft(end, `,`);
-
             if (
               prop.node.arg.type === NodeTypes.SIMPLE_EXPRESSION &&
               prop.node.arg.isStatic
             ) {
               s.prependLeft(end, ".");
-              // s.prependRight(prop.node.arg.loc.start.offset, '');
-              // s.prependLeft(prop.node.arg.loc.end.offset, '"');
-            } else {
-              // s.remove(
-              //   prop.node.arg.loc.start.offset,
-              //   prop.node.arg.loc.start.offset + 1
-              // );
-              // s.remove(
-              //   prop.node.arg.loc.end.offset - 1,
-              //   prop.node.arg.loc.end.offset
-              // );
             }
           }
 
@@ -449,17 +415,9 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
               ")"
             );
             s.prependLeft(prop.node.exp.loc.end.offset + 1, "=>{");
-
-            // s.remove(
-            //   prop.node.exp.loc.start.offset - 2,
-            //   prop.node.exp.loc.start.offset -1
-            // );
-            // s.prependLeft(prop.node.exp.loc.start.offset-1, ")");
           } else {
             s.appendLeft(tagEnd, `)(()=>{`);
           }
-
-          // s.appendLeft(tagEnd, `)=>{`);
 
           if (slot.context.conditions.length > 0) {
             ctx.doNarrow(
@@ -475,33 +433,21 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
               },
               s
             );
-            // ctx.toNarrow?.push({
-            //   index: prop.node.exp ? prop.node.exp.loc.end.offset + 1 : tagEnd,
-            //   inBlock: true,
-            //   conditions: slot.context.conditions,
-            //   type: "append",
-            //   // empty condition because we need the current slot condition to also apply if present
-            //   condition: null,
-            // });
           }
 
           s.prependLeft(node.loc.end.offset, "});");
         } else {
-          // todo?
-          debugger;
+          throw new Error("TODO: handle slot directive");
         }
 
         s.prependRight(node.loc.start.offset + 1, "<");
       } else {
-        // todo
-        debugger;
+        throw new Error("TODO handle slot not being an element");
       }
     } else {
       // <Comp v-slot="slot">
       const element = slot.element as ElementNode;
       this.handleSlotRender(slot, s, element as ElementNode, ctx);
-
-      // const pos = slot.prop.node!.loc.end.offset;
 
       const endPropIndex = slot.prop.node!.loc.end.offset;
 
@@ -546,7 +492,6 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
           s.remove(arg.loc.start.offset - 1, arg.loc.start.offset);
         }
 
-        // todo
         if (directive.exp) {
           s.update(
             directive.arg.loc.end.offset,
@@ -578,8 +523,6 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
         }
       }
 
-      // s.appendLeft(directive.loc.end.offset, `)(()=>{`);
-
       if (slot.context.conditions.length > 0) {
         ctx.doNarrow(
           {
@@ -592,14 +535,6 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
           },
           s
         );
-        // ctx.toNarrow?.push({
-        //   index: prop.node.exp ? prop.node.exp.loc.end.offset + 1 : tagEnd,
-        //   inBlock: true,
-        //   conditions: slot.context.conditions,
-        //   type: "append",
-        //   // empty condition because we need the current slot condition to also apply if present
-        //   condition: null,
-        // });
       }
       // content
 

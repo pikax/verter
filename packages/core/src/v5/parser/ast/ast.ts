@@ -58,7 +58,7 @@ export function parseAST(
       ast = result.program;
     }
   } catch (e) {
-    console.error("oxc parser failed", e);
+    console.error("oxc parser failed :(", e);
     // @ts-expect-error
     ast = parseAcornLoose(normaliseSource);
   }

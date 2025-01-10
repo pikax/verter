@@ -206,6 +206,10 @@ export function createContext(
       (x) =>
         x.block === (parsed.descriptor.scriptSetup || parsed.descriptor.script)
     );
+    if (!block) {
+      generic = undefined;
+      return undefined;
+    }
     generic = parseGeneric(block.block.attrs.generic);
     return generic;
   }
