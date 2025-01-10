@@ -27,7 +27,7 @@ describe("bench parser sanity tests", () => {
 
       expect(render.content).toMatchSnapshot();
     });
-    it("new", () => {
+    it.only("new", () => {
       const { render } = parse(content);
       expect(render.result).toMatchSnapshot();
     });

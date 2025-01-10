@@ -38,6 +38,17 @@ export function sanitisePosition(source: string) {
   return source.replace(/[^\x00-\x7F]/g, "*");
 }
 
+function langFilename(filename: string) {
+  const ext = filename.split(".").pop();
+  switch (ext) {
+    case "tsx":
+    case "jsx":
+    case "ts":
+    case "js":
+      return ext;
+  }
+  throw new Error("Unknown extension: " + ext);
+}
 export function parseAST(
   source: string,
   sourceFilename: string = "index.ts"
@@ -46,7 +57,9 @@ export function parseAST(
   const normaliseSource = sanitisePosition(source);
   let ast: VerterAST;
   try {
-    const result = oxc.parseSync(sourceFilename, normaliseSource);
+    const result = oxc.parseSync(sourceFilename, normaliseSource, {
+      lang: langFilename(sourceFilename),
+    });
 
     const ms = result.magicString;
 
@@ -58,7 +71,7 @@ export function parseAST(
       ast = result.program;
     }
   } catch (e) {
-    console.error("oxc parser failed :(", e);
+    console.error("oxc parser failed :(", e, sourceFilename);
     // @ts-expect-error
     ast = parseAcornLoose(normaliseSource);
   }

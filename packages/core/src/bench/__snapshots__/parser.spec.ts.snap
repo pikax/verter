@@ -137,7 +137,7 @@ const { i18n, $ts: ts } = useI18n();
       </template>});
        ___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({ value, type })=>{<template>
         {()=>{if(value){<div >
-          <a href={\`tel:\${value}\`}> { value }</a>"}{" <span> {"("}{ type }{")"}</span>
+          <a href={\`tel:\${value}\`}> { value }</a> <span> {"("}{ type }{")"}</span>
         </div>}
         else{<span >{"—"}</span>}}}
       </template>});

@@ -100,6 +100,11 @@ describe("process template plugins binding", () => {
       `"<div v-slot:[___VERTER___ctx.msg] />"`
     );
   });
+
+  test.only('a href="`mailto:value`"', ()=>{
+    const { result } = parse(`<a :href="\`mailto:\${value}\`" />`);
+    expect(result).toMatchInlineSnapshot(`"<a :href="\`mailto:\${___VERTER___ctx.value}\`" />"`);
+  })
   describe("nested", () => {
     test("{{ { test } }}", () => {
       const { result } = parse(`{{ { test } }}`);

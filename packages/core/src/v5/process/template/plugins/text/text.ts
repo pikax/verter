@@ -4,6 +4,9 @@ export const TextPlugin = {
   name: "VerterText",
   transformText(item, s) {
     const content = item.content.trim();
+    if(!content) {
+      return
+    }
 
     // ignore <, because it can be just the start of the tag
     // NOTE maybe we could recognise this in Language Server and gracefully

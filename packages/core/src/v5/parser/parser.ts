@@ -156,7 +156,7 @@ export function parser(
       }
       case "js":
       case "jsx": {
-        const ast = parseAST(x.block.content, filename);
+        const ast = parseAST(x.block.content, filename + "." + languageId);
 
         const r = parseScript(ast, x.block.content);
         isAsync = r.isAsync;

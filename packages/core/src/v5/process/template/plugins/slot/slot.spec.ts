@@ -402,6 +402,25 @@ describe("process template plugins slot", () => {
   });
 
   describe("bugs", () => {
+it('smal', ()=>{
+const { result } = parse(`<div> 
+      <template #default="{ value, type }">
+        <div v-if="value">
+          <a :href="\`tel:\${value}\`"> {{ value }}</a> <span> ({{ type }})</span>
+        </div>
+        <span v-else>—</span>
+      </template></div>`);
+expect(result).toMatchInlineSnapshot(`
+  "<div v-slot={(___VERTER___slotInstance)=>{ 
+         ___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({ value, type })=>{<template>
+          {()=>{if(value){<div >
+            <a href={\`tel:\${value}\`}> { value }</a> <span> {"("}{ type }{")"}</span>
+          </div>}
+          else{<span >{"—"}</span>}}}
+        </template>});}}></div>"
+`)
+})
+
     // TODO fix this issue
     it.skip("oo", () => {
       const { result } =

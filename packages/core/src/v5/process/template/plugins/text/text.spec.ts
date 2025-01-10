@@ -58,4 +58,10 @@ describe("process template plugins text", () => {
     const { result } = parse(`"`);
     expect(result).toMatchInlineSnapshot(`"{"\\""}"`);
   });
+
+  it('should ignore empty text', () => {
+    const source = `\n\n\r\n      \n\r\n`
+    const { result } = parse(source);
+    expect(result).toBe(source);
+  });
 });
