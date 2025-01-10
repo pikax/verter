@@ -23,16 +23,19 @@ export const ConditionalPlugin = declareTemplatePlugin({
 
     ctx.toNarrow = [];
 
-    ctx.doNarrow = (narrow: {
-      index: number;
-      inBlock: boolean;
-      conditions: TemplateCondition[];
+    ctx.doNarrow = (
+      narrow: {
+        index: number;
+        inBlock: boolean;
+        conditions: TemplateCondition[];
 
-      type?: "prepend" | "append";
-      direction?: "left" | "right";
+        type?: "prepend" | "append";
+        direction?: "left" | "right";
 
-      condition?: TemplateCondition | null;
-    }, s: MagicString) => {
+        condition?: TemplateCondition | null;
+      },
+      s: MagicString
+    ) => {
       const conditions = narrow.conditions.filter(
         (x) => x !== narrow.condition
       );

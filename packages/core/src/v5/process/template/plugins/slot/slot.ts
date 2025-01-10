@@ -39,7 +39,7 @@ declare global {
 export const SlotPlugin = declareTemplatePlugin({
   name: "VerterSlot",
 
-  processedParent: new Set<ElementNode>(),
+  processedParent: new Map<ElementNode, number>(),
 
   // slots: new Set<ElementNode>(),
   // pre() {
@@ -91,21 +91,43 @@ export const SlotPlugin = declareTemplatePlugin({
     parent: ElementNode,
     ctx: TemplateContext
   ) {
-    if (this.processedParent.has(parent)) return;
-    this.processedParent.add(parent);
+    let processedIndex = this.processedParent.get(parent) ?? -1;
+    if (processedIndex >= 0) return processedIndex;
 
     const slotInstance = ctx.retrieveAccessor("slotInstance");
     const children = parent.children;
     const element = slot.element as ElementNode;
+    const pos = parent.loc.start.offset + parent.tag.length + 1;
 
     const first = children.shift();
     // nothing to do if there's no children
     if (!first) {
-      return;
+      this.processedParent.set(parent, pos);
+      return pos;
     }
     const last = children.pop() ?? first;
 
-    const pos =
+    const Movable = new Set(["if", "else", "else-if", "for"]);
+    // const movableProps = parent.props.filter((x) => Movable.has(x.name));
+
+    // let pos = parent.loc.start.offset + parent.tag.length + 1;
+    // // find the place to insert the v-slot, if there's any movable
+    // // props we need to place it before
+    // for (let i = parent.props.length - 1; i >= 0; i--) {
+    //   const prop = parent.props[i];
+    //   if (Movable.has(prop.name)) {
+    //     continue;
+    //   }
+    //   pos = prop.loc.end.offset;
+    // }
+
+    // const pos =
+    parent.loc.start.offset +
+      parent.loc.source
+        .slice(0, first.loc.start.offset - parent.loc.start.offset)
+        .lastIndexOf(">");
+
+    const tagEnd =
       parent.loc.start.offset +
       parent.loc.source
         .slice(0, first.loc.start.offset - parent.loc.start.offset)
@@ -119,7 +141,8 @@ export const SlotPlugin = declareTemplatePlugin({
     if (pos === -1 || pos >= first.loc.start.offset) {
       console.log("should not happen");
       debugger;
-      return;
+      this.processedParent.set(parent, pos);
+      return pos;
     }
 
     s.prependLeft(pos, ` v-slot={(${slotInstance})=>{`);
@@ -131,25 +154,42 @@ export const SlotPlugin = declareTemplatePlugin({
     //     index: pos,
     //     inBlock: true,
     //     conditions: slot.context.conditions,
-    //     // type: "append",
+    //     type: 'append',
+    //     // type: "prepend",
     //     // direction: "right",
     //     condition: slot.condition,
     //   }, s);
     // }
 
     if (ctx.toNarrow && slot.context.conditions.length > 0) {
-      ctx.toNarrow.push({
-        index: pos,
-        inBlock: true,
-        conditions: slot.context.conditions,
-        // type: "append",
-        // direction: "right",
-        condition: slot.condition,
-      });
+      // ctx.toNarrow.push({
+      //   index: pos,
+      //   inBlock: true,
+      //   conditions: slot.context.conditions,
+      //   type: "append",
+      //   // direction: "right",
+      //   condition: slot.condition,
+      // });
+
+      ctx.doNarrow(
+        {
+          index: pos,
+          inBlock: true,
+          conditions: slot.context.conditions,
+          type: "append",
+          // type: "prepend",
+          // direction: "right",
+          condition: slot.condition,
+        },
+        s
+      );
     }
 
-    s.move(pos + 1, endPos, pos);
+    s.move(tagEnd + 1, endPos, pos);
     s.prependRight(pos, "}}");
+
+    this.processedParent.set(parent, pos);
+    return pos;
   },
 
   /**
@@ -297,7 +337,7 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
     // <template v-slot
     if (slot.parent) {
       // this.slots.add(slot.parent);
-      this.handleSlotRender(slot, s, slot.parent, ctx);
+      const parentPos = this.handleSlotRender(slot, s, slot.parent, ctx);
 
       const node = slot.element;
       if (node.type === NodeTypes.ELEMENT) {
@@ -392,29 +432,27 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
           // s.appendLeft(tagEnd, `)=>{`);
 
           if (slot.context.conditions.length > 0) {
-            // ctx.doNarrow(
-            //   {
-            //     index: prop.node.exp
-            //       ? prop.node.exp.loc.end.offset + 1
-            //       : tagEnd,
-            //     inBlock: true,
-            //     conditions: slot.context.conditions,
-            //     type: "prepend",
-
-            //     // empty condition because we need the current slot condition to also apply if present
-            //     condition: null,
-            //   },
-            //   s
-            // );
-
-            ctx.toNarrow?.push({
-              index: prop.node.exp ? prop.node.exp.loc.end.offset + 1 : tagEnd,
-              inBlock: true,
-              conditions: slot.context.conditions,
-              type: "append",
-              // empty condition because we need the current slot condition to also apply if present
-              condition: null,
-            });
+            ctx.doNarrow(
+              {
+                index: prop.node.exp
+                  ? prop.node.exp.loc.end.offset + 1
+                  : tagEnd,
+                inBlock: true,
+                conditions: slot.context.conditions,
+                type: "append",
+                // empty condition because we need the current slot condition to also apply if present
+                condition: null,
+              },
+              s
+            );
+            // ctx.toNarrow?.push({
+            //   index: prop.node.exp ? prop.node.exp.loc.end.offset + 1 : tagEnd,
+            //   inBlock: true,
+            //   conditions: slot.context.conditions,
+            //   type: "append",
+            //   // empty condition because we need the current slot condition to also apply if present
+            //   condition: null,
+            // });
           }
 
           s.prependLeft(node.loc.end.offset, "});");

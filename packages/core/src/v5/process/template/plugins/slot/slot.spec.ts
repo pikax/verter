@@ -115,7 +115,7 @@ describe("process template plugins slot", () => {
         );
       });
 
-      it.skip("conditional", () => {
+      it("conditional", () => {
         const { result } = parse(
           `<div>
             <template v-if="foo === 'test'" v-slot:foo><span>1</span></template>
@@ -127,7 +127,7 @@ describe("process template plugins slot", () => {
         expect(result).toMatchInlineSnapshot(`
           "<div v-slot={(___VERTER___slotInstance)=>{
                        if(___VERTER___ctx.foo === 'test'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{if(!((___VERTER___ctx.foo === 'test'))) return;<template><span>{ "1" }</span></template>});}
-                       else if(___ccccVERTER___ctx.foo === 'app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.app)(()=>{if(!(!((___VERTER___ctx.foo === 'test')) && (___VERTER___ctx.foo === 'app'))) return;<template><span>{ "1" }</span></template>});}
+                       else if(___VERTER___ctx.foo === 'app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.app)(()=>{if(!(!((___VERTER___ctx.foo === 'test')) && (___VERTER___ctx.foo === 'app'))) return;<template><span>{ "1" }</span></template>});}
                        else if(___VERTER___ctx.foo === 'baz'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.baz)(()=>{if(!(!(!((___VERTER___ctx.foo === 'test')) && (___VERTER___ctx.foo === 'test') && (___VERTER___ctx.foo === 'app')) && (___VERTER___ctx.foo === 'baz'))) return;<template><span>{ "1" }</span></template>});}
                        else{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.bar)(()=>{if(!(!(!(!((___VERTER___ctx.foo === 'test')) && (___VERTER___ctx.foo === 'test') && (___VERTER___ctx.foo === 'test') && (___VERTER___ctx.foo === 'app')) && (___VERTER___ctx.foo === 'test') && (___VERTER___ctx.foo === 'app') && (___VERTER___ctx.foo === 'baz')))) return;<template><span>{ "1" }</span></template>});}
                     }}></div>"
@@ -218,11 +218,11 @@ describe("process template plugins slot", () => {
 
       it("parent conditional", () => {
         const { result } = parse(
-          `<div v-if="test === 'foo'"><template #foo>{{test}}</template></div>`
+          `<div v-if="test === 'foo'"><template #[test]>{{test}}</template></div>`
         );
 
         expect(result).toMatchInlineSnapshot(
-          `"{()=>{if(___VERTER___ctx.test === 'foo'){<div  v-slot={(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.test === 'foo'))) return;___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{<template>{___VERTER___ctx.test}</template>}); }}></div>}}}"`
+          `"{()=>{if(___VERTER___ctx.test === 'foo'){<div v-slot={(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.test === 'foo'))) return; ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(()=>{if(!((___VERTER___ctx.test === 'foo'))) return;<template>{___VERTER___ctx.test}</template>});}} ></div>}}}"`
         );
       });
 
