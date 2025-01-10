@@ -60,7 +60,7 @@ describe("process template", () => {
       );
     });
 
-    it.only("v-if > v-if & expect error", () => {
+    it("v-if > v-if & expect error", () => {
       const { result } = parse(
         `<div v-if="test === 'app'"> 
           <!-- @ts-expect-error no overlap -->
@@ -70,7 +70,7 @@ describe("process template", () => {
       expect(result).toMatchInlineSnapshot(`
         "{()=>{if(___VERTER___ctx.test === 'app'){<div > 
                    {()=>{if(!((___VERTER___ctx.test === 'app'))) return;/* @ts-expect-error no overlap */
-                 if(___VERTER___ctx.test === 'foo'){<div >{ " Error " }</div>}}}
+                 if(___VERTER___ctx.test === 'foo'){<div > {"Error"} </div>}}}
                 </div>}}}"
       `);
     });

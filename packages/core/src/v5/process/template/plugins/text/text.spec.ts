@@ -41,7 +41,7 @@ describe("process template plugins text", () => {
 
   it("should handle text", () => {
     const { result } = parse(`test`);
-    expect(result).toMatchInlineSnapshot(`"{ "test" }"`);
+    expect(result).toMatchInlineSnapshot(`"{"test"}"`);
   });
 
   it("should not handle if starts < ", () => {
@@ -51,11 +51,11 @@ describe("process template plugins text", () => {
 
   it("should parse text if has <", () => {
     const { result } = parse(`2 < 1`);
-    expect(result).toMatchInlineSnapshot(`"{ "2 < 1" }"`);
+    expect(result).toMatchInlineSnapshot(`"{"2 < 1"}"`);
   });
 
   it('should escape " in text', () => {
     const { result } = parse(`"`);
-    expect(result).toMatchInlineSnapshot(`"{ "\\"" }"`);
+    expect(result).toMatchInlineSnapshot(`"{"\\""}"`);
   });
 });

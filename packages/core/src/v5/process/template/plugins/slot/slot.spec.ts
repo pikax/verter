@@ -101,7 +101,7 @@ describe("process template plugins slot", () => {
         );
 
         expect(result).toMatchInlineSnapshot(
-          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{<template><span>{ "1" }</span></template>});}}></div>"`
+          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{<template><span>{"1"}</span></template>});}}></div>"`
         );
       });
 
@@ -111,7 +111,7 @@ describe("process template plugins slot", () => {
         );
 
         expect(result).toMatchInlineSnapshot(
-          `"<div v-slot={(___VERTER___slotInstance)=>{ if(___VERTER___ctx.test==='app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{if(!((___VERTER___ctx.test==='app'))) return;<template><span>{ "1" }{___VERTER___ctx.test}</span></template>});}}}></div>"`
+          `"<div v-slot={(___VERTER___slotInstance)=>{ if(___VERTER___ctx.test==='app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{if(!((___VERTER___ctx.test==='app'))) return;<template><span>{"1"}{___VERTER___ctx.test}</span></template>});}}}></div>"`
         );
       });
 
@@ -126,10 +126,10 @@ describe("process template plugins slot", () => {
         );
         expect(result).toMatchInlineSnapshot(`
           "<div v-slot={(___VERTER___slotInstance)=>{
-                       if(___VERTER___ctx.foo === 'test'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{if(!((___VERTER___ctx.foo === 'test'))) return;<template><span>{ "1" }</span></template>});}
-                       else if(___VERTER___ctx.foo === 'app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.app)(()=>{if(!(!((___VERTER___ctx.foo === 'test')) && (___VERTER___ctx.foo === 'app'))) return;<template><span>{ "1" }</span></template>});}
-                       else if(___VERTER___ctx.foo === 'baz'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.baz)(()=>{if(!(!(!((___VERTER___ctx.foo === 'test')) && (___VERTER___ctx.foo === 'test') && (___VERTER___ctx.foo === 'app')) && (___VERTER___ctx.foo === 'baz'))) return;<template><span>{ "1" }</span></template>});}
-                       else{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.bar)(()=>{if(!(!(!(!((___VERTER___ctx.foo === 'test')) && (___VERTER___ctx.foo === 'test') && (___VERTER___ctx.foo === 'test') && (___VERTER___ctx.foo === 'app')) && (___VERTER___ctx.foo === 'test') && (___VERTER___ctx.foo === 'app') && (___VERTER___ctx.foo === 'baz')))) return;<template><span>{ "1" }</span></template>});}
+                       if(___VERTER___ctx.foo === 'test'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{if(!((___VERTER___ctx.foo === 'test'))) return;<template><span>{"1"}</span></template>});}
+                       else if(___VERTER___ctx.foo === 'app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.app)(()=>{if(!(!((___VERTER___ctx.foo === 'test')) && (___VERTER___ctx.foo === 'app'))) return;<template><span>{"1"}</span></template>});}
+                       else if(___VERTER___ctx.foo === 'baz'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.baz)(()=>{if(!(!(!((___VERTER___ctx.foo === 'test')) && (___VERTER___ctx.foo === 'test') && (___VERTER___ctx.foo === 'app')) && (___VERTER___ctx.foo === 'baz'))) return;<template><span>{"1"}</span></template>});}
+                       else{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.bar)(()=>{if(!(!(!(!((___VERTER___ctx.foo === 'test')) && (___VERTER___ctx.foo === 'test') && (___VERTER___ctx.foo === 'test') && (___VERTER___ctx.foo === 'app')) && (___VERTER___ctx.foo === 'test') && (___VERTER___ctx.foo === 'app') && (___VERTER___ctx.foo === 'baz')))) return;<template><span>{"1"}</span></template>});}
                     }}></div>"
         `);
       });
@@ -140,7 +140,7 @@ describe("process template plugins slot", () => {
         );
 
         expect(result).toMatchInlineSnapshot(
-          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{<template><span>{ "1" }</span></template>});}}></div>"`
+          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{<template><span>{"1"}</span></template>});}}></div>"`
         );
       });
 
@@ -150,7 +150,7 @@ describe("process template plugins slot", () => {
         );
 
         expect(result).toMatchInlineSnapshot(
-          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)((obj)=>{<template><span>{ "1 " }{ obj.test }</span></template>});}}></div>"`
+          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)((obj)=>{<template><span>{"1"} { obj.test }</span></template>});}}></div>"`
         );
       });
       it('template #foo="obj"', () => {
@@ -159,7 +159,7 @@ describe("process template plugins slot", () => {
         );
 
         expect(result).toMatchInlineSnapshot(
-          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)((obj)=>{<template><span>{ "1 " }{ obj.test }</span></template>});}}></div>"`
+          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)((obj)=>{<template><span>{"1"} { obj.test }</span></template>});}}></div>"`
         );
       });
 
@@ -169,7 +169,7 @@ describe("process template plugins slot", () => {
         );
 
         expect(result).toMatchInlineSnapshot(
-          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(({bar})=>{<template><span>{ "1" }{bar}</span></template>});}}></div>"`
+          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(({bar})=>{<template><span>{"1"}{bar}</span></template>});}}></div>"`
         );
       });
       it('template #foo="{bar}"', () => {
@@ -178,7 +178,7 @@ describe("process template plugins slot", () => {
         );
 
         expect(result).toMatchInlineSnapshot(
-          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(({bar})=>{<template><span>{ "1" }{bar}</span></template>});}}></div>"`
+          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(({bar})=>{<template><span>{"1"}{bar}</span></template>});}}></div>"`
         );
       });
 
@@ -187,7 +187,7 @@ describe("process template plugins slot", () => {
           `<div><template v-slot:[foo]><span>1</span></template></div>`
         );
         expect(result).toMatchInlineSnapshot(
-          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(()=>{<template><span>{ "1" }</span></template>});}}></div>"`
+          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(()=>{<template><span>{"1"}</span></template>});}}></div>"`
         );
       });
       it("template #[foo]", () => {
@@ -195,7 +195,7 @@ describe("process template plugins slot", () => {
           `<div><template #[foo]><span>1</span></template></div>`
         );
         expect(result).toMatchInlineSnapshot(
-          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(()=>{<template><span>{ "1" }</span></template>});}}></div>"`
+          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(()=>{<template><span>{"1"}</span></template>});}}></div>"`
         );
       });
 
@@ -204,7 +204,7 @@ describe("process template plugins slot", () => {
           `<div><template v-slot:[foo]="{obj}"><span>1{{obj}}</span></template></div>`
         );
         expect(result).toMatchInlineSnapshot(
-          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(({obj})=>{<template><span>{ "1" }{obj}</span></template>});}}></div>"`
+          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(({obj})=>{<template><span>{"1"}{obj}</span></template>});}}></div>"`
         );
       });
       it('template #[foo]="{obj}"', () => {
@@ -212,7 +212,7 @@ describe("process template plugins slot", () => {
           `<div><template #[foo]="{obj}"><span>1{{obj}}</span></template></div>`
         );
         expect(result).toMatchInlineSnapshot(
-          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(({obj})=>{<template><span>{ "1" }{obj}</span></template>});}}></div>"`
+          `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(({obj})=>{<template><span>{"1"}{obj}</span></template>});}}></div>"`
         );
       });
 
@@ -226,28 +226,52 @@ describe("process template plugins slot", () => {
         );
       });
 
-      it.skip(`keep comments correct @ts-expect-error`, () => {
+      it(`keep comments correct @ts-expect-error`, () => {
         const { result } = parse(
           `<div v-if="test === 'foo'">
           // @ts-expect-error invalid app
           <template v-if="test==='app'" v-slot:foo><span>1{{test}}</span></template></div>`
         );
-
-        expect(result).toMatchInlineSnapshot(
-          `
-          "{()=>{if(___VERTER___ctx.test === 'foo'){ v-slot={(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.test === 'foo'){ v-slot={(___VERTER___slotInstance)=>)) return;<div { "
-                    // @ts-expect-error invalid app
-                    if(!((___VERTER___ctx.test === 'foo'))) return;" } if(___VERTER___ctx.test==='app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{if(!((___VERTER___ctx.test === 'foo'){ v-slot={(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.test === 'foo'){ v-slot={(___VERTER___slotInstance)=>)) return; && (___VERTER___ctx.test==='app'))) return;<template><span>{ "1" }{___VERTER___ctx.test}</span></template>});}}}></div>}}}"
-        `
-        );
+        expect(result).toMatchInlineSnapshot(`
+          "{()=>{if(___VERTER___ctx.test === 'foo'){<div v-slot={(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.test === 'foo'))) return;
+                    {"// @ts-expect-error invalid app"}
+                    if(!((___VERTER___ctx.test === 'foo'))) return; if(___VERTER___ctx.test==='app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{if(!((___VERTER___ctx.test === 'foo') && (___VERTER___ctx.test==='app'))) return;<template><span>{"1"}{___VERTER___ctx.test}</span></template>});}}} ></div>}}}"
+        `);
+        //     expect(result).toMatchInlineSnapshot(`
+        //       "{()=>{if(___VERTER___ctx.test === 'foo'){<div v-slot={(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.test === 'foo'))) return;
+        // // @ts-expect-error invalid app
+        // if(___VERTER___ctx.test==='app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{if(!((___VERTER___ctx.test === 'foo') && (___VERTER___ctx.test==='app'))) return;<template><span>{"1"}{___VERTER___ctx.test}</span></template>});}}} ></div>}}}"
+        //     `);
       });
     });
 
-    it.skip('Comp v-slot="{foo}"', () => {
-      const { result } = parse(`<Comp v-slot="{foo}">{{foo}}</Comp>`);
-      expect(result).toMatchInlineSnapshot(
-        `"<Comp v-slot={(___VERTER___slotInstance)=>{const ___VERTER___$slot=___VERTER___slotInstance.$slots;___VERTER___SLOT_CALLBACK(___VERTER___$slot.default)(({foo})=>{foo})}}></Comp>"`
-      );
+    describe("v-slot", () => {
+      it("Comp v-slot", () => {
+        const { result } = parse(`<Comp v-slot></Comp>`);
+        expect(result).toMatchInlineSnapshot(
+          `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{})}}></Comp>"`
+        );
+      });
+
+      it("Comp v-slot self-closing", () => {
+        const { result } = parse(`<Comp v-slot/>`);
+        expect(result).toMatchInlineSnapshot(
+          `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{})}}/>"`
+        );
+      });
+
+      it('Comp v-slot="{foo}"', () => {
+        const { result } = parse(`<Comp v-slot="{foo}">{{foo}}</Comp>`);
+        expect(result).toMatchInlineSnapshot(
+          `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({foo})=>{{foo}})}}></Comp>"`
+        );
+      });
+      it('Comp #="{foo}"', () => {
+        const { result } = parse(`<Comp #="{foo}">{{foo}}</Comp>`);
+        expect(result).toMatchInlineSnapshot(
+          `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({foo})=>{{foo}})}}></Comp>"`
+        );
+      });
     });
   });
 

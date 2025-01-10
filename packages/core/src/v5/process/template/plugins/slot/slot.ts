@@ -39,7 +39,10 @@ declare global {
 export const SlotPlugin = declareTemplatePlugin({
   name: "VerterSlot",
 
-  processedParent: new Map<ElementNode, number>(),
+  processedParent: new Set<ElementNode>(),
+  pre() {
+    this.processedParent.clear();
+  },
 
   // slots: new Set<ElementNode>(),
   // pre() {
@@ -91,77 +94,88 @@ export const SlotPlugin = declareTemplatePlugin({
     parent: ElementNode,
     ctx: TemplateContext
   ) {
-    let processedIndex = this.processedParent.get(parent) ?? -1;
-    if (processedIndex >= 0) return processedIndex;
-
+    if (this.processedParent.has(parent)) return;
     const slotInstance = ctx.retrieveAccessor("slotInstance");
+    const isTemplateSlot = !!slot.parent;
+
     const children = parent.children;
-    const element = slot.element as ElementNode;
-    const pos = parent.loc.start.offset + parent.tag.length + 1;
 
-    const first = children.shift();
-    // nothing to do if there's no children
-    if (!first) {
-      this.processedParent.set(parent, pos);
-      return pos;
-    }
-    const last = children.pop() ?? first;
+    // const pos = isTemplateSlot
+    //   ? parent.loc.start.offset + parent.tag.length + 1
+    //   : (slot.prop.node?.exp?.loc.start.offset ??
+    //       slot.prop.node?.arg.loc.end.offset) + 1;
 
-    const Movable = new Set(["if", "else", "else-if", "for"]);
-    // const movableProps = parent.props.filter((x) => Movable.has(x.name));
+    // const first = children.shift();
+    // // nothing to do if there's no children
+    // if (!first) {
+    //   this.processedParent.add(parent);
+    //   return;
+    // }
+    // const last = children.pop() ?? first;
+    // const tagEnd =
+    //   parent.loc.start.offset +
+    //   parent.loc.source
+    //     .slice(0, first.loc.start.offset - parent.loc.start.offset)
+    //     .lastIndexOf(">");
 
-    // let pos = parent.loc.start.offset + parent.tag.length + 1;
-    // // find the place to insert the v-slot, if there's any movable
-    // // props we need to place it before
-    // for (let i = parent.props.length - 1; i >= 0; i--) {
-    //   const prop = parent.props[i];
-    //   if (Movable.has(prop.name)) {
-    //     continue;
-    //   }
-    //   pos = prop.loc.end.offset;
+    // const endPos =
+    //   parent.loc.source
+    //     .slice(last.loc.end.offset - parent.loc.start.offset)
+    //     .indexOf("<") + last.loc.end.offset;
+
+    // if (pos === -1 || pos >= first.loc.start.offset) {
+    //   console.log("should not happen");
+    //   debugger;
+    //   return;
     // }
 
-    // const pos =
-    parent.loc.start.offset +
-      parent.loc.source
-        .slice(0, first.loc.start.offset - parent.loc.start.offset)
-        .lastIndexOf(">");
+    const parentSource = parent.loc.source;
 
+    const endTagPos = parentSource.lastIndexOf("</") + parent.loc.start.offset;
     const tagEnd =
       parent.loc.start.offset +
-      parent.loc.source
-        .slice(0, first.loc.start.offset - parent.loc.start.offset)
+      parentSource
+        .slice(
+          0,
+          parent.children.length === 0
+            ? endTagPos - parent.loc.start.offset
+            : children[0].loc.start.offset - parent.loc.start.offset
+        )
         .lastIndexOf(">");
+    let pos = -1;
 
-    const endPos =
-      parent.loc.source
-        .slice(last.loc.end.offset - parent.loc.start.offset)
-        .indexOf("<") + last.loc.end.offset;
+    if (isTemplateSlot) {
+      const first = children.shift();
+      // nothing to do if there's no children
+      if (!first) {
+        this.processedParent.add(parent);
+        return;
+      }
+      const last = children.pop() ?? first;
 
-    if (pos === -1 || pos >= first.loc.start.offset) {
-      console.log("should not happen");
-      debugger;
-      this.processedParent.set(parent, pos);
-      return pos;
+      pos = parent.loc.start.offset + parent.tag.length + 1;
+      // tagEnd =
+      //   parent.loc.start.offset +
+      //   parent.loc.source
+      //     .slice(0, first.loc.start.offset - parent.loc.start.offset)
+      //     .lastIndexOf(">");
+
+      // endTagPos =
+      //   parent.loc.source
+      //     .slice(last.loc.end.offset - parent.loc.start.offset)
+      //     .indexOf("<") + last.loc.end.offset;
+
+      if (pos === -1 || pos >= first.loc.start.offset) {
+        console.log("should not happen");
+        debugger;
+        return;
+      }
+    } else {
+      pos = slot.prop.node!.loc.start.offset;
     }
-
     s.prependLeft(pos, ` v-slot={(${slotInstance})=>{`);
-    // s.appendLeft(pos, ` v-slot={(${slotInstance})=>{`);
-    // s.prependRight(pos, ` v-slot={(${slotInstance})=>{`);
 
-    // if (ctx.doNarrow) {
-    //   ctx.doNarrow({
-    //     index: pos,
-    //     inBlock: true,
-    //     conditions: slot.context.conditions,
-    //     type: 'append',
-    //     // type: "prepend",
-    //     // direction: "right",
-    //     condition: slot.condition,
-    //   }, s);
-    // }
-
-    if (ctx.toNarrow && slot.context.conditions.length > 0) {
+    if (ctx.doNarrow && slot.context.conditions.length > 0) {
       // ctx.toNarrow.push({
       //   index: pos,
       //   inBlock: true,
@@ -185,10 +199,20 @@ export const SlotPlugin = declareTemplatePlugin({
       );
     }
 
-    s.move(tagEnd + 1, endPos, pos);
-    s.prependRight(pos, "}}");
+    if (isTemplateSlot) {
+      if (tagEnd < endTagPos - 2) {
+        // if (tagEnd !== endTagPos) {
+        s.move(tagEnd + 1, endTagPos, pos);
+      }
+      s.prependRight(pos, "}}");
+    } else {
+      if (tagEnd < endTagPos - 2) {
+        s.move(tagEnd + 1, endTagPos, slot.prop.node!.loc.end.offset);
+      }
+      s.prependRight(slot.prop.node!.loc.end.offset, "}}");
+    }
 
-    this.processedParent.set(parent, pos);
+    this.processedParent.add(parent);
     return pos;
   },
 
@@ -337,7 +361,7 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
     // <template v-slot
     if (slot.parent) {
       // this.slots.add(slot.parent);
-      const parentPos = this.handleSlotRender(slot, s, slot.parent, ctx);
+      this.handleSlotRender(slot, s, slot.parent, ctx);
 
       const node = slot.element;
       if (node.type === NodeTypes.ELEMENT) {
@@ -468,6 +492,110 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
       }
     } else {
       // <Comp v-slot="slot">
+      const element = slot.element as ElementNode;
+      this.handleSlotRender(slot, s, element as ElementNode, ctx);
+
+      // const pos = slot.prop.node!.loc.end.offset;
+
+      const endPropIndex = slot.prop.node!.loc.end.offset;
+
+      const directive = slot.prop.node as DirectiveNode;
+
+      s.overwrite(
+        slot.prop.node!.loc.start.offset,
+        slot.prop.node!.loc.start.offset +
+          (directive.rawName!.startsWith("#") ? 1 : "v-slot".length),
+        `$slots`
+      );
+
+      s.prependRight(
+        directive.loc.start.offset,
+        `${slotRender}(${slotInstance}.`
+      );
+
+      // update exp delimiters
+      if (directive.exp) {
+        s.overwrite(
+          directive.exp.loc.start.offset - 1,
+          directive.exp.loc.start.offset,
+          ""
+        );
+        s.overwrite(
+          directive.exp.loc.end.offset,
+          directive.exp.loc.end.offset + 1,
+          ""
+        );
+      }
+
+      if (directive.arg) {
+        // todo
+        if (directive.exp) {
+          s.update(
+            directive.arg.loc.end.offset,
+            directive.exp.loc.start.offset,
+            ""
+          );
+        } else {
+        }
+      } else {
+        if (directive.exp) {
+          s.update(
+            directive.loc.start.offset +
+              (directive.rawName!.startsWith("#") ? 1 : "v-slot".length),
+            directive.loc.start.offset +
+              (directive.rawName!.startsWith("#") ? 2 : "v-slot=".length),
+            ""
+          );
+
+          s.prependLeft(directive.exp.loc.start.offset, `.default)((`);
+
+          // s.overwrite(
+          //   directive.exp.loc.start.offset,
+          //   directive.exp.loc.start.offset + 1,
+          //   "("
+          // );
+          // s.overwrite(
+          //   directive.exp.loc.end.offset - 1,
+          //   directive.exp.loc.end.offset,
+          //   "}"
+          // );
+
+          // s.prependLeft(directive.exp.loc.start.offset, `)=>{`);
+          s.prependLeft(directive.exp.loc.end.offset, `)=>{`);
+        } else {
+          s.appendLeft(directive.loc.end.offset, `.default`);
+          s.appendLeft(directive.loc.end.offset, `)(()=>{`);
+        }
+      }
+
+      // s.appendLeft(directive.loc.end.offset, `)(()=>{`);
+
+      if (slot.context.conditions.length > 0) {
+        ctx.doNarrow(
+          {
+            index: directive.loc.end.offset,
+            inBlock: true,
+            conditions: slot.context.conditions,
+            type: "append",
+            // empty condition because we need the current slot condition to also apply if present
+            condition: null,
+          },
+          s
+        );
+        // ctx.toNarrow?.push({
+        //   index: prop.node.exp ? prop.node.exp.loc.end.offset + 1 : tagEnd,
+        //   inBlock: true,
+        //   conditions: slot.context.conditions,
+        //   type: "append",
+        //   // empty condition because we need the current slot condition to also apply if present
+        //   condition: null,
+        // });
+      }
+      // content
+
+      // closing
+
+      s.prependRight(directive.loc.end.offset, "})");
     }
   },
 });

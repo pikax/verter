@@ -16,11 +16,26 @@ export const TextPlugin = {
 
     for (let i = 0; i < content.length; i++) {
       if (content[i] === '"') {
-        s.overwrite(item.node.loc.start.offset + i, item.node.loc.start.offset + i + 1, '\\"');
+        s.overwrite(
+          item.node.loc.start.offset + i,
+          item.node.loc.start.offset + i + 1,
+          '\\"'
+        );
       }
     }
 
-    s.appendRight(item.node.loc.start.offset, '{ "');
-    s.appendLeft(item.node.loc.end.offset, '" }');
+    const start =
+      item.node.loc.source.indexOf(content) + item.node.loc.start.offset;
+
+    const end = start + content.length;
+
+    s.prependRight(start, '{"');
+    s.prependLeft(end, '"}');
+
+    // s.appendRight(item.node.loc.start.offset, '{ "');
+    // s.appendLeft(item.node.loc.end.offset, '" }');
+
+    // s.prependRight(item.node.loc.start.offset, '{ "');
+    // s.prependLeft(item.node.loc.end.offset, '" }');
   },
 } as TemplatePlugin;
