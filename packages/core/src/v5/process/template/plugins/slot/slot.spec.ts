@@ -246,30 +246,149 @@ describe("process template plugins slot", () => {
     });
 
     describe("v-slot", () => {
-      it("Comp v-slot", () => {
-        const { result } = parse(`<Comp v-slot></Comp>`);
-        expect(result).toMatchInlineSnapshot(
-          `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{})}}></Comp>"`
-        );
+      describe("default", () => {
+        it("no children", () => {
+          const { result } = parse(`<Comp v-slot></Comp>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{})}}></Comp>"`
+          );
+        });
+
+        it("self-closing", () => {
+          const { result } = parse(`<Comp v-slot/>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{})}}/>"`
+          );
+        });
+
+        it("with children", () => {
+          const { result } = parse(`<Comp v-slot>{{foo}}</Comp>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{{___VERTER___ctx.foo}})}}></Comp>"`
+          );
+        });
+
+        it('Comp v-slot="{foo}"', () => {
+          const { result } = parse(`<Comp v-slot="{foo}">{{foo}}</Comp>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({foo})=>{{foo}})}}></Comp>"`
+          );
+        });
+        it('#="{foo}"', () => {
+          const { result } = parse(`<Comp #="{foo}">{{foo}}</Comp>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({foo})=>{{foo}})}}></Comp>"`
+          );
+        });
+
+        it('v-if="test === \'app\'" v-slot="{foo}"', () => {
+          const { result } = parse(
+            `<Comp v-if="test === 'app'" v-slot="{foo}">{{foo}}</Comp>`
+          );
+          expect(result).toMatchInlineSnapshot(
+            `"{()=>{if(___VERTER___ctx.test === 'app'){<Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></Comp>}}}"`
+          );
+        });
       });
 
-      it("Comp v-slot self-closing", () => {
-        const { result } = parse(`<Comp v-slot/>`);
-        expect(result).toMatchInlineSnapshot(
-          `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{})}}/>"`
-        );
+      describe("named", () => {
+        it("no children", () => {
+          const { result } = parse(`<Comp v-slot:test></Comp>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(()=>{})}}></Comp>"`
+          );
+        });
+
+        it("self-closing", () => {
+          const { result } = parse(`<Comp v-slot:test/>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(()=>{})}}/>"`
+          );
+        });
+
+        it("with children", () => {
+          const { result } = parse(`<Comp v-slot:test>{{foo}}</Comp>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(()=>{{___VERTER___ctx.foo}})}}></Comp>"`
+          );
+        });
+
+        it('Comp v-slot:test="{foo}"', () => {
+          const { result } = parse(`<Comp v-slot:test="{foo}">{{foo}}</Comp>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(({foo})=>{{foo}})}}></Comp>"`
+          );
+        });
+        it('#test="{foo}"', () => {
+          const { result } = parse(`<Comp #test="{foo}">{{foo}}</Comp>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(({foo})=>{{foo}})}}></Comp>"`
+          );
+        });
+
+        it('v-if="test === \'app\'" v-slot:test="{foo}"', () => {
+          const { result } = parse(
+            `<Comp v-if="test === 'app'" v-slot:test="{foo}">{{foo}}</Comp>`
+          );
+          expect(result).toMatchInlineSnapshot(
+            `"{()=>{if(___VERTER___ctx.test === 'app'){<Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></Comp>}}}"`
+          );
+        });
       });
 
-      it('Comp v-slot="{foo}"', () => {
-        const { result } = parse(`<Comp v-slot="{foo}">{{foo}}</Comp>`);
-        expect(result).toMatchInlineSnapshot(
-          `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({foo})=>{{foo}})}}></Comp>"`
-        );
+      describe("dynamic", () => {
+        it("no children", () => {
+          const { result } = parse(`<Comp v-slot:[test]></Comp>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(()=>{})}}></Comp>"`
+          );
+        });
+
+        it("self-closing", () => {
+          const { result } = parse(`<Comp v-slot:[test]/>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(()=>{})}}/>"`
+          );
+        });
+
+        it("with children", () => {
+          const { result } = parse(`<Comp v-slot:[test]>{{foo}}</Comp>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(()=>{{___VERTER___ctx.foo}})}}></Comp>"`
+          );
+        });
+
+        it('Comp v-slot:[test]="{foo}"', () => {
+          const { result } = parse(
+            `<Comp v-slot:[test]="{foo}">{{foo}}</Comp>`
+          );
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>{{foo}})}}></Comp>"`
+          );
+        });
+        it('#[test]="{foo}"', () => {
+          const { result } = parse(`<Comp #[test]="{foo}">{{foo}}</Comp>`);
+          expect(result).toMatchInlineSnapshot(
+            `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>{{foo}})}}></Comp>"`
+          );
+        });
+
+        it('v-if="test === \'app\'" v-slot:[test]="{foo}"', () => {
+          const { result } = parse(
+            `<Comp v-if="test === 'app'" v-slot:[test]="{foo}">{{foo}}</Comp>`
+          );
+          expect(result).toMatchInlineSnapshot(
+            `"{()=>{if(___VERTER___ctx.test === 'app'){<Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></Comp>}}}"`
+          );
+        });
       });
-      it('Comp #="{foo}"', () => {
-        const { result } = parse(`<Comp #="{foo}">{{foo}}</Comp>`);
+
+      it('Comp v-if="test === \'app\'" v-slot:[test]="{foo}"', () => {
+        const { result } = parse(
+          `<Comp v-if="test === 'app'" v-slot:[test]="{foo}">{{foo}}</Comp>`
+        );
         expect(result).toMatchInlineSnapshot(
-          `"<Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({foo})=>{{foo}})}}></Comp>"`
+          `"{()=>{if(___VERTER___ctx.test === 'app'){<Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></Comp>}}}"`
         );
       });
     });

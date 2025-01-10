@@ -3,6 +3,7 @@ import {
   DirectiveNode,
   ElementNode,
   NodeTypes,
+  SimpleExpressionNode,
 } from "@vue/compiler-core";
 import {
   declareTemplatePlugin,
@@ -528,6 +529,18 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
       }
 
       if (directive.arg) {
+        const arg = directive.arg as SimpleExpressionNode;
+        if (arg.isStatic) {
+          // the # was overriden to be $slots, this is to allow over in intellisense
+          if (directive.rawName!.startsWith("v-")) {
+            s.update(arg.loc.start.offset - 1, arg.loc.start.offset, ".");
+          } else {
+            s.prependLeft(arg.loc.start.offset, ".");
+          }
+        } else if (directive.rawName!.startsWith("v-")) {
+          s.remove(arg.loc.start.offset - 1, arg.loc.start.offset);
+        }
+
         // todo
         if (directive.exp) {
           s.update(
@@ -535,7 +548,11 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
             directive.exp.loc.start.offset,
             ""
           );
+          s.prependLeft(directive.exp.loc.start.offset, `)((`);
+
+          s.prependLeft(directive.exp.loc.end.offset, `)=>{`);
         } else {
+          s.prependLeft(directive.arg.loc.end.offset, ")(()=>{");
         }
       } else {
         if (directive.exp) {
