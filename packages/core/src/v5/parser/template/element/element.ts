@@ -35,9 +35,12 @@ export function handleElement(
   const propBindings = handleProps(node, context);
   const props =
     propBindings?.filter((x) => x.type === TemplateTypes.Prop) ?? [];
-  const slot = handleSlotDeclaration(node, parent, context);
+  const slot = handleSlotDeclaration(node, parent as ElementNode, context);
 
   const propSlot = handleSlotProp(node, parent, context, conditions?.condition);
+  if (propSlot) {
+    context = propSlot.context;
+  }
 
   const element: TemplateElement = {
     type: TemplateTypes.Element,
@@ -63,7 +66,7 @@ export function handleElement(
     ...(loop?.items ?? []),
     element,
     ...(propBindings ?? []),
-    ...propSlot?.items ?? [],
+    ...(propSlot?.items ?? []),
     ...[slot?.slot].filter((x) => x),
   ];
 

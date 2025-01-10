@@ -123,19 +123,32 @@ export const SlotPlugin = declareTemplatePlugin({
     }
 
     s.prependLeft(pos, ` v-slot={(${slotInstance})=>{`);
+    // s.appendLeft(pos, ` v-slot={(${slotInstance})=>{`);
+    // s.prependRight(pos, ` v-slot={(${slotInstance})=>{`);
+
+    // if (ctx.doNarrow) {
+    //   ctx.doNarrow({
+    //     index: pos,
+    //     inBlock: true,
+    //     conditions: slot.context.conditions,
+    //     // type: "append",
+    //     // direction: "right",
+    //     condition: slot.condition,
+    //   }, s);
+    // }
 
     if (ctx.toNarrow && slot.context.conditions.length > 0) {
       ctx.toNarrow.push({
         index: pos,
         inBlock: true,
         conditions: slot.context.conditions,
-        type: "append",
+        // type: "append",
+        // direction: "right",
         condition: slot.condition,
       });
     }
 
     s.move(pos + 1, endPos, pos);
-
     s.prependRight(pos, "}}");
   },
 
@@ -348,7 +361,7 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
             // update = to )
             s.overwrite(
               prop.node.exp.loc.start.offset - 2,
-              prop.node.exp.loc.start.offset -1,
+              prop.node.exp.loc.start.offset - 1,
               ")"
             );
 
@@ -365,7 +378,7 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
               prop.node.exp.loc.end.offset + 1,
               ")"
             );
-            s.prependLeft(prop.node.exp.loc.end.offset +1, "=>{");
+            s.prependLeft(prop.node.exp.loc.end.offset + 1, "=>{");
 
             // s.remove(
             //   prop.node.exp.loc.start.offset - 2,
@@ -378,14 +391,31 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
 
           // s.appendLeft(tagEnd, `)=>{`);
 
-          ctx.toNarrow?.push({
-            index: prop.node.exp ? prop.node.exp.loc.end.offset +1 : tagEnd,
-            inBlock: true,
-            conditions: slot.context.conditions,
-            type: "append",
-            // empty condition because we need the current slot condition to also apply if present
-            condition: null,
-          });
+          if (slot.context.conditions.length > 0) {
+            // ctx.doNarrow(
+            //   {
+            //     index: prop.node.exp
+            //       ? prop.node.exp.loc.end.offset + 1
+            //       : tagEnd,
+            //     inBlock: true,
+            //     conditions: slot.context.conditions,
+            //     type: "prepend",
+
+            //     // empty condition because we need the current slot condition to also apply if present
+            //     condition: null,
+            //   },
+            //   s
+            // );
+
+            ctx.toNarrow?.push({
+              index: prop.node.exp ? prop.node.exp.loc.end.offset + 1 : tagEnd,
+              inBlock: true,
+              conditions: slot.context.conditions,
+              type: "append",
+              // empty condition because we need the current slot condition to also apply if present
+              condition: null,
+            });
+          }
 
           s.prependLeft(node.loc.end.offset, "});");
         } else {

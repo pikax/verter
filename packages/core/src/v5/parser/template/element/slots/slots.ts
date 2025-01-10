@@ -117,14 +117,19 @@ export function handleSlotProp<T extends SlotsContext>(
     TemplateDirective
   ];
 
-  const context = {
-    ...parentContext,
-    ignoredIdentifiers: [
-      ...parentContext.ignoredIdentifiers,
-      ...(prop.exp?.map((x) => x.type === TemplateTypes.Binding && x.name) ??
-        []),
-    ],
-  };
+  const ignoredIdentifiers =
+    prop.exp?.map((x) => x.type === TemplateTypes.Binding && x.name) ?? [];
+
+  const context =
+    ignoredIdentifiers.length > 0
+      ? {
+          ...parentContext,
+          ignoredIdentifiers: [
+            ...parentContext.ignoredIdentifiers,
+            ...ignoredIdentifiers,
+          ],
+        }
+      : parentContext;
 
   const slot: TemplateRenderSlot = {
     type: TemplateTypes.SlotRender,

@@ -1,6 +1,7 @@
 import { parse as parseSFC } from "@vue/compiler-sfc";
 import { handleElement } from "./index.js";
 import { ElementContext, TemplateTypes } from "../types.js";
+import element from "../../../../plugins/template/v2/transpile/transpilers/element/element.js";
 
 describe("parser template element", () => {
   function parse(
@@ -379,6 +380,19 @@ describe("parser template element", () => {
           ignore: true,
         },
       ],
+    });
+  });
+
+  it('v-slot="slotProps"', () => {
+    const { result } = parse(
+      `<div v-slot="slotProps" :name="slotProps.test">{{slotProps}}</div>`
+    );
+    expect(result).toMatchObject({
+      element: {
+        context: {
+          ignoredIdentifiers: ["slotProps"],
+        },
+      },
     });
   });
 });

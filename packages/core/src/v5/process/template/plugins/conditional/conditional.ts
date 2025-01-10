@@ -1,6 +1,7 @@
 import { CommentNode, NodeTypes } from "@vue/compiler-core";
 import {
   TemplateCondition,
+  TemplateItemByType,
   TemplateTypes,
 } from "../../../../parser/template/types";
 import { declareTemplatePlugin } from "../../template";
@@ -21,12 +22,48 @@ export const ConditionalPlugin = declareTemplatePlugin({
     //   this.narrows.length = 0;
 
     ctx.toNarrow = [];
+
+    ctx.doNarrow = (narrow: {
+      index: number;
+      inBlock: boolean;
+      conditions: TemplateCondition[];
+
+      type?: "prepend" | "append";
+      direction?: "left" | "right";
+
+      condition?: TemplateCondition | null;
+    }, s: MagicString) => {
+      const conditions = narrow.conditions.filter(
+        (x) => x !== narrow.condition
+      );
+      if (conditions.length > 0) {
+        const condition = narrow.inBlock
+          ? generateBlockCondition(conditions, s)
+          : generateTernaryCondition(conditions, s);
+
+        if (narrow.type === "append") {
+          if (narrow.direction === "right") {
+            s.appendRight(narrow.index, condition);
+          } else {
+            s.appendLeft(narrow.index, condition);
+          }
+        } else {
+          if (narrow.direction === "right") {
+            s.prependRight(narrow.index, condition);
+          } else {
+            s.prependLeft(narrow.index, condition);
+          }
+        }
+      }
+    };
   },
 
   post(s, ctx) {
     if (!ctx.toNarrow) return;
     for (const narrow of ctx.toNarrow) {
-      const conditions = narrow.conditions.filter((x) => x !== narrow.condition);
+      const conditions = narrow.conditions.filter(
+        (x) => x !== narrow.condition
+      );
       if (conditions.length > 0) {
         const condition = narrow.inBlock
           ? generateBlockCondition(conditions, s)
@@ -54,9 +91,10 @@ export const ConditionalPlugin = declareTemplatePlugin({
     const node = item.node;
     const rawName = node.rawName!;
 
-
     // slot render have special conditions and places where the v-if should be placed
-    const canMove = !(element.tag === "template" && element.props.find((x) => x.name === "slot"));
+    const canMove = !(
+      element.tag === "template" && element.props.find((x) => x.name === "slot")
+    );
 
     // Move comments to after the element contition narrow and
     // before the element condition
@@ -86,14 +124,14 @@ export const ConditionalPlugin = declareTemplatePlugin({
       }
     }
 
-    if(canMove) {
-    // move v-* to the beginning of the element
-    s.move(
-      node.loc.start.offset,
-      node.loc.end.offset,
-      element.loc.start.offset
-    );
-  }
+    if (canMove) {
+      // move v-* to the beginning of the element
+      s.move(
+        node.loc.start.offset,
+        node.loc.end.offset,
+        element.loc.start.offset
+      );
+    }
 
     if (node.name === "else-if") {
       // replace '-' with ' '
