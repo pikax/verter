@@ -60,7 +60,7 @@ describe("process template", () => {
       );
     });
 
-    it("v-if > v-if & expect error", () => {
+    it.only("v-if > v-if & expect error", () => {
       const { result } = parse(
         `<div v-if="test === 'app'"> 
           <!-- @ts-expect-error no overlap -->

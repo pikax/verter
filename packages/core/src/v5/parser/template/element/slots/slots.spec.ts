@@ -20,7 +20,11 @@ describe("parser template slots", () => {
       const template = sfc.descriptor.template;
       const ast = template?.ast!;
 
-      const result = handleSlotDeclaration(ast.children[0] as any, context);
+      const result = handleSlotDeclaration(
+        ast.children[0] as any,
+        ast as any,
+        context
+      );
 
       return {
         source,
@@ -33,7 +37,7 @@ describe("parser template slots", () => {
         type: NodeTypes.COMMENT,
       } as any as ElementNode;
       expect(
-        handleSlotDeclaration(node, { ignoredIdentifiers: [] })
+        handleSlotDeclaration(node, {} as any, { ignoredIdentifiers: [] })
       ).toBeNull();
     });
     it("return null if node type is not <slot/>", () => {
@@ -51,7 +55,7 @@ describe("parser template slots", () => {
           },
           name: null,
           props: [],
-          parent: null,
+          parent: {},
         },
 
         context: { ignoredIdentifiers: [] },
@@ -93,7 +97,7 @@ describe("parser template slots", () => {
               },
             },
           ],
-          parent: null,
+          parent: {},
         },
         context: { ignoredIdentifiers: [] },
         items: [
@@ -148,7 +152,7 @@ describe("parser template slots", () => {
               },
             },
           ],
-          parent: null,
+          parent: {},
         },
         context: { ignoredIdentifiers: [] },
         items: [
@@ -221,7 +225,7 @@ describe("parser template slots", () => {
               },
             },
           ],
-          parent: null,
+          parent: {},
         },
         context: { ignoredIdentifiers: [] },
         items: [
@@ -284,7 +288,7 @@ describe("parser template slots", () => {
               },
             },
           ],
-          parent: null,
+          parent: {},
         },
         context: { ignoredIdentifiers: [] },
         items: [
@@ -328,7 +332,7 @@ describe("parser template slots", () => {
               ],
             },
           ],
-          parent: null,
+          parent: {},
         },
         context: { ignoredIdentifiers: [] },
         items: [

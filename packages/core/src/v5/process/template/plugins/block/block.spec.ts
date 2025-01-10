@@ -3,6 +3,7 @@ import { ParsedBlockTemplate } from "../../../../parser/types";
 import { processTemplate, TemplateContext } from "../../template";
 import { MagicString } from "@vue/compiler-sfc";
 import { BlockPlugin } from "./index";
+import { DefaultPlugins } from "../..";
 
 describe("process template plugins narrow", () => {
   function parse(content: string, options: Partial<TemplateContext> = {}) {
@@ -18,7 +19,8 @@ describe("process template plugins narrow", () => {
     const r = processTemplate(
       templateBlock.result.items,
       [
-        BlockPlugin,
+        // BlockPlugin,
+        ...DefaultPlugins,
         // clean template tag
         {
           post: (s) => {
@@ -32,6 +34,7 @@ describe("process template plugins narrow", () => {
         s,
         filename: "test.vue",
         blocks: parsed.blocks,
+        // narrow: true,
       }
     );
 
@@ -44,53 +47,47 @@ describe("process template plugins narrow", () => {
         `<div v-if="typeof test === string" :test="()=>test" />`
       );
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{<div v-if="typeof test === string" :test="()=>test" />}}"`
+        `"{()=>{if(typeof ___VERTER___ctx.test === ___VERTER___ctx.string){<div  test={()=>___VERTER___ctx.test} />}}}"`
       );
     });
 
     it("v-if v-else", () => {
       const { result } = parse(
-        `<div v-if="typeof test === string" :test="()=>test" />
+        `<div v-if="typeof test === 'string'" :test="()=>test" />
           <div v-else :test="()=>test" />`
       );
-      expect(result).toMatchInlineSnapshot(
-        `
-        "{()=>{<div v-if="typeof test === string" :test="()=>test" />
-                  <div v-else :test="()=>test" />}}"
-      `
-      );
+      expect(result).toMatchInlineSnapshot(`
+        "{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}
+                  else{<div  test={()=>___VERTER___ctx.test} />}}}"
+      `);
     });
 
     it("v-if v-else-if v-else", () => {
       const { result } = parse(
-        `<div v-if="typeof test === string" :test="()=>test" />
-          <div v-else-if="typeof test === number" :test="()=>test" />
+        `<div v-if="typeof test === 'string'" :test="()=>test" />
+          <div v-else-if="typeof test === 'number'" :test="()=>test" />
           <div v-else :test="()=>test" />`
       );
-      expect(result).toMatchInlineSnapshot(
-        `
-        "{()=>{<div v-if="typeof test === string" :test="()=>test" />
-                  <div v-else-if="typeof test === number" :test="()=>test" />
-                  <div v-else :test="()=>test" />}}"
-      `
-      );
+      expect(result).toMatchInlineSnapshot(`
+        "{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}
+                  else if(typeof ___VERTER___ctx.test === 'number'){<div  test={()=>___VERTER___ctx.test} />}
+                  else{<div  test={()=>___VERTER___ctx.test} />}}}"
+      `);
     });
 
     it("v-if v-else-if v-else with if", () => {
       const { result } = parse(
-        `<div v-if="typeof test === string" :test="()=>test" />
-          <div v-else-if="typeof test === number" :test="()=>test" />
+        `<div v-if="typeof test === 'string'" :test="()=>test" />
+          <div v-else-if="typeof test === 'number'" :test="()=>test" />
           <div v-else :test="()=>test" />
-          <div v-if="typeof test === string" :test="()=>test" />`
+          <div v-if="typeof test === 'string'" :test="()=>test" />`
       );
-      expect(result).toMatchInlineSnapshot(
-        `
-        "{()=>{<div v-if="typeof test === string" :test="()=>test" />
-                  <div v-else-if="typeof test === number" :test="()=>test" />
-                  <div v-else :test="()=>test" />
-                  <div v-if="typeof test === string" :test="()=>test" />}}"
-      `
-      );
+      expect(result).toMatchInlineSnapshot(`
+        "{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}
+                  else if(typeof ___VERTER___ctx.test === 'number'){<div  test={()=>___VERTER___ctx.test} />}
+                  else{<div  test={()=>___VERTER___ctx.test} />}
+                  if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}}}"
+      `);
     });
   });
 
@@ -100,8 +97,7 @@ describe("process template plugins narrow", () => {
         `<div v-for="item in items" :test="()=>test" />`
       );
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{<div v-for="item in items" :test="()=>test" />}}"`
-      );
+      `"{()=>{<div v-for="item in ___VERTER___ctx.items" test={()=>___VERTER___ctx.test} />}}"`);
     });
 
     it("for with v-if", () => {
@@ -109,8 +105,7 @@ describe("process template plugins narrow", () => {
         `<div v-for="item in items" v-if="item" :test="()=>test" />`
       );
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{<div v-for="item in items" v-if="item" :test="()=>test" />}}"`
-      );
+      `"{()=>{if(___VERTER___ctx.item){<div v-for="item in ___VERTER___ctx.items"  test={()=>___VERTER___ctx.test} />}}}"`);
     });
   });
 
@@ -118,7 +113,7 @@ describe("process template plugins narrow", () => {
     it("v-slot simple", () => {
       const { result } = parse(`<div v-slot><span>test</span></div>`);
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{<div v-slot><span>test</span></div>}}"`
+        `"<div  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{<span>{"test"}</span>})}}></div>"`
       );
     });
     it("v-slot", () => {
@@ -126,7 +121,7 @@ describe("process template plugins narrow", () => {
         `<div v-slot="item" :test="()=>test"><span>test</span></div>`
       );
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{<div v-slot="item" :test="()=>test"><span>test</span></div>}}"`
+        `"<div  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)((item)=>{<span>{"test"}</span>})}} test={()=>___VERTER___ctx.test}></div>"`
       );
     });
 
@@ -135,14 +130,15 @@ describe("process template plugins narrow", () => {
         `<div v-slot="item" v-if="item" :test="()=>test"><span>test</span></div>`
       );
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{<div v-slot="item" v-if="item" :test="()=>test"><span>test</span></div>}}"`
-      );
+      `"{()=>{if(___VERTER___ctx.item){<div  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)((item)=>{if(!((___VERTER___ctx.item))) return;<span>{"test"}</span>})}}  test={()=>___VERTER___ctx.test}></div>}}}"`);
     });
 
     it("<template #slot>", () => {
-      const { result } = parse(`<template #slot><span>test</span></template>`);
+      const { result } = parse(
+        `<div><template #slot><span>test</span></template></div>`
+      );
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{<template #slot><span>test</span></template>}}"`
+        `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.slot)(()=>{<template><span>{"test"}</span></template>});}}></div>"`
       );
     });
   });

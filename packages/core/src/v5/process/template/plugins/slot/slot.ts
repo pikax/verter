@@ -154,6 +154,11 @@ export const SlotPlugin = declareTemplatePlugin({
       }
       const last = children.pop() ?? first;
 
+      if (!parent.tag) {
+        // TODO mark error, this is because the parent is the AST Root
+        return;
+      }
+
       pos = parent.loc.start.offset + parent.tag.length + 1;
       // tagEnd =
       //   parent.loc.start.offset +
@@ -566,18 +571,6 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
 
           s.prependLeft(directive.exp.loc.start.offset, `.default)((`);
 
-          // s.overwrite(
-          //   directive.exp.loc.start.offset,
-          //   directive.exp.loc.start.offset + 1,
-          //   "("
-          // );
-          // s.overwrite(
-          //   directive.exp.loc.end.offset - 1,
-          //   directive.exp.loc.end.offset,
-          //   "}"
-          // );
-
-          // s.prependLeft(directive.exp.loc.start.offset, `)=>{`);
           s.prependLeft(directive.exp.loc.end.offset, `)=>{`);
         } else {
           s.appendLeft(directive.loc.end.offset, `.default`);

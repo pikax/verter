@@ -8,9 +8,12 @@ import { declareTemplatePlugin } from "../../template";
 import { ParseTemplateContext } from "../../../../parser/template";
 import type * as babel_types from "@babel/types";
 import { MagicString } from "@vue/compiler-sfc";
+import { VerterNode } from "../../../../parser/walk";
 
 export const ConditionalPlugin = declareTemplatePlugin({
   name: "VerterConditional",
+
+  processed: new Set<VerterNode>(),
 
   // narrows: [] as {
   //   index: number;
@@ -20,6 +23,7 @@ export const ConditionalPlugin = declareTemplatePlugin({
 
   pre(_, ctx) {
     //   this.narrows.length = 0;
+    this.processed.clear();
 
     ctx.toNarrow = [];
 
@@ -33,9 +37,15 @@ export const ConditionalPlugin = declareTemplatePlugin({
         direction?: "left" | "right";
 
         condition?: TemplateCondition | null;
+
+        parent: VerterNode;
       },
       s: MagicString
     ) => {
+      if (this.processed.has(narrow.parent)) return;
+      if (narrow.parent) {
+        this.processed.add(narrow.parent);
+      }
       const conditions = narrow.conditions.filter(
         (x) => x !== narrow.condition
       );
@@ -93,6 +103,7 @@ export const ConditionalPlugin = declareTemplatePlugin({
     const element = item.element;
     const node = item.node;
     const rawName = node.rawName!;
+    this.processed.add(element);
 
     // slot render have special conditions and places where the v-if should be placed
     const canMove = !(
@@ -229,7 +240,14 @@ export const ConditionalPlugin = declareTemplatePlugin({
     const node = item.node;
 
     const inBlock = node.type.indexOf("Arrow") === -1;
-    s.prependRight(
+    // s.prependRight(
+    //   item.body.loc.start.offset,
+    //   inBlock
+    //     ? generateBlockCondition(conditions, s)
+    //     : generateTernaryCondition(conditions, s)
+    // );
+
+    s.prependLeft(
       item.body.loc.start.offset,
       inBlock
         ? generateBlockCondition(conditions, s)
@@ -254,6 +272,7 @@ function generateTernaryCondition(
   return `!(${text})? undefined :`;
 }
 
+// TODO test this, specially when is in a Function
 function generateConditionText(
   conditions: TemplateCondition[],
   s: MagicString

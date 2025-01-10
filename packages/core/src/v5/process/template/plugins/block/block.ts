@@ -1,29 +1,50 @@
-import { declareTemplatePlugin } from "../../template";
+import { declareTemplatePlugin, TemplateContext } from "../../template";
 import { Node } from "@vue/compiler-core";
 
 export const BlockPlugin = declareTemplatePlugin({
   name: "VerterBlock",
   conditions: new Map<Node, Node[]>(),
+  contexts: new Map<Node, TemplateContext>(),
 
-  addItem(element: Node, parent: Node) {
+  addItem(element: Node, parent: Node, ctx?: TemplateContext) {
     let parentBlock = this.conditions.get(parent);
     if (parentBlock) {
       parentBlock.push(element);
     } else {
       this.conditions.set(parent, [element]);
     }
+    if (ctx) this.contexts.set(element, ctx);
   },
 
   pre() {
     this.conditions.clear();
   },
 
-  post(s) {
-    for (const [_, block] of this.conditions) {
+  post(s, ctx) {
+    for (const [parent, block] of this.conditions) {
       const first = block.shift()!;
       const last = block.pop() ?? first;
 
       s.prependLeft(first.loc.start.offset, "{()=>{");
+
+      const conditions = this.contexts.get(first);
+
+      // TODO this is not 100% correct, since the child might have a v-if
+      if (conditions?.conditions.length) {
+        ctx.doNarrow(
+          {
+            index: first.loc.end.offset,
+            inBlock: true,
+            conditions: conditions.conditions,
+            type: "prepend",
+            direction: "left",
+            condition: null,
+            parent,
+          },
+          s
+        );
+      }
+
       s.prependLeft(last.loc.end.offset, "}}");
     }
   },
@@ -36,7 +57,7 @@ export const BlockPlugin = declareTemplatePlugin({
     ) {
       return;
     }
-    this.addItem(item.element, item.parent);
+    this.addItem(item.element, item.parent, item.context);
   },
 
   transformLoop(item) {
@@ -52,8 +73,11 @@ export const BlockPlugin = declareTemplatePlugin({
   },
 
   transformElement(item) {
-    // if (item.tag === "template") {
-    //   this.addItem(item.node, item.parent);
-    // }
+    if (
+      item.tag === "template" &&
+      !item.node.props.find((x) => x.name === "slot")
+    ) {
+      this.addItem(item.node, item.parent);
+    }
   },
 });
