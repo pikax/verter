@@ -2,6 +2,7 @@ import { ElementTypes } from "@vue/compiler-core";
 import { declareTemplatePlugin } from "../../template";
 import { BindingPlugin } from "../binding";
 
+
 export const DirectivePlugin = declareTemplatePlugin({
   name: "VerterDirective",
   transformDirective(directive, s, ctx) {

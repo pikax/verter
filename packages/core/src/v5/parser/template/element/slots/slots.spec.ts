@@ -138,7 +138,7 @@ describe("parser template slots", () => {
           props: [
             {
               type: TemplateTypes.Prop,
-              name: [
+              arg: [
                 {
                   type: TemplateTypes.Binding,
                   name: "name",
@@ -166,7 +166,7 @@ describe("parser template slots", () => {
           },
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "name",
@@ -211,7 +211,7 @@ describe("parser template slots", () => {
           props: [
             {
               type: TemplateTypes.Prop,
-              name: [
+              arg: [
                 {
                   type: TemplateTypes.Binding,
                   name: "name",
@@ -239,7 +239,7 @@ describe("parser template slots", () => {
           },
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "name",
@@ -316,14 +316,14 @@ describe("parser template slots", () => {
           props: [
             {
               type: TemplateTypes.Prop,
-              name: [
+              arg: [
                 {
                   type: TemplateTypes.Binding,
                   name: "test",
                   ignore: true,
                 },
               ],
-              value: [
+              exp: [
                 {
                   type: TemplateTypes.Binding,
                   name: "foo",

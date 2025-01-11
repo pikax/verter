@@ -173,14 +173,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "foo",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
@@ -216,14 +216,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "foo",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
@@ -259,8 +259,8 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: null,
-            value: [
+            arg: null,
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
@@ -289,14 +289,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "foo",
                 ignore: false,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
@@ -330,14 +330,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "foo",
                 ignore: false,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
@@ -372,14 +372,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "bind",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
@@ -416,14 +416,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "bind",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "i",
@@ -459,14 +459,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "bind",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "false",
@@ -502,14 +502,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "bind",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
@@ -545,8 +545,8 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: null,
-            value: [
+            arg: null,
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
@@ -593,8 +593,8 @@ describe("parser template element props", () => {
           },
           {
             type: TemplateTypes.Prop,
-            name: null,
-            value: [
+            arg: null,
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
@@ -625,14 +625,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "foo",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
@@ -670,14 +670,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "foo",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "isFoo",
@@ -733,14 +733,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "aria-autocomplete",
                 ignore: true,
               },
             ],
-            value: [],
+            exp: [],
 
             node: {
               name: "bind",
@@ -765,8 +765,8 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: null,
-            value: null,
+            arg: null,
+            exp: null,
           },
         ]);
 
@@ -779,14 +779,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "name",
                 ignore: true,
               },
             ],
-            value: null,
+            exp: null,
             node: {
               name: "bind",
               rawName: ":name",
@@ -808,14 +808,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "foo-bar",
                 ignore: true,
               },
             ],
-            value: null,
+            exp: null,
             node: {
               name: "bind",
               rawName: ":foo-bar",
@@ -838,14 +838,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "name",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "name",
@@ -879,14 +879,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "name",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "name",
@@ -926,14 +926,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "name",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "name",
@@ -973,14 +973,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "name",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "test",
@@ -1016,14 +1016,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "check-for-something",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "e",
@@ -1088,14 +1088,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "check-for-something",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
@@ -1131,14 +1131,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "item",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "item",
@@ -1175,14 +1175,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "item",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 value: "item.",
@@ -1225,14 +1225,14 @@ describe("parser template element props", () => {
         expect(result).toMatchObject([
           {
             type: TemplateTypes.Prop,
-            name: [
+            arg: [
               {
                 type: TemplateTypes.Binding,
                 name: "back",
                 ignore: true,
               },
             ],
-            value: [
+            exp: [
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
@@ -1261,7 +1261,7 @@ describe("parser template element props", () => {
       });
     });
 
-    it.only("v-once", () => {
+    it("v-once", () => {
       const { result } = parse(`<span v-once />`);
 
       expect(result).toMatchObject([
@@ -1282,7 +1282,19 @@ describe("parser template element props", () => {
     it("v-pre", () => {
       const { result } = parse(`<span v-pre>{{ test }}</span>`);
 
-      expect(result).toHaveLength(0);
+      expect(result).toMatchObject([
+        {
+          type: TemplateTypes.Prop,
+
+          name: "pre",
+          exp: null,
+          arg: null,
+
+          context: {
+            ignoredIdentifiers: [],
+          },
+        },
+      ]);
     });
 
     it("v-cloak", () => {
@@ -1305,7 +1317,7 @@ describe("parser template element props", () => {
       const { result } = parse(`<span v-model="foo" />`);
       expect(result).toMatchObject([
         {
-          type: TemplateTypes.Prop,
+          type: TemplateTypes.Directive,
 
           name: "model",
           arg: null,
@@ -1501,8 +1513,8 @@ describe("parser template element props", () => {
               },
               {
                 type: TemplateTypes.Prop,
-                name: [{ name: "class", ignore: true }],
-                value: [
+                arg: [{ name: "class", ignore: true }],
+                exp: [
                   {
                     type: TemplateTypes.Binding,
                     name: "baz",
@@ -1582,8 +1594,8 @@ describe("parser template element props", () => {
               },
               {
                 type: TemplateTypes.Prop,
-                name: [{ name: "style", ignore: true }],
-                value: [
+                arg: [{ name: "style", ignore: true }],
+                exp: [
                   {
                     type: TemplateTypes.Binding,
                     name: "baz",

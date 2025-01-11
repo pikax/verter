@@ -105,11 +105,40 @@ describe("process template plugins directive", () => {
         );
       });
     });
-    describe("v-once", () => {});
-    describe("v-pre", () => {});
-    describe("v-cloak", () => {});
-    describe("v-show", () => {});
-    describe("v-html", () => {});
+    describe("v-once", () => {
+      it("div v-once", () => {
+        const { result } = parse(`<div v-once />`);
+        expect(result).toMatchInlineSnapshot(`"<div v-once />"`);
+      });
+    });
+    describe("v-pre", () => {
+      it("div v-pre", () => {
+        const { result } = parse(`<div v-pre />`);
+        expect(result).toMatchInlineSnapshot(`"<div v-pre />"`);
+      });
+    });
+    describe("v-cloak", () => {
+      it("div v-cloak", () => {
+        const { result } = parse(`<div v-cloak />`);
+        expect(result).toMatchInlineSnapshot(`"<div v-cloak />"`);
+      });
+    });
+    describe("v-show", () => {
+      it('div v-show="foo"', () => {
+        const { result } = parse(`<div v-show="foo" />`);
+        expect(result).toMatchInlineSnapshot(
+          `"<div v-show={___VERTER___ctx.foo} />"`
+        );
+      });
+    });
+    describe("v-html", () => {
+      it('div v-html="foo"', () => {
+        const { result } = parse(`<div v-html="foo" />`);
+        expect(result).toMatchInlineSnapshot(
+          `"<div v-html={___VERTER___ctx.foo} />"`
+        );
+      });
+    });
   });
 
   describe("bespoke directives", () => {});

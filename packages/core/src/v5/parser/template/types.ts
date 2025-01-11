@@ -117,7 +117,7 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
       invalid: true;
 
       ignore: false;
-      
+
       exp: SimpleExpressionNode | null;
 
       // directive?: null;
@@ -136,9 +136,10 @@ export type TemplateProp = { type: TemplateTypes.Prop } & (
   | {
       node: DirectiveNode;
       event: boolean;
+      name: string;
 
-      name: null | TemplateBinding[];
-      value: null | TemplateBinding[];
+      arg: null | TemplateBinding[];
+      exp: null | TemplateBinding[];
 
       static: false;
       context: Record<string, any>;

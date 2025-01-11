@@ -137,7 +137,7 @@ export const PropPlugin = declareTemplatePlugin({
       }
     } else {
       // directive
-      const [nameBinding] = prop.name ?? [];
+      const [nameBinding] = prop.arg ?? [];
       // handle camelCase
       if (nameBinding?.ignore === true) {
         // const node = prop.name[0].node as DirectiveNode;

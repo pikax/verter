@@ -120,6 +120,31 @@ export function handleProps(node: VerterNode, context: PropsContext) {
     items.push(...bindings);
   }
 
+  const tagEnd =
+    (node.isSelfClosing
+      ? node.loc.end.offset
+      : node.children.length > 0
+      ? node.children[node.children.length - 1].loc.end.offset
+      : node.loc.end.offset) - node.loc.start.offset;
+
+  const hasPre = node.loc.source.slice(0, tagEnd).indexOf("v-pre");
+  if (hasPre !== -1) {
+    items.push({
+      type: TemplateTypes.Prop,
+      name: "pre",
+      arg: null,
+      exp: null,
+      static: true,
+      node: {
+        loc: {
+          start: { offset: hasPre + node.loc.start.offset },
+          end: { offset: hasPre + 5 + node.loc.start.offset },
+        },
+      },
+      context,
+    });
+  }
+
   return items;
 }
 
@@ -164,15 +189,16 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
       {
         type: TemplateTypes.Prop,
         node: prop,
-        name: prop.arg
+        arg: prop.arg
           ? nameBinding.filter((x) => x.type === TemplateTypes.Binding)
           : null,
-        value: prop.exp
+        exp: prop.exp
           ? valueBinding.filter((x) => x.type === TemplateTypes.Binding)
           : null,
         static: false,
 
         event: prop.name === "on",
+        name: prop.name,
         context,
       },
       ...nameBinding,

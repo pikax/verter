@@ -113,7 +113,7 @@ describe("parser template element", () => {
         props: [
           {
             type: TemplateTypes.Prop,
-            name: [{ name: "temp" }],
+            arg: [{ name: "temp" }],
           },
         ],
 
@@ -142,7 +142,7 @@ describe("parser template element", () => {
         },
         {
           type: TemplateTypes.Prop,
-          name: [{ name: "temp" }],
+          arg: [{ name: "temp" }],
         },
         {
           type: TemplateTypes.Binding,
@@ -173,7 +173,7 @@ describe("parser template element", () => {
         props: [
           {
             type: TemplateTypes.Prop,
-            name: [{ name: "temp" }],
+            arg: [{ name: "temp" }],
           },
         ],
 
@@ -205,7 +205,7 @@ describe("parser template element", () => {
         },
         {
           type: TemplateTypes.Prop,
-          name: [{ name: "temp" }],
+          arg: [{ name: "temp" }],
         },
         {
           type: TemplateTypes.Binding,
@@ -238,7 +238,7 @@ describe("parser template element", () => {
         props: [
           {
             type: TemplateTypes.Prop,
-            name: [{ name: "temp" }],
+            arg: [{ name: "temp" }],
           },
         ],
 
@@ -286,7 +286,7 @@ describe("parser template element", () => {
         },
         {
           type: TemplateTypes.Prop,
-          name: [{ name: "temp" }],
+          arg: [{ name: "temp" }],
         },
         {
           type: TemplateTypes.Binding,
@@ -319,7 +319,7 @@ describe("parser template element", () => {
         props: [
           {
             type: TemplateTypes.Prop,
-            name: [{ name: "temp" }],
+            arg: [{ name: "temp" }],
           },
         ],
 
@@ -367,7 +367,7 @@ describe("parser template element", () => {
         },
         {
           type: TemplateTypes.Prop,
-          name: [{ name: "temp" }],
+          arg: [{ name: "temp" }],
         },
         {
           type: TemplateTypes.Binding,
