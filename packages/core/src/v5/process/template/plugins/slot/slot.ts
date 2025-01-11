@@ -243,6 +243,14 @@ const $slots = PatchSlots(c.$slots);
         node.loc.start.offset + 5,
         renderSlot
       );
+      // rename end tag
+      if (!node.isSelfClosing) {
+        const nameIndex =
+          node.loc.source.indexOf("slot", node.loc.source.lastIndexOf("</")) +
+          node.loc.start.offset;
+
+        s.overwrite(nameIndex, nameIndex + 4, renderSlot);
+      }
 
       s.prependRight(node.loc.start.offset + 1, `<`);
 

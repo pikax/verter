@@ -30,7 +30,7 @@ export const BlockPlugin = declareTemplatePlugin({
       const conditions = this.contexts.get(first);
 
       // TODO this is not 100% correct, since the child might have a v-if
-      if (conditions?.conditions.length) {
+      if (ctx.doNarrow && conditions?.conditions.length) {
         ctx.doNarrow(
           {
             index: first.loc.end.offset,
@@ -45,7 +45,7 @@ export const BlockPlugin = declareTemplatePlugin({
         );
       }
 
-      s.prependLeft(last.loc.end.offset, "}}");
+      s.prependRight(last.loc.end.offset, "}}");
     }
   },
 
@@ -61,7 +61,7 @@ export const BlockPlugin = declareTemplatePlugin({
   },
 
   transformLoop(item) {
-    this.addItem(item.element, item.parent);
+    // this.addItem(item.element, item.parent, item.context);
   },
 
   transformSlotDeclaration(item) {

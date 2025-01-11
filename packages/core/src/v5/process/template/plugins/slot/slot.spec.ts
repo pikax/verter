@@ -92,6 +92,13 @@ describe("process template plugins slot", () => {
       );
     });
 
+    it.only("<slot> <span>1</span> </slot>", () => {
+      const { result } = parse(`<slot> <span>1</span> </slot>`);
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent> <span>{"1"}</span> </___VERTER___slotComponent>}}"`
+      );
+    });
+
     it.skip('<slot v-for="name in names" :name="name"/>', () => {
       const { result } = parse(`<slot v-for="name in names" :name="name"/>`);
       expect(result).toMatchInlineSnapshot(

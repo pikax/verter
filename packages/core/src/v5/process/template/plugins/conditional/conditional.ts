@@ -8,12 +8,12 @@ import { declareTemplatePlugin } from "../../template";
 import { ParseTemplateContext } from "../../../../parser/template";
 import type * as babel_types from "@babel/types";
 import { MagicString } from "@vue/compiler-sfc";
-import { VerterNode } from "../../../../parser/walk";
+import { VerterASTNode } from "../../../../parser/ast";
 
 export const ConditionalPlugin = declareTemplatePlugin({
   name: "VerterConditional",
 
-  processed: new Set<VerterNode>(),
+  processed: new Set<VerterASTNode>(),
 
   // narrows: [] as {
   //   index: number;
@@ -25,25 +25,9 @@ export const ConditionalPlugin = declareTemplatePlugin({
     //   this.narrows.length = 0;
     this.processed.clear();
 
-    ctx.toNarrow = [];
-
-    ctx.doNarrow = (
-      narrow: {
-        index: number;
-        inBlock: boolean;
-        conditions: TemplateCondition[];
-
-        type?: "prepend" | "append";
-        direction?: "left" | "right";
-
-        condition?: TemplateCondition | null;
-
-        parent: VerterNode;
-      },
-      s: MagicString
-    ) => {
-      if (this.processed.has(narrow.parent)) return;
+    ctx.doNarrow = (narrow, s: MagicString) => {
       if (narrow.parent) {
+        if (this.processed.has(narrow.parent)) return;
         this.processed.add(narrow.parent);
       }
       const conditions = narrow.conditions.filter(
@@ -71,33 +55,33 @@ export const ConditionalPlugin = declareTemplatePlugin({
     };
   },
 
-  post(s, ctx) {
-    if (!ctx.toNarrow) return;
-    for (const narrow of ctx.toNarrow) {
-      const conditions = narrow.conditions.filter(
-        (x) => x !== narrow.condition
-      );
-      if (conditions.length > 0) {
-        const condition = narrow.inBlock
-          ? generateBlockCondition(conditions, s)
-          : generateTernaryCondition(conditions, s);
+  // post(s, ctx) {
+  //   if (!ctx.toNarrow) return;
+  //   for (const narrow of ctx.toNarrow) {
+  //     const conditions = narrow.conditions.filter(
+  //       (x) => x !== narrow.condition
+  //     );
+  //     if (conditions.length > 0) {
+  //       const condition = narrow.inBlock
+  //         ? generateBlockCondition(conditions, s)
+  //         : generateTernaryCondition(conditions, s);
 
-        if (narrow.type === "append") {
-          if (narrow.direction === "right") {
-            s.appendRight(narrow.index, condition);
-          } else {
-            s.appendLeft(narrow.index, condition);
-          }
-        } else {
-          if (narrow.direction === "right") {
-            s.prependRight(narrow.index, condition);
-          } else {
-            s.prependLeft(narrow.index, condition);
-          }
-        }
-      }
-    }
-  },
+  //       if (narrow.type === "append") {
+  //         if (narrow.direction === "right") {
+  //           s.appendRight(narrow.index, condition);
+  //         } else {
+  //           s.appendLeft(narrow.index, condition);
+  //         }
+  //       } else {
+  //         if (narrow.direction === "right") {
+  //           s.prependRight(narrow.index, condition);
+  //         } else {
+  //           s.prependLeft(narrow.index, condition);
+  //         }
+  //       }
+  //     }
+  //   }
+  // },
 
   transformCondition(item, s, ctx) {
     const element = item.element;

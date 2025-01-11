@@ -7,6 +7,7 @@ import {
 } from "../../parser/template/types";
 import { defaultPrefix } from "../utils";
 import { ProcessContext, ProcessPlugin } from "./../types";
+import { VerterASTNode } from "../../parser/ast";
 
 export type TemplatePlugin = ProcessPlugin<TemplateItem, TemplateContext> & {
   [K in `transform${TemplateTypes}`]?: (
@@ -49,7 +50,7 @@ export type TemplateAccessors =
   // callback for events
   | "eventCb"
   // (...eventArgs) in the event callback
-  | 'eventArgs';
+  | "eventArgs";
 export type TemplateContext = ProcessContext & {
   prefix: (str: string) => string;
   isCustomElement: (tag: string) => boolean;
@@ -64,16 +65,20 @@ export type TemplateContext = ProcessContext & {
         functions: boolean;
       };
 
-  toNarrow?: Array<{
-    index: number;
-    inBlock: boolean;
-    conditions: TemplateItemByType[TemplateTypes.Condition][];
+  doNarrow?: (
+    o: {
+      parent?: VerterASTNode;
+      index: number;
+      inBlock: boolean;
+      conditions: TemplateItemByType[TemplateTypes.Condition][];
 
-    type?: "prepend" | "append";
-    direction?: "left" | "right";
+      type?: "prepend" | "append";
+      direction?: "left" | "right";
 
-    condition?: TemplateCondition | null;
-  }>;
+      condition?: TemplateCondition | null;
+    },
+    s: MagicString
+  ) => void;
 };
 
 export function declareTemplatePlugin<T extends TemplatePlugin>(plugin: T) {

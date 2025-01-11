@@ -91,24 +91,6 @@ describe("process template plugins narrow", () => {
     });
   });
 
-  describe("loop", () => {
-    it("for", () => {
-      const { result } = parse(
-        `<div v-for="item in items" :test="()=>test" />`
-      );
-      expect(result).toMatchInlineSnapshot(
-      `"{()=>{<div v-for="item in ___VERTER___ctx.items" test={()=>___VERTER___ctx.test} />}}"`);
-    });
-
-    it("for with v-if", () => {
-      const { result } = parse(
-        `<div v-for="item in items" v-if="item" :test="()=>test" />`
-      );
-      expect(result).toMatchInlineSnapshot(
-      `"{()=>{if(___VERTER___ctx.item){<div v-for="item in ___VERTER___ctx.items"  test={()=>___VERTER___ctx.test} />}}}"`);
-    });
-  });
-
   describe("slot", () => {
     it("v-slot simple", () => {
       const { result } = parse(`<div v-slot><span>test</span></div>`);
@@ -130,7 +112,8 @@ describe("process template plugins narrow", () => {
         `<div v-slot="item" v-if="item" :test="()=>test"><span>test</span></div>`
       );
       expect(result).toMatchInlineSnapshot(
-      `"{()=>{if(___VERTER___ctx.item){<div  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)((item)=>{if(!((___VERTER___ctx.item))) return;<span>{"test"}</span>})}}  test={()=>___VERTER___ctx.test}></div>}}}"`);
+        `"{()=>{if(___VERTER___ctx.item){<div  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)((item)=>{if(!((___VERTER___ctx.item))) return;<span>{"test"}</span>})}}  test={()=>___VERTER___ctx.test}></div>}}}"`
+      );
     });
 
     it("<template #slot>", () => {

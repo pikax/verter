@@ -212,6 +212,7 @@ export type TemplateLoop = {
 
   element: VerterNode;
   parent: VerterNode;
+  context: Record<string, any>;
 };
 
 export type TemplateElement = {
