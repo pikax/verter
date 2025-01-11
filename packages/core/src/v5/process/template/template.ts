@@ -45,7 +45,11 @@ export type TemplateAccessors =
   // instance from v-slot=
   | "slotInstance"
   // slotRender, slotRender(ctx.$slots.default, (slotProps)=> [...])
-  | "slotRender";
+  | "slotRender"
+  // callback for events
+  | "eventCb"
+  // (...eventArgs) in the event callback
+  | 'eventArgs';
 export type TemplateContext = ProcessContext & {
   prefix: (str: string) => string;
   isCustomElement: (tag: string) => boolean;

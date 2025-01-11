@@ -11,4 +11,5 @@ export const DefaultPlugins = [
   Plugins.SlotPlugin,
   Plugins.BlockPlugin,
   Plugins.ConditionalPlugin,
+  Plugins.EventPlugin,
 ];

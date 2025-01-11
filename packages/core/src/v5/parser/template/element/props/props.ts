@@ -126,6 +126,7 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
         name: prop.name,
         value: prop.value?.content ?? null,
         static: true,
+        event: false,
       },
     ];
   } else if (prop.name === "bind" || prop.name === "on") {

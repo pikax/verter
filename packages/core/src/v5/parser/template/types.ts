@@ -121,6 +121,7 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
 
 export type TemplateProp = { type: TemplateTypes.Prop } & (
   | {
+      event: false;
       node: AttributeNode;
       name: string;
 
@@ -141,6 +142,7 @@ export type TemplateProp = { type: TemplateTypes.Prop } & (
       // used to merge styles and classes
       node: null;
       name: string;
+      event: false;
 
       props: TemplateProp[];
     }
