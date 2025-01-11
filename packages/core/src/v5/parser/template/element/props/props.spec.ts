@@ -1261,6 +1261,161 @@ describe("parser template element props", () => {
       });
     });
 
+    it.only("v-once", () => {
+      const { result } = parse(`<span v-once />`);
+
+      expect(result).toMatchObject([
+        {
+          type: TemplateTypes.Prop,
+
+          name: "once",
+          exp: null,
+          arg: null,
+
+          context: {
+            ignoredIdentifiers: [],
+          },
+        },
+      ]);
+    });
+
+    it("v-pre", () => {
+      const { result } = parse(`<span v-pre>{{ test }}</span>`);
+
+      expect(result).toHaveLength(0);
+    });
+
+    it("v-cloak", () => {
+      const { result } = parse(`<span v-cloak />`);
+      expect(result).toMatchObject([
+        {
+          type: TemplateTypes.Prop,
+
+          name: "cloak",
+          exp: null,
+          arg: null,
+          context: {
+            ignoredIdentifiers: [],
+          },
+        },
+      ]);
+    });
+
+    it("v-model", () => {
+      const { result } = parse(`<span v-model="foo" />`);
+      expect(result).toMatchObject([
+        {
+          type: TemplateTypes.Prop,
+
+          name: "model",
+          arg: null,
+          exp: [
+            {
+              type: TemplateTypes.Binding,
+              name: "foo",
+              ignore: false,
+            },
+          ],
+          context: {
+            ignoredIdentifiers: [],
+          },
+        },
+
+        {
+          type: TemplateTypes.Binding,
+          name: "foo",
+          ignore: false,
+        },
+      ]);
+    });
+
+    it("v-show", () => {
+      const { result } = parse(`<span v-show="foo" />`);
+
+      expect(result).toMatchObject([
+        {
+          type: TemplateTypes.Prop,
+
+          name: "show",
+          arg: null,
+          exp: [
+            {
+              type: TemplateTypes.Binding,
+              name: "foo",
+              ignore: false,
+            },
+          ],
+          context: {
+            ignoredIdentifiers: [],
+          },
+        },
+
+        {
+          type: TemplateTypes.Binding,
+          name: "foo",
+          ignore: false,
+        },
+      ]);
+    });
+
+    it("v-html", () => {
+      const { result } = parse(`<span v-html="foo" />`);
+
+      expect(result).toMatchObject([
+        {
+          type: TemplateTypes.Prop,
+
+          name: "html",
+          arg: null,
+          exp: [
+            {
+              type: TemplateTypes.Binding,
+              name: "foo",
+              ignore: false,
+            },
+          ],
+          context: {
+            ignoredIdentifiers: [],
+          },
+        },
+
+        {
+          type: TemplateTypes.Binding,
+          name: "foo",
+          ignore: false,
+        },
+      ]);
+    });
+
+    it("v-text", () => {
+      const { result } = parse(`<span v-text="foo" />`);
+
+      expect(result).toMatchObject([
+        {
+          type: TemplateTypes.Prop,
+
+          name: "text",
+          arg: null,
+          exp: [
+            {
+              type: TemplateTypes.Binding,
+              name: "foo",
+              ignore: false,
+            },
+          ],
+          context: {
+            ignoredIdentifiers: [],
+          },
+        },
+
+        {
+          type: TemplateTypes.Binding,
+          name: "foo",
+          ignore: false,
+        },
+      ]);
+    });
+
     // special directives
     describe("Not-handled directives", () => {
       it("v-slot", () => {
@@ -1291,161 +1446,6 @@ describe("parser template element props", () => {
         const { result } = parse(`<span v-for="foo in bar" />`);
 
         expect(result).toHaveLength(0);
-      });
-
-      it("v-once", () => {
-        const { result } = parse(`<span v-once />`);
-
-        expect(result).toMatchObject([
-          {
-            type: TemplateTypes.Directive,
-
-            name: "once",
-            exp: null,
-            arg: null,
-
-            context: {
-              ignoredIdentifiers: [],
-            },
-          },
-        ]);
-      });
-
-      it("v-pre", () => {
-        const { result } = parse(`<span v-pre>{{ test }}</span>`);
-
-        expect(result).toHaveLength(0);
-      });
-
-      it("v-cloak", () => {
-        const { result } = parse(`<span v-cloak />`);
-        expect(result).toMatchObject([
-          {
-            type: TemplateTypes.Directive,
-
-            name: "cloak",
-            exp: null,
-            arg: null,
-            context: {
-              ignoredIdentifiers: [],
-            },
-          },
-        ]);
-      });
-
-      it("v-model", () => {
-        const { result } = parse(`<span v-model="foo" />`);
-        expect(result).toMatchObject([
-          {
-            type: TemplateTypes.Directive,
-
-            name: "model",
-            arg: null,
-            exp: [
-              {
-                type: TemplateTypes.Binding,
-                name: "foo",
-                ignore: false,
-              },
-            ],
-            context: {
-              ignoredIdentifiers: [],
-            },
-          },
-
-          {
-            type: TemplateTypes.Binding,
-            name: "foo",
-            ignore: false,
-          },
-        ]);
-      });
-
-      it("v-show", () => {
-        const { result } = parse(`<span v-show="foo" />`);
-
-        expect(result).toMatchObject([
-          {
-            type: TemplateTypes.Directive,
-
-            name: "show",
-            arg: null,
-            exp: [
-              {
-                type: TemplateTypes.Binding,
-                name: "foo",
-                ignore: false,
-              },
-            ],
-            context: {
-              ignoredIdentifiers: [],
-            },
-          },
-
-          {
-            type: TemplateTypes.Binding,
-            name: "foo",
-            ignore: false,
-          },
-        ]);
-      });
-
-      it("v-html", () => {
-        const { result } = parse(`<span v-html="foo" />`);
-
-        expect(result).toMatchObject([
-          {
-            type: TemplateTypes.Directive,
-
-            name: "html",
-            arg: null,
-            exp: [
-              {
-                type: TemplateTypes.Binding,
-                name: "foo",
-                ignore: false,
-              },
-            ],
-            context: {
-              ignoredIdentifiers: [],
-            },
-          },
-
-          {
-            type: TemplateTypes.Binding,
-            name: "foo",
-            ignore: false,
-          },
-        ]);
-      });
-
-      it("v-text", () => {
-        const { result } = parse(`<span v-text="foo" />`);
-
-        expect(result).toMatchObject([
-          {
-            type: TemplateTypes.Directive,
-
-            name: "text",
-            arg: null,
-            exp: [
-              {
-                type: TemplateTypes.Binding,
-                name: "foo",
-                ignore: false,
-              },
-            ],
-            context: {
-              ignoredIdentifiers: [],
-            },
-          },
-
-          {
-            type: TemplateTypes.Binding,
-            name: "foo",
-            ignore: false,
-          },
-        ]);
       });
     });
   });

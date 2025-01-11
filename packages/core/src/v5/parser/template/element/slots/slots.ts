@@ -113,7 +113,7 @@ export function handleSlotProp<T extends SlotsContext>(
     return null;
   }
 
-  const [prop] = propToTemplateProp(propDirective, parentContext) as [
+  const [prop] = propToTemplateProp(propDirective, node, parentContext) as [
     TemplateDirective
   ];
 

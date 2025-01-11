@@ -45,6 +45,7 @@ export function retrieveBindings(
       parent: null,
       ignore: context.ignoredIdentifiers.includes(name) || exp.isStatic,
       directive,
+      exp,
     });
   } else if (exp.ast) {
     walk(exp.ast, {
@@ -106,9 +107,10 @@ export function retrieveBindings(
               node: pNode,
               name,
               parent,
-              directive:null,
+              directive: null,
 
               ignore: ignoredIdentifiers.includes(name),
+              exp,
             });
             break;
           }
@@ -138,6 +140,7 @@ export function retrieveBindings(
       ignore: false,
       name: undefined,
       parent: null,
+      exp,
     });
   }
 

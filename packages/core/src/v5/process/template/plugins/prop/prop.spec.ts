@@ -57,7 +57,7 @@ describe("process template plugins prop", () => {
       );
     });
   });
-  describe("directive", () => {
+  describe("v-bind", () => {
     it("should handle prop with v-bind", () => {
       const { result } = parse(`<div v-bind:test="test" />`);
       expect(result).toMatchInlineSnapshot(`"<div test={test} />"`);

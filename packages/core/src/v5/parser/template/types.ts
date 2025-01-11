@@ -6,6 +6,7 @@ import type {
   ElementNode,
   ExpressionNode,
   InterpolationNode,
+  SimpleExpressionNode,
 } from "@vue/compiler-core";
 import type * as babel_types from "@babel/types";
 import { VerterNode } from "../walk";
@@ -86,6 +87,8 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
       ignore: boolean;
 
       directive: null | DirectiveNode;
+
+      exp: SimpleExpressionNode | null;
     }
   | {
       node:
@@ -114,6 +117,8 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
       invalid: true;
 
       ignore: false;
+      
+      exp: SimpleExpressionNode | null;
 
       // directive?: null;
     }
@@ -158,6 +163,8 @@ export type TemplateDirective = {
   exp: null | TemplateBinding[];
   context: Record<string, any>;
   static: false;
+
+  element: ElementNode;
 };
 
 export type TemplateSlot = {

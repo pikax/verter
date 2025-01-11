@@ -1,5 +1,9 @@
 import { NodeTypes } from "@vue/compiler-core";
-import type { AttributeNode, DirectiveNode } from "@vue/compiler-core";
+import type {
+  AttributeNode,
+  DirectiveNode,
+  ElementNode,
+} from "@vue/compiler-core";
 import { VerterNode } from "../../../walk";
 import {
   TemplateBinding,
@@ -47,7 +51,7 @@ export function handleProps(node: VerterNode, context: PropsContext) {
             break;
           }
 
-          items.push(...propToTemplateProp(prop, context));
+          items.push(...propToTemplateProp(prop, node, context));
         }
         break;
       }
@@ -62,7 +66,7 @@ export function handleProps(node: VerterNode, context: PropsContext) {
         }
       }
       default:
-        items.push(...propToTemplateProp(prop, context));
+        items.push(...propToTemplateProp(prop, node, context));
     }
   }
 
@@ -71,7 +75,11 @@ export function handleProps(node: VerterNode, context: PropsContext) {
     const bindings = [];
 
     for (let i = 0; i < toNormalise.classes.length; i++) {
-      const [p, ...b] = propToTemplateProp(toNormalise.classes[i], context);
+      const [p, ...b] = propToTemplateProp(
+        toNormalise.classes[i],
+        node,
+        context
+      );
 
       props.push(p);
       bindings.push(...b);
@@ -92,7 +100,11 @@ export function handleProps(node: VerterNode, context: PropsContext) {
     const bindings = [];
 
     for (let i = 0; i < toNormalise.styles.length; i++) {
-      const [p, ...b] = propToTemplateProp(toNormalise.styles[i], context);
+      const [p, ...b] = propToTemplateProp(
+        toNormalise.styles[i],
+        node,
+        context
+      );
 
       props.push(p);
       bindings.push(...b);
@@ -111,8 +123,21 @@ export function handleProps(node: VerterNode, context: PropsContext) {
   return items;
 }
 
+const BuiltInDirectivesAsProps = new Set([
+  "bind",
+  "on",
+  "text",
+  "html",
+  "show",
+  "pre",
+  "once",
+  "memo",
+  "cloak",
+]);
+
 export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
   prop: T,
+  element: ElementNode,
   context: PropsContext
 ): [
   TemplateProp | TemplateDirective,
@@ -129,7 +154,7 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
         event: false,
       },
     ];
-  } else if (prop.name === "bind" || prop.name === "on") {
+  } else if (BuiltInDirectivesAsProps.has(prop.name)) {
     const nameBinding = prop.arg
       ? retrieveBindings(prop.arg, context, prop)
       : [];
@@ -170,6 +195,7 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
           : null,
         static: false,
         context,
+        element,
       },
       ...nameBinding,
       ...valueBinding,

@@ -101,10 +101,20 @@ describe("process template plugins binding", () => {
     );
   });
 
-  test.only('a href="`mailto:value`"', ()=>{
+  test('a href="`mailto:value`"', () => {
     const { result } = parse(`<a :href="\`mailto:\${value}\`" />`);
-    expect(result).toMatchInlineSnapshot(`"<a :href="\`mailto:\${___VERTER___ctx.value}\`" />"`);
-  })
+    expect(result).toMatchInlineSnapshot(
+      `"<a :href="\`mailto:\${___VERTER___ctx.value}\`" />"`
+    );
+  });
+
+  test("dynamic binding", () => {
+    const { result } = parse('<Comp v-model:[`${msg}ss`]="msg" />');
+    expect(result).toMatchInlineSnapshot(
+      `"<Comp v-model:[\`\${___VERTER___ctx.msg}ss\`]="___VERTER___ctx.msg" />"`
+    );
+  });
+
   describe("nested", () => {
     test("{{ { test } }}", () => {
       const { result } = parse(`{{ { test } }}`);
