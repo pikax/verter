@@ -50,7 +50,15 @@ export type TemplateAccessors =
   // callback for events
   | "eventCb"
   // (...eventArgs) in the event callback
-  | "eventArgs";
+  | "eventArgs"
+  // to retrieve the instance on a component or element Template
+  | "instancePropertySymbol"
+  // retrieve the directive function for an element, eg: const dir = {instanceToDirectiveFn}(new HTMLInputElement());
+  | "instanceToDirectiveFn"
+  // var for directive, eg: const {instanceToDirectiveVar} = instanceToDirectiveFn(new HTMLInputElement())
+  | "instanceToDirectiveVar"
+  // directive name
+  | "directiveName";
 export type TemplateContext = ProcessContext & {
   prefix: (str: string) => string;
   isCustomElement: (tag: string) => boolean;

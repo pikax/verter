@@ -22,8 +22,8 @@ describe("process template plugins directive", () => {
         // clean template tag
         {
           post: (s) => {
-            s.remove(0, "<template>".length);
-            s.remove(source.length - "</template>".length, source.length);
+            s.update(0, "<template>".length, "");
+            s.update(source.length - "</template>".length, source.length, "");
           },
         },
       ],
@@ -141,5 +141,82 @@ describe("process template plugins directive", () => {
     });
   });
 
-  describe("bespoke directives", () => {});
+  describe("bespoke directives", () => {
+    it("div v-test", () => {
+      const { result } = parse(`<div v-test />`);
+
+      expect(result).toMatchInlineSnapshot(
+        `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);}}} />"`
+      );
+    });
+
+    it("div v-test:foo", () => {
+      const { result } = parse(`<div v-test:foo />`);
+
+      expect(result).toMatchInlineSnapshot(
+        `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";}}} />"`
+      );
+    });
+
+    it("div v-test:foo.app", () => {
+      const { result } = parse(`<div v-test:foo.app />`);
+
+      expect(result).toMatchInlineSnapshot(
+        `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.modifiers=["app"];}}} />"`
+      );
+    });
+
+    it("div v-test:foo.app.baz", () => {
+      const { result } = parse(`<div v-test:foo.app.baz />`);
+
+      expect(result).toMatchInlineSnapshot(
+        `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.modifiers=["app","baz"];}}} />"`
+      );
+    });
+
+    it('div v-test="bar"', () => {
+      const { result } = parse(`<div v-test="bar" />`);
+
+      expect(result).toMatchInlineSnapshot(
+        `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />"`
+      );
+    });
+
+    it('div v-test:foo="bar"', () => {
+      const { result } = parse(`<div v-test:foo="bar" />`);
+
+      expect(result).toMatchInlineSnapshot(
+        `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />"`
+      );
+    });
+
+    it('div v-test:foo.app="bar"', () => {
+      const { result } = parse(`<div v-test:foo.app="bar" />`);
+
+      expect(result).toMatchInlineSnapshot(
+        `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.modifiers=["app"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />"`
+      );
+    });
+
+    it('div v-test:foo.app.baz="bar"', () => {
+      const { result } = parse(`<div v-test:foo.app.baz="bar" />`);
+      expect(result).toMatchInlineSnapshot(
+        `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.modifiers=["app","baz"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />"`
+      );
+    });
+
+    it('div v-if="foo" v-test="foo"', () => {
+      const { result } = parse(`<div v-if="foo" v-test="foo" />`);
+
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{if(___VERTER___ctx.foo){<div  {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.foo))) return;const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.value=___VERTER___ctx.foo;}}} />}}}"`
+      );
+    });
+
+    it.only('div v-test.app="bar"', () => {
+      const { result } = parse(`<div v-test.app="bar" />`);
+
+      expect(result).toMatchInlineSnapshot(`"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />"`);
+    });
+  });
 });
