@@ -1,3 +1,4 @@
+import { ParseTemplateContext } from "../../../../parser/template";
 import { declareTemplatePlugin } from "../../template";
 
 const IgnoredASTTypes = new Set([
@@ -38,6 +39,19 @@ declare function ___VERTER___eventCb
       exp.loc.start.offset,
       `(...${eventArgs})=>${eventCb}(${eventArgs},($event)=>$event&&0?undefined:`
     );
+
+    const context = prop.context as ParseTemplateContext;
+    if (ctx.doNarrow && context.conditions.length > 0) {
+      ctx.doNarrow(
+        {
+          index: exp.loc.start.offset,
+          inBlock: false,
+          conditions: context.conditions,
+          type: "append",
+        },
+        s
+      );
+    }
 
     s.prependLeft(exp.loc.end.offset, ")");
   },

@@ -67,6 +67,26 @@ describe("process template plugins event", () => {
     );
   });
 
+  it("narrow", () => {
+    const { result } = parse(
+      `<div v-if="typeof msg === 'string'" @click="msg.toLowerCase()" @auxclick="() => msg.toLowerCase()"></div>`
+    );
+
+    expect(result).toMatchInlineSnapshot(
+    `"{()=>{if(typeof ___VERTER___ctx.msg === 'string'){<div  onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:!((typeof ___VERTER___ctx.msg === 'string'))? undefined :___VERTER___ctx.msg.toLowerCase())} onAuxclick={() => ___VERTER___ctx.msg.toLowerCase()}></div>}}}"`);
+  });
+
+  it("deep narrow with narrow:true", () => {
+    const { result } = parse(
+      `<div v-if="typeof msg === 'string'" @click="msg.toLowerCase()" @auxclick="() => msg.toLowerCase()"></div>`,
+      { narrow: true }
+    );
+
+    expect(result).toMatchInlineSnapshot(
+      `"{()=>{if(typeof ___VERTER___ctx.msg === 'string'){<div  onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:!((typeof ___VERTER___ctx.msg === 'string'))? undefined :___VERTER___ctx.msg.toLowerCase())} onAuxclick={() => !((typeof ___VERTER___ctx.msg === 'string'))? undefined :___VERTER___ctx.msg.toLowerCase()}></div>}}}"`
+    );
+  });
+
   describe("not events", () => {
     test("no call", () => {
       const { result } = parse(`<div @click="test" />`);
