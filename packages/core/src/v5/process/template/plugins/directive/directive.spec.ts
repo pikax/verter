@@ -213,10 +213,12 @@ describe("process template plugins directive", () => {
       );
     });
 
-    it.only('div v-test.app="bar"', () => {
+    it('div v-test.app="bar"', () => {
       const { result } = parse(`<div v-test.app="bar" />`);
 
-      expect(result).toMatchInlineSnapshot(`"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />"`);
+      expect(result).toMatchInlineSnapshot(
+        `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />"`
+      );
     });
   });
 });

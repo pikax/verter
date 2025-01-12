@@ -57,8 +57,10 @@ export type TemplateAccessors =
   | "instanceToDirectiveFn"
   // var for directive, eg: const {instanceToDirectiveVar} = instanceToDirectiveFn(new HTMLInputElement())
   | "instanceToDirectiveVar"
-  // directive name
-  | "directiveName";
+  // directive name, eg: const {directiveName} = instanceToDirectiveVar(directive);
+  | "directiveName"
+  // accessor for directives, in setup is equivalent to ctx, but in object API should filter only declared in directives
+  | "directiveAccessor";
 export type TemplateContext = ProcessContext & {
   prefix: (str: string) => string;
   isCustomElement: (tag: string) => boolean;

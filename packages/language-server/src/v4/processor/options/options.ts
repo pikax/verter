@@ -846,22 +846,6 @@ type MakeOptionalIfUndefined<T> = {
 
 import { ModelRef } from 'vue'
 
-
-
-// TEMP DECLA
-
-const declaration  = ${JSON.stringify(
-    context.locations.map((x) => ({
-      ...x,
-      node: undefined,
-      exp: undefined,
-    }))
-  )};
-
-
-// /TEMP DECLA
-
-
     `);
 
   //   s.append(`\nexport ${isAsync ? "async " : ""}function ${ResolveProps}${
