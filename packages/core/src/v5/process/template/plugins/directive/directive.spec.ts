@@ -94,6 +94,13 @@ describe("process template plugins directive", () => {
         `"<Comp {...{[\`\${___VERTER___ctx.msg}ss\`]:___VERTER___ctx.msg,[\`onUpdate:\${\`\${___VERTER___ctx.msg}ss\`}\`]:($event)=>(___VERTER___ctx.msg=$event)}} />"`
       );
     });
+
+    it('v-model.lazy="foo"', () => {
+      const { result } = parse(`<input v-model.lazy="foo" />`);
+      expect(result).toMatchInlineSnapshot(
+        `"<input value={___VERTER___ctx.foo} onBlur={($event)=>(___VERTER___ctx.foo=$event.target.value)} />"`
+      );
+    })
   });
 
   describe("vue", () => {
@@ -213,6 +220,15 @@ describe("process template plugins directive", () => {
       );
     });
 
+
+    it('div v-test.app', () => {
+      const { result } = parse(`<div v-test.app />`);
+
+      expect(result).toMatchInlineSnapshot(
+      `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];}}} />"`);
+    });
+    
+
     it('div v-test.app="bar"', () => {
       const { result } = parse(`<div v-test.app="bar" />`);
 
@@ -220,5 +236,6 @@ describe("process template plugins directive", () => {
         `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />"`
       );
     });
+
   });
 });
