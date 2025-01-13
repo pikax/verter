@@ -87,6 +87,16 @@ describe("process template plugins event", () => {
     );
   });
 
+
+  describe('vue', ()=>{
+    it('@vue:mounted', ()=>{
+      const { result } = parse(`<div @vue:mounted="test" />`);
+      expect(result).toMatchInlineSnapshot(
+        `"<div onVue:mounted={___VERTER___ctx.test} />"`
+      );
+    })
+  })
+
   describe("not events", () => {
     test("no call", () => {
       const { result } = parse(`<div @click="test" />`);
