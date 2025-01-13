@@ -185,7 +185,7 @@ describe("process tempalte plugins loop", () => {
   it("v-for with slots dynamic", () => {
     const { result } = parse(`<Comp v-for="item in items" #[item]></Comp>`);
     expect(result).toMatchInlineSnapshot(
-      `"{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[item])(()=>{})}}></Comp>})}}"`
+      `"{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <___VERTER___COMPONENT_CTX.Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[item])(()=>{})}}></___VERTER___COMPONENT_CTX.Comp>})}}"`
     );
   });
 

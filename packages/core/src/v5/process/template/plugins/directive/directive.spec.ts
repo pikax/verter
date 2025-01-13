@@ -49,49 +49,49 @@ describe("process template plugins directive", () => {
     it('Comp v-model="foo"', () => {
       const { result } = parse(`<Comp v-model="foo" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<Comp modelValue={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} />"`
+        `"<___VERTER___COMPONENT_CTX.Comp modelValue={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} />"`
       );
     });
 
     it('Comp v-model="foo" modelValue="bar"', () => {
       const { result } = parse(`<Comp v-model="foo" modelValue="bar" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<Comp modelValue={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} modelValue={"bar"} />"`
+        `"<___VERTER___COMPONENT_CTX.Comp modelValue={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} modelValue={"bar"} />"`
       );
     });
 
     it('Comp v-model:msg="foo"', () => {
       const { result } = parse(`<Comp v-model:msg="foo" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} />"`
+        `"<___VERTER___COMPONENT_CTX.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} />"`
       );
     });
 
     it('Comp v-model:msg="foo" msg="bar"', () => {
       const { result } = parse(`<Comp v-model:msg="foo" msg="bar" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} msg={"bar"} />"`
+        `"<___VERTER___COMPONENT_CTX.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} msg={"bar"} />"`
       );
     });
 
     it('Comp v-model:msg="foo" v-model="bar"', () => {
       const { result } = parse(`<Comp v-model:msg="foo" v-model="bar" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} modelValue={___VERTER___ctx.bar} onUpdate:modelValue={($event)=>(___VERTER___ctx.bar=$event)} />"`
+        `"<___VERTER___COMPONENT_CTX.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} modelValue={___VERTER___ctx.bar} onUpdate:modelValue={($event)=>(___VERTER___ctx.bar=$event)} />"`
       );
     });
 
     it('Comp v-model:[msg]="foo"', () => {
       const { result } = parse(`<Comp v-model:[msg]="foo" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<Comp {...{[___VERTER___ctx.msg]:___VERTER___ctx.foo,[\`onUpdate:\${___VERTER___ctx.msg}\`]:($event)=>(___VERTER___ctx.foo=$event)}} />"`
+        `"<___VERTER___COMPONENT_CTX.Comp {...{[___VERTER___ctx.msg]:___VERTER___ctx.foo,[\`onUpdate:\${___VERTER___ctx.msg}\`]:($event)=>(___VERTER___ctx.foo=$event)}} />"`
       );
     });
 
     it('Comp v-model:[`${msg}ss`]="msg"', () => {
       const { result } = parse(`<Comp v-model:[\`\${msg}ss\`]="msg" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<Comp {...{[\`\${___VERTER___ctx.msg}ss\`]:___VERTER___ctx.msg,[\`onUpdate:\${\`\${___VERTER___ctx.msg}ss\`}\`]:($event)=>(___VERTER___ctx.msg=$event)}} />"`
+        `"<___VERTER___COMPONENT_CTX.Comp {...{[\`\${___VERTER___ctx.msg}ss\`]:___VERTER___ctx.msg,[\`onUpdate:\${\`\${___VERTER___ctx.msg}ss\`}\`]:($event)=>(___VERTER___ctx.msg=$event)}} />"`
       );
     });
 

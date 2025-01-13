@@ -116,24 +116,24 @@ const { i18n, $ts: ts } = useI18n();
 </script>
 
 <template>
-  <tabled-content>
-    {()=>{if(!___VERTER___ctx.item.isCompany && ___VERTER___ctx.item.company){<tabled-content-row
+  {()=>{const TABLEDCONTENT=___VERTER___COMPONENT_CTX["tabled-content"];___VERTER___COMPONENT_CTX.tabled-content;<TABLEDCONTENT>
+    {()=>{if(!___VERTER___ctx.item.isCompany && ___VERTER___ctx.item.company){const TABLEDCONTENTROW=___VERTER___COMPONENT_CTX["tabled-content-row"];___VERTER___COMPONENT_CTX.tabled-content-row;<TABLEDCONTENTROW
       
       label={\`\${___VERTER___ctx.i18n.contact.form.info.company.label} / \${___VERTER___ctx.i18n.contact.form.info.companyTitle.label}\`}
       value={___VERTER___ctx.item.company}
     >
       <div class="flex">
-        <contact-display value={___VERTER___ctx.item.company} /> {"/"}
+        {()=>{const CONTACTDISPLAY=___VERTER___COMPONENT_CTX["contact-display"];<CONTACTDISPLAY value={___VERTER___ctx.item.company} />if(!((!___VERTER___ctx.item.isCompany && ___VERTER___ctx.item.company))) return;}} {"/"}
         { ___VERTER___ctx.item.companyTitle || "none" }
       </div>
-    </tabled-content-row>}}}
+    </TABLEDCONTENTROW>}}}
 
-    <tabled-content-row v-slot={(___VERTER___slotInstance)=>{
+    {()=>{const TABLEDCONTENTROW=___VERTER___COMPONENT_CTX["tabled-content-row v-slot={(___VERTER___slotInstance)=>{"];___VERTER___COMPONENT_CTX.tabled-content-row;<TABLEDCONTENTROW
        ___VERTER___slotRender(___VERTER___slotInstance.$slots.label)(()=>{<template>
         <span>{ ___VERTER___ctx.i18n.contact.form.info.phones.label }</span>
-        {()=>{if(___VERTER___ctx.item.phones.length > 1){<h-pill >
+        {()=>{if(___VERTER___ctx.item.phones.length > 1){const HPILL=___VERTER___COMPONENT_CTX["h-pill"];___VERTER___COMPONENT_CTX.h-pill;<HPILL >
           { ___VERTER___ctx.ts("contact.form.info.phones.more", [___VERTER___ctx.item.phones.length - 1]) }
-        </h-pill>}}}
+        </HPILL>}}}
       </template>});
        ___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({ value, type })=>{<template>
         {()=>{if(value){<div >
@@ -141,47 +141,47 @@ const { i18n, $ts: ts } = useI18n();
         </div>}
         else{<span >{"—"}</span>}}}
       </template>});
-    }} value={___VERTER___ctx.item.phones.find((x) => x.primary)}></tabled-content-row>
+    }} value={___VERTER___ctx.item.phones.find((x) => x.primary)}></TABLEDCONTENTROW>}}
 
-    <tabled-content-row v-slot={(___VERTER___slotInstance)=>{
+    {()=>{const TABLEDCONTENTROW=___VERTER___COMPONENT_CTX["tabled-content-row v-slot={(___VERTER___slotInstance)=>{"];___VERTER___COMPONENT_CTX.tabled-content-row;<TABLEDCONTENTROW
        ___VERTER___slotRender(___VERTER___slotInstance.$slots.label)(()=>{<template>
         <span>{ ___VERTER___ctx.i18n.contact.form.info.emails.label }</span>
-        {()=>{if(___VERTER___ctx.item.emails.length > 1){<h-pill >
+        {()=>{if(___VERTER___ctx.item.emails.length > 1){const HPILL=___VERTER___COMPONENT_CTX["h-pill"];___VERTER___COMPONENT_CTX.h-pill;<HPILL >
           { ___VERTER___ctx.ts("contact.form.info.emails.more", [___VERTER___ctx.item.emails.length - 1]) }
-        </h-pill>}}}
+        </HPILL>}}}
       </template>});
        ___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({ value, type })=>{<template>
         <a href={\`mailto:\${value}\`}> { value }</a>
         <span> {"("}{ type }{")"}</span>
       </template>});
-    }} value={___VERTER___ctx.item.emails.find((x) => x.primary)}></tabled-content-row>
+    }} value={___VERTER___ctx.item.emails.find((x) => x.primary)}></TABLEDCONTENTROW>}}
 
-    <tabled-content-row v-slot={(___VERTER___slotInstance)=>{
+    {()=>{const TABLEDCONTENTROW=___VERTER___COMPONENT_CTX["tabled-content-row v-slot={(___VERTER___slotInstance)=>{"];___VERTER___COMPONENT_CTX.tabled-content-row;<TABLEDCONTENTROW
        ___VERTER___slotRender(___VERTER___slotInstance.$slots.label)(()=>{<template>
         <span>{ ___VERTER___ctx.i18n.contact.form.info.websites.label }</span>
-        {()=>{if(___VERTER___ctx.item.websites.length > 1){<h-pill >
+        {()=>{if(___VERTER___ctx.item.websites.length > 1){const HPILL=___VERTER___COMPONENT_CTX["h-pill"];___VERTER___COMPONENT_CTX.h-pill;<HPILL >
           {
             ___VERTER___ctx.ts("contact.form.info.websites.more", [___VERTER___ctx.item.websites.length - 1])
           }
-        </h-pill>}}}
+        </HPILL>}}}
       </template>});
        ___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({ value, type })=>{<template>
         <a href={value} target={"_bank"}>
           <span>{ value }</span>
-          <h-icon class="mx-1 inline-block" icon={"ic:round-launch"} />
+          {()=>{const HICON=___VERTER___COMPONENT_CTX["h-icon"];<HICON class="mx-1 inline-block" icon={"ic:round-launch"} />}}
         </a>
         <span> {"("}{ type }{")"}</span>
       </template>});
-    }} value={___VERTER___ctx.item.websites.find((x) => x.primary)}></tabled-content-row>
+    }} value={___VERTER___ctx.item.websites.find((x) => x.primary)}></TABLEDCONTENTROW>}}
 
-    <tabled-content-row v-slot={(___VERTER___slotInstance)=>{
+    {()=>{const TABLEDCONTENTROW=___VERTER___COMPONENT_CTX["tabled-content-row v-slot={(___VERTER___slotInstance)=>{"];___VERTER___COMPONENT_CTX.tabled-content-row;<TABLEDCONTENTROW
        ___VERTER___slotRender(___VERTER___slotInstance.$slots.label)(()=>{<template>
         <span>{ ___VERTER___ctx.i18n.contact.form.info.addresses.label }</span>
-        {()=>{if(___VERTER___ctx.item.addresses.length > 1){<h-pill >
+        {()=>{if(___VERTER___ctx.item.addresses.length > 1){const HPILL=___VERTER___COMPONENT_CTX["h-pill"];___VERTER___COMPONENT_CTX.h-pill;<HPILL >
           {
             ___VERTER___ctx.ts("contact.form.info.addresses.more", [___VERTER___ctx.item.addresses.length - 1])
           }
-        </h-pill>}}}
+        </HPILL>}}}
       </template>});
        ___VERTER___slotRender(___VERTER___slotInstance.$slots.default)((address)=>{<template>
         <div class="relative pr-8">
@@ -192,7 +192,7 @@ const { i18n, $ts: ts } = useI18n();
 
           <div class="absolute right-0 top-0">
             <button>
-              <h-icon icon={"ic:round-copy-all"} />
+              {()=>{const HICON=___VERTER___COMPONENT_CTX["h-icon"];<HICON icon={"ic:round-copy-all"} />}}
               /* TODO copy to clipboard */
             </button>
             <a
@@ -206,7 +206,7 @@ const { i18n, $ts: ts } = useI18n();
                 .join(', ')}\`}
             >
               /* TODO open google maps */
-              <h-icon icon={"ic:round-map"} />
+              {()=>{const HICON=___VERTER___COMPONENT_CTX["h-icon"];<HICON icon={"ic:round-map"} />}}
             </a>
           </div>
         </div>
@@ -217,9 +217,9 @@ const { i18n, $ts: ts } = useI18n();
           </a>
           ({{ type }}) */
       </template>});
-    }} value={___VERTER___ctx.item.addresses.find((x) => x.primary)}></tabled-content-row>
+    }} value={___VERTER___ctx.item.addresses.find((x) => x.primary)}></TABLEDCONTENTROW>}}
     /* TODO others */
-  </tabled-content>
+  </TABLEDCONTENT>}}
 </template>
 "
 `;
