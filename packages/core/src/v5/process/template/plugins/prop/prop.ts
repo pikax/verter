@@ -8,6 +8,8 @@ import {
   SourceLocation,
 } from "@vue/compiler-core";
 import { camelize } from "vue";
+import { DirectivePlugin } from "../directive";
+import { ParseTemplateContext } from "../../../../parser/template";
 
 function overrideCamelCase(
   loc: SourceLocation,
@@ -203,6 +205,13 @@ export const PropPlugin = declareTemplatePlugin({
           s.appendLeft(node.loc.end.offset, `={${camelize(nameBinding.name)}}`);
         }
       }
+
+      DirectivePlugin.handleDirectiveModifiers(
+        node,
+        prop.context as ParseTemplateContext,
+        s,
+        ctx
+      );
     }
   },
 });

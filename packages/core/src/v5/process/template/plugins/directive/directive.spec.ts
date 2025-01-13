@@ -98,9 +98,47 @@ describe("process template plugins directive", () => {
     it('v-model.lazy="foo"', () => {
       const { result } = parse(`<input v-model.lazy="foo" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<input value={___VERTER___ctx.foo} onBlur={($event)=>(___VERTER___ctx.foo=$event.target.value)} />"`
+        `"<input {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vModelText);___VERTER___directiveName.modifiers=["lazy"];}}} value={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} />"`
       );
-    })
+    });
+
+    describe.skip("checkbox", () => {});
+    describe.skip("dynamic", () => {});
+    describe.skip("radio", () => {});
+    describe.skip("select", () => {});
+    describe.skip("text", () => {});
+  });
+
+  describe("v-on", () => {
+    it('div v-on:click.bar="foo"', () => {
+      const { result } = parse(`<div v-on:click.bar="foo" />`);
+      expect(result).toMatchInlineSnapshot(
+        `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vOn);___VERTER___directiveName.modifiers=["bar"];}}} onClick={___VERTER___ctx.foo} />"`
+      );
+    });
+
+    it('div v-if="foo" v-on:click.bar="foo"', () => {
+      const { result } = parse(`<div v-if="foo" v-on:click.bar="foo" />`);
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{if(___VERTER___ctx.foo){<div  {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.foo))) return;const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vOn);___VERTER___directiveName.modifiers=["bar"];}}} onClick={___VERTER___ctx.foo} />}}}"`
+      );
+    });
+  });
+
+  describe("v-bind", () => {
+    it('div v-bind:click.bar="foo"', () => {
+      const { result } = parse(`<div v-bind:click.bar="foo" />`);
+      expect(result).toMatchInlineSnapshot(
+        `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vBind);___VERTER___directiveName.modifiers=["bar"];}}} click={___VERTER___ctx.foo} />"`
+      );
+    });
+
+    it('div v-if="foo" v-bind:click.bar="foo"', () => {
+      const { result } = parse(`<div v-if="foo" v-bind:click.bar="foo" />`);
+      expect(result).toMatchInlineSnapshot(
+        `"{()=>{if(___VERTER___ctx.foo){<div  {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.foo))) return;const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vBind);___VERTER___directiveName.modifiers=["bar"];}}} click={___VERTER___ctx.foo} />}}}"`
+      );
+    });
   });
 
   describe("vue", () => {
@@ -220,14 +258,13 @@ describe("process template plugins directive", () => {
       );
     });
 
-
-    it('div v-test.app', () => {
+    it("div v-test.app", () => {
       const { result } = parse(`<div v-test.app />`);
 
       expect(result).toMatchInlineSnapshot(
-      `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];}}} />"`);
+        `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];}}} />"`
+      );
     });
-    
 
     it('div v-test.app="bar"', () => {
       const { result } = parse(`<div v-test.app="bar" />`);
@@ -236,6 +273,5 @@ describe("process template plugins directive", () => {
         `"<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />"`
       );
     });
-
   });
 });

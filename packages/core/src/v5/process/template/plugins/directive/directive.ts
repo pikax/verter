@@ -1,10 +1,122 @@
-import { ElementTypes } from "@vue/compiler-core";
+import { ElementTypes, DirectiveNode } from "@vue/compiler-core";
+import { MagicString } from "@vue/compiler-sfc";
 import { declareTemplatePlugin, TemplateContext } from "../../template";
 import { BindingPlugin } from "../binding";
 import { ParseTemplateContext } from "../../../../parser/template";
+import {
+  capitalize,
+  Directive,
+  GlobalDirectives,
+  ObjectDirective,
+  vModelCheckbox,
+  vModelDynamic,
+  vModelRadio,
+  vModelSelect,
+  vModelText,
+} from "vue";
+
+/**
+ * Vmodel 
+ * 
+ * type DirectiveRenderBetter<T extends HTMLElement> =
+
+    | (<Value = any, Modifiers extends string = string, Arg extends string = string>(directive: Directive<T & { _assigning?: boolean }, Value, Modifiers, Arg>) => {
+        value: Value,
+        arg: Arg,
+        modifiers: Modifiers[]
+    });
+
+
+// TODO maybe add the instance and also support binding instance
+declare function ___VERTER___instanceToDirectiveFn<T extends HTMLElement>(node: T): DirectiveRenderBetter<T>
+
+ * 
+accessor= {
+    vModelText: {} as ModelDirective<
+        any,
+        'trim' | 'number' | 'lazy'
+    >,
+}
+ */
 
 export const DirectivePlugin = declareTemplatePlugin({
   name: "VerterDirective",
+
+  // create type safe modifiers
+  handleDirectiveModifiers(
+    node: DirectiveNode,
+    context: ParseTemplateContext,
+    s: MagicString,
+    ctx: TemplateContext
+  ) {
+    if (node.modifiers.length === 0) {
+      return;
+    }
+    const directiveAccessor = ctx.retrieveAccessor("directiveAccessor");
+    const instancePropertySymbol = ctx.retrieveAccessor(
+      "instancePropertySymbol"
+    );
+    const slotInstance = ctx.retrieveAccessor("slotInstance");
+    const instanceToDirectiveFn = ctx.retrieveAccessor("instanceToDirectiveFn");
+    const instanceToDirectiveVar = ctx.retrieveAccessor(
+      "instanceToDirectiveVar"
+    );
+    const directiveName = ctx.retrieveAccessor("directiveName");
+
+    const index = node.loc.start.offset;
+
+    const declaration =
+      `const ${instanceToDirectiveVar}=${instanceToDirectiveFn}(${slotInstance});` +
+      `const ${directiveName}=${instanceToDirectiveVar}(${directiveAccessor}.${
+        // NOTE v-model text is the default, maybe we can add more here later
+        node.name === "model" ? "vModelText" : `v${capitalize(node.name)}`
+      });`;
+
+    s.prependLeft(index, declaration);
+    if (ctx.doNarrow && context.conditions.length > 0) {
+      ctx.doNarrow(
+        {
+          index: index,
+          conditions: context.conditions,
+          inBlock: true,
+          type: "prepend",
+          direction: "left",
+        },
+        s
+      );
+    }
+    s.prependLeft(
+      index,
+      `{...{[${instancePropertySymbol}]:(${slotInstance})=>{`
+    );
+
+    if (node.modifiers.length > 0) {
+      const start = node.modifiers[0].loc.start.offset - 1;
+      const end = node.modifiers[node.modifiers.length - 1].loc.end.offset;
+      s.move(start, end, index);
+
+      s.overwrite(start, start + 1, `${directiveName}.modifiers=[`);
+
+      // s.overwrite(start - 1, start, `${directiveName}.modifiers=[`);
+      s.prependLeft(end, "];");
+
+      for (let i = 0; i < node.modifiers.length; i++) {
+        const modifier = node.modifiers[i];
+        if (i > 0) {
+          s.overwrite(
+            modifier.loc.start.offset - 1,
+            modifier.loc.start.offset,
+            ","
+          );
+        }
+        s.prependRight(modifier.loc.start.offset, '"');
+        s.prependLeft(modifier.loc.end.offset, '"');
+      }
+    }
+
+    s.prependRight(index, "}}} ");
+  },
+
   transformDirective(item, s, ctx) {
     const element = item.element;
     const node = item.node;
@@ -101,6 +213,12 @@ export const DirectivePlugin = declareTemplatePlugin({
           // shouldn't be here
         }
 
+        this.handleDirectiveModifiers(
+          node,
+          item.context as ParseTemplateContext,
+          s,
+          ctx
+        );
         break;
       }
       default: {
