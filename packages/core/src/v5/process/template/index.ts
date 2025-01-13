@@ -14,4 +14,5 @@ export const DefaultPlugins = [
   Plugins.EventPlugin,
   Plugins.LoopPlugin,
   Plugins.DirectivePlugin,
+  Plugins.ElementPlugin,
 ];

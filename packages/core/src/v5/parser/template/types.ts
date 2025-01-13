@@ -10,6 +10,7 @@ import type {
 } from "@vue/compiler-core";
 import type * as babel_types from "@babel/types";
 import { VerterNode } from "../walk";
+import { ParseTemplateContext } from "./template";
 
 export const enum TemplateTypes {
   Binding = "Binding",
@@ -238,7 +239,7 @@ export type TemplateElement = {
   loop: TemplateLoop | null;
   slot: TemplateSlot | TemplateRenderSlot | null;
 
-  context: ElementContext;
+  context: Record<string, any>;
 };
 
 export type TemplateItemByType = {
@@ -269,9 +270,3 @@ export type TemplateItem =
   | TemplateInterpolation
   | TemplateElement
   | TemplateFunction;
-
-export type ElementContext = {
-  conditions: TemplateCondition[];
-  inFor: boolean;
-  ignoredIdentifiers: string[];
-};
