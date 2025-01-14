@@ -1,10 +1,10 @@
 import 'vue/jsx'
-import { NormaliseComponentKey } from "./name";
+import { $V_NormaliseComponentKey } from "./name";
 
 function normaliseComponents<T extends Record<PropertyKey, any>>(
   obj: T
 ): {
-  [K in keyof T as NormaliseComponentKey<K & string>]: T[K];
+  [K in keyof T as $V_NormaliseComponentKey<K & string>]: T[K];
 } {
   return {} as any;
 }

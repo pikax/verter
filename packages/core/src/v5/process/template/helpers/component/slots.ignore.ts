@@ -1,5 +1,5 @@
 import { defineComponent, SlotsType } from "vue";
-import { StrictRenderSlot } from "./slots.js";
+import { $V_StrictRenderSlot } from "./slots.js";
 
 const Comp = defineComponent({
   props: {
@@ -18,40 +18,40 @@ const Comp = defineComponent({
 });
 
 // any
-StrictRenderSlot(new Comp().$slots.default, [null]);
+$V_StrictRenderSlot(new Comp().$slots.default, [null]);
 
 // foo
-StrictRenderSlot(new Comp().$slots.foo, [{ foo: "foo" }]);
+$V_StrictRenderSlot(new Comp().$slots.foo, [{ foo: "foo" }]);
 
 // single
-StrictRenderSlot(new Comp().$slots.single, [new HTMLInputElement()]);
+$V_StrictRenderSlot(new Comp().$slots.single, [new HTMLInputElement()]);
 
 // @ts-expect-error
-StrictRenderSlot(new Comp().$slots.single, [
+$V_StrictRenderSlot(new Comp().$slots.single, [
   new HTMLInputElement(),
   new HTMLInputElement(),
 ]);
 
 // multiple
-StrictRenderSlot(new Comp().$slots.multiple, [new HTMLInputElement()]);
+$V_StrictRenderSlot(new Comp().$slots.multiple, [new HTMLInputElement()]);
 
 // @ts-expect-error
-StrictRenderSlot(new Comp().$slots.multiple, [new HTMLElement()]);
+$V_StrictRenderSlot(new Comp().$slots.multiple, [new HTMLElement()]);
 
 // two
-StrictRenderSlot(new Comp().$slots.two, [
+$V_StrictRenderSlot(new Comp().$slots.two, [
   new HTMLMediaElement(),
   new HTMLAnchorElement(),
 ]);
 
 // @ts-expect-error
-StrictRenderSlot(new Comp().$slots.two, [
+$V_StrictRenderSlot(new Comp().$slots.two, [
   new HTMLMediaElement(),
   new HTMLAnchorElement(),
   new HTMLAnchorElement(),
 ]);
 
-StrictRenderSlot(new Comp().$slots.two, [
+$V_StrictRenderSlot(new Comp().$slots.two, [
   new HTMLMediaElement(),
   // @ts-expect-error
   new HTMLMediaElement(),

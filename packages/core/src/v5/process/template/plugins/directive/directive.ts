@@ -198,16 +198,20 @@ export const DirectivePlugin = declareTemplatePlugin({
               .slice(1, -1);
           }
 
+          const eventName = element.tag === "input" ? "onInput" : "onUpdate:modelValue";
+          const valueAccessor = element.tag === "input" ? "$event.target.value" : "$event";
           const pre = isDynamic
-            ? `,[\`onUpdate:\${${bindingTo}}\`]:`
-            : `} onUpdate:${bindingTo}={`;
+            ? `,[\`${eventName}:\${${bindingTo}}\`]:`
+            : `} ${eventName}:${bindingTo}={`;
 
           const post = isDynamic ? "}}" : "}";
+
+
 
           s.overwrite(
             node.exp.loc.end.offset,
             node.exp.loc.end.offset + 1,
-            `${pre}($event)=>(${exp.toString()}=$event)${post}`
+            `${pre}($event)=>(${exp.toString()}=${valueAccessor})${post}`
           );
         } else {
           // shouldn't be here

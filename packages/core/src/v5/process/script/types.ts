@@ -19,3 +19,5 @@ export type ScriptPlugin = ProcessPlugin<ScriptItem, ProcessContext> & {
 export function definePlugin<T extends ScriptPlugin>(plugin: T) {
   return plugin;
 }
+
+
