@@ -1,1 +1,1 @@
-export * as Component from "./Component/index.js";
+export * as Component from "./component/index.js";

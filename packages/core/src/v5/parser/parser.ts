@@ -156,9 +156,12 @@ export function parser(
       }
       case "js":
       case "jsx": {
-        const ast = parseAST(x.block.content, filename + "." + languageId);
+        const prepend = "".padStart(x.block.loc.start.offset, " ");
+        const content = prepend + x.block.content;
 
-        const r = parseScript(ast, x.block.content);
+        const ast = parseAST(content, filename + "." + languageId);
+
+        const r = parseScript(ast, content, x.block.attrs);
         isAsync = r.isAsync;
 
         return {

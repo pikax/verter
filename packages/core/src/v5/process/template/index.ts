@@ -16,3 +16,8 @@ export const DefaultPlugins = [
   Plugins.DirectivePlugin,
   Plugins.ElementPlugin,
 ];
+
+
+export const ScriptDefaultPlugins = [
+  
+]

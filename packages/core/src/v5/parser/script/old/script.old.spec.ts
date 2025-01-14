@@ -8,6 +8,17 @@ describe("parser script", () => {
     return parseScript(ast.program, source);
   }
 
+  test.only("test", () => {
+    const result = parse(`export default {
+    data:()=> ({
+    foo:1}),
+  computed: {
+      foo:()=> 1
+  }
+}`);
+    console.log(result);
+  });
+
   describe("old", () => {
     describe("isAsync", () => {
       it("not async", () => {
@@ -1790,8 +1801,8 @@ describe("parser script", () => {
             });
           });
 
-          describe('setup', ()=> {
-            test('simple', ()=> {
+          describe("setup", () => {
+            test("simple", () => {
               const result = parseWrap(`{ setup(){ return { a: 1 } }}`);
               expect(result.bindings).toMatchObject([
                 {
@@ -1809,10 +1820,12 @@ describe("parser script", () => {
                   },
                 },
               ]);
-            })
+            });
 
-            test('with others', ()=> {
-              const result = parseWrap(`{ data(){ return { a: 3}}, computed: { b(){ return 4}}, methods: { foo() { }} setup(){ return { a: 1, b: 2, foo: 'ee' } }}`);
+            test("with others", () => {
+              const result = parseWrap(
+                `{ data(){ return { a: 3}}, computed: { b(){ return 4}}, methods: { foo() { }} setup(){ return { a: 1, b: 2, foo: 'ee' } }}`
+              );
               expect(result.bindings).toMatchObject([
                 {
                   content: "a: 1",
@@ -1843,12 +1856,10 @@ describe("parser script", () => {
                   },
                 },
               ]);
-            })
-          })
+            });
+          });
         });
       }
-
-    
     );
   });
 

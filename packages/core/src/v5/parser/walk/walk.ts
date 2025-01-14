@@ -5,16 +5,28 @@ import type {
   TemplateChildNode,
   CompoundExpressionNode,
 } from "@vue/compiler-core";
-import type { VerterAST, Statement, ModuleDeclaration } from "../ast/index.js";
+import type {
+  VerterAST,
+  Statement,
+  ModuleDeclaration,
+  Function,
+  ArrowFunctionExpression,
+} from "../ast/index.js";
 import { isObject } from "@vue/shared";
 import { TemplateCondition } from "../template/types.js";
 
 export function shallowWalk(
-  root: VerterAST,
+  root: VerterAST | Function | ArrowFunctionExpression,
   cb: (node: Statement | ModuleDeclaration) => void
 ) {
-  for (let i = 0; i < root.body.length; i++) {
-    cb(root.body[i]);
+  if (root.type === "Program") {
+    for (let i = 0; i < root.body.length; i++) {
+      cb(root.body[i]);
+    }
+  } else if (root.body) {
+    for (let i = 0; i < root.body.statements.length; i++) {
+      cb(root.body.statements[i]);
+    }
   }
 }
 

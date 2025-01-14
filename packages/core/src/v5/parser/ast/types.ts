@@ -42,7 +42,15 @@ import type {
   BindingProperty,
   TSTypeAliasDeclaration,
   CallExpression,
-  ExportSpecifier
+  ExportSpecifier,
+  Function,
+  FunctionBody,
+  ObjectProperty,
+  ArrowFunctionExpression,
+  ObjectExpression,
+  AwaitExpression,
+  ExpressionStatement,
+  ExportDefaultDeclaration
 } from "oxc-parser";
 
 export type {
@@ -65,6 +73,12 @@ export type {
   ExportAllDeclaration,
   ExportDefaultDeclaration,
   ExportSpecifier,
+  FunctionBody,
+  ObjectProperty,
+  Function,
+  ArrowFunctionExpression,
+  ObjectExpression,
+  AwaitExpression,
 } from "oxc-parser";
 
 export type VerterAST = ParseResult["program"];
@@ -109,4 +123,12 @@ export type VerterASTNode =
   | VariableDeclarator
   | BindingProperty
   | TSTypeAliasDeclaration
-  | ExportSpecifier;
+  | ExportSpecifier
+  | FunctionBody
+  | ObjectProperty
+  | Function
+  | ArrowFunctionExpression
+  | ObjectExpression
+  | AwaitExpression
+  | ExpressionStatement
+  | ExportDefaultDeclaration;
