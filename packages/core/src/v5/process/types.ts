@@ -1,10 +1,5 @@
 import { MagicString } from "@vue/compiler-sfc";
 import { ParsedBlock } from "../parser/types";
-import {
-  TemplateItem,
-  TemplateItemByType,
-  TemplateTypes,
-} from "../parser/template/types";
 import { VerterASTNode } from "../parser/ast";
 import { Node } from "@vue/compiler-core";
 import { GenericInfo } from "../parser/script/generic";

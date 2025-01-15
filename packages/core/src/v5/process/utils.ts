@@ -31,9 +31,8 @@ export function handleHelpers(source: string) {
     .trim();
 
   function withPrefix(prefix: string) {
-    // todo replace $V_
     return {
-      content: content.replaceAll("$V_", prefix),
+      content: content.replaceAll("$V_", prefix).replaceAll('\nexport ', '\n'),
       imports: imports.map(
         (i) =>
           ({
@@ -92,7 +91,7 @@ export function generateImport(items: ImportModule[]) {
       `import { ${toAdd
         .map(
           (i) =>
-            (i.type ? `type ${i.name}` : "") +
+            (i.type ? `type ` : "") +
             i.name +
             (i.alias ? ` as ${i.alias}` : "")
         )

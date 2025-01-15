@@ -1,3 +1,4 @@
+import { camelize, capitalize } from "vue";
 import { VerterAST } from "../../../../parser/ast";
 import { ScriptItem } from "../../../../parser/script/types";
 import { BundlerHelper } from "../../../template/helpers/bundler";
@@ -31,28 +32,45 @@ export function buildBundle(
           const prefix = ctx.prefix("");
           // s.prepend(`${prefix}export default `);
           const bundler = BundlerHelper.withPrefix(prefix);
+
+          // bundler names
+          const ProcessPropsName = ctx.prefix("ProcessProps");
+
           const imports = [...bundler.imports];
 
+          const defaultOptionsName = ctx.prefix("default");
+          const resolvePropsName = ctx.prefix("resolveProps");
+          const resolveExtraPropsName = ctx.prefix("resolveExtraProps");
+          const resolveSlotsName = ctx.prefix("resolveSlots");
+          
           imports.push({
             from: relative(ctx.filename, ResolveOptionsFilename(ctx.filename)),
             items: [
-              {
-                name: ctx.prefix("resolveProps"),
-              },
-              {
-                name: ctx.prefix("default"),
-              },
-              {
-                name: ctx.prefix("resolveExtraProps"),
-              },
-              {
-                name: ctx.prefix("resolveSlots"),
-              },
+              { name: defaultOptionsName },
+              { name: resolvePropsName },
+              { name: resolveExtraPropsName },
+              { name: resolveSlotsName },
             ],
           });
 
           const importsStr = generateImport(imports);
-          s.prepend([importsStr, bundler.content].join("\n"));
+          const compName = capitalize(camelize(ctx.filename.split("/").pop()?.slice(0, -4) ?? "Comp"));
+
+          const sanitisedNames =ctx.generic ? `<${ctx.generic.sanitisedNames.join(',')}>` : ""
+          const declaration = [
+            `declare const ${compName}: typeof ${defaultOptionsName} & `,
+            `{new${ctx.generic ? `<${ctx.generic.declaration}>` : ""}(): {`,
+            `$props: (${ProcessPropsName}<ReturnType<typeof ${resolvePropsName}${sanitisedNames}>`,
+            `${ctx.isAsync ? " extends Promise<infer P> ? P : {}" : ""}>)`,
+            `& ReturnType<typeof ${resolveExtraPropsName}${sanitisedNames}>;`,
+            `$slots: ReturnType<typeof ${resolveSlotsName}${sanitisedNames}>`,
+            `extends ${ctx.isAsync ? "Promise<" : ""}infer P${ctx.isAsync ? ">" : ""}`,
+            `? P extends P & 1 ? {} : P : never;}};`,
+
+            `export default ${compName};`,
+          ]
+          
+          s.prepend([importsStr, bundler.content, declaration.join('')].join("\n"));
         },
       },
     ],
