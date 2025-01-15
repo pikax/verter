@@ -30,7 +30,7 @@ describe("process script plugins imports", () => {
         {
           pre: (s) => {
             s.update(0, prepend.length, "");
-            s.update(source.length - "</template>".length, source.length, "");
+            s.update(source.length - "</script>".length, source.length, "");
           },
         },
       ],
@@ -45,9 +45,9 @@ describe("process script plugins imports", () => {
   }
 
   it("should import plugin correctly", () => {
-    const { s } = parse(`let a = 0; import { a } from "b"`);
+    const { s } = parse(`let a = 0; import { a } from "b";`);
     expect(s.toString()).toMatchInlineSnapshot(
-      `"import { a } from 'b'; let a = 0;"`
+      `"import { a } from "b";let a = 0; "`
     );
   });
 });

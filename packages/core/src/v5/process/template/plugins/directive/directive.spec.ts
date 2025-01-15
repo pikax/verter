@@ -42,7 +42,7 @@ describe("process template plugins directive", () => {
     it('div v-model="foo"', () => {
       const { result } = parse(`<div v-model="foo" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<div value={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} />"`
+        `"<div value={___VERTER___ctx.foo} onInput={($event)=>(___VERTER___ctx.foo=$event.target.value)} />"`
       );
     });
 
@@ -98,7 +98,7 @@ describe("process template plugins directive", () => {
     it('v-model.lazy="foo"', () => {
       const { result } = parse(`<input v-model.lazy="foo" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<input {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vModelText);___VERTER___directiveName.modifiers=["lazy"];}}} value={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} />"`
+        `"<input {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vModelText);___VERTER___directiveName.modifiers=["lazy"];}}} value={___VERTER___ctx.foo} onInput={($event)=>(___VERTER___ctx.foo=$event.target.value)} />"`
       );
     });
 

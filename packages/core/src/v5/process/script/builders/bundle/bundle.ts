@@ -3,13 +3,17 @@ import { ScriptItem } from "../../../../parser/script/types";
 import { ProcessContext } from "../../../types";
 import { processScript, ScriptContext } from "../../script";
 
-// import 
+// import
 
 export function buildBundle(
   items: ScriptItem[],
   _context: Partial<ScriptContext> &
-    Pick<ProcessContext, "filename" | "s" | "blocks">) {
-
+    Pick<ProcessContext, "filename" | "s" | "blocks">
+) {
+  return processScript(items, [
     
-    return processScript(items, [], _context);
+    {
+    }
+
+  ], _context);
 }

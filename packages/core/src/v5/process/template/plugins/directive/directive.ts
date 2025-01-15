@@ -136,7 +136,8 @@ export const DirectivePlugin = declareTemplatePlugin({
         const fallbakName =
           element.tagType === ElementTypes.ELEMENT ? "value" : "modelValue";
 
-        let bindingTo = "modelValue";
+        let bindingTo =
+          element.tagType === ElementTypes.ELEMENT ? "input" : "modelValue";
 
         let isDynamic = false;
 
@@ -198,15 +199,22 @@ export const DirectivePlugin = declareTemplatePlugin({
               .slice(1, -1);
           }
 
-          const eventName = element.tag === "input" ? "onInput" : "onUpdate:modelValue";
-          const valueAccessor = element.tag === "input" ? "$event.target.value" : "$event";
+          const eventName =
+            element.tagType === ElementTypes.ELEMENT
+              ? "onInput"
+              : isDynamic
+              ? "onUpdate"
+              : `onUpdate:${bindingTo}`;
+
+          const valueAccessor =
+            element.tagType === ElementTypes.ELEMENT
+              ? "$event.target.value"
+              : "$event";
           const pre = isDynamic
             ? `,[\`${eventName}:\${${bindingTo}}\`]:`
-            : `} ${eventName}:${bindingTo}={`;
+            : `} ${eventName}={`;
 
           const post = isDynamic ? "}}" : "}";
-
-
 
           s.overwrite(
             node.exp.loc.end.offset,

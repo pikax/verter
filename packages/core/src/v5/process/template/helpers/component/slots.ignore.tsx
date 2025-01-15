@@ -56,3 +56,44 @@ $V_StrictRenderSlot(new Comp().$slots.two, [
   // @ts-expect-error
   new HTMLMediaElement(),
 ]);
+
+// <Comp>
+//       <template #default="{ value, type }">
+//         <div v-if="value">
+//           <a :href="\`tel:\${value}\`"> {{ value }}</a> <span> ({{ type }})</span>
+//         </div>
+//         <span v-else>—</span>
+//       </template></Comp>
+
+<>
+  <Comp
+    v-slot={({ $slots }) => {
+      <input
+        v-slot={(child1) => {
+          $V_StrictRenderSlot($slots.single, [child1]);
+        }}
+      />;
+    }}
+  />
+</>;
+
+declare const SupaComp: {
+  new <T>(): {
+    $props: {
+      foo: T;
+      onFoo: (e: { bar: "bar"; foo: T }) => any;
+    };
+  };
+};
+
+<>
+  <SupaComp ref="el" foo={"hello"} onFoo={(e) => e.bar && e.foo} />
+  <SupaComp ref="el1" foo={{ bax: 1 }} onFoo={(e) => e.bar && e.foo.bax} />
+  {1 === 1 /* fake condition for the sake of the example */ ? (
+    <SupaComp ref="el2" foo={42} onFoo={(e) => e.bar && e.foo} />
+  ) : (
+    <SupaComp ref="el2" foo={"42"} onFoo={(e) => e.bar && e.foo} />
+  )}
+</>;
+
+// I want to retrieve the type for SupaComp 1 & 2

@@ -1,18 +1,18 @@
-import { VNode as $V_VNode, ComponentInternalInstance as $V_ComponentInternalInstance } from "vue";
-
+import type {
+  VNode as $V_VNode,
+  ComponentInternalInstance as $V_ComponentInternalInstance,
+} from "vue";
 
 /* __VERTER_IMPORTS__
 [
-    {
-        "name": "VNode",
-        "source": "vue",
-        "default": false
-    },
-    {
-        "name": "ComponentInternalInstance",
-        "source": "vue",
-        "default": false
-    },
+  {
+    "from": "vue",
+    "asType": true,
+    "items": [
+      { name: "VNode", alias: "$V_VNode" },
+      { name: "ComponentInternalInstance", alias: "$V_ComponentInternalInstance" },
+    ]
+  }
 ]
 /__VERTER_IMPORTS__ */
 
@@ -20,21 +20,26 @@ import { VNode as $V_VNode, ComponentInternalInstance as $V_ComponentInternalIns
 
 declare module "vue" {
   interface HTMLAttributes {
-    "v-slot"?: {
-      default: () => JSX.Element;
-    };
+    // "v-slot"?: (instance: HTMLElement) => any;
+  }
+  interface HTMLAttributes {
+    "v-slot"?: (instance: HTMLElement) => any;
   }
   interface InputHTMLAttributes {
-    onInput?: (e: Event & {target: HTMLInputElement}) => void;
+    "v-slot"?: (instance: HTMLInputElement) => any;
+    onInput?: (e: Event & { target: HTMLInputElement }) => void;
   }
   interface SelectHTMLAttributes {
-    onInput?: (e: Event & {target: HTMLSelectElement}) => void;
+    onInput?: (e: Event & { target: HTMLSelectElement }) => void;
   }
 }
 
 // TODO improve these types
 // this should contain almost all the component information
-type $V_ToVNode<T> = $V_VNode & { ctx: $V_ComponentInternalInstance & { proxy: T } };
+type $V_ToVNode<T> = $V_VNode & {
+  ctx: $V_ComponentInternalInstance & { proxy: T };
+};
+declare const $V_instancePropertySymbol: unique symbol;
 
 // patching elements
 declare global {
@@ -49,7 +54,33 @@ declare global {
       "onVue:updated"?: (vnode: $V_ToVNode<T>, old: $V_ToVNode<T>) => void;
       "onVue:before-mounted"?: (vnode: $V_ToVNode<T>) => void;
       "onVue:before-unmounted"?: (vnode: $V_ToVNode<T>) => void;
-      "onVue:before-updated"?: (vnode: $V_ToVNode<T>, old: $V_ToVNode<T>) => void;
+      "onVue:before-updated"?: (
+        vnode: $V_ToVNode<T>,
+        old: $V_ToVNode<T>
+      ) => void;
+    }
+
+    interface LiHTMLAttributes {
+      [$V_instancePropertySymbol]?(i: HTMLLIElement): any;
+    }
+
+    interface MeterHTMLAttributes {
+      [$V_instancePropertySymbol]?(i: HTMLMeterElement): any;
+    }
+    interface OptionHTMLAttributes {
+      [$V_instancePropertySymbol]?(i: HTMLOptionElement): any;
+    }
+    interface ParamHTMLAttributes {
+      [$V_instancePropertySymbol]?(i: HTMLParamElement): any;
+    }
+    interface ProgressHTMLAttributes {
+      [$V_instancePropertySymbol]?(i: HTMLProgressElement): any;
+    }
+    interface SelectHTMLAttributes {
+      [$V_instancePropertySymbol]?(i: HTMLSelectElement): any;
+    }
+    interface TextareaHTMLAttributes {
+      [$V_instancePropertySymbol]?(i: TextareaHTMLAttributes): any;
     }
   }
 }

@@ -1,15 +1,13 @@
-import { DefineProps as $V_DefineProps } from "vue";
-
+import type { DefineProps as $V_DefineProps } from "vue";
 
 /* __VERTER_IMPORTS__
 [
-  {
-    "from": "vue",
-    "asType": true,
-    "items": [
-      { name: "DefineProps", alias: "$V_DefineProps" },
-    ]
-  }
+    {
+        "name": "DefineProps",
+        "source": "vue",
+        "default": false,
+        type: true
+    },
 ]
 /__VERTER_IMPORTS__ */
 

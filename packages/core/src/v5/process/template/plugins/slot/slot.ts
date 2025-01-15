@@ -427,7 +427,7 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
             s.appendLeft(tagEnd, `)(()=>{`);
           }
 
-          if (slot.context.conditions.length > 0) {
+          if (ctx.doNarrow && slot.context.conditions.length > 0) {
             ctx.doNarrow(
               {
                 index: prop.node.exp
@@ -531,7 +531,7 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
         }
       }
 
-      if (slot.context.conditions.length > 0) {
+      if (ctx.doNarrow && slot.context.conditions.length > 0) {
         ctx.doNarrow(
           {
             index: directive.loc.end.offset,

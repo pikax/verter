@@ -33,3 +33,15 @@ export type ProcessPlugin<T, C extends ProcessContext> = {
   post?: (s: MagicString, context: C) => void;
   pre?: (s: MagicString, context: C) => void;
 };
+
+export type ImportModule = {
+  from: string;
+  items: ImportItem[];
+  asType?: boolean;
+};
+
+export type ImportItem = {
+  name: string;
+  alias?: string;
+  type?: boolean;
+};

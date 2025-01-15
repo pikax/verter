@@ -1,5 +1,6 @@
-import 'vue/jsx'
+import "vue/jsx";
 import { $V_NormaliseComponentKey } from "./name";
+import { defineComponent } from "vue";
 
 function normaliseComponents<T extends Record<PropertyKey, any>>(
   obj: T
@@ -46,3 +47,22 @@ CTX_Components["snake_foo-Bar"];
 CTX_Components.snakeFooBar;
 // @ts-expect-error
 CTX_Components["snake-foo-bar"];
+
+const Comp = defineComponent({
+  props: {
+    foo: String,
+  },
+});
+
+{
+  /* <>
+  {() => {
+    <Comp foo="bar" v-slot={(e):any => {
+
+      renderSlot(e, "default", { foo: "bar" });
+
+    }} />;
+    
+  }}
+</>; */
+}
