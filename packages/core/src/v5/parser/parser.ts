@@ -19,6 +19,7 @@ import {
   ParsedBlockTemplate,
   ParsedBlockUnknown,
 } from "./types.js";
+import { parseGeneric, GenericInfo } from "./script/generic/index.js";
 
 // import { parseScript } from "./script/index.js";
 
@@ -28,71 +29,13 @@ export type ParserResult = {
   s: MagicString;
 
   isAsync: boolean;
-  // generic: GenericInfo | undefined;
-  generic: string | undefined;
+  generic: GenericInfo | null;
 
   blocks: ParsedBlock[];
 };
 
 export type VerterParserOptions = SFCParseOptions & {
   accessorPrefix: string;
-};
-
-export type GenericInfo = {
-  /**
-   * Source of the generic
-   *
-   * @value
-   *  ```ts
-   *  T extends 'foo' | 'bar'
-   * ```
-   * @example
-   * ```vue
-   * <script generic="T extends 'foo' | 'bar'" setup lang="ts">
-   * ```
-   */
-  source: string;
-
-  /**
-   * Used to prefix sanitised names
-   * @default '__VERTER__TS__'
-   */
-  sanitisePrefix?: string;
-
-  /**
-   * The generic array names
-   * @example
-   * ```vue
-   * <script generic="T extends 'foo' | 'bar', Comp" setup lang="ts">
-   * ```
-   * The names will be `['T', 'Comp']`
-   */
-  names: string[];
-
-  /**
-   * The sanitised names, prefixed with `sanitisePrefix`
-   * @example
-   * ```vue
-   * <script generic="T extends 'foo' | 'bar', Comp" setup lang="ts">
-   * ```
-   * The names will be `['__VERTER__TS__T', '__VERTER__TS__Comp']`
-   */
-  sanitisedNames: string[];
-
-  /**
-   * Declaration generic, it contains the same constraints and default as `source`
-   * but the names are sanitised and if no default provided it will default to `any`
-   *
-   * @example
-   * ```vue
-   * <script generic="T extends 'foo' | 'bar', Comp" setup lang="ts">
-   * ```
-   * The declaration will be the content
-   * ```ts
-   * <__VERTER__TS__T extends 'foo' | 'bar' = any, Comp = any>()=>{}
-   * ```
-   */
-  declaration: string;
 };
 
 const JS_AST_LANGUAGES = new Set(["ts", "tsx", "js", "jsx"]);
@@ -116,7 +59,7 @@ export function parser(
   }
 
   const s = new MagicString(source);
-  let generic: string | undefined = undefined;
+  let generic: GenericInfo | null = null;
   let isAsync = false;
 
   const sfcParse = parse(source, {
@@ -151,7 +94,7 @@ export function parser(
           x.block.attrs.generic &&
           typeof x.block.attrs.generic === "string"
         ) {
-          generic = x.block.attrs.generic;
+          generic = parseGeneric(x.block.attrs.generic);
         }
       }
       case "js":
@@ -160,8 +103,7 @@ export function parser(
         const content = prepend + x.block.content;
 
         const ast = parseAST(content, filename + "." + languageId);
-
-        const r = parseScript(ast, content, x.block.attrs);
+        const r = parseScript(ast, x.block.attrs);
         isAsync = r.isAsync;
 
         return {

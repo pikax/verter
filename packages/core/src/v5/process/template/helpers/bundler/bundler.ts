@@ -7,7 +7,7 @@ import { DefineProps as $V_DefineProps } from "vue";
     "from": "vue",
     "asType": true,
     "items": [
-      { name: "DefineProps", alias: "$V_DefineProps" },
+      { "name": "DefineProps", "alias": "$V_DefineProps" }
     ]
   }
 ]

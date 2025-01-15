@@ -102,7 +102,7 @@ export function processTemplate(
     Pick<ProcessContext, "filename" | "s" | "blocks">
 ) {
   const context: TemplateContext = {
-    generic: undefined,
+    generic: null,
     isAsync: false,
     camelWhitelistAttributes: (name: string) => {
       return name.startsWith("data-") || name.startsWith("aria-");
@@ -115,6 +115,8 @@ export function processTemplate(
     retrieveAccessor: (name: TemplateAccessors) => {
       return defaultPrefix(name);
     },
+
+    items: [],
 
     ..._context,
   };

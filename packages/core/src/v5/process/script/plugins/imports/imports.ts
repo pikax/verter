@@ -5,8 +5,5 @@ export const ImportsPlugin = definePlugin({
   name: "VerterImports",
   transformImport(item, s) {
     s.move(item.node.start, item.node.end, 0);
-    
-
-    console.log('ss', item.node.source)
   },
 });

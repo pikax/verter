@@ -15,7 +15,7 @@ function retriveImportFromHelpers(source: string): ImportModule[] {
   if (end === -1) {
     throw new Error(endStr + ": not found");
   }
-  const content = source.slice(start + startStr.length, end + endStr.length);
+  const content = source.slice(start + startStr.length, end);
 
   const items = JSON.parse(content);
   return items as ImportModule[];
@@ -26,14 +26,33 @@ export function handleHelpers(source: string) {
 
   const imports = retriveImportFromHelpers(source);
 
-  const content = source.slice(
-    0,
-    source.indexOf(VERTER_START) + VERTER_START.length
-  );
+  const content = source
+    .slice(source.indexOf(VERTER_START) + VERTER_START.length)
+    .trim();
+
+  function withPrefix(prefix: string) {
+    // todo replace $V_
+    return {
+      content: content.replaceAll("$V_", prefix),
+      imports: imports.map(
+        (i) =>
+          ({
+            ...i,
+            items: i.items.map((i) => ({
+              ...i,
+              alias: i.alias ? i.alias.replaceAll("$V_", prefix) : undefined,
+            })),
+          } as ImportModule)
+      ),
+    };
+  }
 
   return {
     content,
+
     imports,
+
+    withPrefix,
   };
 }
 

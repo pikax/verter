@@ -1,4 +1,4 @@
-import oxc, { EcmaScriptModule } from "oxc-parser";
+import oxc, { ParserOptions } from "oxc-parser";
 import { parse as acornLooseParse, LooseParser } from "acorn-loose";
 
 import { parse as acornParse } from "acorn";
@@ -25,12 +25,15 @@ export function parseAcorn(source: string) {
   return ast;
 }
 
-export function parseOXC(source: string) {
-  return oxc.parseSync("index.ts", source);
+export function parseOXC(source: string, options?: ParserOptions) {
+  return oxc.parseSync("index.ts", source, options);
 }
 
-export function parseBabel(source: string) {
-  return babelParse(source);
+export function parseBabel(
+  source: string,
+  options: Parameters<typeof babelParse>[1]
+) {
+  return babelParse(source, options);
 }
 
 export function sanitisePosition(source: string) {

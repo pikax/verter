@@ -14,6 +14,7 @@ import {
   vModelSelect,
   vModelText,
 } from "vue";
+import { ProcessItemType } from "../../../types";
 
 /**
  * Vmodel 
@@ -223,6 +224,15 @@ export const DirectivePlugin = declareTemplatePlugin({
           );
         } else {
           // shouldn't be here
+          // todo add a warning
+
+          ctx.items.push({
+            type: ProcessItemType.Warning,
+            message: "NO_EXPRESSION_VMODEL",
+            start: node.loc.start.offset,
+            end: node.loc.end.offset,
+            node,
+          });
         }
 
         this.handleDirectiveModifiers(

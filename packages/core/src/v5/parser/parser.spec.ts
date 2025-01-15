@@ -69,45 +69,104 @@ describe("parser", () => {
       const source = ``;
       const parsed = parser(source);
 
-      expect(parsed.generic).toBe(undefined);
+      expect(parsed.generic).toBe(null);
     });
 
     it('generic="T"', () => {
       const source = `<script lang="ts" generic="T"></script>`;
       const parsed = parser(source);
-      expect(parsed.generic).toBe("T");
+      expect(parsed.generic).toMatchInlineSnapshot(`
+        {
+          "declaration": "__VERTER__TS__T = any",
+          "names": [
+            "T",
+          ],
+          "sanitisedNames": [
+            "__VERTER__TS__T",
+          ],
+          "source": "T",
+        }
+      `);
     });
 
     it('generic="T extends string"', () => {
       const source = `<script lang="ts" generic="T extends string"></script>`;
       const parsed = parser(source);
-      expect(parsed.generic).toBe("T extends string");
+      expect(parsed.generic).toMatchInlineSnapshot(`
+        {
+          "declaration": "__VERTER__TS__T extends string = any",
+          "names": [
+            "T",
+          ],
+          "sanitisedNames": [
+            "__VERTER__TS__T",
+          ],
+          "source": "T extends string",
+        }
+      `);
     });
 
     it('generic="T extends string, U"', () => {
       const source = `<script lang="ts" generic="T extends string, U"></script>`;
       const parsed = parser(source);
-      expect(parsed.generic).toBe("T extends string, U");
+      expect(parsed.generic).toMatchInlineSnapshot(`
+        {
+          "declaration": "__VERTER__TS__T extends string = any, __VERTER__TS__U = any",
+          "names": [
+            "T",
+            "U",
+          ],
+          "sanitisedNames": [
+            "__VERTER__TS__T",
+            "__VERTER__TS__U",
+          ],
+          "source": "T extends string, U",
+        }
+      `);
     });
 
     it('generic="T extends string, U extends number"', () => {
       const source = `<script lang="ts" generic="T extends string, U extends number"></script>`;
       const parsed = parser(source);
-      expect(parsed.generic).toBe("T extends string, U extends number");
+      expect(parsed.generic).toMatchInlineSnapshot(`
+        {
+          "declaration": "__VERTER__TS__T extends string = any, __VERTER__TS__U extends number = any",
+          "names": [
+            "T",
+            "U",
+          ],
+          "sanitisedNames": [
+            "__VERTER__TS__T",
+            "__VERTER__TS__U",
+          ],
+          "source": "T extends string, U extends number",
+        }
+      `);
     });
 
     it('generic="T extends Deep<U>, U extends Record<string, { sup: boolean }>"', () => {
       const source = `<script lang="ts" generic="T extends Deep<U>, U extends Record<string, { sup: boolean }>"></script>`;
       const parsed = parser(source);
-      expect(parsed.generic).toBe(
-        "T extends Deep<U>, U extends Record<string, { sup: boolean }>"
-      );
+      expect(parsed.generic).toMatchInlineSnapshot(`
+        {
+          "declaration": "__VERTER__TS__T extends Deep<__VERTER__TS__U> = any, __VERTER__TS__U extends Record<string, { sup: boolean }> = any",
+          "names": [
+            "T",
+            "U",
+          ],
+          "sanitisedNames": [
+            "__VERTER__TS__T",
+            "__VERTER__TS__U",
+          ],
+          "source": "T extends Deep<U>, U extends Record<string, { sup: boolean }>",
+        }
+      `);
     });
 
     it('not generic if not lang="ts"', () => {
       const source = `<script generic="T"></script>`;
       const parsed = parser(source);
-      expect(parsed.generic).toBe(undefined);
+      expect(parsed.generic).toBe(null);
     });
   });
 
@@ -119,8 +178,15 @@ describe("parser", () => {
       expect(parsed.isAsync).toBe(false);
     });
 
-    it("async", () => {
-      const source = `<script>await Promise.resolve()</script>`;
+    it("async setup", () => {
+      const source = `<script setup>await Promise.resolve()</script>`;
+      const parsed = parser(source);
+
+      expect(parsed.isAsync).toBe(true);
+    });
+
+    it("async options", () => {
+      const source = `<script>export default { async setup() { await Promise.resolve()} }</script>`;
       const parsed = parser(source);
 
       expect(parsed.isAsync).toBe(true);

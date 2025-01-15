@@ -102,11 +102,32 @@ describe("process template plugins directive", () => {
       );
     });
 
-    describe.skip("checkbox", () => {});
-    describe.skip("dynamic", () => {});
-    describe.skip("radio", () => {});
-    describe.skip("select", () => {});
-    describe.skip("text", () => {});
+    describe("partial", () => {
+      it("v-model no expression", () => {
+        const { result } = parse(`<input v-model />`);
+        expect(result).toMatchInlineSnapshot(`"<input value />"`);
+      });
+
+      it('v-model=""', () => {
+        const { result } = parse(`<input v-model="" />`);
+        expect(result).toMatchInlineSnapshot(
+          `"<input value={___VERTER___ctx.} onInput={($event)=>(=$event.target.value)} />"`
+        );
+      });
+
+      // TODO: Fix this test
+      it.skip("v-model=", () => {
+        const { result } = parse(`<input v-model=/>`);
+        expect(result).toMatchInlineSnapshot(
+          `"<input value={___VERTER___ctx.} onInput={($event)=>(=$event.target.value)} />"`
+        );
+      });
+    });
+    describe.todo("checkbox", () => {});
+    describe.todo("dynamic", () => {});
+    describe.todo("radio", () => {});
+    describe.todo("select", () => {});
+    describe.todo("text", () => {});
   });
 
   describe("v-on", () => {

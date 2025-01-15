@@ -1,10 +1,12 @@
 import { VerterAST } from "../ast";
 import { shallowWalk } from "../walk";
 import { ScriptItem } from "./types";
+import { parseGeneric } from "./generic/index.js";
 
 import { handleShared } from "./shared/index.js";
 import { handleOptionsNode } from "./options/index.js";
 import { handleSetupNode } from "./setup/index.js";
+import { GenericInfo } from "../parser";
 
 export function parseScript(
   ast: VerterAST,

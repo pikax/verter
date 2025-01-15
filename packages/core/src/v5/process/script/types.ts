@@ -6,18 +6,19 @@ import {
 } from "../../parser/script/types";
 import { ProcessContext, ProcessPlugin } from "../types";
 
-export type ScriptPlugin = ProcessPlugin<ScriptItem, ProcessContext> & {
+export interface ScriptContext extends ProcessContext {
+  prefix(name: string): string;
+}
+export type ScriptPlugin = ProcessPlugin<ScriptItem, ScriptContext> & {
   [K in `transform${ScriptTypes}`]?: (
     item: K extends `transform${infer C extends ScriptTypes}`
       ? ScriptItemByType[C]
       : ScriptItem,
     s: MagicString,
-    context: ProcessContext
+    context: ScriptContext
   ) => void;
 };
 
 export function definePlugin<T extends ScriptPlugin>(plugin: T) {
   return plugin;
 }
-
-

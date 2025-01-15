@@ -5,7 +5,8 @@ import {
   ScriptTypes,
 } from "../../parser/script/types";
 import { ProcessContext } from "../types";
-import { ScriptPlugin } from "./types";
+import { ScriptContext, ScriptPlugin } from "./types";
+import { defaultPrefix } from "../utils";
 
 export function buildBundle() {}
 export function buildOptions() {}
@@ -15,8 +16,6 @@ export function buildOptions() {}
 // some magic still needs to happen
 export function buildProduction() {}
 
-export interface ScriptContext extends ProcessContext {}
-
 export function processScript(
   items: ScriptItem[],
   plugins: ScriptPlugin[],
@@ -24,19 +23,10 @@ export function processScript(
     Pick<ProcessContext, "filename" | "s" | "blocks">
 ) {
   const context: ScriptContext = {
-    generic: undefined,
+    generic: null,
     isAsync: false,
-    // camelWhitelistAttributes: (name: string) => {
-    //   return name.startsWith("data-") || name.startsWith("aria-");
-    // },
-    // isCustomElement: (_: string) => {
-    //   return false;
-    // },
-    // prefix: defaultPrefix,
-
-    // retrieveAccessor: (name: TemplateAccessors) => {
-    //   return defaultPrefix(name);
-    // },
+    items: [],
+    prefix: defaultPrefix,
 
     ..._context,
   };
@@ -57,17 +47,17 @@ export function processScript(
       (
         item: ScriptItemByType[K],
         s: MagicString,
-        context: ProcessContext
+        context: ScriptContext
       ) => void
     >;
   };
   const PLUGIN_TYPES = Object.keys(pluginsByType) as readonly ScriptTypes[];
 
   const prePlugins = [] as Array<
-    (s: MagicString, context: ProcessContext) => void
+    (s: MagicString, context: ScriptContext) => void
   >;
   const postPlugins = [] as Array<
-    (s: MagicString, context: ProcessContext) => void
+    (s: MagicString, context: ScriptContext) => void
   >;
 
   [...plugins]
