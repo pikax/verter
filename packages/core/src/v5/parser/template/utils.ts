@@ -1,6 +1,8 @@
 import {
   DirectiveNode,
+  Node,
   NodeTypes,
+  SimpleExpressionNode,
   type ExpressionNode,
 } from "@vue/compiler-core";
 import {
@@ -23,6 +25,7 @@ import {
 import { walk } from "@vue/compiler-sfc";
 import * as babel_types from "@babel/types";
 import { patchBabelNodeLoc } from "../../utils/node/node.js";
+import { VerterASTNode } from "../ast/types.js";
 
 export function retrieveBindings(
   exp: ExpressionNode,
@@ -48,87 +51,7 @@ export function retrieveBindings(
       exp,
     });
   } else if (exp.ast) {
-    walk(exp.ast, {
-      enter(n: babel_types.Node, parent: babel_types.Node) {
-        const ignoredIdentifiers: string[] =
-          // @ts-expect-error
-          (n._ignoredIdentifiers = [
-            // @ts-expect-error
-            ...(parent?._ignoredIdentifiers || context.ignoredIdentifiers),
-          ]);
-
-        switch (n.type) {
-          case "FunctionDeclaration":
-          case "FunctionExpression": {
-            if (n.id) {
-              ignoredIdentifiers.push(n.id.name);
-            }
-          }
-          case "ArrowFunctionExpression": {
-            n.params.forEach((param) => {
-              if (param.type === "Identifier") {
-                ignoredIdentifiers.push(param.name);
-              }
-            });
-
-            const pN = patchBabelNodeLoc(n, exp);
-            const bN = patchBabelNodeLoc(n.body, exp);
-            bindings.push({
-              type: TemplateTypes.Function,
-              node: pN,
-              body: bN,
-              context,
-            });
-            break;
-          }
-          case "Identifier": {
-            const name = n.name;
-            if (
-              ("property" in parent && parent.property === n) ||
-              ("key" in parent && parent.key === n)
-            ) {
-              this.skip();
-              return;
-            }
-            // if (
-            //   (parent.type === "OptionalMemberExpression" &&
-            //     parent.property === n) ||
-            //   (parent.type === "MemberExpression" && parent.property === n) ||
-            //   (parent.type === "ObjectProperty" && parent.key === n) ||
-            //   (parent.type === "ClassMethod" && parent.key === n)
-            // ) {
-            //   this.skip();
-            //   return;
-            // }
-            const pNode = patchBabelNodeLoc(n, exp);
-
-            bindings.push({
-              type: TemplateTypes.Binding,
-              node: pNode,
-              name,
-              parent,
-              directive: null,
-
-              ignore: ignoredIdentifiers.includes(name),
-              exp,
-            });
-            break;
-          }
-          default: {
-            if ("id" in n) {
-              if (n.id?.type === "Identifier") {
-                ignoredIdentifiers.push(n.id.name);
-              }
-            }
-          }
-        }
-      },
-
-      leave(n: babel_types.Node) {
-        // @ts-expect-error
-        delete n._ignoredIdentifiers;
-      },
-    });
+    bindings.push(...getASTBindings(exp.ast, context, exp));
   } else {
     bindings.push({
       type: TemplateTypes.Binding,
@@ -143,6 +66,104 @@ export function retrieveBindings(
       exp,
     });
   }
+
+  return bindings;
+}
+
+export function getASTBindings(
+  ast: babel_types.Node | VerterASTNode,
+  context: Record<string, any>,
+  exp?: Node
+) {
+  const bindings = [] as Array<TemplateBinding | TemplateFunction>;
+  walk(ast, {
+    enter(
+      n: babel_types.Node | VerterASTNode,
+      parent: babel_types.Node | VerterASTNode
+    ) {
+      const ignoredIdentifiers: string[] =
+        // @ts-expect-error
+        (n._ignoredIdentifiers = [
+          // @ts-expect-error
+          ...(parent?._ignoredIdentifiers || context.ignoredIdentifiers),
+        ]);
+
+      switch (n.type) {
+        case "FunctionDeclaration":
+        case "FunctionExpression": {
+          if (n.id) {
+            ignoredIdentifiers.push(n.id.name);
+          }
+        }
+        case "ArrowFunctionExpression": {
+          const params = Array.isArray(n.params) ? n.params : n.params.items;
+          params.forEach((param) => {
+            if (param.type === "Identifier") {
+              ignoredIdentifiers.push(param.name);
+            }
+          });
+
+          const pN = exp ? patchBabelNodeLoc(n as babel_types.Node, exp) : n;
+          const bN = exp
+            ? patchBabelNodeLoc(n.body as babel_types.Node, exp)
+            : n;
+          bindings.push({
+            type: TemplateTypes.Function,
+            node: pN,
+            body: bN,
+            context,
+          });
+          break;
+        }
+        case "Identifier": {
+          const name = n.name;
+          if (
+            parent &&
+            (("property" in parent && parent.property === n) ||
+              ("key" in parent && parent.key === n))
+          ) {
+            this.skip();
+            return;
+          }
+          // if (
+          //   (parent.type === "OptionalMemberExpression" &&
+          //     parent.property === n) ||
+          //   (parent.type === "MemberExpression" && parent.property === n) ||
+          //   (parent.type === "ObjectProperty" && parent.key === n) ||
+          //   (parent.type === "ClassMethod" && parent.key === n)
+          // ) {
+          //   this.skip();
+          //   return;
+          // }
+          const pNode = exp ? patchBabelNodeLoc(n, exp) : n;
+
+          bindings.push({
+            type: TemplateTypes.Binding,
+            node: pNode,
+            name,
+            parent,
+            directive: null,
+
+            ignore: ignoredIdentifiers.includes(name),
+            exp: exp as SimpleExpressionNode | null,
+          });
+          break;
+        }
+        default: {
+          if ("id" in n) {
+            if (n.id?.type === "Identifier") {
+              ignoredIdentifiers.push(n.id.name);
+            }
+          }
+        }
+      }
+    },
+
+    leave(n: babel_types.Node) {
+      // @ts-expect-error
+      delete n._ignoredIdentifiers;
+    },
+  });
 
   return bindings;
 }

@@ -1,0 +1,109 @@
+import { MagicString } from "@vue/compiler-sfc";
+import { parser } from "../../../../parser";
+import { ParsedBlockScript } from "../../../../parser/types";
+import { processScript } from "../../script";
+
+import { MacrosPlugin } from "./index.js";
+
+describe("process script plugin script block", () => {
+  function _parse(
+    content: string,
+    wrapper: string | false = false,
+    lang = "js",
+
+    pre = "",
+    post = ""
+  ) {
+    const prepend = `${pre}<script ${
+      wrapper === false ? "setup" : ""
+    } lang="${lang}">`;
+    const source = `${prepend}${content}</script>${post}`;
+    const parsed = parser(source);
+
+    const s = new MagicString(source);
+
+    const scriptBlock = parsed.blocks.find(
+      (x) => x.type === "script"
+    ) as ParsedBlockScript;
+
+    const r = processScript(
+      scriptBlock.result.items,
+      [
+        MacrosPlugin,
+        // // clean template tag
+        // {
+        //   post: (s) => {
+        //     s.update(pre.length, pre.length + prepend.length, "");
+        //     s.update(source.length - "</script>".length - pos, source.length, "");
+        //   },
+        // },
+      ],
+      {
+        s,
+        filename: "test.vue",
+        blocks: parsed.blocks,
+      }
+    );
+
+    return r;
+  }
+
+  //   describe("ts", () => {});
+
+  //   it.only("test", () => {
+  //     const { s } = _parse(`export default { setup(){ defineExpose({ a: 0 }); }}`, 'ddd');
+  //     expect(s.original).toBe(s.toString());
+  //   });
+
+  describe("setup", () => {
+    function parse(content: string, lang = "ts", pre: string = "") {
+      return _parse(`${pre ? pre + "\n" : ""}${content}`, false, lang, pre);
+    }
+
+    it("defineProps", () => {
+      const { result } = parse(`const props = defineProps({ a: String })`);
+      expect(result).toMatchInlineSnapshot(
+        `"export default { props: { a: String } }"`
+      );
+    });
+  });
+
+  describe.skip.each(["js", "ts"])("lang %s", (lang) => {
+    describe.each([
+      false as false,
+      "defineComponent",
+      "randomComponentDeclarator",
+    ])("options %s", (wrapper) => {
+      function parse(content: string, pre: string = "") {
+        return _parse(
+          `${pre ? pre + "\n" : ""}export default ${
+            wrapper ? wrapper + "(" : ""
+          }${content}${wrapper ? ")" : ""}`,
+          wrapper,
+          lang,
+          pre
+        );
+      }
+
+      it("leave the script untouched", () => {
+        const { s } = parse("{ data(){ return { a: 0 } } }");
+        expect(s.original).toBe(s.toString());
+      });
+
+      it("defineExpose", () => {
+        const { s } = parse(`{ setup(){ defineExpose({ a: 0 }) }}`);
+        expect(s.original).toBe(s.toString());
+      });
+    });
+
+    // describe.each([false, "defineComponent", "randomComponentDeclarator"])(
+    //   "wrapper %s",
+    //   (wrapper) => {
+    //     function parseWrapper(content: string) {
+
+    //     }
+
+    //   }
+    // );
+  });
+});

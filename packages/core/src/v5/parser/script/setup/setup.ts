@@ -1,5 +1,7 @@
 import { VerterASTNode } from "../../ast";
-import { ScriptItem, ScriptTypes } from "../types";
+import { TemplateBinding, TemplateTypes } from "../../template/types";
+import { getASTBindings, retrieveBindings } from "../../template/utils";
+import { ScriptDeclaration, ScriptItem, ScriptTypes } from "../types";
 
 export function handleSetupNode(node: VerterASTNode):
   | ScriptItem[]
@@ -36,6 +38,30 @@ export function handleSetupNode(node: VerterASTNode):
           },
         ];
       }
+      return [];
+    }
+    case "VariableDeclaration": {
+      return node.declarations.flatMap((x) => {
+        const bindings = getASTBindings(x.id, {
+          ignoredIdentifiers: [],
+        });
+
+        return bindings
+          .filter(
+            (x) =>
+              x.type === TemplateTypes.Binding &&
+              !x.parent?.type.startsWith("TS")
+          )
+          .map((b) => {
+            return {
+              type: ScriptTypes.Declaration,
+              node: b.node as VerterASTNode,
+              name: (b as TemplateBinding).name,
+              parent: x,
+              rest: false,
+            } as ScriptDeclaration;
+          });
+      });
     }
 
     case "ExportDefaultDeclaration": {

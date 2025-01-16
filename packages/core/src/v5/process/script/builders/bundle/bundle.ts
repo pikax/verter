@@ -42,7 +42,7 @@ export function buildBundle(
           const resolvePropsName = ctx.prefix("resolveProps");
           const resolveExtraPropsName = ctx.prefix("resolveExtraProps");
           const resolveSlotsName = ctx.prefix("resolveSlots");
-          
+
           imports.push({
             from: relative(ctx.filename, ResolveOptionsFilename(ctx.filename)),
             items: [
@@ -54,23 +54,39 @@ export function buildBundle(
           });
 
           const importsStr = generateImport(imports);
-          const compName = capitalize(camelize(ctx.filename.split("/").pop()?.slice(0, -4) ?? "Comp"));
+          const compName = capitalize(
+            camelize(ctx.filename.split("/").pop()?.slice(0, -4) ?? "Comp")
+          );
 
-          const sanitisedNames =ctx.generic ? `<${ctx.generic.sanitisedNames.join(',')}>` : ""
-          const declaration = [
-            `declare const ${compName}: typeof ${defaultOptionsName} & `,
-            `{new${ctx.generic ? `<${ctx.generic.declaration}>` : ""}(): {`,
+          const sanitisedNames = ctx.generic
+            ? `<${ctx.generic.sanitisedNames.join(",")}>`
+            : "";
+
+          const props = [
             `$props: (${ProcessPropsName}<ReturnType<typeof ${resolvePropsName}${sanitisedNames}>`,
             `${ctx.isAsync ? " extends Promise<infer P> ? P : {}" : ""}>)`,
             `& ReturnType<typeof ${resolveExtraPropsName}${sanitisedNames}>;`,
-            `$slots: ReturnType<typeof ${resolveSlotsName}${sanitisedNames}>`,
-            `extends ${ctx.isAsync ? "Promise<" : ""}infer P${ctx.isAsync ? ">" : ""}`,
-            `? P extends P & 1 ? {} : P : never;}};`,
+          ];
 
+          const slots = [
+            `$slots: ReturnType<typeof ${resolveSlotsName}${sanitisedNames}>`,
+            `extends ${ctx.isAsync ? "Promise<" : ""}infer P${
+              ctx.isAsync ? ">" : ""
+            }`,
+            `? P extends P & 1 ? {} : P : never;`,
+          ];
+
+          const declaration = [
+            `declare const ${compName}: typeof ${defaultOptionsName} & {new():{`,
+            ...props,
+            ...slots,
+            `}};`,
             `export default ${compName};`,
-          ]
-          
-          s.prepend([importsStr, bundler.content, declaration.join('')].join("\n"));
+          ];
+
+          s.prepend(
+            [importsStr, bundler.content, declaration.join("")].join("\n")
+          );
         },
       },
     ],
