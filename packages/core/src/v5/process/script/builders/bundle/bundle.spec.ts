@@ -44,7 +44,7 @@ describe("process script builders bundle", () => {
       type ___VERTER___ProcessProps<T> = T extends ___VERTER___DefineProps<infer U, infer BKeys>
         ? ___VERTER___PartialUndefined<U>
         : T;
-      declare const Test: typeof ___VERTER___default & {new(): {$props: (___VERTER___ProcessProps<ReturnType<typeof ___VERTER___resolveProps>>)& ReturnType<typeof ___VERTER___resolveExtraProps>;$slots: ReturnType<typeof ___VERTER___resolveSlots>extends infer P? P extends P & 1 ? {} : P : never;}};"
+      declare const Test: typeof ___VERTER___default & {new():{$props: (___VERTER___ProcessProps<ReturnType<typeof ___VERTER___resolveProps>>)& ReturnType<typeof ___VERTER___resolveExtraProps>;$slots: ReturnType<typeof ___VERTER___resolveSlots>extends infer P? P extends P & 1 ? {} : P : never;}};export default Test;"
     `);
   });
 });

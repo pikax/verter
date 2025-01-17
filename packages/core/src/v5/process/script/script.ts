@@ -27,6 +27,7 @@ export function processScript(
     isAsync: false,
     items: [],
     prefix: defaultPrefix,
+    isSetup: false,
 
     ..._context,
   };

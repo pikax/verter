@@ -149,6 +149,7 @@ export type ScriptDeclaration = {
   type: ScriptTypes.Declaration;
   node: VerterASTNode;
   parent: VerterASTNode;
+  declarator: VerterASTNode;
 } & (
   | {
       name: string;

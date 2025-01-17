@@ -8,6 +8,8 @@ import { ProcessContext, ProcessPlugin } from "../types";
 
 export interface ScriptContext extends ProcessContext {
   prefix(name: string): string;
+
+  isSetup: boolean;
 }
 export type ScriptPlugin = ProcessPlugin<ScriptItem, ScriptContext> & {
   [K in `transform${ScriptTypes}`]?: (

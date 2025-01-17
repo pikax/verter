@@ -3,25 +3,25 @@ import { ScriptBinding, ScriptItem, ScriptTypes } from "../types";
 
 export function handleShared(node: VerterASTNode): ScriptItem[] | false {
   switch (node.type) {
-    case "ExpressionStatement": {
-      const expression = node.expression;
+    // case "ExpressionStatement": {
+    //   const expression = node.expression;
 
-      if (expression.type === "CallExpression") {
-        return [
-          {
-            type: ScriptTypes.FunctionCall,
-            node: expression,
-            parent: node,
-            name:
-              expression.callee.type === "Identifier"
-                ? expression.callee.name
-                : "",
-          },
-        ];
-      }
+    //   if (expression.type === "CallExpression") {
+    //     return [
+    //       {
+    //         type: ScriptTypes.FunctionCall,
+    //         node: expression,
+    //         parent: node,
+    //         name:
+    //           expression.callee.type === "Identifier"
+    //             ? expression.callee.name
+    //             : "",
+    //       },
+    //     ];
+    //   }
 
-      return false;
-    }
+    //   return false;
+    // }
 
     case "ExportAllDeclaration": {
       return [

@@ -131,4 +131,5 @@ export type VerterASTNode =
   | ObjectExpression
   | AwaitExpression
   | ExpressionStatement
-  | ExportDefaultDeclaration;
+  | ExportDefaultDeclaration
+  | CallExpression;

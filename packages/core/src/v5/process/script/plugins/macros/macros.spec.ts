@@ -42,6 +42,7 @@ describe("process script plugin script block", () => {
         s,
         filename: "test.vue",
         blocks: parsed.blocks,
+        isSetup: wrapper === false,
       }
     );
 
@@ -62,13 +63,51 @@ describe("process script plugin script block", () => {
 
     it("defineProps", () => {
       const { result } = parse(`const props = defineProps({ a: String })`);
-      expect(result).toMatchInlineSnapshot(
-        `"export default { props: { a: String } }"`
+
+      expect(result).toContain(
+        `let ___VERTER___Props;const props=___VERTER___Props = defineProps({ a: String })`
       );
+    });
+
+    describe("defineModel", () => {
+      it("model without assignment", () => {
+        const { result } = parse(`defineModel()`);
+        expect(result).toContain(
+          `const ___VERTER___models_modelValue=defineModel()`
+        );
+      });
+
+      it("defineModel()", () => {
+        const { result } = parse(`const model = defineModel()`);
+        expect(result).toContain(
+          `let ___VERTER___models_modelValue;const model=___VERTER___models_modelValue = defineModel()`
+        );
+      });
+
+      it("defineModel({})", () => {
+        const { result } = parse(`const model = defineModel({})`);
+        expect(result).toContain(
+          `let ___VERTER___models_modelValue;const model=___VERTER___models_modelValue = defineModel({})`
+        );
+      });
+
+      it('defineModel("model")', () => {
+        const { result } = parse(`const model = defineModel("model")`);
+        expect(result).toContain(
+          `let ___VERTER___models_model;const model=___VERTER___models_model = defineModel("model")`
+        );
+      });
+
+      it('defineModel("model", {})', () => {
+        const { result } = parse(`const model = defineModel("model", {})`);
+        expect(result).toContain(
+          `let ___VERTER___models_model;const model=___VERTER___models_model = defineModel("model", {})`
+        );
+      });
     });
   });
 
-  describe.skip.each(["js", "ts"])("lang %s", (lang) => {
+  describe.each(["js", "ts"])("lang %s", (lang) => {
     describe.each([
       false as false,
       "defineComponent",
@@ -92,6 +131,11 @@ describe("process script plugin script block", () => {
 
       it("defineExpose", () => {
         const { s } = parse(`{ setup(){ defineExpose({ a: 0 }) }}`);
+        expect(s.original).toBe(s.toString());
+      });
+
+      it("defineModel", () => {
+        const { s } = parse(`{ setup(){ defineModel() }}`);
         expect(s.original).toBe(s.toString());
       });
     });

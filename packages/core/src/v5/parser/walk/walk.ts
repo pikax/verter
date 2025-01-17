@@ -11,17 +11,22 @@ import type {
   ModuleDeclaration,
   Function,
   ArrowFunctionExpression,
+  FunctionBody,
 } from "../ast/index.js";
 import { isObject } from "@vue/shared";
 import { TemplateCondition } from "../template/types.js";
 
 export function shallowWalk(
-  root: VerterAST | Function | ArrowFunctionExpression,
+  root: VerterAST | Function | ArrowFunctionExpression | FunctionBody,
   cb: (node: Statement | ModuleDeclaration) => void
 ) {
   if (root.type === "Program") {
     for (let i = 0; i < root.body.length; i++) {
       cb(root.body[i]);
+    }
+  } else if (root.type === "FunctionBody") {
+    for (let i = 0; i < root.statements.length; i++) {
+      cb(root.statements[i]);
     }
   } else if (root.body) {
     for (let i = 0; i < root.body.statements.length; i++) {

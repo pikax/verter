@@ -3,7 +3,10 @@ import { TemplateBinding, TemplateTypes } from "../../template/types";
 import { getASTBindings, retrieveBindings } from "../../template/utils";
 import { ScriptDeclaration, ScriptItem, ScriptTypes } from "../types";
 
-export function handleSetupNode(node: VerterASTNode):
+export function handleSetupNode(
+  node: VerterASTNode,
+  isOptions = false
+):
   | ScriptItem[]
   | {
       items: ScriptItem[];
@@ -57,6 +60,7 @@ export function handleSetupNode(node: VerterASTNode):
               type: ScriptTypes.Declaration,
               node: b.node as VerterASTNode,
               name: (b as TemplateBinding).name,
+              declarator: node,
               parent: x,
               rest: false,
             } as ScriptDeclaration;
@@ -76,6 +80,10 @@ export function handleSetupNode(node: VerterASTNode):
     }
 
     case "ReturnStatement": {
+      if (isOptions) {
+        // TODO return bindings from return statement
+        return [];
+      }
       return [
         {
           type: ScriptTypes.Error,
