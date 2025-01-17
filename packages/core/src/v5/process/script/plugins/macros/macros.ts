@@ -42,9 +42,6 @@ export const MacrosPlugin = definePlugin({
               ""
             )
           );
-
-          // const accessor = ctx.prefix("models");
-          // s.prependLeft(item.parent.start, "let ___TETTERT;");
         }
 
         if (ctx.isSetup) {
