@@ -29,6 +29,8 @@ export function processScript(
     prefix: defaultPrefix,
     isSetup: false,
 
+    templateBindings: [],
+
     ..._context,
   };
 

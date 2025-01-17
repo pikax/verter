@@ -5,12 +5,16 @@ import {
   ScriptTypes,
 } from "../../parser/script/types";
 import { ProcessContext, ProcessPlugin } from "../types";
+import { TemplateBinding } from "../../parser/template/types";
 
 export interface ScriptContext extends ProcessContext {
   prefix(name: string): string;
 
   isSetup: boolean;
+
+  templateBindings: TemplateBinding[]
 }
+
 export type ScriptPlugin = ProcessPlugin<ScriptItem, ScriptContext> & {
   [K in `transform${ScriptTypes}`]?: (
     item: K extends `transform${infer C extends ScriptTypes}`

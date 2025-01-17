@@ -1,6 +1,7 @@
 import { ParsedBlockScript } from "../../../../parser/types";
 import { definePlugin } from "../../types";
 import type { CallExpression } from "../../../../parser/ast/types";
+import { ProcessItemType } from "../../../types";
 
 const Macros = new Set([
   "defineProps",
@@ -18,8 +19,6 @@ export const MacrosPlugin = definePlugin({
   name: "VerterMacro",
 
   transformDeclaration(item, s, ctx) {
-    console.log("sss", item);
-
     if (
       item.parent.type === "VariableDeclarator" &&
       item.parent.init?.type === "CallExpression"
@@ -47,16 +46,22 @@ export const MacrosPlugin = definePlugin({
         if (ctx.isSetup) {
           s.prependLeft(item.declarator.start, `let ${varName};`);
           s.prependLeft(item.parent.id.end, `=${varName}`);
+          ctx.items.push({
+            type: ProcessItemType.Binding,
+            name: varName,
+          });
         } else {
-          // todo add warning
+          ctx.items.push({
+            type: ProcessItemType.Warning,
+            message: "MACRO_NOT_IN_SETUP",
+            node: item.node,
+            start: item.node.start,
+            end: item.node.end, 
+          });
         }
       }
     }
   },
-  transformBinding(item, s, ctx) {
-    console.log("sss", item);
-  },
-
   transformFunctionCall(item, s, ctx) {
     if (!Macros.has(item.name)) {
       return;
@@ -76,8 +81,18 @@ export const MacrosPlugin = definePlugin({
 
     if (ctx.isSetup) {
       s.prependLeft(item.node.start, `const ${varName}=`);
+      ctx.items.push({
+        type: ProcessItemType.Binding,
+        name: varName,
+      });
     } else {
-      // todo add warning
+      ctx.items.push({
+        type: ProcessItemType.Warning,
+        message: "MACRO_NOT_IN_SETUP",
+        node: item.node,
+        start: item.node.start,
+        end: item.node.end, 
+      });
     }
   },
 });

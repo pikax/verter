@@ -37,6 +37,7 @@ export const enum ProcessItemType {
   Import = "import",
   Warning = "warning",
   Error = "error",
+  Binding = "binding",
 }
 
 export type ProcessItemImport = {
@@ -56,12 +57,19 @@ export type ProcessItemWarning = {
 } & LocationProcessItem;
 
 export type ItemErrorString = "";
-export type ItemWarningString = "NO_EXPRESSION_VMODEL";
+export type ItemWarningString = "NO_EXPRESSION_VMODEL" | 'MACRO_NOT_IN_SETUP';
+
+
+export type ProcessItemBinding = {
+  type: ProcessItemType.Binding;
+  name: string;
+}
 
 export type ProcessItem =
   | ProcessItemImport
   | ProcessItemError
-  | ProcessItemWarning;
+  | ProcessItemWarning
+  | ProcessItemBinding;
 
 export type LocationProcessItem = {
   start: number;
