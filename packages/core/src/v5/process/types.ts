@@ -11,6 +11,10 @@ export type ProcessContext = {
   isAsync: boolean;
   generic: GenericInfo | null;
 
+  /**
+   * Current block
+   */
+  block: ParsedBlock;
   blocks: ParsedBlock[];
 
   items: ProcessItem[];
@@ -57,13 +61,12 @@ export type ProcessItemWarning = {
 } & LocationProcessItem;
 
 export type ItemErrorString = "";
-export type ItemWarningString = "NO_EXPRESSION_VMODEL" | 'MACRO_NOT_IN_SETUP';
-
+export type ItemWarningString = "NO_EXPRESSION_VMODEL" | "MACRO_NOT_IN_SETUP";
 
 export type ProcessItemBinding = {
   type: ProcessItemType.Binding;
   name: string;
-}
+};
 
 export type ProcessItem =
   | ProcessItemImport

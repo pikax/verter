@@ -19,7 +19,7 @@ export function ResolveBundleFilename(filename: string) {
 export function buildBundle(
   items: ScriptItem[],
   context: Partial<ScriptContext> &
-    Pick<ProcessContext, "filename" | "s" | "blocks">
+    Pick<ProcessContext, "filename" | "s" | "blocks" | "block">
 ) {
   return processScript(
     items,
@@ -40,7 +40,6 @@ export function buildBundle(
 
           const defaultOptionsName = ctx.prefix("default");
           const resolvePropsName = ctx.prefix("resolveProps");
-          const resolveExtraPropsName = ctx.prefix("resolveExtraProps");
           const resolveSlotsName = ctx.prefix("resolveSlots");
 
           imports.push({
@@ -48,7 +47,6 @@ export function buildBundle(
             items: [
               { name: defaultOptionsName },
               { name: resolvePropsName },
-              { name: resolveExtraPropsName },
               { name: resolveSlotsName },
             ],
           });
@@ -64,8 +62,7 @@ export function buildBundle(
 
           const props = [
             `$props: (${ProcessPropsName}<ReturnType<typeof ${resolvePropsName}${sanitisedNames}>`,
-            `${ctx.isAsync ? " extends Promise<infer P> ? P : {}" : ""}>)`,
-            `& ReturnType<typeof ${resolveExtraPropsName}${sanitisedNames}>;`,
+            `${ctx.isAsync ? " extends Promise<infer P> ? P : {}" : ""}>);`,
           ];
 
           const slots = [

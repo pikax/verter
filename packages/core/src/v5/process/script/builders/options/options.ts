@@ -17,7 +17,9 @@ export function ResolveOptionsFilename(filename: string) {
 export function buildOptions(
   items: ScriptItem[],
   context: Partial<ScriptContext> &
-    Pick<ProcessContext, "filename" | "s" | "blocks">
+    Pick<ProcessContext, "filename" | "s" | "blocks" | "block">
 ) {
+  const template = context.blocks.find((x) => x.type === "template");
+
   return processScript(items, [ImportsPlugin, ScriptBlockPlugin], context);
 }

@@ -15,6 +15,7 @@ export function retrieveDeclarations(
         name,
         node: overrideNode,
         parent,
+        declarator: parent,
         rest: false,
       });
       break;
@@ -25,6 +26,7 @@ export function retrieveDeclarations(
         name: null,
         node: overrideNode,
         parent,
+        declarator: parent,
         rest: node,
       });
       break;

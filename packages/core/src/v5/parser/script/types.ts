@@ -10,6 +10,11 @@ import {
   VerterASTNode,
 } from "../ast";
 
+export type ParsedScriptResult = {
+  isAsync: boolean;
+  items: ScriptItem[];
+};
+
 export const enum ScriptTypes {
   /**
    * in Setup is any declaration

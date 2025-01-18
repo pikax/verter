@@ -1,4 +1,3 @@
-import { ParsedBlockScript } from "../../../../parser/types";
 import { definePlugin } from "../../types";
 import type { CallExpression } from "../../../../parser/ast/types";
 import { ProcessItemType } from "../../../types";

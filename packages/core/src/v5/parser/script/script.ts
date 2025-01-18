@@ -1,7 +1,6 @@
 import { VerterAST } from "../ast";
 import { shallowWalk } from "../walk";
-import { ScriptItem } from "./types";
-import { parseGeneric } from "./generic/index.js";
+import { ParsedScriptResult, ScriptItem } from "./types";
 
 import { handleShared } from "./shared/index.js";
 import { handleOptionsNode } from "./options/index.js";
@@ -10,10 +9,7 @@ import { handleSetupNode } from "./setup/index.js";
 export function parseScript(
   ast: VerterAST,
   attrs: Record<string, string | true>
-): {
-  isAsync: boolean;
-  items: ScriptItem[];
-} {
+): ParsedScriptResult {
   let isAsync = false;
   const items: ScriptItem[] = [];
 
