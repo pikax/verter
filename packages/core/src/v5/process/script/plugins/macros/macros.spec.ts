@@ -128,6 +128,130 @@ describe("process script plugin script block", () => {
         );
       });
     });
+
+    describe("defineOptions", () => {
+      it("defineOptions({})", () => {
+        const { result, context } = parse(`defineOptions({})`);
+        expect(result).toContain(`defineOptions({})`);
+
+        expect(context.items).toMatchObject([
+          {
+            type: "options",
+            expression: {
+              type: "ObjectExpression",
+              properties: [],
+            },
+          },
+        ]);
+      });
+      it("const foo = defineOptions({})", () => {
+        const { result, context } = parse(`const foo = defineOptions({})`);
+        expect(result).toContain(`const foo = defineOptions({})`);
+
+        expect(context.items).toMatchObject([
+          {
+            type: "options",
+            expression: {
+              type: "ObjectExpression",
+              properties: [],
+            },
+          },
+        ]);
+      });
+
+      it("defineOptions({ a: 0 })", () => {
+        const { result, context } = parse(`defineOptions({ a: 0 })`);
+        expect(result).toContain(`defineOptions({ a: 0 })`);
+
+        expect(context.items).toMatchObject([
+          {
+            type: "options",
+            expression: {
+              type: "ObjectExpression",
+              properties: [
+                {
+                  type: "ObjectProperty",
+                  key: { type: "Identifier", name: "a" },
+                  value: { type: "Literal", value: 0 },
+                },
+              ],
+            },
+          },
+        ]);
+      });
+
+      it("defineOptions(myOptions)", () => {
+        const { result, context } = parse(`defineOptions(myOptions)`);
+        expect(result).toContain(`defineOptions(myOptions)`);
+
+        expect(context.items).toMatchObject([
+          {
+            type: "options",
+            expression: {
+              type: "Identifier",
+              name: "myOptions",
+            },
+          },
+        ]);
+      });
+
+      describe("invalid", () => {
+        it("defineOptions()", () => {
+          const { result, context } = parse(`defineOptions()`);
+          expect(result).toContain(`defineOptions()`);
+
+          expect(context.items).toMatchObject([
+            {
+              type: "warning",
+              message: "INVALID_DEFINE_OPTIONS",
+            },
+          ]);
+        });
+        
+        it("const foo = defineOptions()", () => {
+          const { result, context } = parse(`const foo = defineOptions()`);
+          expect(result).toContain(`const foo = defineOptions()`);
+
+          expect(context.items).toMatchObject([
+            {
+              type: "warning",
+              message: "INVALID_DEFINE_OPTIONS",
+            },
+          ]);
+        });
+        
+        it('defineOptions("a")', () => {
+          const { result, context } = parse(`defineOptions("a")`);
+          expect(result).toContain(`defineOptions("a")`);
+
+          expect(context.items).toMatchObject([
+            {
+              type: "warning",
+              message: "INVALID_DEFINE_OPTIONS",
+            },
+          ]);
+        });
+
+        it("defineOptions({}, hello)", () => {
+          const { result, context } = parse(`defineOptions({}, hello)`);
+          expect(result).toContain(`defineOptions({}, hello)`);
+
+          expect(context.items).toMatchObject([
+            {
+              type: "options",
+              expression: {
+                type: "ObjectExpression",
+                properties: [],
+              },
+            },
+            {
+              type: "warning",
+              message: "INVALID_DEFINE_OPTIONS",
+            },
+          ]);
+        });
+      });
+    });
   });
 
   describe.each(["js", "ts"])("lang %s", (lang) => {

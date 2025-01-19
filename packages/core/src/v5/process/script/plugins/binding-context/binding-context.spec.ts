@@ -60,54 +60,68 @@ describe("process script plugin binding context", () => {
   //     const { s } = _parse(`export default { setup(){ defineExpose({ a: 0 }); }}`, 'ddd');
   //     expect(s.original).toBe(s.toString());
   //   });
-  
-  describe('ts', ()=> {
-    describe('setup', ()=> {
-        function parse(content: string, attributes = '') {
-            return _parse(content, false, 'ts', attributes);
-        }
-        it('work', ()=> {
-            const {result} = parse('let a = 0')
-            expect(result).toMatchInlineSnapshot(`"export function ___VERTER___BindingContext(){ let a = 0;return {a: typeof a}}"`)
-        })
 
-        it('attributes', ()=> {
-            const {result} = parse('let a = 0;', 'attributes="HTMLAttributes"')
-            expect(result).toMatchInlineSnapshot(`
-              "export function ___VERTER___BindingContext(){ let a = 0;;return {a: typeof a}} /**
-               * ___VERTER___ATTRIBUTES
-               */type ___VERTER___attributes=HTMLAttributes;"
-            `)
-        })
+  describe("ts", () => {
+    describe("setup", () => {
+      function parse(content: string, attributes = "") {
+        return _parse(content, false, "ts", attributes);
+      }
+      it("work", () => {
+        const { result } = parse("let a = 0");
+        expect(result).toMatchInlineSnapshot(
+          `"export function ___VERTER___BindingContext(){   let a = 0;return {a: typeof a}}"`
+        );
+      });
 
-        it('generic', ()=> {
-            const {result} = parse('let a = 0;', 'generic="T"')
-            expect(result).toMatchInlineSnapshot(`"export function ___VERTER___BindingContext<T>(){let a = 0;;return {a: typeof a}}"`)
-        })
+      it("attributes", () => {
+        const { result } = parse("let a = 0;", 'attributes="HTMLAttributes"');
+        expect(result).toMatchInlineSnapshot(`
+          "export function ___VERTER___BindingContext(){   let a = 0;;return {a: typeof a}}
+          /**
+           * ___VERTER___ATTRIBUTES
+           */type ___VERTER___attributes=HTMLAttributes;"
+        `);
+      });
 
-        it('generic and attributes', ()=> {
-            const {result} = parse('let a = 0;', 'generic="T" attributes="T extends true ? HTMLAttributes : {}"')
-            expect(result).toMatchInlineSnapshot(`
-              "export function ___VERTER___BindingContext<T>(){let a = 0;;return {a: typeof a}} /**
-               * ___VERTER___ATTRIBUTES
-               */type ___VERTER___attributes=T extends true ? HTMLAttributes : {}T;"
-            `)
-        })
+      it("generic", () => {
+        const { result } = parse("let a = 0;", 'generic="T"');
+        expect(result).toMatchInlineSnapshot(
+          `"export function ___VERTER___BindingContext   <T>(){let a = 0;;return {a: typeof a}}"`
+        );
+      });
 
-        it('attributes and generic', ()=> {
-            const {result} = parse('let a = 0;', 'attributes="T extends true ? HTMLAttributes : {}" generic="T"')
-            expect(result).toMatchInlineSnapshot(`
-              "export function ___VERTER___BindingContext<T>(){let a = 0;;return {a: typeof a}} /**
-               * ___VERTER___ATTRIBUTES
-               */type ___VERTER___attributes=T extends true ? HTMLAttributes : {}T;"
-            `)
-        })
+      it("generic and attributes", () => {
+        const { result } = parse(
+          "let a = 0;",
+          'generic="T" attributes="T extends true ? HTMLAttributes : {}"'
+        );
+        expect(result).toMatchInlineSnapshot(`
+          "export function ___VERTER___BindingContext   <T>(){ let a = 0;;return {a: typeof a}}
+          /**
+           * ___VERTER___ATTRIBUTES
+           */type ___VERTER___attributes=T extends true ? HTMLAttributes : {}T;"
+        `);
+      });
 
-        it('defineProps', ()=> {
-            const {result} = parse('const props = defineProps({ a: String })')
-            expect(result).toMatchInlineSnapshot(`"export function ___VERTER___BindingContext(){ const props=___VERTER___Props = defineProps({ a: String });return {props: typeof props,___VERTER___Props: typeof ___VERTER___Props}}"`)
-        })
-    })
+      it("attributes and generic", () => {
+        const { result } = parse(
+          "let a = 0;",
+          'attributes="T extends true ? HTMLAttributes : {}" generic="T"'
+        );
+        expect(result).toMatchInlineSnapshot(`
+          "export function ___VERTER___BindingContext    <T>(){let a = 0;;return {a: typeof a}}
+          /**
+           * ___VERTER___ATTRIBUTES
+           */type ___VERTER___attributes=T extends true ? HTMLAttributes : {}T;"
+        `);
+      });
 
-  })
+      it("defineProps", () => {
+        const { result } = parse("const props = defineProps({ a: String })");
+        expect(result).toMatchInlineSnapshot(
+          `"export function ___VERTER___BindingContext(){   const props=___VERTER___Props = defineProps({ a: String });return {props: typeof props,___VERTER___Props: typeof ___VERTER___Props}}"`
+        );
+      });
+    });
+  });
 });

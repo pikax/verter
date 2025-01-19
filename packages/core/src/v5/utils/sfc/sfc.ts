@@ -16,6 +16,23 @@ export type BlockPosition = {
 //   type: "invalid";
 // };
 
+export type AttributePosition = {
+  /**
+   * Key position
+   */
+  key: BlockPosition & { content: string };
+
+  /**
+   * Value position
+   */
+  value: undefined | (BlockPosition & { content: string });
+
+  /**
+   * Attribute content with ${key}="${value}"
+   */
+  content: string;
+} & BlockPosition;
+
 export interface VerterSFCBlock<
   T extends SFCBlock =
     | SFCTemplateBlock
@@ -32,6 +49,8 @@ export interface VerterSFCBlock<
      * TAG Content not block content
      */
     content: string;
+
+    attributes: Record<string, AttributePosition>;
 
     pos: {
       // this is contains `content`
@@ -204,6 +223,7 @@ export function extractBlocksFromDescriptor(
       tag: {
         type: tag,
         content,
+        attributes: retrieveAttributes(content, block.attrs, contentStartIndex),
         pos: {
           open: startTagPos,
           close: endTagPos,
@@ -272,4 +292,75 @@ export function keepBlocks(
 export function removeBlockTag(block: VerterSFCBlock, s: MagicString) {
   s.remove(block.tag.pos.open.start, block.tag.pos.open.end);
   s.remove(block.tag.pos.close.start, block.tag.pos.close.end);
+}
+
+export function retrieveAttributes(
+  source: string,
+  parsedAttributes: Record<string, string | true>,
+  offset: number = 0
+): Record<string, AttributePosition> {
+  const attributes = {} as Record<string, AttributePosition>;
+  const booleanAttributes = new Set<string>();
+
+  function removeContent(source: string, start: number, end: number) {
+    return source.slice(0, start) + " ".repeat(end - start) + source.slice(end);
+  }
+
+  for (const [key, value] of Object.entries(parsedAttributes)) {
+    // because boolean attributes are more difficult to do a regex
+    // we can handled it afterwards
+    if (value === true) {
+      booleanAttributes.add(key);
+      continue;
+    }
+    const match = source.match(
+      new RegExp(`\\s${key}[^=]{0,}=\\s{0,}["'].{${value.length}}["']`)
+    );
+    if (match?.index !== undefined) {
+      const len = match[0].length - 1;
+      const keyIndex = match.index + 1;
+      const valueIndex = keyIndex + match[0].indexOf(value) - 1;
+      const end = keyIndex + len;
+
+      attributes[key] = {
+        key: {
+          content: key,
+          start: keyIndex + offset,
+          end: keyIndex + key.length + offset,
+        },
+        value: {
+          content: value,
+          start: valueIndex + offset,
+          end: valueIndex + (value as string).length + offset,
+        },
+        content: match[0].slice(1),
+        start: keyIndex + offset,
+        end: end + offset,
+      };
+
+      // update the source start to end to be *
+      source = removeContent(source, keyIndex, end);
+    }
+  }
+
+  booleanAttributes.forEach((key) => {
+    const keyIndex = source.indexOf(key);
+    const end = keyIndex + key.length;
+
+    attributes[key] = {
+      key: {
+        content: key,
+        start: keyIndex + offset,
+        end: keyIndex + key.length + offset,
+      },
+      content: key,
+      start: keyIndex + offset,
+      end: end + offset,
+      value: undefined,
+    };
+
+    // update the source start to end to be *
+    source = removeContent(source, keyIndex, end);
+  });
+  return attributes;
 }

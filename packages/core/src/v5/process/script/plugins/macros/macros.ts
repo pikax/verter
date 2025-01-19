@@ -1,6 +1,9 @@
 import { definePlugin } from "../../types";
-import type { CallExpression } from "../../../../parser/ast/types";
-import { ProcessItemType } from "../../../types";
+import type {
+  CallExpression,
+  ObjectExpression,
+} from "../../../../parser/ast/types";
+import { ProcessContext, ProcessItemType } from "../../../types";
 
 const Macros = new Set([
   "defineProps",
@@ -33,6 +36,8 @@ export const MacrosPlugin = definePlugin({
           const accessor = ctx.prefix("models");
           const modelName = getModelName(item.parent.init);
           varName = `${accessor}_${modelName}`;
+        } else if (macroName === "defineOptions") {
+          return handleDefineOptions(item.parent.init, ctx);
         } else {
           varName = ctx.prefix(
             (macroName === "withDefaults" ? "defineProps" : macroName).replace(
@@ -55,7 +60,7 @@ export const MacrosPlugin = definePlugin({
             message: "MACRO_NOT_IN_SETUP",
             node: item.node,
             start: item.node.start,
-            end: item.node.end, 
+            end: item.node.end,
           });
         }
       }
@@ -69,6 +74,8 @@ export const MacrosPlugin = definePlugin({
     if (item.name === "defineModel") {
       const modelName = getModelName(item.node);
       varName = `${ctx.prefix("models")}_${modelName}`;
+    } else if (item.name === "defineOptions") {
+      return handleDefineOptions(item.node, ctx);
     } else {
       varName = ctx.prefix(
         (item.name === "withDefaults" ? "defineProps" : item.name).replace(
@@ -90,11 +97,55 @@ export const MacrosPlugin = definePlugin({
         message: "MACRO_NOT_IN_SETUP",
         node: item.node,
         start: item.node.start,
-        end: item.node.end, 
+        end: item.node.end,
       });
     }
   },
 });
+
+function handleDefineOptions(node: CallExpression, ctx: ProcessContext) {
+  if (node.arguments.length > 0) {
+    const [arg] = node.arguments;
+    switch (arg.type) {
+      case "Identifier":
+      case "ObjectExpression": {
+        ctx.items.push({
+          type: ProcessItemType.Options,
+          node: node,
+          expression: arg,
+        });
+        break;
+      }
+      default: {
+        ctx.items.push({
+          type: ProcessItemType.Warning,
+          message: "INVALID_DEFINE_OPTIONS",
+          node: node,
+          start: node.start,
+          end: node.end,
+        });
+      }
+    }
+    if (node.arguments.length > 1) {
+      ctx.items.push({
+        type: ProcessItemType.Warning,
+        message: "INVALID_DEFINE_OPTIONS",
+        node: node,
+        start: arg.end,
+        end: node.end,
+      });
+    }
+    return;
+  } else {
+    ctx.items.push({
+      type: ProcessItemType.Warning,
+      message: "INVALID_DEFINE_OPTIONS",
+      node: node,
+      start: node.start,
+      end: node.end,
+    });
+  }
+}
 
 function getModelName(node: CallExpression) {
   const nameArg = node.arguments[0];

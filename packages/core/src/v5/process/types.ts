@@ -1,6 +1,6 @@
 import { MagicString } from "@vue/compiler-sfc";
 import { ParsedBlock } from "../parser/types";
-import { VerterASTNode } from "../parser/ast";
+import { ObjectExpression, VerterASTNode, IdentifierName } from "../parser/ast";
 import { Node } from "@vue/compiler-core";
 import { GenericInfo } from "../parser/script/generic";
 
@@ -42,6 +42,10 @@ export const enum ProcessItemType {
   Warning = "warning",
   Error = "error",
   Binding = "binding",
+  /**
+   * Contains the component options, for example `defineOptions`
+   */
+  Options = "options",
 }
 
 export type ProcessItemImport = {
@@ -61,18 +65,34 @@ export type ProcessItemWarning = {
 } & LocationProcessItem;
 
 export type ItemErrorString = "";
-export type ItemWarningString = "NO_EXPRESSION_VMODEL" | "MACRO_NOT_IN_SETUP";
+export type ItemWarningString =
+  | "NO_EXPRESSION_VMODEL"
+  | "MACRO_NOT_IN_SETUP"
+  | "INVALID_DEFINE_OPTIONS";
 
 export type ProcessItemBinding = {
   type: ProcessItemType.Binding;
   name: string;
 };
 
+export type ProcessItemOptions = {
+  type: ProcessItemType.Options;
+  /**
+   * usually the function call node
+   */
+  node: VerterASTNode;
+  /**
+   * actual object expressions
+   */
+  expression: ObjectExpression | IdentifierName;
+};
+
 export type ProcessItem =
   | ProcessItemImport
   | ProcessItemError
   | ProcessItemWarning
-  | ProcessItemBinding;
+  | ProcessItemBinding
+  | ProcessItemOptions;
 
 export type LocationProcessItem = {
   start: number;

@@ -4,6 +4,7 @@ import {
   findBlockLanguage,
   keepBlocks,
   removeBlockTag,
+  retrieveAttributes,
 } from "./";
 import { MagicString, parse } from "@vue/compiler-sfc";
 
@@ -157,8 +158,6 @@ describe("Utils SFC", () => {
         ignoreEmpty: false,
         templateParseOptions: { parseMode: "sfc" },
       });
-
-      console.log("ddd", rest);
       return extractBlocksFromDescriptor(descriptor);
     }
 
@@ -511,6 +510,25 @@ foo
             type: "script",
             content:
               ' lang="ts" generic="T extends string & { supa?: () => number } = \'foo\'"',
+
+            attributes: {
+              generic: {
+                key: {
+                  start: 18,
+                  end: 25,
+                },
+                content: `generic="T extends string & { supa?: () => number } = 'foo'"`,
+                value: {
+                  start: 27,
+                  end: 77,
+                },
+              },
+              lang: {
+                content: 'lang="ts"',
+                start: 8,
+                end: 17,
+              },
+            },
             pos: {
               open: { start: 0, end: 79 },
               close: {
@@ -868,6 +886,237 @@ foo
 
       removeBlockTag(blocks[0], s);
       expect(s.toString()).toBe(content);
+    });
+  });
+
+  describe("retrieveAttributes", () => {
+    function getAttributes(source: string) {
+      const { descriptor } = parse(source, {
+        ignoreEmpty: false,
+        templateParseOptions: { parseMode: "sfc" },
+      });
+      // const block = descriptor.script ?? descriptor.scriptSetup!;
+      const blocks = extractBlocksFromDescriptor(descriptor);
+      const block = blocks.find((x) => x.tag.type === "script")!;
+
+      return retrieveAttributes(
+        block.tag.content,
+        block.block.attrs,
+        block.tag.pos.content.start
+      );
+    }
+
+    it("should parse attributes", () => {
+      const source = `<script lang="ts" setup></script>`;
+      const attributes = getAttributes(source);
+
+      expect(attributes).toMatchObject({
+        lang: {
+          start: 8,
+          end: 17,
+          content: 'lang="ts"',
+
+          key: {
+            start: 8,
+            end: 12,
+            content: "lang",
+          },
+          value: {
+            start: 14,
+            end: 16,
+            content: "ts",
+          },
+        },
+        setup: {
+          start: 18,
+          end: 23,
+          content: "setup",
+
+          key: {
+            start: 18,
+            end: 23,
+            content: "setup",
+          },
+          value: undefined,
+        },
+      });
+    });
+
+    it("should offset", () => {
+      const source = `<!-- test> lang="ts" --><script lang="ts" setup></script>`;
+      const attributes = getAttributes(source);
+
+      const lang = attributes.lang;
+      expect(source.slice(lang.start, lang.end)).toBe(lang.content);
+      expect(source.slice(lang.key.start, lang.key.end)).toBe(lang.key.content);
+      expect(source.slice(lang.value!.start, lang.value!.end)).toBe(
+        lang.value!.content
+      );
+      const setup = attributes.setup;
+      expect(source.slice(setup.start, setup.end)).toBe(setup.content);
+      expect(source.slice(setup.key.start, setup.key.end)).toBe(
+        setup.key.content
+      );
+      expect(setup.value).toBeUndefined();
+    });
+
+    it('with spaces between "=" and value', () => {
+      const source = `<script lang = "ts" setup></script>`;
+      const attributes = getAttributes(source);
+
+      expect(attributes).toMatchObject({
+        lang: {
+          content: 'lang = "ts"',
+          end: 19,
+          key: {
+            content: "lang",
+            end: 12,
+            start: 8,
+          },
+          start: 8,
+          value: {
+            content: "ts",
+            end: 18,
+            start: 16,
+          },
+        },
+        setup: {
+          content: "setup",
+          end: 25,
+          key: {
+            content: "setup",
+            end: 25,
+            start: 20,
+          },
+          start: 20,
+          value: undefined,
+        },
+      });
+    });
+
+    it("with keys and values multiple times", () => {
+      const source = `<script lang="ts" ts="lang"></script>`;
+      const attributes = getAttributes(source);
+
+      expect(attributes).toMatchObject({
+        lang: {
+          content: 'lang="ts"',
+          end: 17,
+          key: {
+            content: "lang",
+            end: 12,
+            start: 8,
+          },
+          start: 8,
+          value: {
+            content: "ts",
+            end: 16,
+            start: 14,
+          },
+        },
+      });
+    });
+
+    it("with value same name as true value", () => {
+      const source = `<script attributes="setup" setup></script>`;
+      const attributes = getAttributes(source);
+
+      expect(attributes).toMatchObject({
+        attributes: {
+          content: 'attributes="setup"',
+          end: 26,
+          key: {
+            content: "attributes",
+            end: 18,
+            start: 8,
+          },
+          start: 8,
+          value: {
+            content: "setup",
+            end: 25,
+            start: 20,
+          },
+        },
+        setup: {
+          content: "setup",
+          end: 32,
+          key: {
+            content: "setup",
+            end: 32,
+            start: 27,
+          },
+          start: 27,
+          value: undefined,
+        },
+      });
+    });
+
+    it('to-lang="ts" lang="ts"', () => {
+      const source = `<script to-lang="ts" lang="ts"></script>`;
+      const attributes = getAttributes(source);
+
+      expect(attributes).toMatchObject({
+        lang: {
+          content: 'lang="ts"',
+          end: 30,
+          key: {
+            content: "lang",
+            end: 25,
+            start: 21,
+          },
+          start: 21,
+          value: {
+            content: "ts",
+            end: 29,
+            start: 27,
+          },
+        },
+        "to-lang": {
+          content: 'to-lang="ts"',
+          end: 20,
+          key: {
+            content: "to-lang",
+            end: 15,
+            start: 8,
+          },
+          start: 8,
+          value: {
+            content: "ts",
+            end: 19,
+            start: 17,
+          },
+        },
+      });
+    });
+
+    it("to-lang lang", () => {
+      const source = `<script to-lang lang=></script>`;
+      const attributes = getAttributes(source);
+
+      expect(attributes).toMatchObject({
+        lang: {
+          content: "lang",
+          end: 20,
+          key: {
+            content: "lang",
+            end: 20,
+            start: 16,
+          },
+          start: 16,
+          value: undefined,
+        },
+        "to-lang": {
+          content: "to-lang",
+          end: 15,
+          key: {
+            content: "to-lang",
+            end: 15,
+            start: 8,
+          },
+          start: 8,
+          value: undefined,
+        },
+      });
     });
   });
 });

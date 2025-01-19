@@ -50,7 +50,8 @@ import type {
   ObjectExpression,
   AwaitExpression,
   ExpressionStatement,
-  ExportDefaultDeclaration
+  ExportDefaultDeclaration,
+  IdentifierName,
 } from "oxc-parser";
 
 export type {
@@ -78,7 +79,7 @@ export type {
   Function,
   ArrowFunctionExpression,
   ObjectExpression,
-  AwaitExpression,
+  AwaitExpression,IdentifierName
 } from "oxc-parser";
 
 export type VerterAST = ParseResult["program"];
@@ -132,4 +133,5 @@ export type VerterASTNode =
   | AwaitExpression
   | ExpressionStatement
   | ExportDefaultDeclaration
-  | CallExpression;
+  | CallExpression
+  | IdentifierName;
