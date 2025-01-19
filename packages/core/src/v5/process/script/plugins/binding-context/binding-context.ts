@@ -31,6 +31,9 @@ export const BindingContextPlugin = definePlugin({
     let attrStart: number | undefined = undefined;
     let attrEnd: number | undefined = undefined;
 
+    let genStart: number | undefined = undefined;
+    let genEnd: number | undefined = undefined;
+
     // handle attributes
     if (typeof block.attrs.attributes === "string") {
       const attributesContentStart =
@@ -46,7 +49,7 @@ export const BindingContextPlugin = definePlugin({
 
       s.prependLeft(attributesStart, prefix);
       s.prependLeft(attributesStart, preAttributes);
-      s.prependLeft(attrEnd, ";");
+      s.prependLeft(attrEnd, `${generic ? generic.source : ""};`);
 
       // remove delimiter
       s.remove(attributesContentStart - 1, attributesContentStart);
@@ -73,12 +76,17 @@ export const BindingContextPlugin = definePlugin({
 
         // remove before generic
         s.remove(tag.pos.content.start, genericStart);
-        // remove after generic
-        s.remove(genericEnd, tag.pos.open.end);
+        // // remove after generic
+        // s.remove(genericEnd, tag.pos.open.end);
+        // remove generic delimiter
+        s.remove(genericEnd, genericEnd + 1);
 
         // update generic
         s.prependLeft(genericStart, "<");
         s.prependLeft(genericEnd, ">" + postGeneric);
+
+        genStart = genericStart;
+        genEnd = genericEnd;
       } else {
         s.prependLeft(tag.pos.content.start, postGeneric);
         // update tag start to attribute start
@@ -88,6 +96,24 @@ export const BindingContextPlugin = definePlugin({
           s.remove(attrEnd!, tag.pos.open.end);
         }
       }
+
+      //   // remove attributes
+      //   const handledAttributes = new Set(["attributes", "generic"]);
+      //   Object.keys(block.attrs).forEach((key) => {
+      //     if (!handledAttributes.has(key)) {
+      //       const value = block.attrs[key];
+      //       const start =
+      //         tag.content.indexOf(`${key}${value === true ? "" : "="}`);
+      //       const end =
+      //         value === true
+      //           ? start + key.length
+      //           : tag.content.indexOf(value, start) +
+      //           tag.pos.content.start + value.length;
+      //       s.remove(start + tag.pos.content.start, end +tag.pos.content.start);
+      //     }
+      //   });
+      // remove > from open tag
+      s.remove(tag.pos.content.end - 1, tag.pos.open.end);
 
       // handle return
 
