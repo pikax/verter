@@ -71,3 +71,10 @@ export type $V_MakeOptionalIfUndefined<T> = {
     [K in keyof T as undefined extends T[K] ? K : never]?: T[K];
 } extends infer Optional ? Omit<T, keyof Optional> & Optional
     : {}
+
+
+/**
+ * Helper to maintain the actual type of the name and inheritAttrs options
+ * @param o 
+ */
+export declare function $V_DefineOptions<T extends { name?: TName, inheritAttrs?: TAttr}, TName extends string, TAttr extends boolean>(o:T ) : T;
