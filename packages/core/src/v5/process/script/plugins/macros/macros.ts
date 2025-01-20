@@ -4,7 +4,7 @@ import type {
   ObjectExpression,
 } from "../../../../parser/ast/types";
 import { ProcessContext, ProcessItemType } from "../../../types";
-import { generateTypeString } from "../utils";
+import { generateTypeDeclaration, generateTypeString } from "../utils";
 
 const Macros = new Set([
   "defineProps",
@@ -37,24 +37,44 @@ export const MacrosPlugin = definePlugin({
     const macroBindinds = ctx.items.filter(
       (x) => x.type === ProcessItemType.MacroBinding
     );
-    if (macroBindinds.length === 0) return;
-
     for (const macro of Macros) {
-      const name = ctx.prefix(macro === "withDefaults" ? "defineProps" : macro);
+      if(macro === 'withDefaults') continue
+      const name = ctx.prefix(macro);
       const itemMacro = macroBindinds.find((x) => x.macro === macro);
       const TemplateBinding = ctx.prefix("TemplateBinding");
 
       if (isTS) {
         if (itemMacro) {
-          const str = generateTypeString(name, {
-            from: TemplateBinding,
-            key: name,
-            isType: true,
-          }, ctx);
+          const str = generateTypeString(
+            name,
+            {
+              from: TemplateBinding,
+              key: name,
+              isType: true,
+            },
+            ctx
+          );
           s.append(str);
         } else {
+          const str = generateTypeDeclaration(name, "{}", undefined, true);
+          s.append(str);
         }
       } else {
+        if(itemMacro) {
+          const str = generateTypeString(
+            name,
+            {
+              from: TemplateBinding,
+              key: name,
+              isType: true,
+            },
+            ctx
+          );
+          s.append(str);
+        } else {
+          const str = generateTypeDeclaration(name, "{}", undefined, false);
+          s.append(str);
+        }
       }
     }
   },

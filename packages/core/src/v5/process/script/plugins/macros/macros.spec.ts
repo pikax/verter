@@ -29,13 +29,17 @@ describe("process script plugin script block", () => {
       (x) => x.type === "script"
     ) as ParsedBlockScript;
 
-    const r = processScript(scriptBlock.result.items, [MacrosPlugin, TemplateBindingPlugin, ScriptBlockPlugin, BindingPlugin], {
-      s,
-      filename: "test.vue",
-      blocks: parsed.blocks,
-      isSetup: wrapper === false,
-      block: scriptBlock,
-    });
+    const r = processScript(
+      scriptBlock.result.items,
+      [MacrosPlugin, TemplateBindingPlugin, ScriptBlockPlugin, BindingPlugin],
+      {
+        s,
+        filename: "test.vue",
+        blocks: parsed.blocks,
+        isSetup: wrapper === false,
+        block: scriptBlock,
+      }
+    );
 
     return r;
   }
@@ -52,7 +56,43 @@ describe("process script plugin script block", () => {
       return _parse(`${pre ? pre + "\n" : ""}${content}`, false, lang, pre);
     }
 
-    it.only("defineProps", () => {
+    it.only("test", () => {
+      const { s } = parse(
+        `let a = 0`
+      ,'js');
+      expect(s.toString()).toMatchInlineSnapshot(`
+        "/** @returns {{}} */function ___VERTER___TemplateBindingFN  (){let a = 0;return{}}
+        /** @typedef {ReturnType<typeof ___VERTER___TemplateBindingFN>} ___VERTER___TemplateBinding */
+        /** @type {___VERTER___TemplateBinding} */
+        export const ___VERTER___TemplateBinding = null;
+
+        /** @typedef {{}} ___VERTER___defineProps */
+        /** @type {___VERTER___defineProps} */
+        export const ___VERTER___defineProps = null;
+
+        /** @typedef {{}} ___VERTER___defineEmits */
+        /** @type {___VERTER___defineEmits} */
+        export const ___VERTER___defineEmits = null;
+
+        /** @typedef {{}} ___VERTER___defineExpose */
+        /** @type {___VERTER___defineExpose} */
+        export const ___VERTER___defineExpose = null;
+
+        /** @typedef {{}} ___VERTER___defineOptions */
+        /** @type {___VERTER___defineOptions} */
+        export const ___VERTER___defineOptions = null;
+
+        /** @typedef {{}} ___VERTER___defineModel */
+        /** @type {___VERTER___defineModel} */
+        export const ___VERTER___defineModel = null;
+
+        /** @typedef {{}} ___VERTER___defineSlots */
+        /** @type {___VERTER___defineSlots} */
+        export const ___VERTER___defineSlots = null;
+        "
+      `);
+    });
+    it("defineProps", () => {
       const { result, context } = parse(
         `const props = defineProps({ a: String })`
       );
@@ -69,8 +109,6 @@ describe("process script plugin script block", () => {
       //     macro: "defineProps",
       //   },
       // ]);
-
-      expect(result).toMatchInlineSnapshot(`"function ___VERTER___TemplateBindingFN  (){let ___VERTER___Props;const props=___VERTER___Props = defineProps({ a: String });return{___VERTER___defineProps:___VERTER___Props:___VERTER___Props as typeof ___VERTER___Props}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>;;export type ___VERTER___defineProps=___VERTER___TemplateBinding  extends { ___VERTER___Props: infer K }?K:never;"`)
     });
 
     describe("defineModel", () => {
@@ -80,9 +118,10 @@ describe("process script plugin script block", () => {
           `const ___VERTER___models_modelValue=defineModel()`
         );
 
-        expect(context.items).toMatchObject([{
-          type: 'import'
-        },
+        expect(context.items).toMatchObject([
+          {
+            type: "import",
+          },
           {
             name: "___VERTER___models_modelValue",
             type: "macro-binding",
@@ -98,9 +137,10 @@ describe("process script plugin script block", () => {
           `let ___VERTER___models_modelValue;const model=___VERTER___models_modelValue = defineModel()`
         );
 
-        expect(context.items).toMatchObject([{
-          type: 'import'
-        },
+        expect(context.items).toMatchObject([
+          {
+            type: "import",
+          },
           {
             name: "___VERTER___models_modelValue",
             type: "macro-binding",
@@ -116,9 +156,10 @@ describe("process script plugin script block", () => {
           `let ___VERTER___models_modelValue;const model=___VERTER___models_modelValue = defineModel({})`
         );
 
-        expect(context.items).toMatchObject([{
-          type: 'import'
-        },
+        expect(context.items).toMatchObject([
+          {
+            type: "import",
+          },
           {
             name: "___VERTER___models_modelValue",
             type: "macro-binding",
@@ -134,9 +175,10 @@ describe("process script plugin script block", () => {
           `let ___VERTER___models_model;const model=___VERTER___models_model = defineModel("model")`
         );
 
-        expect(context.items).toMatchObject([{
-          type: 'import'
-        },
+        expect(context.items).toMatchObject([
+          {
+            type: "import",
+          },
           {
             name: "___VERTER___models_model",
             type: "macro-binding",
@@ -156,7 +198,7 @@ describe("process script plugin script block", () => {
 
         expect(context.items).toMatchObject([
           {
-            type: 'import'
+            type: "import",
           },
           {
             name: "___VERTER___models_model",
