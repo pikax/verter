@@ -12,7 +12,8 @@ export interface ScriptContext extends ProcessContext {
 
   isSetup: boolean;
 
-  templateBindings: TemplateBinding[]
+  templateBindings: TemplateBinding[];
+  handledAttributes?: Set<string>;
 }
 
 export type ScriptPlugin = ProcessPlugin<ScriptItem, ScriptContext> & {

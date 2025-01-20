@@ -32,10 +32,12 @@ export const MacrosPlugin = definePlugin({
         }
 
         let varName = "";
+        let originalName: string | undefined = undefined;
         if (macroName === "defineModel") {
           const accessor = ctx.prefix("models");
           const modelName = getModelName(item.parent.init);
           varName = `${accessor}_${modelName}`;
+          originalName = modelName;
         } else if (macroName === "defineOptions") {
           return handleDefineOptions(item.parent.init, ctx);
         } else {
@@ -51,8 +53,10 @@ export const MacrosPlugin = definePlugin({
           s.prependLeft(item.declarator.start, `let ${varName};`);
           s.prependLeft(item.parent.id.end, `=${varName}`);
           ctx.items.push({
-            type: ProcessItemType.Binding,
+            type: ProcessItemType.MacroBinding,
             name: varName,
+            macro: macroName,
+            originalName,
           });
         } else {
           ctx.items.push({
@@ -71,9 +75,12 @@ export const MacrosPlugin = definePlugin({
       return;
     }
     let varName = "";
+    let originalName: string | undefined = undefined;
     if (item.name === "defineModel") {
       const modelName = getModelName(item.node);
-      varName = `${ctx.prefix("models")}_${modelName}`;
+      const accessor = ctx.prefix("models");
+      varName = `${accessor}_${modelName}`;
+      originalName = modelName;
     } else if (item.name === "defineOptions") {
       return handleDefineOptions(item.node, ctx);
     } else {
@@ -88,8 +95,10 @@ export const MacrosPlugin = definePlugin({
     if (ctx.isSetup) {
       s.prependLeft(item.node.start, `const ${varName}=`);
       ctx.items.push({
-        type: ProcessItemType.Binding,
+        type: ProcessItemType.MacroBinding,
         name: varName,
+        macro: item.name,
+        originalName,
       });
     } else {
       ctx.items.push({
@@ -149,7 +158,8 @@ function handleDefineOptions(node: CallExpression, ctx: ProcessContext) {
 
 function getModelName(node: CallExpression) {
   const nameArg = node.arguments[0];
-  const modelName = nameArg?.type === "Literal" ? nameArg.value : "modelValue";
+  const modelName =
+    nameArg?.type === "Literal" ? nameArg.value?.toString() : "modelValue";
 
   return modelName;
 }

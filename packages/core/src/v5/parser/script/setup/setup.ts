@@ -14,9 +14,15 @@ export function handleSetupNode(
     } {
   switch (node.type) {
     case "ExpressionStatement": {
-      const expression = node.expression;
+      let asyncItem:
+        | {
+            items: ScriptItem[];
+            isAsync: boolean;
+          }
+        | undefined = undefined;
+      let expression = node.expression;
       if (expression.type === "AwaitExpression") {
-        return {
+        asyncItem = {
           isAsync: true,
           items: [
             {
@@ -26,29 +32,52 @@ export function handleSetupNode(
             },
           ],
         };
+        expression = expression.argument;
       }
 
       if (expression.type === "CallExpression") {
-        return [
-          {
-            type: ScriptTypes.FunctionCall,
-            node: expression,
-            parent: node,
-            name:
-              expression.callee.type === "Identifier"
-                ? expression.callee.name
-                : "",
-          },
-        ];
+        const item: ScriptItem = {
+          type: ScriptTypes.FunctionCall,
+          node: expression,
+          parent: node,
+          name:
+            expression.callee.type === "Identifier"
+              ? expression.callee.name
+              : "",
+        };
+        if (asyncItem) {
+          asyncItem.items.push(item);
+          return asyncItem;
+        }
+        return [item];
       }
-      return [];
+      return asyncItem ?? [];
     }
     case "VariableDeclaration": {
-      return node.declarations.flatMap((x) => {
+      let asyncItem:
+        | {
+            items: ScriptItem[];
+            isAsync: boolean;
+          }
+        | undefined = undefined;
+
+      const items = node.declarations.flatMap((x) => {
         const bindings = getASTBindings(x.id, {
           ignoredIdentifiers: [],
         });
 
+        if (x.init?.type === "AwaitExpression") {
+          asyncItem = {
+            isAsync: true,
+            items: [
+              {
+                type: ScriptTypes.Async,
+                isAsync: true,
+                node: x.init,
+              },
+            ],
+          };
+        }
         return bindings
           .filter(
             (x) =>
@@ -66,6 +95,16 @@ export function handleSetupNode(
             } as ScriptDeclaration;
           });
       });
+
+      if (asyncItem) {
+        (
+          asyncItem as {
+            items: ScriptItem[];
+          }
+        ).items.push(...items);
+        return asyncItem;
+      }
+      return items;
     }
 
     case "ExportDefaultDeclaration": {

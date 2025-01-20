@@ -177,4 +177,30 @@ describe("parser script setup", () => {
       },
     ]);
   });
+
+  it("await Promise.resolve()", () => {
+    const { items } = parse(`await Promise.resolve()`);
+    expect(items).toMatchObject([
+      {
+        type: ScriptTypes.Async,
+      },
+      {
+        type: ScriptTypes.FunctionCall,
+        name: "",
+      },
+    ]);
+  });
+
+  it("const a = await Promise.resolve()", () => {
+    const { items } = parse(`const a = await Promise.resolve()`);
+    expect(items).toMatchObject([
+      {
+        type: ScriptTypes.Async,
+      },
+      {
+        type: ScriptTypes.Declaration,
+        name: "a",
+      },
+    ]);
+  });
 });

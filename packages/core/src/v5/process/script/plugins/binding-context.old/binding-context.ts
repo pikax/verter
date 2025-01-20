@@ -9,7 +9,6 @@ export const BindingContextPlugin = definePlugin({
     // this should update the <script > ... with the function bindings
     // then return it
     // and then have the fullBinding context
-
     const block = ctx.block.block.block;
     const tag = ctx.block.block.tag;
 
@@ -34,13 +33,13 @@ export const BindingContextPlugin = definePlugin({
       s.prependRight(attribute.start, prefix);
       s.prependRight(attribute.start, preAttributes);
       s.prependLeft(
-        attribute.value.end,
-        `${genericInfo ? genericInfo.source : ""};`
+        attribute.key.end,
+        `${genericInfo ? `<${genericInfo.source}>` : ""}`
       );
 
       // remove delimiter
       s.remove(attribute.value.start - 1, attribute.value.start);
-      s.remove(attribute.value.end, attribute.value.end + 1);
+      s.overwrite(attribute.value.end, attribute.value.end + 1, ";");
 
       // // move attribute to the end
       s.move(attribute.start, attribute.end, tag.pos.close.end);
@@ -75,31 +74,57 @@ export const BindingContextPlugin = definePlugin({
       }
 
       // remove > from open tag
-      // s.remove(tag.pos.content.end - 1, tag.pos.open.end);
-      s.remove(tag.pos.open.end - 1, tag.pos.open.end);
+      // using update to prevent removal if something was already prepended
+      s.update(tag.pos.open.end - 1, tag.pos.open.end, "");
+
+      const templateBindings =
+        ctx.blocks.find((x) => x.type === "template")?.result?.items ?? [];
 
       // handle return
+      const returnItemsStr = Array.from(
+        ctx.items
+          .filter((x) => x.type === ProcessItemType.Binding)
+          .reduce((acc, x) => {
+            const g = x.group ?? "";
+            let items = acc.get(g);
+            if (!items) {
+              items = [];
+              acc.set(g, items);
+            }
+            items.push(x.name);
+            return acc;
+          }, new Map<string, string[]>())
+          .entries()
+      )
+        .map(([group, names]) => {
+          const mapped = names.map(
+            (x) => `${x}${isTs ? `:${x} as typeof ${x}` : ""}`
+          );
 
-      const returnItemsStr = ctx.items
-        .filter((x) => x.type === ProcessItemType.Binding)
-        .map((x) => x.name)
-        .map((x) => `${x}${isTs ? `: typeof ${x}` : ""}`)
+          if (group) {
+            return `${group}:{${mapped.join(",")}}`;
+          }
+          return mapped.join(",");
+        })
         .join(",");
 
-      s.prependLeft(tag.pos.close.end, `;return {${returnItemsStr}}`);
+      s.prependLeft(tag.pos.close.end, `;return{${returnItemsStr}};`);
 
       // close
       s.appendLeft(tag.pos.close.end, "}");
     } else {
+      // todo ME
     }
   },
 
-  // add known bindings
-  transformDeclaration(item, s, ctx) {
-    if (!item.name) return;
-    ctx.items.push({
-      type: ProcessItemType.Binding,
-      name: item.name,
-    });
-  },
+  // // add known bindings
+  // transformDeclaration(item, s, ctx) {
+  //   if (!item.name) return;
+  //   const binding = ctx.prefix("binding");
+  //   ctx.items.push({
+  //     type: ProcessItemType.Binding,
+  //     name: item.name,
+  //     group: binding,
+  //   });
+  // },
 });

@@ -3,6 +3,7 @@ import { ParsedBlock } from "../parser/types";
 import { ObjectExpression, VerterASTNode, IdentifierName } from "../parser/ast";
 import { Node } from "@vue/compiler-core";
 import { GenericInfo } from "../parser/script/generic";
+import { ScriptItem } from "../parser/script";
 
 export type ProcessContext = {
   filename: string;
@@ -41,7 +42,15 @@ export const enum ProcessItemType {
   Import = "import",
   Warning = "warning",
   Error = "error",
+
+  /**
+   * Contains the bindings for the component
+   */
   Binding = "binding",
+  /**
+   * Contains macro information
+   */
+  MacroBinding = "macro-binding",
   /**
    * Contains the component options, for example `defineOptions`
    */
@@ -64,6 +73,13 @@ export type ProcessItemWarning = {
   message: ItemWarningString;
 } & LocationProcessItem;
 
+export type ProcessItemMacroBinding = {
+  type: ProcessItemType.MacroBinding;
+  name: string;
+  macro: string;
+  originalName?: string;
+};
+
 export type ItemErrorString = "";
 export type ItemWarningString =
   | "NO_EXPRESSION_VMODEL"
@@ -73,6 +89,10 @@ export type ItemWarningString =
 export type ProcessItemBinding = {
   type: ProcessItemType.Binding;
   name: string;
+
+  originalName?: string;
+
+  item: ScriptItem;
 };
 
 export type ProcessItemOptions = {
@@ -92,7 +112,8 @@ export type ProcessItem =
   | ProcessItemError
   | ProcessItemWarning
   | ProcessItemBinding
-  | ProcessItemOptions;
+  | ProcessItemOptions
+  | ProcessItemMacroBinding;
 
 export type LocationProcessItem = {
   start: number;

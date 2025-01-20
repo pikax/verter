@@ -26,25 +26,12 @@ describe("process script plugin script block", () => {
       (x) => x.type === "script"
     ) as ParsedBlockScript;
 
-    const r = processScript(
-      scriptBlock.result.items,
-      [
-        MacrosPlugin,
-        // // clean template tag
-        // {
-        //   post: (s) => {
-        //     s.update(pre.length, pre.length + prepend.length, "");
-        //     s.update(source.length - "</script>".length - pos, source.length, "");
-        //   },
-        // },
-      ],
-      {
-        s,
-        filename: "test.vue",
-        blocks: parsed.blocks,
-        isSetup: wrapper === false,
-      }
-    );
+    const r = processScript(scriptBlock.result.items, [MacrosPlugin], {
+      s,
+      filename: "test.vue",
+      blocks: parsed.blocks,
+      isSetup: wrapper === false,
+    });
 
     return r;
   }
@@ -73,7 +60,9 @@ describe("process script plugin script block", () => {
       expect(context.items).toMatchObject([
         {
           name: "___VERTER___Props",
-          type: "binding",
+          type: "macro-binding",
+          originalName: undefined,
+          macro: "defineProps",
         },
       ]);
     });
@@ -88,7 +77,9 @@ describe("process script plugin script block", () => {
         expect(context.items).toMatchObject([
           {
             name: "___VERTER___models_modelValue",
-            type: "binding",
+            type: "macro-binding",
+            macro: "defineModel",
+            originalName: "modelValue",
           },
         ]);
       });
@@ -102,30 +93,61 @@ describe("process script plugin script block", () => {
         expect(context.items).toMatchObject([
           {
             name: "___VERTER___models_modelValue",
-            type: "binding",
+            type: "macro-binding",
+            macro: "defineModel",
+            originalName: "modelValue",
           },
         ]);
       });
 
       it("defineModel({})", () => {
-        const { result } = parse(`const model = defineModel({})`);
+        const { result, context } = parse(`const model = defineModel({})`);
         expect(result).toContain(
           `let ___VERTER___models_modelValue;const model=___VERTER___models_modelValue = defineModel({})`
         );
+
+        expect(context.items).toMatchObject([
+          {
+            name: "___VERTER___models_modelValue",
+            type: "macro-binding",
+            macro: "defineModel",
+            originalName: "modelValue",
+          },
+        ]);
       });
 
       it('defineModel("model")', () => {
-        const { result } = parse(`const model = defineModel("model")`);
+        const { result, context } = parse(`const model = defineModel("model")`);
         expect(result).toContain(
           `let ___VERTER___models_model;const model=___VERTER___models_model = defineModel("model")`
         );
+
+        expect(context.items).toMatchObject([
+          {
+            name: "___VERTER___models_model",
+            type: "macro-binding",
+            macro: "defineModel",
+            originalName: "model",
+          },
+        ]);
       });
 
       it('defineModel("model", {})', () => {
-        const { result } = parse(`const model = defineModel("model", {})`);
+        const { result, context } = parse(
+          `const model = defineModel("model", {})`
+        );
         expect(result).toContain(
           `let ___VERTER___models_model;const model=___VERTER___models_model = defineModel("model", {})`
         );
+
+        expect(context.items).toMatchObject([
+          {
+            name: "___VERTER___models_model",
+            type: "macro-binding",
+            macro: "defineModel",
+            originalName: "model",
+          },
+        ]);
       });
     });
 
@@ -207,7 +229,7 @@ describe("process script plugin script block", () => {
             },
           ]);
         });
-        
+
         it("const foo = defineOptions()", () => {
           const { result, context } = parse(`const foo = defineOptions()`);
           expect(result).toContain(`const foo = defineOptions()`);
@@ -219,7 +241,7 @@ describe("process script plugin script block", () => {
             },
           ]);
         });
-        
+
         it('defineOptions("a")', () => {
           const { result, context } = parse(`defineOptions("a")`);
           expect(result).toContain(`defineOptions("a")`);
