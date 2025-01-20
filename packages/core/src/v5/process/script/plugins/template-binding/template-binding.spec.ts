@@ -93,9 +93,6 @@ describe("process script plugin script block", () => {
       ""
     );
 
-    expect(result).toMatchInlineSnapshot(`
-      "<template><div>{{ a }}</div></template>function ___VERTER___TemplateBindingFN  (){let a = 0;return{a:a as typeof a}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>;
-      "
-    `);
+    expect(result).toMatchInlineSnapshot(`"<template><div>{{ a }}</div></template>function ___VERTER___TemplateBindingFN  (){let a = 0;return{a:a as typeof a}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>;"`);
   });
 });

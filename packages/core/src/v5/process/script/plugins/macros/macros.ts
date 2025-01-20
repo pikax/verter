@@ -4,6 +4,7 @@ import type {
   ObjectExpression,
 } from "../../../../parser/ast/types";
 import { ProcessContext, ProcessItemType } from "../../../types";
+import { generateTypeString } from "../utils";
 
 const Macros = new Set([
   "defineProps",
@@ -32,16 +33,30 @@ export const MacrosPlugin = definePlugin({
   name: "VerterMacro",
 
   post(s, ctx) {
+    const isTS = ctx.block.lang.startsWith("ts");
     const macroBindinds = ctx.items.filter(
       (x) => x.type === ProcessItemType.MacroBinding
     );
     if (macroBindinds.length === 0) return;
 
-    array.forEach(element => {
-      
-    });
+    for (const macro of Macros) {
+      const name = ctx.prefix(macro === "withDefaults" ? "defineProps" : macro);
+      const itemMacro = macroBindinds.find((x) => x.macro === macro);
+      const TemplateBinding = ctx.prefix("TemplateBinding");
 
-    
+      if (isTS) {
+        if (itemMacro) {
+          const str = generateTypeString(name, {
+            from: TemplateBinding,
+            key: name,
+            isType: true,
+          }, ctx);
+          s.append(str);
+        } else {
+        }
+      } else {
+      }
+    }
   },
 
   transformDeclaration(item, s, ctx) {

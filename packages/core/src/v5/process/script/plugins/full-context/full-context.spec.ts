@@ -55,30 +55,21 @@ describe("process script plugin full context", () => {
       it("work", () => {
         const { result } = parse("let a = 0");
         expect(result).toMatchInlineSnapshot(
-          `
-          "function script   (){let a = 0};function ___VERTER___FullContextFN() {let a = 0;return{a:a as typeof a}};;export type ___VERTER___FullContext=ReturnType<typeof ___VERTER___FullContextFN>;
-          "
-        `
+          `"function script   (){let a = 0};function ___VERTER___FullContextFN() {let a = 0;return{a:a as typeof a}};;export type ___VERTER___FullContext=ReturnType<typeof ___VERTER___FullContextFN>;"`
         );
       });
 
       it("async", () => {
         const { result } = parse("let a = await Promise.resolve(0);");
         expect(result).toMatchInlineSnapshot(
-          `
-          "async function script   (){let a = await Promise.resolve(0);};async function ___VERTER___FullContextFN() {let a = await Promise.resolve(0);;return{a:a as typeof a}};;export type ___VERTER___FullContext=ReturnType<typeof ___VERTER___FullContextFN> extends Promise<infer R>?R:never;
-          "
-        `
+          `"async function script   (){let a = await Promise.resolve(0);};async function ___VERTER___FullContextFN() {let a = await Promise.resolve(0);;return{a:a as typeof a}};;export type ___VERTER___FullContext=ReturnType<typeof ___VERTER___FullContextFN> extends Promise<infer R>?R:never;"`
         );
       });
 
       it("generic", () => {
         const { result } = parse("let a = {} as unknown as T", 'generic="T"');
         expect(result).toMatchInlineSnapshot(
-        `
-          "function script   <T>(){let a = {} as unknown as T};function ___VERTER___FullContextFN<T>() {let a = {} as unknown as T;return{a:a as typeof a}};;export type ___VERTER___FullContext<T>=ReturnType<typeof ___VERTER___FullContextFN<T>>;
-          "
-        `);
+        `"function script   <T>(){let a = {} as unknown as T};function ___VERTER___FullContextFN<T>() {let a = {} as unknown as T;return{a:a as typeof a}};;export type ___VERTER___FullContext<T>=ReturnType<typeof ___VERTER___FullContextFN<T>>;"`);
       });
 
       it("generic async", () => {
@@ -87,10 +78,7 @@ describe("process script plugin full context", () => {
           'generic="T"'
         );
         expect(result).toMatchInlineSnapshot(
-        `
-          "async function script   <T>(){let a = await Promise.resolve({} as unknown as T)};async function ___VERTER___FullContextFN<T>() {let a = await Promise.resolve({} as unknown as T);return{a:a as typeof a}};;export type ___VERTER___FullContext<T>=ReturnType<typeof ___VERTER___FullContextFN<T>> extends Promise<infer R>?R:never;
-          "
-        `);
+        `"async function script   <T>(){let a = await Promise.resolve({} as unknown as T)};async function ___VERTER___FullContextFN<T>() {let a = await Promise.resolve({} as unknown as T);return{a:a as typeof a}};;export type ___VERTER___FullContext<T>=ReturnType<typeof ___VERTER___FullContextFN<T>> extends Promise<infer R>?R:never;"`);
       });
     });
   });

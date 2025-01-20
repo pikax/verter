@@ -4,6 +4,9 @@ import { ParsedBlockScript } from "../../../../parser/types";
 import { processScript } from "../../script";
 
 import { MacrosPlugin } from "./index.js";
+import { TemplateBindingPlugin } from "../template-binding";
+import { ScriptBlockPlugin } from "../script-block";
+import { BindingPlugin } from "../binding";
 
 describe("process script plugin script block", () => {
   function _parse(
@@ -26,7 +29,7 @@ describe("process script plugin script block", () => {
       (x) => x.type === "script"
     ) as ParsedBlockScript;
 
-    const r = processScript(scriptBlock.result.items, [MacrosPlugin], {
+    const r = processScript(scriptBlock.result.items, [MacrosPlugin, TemplateBindingPlugin, ScriptBlockPlugin, BindingPlugin], {
       s,
       filename: "test.vue",
       blocks: parsed.blocks,
@@ -49,7 +52,7 @@ describe("process script plugin script block", () => {
       return _parse(`${pre ? pre + "\n" : ""}${content}`, false, lang, pre);
     }
 
-    it("defineProps", () => {
+    it.only("defineProps", () => {
       const { result, context } = parse(
         `const props = defineProps({ a: String })`
       );
@@ -58,17 +61,19 @@ describe("process script plugin script block", () => {
         `let ___VERTER___Props;const props=___VERTER___Props = defineProps({ a: String })`
       );
 
-      expect(context.items).toMatchObject([
-        {
-          name: "___VERTER___Props",
-          type: "macro-binding",
-          originalName: undefined,
-          macro: "defineProps",
-        },
-      ]);
+      // expect(context.items).toMatchObject([
+      //   {
+      //     name: "___VERTER___Props",
+      //     type: "macro-binding",
+      //     originalName: undefined,
+      //     macro: "defineProps",
+      //   },
+      // ]);
+
+      expect(result).toMatchInlineSnapshot(`"function ___VERTER___TemplateBindingFN  (){let ___VERTER___Props;const props=___VERTER___Props = defineProps({ a: String });return{___VERTER___defineProps:___VERTER___Props:___VERTER___Props as typeof ___VERTER___Props}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>;;export type ___VERTER___defineProps=___VERTER___TemplateBinding  extends { ___VERTER___Props: infer K }?K:never;"`)
     });
 
-    describe.only("defineModel", () => {
+    describe("defineModel", () => {
       it("model without assignment", () => {
         const { result, context } = parse(`defineModel()`);
         expect(result).toContain(

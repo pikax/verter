@@ -17,6 +17,22 @@ export const TemplateBindingPlugin = definePlugin({
         .map((x) => x.name)
     );
 
+    const macroBindings = ctx.items
+      .filter((x) => x.type === ProcessItemType.MacroBinding)
+      .reduce((acc, x) => {
+        const n = ctx.prefix(
+          x.macro === "withDefaults" ? "defineProps" : x.macro
+        );
+        if (x.macro === "defineModel") {
+          if (!acc[n]) {
+            acc[n] = [];
+          }
+          (acc[n] as string[]).push(x.name);
+        } else {
+          acc[n] = x.name;
+        }
+        return acc;
+      }, {} as Record<string, string | string[]>);
     const usedBindings = ctx.templateBindings
       .filter((x) => x.name && bindings.has(x.name))
       .map((x) => x.name!);
@@ -25,6 +41,19 @@ export const TemplateBindingPlugin = definePlugin({
       tag.pos.close.start,
       `;return{${usedBindings
         .map((x) => `${x}${isTS ? `:${x} as typeof ${x}` : ""}`)
+        .concat(
+          Object.entries(macroBindings).map(
+            ([k, x]) =>
+              `${k}:${
+                Array.isArray(x)
+                  ? `{${x.map((x) => `${x}${isTS ? `:${x} as typeof ${x}` : ""}`).join(",")}}`
+                  :  `${isTS ? `${x} as typeof ${x}` : ""}`
+              }`
+          )
+          // Object.entries(macroBindings).map(([k, v]) =>
+          //   v.map((x) => `${k}:${k}`)
+          // )
+        )
         .join(",")}}`
     );
 

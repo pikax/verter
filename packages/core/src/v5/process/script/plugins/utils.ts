@@ -26,10 +26,10 @@ export function generateTypeString(
   const content = `${info.isFunction ? "ReturnType<" : ""}${
     info.isType ? "" : "typeof "
   }${info.from}${generic ? `<${generic.source}>` : ""}${info.isFunction ? ">" : ""}${
-    isAsync || info.key
-      ? ` ${isAsync ? "extends Promise<infer R" : ""}${
+    (isAsync && info.isFunction) || info.key
+      ? ` ${isAsync && info.isFunction ? "extends Promise<infer R" : ""}${
           info.key ? ` extends { ${info.key}: infer K }` : ""
-        }${isAsync ? ">" : ""}?${info.key ? "K" : "R"}:never`
+        }${isAsync && info.isFunction ? ">" : ""}?${info.key ? "K" : "R"}:never`
       : ""
   }`;
 
