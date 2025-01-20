@@ -2,6 +2,13 @@ import { GenericInfo } from "../../../../parser";
 import { ProcessContext } from "../../types";
 import { ScriptContext } from "../types";
 
+
+export function generateTypeDeclaration(name: string, content: string, generic: string | undefined, typescript: boolean) {
+  return typescript
+    ? `;export type ${name}${generic? `<${generic}>`:''}=${content};`
+    : `\n/** @typedef {${content}} ${name} */\n/** @type {${name}} */\nexport const ${name} = null;\n`;
+}
+
 export function generateTypeString(
   name: string,
   info: {
@@ -25,6 +32,8 @@ export function generateTypeString(
         }${isAsync ? ">" : ""}?${info.key ? "K" : "R"}:never`
       : ""
   }`;
+
+  return generateTypeDeclaration(name, content, generic?.source, isTS);
 
   if (isTS) {
     return `;export type ${name}${generic ? `<${generic.source}>` : ""}=${content};\n`;

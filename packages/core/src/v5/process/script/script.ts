@@ -20,7 +20,7 @@ export function processScript(
   items: ScriptItem[],
   plugins: ScriptPlugin[],
   _context: Partial<ScriptContext> &
-    Pick<ProcessContext, "filename" | "s" | "blocks">
+    Pick<ProcessContext, "filename" | "s" | "blocks" | 'block'>
 ) {
   const context: ScriptContext = {
     generic: null,
@@ -30,6 +30,7 @@ export function processScript(
     isSetup: false,
 
     templateBindings: [],
+    handledAttributes: new Set(),
 
     ..._context,
   };

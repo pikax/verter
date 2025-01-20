@@ -14,12 +14,6 @@ export const AttributesPlugin = definePlugin({
     ctx.handledAttributes?.add("attributes");
 
     const prefix = ctx.prefix("");
-
-    // s.prependRight(
-    //   attribute.start,
-    //   `type ${attr}${generic ? `<${generic.source}>` : ""}=`
-    // );
-
     if (isTS) {
       s.prependRight(attribute.start, `;type ${prefix}`);
 
@@ -54,23 +48,5 @@ export const AttributesPlugin = definePlugin({
       s.prependLeft(attribute.key.end, `*/`);
       s.move(attribute.key.start, attribute.key.end, moveTo);
     }
-
-    // const ATTRIBUTES = ctx.prefix("ATTRIBUTES");
-    // const prefix = ctx.prefix("");
-    // const preAttributes = `\n/**\n * ${ATTRIBUTES}\n */type `;
-
-    // s.prependRight(attribute.start, prefix);
-    // s.prependRight(attribute.start, preAttributes);
-    // s.prependLeft(
-    //   attribute.key.end,
-    //   `${genericInfo ? `<${genericInfo.source}>` : ""}`
-    // );
-
-    // // remove delimiter
-    // s.remove(attribute.value.start - 1, attribute.value.start);
-    // s.overwrite(attribute.value.end, attribute.value.end + 1, ";");
-
-    // // // move attribute to the end
-    // s.move(attribute.start, attribute.end, tag.pos.close.end);
   },
 });

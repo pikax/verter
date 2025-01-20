@@ -31,6 +31,7 @@ describe("process script plugin script block", () => {
       filename: "test.vue",
       blocks: parsed.blocks,
       isSetup: wrapper === false,
+      block: scriptBlock,
     });
 
     return r;
@@ -67,14 +68,16 @@ describe("process script plugin script block", () => {
       ]);
     });
 
-    describe("defineModel", () => {
+    describe.only("defineModel", () => {
       it("model without assignment", () => {
         const { result, context } = parse(`defineModel()`);
         expect(result).toContain(
           `const ___VERTER___models_modelValue=defineModel()`
         );
 
-        expect(context.items).toMatchObject([
+        expect(context.items).toMatchObject([{
+          type: 'import'
+        },
           {
             name: "___VERTER___models_modelValue",
             type: "macro-binding",
@@ -90,7 +93,9 @@ describe("process script plugin script block", () => {
           `let ___VERTER___models_modelValue;const model=___VERTER___models_modelValue = defineModel()`
         );
 
-        expect(context.items).toMatchObject([
+        expect(context.items).toMatchObject([{
+          type: 'import'
+        },
           {
             name: "___VERTER___models_modelValue",
             type: "macro-binding",
@@ -106,7 +111,9 @@ describe("process script plugin script block", () => {
           `let ___VERTER___models_modelValue;const model=___VERTER___models_modelValue = defineModel({})`
         );
 
-        expect(context.items).toMatchObject([
+        expect(context.items).toMatchObject([{
+          type: 'import'
+        },
           {
             name: "___VERTER___models_modelValue",
             type: "macro-binding",
@@ -122,7 +129,9 @@ describe("process script plugin script block", () => {
           `let ___VERTER___models_model;const model=___VERTER___models_model = defineModel("model")`
         );
 
-        expect(context.items).toMatchObject([
+        expect(context.items).toMatchObject([{
+          type: 'import'
+        },
           {
             name: "___VERTER___models_model",
             type: "macro-binding",
@@ -141,6 +150,9 @@ describe("process script plugin script block", () => {
         );
 
         expect(context.items).toMatchObject([
+          {
+            type: 'import'
+          },
           {
             name: "___VERTER___models_model",
             type: "macro-binding",

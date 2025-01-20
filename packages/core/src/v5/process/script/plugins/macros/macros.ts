@@ -1,4 +1,4 @@
-import { definePlugin } from "../../types";
+import { definePlugin, ScriptContext } from "../../types";
 import type {
   CallExpression,
   ObjectExpression,
@@ -17,8 +17,32 @@ const Macros = new Set([
   // useSlots()/useAttrs()
 ]);
 
+const HelperLocation = "$verter/options.helper.ts";
+
+const MacroDependencies = new Map([
+  [
+    "defineEmits",
+    ["UnionToIntersection", "EmitMapToProps", "OverloadParameters"],
+  ],
+  ["defineModel", ["ModelToProps", "UnionToIntersection", "ModelToEmits"]],
+  ["defineOptions", ["DefineOptions"]],
+]);
+
 export const MacrosPlugin = definePlugin({
   name: "VerterMacro",
+
+  post(s, ctx) {
+    const macroBindinds = ctx.items.filter(
+      (x) => x.type === ProcessItemType.MacroBinding
+    );
+    if (macroBindinds.length === 0) return;
+
+    array.forEach(element => {
+      
+    });
+
+    
+  },
 
   transformDeclaration(item, s, ctx) {
     if (
@@ -30,6 +54,7 @@ export const MacrosPlugin = definePlugin({
         if (!Macros.has(macroName)) {
           return;
         }
+        addMacroDependencies(macroName, ctx);
 
         let varName = "";
         let originalName: string | undefined = undefined;
@@ -74,6 +99,7 @@ export const MacrosPlugin = definePlugin({
     if (!Macros.has(item.name)) {
       return;
     }
+    addMacroDependencies(item.name, ctx);
     let varName = "";
     let originalName: string | undefined = undefined;
     if (item.name === "defineModel") {
@@ -111,6 +137,19 @@ export const MacrosPlugin = definePlugin({
     }
   },
 });
+
+function addMacroDependencies(macroName: string, ctx: ScriptContext) {
+  if (!ctx.block.lang.startsWith("ts")) return;
+  const dependencies = MacroDependencies.get(macroName);
+  if (dependencies) {
+    ctx.items.push({
+      type: ProcessItemType.Import,
+      asType: true,
+      from: HelperLocation,
+      items: dependencies.map((dep) => ({ name: ctx.prefix(dep) })),
+    });
+  }
+}
 
 function handleDefineOptions(node: CallExpression, ctx: ProcessContext) {
   if (node.arguments.length > 0) {

@@ -44,16 +44,6 @@ export const FullContextPlugin = definePlugin({
       ctx
     );
 
-    // const str = `;${isAsync ? "async " : ""}function ${fullContext}FN${
-    //   ctx.generic ? `<${ctx.generic.source}>` : ""
-    // }() {${content.join("\n")};return{${names
-    //   .map((x) => `${x}${isTS ? `:${x} as typeof ${x}` : ""}`)
-    //   .join(",")}}};export type ${fullContext}${
-    //   ctx.generic ? `<${ctx.generic.source}>` : ""
-    // } = ReturnType<typeof ${fullContext}FN${
-    //   ctx.generic ? `<${ctx.generic.names.join(", ")}>` : ""
-    // }>${isAsync ? `extends Promise<infer R>?R:never` : ""};`;
-
     const str = `;${isAsync ? "async " : ""}function ${fullContext}FN${
       ctx.generic ? `<${ctx.generic.source}>` : ""
     }() {${content.join("\n")};return{${names
