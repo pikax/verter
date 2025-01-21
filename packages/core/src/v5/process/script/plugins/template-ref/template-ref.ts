@@ -76,10 +76,12 @@ function handleExpression(
       "arg" in ref
         ? // @ts-expect-error
           ref.node.exp?.ast?.type &&
+          // @ts-expect-error
           ref.node.exp?.ast?.type?.indexOf("Function") !== -1
           ? ""
           : `typeof ${ref.exp?.[0]?.exp?.content}`
-        : `"${ref.value}"`;
+        : // @ts-expect-error
+          `"${ref.value}"`;
 
     if (!rawRefName) continue;
     possibleNames.push(rawRefName);
@@ -132,7 +134,19 @@ function handleExpression(
    * <div :ref="a" />
    */
 
-  s.prependLeft(node.callee.end, `<${types || "unknown"},${names}>`);
+  const isTS = ctx.block.lang.startsWith("ts");
+
+  if (isTS) {
+    s.prependLeft(node.callee.end, `<${types || "unknown"},${names}>`);
+  } else {
+    s.prependLeft(
+      node.callee.start,
+      `/**@type{typeof import('vue').useTemplateRef<${
+        types || "unknown"
+      },${names}>}*/(`
+    );
+    s.prependLeft(node.callee.end, ")");
+  }
 }
 
 function resolveTagNameType(
@@ -255,7 +269,7 @@ function retrieveDeclarationStringValueFromObject(
 
   const parts = path.split(".");
 
-  if (item.name !== parts.shift()) return;
+  if (item.name !== parts.shift()) return undefined;
 
   let object = init;
   while (parts.length) {
@@ -275,7 +289,7 @@ function retrieveDeclarationStringValueFromObject(
         : "expression" in property.value &&
           typeof property.value.expression === "object" &&
           "value" in property.value.expression
-        ? property.value.expression?.value
+        ? property.value.expression?.value?.toString()
         : "";
     }
 
