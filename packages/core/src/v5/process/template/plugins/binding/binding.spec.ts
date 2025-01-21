@@ -33,6 +33,7 @@ describe("process template plugins binding", () => {
         s,
         filename: "test.vue",
         blocks: parsed.blocks,
+        block: templateBlock,
       }
     );
 

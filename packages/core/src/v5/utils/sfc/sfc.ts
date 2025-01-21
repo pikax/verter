@@ -182,6 +182,7 @@ export function extractBlocksFromDescriptor(
 
     const tagMatch = cleanTag.matchAll(BLOCK_TAG_REGEX).next()
       .value as RegExpMatchArray;
+    if (!tagMatch.groups || tagMatch.index === undefined) continue;
 
     const hasClosingTagOnContent = cleanTag.indexOf(">") < cleanTag.length - 1;
 

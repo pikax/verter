@@ -2,10 +2,14 @@ import { GenericInfo } from "../../../../parser";
 import { ProcessContext } from "../../types";
 import { ScriptContext } from "../types";
 
-
-export function generateTypeDeclaration(name: string, content: string, generic: string | undefined, typescript: boolean) {
+export function generateTypeDeclaration(
+  name: string,
+  content: string,
+  generic: string | undefined,
+  typescript: boolean
+) {
   return typescript
-    ? `;export type ${name}${generic? `<${generic}>`:''}=${content};`
+    ? `;export type ${name}${generic ? `<${generic}>` : ""}=${content};`
     : `\n/** @typedef {${content}} ${name} */\n/** @type {${name}} */\nexport const ${name} = null;\n`;
 }
 
@@ -25,7 +29,9 @@ export function generateTypeString(
 
   const content = `${info.isFunction ? "ReturnType<" : ""}${
     info.isType ? "" : "typeof "
-  }${info.from}${generic ? `<${generic.source}>` : ""}${info.isFunction ? ">" : ""}${
+  }${info.from}${generic ? `<${generic.source}>` : ""}${
+    info.isFunction ? ">" : ""
+  }${
     (isAsync && info.isFunction) || info.key
       ? ` ${isAsync && info.isFunction ? "extends Promise<infer R" : ""}${
           info.key ? ` extends { ${info.key}: infer K }` : ""
@@ -34,10 +40,4 @@ export function generateTypeString(
   }`;
 
   return generateTypeDeclaration(name, content, generic?.source, isTS);
-
-  if (isTS) {
-    return `;export type ${name}${generic ? `<${generic.source}>` : ""}=${content};\n`;
-  } else {
-    return `\n/** @typedef {${content}} ${name} */\n/** @type {${name}} */\nexport const ${name} = null;\n`;
-  }
 }

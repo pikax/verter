@@ -32,6 +32,7 @@ describe.skip("process template plugins slot-type-check", () => {
         s,
         filename: "test.vue",
         blocks: parsed.blocks,
+        block: templateBlock,
       }
     );
 

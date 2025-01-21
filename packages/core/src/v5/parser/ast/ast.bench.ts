@@ -86,7 +86,7 @@ describe("ast bench", () => {
   describe("magicstring", () => {
     function makeChanges(s: MagicString, ast: any) {
       walk(ast, {
-        enter: (n, p) => {
+        enter: (n: any, p: any) => {
           if (isFunctionType(n)) {
             s.prependLeft(p.start, "VERTER_");
           }

@@ -1,7 +1,7 @@
 import { MagicString } from "@vue/compiler-sfc";
 import { ParsedBlock } from "../parser/types";
 import { ObjectExpression, VerterASTNode, IdentifierName } from "../parser/ast";
-import { Node } from "@vue/compiler-core";
+import { Node, ExpressionNode } from "@vue/compiler-core";
 import { GenericInfo } from "../parser/script/generic";
 import { ScriptItem } from "../parser/script";
 

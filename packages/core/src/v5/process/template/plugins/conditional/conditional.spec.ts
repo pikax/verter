@@ -35,6 +35,7 @@ describe("process template plugins conditional", () => {
         filename: "test.vue",
         blocks: parsed.blocks,
         narrow: true,
+        block: templateBlock,
       }
     );
 

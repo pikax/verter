@@ -32,6 +32,7 @@ describe("process template plugins event", () => {
         s,
         filename: "test.vue",
         blocks: parsed.blocks,
+        block: templateBlock,
       }
     );
 

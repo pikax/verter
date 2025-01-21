@@ -1,6 +1,6 @@
 import { parse as parseSFC } from "@vue/compiler-sfc";
-import { handleElement } from "./index.js";
-import { ElementContext, TemplateTypes } from "../types.js";
+import { ElementContext, handleElement } from "./index.js";
+import { TemplateTypes } from "../types.js";
 import element from "../../../../plugins/template/v2/transpile/transpilers/element/element.js";
 
 describe("parser template element", () => {

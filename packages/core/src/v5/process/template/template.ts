@@ -1,6 +1,7 @@
 import { MagicString } from "@vue/compiler-sfc";
 import {
   TemplateCondition,
+  TemplateElement,
   TemplateItem,
   TemplateItemByType,
   TemplateTypes,
@@ -8,6 +9,7 @@ import {
 import { defaultPrefix } from "../utils";
 import { ProcessContext, ProcessPlugin } from "./../types";
 import { VerterASTNode } from "../../parser/ast";
+import { Node } from "@vue/compiler-core";
 
 export type TemplatePlugin = ProcessPlugin<TemplateItem, TemplateContext> & {
   [K in `transform${TemplateTypes}`]?: (
@@ -77,7 +79,7 @@ export type TemplateContext = ProcessContext & {
 
   doNarrow?: (
     o: {
-      parent?: VerterASTNode;
+      parent?: VerterASTNode | Node | TemplateElement | undefined;
       index: number;
       inBlock: boolean;
       conditions: TemplateItemByType[TemplateTypes.Condition][];
@@ -99,7 +101,7 @@ export function processTemplate(
   items: TemplateItem[],
   plugins: TemplatePlugin[],
   _context: Partial<TemplateContext> &
-    Pick<ProcessContext, "filename" | "s" | "blocks">
+    Pick<ProcessContext, "filename" | "s" | "blocks" | "block">
 ) {
   const context: TemplateContext = {
     generic: null,

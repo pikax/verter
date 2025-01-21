@@ -31,7 +31,7 @@ export function parseOXC(source: string, options?: ParserOptions) {
 
 export function parseBabel(
   source: string,
-  options: Parameters<typeof babelParse>[1]
+  options?: Parameters<typeof babelParse>[1]
 ) {
   return babelParse(source, options);
 }

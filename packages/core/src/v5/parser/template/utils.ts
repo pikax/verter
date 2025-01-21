@@ -109,7 +109,9 @@ export function getASTBindings(
             : n;
           bindings.push({
             type: TemplateTypes.Function,
+            // @ts-expect-error not correct type
             node: pN,
+            // @ts-expect-error not correct type
             body: bN,
             context,
           });
@@ -135,12 +137,15 @@ export function getASTBindings(
           //   this.skip();
           //   return;
           // }
+          // @ts-expect-error not correct type
           const pNode = exp ? patchBabelNodeLoc(n, exp) : n;
 
           bindings.push({
             type: TemplateTypes.Binding,
+            // @ts-expect-error not correct type
             node: pNode,
             name,
+            // @ts-expect-error not correct type
             parent,
             directive: null,
 

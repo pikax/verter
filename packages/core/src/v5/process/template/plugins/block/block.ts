@@ -1,13 +1,19 @@
+import { VerterASTNode } from "../../../../parser/ast";
 import { ParseTemplateContext } from "../../../../parser/template";
+import { TemplateElement } from "../../../../parser/template/types";
 import { declareTemplatePlugin, TemplateContext } from "../../template";
 import { Node } from "@vue/compiler-core";
 
 export const BlockPlugin = declareTemplatePlugin({
   name: "VerterBlock",
-  conditions: new Map<Node, Node[]>(),
+  conditions: new Map<Node | VerterASTNode | TemplateElement, Node[]>(),
   contexts: new Map<Node, ParseTemplateContext>(),
 
-  addItem(element: Node, parent: Node, ctx?: ParseTemplateContext) {
+  addItem(
+    element: Node,
+    parent: Node | VerterASTNode | TemplateElement,
+    ctx?: ParseTemplateContext
+  ) {
     let parentBlock = this.conditions.get(parent);
     if (parentBlock) {
       parentBlock.push(element);

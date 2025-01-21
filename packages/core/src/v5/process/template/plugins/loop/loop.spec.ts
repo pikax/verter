@@ -36,6 +36,7 @@ describe("process tempalte plugins loop", () => {
         s,
         filename: "test.vue",
         blocks: parsed.blocks,
+        block: templateBlock,
       }
     );
 

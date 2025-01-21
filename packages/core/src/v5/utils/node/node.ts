@@ -24,7 +24,7 @@ export function patchBabelNodeLoc<T extends babel_types.Node>(
 }
 
 export function patchBabelPosition(
-  pos: babel_types.Node["loc"]["start"],
+  pos: babel_types.SourceLocation["start"],
   offsetPos: Position
 ) {
   pos.line = offsetPos.line + pos.line - 1;
@@ -32,5 +32,5 @@ export function patchBabelPosition(
   // @ts-expect-error not part of pos
   pos.offset = offsetPos.offset + pos.index - 1;
 
-  return pos as babel_types.Node["loc"]["start"] & Position;
+  return pos as babel_types.SourceLocation["start"] & Position;
 }

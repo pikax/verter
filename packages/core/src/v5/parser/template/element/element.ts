@@ -1,15 +1,16 @@
 import { ElementNode, NodeTypes } from "@vue/compiler-core";
 import { handleConditions } from "./conditions";
-import {
-  TemplateCondition,
-  TemplateTypes,
-  TemplateElement,
-  ElementContext,
-} from "../types";
+import { TemplateCondition, TemplateTypes, TemplateElement } from "../types";
 import { handleLoopProp } from "./loops";
 import { handleProps } from "./props";
 import { handleSlotDeclaration, handleSlotProp } from "./slots";
 import { VerterNode } from "../../walk";
+
+export type ElementContext = {
+  conditions: TemplateCondition[];
+  ignoredIdentifiers: string[];
+  inFor: boolean;
+};
 
 export function handleElement(
   node: VerterNode,

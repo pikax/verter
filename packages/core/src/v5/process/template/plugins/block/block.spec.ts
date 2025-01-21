@@ -35,6 +35,7 @@ describe("process template plugins narrow", () => {
         filename: "test.vue",
         blocks: parsed.blocks,
         // narrow: true,
+        block: templateBlock,
       }
     );
 

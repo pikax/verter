@@ -35,6 +35,7 @@ describe("process template plugins slot", () => {
         s,
         filename: "test.vue",
         blocks: parsed.blocks,
+        block: templateBlock,
       }
     );
 

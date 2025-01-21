@@ -31,6 +31,7 @@ describe("process template plugins interpolation", () => {
         s,
         filename: "test.vue",
         blocks: parsed.blocks,
+        block: templateBlock,
       }
     );
 

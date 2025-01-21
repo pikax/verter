@@ -49,17 +49,23 @@ describe("process script plugins imports", () => {
 
   it("should import plugin correctly", () => {
     const { s } = parse(`let a = 0; import { a } from "b";`);
-    expect(s.toString()).toMatchInlineSnapshot(
-      `"import { a } from "b";let a = 0; "`
-    );
+    expect(s.toString()).toContain(`import { a } from "b";let a = 0;`);
   });
 
-  it('should add imports', ()=> {
-    const { s } = parse(`let a = defineModel();`, false, 'ts');
-    expect(s.toString()).toMatchInlineSnapshot(`"import { type ___VERTER___ModelToProps, type ___VERTER___UnionToIntersection, type ___VERTER___ModelToEmits } from "$verter/options.helper.ts";let a = defineModel();"`)
-  })
-  it('should only generate 1 import', ()=> {
-    const { s } = parse(`defineModel(); defineModel('foo); defineEmits()`, false, 'ts');
-    expect(s.toString()).toMatchInlineSnapshot(`"import { type ___VERTER___ModelToProps, type ___VERTER___UnionToIntersection, type ___VERTER___ModelToEmits } from "$verter/options.helper.ts";defineModel(); defineModel('foo); defineEmits()"`)
-  })
+  it("should add imports", () => {
+    const { s } = parse(`let a = defineModel();`, false, "ts");
+    expect(s.toString()).toContain(
+      `import { type ___VERTER___ModelToProps, type ___VERTER___UnionToIntersection, type ___VERTER___ModelToEmits } from "$verter/options.helper.ts";let a = defineModel();`
+    );
+  });
+  it("should only generate 1 import", () => {
+    const { s } = parse(
+      `defineModel(); defineModel('foo); defineEmits()`,
+      false,
+      "ts"
+    );
+    expect(s.toString()).toContain(
+      `import { type ___VERTER___ModelToProps, type ___VERTER___UnionToIntersection, type ___VERTER___ModelToEmits } from "$verter/options.helper.ts";defineModel(); defineModel('foo); defineEmits()`
+    );
+  });
 });

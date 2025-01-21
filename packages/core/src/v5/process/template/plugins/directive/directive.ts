@@ -1,4 +1,8 @@
-import { ElementTypes, DirectiveNode } from "@vue/compiler-core";
+import {
+  ElementTypes,
+  DirectiveNode,
+  SimpleExpressionNode,
+} from "@vue/compiler-core";
 import { MagicString } from "@vue/compiler-sfc";
 import { declareTemplatePlugin, TemplateContext } from "../../template";
 import { BindingPlugin } from "../binding";
@@ -143,25 +147,19 @@ export const DirectivePlugin = declareTemplatePlugin({
         let isDynamic = false;
 
         if (node.arg) {
-          if (!node.arg.ast && node.arg.isStatic) {
-            bindingTo = node.arg.content;
-            s.overwrite(
-              node.loc.start.offset,
-              node.arg.loc.end.offset,
-              bindingTo
-            );
+          const arg = node.arg as SimpleExpressionNode;
+
+          if (!node.arg.ast && arg.isStatic) {
+            bindingTo = arg.content;
+            s.overwrite(node.loc.start.offset, arg.loc.end.offset, bindingTo);
           } else {
             isDynamic = true;
 
             // remove v-model
-            s.overwrite(node.loc.start.offset, node.arg.loc.start.offset, "");
+            s.overwrite(node.loc.start.offset, arg.loc.start.offset, "");
             // replace = with :
-            if (s.original[node.arg.loc.end.offset] === "=") {
-              s.overwrite(
-                node.arg.loc.end.offset,
-                node.arg.loc.end.offset + 1,
-                ":"
-              );
+            if (s.original[arg.loc.end.offset] === "=") {
+              s.overwrite(arg.loc.end.offset, arg.loc.end.offset + 1, ":");
             }
             s.prependLeft(node.loc.start.offset, "{...{");
           }
@@ -293,20 +291,17 @@ export const DirectivePlugin = declareTemplatePlugin({
         s.prependLeft(node.loc.start.offset + 2 + item.name.length, ");");
 
         if (node.arg) {
+          const arg = node.arg as SimpleExpressionNode;
           // replace ':' with '='
-          s.overwrite(
-            node.arg.loc.start.offset - 1,
-            node.arg.loc.start.offset,
-            "="
-          );
+          s.overwrite(arg.loc.start.offset - 1, arg.loc.start.offset, "=");
 
-          s.prependRight(node.arg.loc.start.offset - 1, `${directiveName}.arg`);
-          s.prependLeft(node.arg.loc.end.offset, ";");
+          s.prependRight(arg.loc.start.offset - 1, `${directiveName}.arg`);
+          s.prependLeft(arg.loc.end.offset, ";");
 
-          if (node.arg.isStatic) {
+          if (arg.isStatic) {
             // add quotes
-            s.prependLeft(node.arg.loc.start.offset, '"');
-            s.prependLeft(node.arg.loc.end.offset, '"');
+            s.prependLeft(arg.loc.start.offset, '"');
+            s.prependLeft(arg.loc.end.offset, '"');
           }
         }
 

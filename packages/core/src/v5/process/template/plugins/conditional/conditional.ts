@@ -1,6 +1,7 @@
-import { CommentNode, NodeTypes } from "@vue/compiler-core";
+import { CommentNode, ElementNode, NodeTypes, Node } from "@vue/compiler-core";
 import {
   TemplateCondition,
+  TemplateElement,
   TemplateItemByType,
   TemplateTypes,
 } from "../../../../parser/template/types";
@@ -13,7 +14,7 @@ import { VerterASTNode } from "../../../../parser/ast";
 export const ConditionalPlugin = declareTemplatePlugin({
   name: "VerterConditional",
 
-  processed: new Set<VerterASTNode>(),
+  processed: new Set<TemplateElement | VerterASTNode | Node | ElementNode>(),
 
   // narrows: [] as {
   //   index: number;

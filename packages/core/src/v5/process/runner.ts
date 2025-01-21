@@ -5,9 +5,9 @@ import {
 } from "../parser/template/types";
 import { ProcessContext, ProcessPlugin } from "./types";
 
-export function runPlugins(
+export function runPlugins<T, C extends ProcessContext>(
   items: TemplateItem[],
-  plugins: ProcessPlugin[],
+  plugins: ProcessPlugin<T, C>[],
   context: ProcessContext
 ) {
   const pluginsByType = {
