@@ -7,17 +7,25 @@ import {
   processBlocks,
   ProcessedBlock,
 } from "./utils";
-import { VerterASTBlock } from "@verter/core";
+import { ParsedBlock } from "@verter/core";
 import { createSubDocument } from "../../utils.js";
 import { RawSourceMap, SourceMapConsumer } from "source-map-js";
 
 describe("utils", () => {
   describe("processBlocks", () => {
-    function makeBlock(tag: string, lang?: string | true): VerterASTBlock {
+    function makeBlock(tag: string, lang?: string | true): ParsedBlock {
+      const { type, block, result } = {} as unknown as ParsedBlock;
+
       return {
-        tag: { type: tag },
-        block: { attrs: lang ? { lang } : {} },
-      } as VerterASTBlock;
+        block: {
+          tag: { type: tag, attributes: {} },
+          block: { attrs: lang ? { lang } : {}, content: "" },
+        } as any,
+        lang,
+        result: null,
+        isMain: true,
+        type: "script",
+      } as ParsedBlock;
     }
 
     it("should return empty if there are no blocks", () => {
@@ -103,7 +111,7 @@ describe("utils", () => {
       expect(templateBlock.blocks).toHaveLength(1);
 
       const customBlock = result.find((b) => b.type === "custom")!;
-      expect(customBlock.blocks.map((b) => b.tag.type).sort()).toEqual([
+      expect(customBlock.blocks.map((b) => b.block.tag.type).sort()).toEqual([
         "unknown",
         "weird",
       ]);
@@ -145,7 +153,7 @@ describe("utils", () => {
 
       const customBlock = result.find((b) => b.type === "custom")!;
       expect(customBlock.blocks).toHaveLength(1); // leftover customtag
-      expect(customBlock.blocks[0].tag.type).toBe("customtag");
+      expect(customBlock.blocks[0].block.tag.type).toBe("customtag");
     });
   });
 

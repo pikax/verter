@@ -1,4 +1,4 @@
-import { VerterASTBlock } from "@verter/core";
+import { ParsedBlock } from "@verter/core";
 import { SourceMapConsumer } from "source-map-js";
 import {
   Position as DocumentPosition,
@@ -13,18 +13,18 @@ export interface ProcessedBlock {
   //   index: number;
   uri: string;
   languageId: string;
-  blocks: Array<VerterASTBlock>;
+  blocks: Array<ParsedBlock>;
 }
 
 export function processBlocks(
   uri: string,
-  blocks: VerterASTBlock[]
+  blocks: ParsedBlock[]
 ): ProcessedBlock[] {
-  const byTag = new Map<string, VerterASTBlock[]>();
+  const byTag = new Map<string, ParsedBlock[]>();
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
-    const tag = block.tag.type;
+    const tag = block.block.tag.type;
     const arr = byTag.get(tag);
     if (arr) {
       arr.push(block);
@@ -56,7 +56,7 @@ export function processBlocks(
       byTag.delete("script");
 
       // all the blocks must be the same language
-      const lang = blocks[0].block.attrs.lang;
+      const lang = blocks[0].block.block.attrs.lang;
       const languageId = lang === true ? "js" : lang ?? "js";
 
       result.push({
@@ -74,13 +74,13 @@ export function processBlocks(
     if (blocks) {
       byTag.delete("style");
 
-      const byLang = new Map<string, VerterASTBlock[]>();
+      const byLang = new Map<string, ParsedBlock[]>();
       for (let i = 0; i < blocks.length; i++) {
         const block = blocks[i];
         const language =
-          block.block.attrs.lang === true
+          block.block.block.attrs.lang === true
             ? "css"
-            : block.block.attrs.lang ?? "css";
+            : block.block.block.attrs.lang ?? "css";
         const arr = byLang.get(language);
         if (arr) {
           arr.push(block);

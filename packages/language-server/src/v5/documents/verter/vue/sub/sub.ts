@@ -1,7 +1,6 @@
 import { VueDocument } from "../vue.js";
 import { VerterDocument } from "../../verter.js";
-import MagicString from "magic-string";
-import { ParseContext, VerterASTBlock } from "@verter/core";
+import { ParserResult } from "@verter/core";
 import { SourceMapConsumer } from "source-map-js";
 import { Position, Range } from "vscode-languageserver-textdocument";
 import {
@@ -11,12 +10,7 @@ import {
   originalRangeFor,
 } from "../utils.js";
 
-export interface SubDocumentProcessContext {
-  s: MagicString;
-
-  blocks: Array<VerterASTBlock>;
-  parsed: ParseContext;
-}
+export interface SubDocumentProcessContext extends ParserResult {}
 
 export abstract class VueSubDocument extends VerterDocument {
   protected constructor(
@@ -40,14 +34,10 @@ export abstract class VueSubDocument extends VerterDocument {
     return (
       this._sourceMapConsumer ?? (this._sourceMapConsumer = this.sync(true))
     );
-    // if (this.version === this._parent.version && this._sourceMapConsumer) {
-    //   return this._sourceMapConsumer;
-    // }
-    // return (this._sourceMapConsumer = this.sync());
   }
 
   protected _isSynching = false;
-  protected sync(force?: boolean): SourceMapConsumer | null {
+  protected sync(force?: boolean): SourceMapConsumer {
     const parent = this._parent;
 
     if (!force && this.sourceMapConsumer) {
@@ -55,9 +45,10 @@ export abstract class VueSubDocument extends VerterDocument {
     }
 
     try {
-      if (this._isSynching) return;
+      if (this._isSynching) return this.sourceMapConsumer;
       this._isSynching = true;
       const context = parent.context;
+
       const block = parent.blocks.find((x) => x.uri === this.uri);
       if (!block) {
         throw new Error("Block not found!");
@@ -65,9 +56,8 @@ export abstract class VueSubDocument extends VerterDocument {
 
       const s = context.s.clone();
       this.process({
+        ...context,
         s,
-        parsed: context,
-        blocks: block.blocks,
       });
 
       this.update(s.toString(), this.parent.version);
@@ -133,7 +123,7 @@ export abstract class VueSubDocument extends VerterDocument {
   }
 
   toOriginalRange(range: Range): Range {
-    return originalRangeFor(this._sourceMapConsumer, range);
+    return originalRangeFor(this.sourceMapConsumer, range);
   }
 
   getText(range?: Range): string {

@@ -44,13 +44,22 @@ export class VueStyleDocument extends VueSubDocument {
   }
 
   protected process(context: SubDocumentProcessContext): void {
-    for (const block of context.parsed.blocks) {
-      if (block.tag.type !== "style") {
+    for (const block of context.blocks) {
+      if (block.block.tag.type !== "style") {
         // DELETE the whole block
-        context.s.remove(block.tag.pos.open.start, block.tag.pos.close.end);
+        context.s.remove(
+          block.block.tag.pos.open.start,
+          block.block.tag.pos.close.end
+        );
       } else {
-        context.s.remove(block.tag.pos.open.start, block.tag.pos.open.end);
-        context.s.remove(block.tag.pos.close.start, block.tag.pos.close.end);
+        context.s.remove(
+          block.block.tag.pos.open.start,
+          block.block.tag.pos.open.end
+        );
+        context.s.remove(
+          block.block.tag.pos.close.start,
+          block.block.tag.pos.close.end
+        );
       }
     }
   }

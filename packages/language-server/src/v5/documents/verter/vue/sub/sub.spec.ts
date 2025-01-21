@@ -1,14 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { VueDocument } from "../vue.js";
 import { VueSubDocument, SubDocumentProcessContext } from "./sub.js";
-import { VerterASTBlock, ParseContext } from "@verter/core";
-import MagicString from "magic-string";
-import { SourceMapConsumer } from "source-map-js";
-import {
-  Position,
-  Range,
-  TextDocument,
-} from "vscode-languageserver-textdocument";
+import { Position, Range } from "vscode-languageserver-textdocument";
 
 // /**
 //  * A minimal mock for VueDocument, just enough to make the sub-document logic work.

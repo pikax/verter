@@ -18,8 +18,14 @@ class MockTypeScriptElement extends VueTypescriptDocument {
     // nothing
 
     for (const block of context.blocks) {
-      context.s.remove(block.tag.pos.open.start, block.tag.pos.open.end);
-      context.s.remove(block.tag.pos.close.start, block.tag.pos.close.end);
+      context.s.remove(
+        block.block.tag.pos.open.start,
+        block.block.tag.pos.open.end
+      );
+      context.s.remove(
+        block.block.tag.pos.close.start,
+        block.block.tag.pos.close.end
+      );
     }
   }
 }

@@ -5,7 +5,7 @@ import { VueDocument } from "../../vue.js";
 export type LanguageTypescript = "ts" | "tsx" | "js" | "jsx";
 
 export abstract class VueTypescriptDocument extends VueSubDocument {
-  private _snapshot: ts.IScriptSnapshot | null;
+  private _snapshot: ts.IScriptSnapshot | null = null;
 
   protected constructor(
     uri: string,

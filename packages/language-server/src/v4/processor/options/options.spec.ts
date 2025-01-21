@@ -1,4 +1,4 @@
-import { createContext } from "@verter/core";
+import { parser } from "@verter/core";
 import { processOptions } from "./options.js";
 import { type Position, SourceMapConsumer } from "source-map-js";
 import { MagicString } from "vue/compiler-sfc";
@@ -8,7 +8,7 @@ import { expectFindStringWithMap } from "../../../utils.test-utils.js";
 
 describe("processor options", () => {
   function process(source: string, filename = "test.vue") {
-    const context = createContext(source, filename);
+    const context = parser(source, filename);
     return processOptions(context);
   }
 
