@@ -14,6 +14,7 @@ import {
   TemplateInterpolation,
   TemplateItem,
   TemplateItemByType,
+  TemplateLiteral,
   TemplateLoop,
   TemplateProp,
   TemplateRenderSlot,
@@ -33,8 +34,9 @@ export function retrieveBindings(
     ignoredIdentifiers: string[];
   },
   directive: null | DirectiveNode = null
-): Array<TemplateBinding | TemplateFunction> {
-  const bindings: Array<TemplateBinding | TemplateFunction> = [];
+): Array<TemplateBinding | TemplateFunction | TemplateLiteral> {
+  const bindings: Array<TemplateBinding | TemplateFunction | TemplateLiteral> =
+    [];
 
   if (exp.type !== NodeTypes.SIMPLE_EXPRESSION) {
     return bindings;
@@ -75,7 +77,9 @@ export function getASTBindings(
   context: Record<string, any>,
   exp?: Node
 ) {
-  const bindings = [] as Array<TemplateBinding | TemplateFunction>;
+  const bindings = [] as Array<
+    TemplateBinding | TemplateFunction | TemplateLiteral
+  >;
   walk(ast, {
     enter(
       n: babel_types.Node | VerterASTNode,
@@ -155,6 +159,24 @@ export function getASTBindings(
           break;
         }
         default: {
+          if (n.type.endsWith("Literal")) {
+            // @ts-expect-error not correct type
+            const pNode = exp ? patchBabelNodeLoc(n, exp) : n;
+            let content = "";
+            let value = undefined;
+
+            if ("value" in n) {
+              content = `${n.value}`;
+              value = n.value;
+            }
+
+            bindings.push({
+              type: TemplateTypes.Literal,
+              content,
+              value,
+              node: pNode,
+            });
+          }
           if ("id" in n) {
             if (n.id?.type === "Identifier") {
               ignoredIdentifiers.push(n.id.name);
@@ -187,6 +209,7 @@ export function createTemplateTypeMap() {
     [TemplateTypes.Directive]: [] as Array<TemplateDirective>,
     [TemplateTypes.Interpolation]: [] as Array<TemplateInterpolation>,
     [TemplateTypes.Function]: [] as Array<TemplateFunction>,
+    [TemplateTypes.Literal]: [] as Array<TemplateLiteral>,
   } satisfies {
     [K in TemplateTypes]: Array<TemplateItemByType[K]>;
   };

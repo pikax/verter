@@ -448,6 +448,21 @@ describe("parser template element props", () => {
             name: "i",
             ignore: false,
           },
+          {
+            type: TemplateTypes.Literal,
+            content: "1",
+            value: 1,
+          },
+          {
+            type: TemplateTypes.Literal,
+            content: "false",
+            value: false,
+          },
+          {
+            type: TemplateTypes.Literal,
+            content: "true",
+            value: true,
+          },
         ]);
 
         expectMapping(result, source);
@@ -753,6 +768,11 @@ describe("parser template element props", () => {
             type: TemplateTypes.Binding,
             name: "aria-autocomplete",
             ignore: true,
+          },
+          {
+            type: TemplateTypes.Literal,
+            value: "bar",
+            content: "bar",
           },
         ]);
 
@@ -1112,6 +1132,14 @@ describe("parser template element props", () => {
             type: TemplateTypes.Binding,
             name: "check-for-something",
             ignore: true,
+          },
+          {
+            type: TemplateTypes.Literal,
+            content: "",
+            value: undefined,
+            node: {
+              type: "TemplateLiteral",
+            },
           },
           {
             type: TemplateTypes.Binding,

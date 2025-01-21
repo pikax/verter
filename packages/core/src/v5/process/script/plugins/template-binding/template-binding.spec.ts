@@ -11,7 +11,7 @@ import { ScriptBlockPlugin } from "../script-block";
 import { BindingPlugin } from "../binding";
 import { TemplateTypes } from "../../../../parser/template/types";
 
-describe("process script plugin script block", () => {
+describe("process script plugin template-binding", () => {
   function parse(
     content: string,
     wrapper: string | false = false,

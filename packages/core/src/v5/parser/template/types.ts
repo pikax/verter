@@ -29,12 +29,22 @@ export const enum TemplateTypes {
   Loop = "Loop",
 
   Function = "Function",
+
+  Literal = "Literal",
 }
 
 export type TemplateComment = {
   type: TemplateTypes.Comment;
   content: string;
   node: CommentNode;
+};
+export type TemplateLiteral = {
+  type: TemplateTypes.Literal;
+  content: string;
+  value: any;
+  node: Omit<babel_types.Node, "loc"> & {
+    loc: Node["loc"] & babel_types.Node["loc"];
+  };
 };
 
 export type TemplateInterpolation = {
@@ -133,6 +143,7 @@ export type TemplateProp = { type: TemplateTypes.Prop } & (
 
       value: string | null;
       static: true;
+      items: TemplateItem[];
     }
   | {
       node: DirectiveNode;
@@ -144,14 +155,17 @@ export type TemplateProp = { type: TemplateTypes.Prop } & (
 
       static: false;
       context: Record<string, any>;
+      items: TemplateItem[];
     }
   | {
       // used to merge styles and classes
       node: null;
       name: string;
       event: false;
+      static: false;
 
       props: TemplateProp[];
+      items: TemplateItem[];
     }
 );
 
@@ -167,6 +181,7 @@ export type TemplateDirective = {
   static: false;
 
   element: ElementNode;
+  items: TemplateItem[];
 };
 
 export type TemplateSlot = {
@@ -255,6 +270,7 @@ export type TemplateItemByType = {
   [TemplateTypes.Condition]: TemplateCondition;
   [TemplateTypes.Loop]: TemplateLoop;
   [TemplateTypes.Function]: TemplateFunction;
+  [TemplateTypes.Literal]: TemplateLiteral;
 };
 
 export type TemplateItem =
@@ -269,4 +285,5 @@ export type TemplateItem =
   | TemplateLoop
   | TemplateInterpolation
   | TemplateElement
-  | TemplateFunction;
+  | TemplateFunction
+  | TemplateLiteral;

@@ -51,7 +51,7 @@ export function handleElement(
     parent,
 
     // @ts-expect-error
-    ref: props?.find((x) => x.name === "ref") ?? null,
+    ref: props?.find((x) => x.name === "ref" || x.node?.rawName === ':ref') ?? null,
     // @ts-expect-error
     props: props ?? [],
 

@@ -138,6 +138,7 @@ export function processTemplate(
     [TemplateTypes.Directive]: [],
     [TemplateTypes.Function]: [],
     [TemplateTypes.Condition]: [],
+    [TemplateTypes.Literal]: [],
   } as {
     [K in TemplateTypes]: Array<
       (

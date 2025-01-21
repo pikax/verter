@@ -351,6 +351,11 @@ describe("parser template element loops", () => {
         {
           type: TemplateTypes.Loop,
         },
+        {
+          type: TemplateTypes.Literal,
+          content: "10",
+          value: 10,
+        },
       ],
       context: {
         ignoredIdentifiers: ["n"],
@@ -369,6 +374,16 @@ describe("parser template element loops", () => {
       items: [
         {
           type: TemplateTypes.Loop,
+        },
+        {
+          type: TemplateTypes.Literal,
+          content: "1",
+          value: 1,
+        },
+        {
+          type: TemplateTypes.Literal,
+          content: "42",
+          value: 42,
         },
       ],
       context: {

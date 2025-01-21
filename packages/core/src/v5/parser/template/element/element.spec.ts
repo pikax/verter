@@ -395,4 +395,53 @@ describe("parser template element", () => {
       },
     });
   });
+
+  describe("ref", () => {
+    it('ref="name"', () => {
+      const { result } = parse(`<div ref="name"></div>`);
+      expect(result).toMatchObject({
+        element: {
+          ref: {
+            type: TemplateTypes.Prop,
+            name: "ref",
+            value: "name",
+          },
+        },
+      });
+    });
+
+    it(':ref="name"', () => {
+      const { result } = parse(`<div :ref="name"></div>`);
+      expect(result).toMatchObject({
+        element: {
+          ref: {
+            type: TemplateTypes.Prop,
+            name: "bind",
+            arg: [{ name: "ref" }],
+            exp: [{ name: "name" }],
+          },
+        },
+      });
+    });
+
+    it(':ref="el=> name = el"', () => {
+      const { result } = parse(`<div :ref="(el)=> name = el"></div>`);
+      expect(result).toMatchObject({
+        element: {
+          ref: {
+            type: TemplateTypes.Prop,
+            name: "bind",
+            arg: [{ name: "ref" }],
+            node: {
+              exp: {
+                ast: {
+                  type: "ArrowFunctionExpression",
+                },
+              },
+            },
+          },
+        },
+      });
+    });
+  });
 });

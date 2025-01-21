@@ -83,6 +83,10 @@ describe("parser template interpolation", () => {
         name: "temp",
         ignore: false,
       },
+      {
+        type: TemplateTypes.Literal,
+        value: "temp",
+      },
     ]);
 
     const [_, n] = result as any;
@@ -283,6 +287,10 @@ describe("parser template interpolation", () => {
       {
         type: "Interpolation",
       },
+      {
+        type: TemplateTypes.Literal,
+        value: "test",
+      },
     ]);
   });
 
@@ -316,6 +324,10 @@ describe("parser template interpolation", () => {
       {
         name: "Foo",
         ignore: false,
+      },
+      {
+        type: TemplateTypes.Literal,
+        value: "bar",
       },
     ]);
 
@@ -387,7 +399,10 @@ describe("parser template interpolation", () => {
 
     expect(result).toMatchObject([
       {
-        type: "Interpolation",
+        type: TemplateTypes.Interpolation,
+      },
+      {
+        type: TemplateTypes.Literal,
       },
     ]);
   });
@@ -450,6 +465,10 @@ describe("parser template interpolation", () => {
         ignore: false,
       },
       {
+        type: TemplateTypes.Literal,
+        value: 1,
+      },
+      {
         name: "kuz",
         ignore: false,
       },
@@ -486,6 +505,10 @@ describe("parser template interpolation", () => {
         name: "ar",
         ignore: true,
       },
+      {
+        type: TemplateTypes.Literal,
+        value: 1,
+      },
     ]);
 
     // @ts-expect-error
@@ -517,6 +540,10 @@ describe("parser template interpolation", () => {
       {
         name: "ar",
         ignore: true,
+      },
+      {
+        type: TemplateTypes.Literal,
+        value: 1,
       },
     ]);
 
@@ -557,6 +584,10 @@ describe("parser template interpolation", () => {
       {
         name: "foo",
         ignore: true,
+      },
+      {
+        type: TemplateTypes.Literal,
+        value: 1,
       },
     ]);
 

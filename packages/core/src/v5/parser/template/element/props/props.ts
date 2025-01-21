@@ -177,6 +177,7 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
         value: prop.value?.content ?? null,
         static: true,
         event: false,
+        items: [],
       },
     ];
   } else if (BuiltInDirectivesAsProps.has(prop.name)) {
@@ -200,6 +201,7 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
         event: prop.name === "on",
         name: prop.name,
         context,
+        items: [...nameBinding, ...valueBinding],
       },
       ...nameBinding,
       ...valueBinding,
@@ -222,6 +224,8 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
         static: false,
         context,
         element,
+
+        items: [...nameBinding, ...valueBinding],
       },
       ...nameBinding,
       ...valueBinding,
