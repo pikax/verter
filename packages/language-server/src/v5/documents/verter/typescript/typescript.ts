@@ -13,7 +13,7 @@ export class TypescriptDocument extends VerterDocument {
     return new TypescriptDocument(uri, languageId, version, content);
   }
 
-  private _snapshot: ts.IScriptSnapshot | null;
+  private _snapshot: ts.IScriptSnapshot | null = null;
 
   protected constructor(
     uri: string,
@@ -31,8 +31,10 @@ export class TypescriptDocument extends VerterDocument {
     );
   }
 
-  update(content: string, version?: number): void {
+  update(content: string, version?: number) {
     this._snapshot = null;
     super.update(content, version);
+
+    return this;
   }
 }

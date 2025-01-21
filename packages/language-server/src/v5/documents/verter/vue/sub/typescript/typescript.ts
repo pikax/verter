@@ -27,8 +27,9 @@ export abstract class VueTypescriptDocument extends VueSubDocument {
     );
   }
 
-  update(content: string, version?: number): void {
+  update(content: string, version?: number) {
     this._snapshot = null;
     super.update(content, version);
+    return this;
   }
 }

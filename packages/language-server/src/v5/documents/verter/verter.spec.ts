@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { TextEdit, Range, Position } from "vscode-languageserver-protocol";
-import { VerterDocument } from "./verter.js";
+import { TextEdit, Range } from "vscode-languageserver-protocol";
+import { VerterDocument } from "./index.js";
 
 // Create a subclass to access protected constructor
 class TestVerterDocument extends VerterDocument {

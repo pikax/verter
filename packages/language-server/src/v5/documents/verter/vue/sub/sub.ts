@@ -77,9 +77,10 @@ export abstract class VueSubDocument extends VerterDocument {
     }
   }
 
-  update(content: string, version?: number): void {
+  update(content: string, version?: number) {
     this._sourceMapConsumer = null;
     super.update(content, version);
+    return this;
   }
 
   toGeneratedPosition(pos: Position): Position {

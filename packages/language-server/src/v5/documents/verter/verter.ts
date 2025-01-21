@@ -3,9 +3,18 @@ import {
   Position,
   Range,
   TextDocument,
+  TextDocumentContentChangeEvent,
 } from "vscode-languageserver-textdocument";
 
 export class VerterDocument implements TextDocument {
+  static createDoc(
+    uri: string,
+    languageId: string,
+    version: number,
+    content: string
+  ) {
+    return new VerterDocument(uri, languageId, version, content);
+  }
   get uri() {
     return this.doc.uri;
   }
@@ -43,21 +52,24 @@ export class VerterDocument implements TextDocument {
     return this.doc.offsetAt(position);
   }
 
-  update(content: string, version?: number) {
+  update(content: string | TextDocumentContentChangeEvent[], version?: number) {
     const d = this.doc;
     TextDocument.update(
       d,
-      [
-        {
-          text: content,
-          range: {
-            start: d.positionAt(0),
-            end: d.positionAt(Number.MAX_SAFE_INTEGER),
-          },
-        },
-      ],
+      typeof content === "string"
+        ? [
+            {
+              text: content,
+              range: {
+                start: d.positionAt(0),
+                end: d.positionAt(Number.MAX_SAFE_INTEGER),
+              },
+            },
+          ]
+        : content,
       version ?? d.version + 1
     );
+    return this;
   }
 
   applyEdits(edits: TextEdit[]) {

@@ -1,7 +1,6 @@
 import { LanguageService, Stylesheet } from "vscode-css-languageservice";
 import { VueDocument } from "../../index.js";
 import { SubDocumentProcessContext, VueSubDocument } from "../sub.js";
-import { StyleDocument } from "../../../style/style.js";
 
 export class VueStyleDocument extends VueSubDocument {
   static create(
@@ -38,9 +37,10 @@ export class VueStyleDocument extends VueSubDocument {
     super(uri, parent, languageId, version);
   }
 
-  update(content: string, version?: number): void {
+  update(content: string, version?: number) {
     this._stylesheet = null;
     super.update(content, version);
+    return this;
   }
 
   protected process(context: SubDocumentProcessContext): void {

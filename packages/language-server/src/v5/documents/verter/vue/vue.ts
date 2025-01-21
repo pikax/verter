@@ -29,9 +29,10 @@ export class VueDocument extends VerterDocument {
     super(uri, "vue", version, content);
   }
 
-  update(content: string, version?: number): void {
+  update(content: string, version?: number) {
     // this._dirty = true;
     this._context = null;
     super.update(content, version);
+    return this;
   }
 }

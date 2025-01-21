@@ -1,5 +1,6 @@
 import { LanguageService, Stylesheet } from "vscode-css-languageservice";
 import { VerterDocument } from "../verter.js";
+import { TextDocumentContentChangeEvent } from "vscode-languageserver-textdocument";
 
 export type LanguageStyle = "css" | "scss" | "less";
 
@@ -39,8 +40,9 @@ export class StyleDocument extends VerterDocument {
     super(uri, languageId, version, content);
   }
 
-  update(content: string, version?: number): void {
+  update(content: string | TextDocumentContentChangeEvent[], version?: number) {
     this._stylesheet = null;
     super.update(content, version);
+    return this;
   }
 }
