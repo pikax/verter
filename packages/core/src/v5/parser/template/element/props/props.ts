@@ -9,6 +9,7 @@ import {
   TemplateBinding,
   TemplateDirective,
   TemplateFunction,
+  TemplateLiteral,
   TemplateProp,
   TemplateTypes,
 } from "../../types";
@@ -166,7 +167,7 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
   context: PropsContext
 ): [
   TemplateProp | TemplateDirective,
-  ...Array<TemplateBinding | TemplateFunction>
+  ...Array<TemplateBinding | TemplateFunction | TemplateLiteral>
 ] {
   if (prop.type === NodeTypes.ATTRIBUTE) {
     return [

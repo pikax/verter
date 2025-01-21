@@ -3,6 +3,7 @@ import {
   TemplateBinding,
   TemplateFunction,
   TemplateInterpolation,
+  TemplateLiteral,
   TemplateTypes,
 } from "../types";
 
@@ -18,7 +19,10 @@ export function handleInterpolation<
   node: InterpolationNode,
   context: Context
 ):
-  | [TemplateInterpolation, ...Array<TemplateBinding | TemplateFunction>]
+  | [
+      TemplateInterpolation,
+      ...Array<TemplateBinding | TemplateFunction | TemplateLiteral>
+    ]
   | null {
   if (node.type !== NodeTypes.INTERPOLATION) {
     return null;

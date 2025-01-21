@@ -174,6 +174,7 @@ export function getASTBindings(
               type: TemplateTypes.Literal,
               content,
               value,
+              // @ts-expect-error
               node: pNode,
             });
           }

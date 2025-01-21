@@ -1,5 +1,3 @@
-import { GenericInfo } from "../../../../parser";
-import { ProcessContext } from "../../types";
 import { ScriptContext } from "../types";
 
 export function generateTypeDeclaration(
