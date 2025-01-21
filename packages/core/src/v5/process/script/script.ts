@@ -8,19 +8,11 @@ import { ProcessContext } from "../types";
 import { ScriptContext, ScriptPlugin } from "./types";
 import { defaultPrefix } from "../utils";
 
-export function buildBundle() {}
-export function buildOptions() {}
-
-// Production does not need all the fancy stuff
-// this only needs to export the correct type
-// some magic still needs to happen
-export function buildProduction() {}
-
 export function processScript(
   items: ScriptItem[],
   plugins: ScriptPlugin[],
   _context: Partial<ScriptContext> &
-    Pick<ProcessContext, "filename" | "s" | "blocks" | 'block'>
+    Pick<ProcessContext, "filename" | "s" | "blocks" | "block">
 ) {
   const context: ScriptContext = {
     generic: null,

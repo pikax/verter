@@ -6,9 +6,9 @@ import { ProcessContext } from "../../../types";
 import { generateImport } from "../../../utils";
 import { processScript } from "../../script";
 import { ScriptContext } from "../../types";
-import { ResolveOptionsFilename } from "../options/index.js";
 
 import { relative } from "node:path/posix";
+import { ResolveOptionsFilename } from "../main";
 
 // import
 

@@ -31,7 +31,6 @@ export const TemplateRefPlugin = definePlugin({
         if (macroName !== "useTemplateRef") {
           return;
         }
-
         handleExpression(item.parent.init, s, ctx);
       }
     }
