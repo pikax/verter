@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { VueTypescriptDocument, LanguageTypescript } from "./typescript.js";
 import { SubDocumentProcessContext } from "../sub.js";
 import { VueDocument } from "../../vue.js";
-import { createSubDocument } from "../../../../utils.js";
+import { createSubDocumentUri } from "../../../../utils.js";
 
 class MockTypeScriptElement extends VueTypescriptDocument {
   static create(
@@ -32,7 +32,7 @@ class MockTypeScriptElement extends VueTypescriptDocument {
 
 describe("TypescriptDocument", () => {
   const parentUri = "file:///test.vue";
-  const uri = createSubDocument(parentUri, "options.tsx");
+  const uri = createSubDocumentUri(parentUri, "options.tsx");
   const languageId: LanguageTypescript = "tsx";
   const version = 1;
   const initialContent = `const greet = (name: string) => {

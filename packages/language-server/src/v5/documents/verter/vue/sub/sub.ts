@@ -49,10 +49,10 @@ export abstract class VueSubDocument extends VerterDocument {
       this._isSynching = true;
       const context = parent.context;
 
-      const block = parent.blocks.find((x) => x.uri === this.uri);
-      if (!block) {
-        throw new Error("Block not found!");
-      }
+      // const block = parent.blocks.find((x) => x.uri === this.uri);
+      // if (!block) {
+      //   throw new Error("Block not found!");
+      // }
 
       const s = context.s.clone();
       this.process({

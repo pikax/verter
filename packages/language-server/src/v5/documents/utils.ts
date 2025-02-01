@@ -32,8 +32,11 @@ const VueSubDocRegex = /(?:\.vue)(\._VERTER_\.\w+\.\w{2,4})$/;
 export function isVueSubDocument(uri: string) {
   return VueSubDocRegex.test(uri);
 }
+export function toVueParentDocument(uri: string) {
+  return uri.replace(VueSubDocRegex, ".vue");
+}
 
-export function createSubDocument(uri: string, ending: string) {
+export function createSubDocumentUri(uri: string, ending: string) {
   if (!uri.endsWith(".vue")) {
     throw new Error("URI is not a Vue file:" + uri);
   }

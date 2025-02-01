@@ -8,7 +8,7 @@ import {
   ProcessedBlock,
 } from "./utils";
 import { ParsedBlock } from "@verter/core";
-import { createSubDocument } from "../../utils.js";
+import { createSubDocumentUri } from "../../utils.js";
 import { RawSourceMap, SourceMapConsumer } from "source-map-js";
 
 describe("utils", () => {
@@ -45,7 +45,7 @@ describe("utils", () => {
 
       const templateBlock = result.find((b) => b.type === "template")!;
       expect(templateBlock.languageId).toBe("tsx");
-      expect(templateBlock.uri).toBe(createSubDocument(uri, "render.tsx"));
+      expect(templateBlock.uri).toBe(createSubDocumentUri(uri, "render.tsx"));
       expect(templateBlock.blocks).toHaveLength(1);
     });
 
@@ -64,7 +64,7 @@ describe("utils", () => {
       const scriptBlock = result.find((b) => b.type === "script")!;
       // First script block had no lang => languageId = 'js'
       expect(scriptBlock.languageId).toBe("js");
-      expect(scriptBlock.uri).toBe(createSubDocument(uri, "options.tsx"));
+      expect(scriptBlock.uri).toBe(createSubDocumentUri(uri, "options.tsx"));
       expect(scriptBlock.blocks).toHaveLength(3);
     });
 
@@ -88,10 +88,10 @@ describe("utils", () => {
         (b) => b.type === "style" && b.languageId === "sass"
       )!;
 
-      expect(cssBlock.uri).toBe(createSubDocument(uri, "style.css"));
+      expect(cssBlock.uri).toBe(createSubDocumentUri(uri, "style.css"));
       expect(cssBlock.blocks).toHaveLength(2); // noLang and true are both css
 
-      expect(sassBlock.uri).toBe(createSubDocument(uri, "style.sass"));
+      expect(sassBlock.uri).toBe(createSubDocumentUri(uri, "style.sass"));
       expect(sassBlock.blocks).toHaveLength(1);
     });
 
@@ -115,7 +115,7 @@ describe("utils", () => {
         "unknown",
         "weird",
       ]);
-      expect(customBlock.uri).toBe(createSubDocument(uri, "custom.temp"));
+      expect(customBlock.uri).toBe(createSubDocumentUri(uri, "custom.temp"));
     });
 
     it("should handle multiple known and leftover blocks producing a custom block", () => {

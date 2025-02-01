@@ -5,6 +5,9 @@ import {
   TextDocumentSyncKind,
 } from "vscode-languageserver/node";
 import { DocumentManager } from "./v5/documents/manager/manager";
+import { VerterManager } from "./v5/documents/verter/manager";
+import { isVueDocument, isVueFile, uriToPath } from "./v5/documents";
+import { formatQuickInfo, mapDefinitionInfo } from "./v5/helpers";
 
 export interface LsConnectionOption {
   /**
@@ -36,6 +39,7 @@ export function startServer(options: LsConnectionOption = {}) {
   const connection = originalConnection;
 
   const documentManager = new DocumentManager();
+  const verterManager = new VerterManager(documentManager);
   connection.onInitialize((params) => {
     return {
       capabilities: {
@@ -78,11 +82,71 @@ export function startServer(options: LsConnectionOption = {}) {
     };
   });
 
+  connection.onDefinition((params) => {
+    console.log("doc", params.textDocument);
+    const uri = params.textDocument.uri;
 
+    const doc = documentManager.getDocument(uri);
+    if (!doc || !isVueDocument(doc)) {
+      return undefined;
+    }
+    const tsService = verterManager.getTsService(uri);
 
+    if (!tsService) {
+      return undefined;
+    }
+
+    const docs = doc.docsForPos(params.position);
+
+    const rrr = docs.flatMap(
+      (x) => tsService.getDefinitionAtPosition(x.doc.uri, x.offset) ?? []
+    );
+
+    // const definitions = docs
+    //   .flatMap(
+    //     (x) => tsService.getDefinitionAtPosition(x.doc.uri, x.offset) ?? []
+    //   )
+    const definitions = rrr
+      .map((x) => {
+        console.log("ff", x);
+
+        return mapDefinitionInfo(x, documentManager, true);
+      });
+
+    console.log("def", definitions);
+
+    return definitions;
+  });
+
+  connection.onHover((params) => {
+    console.log("doc", params.textDocument);
+    const uri = params.textDocument.uri;
+
+    const doc = documentManager.getDocument(uri);
+    if (!doc || !isVueDocument(doc)) {
+      return undefined;
+    }
+    const tsService = verterManager.getTsService(uri);
+    if (!tsService) {
+      return undefined;
+    }
+
+    const docs = doc.docsForPos(params.position);
+    const quickInfo = docs
+      .flatMap(({ doc, offset }) => {
+        const qq = tsService.getQuickInfoAtPosition(doc.uri, offset);
+        if (qq) {
+          return formatQuickInfo(qq, doc);
+        }
+      })
+      .find((x) => !!x);
+
+    console.log("ddd", docs, quickInfo);
+
+    return quickInfo;
+  });
 
   connection.onRequest("$/getCompiledCode", async (params) => {
-
     return {
       js: {
         code: "code",
@@ -95,10 +159,8 @@ export function startServer(options: LsConnectionOption = {}) {
     };
   });
 
-
   documentManager.listen(connection);
   connection.listen();
-
 }
 
-startServer()
+startServer();

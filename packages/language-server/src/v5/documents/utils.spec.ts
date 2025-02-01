@@ -12,7 +12,7 @@ import {
   isVueSubDocument,
   uriToVerterVirtual,
   uriToPath,
-  createSubDocument,
+  createSubDocumentUri,
   VerterVirtualFileScheme,
 } from "./utils.js";
 
@@ -276,27 +276,27 @@ describe("document utils", () => {
     it("creates a sub-document URI with the given ending", () => {
       const uri = "file:///some/path.vue";
       const ending = "template.js";
-      const subUri = createSubDocument(uri, ending);
+      const subUri = createSubDocumentUri(uri, ending);
       expect(subUri).toBe("file:///some/path.vue._VERTER_.template.js");
     });
 
     it("appends the required prefix before the ending", () => {
       const uri = "file:///some/path.vue";
       const ending = "script.ts";
-      const subUri = createSubDocument(uri, ending);
+      const subUri = createSubDocumentUri(uri, ending);
       expect(subUri).toBe("file:///some/path.vue._VERTER_.script.ts");
     });
 
     it("throw with non-vue URIs", () => {
       const uri = "file:///some/path.txt";
       const ending = "data.json";
-      expect(() => createSubDocument(uri, ending)).toThrowError();
+      expect(() => createSubDocumentUri(uri, ending)).toThrowError();
     });
 
     it("createSubDocument should be compatible with isVueSubDocument", () => {
       expect(
         isVueSubDocument(
-          createSubDocument("file:///some/path.vue", "bundle.ts")
+          createSubDocumentUri("file:///some/path.vue", "bundle.ts")
         )
       );
     });

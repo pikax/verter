@@ -4,7 +4,7 @@ import {
   Position as DocumentPosition,
   Range as DocumentRange,
 } from "vscode-languageserver-textdocument";
-import { createSubDocument } from "../../utils";
+import { createSubDocumentUri } from "../../utils";
 
 export type BlockId = "bundle" | "template" | "script" | "style";
 
@@ -35,6 +35,12 @@ export function processBlocks(
 
   const result: ProcessedBlock[] = [];
 
+  result.push({
+    blocks,
+    type: "bundle",
+    languageId: "ts",
+    uri: createSubDocumentUri(uri, "bundle.ts"),
+  });
   // template
   {
     const blocks = byTag.get("template");
@@ -44,7 +50,7 @@ export function processBlocks(
         blocks,
         type: "template",
         languageId: "tsx",
-        uri: createSubDocument(uri, "render.tsx"),
+        uri: createSubDocumentUri(uri, "render.tsx"),
       });
     }
   }
@@ -63,7 +69,7 @@ export function processBlocks(
         blocks,
         languageId,
         type: "script",
-        uri: createSubDocument(uri, "options.tsx"),
+        uri: createSubDocumentUri(uri, "options.tsx"),
       });
     }
   }
@@ -93,7 +99,7 @@ export function processBlocks(
         result.push({
           languageId,
           type: "style",
-          uri: createSubDocument(uri, "style." + languageId),
+          uri: createSubDocumentUri(uri, "style." + languageId),
           blocks: langBlocks,
         });
       }
@@ -112,7 +118,7 @@ export function processBlocks(
         type: "custom",
         blocks: Array.from(byTag.values()).flat(),
         languageId: "",
-        uri: createSubDocument(uri, "custom.temp"),
+        uri: createSubDocumentUri(uri, "custom.temp"),
       });
     }
   }

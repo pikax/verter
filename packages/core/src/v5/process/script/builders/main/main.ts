@@ -20,13 +20,13 @@ import { relative } from "node:path/posix";
 import { TemplateTypes } from "../../../../parser/template/types";
 
 export function ResolveOptionsFilename(filename: string) {
-  return `${filename}.bundle.ts`;
+  return `${filename}.bundle`;
 }
 
 export function buildOptions(
   items: ScriptItem[],
   context: Partial<ScriptContext> &
-    Pick<ProcessContext, "filename" | "s" | "blocks" | "block">
+    Pick<ProcessContext, "filename" | "s" | "blocks" | "block" | "override">
 ) {
   const template = context.blocks.find((x) => x.type === "template");
 

@@ -8,6 +8,10 @@ import { ScriptItem } from "../parser/script";
 export type ProcessContext = {
   filename: string;
   s: MagicString;
+  /**
+   * Uses the passed `s` instead of clone it
+   */
+  override?: boolean;
 
   isAsync: boolean;
   generic: GenericInfo | null;
