@@ -9,6 +9,8 @@ import {
   isVueFile,
   isVueSubDocument,
   uriToPath,
+  toVueParentDocument,
+  uriToVerterVirtual,
 } from "../../utils";
 import { VueDocument } from "../vue";
 import { VueTypescriptDocument } from "../vue/sub";
@@ -166,7 +168,6 @@ export function getTypescriptService(
       // console.log("p", e);
       // console.log("pp", tsSystem.resolvePath(e));
       return tsSystem.resolvePath(e);
-      return e;
     },
     compilerOptions
   );
@@ -269,13 +270,17 @@ export function getTypescriptService(
       containingSourceFile,
       reusedNames
     ) {
+
+      if(isVueFile(containingFile)) {
+        containingFile = createSubDocumentUri(containingFile, 'bundle.ts');
+      }
       const modules = moduleLiterals.map((x) => {
-        // const h = this;
+        const h = this;
         let moduleLoc = x.text;
 
         if (isVueFile(moduleLoc)) {
           // .ts is inferred
-          moduleLoc = createSubDocumentUri(moduleLoc, "bundle");
+          moduleLoc = createSubDocumentUri(moduleLoc, "bundle.ts");
         }
         switch (options.moduleResolution) {
           case ts.ModuleResolutionKind.Classic: {
@@ -296,7 +301,7 @@ export function getTypescriptService(
               moduleLoc,
               containingFile,
               options,
-              host,
+              h,
               moduleCache,
               redirectedReference
             );
@@ -307,10 +312,29 @@ export function getTypescriptService(
               moduleLoc,
               containingFile,
               options,
-              host,
+              h,
               moduleCache,
               redirectedReference
             );
+
+            if (isVueFile(x.text)) {
+              if (r.resolvedModule) {
+                if (
+                  r.resolvedModule.resolvedFileName.endsWith(
+                    createSubDocumentUri(".vue", "bundle.ts")
+                  )
+                ) {
+                  const originalPath = toVueParentDocument(
+                    r.resolvedModule.resolvedFileName
+                  );
+                  r.resolvedModule.originalPath = originalPath;
+                  r.resolvedModule.resolvedFileName = uriToVerterVirtual(
+                    r.resolvedModule.resolvedFileName
+                  );
+                  r.resolvedModule.resolvedUsingTsExtension = false;
+                }
+              }
+            }
 
             return r;
         }

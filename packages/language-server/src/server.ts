@@ -147,9 +147,21 @@ export function startServer(options: LsConnectionOption = {}) {
   });
 
   connection.onRequest("$/getCompiledCode", async (params) => {
+    const doc = documentManager.getDocument(params);
+
+    if (!doc || !isVueDocument(doc)) {
+      return null;
+    }
+
+    
+
+
     return {
       js: {
-        code: "code",
+        code: doc.docs.map(x=> `// start ${x.uri}\n
+${x.getText()}
+
+//end ${x.uri}\n`).join("\n//-----\n"),
         map: "map",
       },
       css: {

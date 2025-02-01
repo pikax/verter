@@ -74,3 +74,10 @@ export function uriToPath(uri: string) {
   const p = url.fsPath.replace(/\\/g, "/");
   return p;
 }
+
+
+// export function retrieveFileExtension(uri: string) {
+//   const url = URI.parse(uri);
+//   url.
+//   return url.path.split(".").pop() ?? "";
+// }

@@ -20,7 +20,10 @@ import { relative } from "node:path/posix";
 import { TemplateTypes } from "../../../../parser/template/types";
 
 export function ResolveOptionsFilename(filename: string) {
-  return `${filename}.bundle`;
+  if(!filename.endsWith('.vue')) {
+    filename = filename.slice(0, filename.lastIndexOf('.vue') + 4);
+  }
+  return `${filename}.options.ts`;
 }
 
 export function buildOptions(

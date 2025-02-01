@@ -7,6 +7,7 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import { VerterDocument, VueDocument } from "../verter/index.js";
 import type { IScriptSnapshot } from "typescript";
 import { readFileSync, existsSync } from "node:fs";
+import { extname} from "node:path";
 
 import {
   isVueDocument,
@@ -104,6 +105,8 @@ export class DocumentManager implements Disposable {
           c
         );
       }
+
+      console.log('ext', extname(filepath));
       this._files.set(filepath, d);
       this._files.set(uri, d);
       return c;

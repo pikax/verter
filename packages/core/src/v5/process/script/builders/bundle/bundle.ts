@@ -43,7 +43,7 @@ export function buildBundle(
           const resolveSlotsName = ctx.prefix("resolveSlots");
 
           imports.push({
-            from: relative(ctx.filename, ResolveOptionsFilename(ctx.filename)),
+            from:  `./${ResolveOptionsFilename(ctx.filename).split("/").pop() ?? ""}`,
             items: [
               { name: defaultOptionsName },
               { name: resolvePropsName },
@@ -53,7 +53,7 @@ export function buildBundle(
 
           const importsStr = generateImport(imports);
           const compName = capitalize(
-            camelize(ctx.filename.split("/").pop()?.slice(0, -4) ?? "Comp")
+            camelize(ctx.filename.split("/").pop()?.split('.').shift() ?? "Comp")
           );
 
           const sanitisedNames = ctx.generic
