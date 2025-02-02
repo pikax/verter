@@ -126,7 +126,7 @@ export function processTemplate(
     ..._context,
   };
 
-  const s = context.s.clone();
+  const s = context.override ? context.s : context.s.clone();
 
   const pluginsByType = {
     [TemplateTypes.SlotDeclaration]: [],
