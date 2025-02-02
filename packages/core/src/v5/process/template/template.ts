@@ -101,7 +101,10 @@ export function processTemplate(
   items: TemplateItem[],
   plugins: TemplatePlugin[],
   _context: Partial<TemplateContext> &
-    Pick<ProcessContext, "filename" | "s" | "blocks" | "block">
+    Pick<
+      ProcessContext,
+      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
+    >
 ) {
   const context: TemplateContext = {
     generic: null,

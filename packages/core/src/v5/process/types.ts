@@ -12,6 +12,7 @@ export type ProcessContext = {
    * Uses the passed `s` instead of clone it
    */
   override?: boolean;
+  blockNameResolver: (name: string) => string;
 
   isAsync: boolean;
   generic: GenericInfo | null;

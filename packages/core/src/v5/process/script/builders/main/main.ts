@@ -19,17 +19,19 @@ import {
 import { relative } from "node:path/posix";
 import { TemplateTypes } from "../../../../parser/template/types";
 
-export function ResolveOptionsFilename(filename: string) {
-  if(!filename.endsWith('.vue')) {
-    filename = filename.slice(0, filename.lastIndexOf('.vue') + 4);
-  }
-  return `${filename}.options.ts`;
+export function ResolveOptionsFilename(
+  ctx: Required<Pick<ProcessContext, "blockNameResolver">>
+) {
+  return ctx.blockNameResolver(`options.ts`);
 }
 
 export function buildOptions(
   items: ScriptItem[],
   context: Partial<ScriptContext> &
-    Pick<ProcessContext, "filename" | "s" | "blocks" | "block" | "override">
+    Pick<
+      ProcessContext,
+      "filename" | "s" | "blocks" | "block" | "override" | "blockNameResolver"
+    >
 ) {
   const template = context.blocks.find((x) => x.type === "template");
 

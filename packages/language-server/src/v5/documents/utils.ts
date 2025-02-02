@@ -21,6 +21,9 @@ export function pathToUri(filepath: string) {
   if (filepath.startsWith("file:///")) {
     return filepath;
   }
+  if (isVerterVirtual(filepath)) {
+    return filepath;
+  }
   return URI.file(filepath).toString();
 }
 
@@ -46,11 +49,13 @@ export function createSubDocumentUri(uri: string, ending: string) {
 export function uriToVerterVirtual(uri: string) {
   if (isVueFile(uri) || isVueSubDocument(uri)) {
     if (!isVerterVirtual(uri)) {
-      const parsed = URI.parse(uri);
-      uri = URI.from({
-        ...parsed,
-        scheme: "file",
-      }).toString();
+      const parsed = uri.startsWith("file:///")
+        ? URI.parse(uri)
+        : URI.file(uri);
+      // uri = `${VerterVirtualFileScheme}://${parsed.path}`;
+      uri = `${VerterVirtualFileScheme}${parsed
+        .toString()
+        .slice(parsed.scheme.length)}`;
     }
     return uri;
   }
@@ -74,7 +79,6 @@ export function uriToPath(uri: string) {
   const p = url.fsPath.replace(/\\/g, "/");
   return p;
 }
-
 
 // export function retrieveFileExtension(uri: string) {
 //   const url = URI.parse(uri);

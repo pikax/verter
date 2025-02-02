@@ -12,7 +12,10 @@ export function processScript(
   items: ScriptItem[],
   plugins: ScriptPlugin[],
   _context: Partial<ScriptContext> &
-    Pick<ProcessContext, "filename" | "s" | "blocks" | "block">
+    Pick<
+      ProcessContext,
+      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
+    >
 ) {
   const context: ScriptContext = {
     generic: null,

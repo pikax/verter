@@ -22,8 +22,6 @@ export function formatQuickInfo(
 ) {
   const contents = itemToMarkdown(quickInfo);
 
-  console.log("sssd", quickInfo.displayParts);
-
   const str =
     "```ts\n" +
     ts.displayPartsToString(quickInfo.displayParts) +

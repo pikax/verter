@@ -4,12 +4,17 @@ import {
   TextDocuments,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
-import { VerterDocument, VueDocument } from "../verter/index.js";
+import {
+  TypescriptDocument,
+  VerterDocument,
+  VueDocument,
+} from "../verter/index.js";
 import type { IScriptSnapshot } from "typescript";
 import { readFileSync, existsSync } from "node:fs";
-import { extname} from "node:path";
+import { extname } from "node:path";
 
 import {
+  isVerterVirtual,
   isVueDocument,
   isVueFile,
   isVueSubDocument,
@@ -63,6 +68,7 @@ export class DocumentManager implements Disposable {
     content: string,
     version: number = 1
   ) {
+    console.log("createDocument doc", uri);
     const filepath = uriToPath(uri);
     if (isVueFile(uri)) {
       const doc = VueDocument.create(uri, content, version);
@@ -70,7 +76,12 @@ export class DocumentManager implements Disposable {
       this._files.set(filepath, doc);
       return doc;
     } else {
-      const doc = VerterDocument.createDoc(uri, languageId, version, content);
+      const doc = TypescriptDocument.create(
+        uri,
+        languageId as any,
+        version,
+        content
+      );
       this._files.set(uri, doc);
       this._files.set(filepath, doc);
       return doc;
@@ -78,6 +89,9 @@ export class DocumentManager implements Disposable {
   }
 
   fileExists(filepath: string) {
+    // normalise path
+    filepath = uriToPath(filepath);
+
     if (isVueSubDocument(filepath)) {
       filepath = toVueParentDocument(filepath);
     }
@@ -86,27 +100,37 @@ export class DocumentManager implements Disposable {
       return true;
     }
 
-    return existsSync(filepath);
+    // normalise path
+    filepath = uriToPath(filepath);
+
+    const exists = existsSync(filepath);
+
+    return exists;
   }
 
   readFile(filepath: string, encoding: BufferEncoding = "utf-8") {
+    // if (isVerterVirtual(filepath)) {
+    // normalise path
+    filepath = uriToPath(filepath);
+    // }
     let d = this._files.get(filepath);
     if (!d) {
+      console.log("readFile doc", filepath);
+
       const c = readFileSync(filepath, { encoding });
       const uri = pathToUri(filepath);
 
       if (isVueFile(filepath)) {
         d = VueDocument.create(uri, c, 0);
       } else {
-        d = VerterDocument.createDoc(
+        d = TypescriptDocument.create(
           uri,
-          filepath.split(".").pop() ?? "ts",
+          filepath.split(".").pop() ?? ("ts" as any),
           0,
           c
         );
       }
 
-      console.log('ext', extname(filepath));
       this._files.set(filepath, d);
       this._files.set(uri, d);
       return c;
@@ -118,6 +142,9 @@ export class DocumentManager implements Disposable {
   getDocument(filename: string) {
     if (isVueSubDocument(filename)) {
       filename = toVueParentDocument(filename);
+    }
+    if (isVerterVirtual(filename)) {
+      filename = uriToPath(filename);
     }
     let d = this._files.get(filename);
     if (!d) {

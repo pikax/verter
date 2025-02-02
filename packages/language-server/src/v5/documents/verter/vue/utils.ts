@@ -4,7 +4,7 @@ import {
   Position as DocumentPosition,
   Range as DocumentRange,
 } from "vscode-languageserver-textdocument";
-import { createSubDocumentUri } from "../../utils";
+import { createSubDocumentUri, uriToVerterVirtual } from "../../utils";
 
 export type BlockId = "bundle" | "template" | "script" | "style";
 
@@ -39,7 +39,7 @@ export function processBlocks(
     blocks,
     type: "bundle",
     languageId: "ts",
-    uri: createSubDocumentUri(uri, "bundle.ts"),
+    uri: uriToVerterVirtual(createSubDocumentUri(uri, "bundle.ts")),
   });
   // template
   {
@@ -50,7 +50,7 @@ export function processBlocks(
         blocks,
         type: "template",
         languageId: "tsx",
-        uri: createSubDocumentUri(uri, "render.tsx"),
+        uri: uriToVerterVirtual(createSubDocumentUri(uri, "render.tsx")),
       });
     }
   }
@@ -69,7 +69,7 @@ export function processBlocks(
         blocks,
         languageId,
         type: "script",
-        uri: createSubDocumentUri(uri, "options.tsx"),
+        uri: uriToVerterVirtual(createSubDocumentUri(uri, "options.tsx")),
       });
     }
   }
@@ -99,7 +99,9 @@ export function processBlocks(
         result.push({
           languageId,
           type: "style",
-          uri: createSubDocumentUri(uri, "style." + languageId),
+          uri: uriToVerterVirtual(
+            createSubDocumentUri(uri, "style." + languageId)
+          ),
           blocks: langBlocks,
         });
       }
@@ -118,7 +120,7 @@ export function processBlocks(
         type: "custom",
         blocks: Array.from(byTag.values()).flat(),
         languageId: "",
-        uri: createSubDocumentUri(uri, "custom.temp"),
+        uri: uriToVerterVirtual(createSubDocumentUri(uri, "custom.temp")),
       });
     }
   }

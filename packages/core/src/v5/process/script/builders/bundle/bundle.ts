@@ -10,16 +10,19 @@ import { ScriptContext } from "../../types";
 import { relative } from "node:path/posix";
 import { ResolveOptionsFilename } from "../main";
 
-// import
-
-export function ResolveBundleFilename(filename: string) {
-  return `${filename}.bundle.ts`;
+export function ResolveBundleFilename(
+  ctx: Required<Pick<ProcessContext, "blockNameResolver">>
+) {
+  return ctx.blockNameResolver(`bundle.ts`);
 }
 
 export function buildBundle(
   items: ScriptItem[],
   context: Partial<ScriptContext> &
-    Pick<ProcessContext, "filename" | "s" | "blocks" | "block">
+    Pick<
+      ProcessContext,
+      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
+    >
 ) {
   return processScript(
     items,
@@ -41,9 +44,9 @@ export function buildBundle(
           const defaultOptionsName = ctx.prefix("default");
           const resolvePropsName = ctx.prefix("resolveProps");
           const resolveSlotsName = ctx.prefix("resolveSlots");
-
+          ctx.blockNameResolver;
           imports.push({
-            from:  `./${ResolveOptionsFilename(ctx.filename).split("/").pop() ?? ""}`,
+            from: `./${ResolveOptionsFilename(ctx).split("/").pop() ?? ""}`,
             items: [
               { name: defaultOptionsName },
               { name: resolvePropsName },
@@ -53,7 +56,9 @@ export function buildBundle(
 
           const importsStr = generateImport(imports);
           const compName = capitalize(
-            camelize(ctx.filename.split("/").pop()?.split('.').shift() ?? "Comp")
+            camelize(
+              ctx.filename.split("/").pop()?.split(".").shift() ?? "Comp"
+            )
           );
 
           const sanitisedNames = ctx.generic

@@ -1,5 +1,4 @@
 import type LSP from "vscode-languageserver-protocol";
-
 import ts, { sortAndDeduplicateDiagnostics } from "typescript";
 import fsPath from "path";
 import { DocumentManager } from "../../manager";
@@ -270,9 +269,8 @@ export function getTypescriptService(
       containingSourceFile,
       reusedNames
     ) {
-
-      if(isVueFile(containingFile)) {
-        containingFile = createSubDocumentUri(containingFile, 'bundle.ts');
+      if (isVueFile(containingFile)) {
+        containingFile = createSubDocumentUri(containingFile, "bundle.ts");
       }
       const modules = moduleLiterals.map((x) => {
         const h = this;
@@ -340,141 +338,21 @@ export function getTypescriptService(
         }
       });
 
+      // // TODO add debug flag
+      // if (true) {
+      //   const emptyModules = modules
+      //     .map((x, i) => (!x.resolvedModule ? i : false))
+      //     .filter((x) => x !== false)
+      //     .map((x: number) => moduleLiterals[x].text);
+      //   if (emptyModules.length > 0) {
+      //     console.warn("Modules missing!", emptyModules);
+      //   }
+      // }
+
       return modules;
     },
 
-    // resolveModuleNameLiterals(
-    //   moduleLiterals,
-    //   containingFile,
-    //   redirectedReference,
-    //   options,
-    //   containingSourceFile,
-    //   reusedNames
-    // ) {
-
-    //   if (isVerterVirtual(containingFile)) {
-    //     containingFile = uriToPath(containingFile)!;
-    //   }
-    //   if (containingFile.endsWith(".vue")) {
-    //     // containingFile =
-    //     //   retrieveVueFileFromBlockUri(containingFile) + ".bundle.ts";
-    //     containingFile += ".bundle.ts";
-    //   }
-    //   const modules = moduleLiterals.map((x) => {
-    //     const h = this;
-    //     // const h = ts.sys;
-
-    //     let moduleLoc = x.text;
-
-    //     // if (~x.text.indexOf("vue")) {
-    //     //   debugger;
-    //     // }
-
-    //     if (moduleLoc.endsWith(".vue")) {
-    //       moduleLoc = x.text + ".bundle.ts";
-    //     }
-
-    //     switch (options.moduleResolution) {
-    //       case ts.ModuleResolutionKind.Classic: {
-    //         return ts.resolveModuleName(
-    //           moduleLoc,
-    //           containingFile,
-    //           options,
-    //           h,
-    //           moduleCache,
-    //           redirectedReference
-    //         );
-    //       }
-    //       case ts.ModuleResolutionKind.NodeJs:
-    //       case ts.ModuleResolutionKind.Node10:
-    //       case ts.ModuleResolutionKind.Node16:
-    //       case ts.ModuleResolutionKind.NodeNext: {
-    //         return ts.nodeModuleNameResolver(
-    //           moduleLoc,
-    //           containingFile,
-    //           options,
-    //           h,
-    //           moduleCache,
-    //           redirectedReference
-    //         );
-    //       }
-    //       case ts.ModuleResolutionKind.Bundler:
-    //       default:
-    //         const r = ts.bundlerModuleNameResolver(
-    //           moduleLoc,
-    //           containingFile,
-    //           options,
-    //           h,
-    //           moduleCache,
-    //           redirectedReference
-    //         );
-
-    //         if (x.text.endsWith(".vue")) {
-    //           if (r.resolvedModule) {
-    //             if (
-    //               r.resolvedModule.resolvedFileName.endsWith(".vue.bundle.ts")
-    //             ) {
-    //               // console.log(
-    //               //   "up resolved",
-    //               //   r,
-    //               //   uriToVerterVirtual(
-    //               //     r.resolvedModule.resolvedFileName.slice(0, -4)
-    //               //   )
-    //               // );
-
-    //               const originalPath = retrieveVueFileFromBlockUri(
-    //                 r.resolvedModule.resolvedFileName
-    //               );
-    //               // @ts-expect-error
-    //               r.resolvedModule.originalPath = originalPath;
-    //               r.resolvedModule.resolvedFileName = uriToVerterVirtual(
-    //                 r.resolvedModule.resolvedFileName
-    //               );
-
-    //               // r.resolvedModule.resolvedFileName =
-    //               //   uriToVerterVirtual(originalPath);
-    //               r.resolvedModule.resolvedUsingTsExtension = false;
-
-    //               // r.resolvedModule.resolvedFileName =
-    //               //   r.resolvedModule.resolvedFileName.slice(0, -4);
-
-    //               // r.resolvedModule.extension = ".vue";
-    //             } else {
-    //               debugger;
-    //             }
-    //           } else {
-    //             console.log("no resolved module", containingFile, x.text);
-    //             // debugger;
-    //           }
-    //         }
-    //         // console.log("sss", r);
-    //         return r;
-    //     }
-    //   });
-
-    //   // TODO add debug flag
-    //   if (true) {
-    //     const emptyModules = modules
-    //       .map((x, i) => (!x.resolvedModule ? i : false))
-    //       .filter((x) => x !== false)
-    //       .map((x: number) => moduleLiterals[x].text);
-    //     if (emptyModules.length > 0) {
-    //       console.warn("Modules missing!", emptyModules);
-    //     }
-    //   }
-
-    //   return modules;
-    // },
-
     realpath: (filename) => {
-      // if(isVueSubDocument(filename)) {
-
-      // }
-
-      // if (filename.endsWith(".vue") || filename.endsWith(".vue.bundle.ts")) {
-      //   debugger;
-      //   0;
-      // }
       return tsSystem.realpath?.(filename) ?? filename;
     },
   };

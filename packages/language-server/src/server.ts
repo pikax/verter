@@ -106,14 +106,9 @@ export function startServer(options: LsConnectionOption = {}) {
     //   .flatMap(
     //     (x) => tsService.getDefinitionAtPosition(x.doc.uri, x.offset) ?? []
     //   )
-    const definitions = rrr
-      .map((x) => {
-        console.log("ff", x);
-
-        return mapDefinitionInfo(x, documentManager, true);
-      });
-
-    console.log("def", definitions);
+    const definitions = rrr.map((x) => {
+      return mapDefinitionInfo(x, documentManager, true);
+    });
 
     return definitions;
   });
@@ -141,8 +136,6 @@ export function startServer(options: LsConnectionOption = {}) {
       })
       .find((x) => !!x);
 
-    console.log("ddd", docs, quickInfo);
-
     return quickInfo;
   });
 
@@ -153,15 +146,16 @@ export function startServer(options: LsConnectionOption = {}) {
       return null;
     }
 
-    
-
-
     return {
       js: {
-        code: doc.docs.map(x=> `// start ${x.uri}\n
+        code: doc.docs
+          .map(
+            (x) => `// start ${x.uri}\n
 ${x.getText()}
 
-//end ${x.uri}\n`).join("\n//-----\n"),
+//end ${x.uri}\n`
+          )
+          .join("\n//-----\n"),
         map: "map",
       },
       css: {

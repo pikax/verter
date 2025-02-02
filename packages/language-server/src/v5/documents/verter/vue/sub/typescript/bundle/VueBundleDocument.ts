@@ -2,7 +2,7 @@ import { buildBundle, ScriptItem } from "@verter/core";
 import { SubDocumentProcessContext } from "../../sub.js";
 import { LanguageTypescript, VueTypescriptDocument } from "../typescript.js";
 import { ParsedBlockScript } from "@verter/core/dist/v5/parser/types.js";
-import { uriToPath } from "../../../../../utils.js";
+import { createSubDocumentUri, uriToPath } from "../../../../../utils.js";
 import { VueDocument } from "../../../vue.js";
 
 export class VueBundleDocument extends VueTypescriptDocument {
@@ -30,6 +30,10 @@ export class VueBundleDocument extends VueTypescriptDocument {
         block,
         filename: uriToPath(this.uri),
         override: true,
+        blockNameResolver: (name) => {
+          const n = this.parent.uri.split("/").pop() ?? "Comp.vue";
+          return createSubDocumentUri(n, name);
+        },
       }
     );
   }

@@ -17,11 +17,11 @@ export class VueDocument extends VerterDocument {
     return new VueDocument(uri, version ?? -1, content);
   }
 
-  private _dirty = false;
+  private _docs_dirty = false;
 
   private _context: ParserResult | null = null;
   get context() {
-    if (this._dirty || !this._context) {
+    if (!this._context) {
       this._context = parser(this.getText(), uriToPath(this.uri));
     }
     return this._context;
@@ -29,7 +29,7 @@ export class VueDocument extends VerterDocument {
 
   private _blocks: ProcessedBlock[] | null = null;
   get blocks() {
-    if (!this._blocks || this._dirty) {
+    if (!this._blocks) {
       this._blocks = processBlocks(this.uri, this.context.blocks);
     }
     return this._blocks;
@@ -37,7 +37,7 @@ export class VueDocument extends VerterDocument {
 
   private _docs: VueSubDocument[] | null = null;
   get docs() {
-    if (this._dirty || !this._docs) {
+    if (this._docs_dirty || !this._docs) {
       const blocks = this.blocks;
       const docs = this._docs ?? [];
       const processed = new Set<any>();
@@ -66,6 +66,7 @@ export class VueDocument extends VerterDocument {
       }
 
       this._docs = docs;
+      this._docs_dirty = false;
     }
 
     return this._docs;
@@ -76,9 +77,9 @@ export class VueDocument extends VerterDocument {
   }
 
   update(content: string, version?: number) {
-    this._dirty = true;
-    // this._context = null;
-    // this._blocks  = null
+    this._docs_dirty = true;
+    this._context = null;
+    this._blocks = null;
 
     super.update(content, version);
     return this;
