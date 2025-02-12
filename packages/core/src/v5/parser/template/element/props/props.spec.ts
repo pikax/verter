@@ -1244,6 +1244,15 @@ describe("parser template element props", () => {
 
         expectMapping(result, source);
       });
+
+      // editor
+      it.only('partial as', ()=> {
+        const { result, source } = parse(`<span :item="item as "/>`, {
+          ignoredIdentifiers:[]
+        });
+        expect(result).toMatchObject([])
+
+      })
     });
 
     describe("v-on", () => {

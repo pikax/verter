@@ -27,6 +27,7 @@ import { walk } from "@vue/compiler-sfc";
 import * as babel_types from "@babel/types";
 import { patchBabelNodeLoc } from "../../utils/node/node.js";
 import { VerterASTNode } from "../ast/types.js";
+import { parseAcornLoose } from "../ast/ast.js";
 
 export function retrieveBindings(
   exp: ExpressionNode,
@@ -55,18 +56,22 @@ export function retrieveBindings(
   } else if (exp.ast) {
     bindings.push(...getASTBindings(exp.ast, context, exp));
   } else {
-    bindings.push({
-      type: TemplateTypes.Binding,
-      node: exp,
-      context,
+    const ast = parseAcornLoose(exp.content);
+    // if we parsed the AST, let's return as is, because is most likely invalid
+    if (!ast)  {
+      bindings.push({
+        type: TemplateTypes.Binding,
+        node: exp,
+        context,
 
-      value: exp.content,
-      invalid: true,
-      ignore: false,
-      name: undefined,
-      parent: null,
-      exp,
-    });
+        value: exp.content,
+        invalid: true,
+        ignore: false,
+        name: undefined,
+        parent: null,
+        exp,
+      });
+    }
   }
 
   return bindings;
