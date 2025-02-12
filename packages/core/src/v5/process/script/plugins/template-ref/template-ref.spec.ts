@@ -47,6 +47,7 @@ describe("process script plugin template-ref", () => {
         template?.result?.items.filter(
           (x) => x.type === TemplateTypes.Binding
         ) ?? [],
+        blockNameResolver: (name) => name,
     });
     return r;
   }

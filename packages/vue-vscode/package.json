@@ -22,8 +22,8 @@
   "author": "Carlos Rodrigues <pikax>",
   "license": "MIT",
   "dependencies": {
-    "@types/lodash": "^4.17.14",
-    "@types/vscode": "^1.96.0",
+    "@types/lodash": "^4.17.15",
+    "@types/vscode": "^1.97.0",
     "@verter/language-server": "workspace:^",
     "@verter/language-shared": "workspace:^",
     "@verter/typescript-plugin": "workspace:^",
@@ -36,9 +36,9 @@
     "vscode-languageserver-types": "^3.17.5"
   },
   "devDependencies": {
-    "@vscode/vsce": "^3.2.1",
+    "@vscode/vsce": "^3.2.2",
     "typescript": "^5.7.3",
-    "vite": "^6.0.7"
+    "vite": "^6.1.0"
   },
   "files": [
     "dist",

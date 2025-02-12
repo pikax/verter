@@ -178,7 +178,7 @@ export function getTypescriptService(
     getDefaultLibFileName: ts.getDefaultLibFilePath,
 
     readFile: (filepath, encoding) => {
-      return documentManager.readFile(filepath, encoding);
+      return documentManager.readFile(filepath, encoding as BufferEncoding);
     },
     fileExists: (filepath) => {
       return documentManager.fileExists(filepath);
@@ -190,7 +190,7 @@ export function getTypescriptService(
     readDirectory(path, extensions, exclude, include, depth) {
       return tsSystem.readDirectory(
         path,
-        [...extensions, ".vue"],
+        [...extensions ??[], ".vue"],
         exclude,
         include,
         depth
@@ -325,6 +325,7 @@ export function getTypescriptService(
                   const originalPath = toVueParentDocument(
                     r.resolvedModule.resolvedFileName
                   );
+                  // @ts-expect-error not part of the object
                   r.resolvedModule.originalPath = originalPath;
                   r.resolvedModule.resolvedFileName = uriToVerterVirtual(
                     r.resolvedModule.resolvedFileName

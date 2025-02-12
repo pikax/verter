@@ -45,7 +45,7 @@ function handleObjectDeclaration(node: ObjectExpression): {
       case "SpreadElement": {
         break;
       }
-      case "ObjectProperty": {
+      case "Property": {
         const key = property.key;
         const value = property.value;
 

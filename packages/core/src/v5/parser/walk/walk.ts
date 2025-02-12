@@ -24,13 +24,21 @@ export function shallowWalk(
     for (let i = 0; i < root.body.length; i++) {
       cb(root.body[i]);
     }
-  } else if (root.type === "FunctionBody") {
-    for (let i = 0; i < root.statements.length; i++) {
-      cb(root.statements[i]);
+  } else if (root.type === "FunctionExpression") {
+    if (root.body) {
+      for (let i = 0; i < root.body.body.length; i++) {
+        cb(root.body.body[i]);
+      }
+    }
+  } else if (root.type === "BlockStatement") {
+    for (let i = 0; i < root.body.length; i++) {
+      cb(root.body[i]);
     }
   } else if (root.body) {
-    for (let i = 0; i < root.body.statements.length; i++) {
-      cb(root.body.statements[i]);
+    if (root.body.type === "BlockStatement") {
+      for (let i = 0; i < root.body.body.length; i++) {
+        cb(root.body.body[i]);
+      }
     }
   }
 }

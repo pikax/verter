@@ -109,7 +109,7 @@ export function mapDefinitionInfo(
       )
     : undefined;
 
-  let textSpan = Range.create(
+  let textSpan : Range | undefined = Range.create(
     doc.positionAt(info.textSpan.start),
     doc.positionAt(info.textSpan.start + info.textSpan.length)
   );

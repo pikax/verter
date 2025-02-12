@@ -276,7 +276,7 @@ function retrieveDeclarationStringValueFromObject(
     if (!part) break;
     const property = object.properties.find(
       (x) =>
-        x.type === "ObjectProperty" &&
+        x.type === "Property" &&
         x.key.type === "Identifier" &&
         x.key.name === part
     ) as ObjectProperty | undefined;

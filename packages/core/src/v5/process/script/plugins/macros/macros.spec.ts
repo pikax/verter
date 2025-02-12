@@ -251,7 +251,7 @@ describe("process script plugin script block", () => {
               type: "ObjectExpression",
               properties: [
                 {
-                  type: "ObjectProperty",
+                  type: "Property",
                   key: { type: "Identifier", name: "a" },
                   value: { type: "Literal", value: 0 },
                 },
