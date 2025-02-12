@@ -73,58 +73,66 @@ export function parser(
     },
   });
 
-  const blocks = extractBlocksFromDescriptor(sfcParse.descriptor).map((x) => {
-    const languageId = findBlockLanguage(x);
-    switch (languageId) {
-      case "vue":
-        const ast = parseTemplate(
-          (x.block as SFCTemplateBlock).ast!,
-          x.block.content
-        );
+  const blocks = extractBlocksFromDescriptor(sfcParse.descriptor)
+    // sort template to last
+    .sort((a, b) => {
+      if (a.tag.type === "template") return 1;
+      if (b.tag.type === "template") return -1;
+      return 0;
+    })
+    .map((x) => {
+      const languageId = findBlockLanguage(x);
+      switch (languageId) {
+        case "vue":
+          const ast = parseTemplate(
+            (x.block as SFCTemplateBlock).ast!,
+            x.block.content,
+            generic?.names
+          );
 
-        return {
-          type: "template",
-          lang: languageId,
-          block: x,
-          result: ast,
-        } as ParsedBlockTemplate;
-      case "ts":
-      case "tsx": {
-        if (
-          x.block.attrs.generic &&
-          typeof x.block.attrs.generic === "string"
-        ) {
-          generic = parseGeneric(x.block.attrs.generic);
+          return {
+            type: "template",
+            lang: languageId,
+            block: x,
+            result: ast,
+          } as ParsedBlockTemplate;
+        case "ts":
+        case "tsx": {
+          if (x.tag.attributes.generic && x.tag.attributes.generic.value) {
+            generic = parseGeneric(
+              x.tag.attributes.generic.value.content,
+              x.tag.attributes.generic.value.start
+            );
+          }
         }
-      }
-      case "js":
-      case "jsx": {
-        const prepend = "".padStart(x.block.loc.start.offset, " ");
-        const content = prepend + x.block.content;
+        case "js":
+        case "jsx": {
+          const prepend = "".padStart(x.block.loc.start.offset, " ");
+          const content = prepend + x.block.content;
 
-        const ast = parseAST(content, filename + "." + languageId);
-        const r = parseScript(ast, x.block.attrs);
-        isAsync = r.isAsync;
+          const ast = parseAST(content, filename + "." + languageId);
+          const r = parseScript(ast, x.block.attrs);
+          isAsync = r.isAsync;
 
-        return {
-          type: "script",
-          lang: languageId,
-          block: x,
-          result: r,
-          isMain:
-            x.block ===
-            (sfcParse.descriptor.scriptSetup || sfcParse.descriptor.script),
-        } as ParsedBlockScript;
+          return {
+            type: "script",
+            lang: languageId,
+            block: x,
+            result: r,
+            isMain:
+              x.block ===
+              (sfcParse.descriptor.scriptSetup || sfcParse.descriptor.script),
+          } as ParsedBlockScript;
+        }
+        default:
+          return {
+            type: x.tag.type,
+            lang: languageId,
+            block: x,
+            result: null,
+          } as ParsedBlockUnknown;
       }
-      default:
-        return {
-          type: x.tag.type,
-          lang: languageId,
-          block: x,
-          result: null,
-        } as ParsedBlockUnknown;
-    }
-  });
+    });
 
   return {
     filename,

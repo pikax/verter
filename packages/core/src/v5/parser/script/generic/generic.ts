@@ -56,10 +56,19 @@ export type GenericInfo = {
    * ```
    */
   declaration: string;
+
+  /**
+   * Position of the generic in the document
+   */
+  position: {
+    start: number;
+    end: number;
+  };
 };
 
 export function parseGeneric(
   genericStr: string,
+  offset: number = 0,
   prefix: string = "__VERTER__TS__"
 ): GenericInfo | null {
   if (!genericStr) return null;
@@ -128,5 +137,9 @@ export function parseGeneric(
     names,
     sanitisedNames,
     declaration,
+    position: {
+      start: offset,
+      end: offset + genericStr.length,
+    },
   };
 }

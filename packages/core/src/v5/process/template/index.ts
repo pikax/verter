@@ -15,6 +15,7 @@ export const DefaultPlugins = [
   Plugins.LoopPlugin,
   Plugins.DirectivePlugin,
   Plugins.ElementPlugin,
+  Plugins.TemplateTagPlugin
 ];
 
 

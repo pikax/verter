@@ -38,7 +38,8 @@ export type ParseTemplateContext = {
 
 export function parseTemplate(
   ast: RootNode,
-  source: string
+  source: string,
+  ignoredIdentifiers: string[] = []
 ): ParsedTemplateResult {
   const items: TemplateItem[] = [];
 
@@ -95,7 +96,7 @@ export function parseTemplate(
     {
       conditions: [],
       inFor: false,
-      ignoredIdentifiers: [],
+      ignoredIdentifiers,
     } as ParseTemplateContext
   );
 

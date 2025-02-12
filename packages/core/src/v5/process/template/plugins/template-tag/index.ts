@@ -1,0 +1,1 @@
+export { TemplateTagPlugin } from "./templateTag";
