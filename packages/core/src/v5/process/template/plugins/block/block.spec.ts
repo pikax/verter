@@ -21,13 +21,6 @@ describe("process template plugins narrow", () => {
       [
         // BlockPlugin,
         ...DefaultPlugins,
-        // clean template tag
-        {
-          post: (s) => {
-            s.update(0, "<template>".length, "");
-            s.update(source.length - "</template>".length, source.length, "");
-          },
-        },
       ],
       {
         ...options,
@@ -36,6 +29,7 @@ describe("process template plugins narrow", () => {
         blocks: parsed.blocks,
         // narrow: true,
         block: templateBlock,
+        blockNameResolver: (name) => name,
       }
     );
 
@@ -48,7 +42,7 @@ describe("process template plugins narrow", () => {
         `<div v-if="typeof test === string" :test="()=>test" />`
       );
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{if(typeof ___VERTER___ctx.test === ___VERTER___ctx.string){<div  test={()=>___VERTER___ctx.test} />}}}"`
+        `"function template(){{()=>{if(typeof ___VERTER___ctx.test === ___VERTER___ctx.string){<div  test={()=>___VERTER___ctx.test} />}}}}"`
       );
     });
 
@@ -58,8 +52,8 @@ describe("process template plugins narrow", () => {
           <div v-else :test="()=>test" />`
       );
       expect(result).toMatchInlineSnapshot(`
-        "{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}
-                  else{<div  test={()=>___VERTER___ctx.test} />}}}"
+        "function template(){{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}
+                  else{<div  test={()=>___VERTER___ctx.test} />}}}}"
       `);
     });
 
@@ -70,9 +64,9 @@ describe("process template plugins narrow", () => {
           <div v-else :test="()=>test" />`
       );
       expect(result).toMatchInlineSnapshot(`
-        "{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}
+        "function template(){{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}
                   else if(typeof ___VERTER___ctx.test === 'number'){<div  test={()=>___VERTER___ctx.test} />}
-                  else{<div  test={()=>___VERTER___ctx.test} />}}}"
+                  else{<div  test={()=>___VERTER___ctx.test} />}}}}"
       `);
     });
 
@@ -84,10 +78,10 @@ describe("process template plugins narrow", () => {
           <div v-if="typeof test === 'string'" :test="()=>test" />`
       );
       expect(result).toMatchInlineSnapshot(`
-        "{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}
+        "function template(){{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}
                   else if(typeof ___VERTER___ctx.test === 'number'){<div  test={()=>___VERTER___ctx.test} />}
                   else{<div  test={()=>___VERTER___ctx.test} />}
-                  if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}}}"
+                  if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}}}}"
       `);
     });
   });
@@ -96,7 +90,7 @@ describe("process template plugins narrow", () => {
     it("v-slot simple", () => {
       const { result } = parse(`<div v-slot><span>test</span></div>`);
       expect(result).toMatchInlineSnapshot(
-        `"<div  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{<span>{"test"}</span>})}}></div>"`
+        `"function template(){<div  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{<span>{"test"}</span>})}}></div>}"`
       );
     });
     it("v-slot", () => {
@@ -104,7 +98,7 @@ describe("process template plugins narrow", () => {
         `<div v-slot="item" :test="()=>test"><span>test</span></div>`
       );
       expect(result).toMatchInlineSnapshot(
-        `"<div  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)((item)=>{<span>{"test"}</span>})}} test={()=>___VERTER___ctx.test}></div>"`
+        `"function template(){<div  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)((item)=>{<span>{"test"}</span>})}} test={()=>___VERTER___ctx.test}></div>}"`
       );
     });
 
@@ -113,7 +107,7 @@ describe("process template plugins narrow", () => {
         `<div v-slot="item" v-if="item" :test="()=>test"><span>test</span></div>`
       );
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{if(___VERTER___ctx.item){<div  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)((item)=>{if(!((___VERTER___ctx.item))) return;<span>{"test"}</span>})}}  test={()=>___VERTER___ctx.test}></div>}}}"`
+        `"function template(){{()=>{if(___VERTER___ctx.item){<div  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)((item)=>{if(!((___VERTER___ctx.item))) return;<span>{"test"}</span>})}}  test={()=>___VERTER___ctx.test}></div>}}}}"`
       );
     });
 
@@ -122,7 +116,7 @@ describe("process template plugins narrow", () => {
         `<div><template #slot><span>test</span></template></div>`
       );
       expect(result).toMatchInlineSnapshot(
-        `"<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.slot)(()=>{<template><span>{"test"}</span></template>});}}></div>"`
+        `"function template(){<div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.slot)(()=>{<template><span>{"test"}</span></template>});}}></div>}"`
       );
     });
   });
@@ -130,11 +124,11 @@ describe("process template plugins narrow", () => {
   describe("template", () => {
     it("<template></template>", () => {
       const { result } = parse(`<template></template>`);
-      expect(result).toMatchInlineSnapshot(`"{()=>{<template></template>}}"`);
+      expect(result).toMatchInlineSnapshot(`"function template(){{()=>{<template></template>}}}"`);
     });
     it("<template/>", () => {
       const { result } = parse(`<template/>`);
-      expect(result).toMatchInlineSnapshot(`"{()=>{<template/>}}"`);
+      expect(result).toMatchInlineSnapshot(`"function template(){{()=>{<template/>}}}"`);
     });
   });
 });

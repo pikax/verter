@@ -81,6 +81,10 @@ describe("parser", () => {
           "names": [
             "T",
           ],
+          "position": {
+            "end": 28,
+            "start": 27,
+          },
           "sanitisedNames": [
             "__VERTER__TS__T",
           ],
@@ -98,6 +102,10 @@ describe("parser", () => {
           "names": [
             "T",
           ],
+          "position": {
+            "end": 43,
+            "start": 27,
+          },
           "sanitisedNames": [
             "__VERTER__TS__T",
           ],
@@ -116,6 +124,10 @@ describe("parser", () => {
             "T",
             "U",
           ],
+          "position": {
+            "end": 46,
+            "start": 27,
+          },
           "sanitisedNames": [
             "__VERTER__TS__T",
             "__VERTER__TS__U",
@@ -135,6 +147,10 @@ describe("parser", () => {
             "T",
             "U",
           ],
+          "position": {
+            "end": 61,
+            "start": 27,
+          },
           "sanitisedNames": [
             "__VERTER__TS__T",
             "__VERTER__TS__U",
@@ -154,6 +170,10 @@ describe("parser", () => {
             "T",
             "U",
           ],
+          "position": {
+            "end": 88,
+            "start": 27,
+          },
           "sanitisedNames": [
             "__VERTER__TS__T",
             "__VERTER__TS__U",

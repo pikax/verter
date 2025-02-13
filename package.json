@@ -15,5 +15,13 @@
   "license": "ISC",
   "devDependencies": {
     "vitest": "^3.0.5"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@swc/core",
+      "@vscode/vsce-sign",
+      "esbuild",
+      "keytar"
+    ]
   }
 }

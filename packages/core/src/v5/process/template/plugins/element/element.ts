@@ -27,8 +27,6 @@ export const ElementPlugin = declareTemplatePlugin({
 
     const shouldWrap = item.tag.includes("-");
 
-    console.log("item", node.loc.source);
-
     const componentAccessor = ctx.retrieveAccessor("COMPONENT_CTX");
     s.prependRight(
       node.loc.start.offset + 1,

@@ -33,11 +33,7 @@ export function retrieveDeclarations(
     }
     case "ObjectPattern": {
       for (const prop of node.properties) {
-        if (
-          // @ts-expect-error only for acorn
-          prop.type === "Property" ||
-          prop.type === "BindingProperty"
-        ) {
+        if (prop.type === "Property") {
           if (prop.key === prop.value) {
             items.push(...retrieveDeclarations(prop.key, parent, prop));
           } else {

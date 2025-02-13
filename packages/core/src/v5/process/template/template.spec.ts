@@ -15,27 +15,14 @@ describe("process template", () => {
       (x) => x.type === "template"
     ) as ParsedBlockTemplate;
 
-    const r = processTemplate(
-      templateBlock.result.items,
-      [
-        ...DefaultPlugins,
-        // clean template tag
-        {
-          post: (s) => {
-            s.update(0, "<template>".length, "");
-            // s.remove(0, "<template>".length);
-            s.update(source.length - "</template>".length, source.length, "");
-          },
-        },
-      ],
-      {
-        ...options,
-        s,
-        filename: "test.vue",
-        blocks: parsed.blocks,
-        block: templateBlock,
-      }
-    );
+    const r = processTemplate(templateBlock.result.items, [...DefaultPlugins], {
+      ...options,
+      s,
+      filename: "test.vue",
+      blocks: parsed.blocks,
+      block: templateBlock,
+      blockNameResolver: (name) => name,
+    });
 
     return r;
   }
@@ -46,7 +33,7 @@ describe("process template", () => {
         `<div :style="{ color: 'red' }" class="color: green" :class="{ color: 'red', test, super: foo }" />`
       );
       expect(result).toMatchInlineSnapshot(
-        `"<div style={___VERTER___normalizeStyle([{ color: 'red' }])}  class={___VERTER___normalizeClass([{ color: 'red', test: ___VERTER___ctx.test, super: ___VERTER___ctx.foo },"color: green"])} />"`
+        `"function template(){<div style={___VERTER___normalizeStyle([{ color: 'red' }])}  class={___VERTER___normalizeClass([{ color: 'red', test: ___VERTER___ctx.test, super: ___VERTER___ctx.foo },"color: green"])} />}"`
       );
     });
   });
@@ -57,11 +44,11 @@ describe("process template", () => {
         `<div v-if="typeof test === 'string'" :test="()=>test" />`
       );
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}}}"`
+        `"function template(){{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}}}}"`
       );
     });
 
-    it.only("v-if > v-if & expect error", () => {
+    it("v-if > v-if & expect error", () => {
       const { result } = parse(
         `<div v-if="test === 'app'"> 
           <!-- @ts-expect-error no overlap -->
@@ -69,10 +56,10 @@ describe("process template", () => {
         </div>`
       );
       expect(result).toMatchInlineSnapshot(`
-        "{()=>{if(___VERTER___ctx.test === 'app'){<div > 
+        "function template(){{()=>{if(___VERTER___ctx.test === 'app'){<div > 
                    {()=>{if(!((___VERTER___ctx.test === 'app'))) return;/* @ts-expect-error no overlap */
                  if(___VERTER___ctx.test === 'foo'){<div > {"Error"} </div>}}}
-                </div>}}}"
+                </div>}}}}"
       `);
     });
   });

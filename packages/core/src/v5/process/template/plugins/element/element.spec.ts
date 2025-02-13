@@ -19,26 +19,14 @@ describe("process template plugins element", () => {
       (x) => x.type === "template"
     ) as ParsedBlockTemplate;
 
-    const r = processTemplate(
-      templateBlock.result.items,
-      [
-        ...DefaultPlugins,
-        // clean template tag
-        {
-          post: (s) => {
-            s.update(0, "<template>".length, "");
-            s.update(source.length - "</template>".length, source.length, "");
-          },
-        },
-      ],
-      {
-        ...options,
-        s,
-        filename: "test.vue",
-        blocks: parsed.blocks,
-        block: templateBlock,
-      }
-    );
+    const r = processTemplate(templateBlock.result.items, [...DefaultPlugins], {
+      ...options,
+      s,
+      filename: "test.vue",
+      blocks: parsed.blocks,
+      block: templateBlock,
+      blockNameResolver: (name) => name,
+    });
 
     return r;
   }
@@ -47,7 +35,7 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Comp></Comp>`);
 
     expect(result).toMatchInlineSnapshot(
-      `"<___VERTER___COMPONENT_CTX.Comp></___VERTER___COMPONENT_CTX.Comp>"`
+      `"function template(){<___VERTER___COMPONENT_CTX.Comp></___VERTER___COMPONENT_CTX.Comp>}"`
     );
   });
 
@@ -55,7 +43,7 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Comp v-if="test"></Comp>`);
 
     expect(result).toMatchInlineSnapshot(
-      `"{()=>{if(___VERTER___ctx.test){<___VERTER___COMPONENT_CTX.Comp ></___VERTER___COMPONENT_CTX.Comp>}}}"`
+      `"function template(){{()=>{if(___VERTER___ctx.test){<___VERTER___COMPONENT_CTX.Comp ></___VERTER___COMPONENT_CTX.Comp>}}}}"`
     );
   });
 
@@ -63,7 +51,7 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Comp v-for="item in items"></Comp>`);
 
     expect(result).toMatchInlineSnapshot(
-      `"{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <___VERTER___COMPONENT_CTX.Comp ></___VERTER___COMPONENT_CTX.Comp>})}}"`
+      `"function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <___VERTER___COMPONENT_CTX.Comp ></___VERTER___COMPONENT_CTX.Comp>})}}}"`
     );
   });
 
@@ -71,7 +59,7 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Comp v-for="item in items" v-if="test"></Comp>`);
 
     expect(result).toMatchInlineSnapshot(
-      `"{()=>{if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;<___VERTER___COMPONENT_CTX.Comp  ></___VERTER___COMPONENT_CTX.Comp>})}}}}}"`
+      `"function template(){{()=>{if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;<___VERTER___COMPONENT_CTX.Comp  ></___VERTER___COMPONENT_CTX.Comp>})}}}}}}"`
     );
   });
 
@@ -79,7 +67,7 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Component.Comp></Component.Comp>`);
 
     expect(result).toMatchInlineSnapshot(
-      `"{()=>{const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp></Componentl__verter__lComp>}}"`
+      `"function template(){{()=>{const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp></Componentl__verter__lComp>}}}"`
     );
   });
 
@@ -87,7 +75,7 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Component.Comp v-if="test"></Component.Comp>`);
 
     expect(result).toMatchInlineSnapshot(
-      `"{()=>{if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp ></Componentl__verter__lComp>}}}"`
+      `"function template(){{()=>{if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp ></Componentl__verter__lComp>}}}}"`
     );
   });
 
@@ -97,7 +85,7 @@ describe("process template plugins element", () => {
     );
 
     expect(result).toMatchInlineSnapshot(
-      `"{()=>{{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp ></Componentl__verter__lComp>})}}}}"`
+      `"function template(){{()=>{{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp ></Componentl__verter__lComp>})}}}}}"`
     );
   });
 
@@ -107,7 +95,7 @@ describe("process template plugins element", () => {
     );
 
     expect(result).toMatchInlineSnapshot(
-      `"{()=>{if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp  ></Componentl__verter__lComp>})}}}}}"`
+      `"function template(){{()=>{if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp  ></Componentl__verter__lComp>})}}}}}}"`
     );
   });
 
@@ -115,7 +103,7 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Component.Comp/>`);
 
     expect(result).toMatchInlineSnapshot(
-      `"{()=>{const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp/>}}"`
+      `"function template(){{()=>{const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp/>}}}"`
     );
   });
 
@@ -123,7 +111,7 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Component.Comp v-if="test"/>`);
 
     expect(result).toMatchInlineSnapshot(
-      `"{()=>{if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp />}}}"`
+      `"function template(){{()=>{if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp />}}}}"`
     );
   });
 
@@ -131,7 +119,7 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Component.Comp v-for="item in items"/>`);
 
     expect(result).toMatchInlineSnapshot(
-      `"{()=>{{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp />})}}}}"`
+      `"function template(){{()=>{{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp />})}}}}}"`
     );
   });
 
@@ -141,7 +129,7 @@ describe("process template plugins element", () => {
     );
 
     expect(result).toMatchInlineSnapshot(
-      `"{()=>{if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp  />})}}}}}"`
+      `"function template(){{()=>{if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;<Componentl__verter__lComp  />})}}}}}}"`
     );
   });
 
@@ -150,7 +138,7 @@ describe("process template plugins element", () => {
       const { result } = parse(`<item-render></item-render>`);
 
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{const ITEMRENDER=___VERTER___COMPONENT_CTX["item-render"];___VERTER___COMPONENT_CTX.item-render;<ITEMRENDER></ITEMRENDER>}}"`
+        `"function template(){{()=>{const ITEMRENDER=___VERTER___COMPONENT_CTX["item-render"];___VERTER___COMPONENT_CTX.item-render;<ITEMRENDER></ITEMRENDER>}}}"`
       );
     });
 

@@ -7,6 +7,8 @@ import type AcornTypes from "acorn";
 import { babelParse } from "@vue/compiler-sfc";
 import { VerterAST } from "./types";
 
+
+
 export function parseAcornLoose(
   source: string
 ): ReturnType<typeof acornLooseParse> {

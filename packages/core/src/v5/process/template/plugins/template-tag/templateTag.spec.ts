@@ -8,7 +8,7 @@ import { MagicString, parse as parseSFC } from "@vue/compiler-sfc";
 
 describe("process template plugins comment", () => {
   function parse(content: string) {
-    const source = `<template>${content}</template><script generic="T extends 'foo' | 'bar'" setup lang="ts"></script>`;
+    const source = `<template>${content}</template>`;
     const parsed = parser(source);
 
     const s = new MagicString(source);
@@ -38,7 +38,8 @@ describe("process template plugins comment", () => {
   it('should replace tag', ()=> {
     const { result } = parse("<div></div>");
 
-    expect(result).toMatchInlineSnapshot("<div></div>");
+    expect(result).toMatchInlineSnapshot(`"function template(){<div></div>}"`);
   })
+
 
 });

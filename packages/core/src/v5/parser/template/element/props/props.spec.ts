@@ -1213,11 +1213,8 @@ describe("parser template element props", () => {
             exp: [
               {
                 type: TemplateTypes.Binding,
-                value: "item.",
-                invalid: true,
-                context: {
-                  ignoredIdentifiers: ["item"],
-                },
+                name: "item",
+                ignore: true,
               },
             ],
             node: {
@@ -1234,11 +1231,8 @@ describe("parser template element props", () => {
           },
           {
             type: TemplateTypes.Binding,
-            value: "item.",
-            invalid: true,
-            context: {
-              ignoredIdentifiers: ["item"],
-            },
+            name: "item",
+            ignore: true,
           },
         ]);
 
@@ -1246,13 +1240,56 @@ describe("parser template element props", () => {
       });
 
       // editor
-      it.only('partial as', ()=> {
+      it("partial as", () => {
         const { result, source } = parse(`<span :item="item as "/>`, {
-          ignoredIdentifiers:[]
+          ignoredIdentifiers: ["as"],
         });
-        expect(result).toMatchObject([])
+        expect(result).toMatchObject([
+          {
+            type: TemplateTypes.Prop,
+            arg: [
+              {
+                type: TemplateTypes.Binding,
+                name: "item",
+                ignore: true,
+              },
+            ],
+            exp: [
+              {
+                type: TemplateTypes.Binding,
+                name: "item",
+                ignore: false,
+              },
+              {
+                type: TemplateTypes.Binding,
+                name: "as",
+                ignore: true,
+              },
+            ],
+            node: {
+              name: "bind",
+              rawName: ":item",
+            },
+            static: false,
+          },
 
-      })
+          {
+            type: TemplateTypes.Binding,
+            name: "item",
+            ignore: true,
+          },
+          {
+            type: TemplateTypes.Binding,
+            name: "item",
+            ignore: false,
+          },
+          {
+            type: TemplateTypes.Binding,
+            name: "as",
+            ignore: true,
+          },
+        ]);
+      });
     });
 
     describe("v-on", () => {

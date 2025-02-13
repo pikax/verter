@@ -25,9 +25,10 @@ import {
 } from "./types.js";
 import { walk } from "@vue/compiler-sfc";
 import * as babel_types from "@babel/types";
-import { patchBabelNodeLoc } from "../../utils/node/node.js";
+import { patchAcornNodeLoc, patchBabelNodeLoc } from "../../utils/node/node.js";
 import { VerterASTNode } from "../ast/types.js";
 import { parseAcornLoose } from "../ast/ast.js";
+import type AcornTypes from "acorn";
 
 export function retrieveBindings(
   exp: ExpressionNode,
@@ -57,8 +58,9 @@ export function retrieveBindings(
     bindings.push(...getASTBindings(exp.ast, context, exp));
   } else {
     const ast = parseAcornLoose(exp.content);
-    // if we parsed the AST, let's return as is, because is most likely invalid
-    if (!ast)  {
+    if (ast) {
+      bindings.push(...getASTBindings(ast, context, exp));
+    } else {
       bindings.push({
         type: TemplateTypes.Binding,
         node: exp,
@@ -78,13 +80,16 @@ export function retrieveBindings(
 }
 
 export function getASTBindings(
-  ast: babel_types.Node | VerterASTNode,
+  ast: babel_types.Node | VerterASTNode | AcornTypes.Program,
   context: Record<string, any>,
   exp?: Node
 ) {
   const bindings = [] as Array<
     TemplateBinding | TemplateFunction | TemplateLiteral
   >;
+
+  const isAcorn = "type" in ast && ast.type === "Program";
+
   walk(ast, {
     enter(
       n: babel_types.Node | VerterASTNode,
@@ -105,7 +110,7 @@ export function getASTBindings(
           }
         }
         case "ArrowFunctionExpression": {
-          const params = Array.isArray(n.params) ? n.params : n.params.items;
+          const params = n.params;
           params.forEach((param) => {
             if (param.type === "Identifier") {
               ignoredIdentifiers.push(param.name);
@@ -136,6 +141,11 @@ export function getASTBindings(
             this.skip();
             return;
           }
+          // this is the node where acorn fails
+          if (isAcorn && name === "✖") {
+            this.skip();
+            return;
+          }
           // if (
           //   (parent.type === "OptionalMemberExpression" &&
           //     parent.property === n) ||
@@ -146,8 +156,13 @@ export function getASTBindings(
           //   this.skip();
           //   return;
           // }
-          // @ts-expect-error not correct type
-          const pNode = exp ? patchBabelNodeLoc(n, exp) : n;
+          const pNode = exp
+            ? isAcorn
+              ? // @ts-expect-error not correct type
+                patchAcornNodeLoc(n, exp)
+              : // @ts-expect-error not correct type
+                patchBabelNodeLoc(n, exp)
+            : n;
 
           bindings.push({
             type: TemplateTypes.Binding,
@@ -166,7 +181,7 @@ export function getASTBindings(
         default: {
           if (n.type.endsWith("Literal")) {
             // @ts-expect-error not correct type
-            const pNode = exp ? patchBabelNodeLoc(n, exp) : n;
+            const pNode = exp && !isAcorn ? patchBabelNodeLoc(n, exp) : n;
             let content = "";
             let value = undefined;
 

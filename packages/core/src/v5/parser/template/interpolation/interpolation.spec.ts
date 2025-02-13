@@ -415,8 +415,12 @@ describe("parser template interpolation", () => {
         type: "Interpolation",
       },
       {
-        value: "temp + foo +",
-        invalid: true,
+        name: "temp",
+        ignore: false,
+      },
+      {
+        name: "foo",
+        ignore: false,
       },
     ]);
 
@@ -429,15 +433,25 @@ describe("parser template interpolation", () => {
   });
 
   it("{{ temp as Foo +  }}", () => {
-    const { result, source } = interpolate(`{{ temp as Foo + }}`);
+    const { result, source } = interpolate(`{{ temp as Foo + }}`, {
+      ignoredIdentifiers: ["as"],
+    });
 
     expect(result).toMatchObject([
       {
         type: "Interpolation",
       },
       {
-        value: "temp as Foo +",
-        invalid: true,
+        name: "temp",
+        ignore: false,
+      },
+      {
+        name: "as",
+        ignore: true,
+      },
+      {
+        name: "Foo",
+        ignore: false,
       },
     ]);
 
