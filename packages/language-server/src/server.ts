@@ -8,12 +8,20 @@ import {
 } from "vscode-languageserver/node";
 import { DocumentManager } from "./v5/documents/manager/manager";
 import { VerterManager } from "./v5/documents/verter/manager";
-import { isVueDocument, isVueFile, uriToPath } from "./v5/documents";
+import {
+  isVueDocument,
+  isVueFile,
+  isVueSubDocument,
+  uriToPath,
+  VerterDocument,
+  VueDocument,
+} from "./v5/documents";
 import {
   formatQuickInfo,
   itemToMarkdown,
   mapCompletion,
   mapDefinitionInfo,
+  mapDiagnostic,
 } from "./v5/helpers";
 import ts, {
   CompletionsTriggerCharacter,
@@ -27,6 +35,8 @@ import {
   RequestType,
 } from "@verter/language-shared";
 import { MagicString } from "vue/compiler-sfc";
+import { VueSubDocument } from "./v5/documents/verter/vue/sub/sub";
+import { VueBundleDocument } from "./v5/documents/verter/vue/sub";
 
 export interface LsConnectionOption {
   /**
@@ -55,7 +65,9 @@ export function startServer(options: LsConnectionOption = {}) {
   //   if (options?.logErrorsOnly !== undefined) {
   //     logger.setLogErrorsOnly(options.logErrorsOnly);
   //   }
-  const connection = patchClient(originalConnection);
+  const connection = originalConnection;
+
+  const patchedConnection = patchClient(connection);
 
   const documentManager = new DocumentManager();
   const verterManager = new VerterManager(documentManager);
@@ -285,8 +297,62 @@ export function startServer(options: LsConnectionOption = {}) {
     return item;
   });
 
+  connection.onRequest("textDocument/diagnostic", async (params) => {
+    const document = documentManager.getDocument(params.textDocument.uri);
+    if (!document || !isVueDocument(document)) {
+      return;
+    }
+    sendDiagnostics(document);
+  });
+
+  connection.onDidOpenTextDocument((params) => {
+    const doc = documentManager.getDocument(params.textDocument.uri);
+    if (!doc) {
+      return;
+    }
+    if (isVueDocument(doc)) {
+      sendDiagnostics(doc);
+    }
+  });
+
+  function sendDiagnostics(document: VueDocument) {
+    if (!isVueDocument(document)) return;
+
+    console.time("sendDiagnostics");
+    const tsService = verterManager.getTsService(document.uri);
+    if (!tsService) {
+      return;
+    }
+
+    function getDiagnostics(doc: VueSubDocument) {
+      const diagnostics = [
+        ...tsService.getSemanticDiagnostics(doc.uri),
+        ...tsService.getSyntacticDiagnostics(doc.uri),
+        ...tsService.getSuggestionDiagnostics(doc.uri),
+      ];
+      return diagnostics.map((x) => mapDiagnostic(x, doc));
+    }
+
+    const diagnostics = document.docs
+      .filter(
+        (x) =>
+          (x.languageId === "ts" || x.languageId === "tsx") &&
+          !(x instanceof VueBundleDocument)
+      )
+      .flatMap((x) => {
+        return getDiagnostics(x);
+      })
+      .filter((x) => !!x);
+
+    connection.sendDiagnostics({
+      uri: document.uri,
+      diagnostics,
+      version: document.version,
+    });
+  }
+
   // connection.onRequest("$/getCompiledCode", async (params) => {
-  connection.onRequest(RequestType.GetCompiledCode, async (params) => {
+  patchedConnection.onRequest(RequestType.GetCompiledCode, async (params) => {
     const doc = documentManager.getDocument(params);
 
     if (!doc || !isVueDocument(doc)) {
@@ -313,15 +379,18 @@ ${x.getText()}
     };
   });
 
-  connection.onNotification(NotificationType.OnFileChanged, async (params) => {
-    params.type;
-    params.uri;
+  patchedConnection.onNotification(
+    NotificationType.OnFileChanged,
+    async (params) => {
+      params.type;
+      params.uri;
 
-    documentManager.handleFileChange(params.uri, params.type);
-    console.log("file changed", params);
-  });
+      documentManager.handleFileChange(params.uri, params.type);
+      console.log("file changed", params);
+    }
+  );
 
-  documentManager.listen(connection as unknown as Connection);
+  documentManager.listen(connection);
   connection.listen();
 }
 

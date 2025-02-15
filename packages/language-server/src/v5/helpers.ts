@@ -265,3 +265,36 @@ function retrieveKindBasedOnSymbol(
 
   return null;
 }
+
+
+
+export function mapDiagnostic(
+  diagnostic: ts.Diagnostic,
+  document: VueSubDocument
+): Diagnostic | undefined {
+  const range = mapTextSpanToRange(diagnostic, document);
+  if (!range) {
+    return;
+  }
+
+  // // ignore all ___VERTER___ errors
+  // if (diagnostic.messageText?.toString().indexOf(DEFAULT_PREFIX) >= 0) {
+  //   return;
+  // }
+
+  const severity = categoryToSeverity(diagnostic.category);
+
+  return {
+    severity,
+    range,
+    source: "Verter",
+    code: diagnostic.code,
+
+    message: ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
+
+    tags: [
+      diagnostic.reportsUnnecessary && DiagnosticTag.Unnecessary,
+      diagnostic.reportsDeprecated && DiagnosticTag.Deprecated,
+    ].filter(Boolean) as DiagnosticTag[],
+  };
+}
