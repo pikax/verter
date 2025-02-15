@@ -7,7 +7,7 @@ export const DefaultPlugins = [
   Plugins.PropPlugin,
   Plugins.BindingPlugin,
   Plugins.CommentPlugin,
-  Plugins.TextPlugin,
+  // Plugins.TextPlugin,
   Plugins.SlotPlugin,
   Plugins.BlockPlugin,
   Plugins.ConditionalPlugin,

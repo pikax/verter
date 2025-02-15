@@ -11,6 +11,8 @@ import {
   uriToPath,
   toVueParentDocument,
   uriToVerterVirtual,
+  normalisePath,
+  pathToUri,
 } from "../../utils";
 import { VueDocument } from "../vue";
 import { VueTypescriptDocument } from "../vue/sub";
@@ -160,14 +162,15 @@ export function getTypescriptService(
     // this is quite damaging for types I reckon
     // when the jsxImportSource is set to vue
     // it will prevent the v-slots patch from working
-    delete tsconfigOptions.jsxImportSource;
+    // delete tsconfigOptions.jsxImportSource;
   }
 
   const compilerOptions: ts.CompilerOptions = {
     ...tsconfigOptions,
     // allowJs: true,
     jsx: ts.JsxEmit.Preserve,
-    declaration: false,
+    // declaration: false,
+    // jsxFactory: 'vue'
     // target: ts.ScriptTarget.ESNext,
     // module: ts.ModuleKind.NodeNext,
     // // jsxFactory: "vue",
@@ -195,10 +198,13 @@ export function getTypescriptService(
     getDefaultLibFileName: ts.getDefaultLibFilePath,
 
     readFile: (filepath, encoding) => {
-      return documentManager.readFile(filepath, encoding as BufferEncoding);
+      return documentManager.readFile(
+        normalisePath(filepath),
+        encoding as BufferEncoding
+      );
     },
     fileExists: (filepath) => {
-      return documentManager.fileExists(filepath);
+      return documentManager.fileExists(normalisePath(filepath));
     },
     getDirectories: ts.sys.getDirectories,
     useCaseSensitiveFileNames: () => tsSystem.useCaseSensitiveFileNames,

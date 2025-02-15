@@ -69,7 +69,7 @@ export function processBlocks(
         blocks,
         languageId,
         type: "script",
-        uri: uriToVerterVirtual(createSubDocumentUri(uri, "options.tsx")),
+        uri: uriToVerterVirtual(createSubDocumentUri(uri, "options.ts")),
       });
     }
   }

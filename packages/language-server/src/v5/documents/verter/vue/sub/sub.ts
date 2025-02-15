@@ -9,6 +9,8 @@ import {
   originalPositionFor,
   originalRangeFor,
 } from "../utils.js";
+import { MagicString } from "vue/compiler-sfc";
+import { SourceMap } from "magic-string";
 
 export interface SubDocumentProcessContext extends ParserResult {}
 
@@ -34,6 +36,11 @@ export abstract class VueSubDocument extends VerterDocument {
     return (
       this._sourceMapConsumer ?? (this._sourceMapConsumer = this.sync(true))
     );
+  }
+
+  private _map: SourceMap | null = null;
+  get map() {
+    return this._map;
   }
 
   protected _isSynching = false;
@@ -62,12 +69,13 @@ export abstract class VueSubDocument extends VerterDocument {
 
       this.update(s.toString(), this.parent.version);
 
-      const consumer = new SourceMapConsumer(
-        s.generateMap({
-          hires: true,
-          includeContent: true,
-        }) as any
-      );
+      this._map = s.generateMap({
+        // hires: true,
+        hires: 'boundary',
+        includeContent: true,
+      });
+
+      const consumer = new SourceMapConsumer(this._map as any);
 
       consumer.computeColumnSpans();
 
@@ -75,6 +83,10 @@ export abstract class VueSubDocument extends VerterDocument {
     } finally {
       this._isSynching = false;
     }
+  }
+
+  sourceMapURL() {
+    return this._map?.toUrl();
   }
 
   update(content: string, version?: number) {

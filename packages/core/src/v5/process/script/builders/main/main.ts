@@ -22,7 +22,7 @@ import { TemplateTypes } from "../../../../parser/template/types";
 export function ResolveOptionsFilename(
   ctx: Required<Pick<ProcessContext, "blockNameResolver">>
 ) {
-  return ctx.blockNameResolver(`options.ts`);
+  return ctx.blockNameResolver(`options`);
 }
 
 export function buildOptions(

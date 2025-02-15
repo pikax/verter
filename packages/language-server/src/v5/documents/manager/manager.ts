@@ -125,6 +125,11 @@ export class DocumentManager implements Disposable {
       this._fileExistsMap.set(filepath, cached);
     }
 
+    // if (filepath.indexOf("vue/runtime-dom") >= 0) {
+    //   const eee = existsSync(filepath);
+    //   console.log("eeer", eee);
+    //   debugger;
+    // }
     return cached;
   }
 

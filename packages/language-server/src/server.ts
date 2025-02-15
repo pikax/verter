@@ -26,6 +26,7 @@ import {
   patchClient,
   RequestType,
 } from "@verter/language-shared";
+import { MagicString } from "vue/compiler-sfc";
 
 export interface LsConnectionOption {
   /**
@@ -215,8 +216,8 @@ export function startServer(options: LsConnectionOption = {}) {
                       ?.triggerCharacter as CompletionsTriggerCharacter),
 
               // includeSymbol: true,
-              // includeAutomaticOptionalChainCompletions: true,
-              // jsxAttributeCompletionStyle: "auto",
+              includeAutomaticOptionalChainCompletions: true,
+              jsxAttributeCompletionStyle: "auto",
               // importModuleSpecifierEnding: "auto",
               // disableSuggestions: true,
               // allowIncompleteCompletions: true,
@@ -298,6 +299,7 @@ export function startServer(options: LsConnectionOption = {}) {
           .map(
             (x) => `// start ${x.uri}\n
 ${x.getText()}
+//# sourceMappingURL=${x.sourceMapURL()}
 
 //end ${x.uri}\n`
           )
