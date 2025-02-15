@@ -554,6 +554,38 @@ describe("parser template element props", () => {
         expectMapping(result, source);
       });
 
+      it('shorthand :foo', ()=>{
+        const { result, source } = parse(`<span :foo/>`);
+
+        expect(result).toMatchObject([
+          {
+            type: TemplateTypes.Prop,
+            arg: [
+              {
+                type: TemplateTypes.Binding,
+                name: "foo",
+                ignore: false,
+              },
+            ],
+            // exp: null,
+
+            node: {
+              name: "bind",
+              rawName: ":foo",
+            },
+
+            static: false,
+          },
+          {
+            type: TemplateTypes.Binding,
+            name: "foo",
+            ignore: false,
+          },
+        ]);
+
+        expectMapping(result, source);
+      })
+
       it("v-bind + props", () => {
         const { result, source } = parse(`<span v-bind="bar" foo="bar"/>`);
 

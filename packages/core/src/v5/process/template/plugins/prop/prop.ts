@@ -141,7 +141,7 @@ export const PropPlugin = declareTemplatePlugin({
       // directive
       const [nameBinding] = prop.arg ?? [];
       // handle camelCase
-      if (nameBinding?.ignore === true) {
+      if (nameBinding?.ignore === true || nameBinding?.skip) {
         // const node = prop.name[0].node as DirectiveNode;
         overrideCamelCase(nameBinding.node.loc, s, ctx);
       }
@@ -201,8 +201,12 @@ export const PropPlugin = declareTemplatePlugin({
             node.exp.loc.end.offset + 1,
             "}"
           );
-        } else if (nameBinding?.ignore === true) {
-          s.appendLeft(node.loc.end.offset, `={${camelize(nameBinding.name)}}`);
+        } else if (nameBinding?.ignore === true || nameBinding?.skip) {
+          const accessor = ctx.retrieveAccessor("ctx");
+          s.appendLeft(
+            node.loc.end.offset,
+            `={${accessor}.${camelize(nameBinding.name)}}`
+          );
         }
       }
 

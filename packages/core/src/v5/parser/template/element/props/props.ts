@@ -187,6 +187,13 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
       : [];
     const valueBinding = prop.exp ? retrieveBindings(prop.exp, context) : [];
 
+    if(!prop.exp ) {
+      nameBinding.filter((x) => x.type === TemplateTypes.Binding).forEach(x=>{
+        x.ignore = false;
+        x.skip = true
+    });
+    }
+
     return [
       {
         type: TemplateTypes.Prop,

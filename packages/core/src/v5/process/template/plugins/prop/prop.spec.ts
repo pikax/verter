@@ -70,13 +70,13 @@ describe("process template plugins prop", () => {
     });
 
     it("should handle prop with v-bind shorthand sugar", () => {
-      const { result } = parse(`<div :test />`);
-      expect(result).toMatchInlineSnapshot(`"<div test={test} />"`);
+      const { result,  } = parse(`<div :test />`);
+      expect(result).toMatchInlineSnapshot(`"<div test={___VERTER___ctx.test} />"`);
     });
 
     it("should camelise prop with v-bind shorthand sugar", () => {
       const { result } = parse(`<div :test-to-foo />`);
-      expect(result).toMatchInlineSnapshot(`"<div testToFoo={testToFoo} />"`);
+      expect(result).toMatchInlineSnapshot(`"<div testToFoo={___VERTER___ctx.testToFoo} />"`);
     });
 
     it("camelCase", () => {
@@ -192,7 +192,7 @@ describe("process template plugins prop", () => {
         `<div v-if="test" :style="{ color: 'red' }" :foo style="color: blue" :class="{ color: 'red' }" @test="onTest" class="color" :test="test" />`
       );
       expect(result).toMatchInlineSnapshot(
-        `"<div v-if="test" style={___VERTER___normalizeStyle([{ color: 'red' },"color: blue"])} foo={foo}  class={___VERTER___normalizeClass([{ color: 'red' },"color"])} onTest={onTest}  test={test} />"`
+        `"<div v-if="test" style={___VERTER___normalizeStyle([{ color: 'red' },"color: blue"])} foo={___VERTER___ctx.foo}  class={___VERTER___normalizeClass([{ color: 'red' },"color"])} onTest={onTest}  test={test} />"`
       );
     });
   });

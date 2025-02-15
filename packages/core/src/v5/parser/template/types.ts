@@ -97,6 +97,8 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
        */
       ignore: boolean;
 
+      skip?: true;
+
       directive: null | DirectiveNode;
 
       exp: SimpleExpressionNode | null;
@@ -128,6 +130,7 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
       invalid: true;
 
       ignore: false;
+      skip?: true;
 
       exp: SimpleExpressionNode | null;
 
