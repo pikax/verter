@@ -59,8 +59,9 @@ export function patchAcornNodeLoc<T extends AcornTypes.AnyNode>(
     node.loc = {
       start: { line: 0, column: 0, offset: node.start },
       end: { line: 0, column: 0, offset: node.end },
+      // @ts-expect-error not part of loc
       source: templateNode.content.slice(node.start, node.end),
-    };
+    } as any;
     patchAcornPosition(node.loc!.start, templateNode.loc.start);
     patchAcornPosition(node.loc!.end, templateNode.loc.start);
   }
@@ -68,7 +69,9 @@ export function patchAcornNodeLoc<T extends AcornTypes.AnyNode>(
   // @ts-expect-error not part of loc
   node.loc.source = // @ts-expect-error not part of loc
     templateNode.content.slice(
+      // @ts-expect-error not part of loc
       node.loc!.start.index - 1,
+      // @ts-expect-error not part of loc
       node.loc!.end.index - 1
     );
 

@@ -36,6 +36,7 @@ describe("process template plugins conditional", () => {
         blocks: parsed.blocks,
         narrow: true,
         block: templateBlock,
+        blockNameResolver: (name) => name,
       }
     );
 

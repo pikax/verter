@@ -1,4 +1,5 @@
 import type LSP from "vscode-languageserver-protocol";
+import vscode from "vscode-languageserver";
 import ts, { sortAndDeduplicateDiagnostics } from "typescript";
 import fsPath from "path";
 import { DocumentManager } from "../../manager";
@@ -38,7 +39,6 @@ export class VerterManager {
     rootUri: LSP.DocumentUri | null;
   }) {
     // this.workspaceFolders = params.workspaceFolders;
-
     if (params.workspaceFolders) {
       for (const workspace of params.workspaceFolders) {
         const filepath = uriToPath(workspace.uri);
@@ -100,15 +100,32 @@ export function getTypescriptService(
     // // TODO watch the config file
     // ts.sys.watchFile!(configFile, (f) => {});
 
-    const tsConfigStr = ts.sys.readFile(
-      fsPath.resolve(workspacePath, "./tsconfig.json"),
-      "utf-8"
-    );
+    let finalConfig = undefined as any | undefined;
+    let mainTsConfigPath = fsPath.resolve(workspacePath, "./tsconfig.json");
 
-    const { config } = ts.parseConfigFileTextToJson(
-      fsPath.resolve(workspacePath, "./tsconfig.json"),
-      tsConfigStr!
-    );
+    const loadConfig = (path: string) => {
+      const tsConfigStr = ts.sys.readFile(path, "utf-8");
+      const { config } = ts.parseConfigFileTextToJson(path, tsConfigStr!);
+      return config;
+    };
+    const c = loadConfig(mainTsConfigPath);
+    if (c.references) {
+      for (const { path } of c.references) {
+        if (path) {
+          const r = loadConfig(fsPath.resolve(workspacePath, path));
+          if (r.include.some((x: string) => x.endsWith(".vue"))) {
+            finalConfig = r;
+          }
+        }
+      }
+      if (!finalConfig) {
+        finalConfig = c;
+      }
+    } else {
+      finalConfig = c;
+    }
+
+    const config = finalConfig;
 
     const parseConfigHost: ts.ParseConfigHost = {
       ...ts.sys,
@@ -188,9 +205,10 @@ export function getTypescriptService(
     getNewLine: () => tsSystem.newLine,
 
     readDirectory(path, extensions, exclude, include, depth) {
+      console.log("reading dir", path);
       return tsSystem.readDirectory(
         path,
-        [...extensions ??[], ".vue"],
+        [...(extensions ?? []), ".vue"],
         exclude,
         include,
         depth

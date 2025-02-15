@@ -33,6 +33,7 @@ describe("process script plugin script block", () => {
       blocks: parsed.blocks,
       block: scriptBlock,
       isAsync: parsed.isAsync,
+      blockNameResolver: (name) => name,
     });
 
     return r;
@@ -47,7 +48,7 @@ describe("process script plugin script block", () => {
       "<style></style>"
     );
     expect(result).toMatchInlineSnapshot(
-      `"<template></template>function script  (){let a = 0}<style></style>"`
+      `"<template></template>;function script  (){let a = 0}<style></style>"`
     );
   });
 
@@ -60,7 +61,7 @@ describe("process script plugin script block", () => {
       "<script>first = 0;</script><style></style>"
     );
     expect(result).toMatchInlineSnapshot(
-      `"first = 0;<template></template>function script  (){let a = 0}<style></style>"`
+      `"first = 0;<template></template>;function script  (){let a = 0}<style></style>"`
     );
   });
 
@@ -73,7 +74,7 @@ describe("process script plugin script block", () => {
       "<style></style>"
     );
     expect(result).toMatchInlineSnapshot(
-      `"<template></template>async function script  (){await fetch('')}<style></style>"`
+      `"<template></template>;async function script  (){await fetch('')}<style></style>"`
     );
   });
 
@@ -87,7 +88,22 @@ describe("process script plugin script block", () => {
       'generic="T"'
     );
     expect(result).toMatchInlineSnapshot(
-      `"<template></template>function script   <T>(){let a = {} as unknown as T}<style></style>"`
-    );  
+      `"<template></template>;function script   <T>(){let a = {} as unknown as T}<style></style>"`
+    );
   });
+
+  it('add ; before function', ()=> {
+    const { result } = parse(
+      `import {a} from 'b'
+let a = 0`,
+      false,
+      "js",
+    );
+    expect(result).toMatchInlineSnapshot(
+      `
+      ";function script  (){import {a} from 'b'
+      let a = 0}"
+    `
+    );
+  })
 });

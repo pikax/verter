@@ -33,7 +33,7 @@ describe("process template plugins text", () => {
         s,
         filename: "test.vue",
         blocks: parsed.blocks,
-        block: templateBlock,
+        block: templateBlock,blockNameResolver: (name) => name,
       }
     );
 

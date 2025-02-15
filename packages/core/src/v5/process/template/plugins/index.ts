@@ -10,4 +10,6 @@ export * from "./event/index.js";
 export * from "./loop/index.js";
 export * from "./directive/index.js";
 export * from "./element/index.js";
-export * from './template-tag/index.js';
+export * from "./template-tag/index.js";
+
+export * from "./sfc-cleaner/index.js";

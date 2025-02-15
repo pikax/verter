@@ -41,6 +41,7 @@ describe("process script plugins imports", () => {
         filename: "test.vue",
         blocks: parsed.blocks,
         block: scriptBlock,
+        blockNameResolver: (name) => name,
       }
     );
 

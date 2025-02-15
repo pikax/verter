@@ -5,6 +5,8 @@ import {
   ExtensionContext,
   ProgressLocation,
   ViewColumn,
+  FileSystemWatcher,
+  WorkspaceFolder,
 } from "vscode";
 import {
   LanguageClient,
@@ -13,6 +15,8 @@ import {
   TransportKind,
   RevealOutputChannelOn,
 } from "vscode-languageclient/node";
+
+import { normalize } from "path";
 
 import type { PatchClient } from "@verter/language-shared";
 import { patchClient, NotificationType } from "@verter/language-shared";
@@ -146,6 +150,8 @@ export function activateVueLanguageServer(context: ExtensionContext) {
   addDidChangeTextDocumentListener(getClient);
   addCompilePreviewCommand(getClient, context);
 
+  addNodeModulesChangedListener(getClient);
+
   return {
     getClient,
   };
@@ -273,4 +279,49 @@ function addWriteVirtualFilesCommand(
       }
     )
   );
+}
+
+function addNodeModulesChangedListener(getClient: GetClient) {
+  const watchers = new Map<string, FileSystemWatcher>();
+  function watchFolder(folder: WorkspaceFolder) {
+    // const fp = normalize(folder.uri.fsPath + "/node_modules/**/*").replace(
+    //   /\\/g,
+    //   "/"
+    // );
+    const fp = folder.uri.fsPath + "/node_modules/**/*";
+    const watcher = workspace.createFileSystemWatcher(fp);
+    watcher.onDidChange((e) => {
+      console.log("changed", e.fsPath);
+      getClient().sendNotification(NotificationType.OnFileChanged, {
+        type: "update",
+        uri: e.fsPath,
+      });
+    });
+    watcher.onDidCreate((e) => {
+      console.log("created", e.fsPath);
+      getClient().sendNotification(NotificationType.OnFileChanged, {
+        type: "create",
+        uri: e.fsPath,
+      });
+    });
+    watcher.onDidDelete((e) => {
+      console.log("deleted", e.fsPath);
+      getClient().sendNotification(NotificationType.OnFileChanged, {
+        type: "delete",
+        uri: e.fsPath,
+      });
+    });
+    watchers.set(folder.uri.fsPath, watcher);
+  }
+
+  if (workspace.workspaceFolders) {
+    workspace.workspaceFolders.forEach(watchFolder);
+  }
+  workspace.onDidChangeWorkspaceFolders((e) => {
+    e.removed.forEach((folder) => {
+      watchers.get(folder.uri.fsPath)?.dispose();
+      watchers.delete(folder.uri.fsPath);
+    });
+    e.added.forEach(watchFolder);
+  });
 }

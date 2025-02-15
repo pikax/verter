@@ -10,7 +10,8 @@ import {
   VueDocument,
 } from "../verter/index.js";
 import type { IScriptSnapshot } from "typescript";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { extname } from "node:path";
 
 import {
@@ -18,10 +19,12 @@ import {
   isVueDocument,
   isVueFile,
   isVueSubDocument,
+  normalisePath,
   pathToUri,
   toVueParentDocument,
   uriToPath,
 } from "../utils.js";
+import { FileNotificationChange } from "@verter/language-shared";
 
 export type VersionScriptSnapshot = IScriptSnapshot & { version: number };
 
@@ -30,6 +33,13 @@ export class DocumentManager implements Disposable {
 
   readonly textDocuments: TextDocuments<VerterDocument>;
   readonly _files = new Map<string, VerterDocument>();
+  readonly _fileExistsMap = new Map<string, boolean>();
+
+  private _currentConnection: Connection | undefined;
+
+  get connection() {
+    return this._currentConnection;
+  }
 
   constructor() {
     this.textDocuments = new TextDocuments({
@@ -58,7 +68,13 @@ export class DocumentManager implements Disposable {
   }
 
   listen(connection: Connection) {
+    if (this._currentConnection) {
+      this._dispose?.dispose();
+      this._currentConnection = undefined;
+    }
     this._dispose = this.textDocuments.listen(connection);
+    this._currentConnection = connection;
+
     return this._dispose;
   }
 
@@ -74,6 +90,7 @@ export class DocumentManager implements Disposable {
       const doc = VueDocument.create(uri, content, version);
       this._files.set(uri, doc);
       this._files.set(filepath, doc);
+      this._fileExistsMap.set(filepath, true);
       return doc;
     } else {
       const doc = TypescriptDocument.create(
@@ -84,6 +101,7 @@ export class DocumentManager implements Disposable {
       );
       this._files.set(uri, doc);
       this._files.set(filepath, doc);
+      this._fileExistsMap.set(filepath, true);
       return doc;
     }
   }
@@ -100,12 +118,14 @@ export class DocumentManager implements Disposable {
       return true;
     }
 
-    // normalise path
-    filepath = uriToPath(filepath);
+    let cached = this._fileExistsMap.get(filepath);
+    if (cached === undefined) {
+      // normalise path
+      cached = existsSync(uriToPath(filepath));
+      this._fileExistsMap.set(filepath, cached);
+    }
 
-    const exists = existsSync(filepath);
-
-    return exists;
+    return cached;
   }
 
   readFile(filepath: string, encoding: BufferEncoding = "utf-8") {
@@ -115,8 +135,7 @@ export class DocumentManager implements Disposable {
     // }
     let d = this._files.get(filepath);
     if (!d) {
-      console.log("readFile doc", filepath);
-
+      console.log("reading file sync", filepath);
       const c = readFileSync(filepath, { encoding });
       const uri = pathToUri(filepath);
 
@@ -155,5 +174,31 @@ export class DocumentManager implements Disposable {
       }
     }
     return d;
+  }
+
+  handleFileChange(uri: string, type: FileNotificationChange) {
+    const path = normalisePath(uri);
+    uri = pathToUri(path);
+
+    switch (type) {
+      case "create": {
+        this._fileExistsMap.set(path, true);
+        break;
+      }
+      case "update": {
+        const doc = this.getDocument(path);
+        if (!doc) return;
+        return readFile(path, { encoding: "utf-8" }).then((c) => {
+          doc?.update(c);
+        });
+      }
+      case "delete": {
+        this._fileExistsMap.set(path, false);
+        this._fileExistsMap.set(uri, false);
+        this._files.delete(path);
+        this._files.delete(uri);
+        break;
+      }
+    }
   }
 }

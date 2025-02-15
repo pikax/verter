@@ -90,7 +90,18 @@ export class VueDocument extends VerterDocument {
     return this.docs.find((x) => x.uri === uri);
   }
 
-  docsForPos(position: Position) {
+  docsForPos(position: Position, all = false) {
+    const offset = this.doc.offsetAt(position);
+    const main = this.blocks.find((x) => {
+      // bundle should never be used as a main
+      if (x.type === "bundle") {
+        return false;
+      }
+      return x.blocks.some((b) => {
+        const pos = b.block.tag.pos;
+        return pos.open.start <= offset && pos.close.end >= offset;
+      });
+    });
     return this.docs
       .map((x) => {
         const o = x.toGeneratedOffsetFromPosition(position);
@@ -98,11 +109,14 @@ export class VueDocument extends VerterDocument {
           return {
             doc: x,
             offset: o,
+            main: x.uri === main?.uri,
+            isBundler: x instanceof VueBundleDocument,
           };
         }
 
         return undefined;
       })
+      .filter((x) => all || x?.main)
       .filter((x) => !!x);
   }
 }

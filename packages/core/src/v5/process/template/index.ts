@@ -15,10 +15,8 @@ export const DefaultPlugins = [
   Plugins.LoopPlugin,
   Plugins.DirectivePlugin,
   Plugins.ElementPlugin,
-  Plugins.TemplateTagPlugin
+  Plugins.TemplateTagPlugin,
+  Plugins.SFCCleanerPlugin,
 ];
 
-
-export const ScriptDefaultPlugins = [
-  
-]
+export const ScriptDefaultPlugins = [];

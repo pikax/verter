@@ -41,6 +41,7 @@ describe("process script plugin attributes", () => {
         block: scriptBlock,
         generic: parsed.generic,
         handledAttributes: new Set(),
+        blockNameResolver: (name) => name,
       }
     );
 
@@ -72,7 +73,8 @@ describe("process script plugin attributes", () => {
         'attributes="{ a: number }"'
       );
       expect(result).toMatchInlineSnapshot(
-      `"async function script   (){let a = await Promise.resolve(0)};type ___VERTER___attributes={ a: number };"`);
+        `"async function script   (){let a = await Promise.resolve(0)};type ___VERTER___attributes={ a: number };"`
+      );
     });
   });
 
@@ -82,7 +84,9 @@ describe("process script plugin attributes", () => {
     }
     it("work", () => {
       const { result } = parse(`let a = 0`, 'attributes="{ a: number }"');
-      expect(result).toMatchInlineSnapshot(`"function script   (){let a = 0}/** @typedef {{ a: number }}___VERTER___attributes*/"`);
+      expect(result).toMatchInlineSnapshot(
+        `"function script   (){let a = 0}/** @typedef {{ a: number }}___VERTER___attributes*/"`
+      );
     });
   });
 });

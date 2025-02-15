@@ -14,6 +14,8 @@ export const ScriptBlockPlugin = definePlugin({
       tag.pos.open.start + 1,
       `${ctx.isAsync ? "async " : ""}function `
     );
+    s.appendRight(tag.pos.open.start, ";");
+
 
     // replace > with (){
     s.overwrite(tag.pos.open.end - 1, tag.pos.open.end, "(){");

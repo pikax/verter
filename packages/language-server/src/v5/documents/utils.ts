@@ -76,8 +76,17 @@ export function uriToPath(uri: string) {
     return uri;
   }
   // normalise path separators for windows
-  const p = url.fsPath.replace(/\\/g, "/");
+  const p = normalisePath(url.fsPath);
   return p;
+}
+
+/**
+ * Replaces `\` to `/` that are used in windows paths
+ * @param path
+ * @returns
+ */
+export function normalisePath(path: string) {
+  return path.replace(/\\/g, "/");
 }
 
 // export function retrieveFileExtension(uri: string) {

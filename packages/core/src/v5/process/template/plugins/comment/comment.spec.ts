@@ -34,6 +34,7 @@ describe("process template plugins comment", () => {
         filename: "test.vue",
         blocks: parsed.blocks,
         block: templateBlock,
+        blockNameResolver: (name) => name,
       }
     );
 
