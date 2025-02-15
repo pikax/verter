@@ -395,7 +395,13 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
               prop.node.arg.type === NodeTypes.SIMPLE_EXPRESSION &&
               prop.node.arg.isStatic
             ) {
-              s.prependLeft(end, ".");
+              // check if we can use . notation or if we need to use wrap in [''] 
+              if(/^\w+$/.test(prop.node.arg.content)) {
+                s.prependLeft(end, ".");
+              } else {
+                s.prependLeft(end, `['`);
+                s.appendLeft(prop.node.arg.loc.end.offset, `']`);
+              }
             }
           }
 

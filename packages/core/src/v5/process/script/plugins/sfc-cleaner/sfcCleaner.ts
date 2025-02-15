@@ -1,12 +1,12 @@
 import { ElementNode, ElementTypes, NodeTypes } from "@vue/compiler-core";
-import { declareTemplatePlugin } from "../../template";
+import { definePlugin } from "../../types";
 
-export const SFCCleanerPlugin = declareTemplatePlugin({
+export const SFCCleanerPlugin = definePlugin({
   name: "VerterSFCCleaner",
 
   post(s, ctx) {
     ctx.blocks.forEach((block) => {
-      if (block === ctx.block || !block.block.block.content) {
+      if (block === ctx.block) {
         return;
       }
       // comment out every line

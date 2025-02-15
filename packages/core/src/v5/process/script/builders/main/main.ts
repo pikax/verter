@@ -14,6 +14,7 @@ import {
   FullContextPlugin,
   MacrosPlugin,
   TemplateBindingPlugin,
+  SFCCleanerPlugin
 } from "../../plugins/";
 
 import { relative } from "node:path/posix";
@@ -45,6 +46,7 @@ export function buildOptions(
       FullContextPlugin,
       MacrosPlugin,
       TemplateBindingPlugin,
+      SFCCleanerPlugin
     ],
     {
       ...context,
