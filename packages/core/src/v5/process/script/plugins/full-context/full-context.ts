@@ -16,9 +16,9 @@ export const FullContextPlugin = definePlugin({
       (x) => x.type === ProcessItemType.Binding && x.item.node
     ) as ProcessItemBinding[];
 
-    const names = [] as string[];
-    const content = [] as string[];
-
+    const names = new Set<string>();
+    // const content = [] as string[];
+    const content = new Set<string>();
     const source = s.original;
     for (const b of bindings) {
       switch (b.item.type) {
@@ -26,8 +26,8 @@ export const FullContextPlugin = definePlugin({
           const name = b.item.name;
           const node = b.item.declarator;
           if (name) {
-            names.push(name);
-            content.push(source.slice(node.start, node.end));
+            names.add(name);
+            content.add(source.slice(node.start, node.end));
           }
         }
         case ScriptTypes.FunctionCall: {
@@ -46,7 +46,7 @@ export const FullContextPlugin = definePlugin({
 
     const str = `;${isAsync ? "async " : ""}function ${fullContext}FN${
       ctx.generic ? `<${ctx.generic.source}>` : ""
-    }() {${content.join("\n")};return{${names
+    }() {${[...content].join("\n")};return{${[...names]
       .map((x) => `${x}${isTS ? `:${x} as typeof ${x}` : ""}`)
       .join(",")}}};${typeStr}`;
 

@@ -130,7 +130,7 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
       invalid: true;
 
       ignore: false;
-      skip?: true;
+      skip?: undefined;
 
       exp: SimpleExpressionNode | null;
 
