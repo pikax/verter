@@ -39,6 +39,7 @@ export function processScript(
     [ScriptTypes.Export]: [],
     [ScriptTypes.FunctionCall]: [],
     [ScriptTypes.Import]: [],
+    [ScriptTypes.TypeAssertion]: [],
     [ScriptTypes.Error]: [],
     [ScriptTypes.Warning]: [],
   } as {

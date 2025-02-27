@@ -33,21 +33,29 @@ export const TemplateBindingPlugin = definePlugin({
         }
         return acc;
       }, {} as Record<string, string | string[]>);
-    const usedBindings = ctx.templateBindings
-      .filter((x) => x.name && bindings.has(x.name))
-      .map((x) => x.name!);
+    const usedBindings = ctx.templateBindings.filter(
+      (x) => x.name && bindings.has(x.name)
+    );
 
+    console.log("sadssa");
     s.prependLeft(
       tag.pos.close.start,
       `;return{${usedBindings
-        .map((x) => `${x}${isTS ? `:${x} as typeof ${x}` : ""}`)
+        .map(
+          (x) =>
+            `${x.name}/*${x.node.loc.start.offset},${
+              x.node.loc.end.offset
+            }*/: ${isTS ? `${x.name}  as typeof ${x.name}` : x.name}`
+        )
         .concat(
           Object.entries(macroBindings).map(
             ([k, x]) =>
               `${k}:${
                 Array.isArray(x)
-                  ? `{${x.map((x) => `${x}${isTS ? `:${x} as typeof ${x}` : ""}`).join(",")}}`
-                  :  `${isTS ? `${x} as typeof ${x}` : ""}`
+                  ? `{${x
+                      .map((x) => `${x}: ${isTS ? `${x} as typeof ${x}` : x}`)
+                      .join(",")}}`
+                  : `${isTS ? `${x} as typeof ${x}` : ""}`
               }`
           )
           // Object.entries(macroBindings).map(([k, v]) =>

@@ -109,6 +109,7 @@ export function processTemplate(
   const context: TemplateContext = {
     generic: null,
     isAsync: false,
+    isTS: false,
     camelWhitelistAttributes: (name: string) => {
       return name.startsWith("data-") || name.startsWith("aria-");
     },

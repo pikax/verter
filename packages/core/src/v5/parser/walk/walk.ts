@@ -5,6 +5,7 @@ import type {
   TemplateChildNode,
   CompoundExpressionNode,
 } from "@vue/compiler-core";
+import { walk } from "@vue/compiler-sfc";
 import type {
   VerterAST,
   Statement,
@@ -12,6 +13,7 @@ import type {
   Function,
   ArrowFunctionExpression,
   FunctionBody,
+  VerterASTNode,
 } from "../ast/index.js";
 import { isObject } from "@vue/shared";
 import { TemplateCondition } from "../template/types.js";
@@ -41,6 +43,17 @@ export function shallowWalk(
       }
     }
   }
+}
+
+export function deepWalk(
+  root: VerterAST,
+  enter: (node: VerterASTNode, parent: VerterASTNode | null, key: string) => void,
+  leave?: (node: VerterASTNode, parent: VerterASTNode | null, key: string) => void
+) {
+  walk(root, {
+    enter,
+    leave,
+  });
 }
 
 export type VerterNode = Exclude<

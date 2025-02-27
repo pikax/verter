@@ -118,6 +118,16 @@ export function mapDefinitionInfo(
     const subDoc = doc.getSubDoc(filename);
     if (!subDoc) return;
 
+    const text = subDoc.getText();
+    const textSpanStr = text.slice(
+      info.textSpan.start,
+      info.textSpan.start + info.textSpan.length
+    );
+    const contextRangeStr = text.slice(
+      info.contextSpan!.start,
+      info.contextSpan!.start + info.contextSpan!.length
+    );
+
     if (info.contextSpan) {
       contextRange = mapTextSpanToRange(info.contextSpan, subDoc);
     }
@@ -265,8 +275,6 @@ function retrieveKindBasedOnSymbol(
 
   return null;
 }
-
-
 
 export function mapDiagnostic(
   diagnostic: ts.Diagnostic,

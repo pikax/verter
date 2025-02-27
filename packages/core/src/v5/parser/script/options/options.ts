@@ -1,7 +1,11 @@
 import { MacrosPlugin } from "../../../process/script/plugins/macros";
-import { ObjectExpression, VerterASTNode } from "../../ast";
+import {
+  FunctionDeclaration,
+  ObjectExpression,
+  VerterASTNode,
+} from "../../ast";
 import { shallowWalk } from "../../walk";
-import { handleSetupNode } from "../setup";
+import { createSetupContext, handleSetupNode } from "../setup";
 import { ScriptItem, ScriptTypes } from "../types";
 
 export function handleOptionsNode(
@@ -56,15 +60,12 @@ function handleObjectDeclaration(node: ObjectExpression): {
                 isAsync = value.async;
 
                 if (value.body) {
-                  // walk the setup body to find any declarations
-                  shallowWalk(value.body, (node) => {
-                    const result = handleSetupNode(node, true);
-                    if (Array.isArray(result)) {
-                      items.push(...result);
-                    } else {
-                      items.push(...result.items);
-                    }
-                  });
+                  const result = handleSetupNode(value.body, undefined, true);
+                  if (Array.isArray(result)) {
+                    items.push(...result);
+                  } else {
+                    items.push(...result.items);
+                  }
                 }
               }
 
@@ -93,4 +94,84 @@ function handleObjectDeclaration(node: ObjectExpression): {
   }
 
   return { items, isAsync };
+}
+
+export function createOptionsContext(opts: {
+  lang: string | "ts" | "tsx" | "js" | "jsx";
+  setupCtx: ReturnType<typeof createSetupContext>;
+}) {
+  let track = false;
+  let objectExpression: ObjectExpression | null = null;
+
+  let setupFunction: null | FunctionDeclaration = null;
+
+  function visit(
+    node: VerterASTNode,
+    parent: VerterASTNode | null,
+    key?: string
+  ): void | ScriptItem | ScriptItem[] {
+    if (node.type === "ExportDefaultDeclaration") {
+      track = true;
+      return;
+    }
+
+    if (!track) return;
+
+    if (setupFunction) {
+      return opts.setupCtx.visit(node, parent, key);
+    }
+
+    switch (node.type) {
+      case "ObjectExpression": {
+        if (objectExpression) return;
+        objectExpression = node;
+        break;
+      }
+      case "CallExpression": {
+        if (!objectExpression) {
+          if (node.arguments[0].type === "ObjectExpression") {
+            objectExpression = node.arguments[0];
+          }
+        }
+        return;
+      }
+      case "FunctionExpression": {
+        if (!setupFunction && key === "setup") {
+          setupFunction = node;
+        }
+        return;
+      }
+    }
+  }
+
+  function leave(
+    node: VerterASTNode,
+    parent: VerterASTNode | null,
+    key?: string
+  ): void {
+    switch (node.type) {
+      case "ExportDefaultDeclaration": {
+        track = false;
+        break;
+      }
+      case "FunctionExpression": {
+        if (node === setupFunction) {
+          setupFunction = null;
+        }
+        break;
+      }
+    }
+
+    if (setupFunction) {
+      opts.setupCtx.leave(node, parent, key);
+    }
+    // if (node.type === "ObjectExpression") {
+    //   return handleObjectDeclaration(node);
+    // }
+  }
+
+  return {
+    visit,
+    leave,
+  };
 }

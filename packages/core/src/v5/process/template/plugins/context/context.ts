@@ -4,6 +4,8 @@ import {
   TemplateItem,
   TemplateTypes,
 } from "../../../../parser";
+import { ResolveOptionsFilename } from "../../../script";
+import { generateImport } from "../../../utils";
 import { TemplatePlugin } from "../../template";
 
 export const ContextPlugin = {
@@ -33,7 +35,30 @@ export const ContextPlugin = {
 
     // console.log("found ", items);
 
-    s.prependLeft(ctx.block.block.block.loc.start.offset, 'fioooo');
+    const options = ResolveOptionsFilename(ctx);
+
+    const TemplateBindingName = ctx.prefix("TemplateBinding");
+    const FullContextName = ctx.prefix("FullContext");
+
+    const importStr = generateImport([
+      {
+        from: `./${options}`,
+        items: [{ name: TemplateBindingName }, { name: FullContextName }],
+      },
+    ]);
+
+    s.prepend(`${importStr}\n`);
+
+    const CTX = ctx.retrieveAccessor("ctx");
+
+    // todo add generic information
+    const ctxItems = [FullContextName, TemplateBindingName].map((x) =>
+      ctx.isTS ? `...({} as ${x})` : `...${x}`
+    );
+
+    const ctxStr = `const ${CTX} = {${ctxItems.join(",")}};`;
+
+    s.prependLeft(ctx.block.block.block.loc.start.offset, ctxStr);
   },
   //   transformBinding(item, s, ctx) {
   //     if (item.ignore || "skip" in item) {

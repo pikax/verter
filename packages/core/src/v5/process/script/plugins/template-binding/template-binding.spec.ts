@@ -59,7 +59,7 @@ describe("process script plugin template-binding", () => {
     const { result } = parse(`let a = 0`, false, "js");
     expect(result).toMatchInlineSnapshot(
       `
-      "/** @returns {{}} */function ___VERTER___TemplateBindingFN  (){let a = 0;return{}}
+      "/** @returns {{}} */;function ___VERTER___TemplateBindingFN  (){let a = 0;return{}}
       /** @typedef {ReturnType<typeof ___VERTER___TemplateBindingFN>} ___VERTER___TemplateBinding */
       /** @type {___VERTER___TemplateBinding} */
       export const ___VERTER___TemplateBinding = null;
@@ -77,12 +77,12 @@ describe("process script plugin template-binding", () => {
       ""
     );
     expect(result).toMatchInlineSnapshot(`
-        "<template><div>{{ a }}</div></template>/** @returns {{a:typeof a}} */function ___VERTER___TemplateBindingFN  (){let a = 0;return{a}}
-        /** @typedef {ReturnType<typeof ___VERTER___TemplateBindingFN>} ___VERTER___TemplateBinding */
-        /** @type {___VERTER___TemplateBinding} */
-        export const ___VERTER___TemplateBinding = null;
-        "
-      `);
+      "<template><div>{{ a }}</div></template>/** @returns {{a:typeof a}} */;function ___VERTER___TemplateBindingFN  (){let a = 0;return{a}}
+      /** @typedef {ReturnType<typeof ___VERTER___TemplateBindingFN>} ___VERTER___TemplateBinding */
+      /** @type {___VERTER___TemplateBinding} */
+      export const ___VERTER___TemplateBinding = null;
+      "
+    `);
   });
 
   it("ts template binding", () => {
@@ -95,7 +95,20 @@ describe("process script plugin template-binding", () => {
     );
 
     expect(result).toMatchInlineSnapshot(
-      `"<template><div>{{ a }}</div></template>function ___VERTER___TemplateBindingFN  (){let a = 0;return{a:a as typeof a}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>;"`
+      `"<template><div>{{ a }}</div></template>;function ___VERTER___TemplateBindingFN  (){let a = 0;return{a:a as typeof a}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>;"`
+    );
+  });
+
+  it("async", () => {
+    const { result } = parse(
+      `let a = await Promise.resolve(0)`,
+      false,
+      "ts",
+      "<template><div>{{ a }}</div></template>",
+      ""
+    );
+    expect(result).toMatchInlineSnapshot(
+      `"<template><div>{{ a }}</div></template>;async function ___VERTER___TemplateBindingFN  (){let a = await Promise.resolve(0);return{a:a as typeof a}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN> extends Promise<infer R>?R:never;"`
     );
   });
 });

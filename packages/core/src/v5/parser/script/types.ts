@@ -63,6 +63,11 @@ export const enum ScriptTypes {
   //  */
   // Slots = "Slots",
 
+  /**
+   * Type assertion, eg: const a = <number>1
+   */
+  TypeAssertion = "TypeAssertion",
+
   Error = "Error",
   Warning = "Warning",
 }
@@ -166,6 +171,11 @@ export type ScriptDeclaration = {
     }
 );
 
+export type ScriptTypeAssertion = {
+  type: ScriptTypes.TypeAssertion;
+  node: VerterASTNode;
+};
+
 export type ScriptItemByType = {
   [ScriptTypes.Async]: ScriptAsync;
   [ScriptTypes.Binding]: ScriptBinding;
@@ -173,6 +183,7 @@ export type ScriptItemByType = {
   [ScriptTypes.FunctionCall]: ScriptFunctionCall;
   [ScriptTypes.Export]: ScriptExport;
   [ScriptTypes.Declaration]: ScriptDeclaration;
+  [ScriptTypes.TypeAssertion]: ScriptTypeAssertion;
   [ScriptTypes.Error]: ScriptError;
   [ScriptTypes.Warning]: ScriptWarning;
 };
@@ -184,6 +195,9 @@ export type ScriptItem =
   | ScriptFunctionCall
   | ScriptExport
   | ScriptDeclaration
+
+  // special
+  | ScriptTypeAssertion
 
   // warnings and errors
   | ScriptError

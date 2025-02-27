@@ -10,7 +10,7 @@ import {
   findBlockLanguage,
   VerterSFCBlock,
 } from "../utils/index.js";
-import { parseScript } from "./script/script.js";
+import { parseScript, parseScriptBetter } from "./script/script.js";
 import { parseAST } from "./ast/ast.js";
 import { parseTemplate } from "./template/template.js";
 import {
@@ -61,6 +61,7 @@ export function parser(
   const s = new MagicString(source);
   let generic: GenericInfo | null = null;
   let isAsync = false;
+  let isTS = false;
 
   const sfcParse = parse(source, {
     ...options,
@@ -98,6 +99,7 @@ export function parser(
           } as ParsedBlockTemplate;
         case "ts":
         case "tsx": {
+          isTS = true;
           if (x.tag.attributes.generic && x.tag.attributes.generic.value) {
             generic = parseGeneric(
               x.tag.attributes.generic.value.content,
@@ -111,7 +113,7 @@ export function parser(
           const content = prepend + x.block.content;
 
           const ast = parseAST(content, filename + "." + languageId);
-          const r = parseScript(ast, x.block.attrs);
+          const r = parseScriptBetter(ast, x.block.attrs);
           isAsync = r.isAsync;
 
           return {
@@ -140,6 +142,7 @@ export function parser(
     s,
     generic,
     isAsync,
+    isTS,
 
     blocks,
   };

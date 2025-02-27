@@ -33,6 +33,7 @@
     "acorn-loose": "^8.4.0",
     "acorn-typescript": "^1.4.13",
     "deepmerge": "^4.3.1",
+    "estree-walker": "^3.0.3",
     "glob": "^11.0.1",
     "oxc-parser": "^0.50.0",
     "source-map-js": "^1.2.1",

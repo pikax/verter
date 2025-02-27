@@ -16,6 +16,7 @@ export type ProcessContext = {
 
   isAsync: boolean;
   generic: GenericInfo | null;
+  isTS: boolean;
 
   /**
    * Current block

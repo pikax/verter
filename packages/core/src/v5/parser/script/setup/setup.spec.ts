@@ -178,29 +178,90 @@ describe("parser script setup", () => {
     ]);
   });
 
-  it("await Promise.resolve()", () => {
-    const { items } = parse(`await Promise.resolve()`);
-    expect(items).toMatchObject([
-      {
-        type: ScriptTypes.Async,
-      },
-      {
-        type: ScriptTypes.FunctionCall,
-        name: "",
-      },
-    ]);
+  it("{ const a = 0 } }", () => {
+    const { items } = parse("{ const a = 0 } }");
+    expect(items).toMatchObject([]);
   });
 
-  it("const a = await Promise.resolve()", () => {
-    const { items } = parse(`const a = await Promise.resolve()`);
-    expect(items).toMatchObject([
-      {
-        type: ScriptTypes.Async,
-      },
-      {
-        type: ScriptTypes.Declaration,
-        name: "a",
-      },
-    ]);
+  describe("async", () => {
+    it("await Promise.resolve()", () => {
+      const { items } = parse(`await Promise.resolve()`);
+      expect(items).toMatchObject([
+        {
+          type: ScriptTypes.Async,
+        },
+        {
+          type: ScriptTypes.FunctionCall,
+          name: "resolve",
+        },
+      ]);
+    });
+
+    it("const a = await Promise.resolve()", () => {
+      const { items } = parse(`const a = await Promise.resolve()`);
+      expect(items).toMatchObject([
+        {
+          type: ScriptTypes.Async,
+        },
+        {
+          type: ScriptTypes.Declaration,
+          name: "a",
+        },
+      ]);
+    });
+
+    it("if(true) { await Promise.resolve() }", () => {
+      const { items } = parse(`if(true) { await Promise.resolve() }`);
+      expect(items).toMatchObject([
+        {
+          type: ScriptTypes.Async,
+        },
+        {
+          type: ScriptTypes.FunctionCall,
+          name: "resolve",
+        },
+      ]);
+    });
+
+    it("if(true){} else { await Promise.resolve() }", () => {
+      const { items } = parse(`if(true){} else { await Promise.resolve() }`);
+      expect(items).toMatchObject([
+        {
+          type: ScriptTypes.Async,
+        },
+        {
+          type: ScriptTypes.FunctionCall,
+          name: "resolve",
+        },
+      ]);
+    });
+
+    it("if(true) { { await Promise.resolve() } }", () => {
+      const { items } = parse(`if(true) { { await Promise.resolve() } }`);
+      expect(items).toMatchObject([
+        {
+          type: ScriptTypes.Async,
+        },
+        {
+          type: ScriptTypes.FunctionCall,
+          name: "resolve",
+        },
+      ]);
+    });
+
+    it("for(let i; i < 10; i++) { await Promise.resolve() }", () => {
+      const { items } = parse(
+        "for(let i; i < 10; i++) { await Promise.resolve() }"
+      );
+      expect(items).toMatchObject([
+        {
+          type: ScriptTypes.Async,
+        },
+        {
+          type: ScriptTypes.FunctionCall,
+          name: "resolve",
+        },
+      ]);
+    });
   });
 });
