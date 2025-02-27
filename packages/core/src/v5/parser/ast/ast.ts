@@ -7,8 +7,6 @@ import type AcornTypes from "acorn";
 import { babelParse } from "@vue/compiler-sfc";
 import { VerterAST } from "./types";
 
-
-
 export function parseAcornLoose(
   source: string
 ): ReturnType<typeof acornLooseParse> {
@@ -59,14 +57,13 @@ export function parseAST(
   sourceFilename: string = "index.ts"
 ): VerterAST {
   // return parseOXC(source).program;
-  const normaliseSource = sanitisePosition(source);
+  // const normaliseSource = sanitisePosition(source);
+  const normaliseSource = source;
   let ast: VerterAST;
   try {
     const result = oxc.parseSync(sourceFilename, normaliseSource, {
       lang: langFilename(sourceFilename),
     });
-
-    const ms = result.magicString;
 
     if (result.errors.length) {
       // fallback to acorn parser if oxc parser failed

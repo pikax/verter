@@ -22,10 +22,10 @@
     "@vue/compiler-core": "^3.5.13",
     "acorn-loose": "^8.4.0",
     "magic-string": "^0.30.17",
-    "oxc-parser": "^0.50.0",
+    "oxc-parser": "^0.53.0",
     "source-map-js": "^1.2.1",
     "sucrase": "^3.35.0",
-    "typescript": "^5.7.3",
+    "typescript": "^5.8.2",
     "vscode-css-languageservice": "^6.3.2",
     "vscode-languageserver": "^9.0.1",
     "vscode-languageserver-protocol": "^3.17.5",
@@ -33,9 +33,9 @@
     "vscode-uri": "^3.1.0"
   },
   "devDependencies": {
-    "@babel/types": "^7.26.8",
-    "vite": "^6.1.0",
-    "vitest": "^3.0.5",
+    "@babel/types": "^7.26.9",
+    "vite": "^6.2.0",
+    "vitest": "^3.0.7",
     "vue": "^3.5.13"
   }
 }

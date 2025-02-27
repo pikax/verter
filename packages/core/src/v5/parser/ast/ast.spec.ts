@@ -55,22 +55,17 @@ describe("parse AST", () => {
     });
 
     describe("non-ascii", () => {
-      it(
-        "oxc has issues with the correct position on non-ascii",
-        { fails: true },
-        () => {
-          // { fails: true }, // note if this starts working, sanitisation is not necessary
-          const sourceA = `const a = '金';`;
-          const sourceB = `const b = 'a';`;
+      it("oxc has issues with the correct position on non-ascii", () => {
+        const sourceA = `const a = '金';`;
+        const sourceB = `const b = 'a';`;
 
-          let source = [sourceA, sourceB].join("\n");
-          const parsed = parse(source);
+        let source = [sourceA, sourceB].join("\n");
+        const parsed = parse(source);
 
-          const [a, b] = parsed.program.body;
-          expect(source.slice(a.start, a.end)).toBe(sourceA);
-          expect(source.slice(b.start, b.end)).toBe(sourceB);
-        }
-      );
+        const [a, b] = parsed.program.body;
+        expect(source.slice(a.start, a.end)).toBe(sourceA);
+        expect(source.slice(b.start, b.end)).toBe(sourceB);
+      });
 
       it("sanitisePosition should work correctly", () => {
         const sourceA = `const a = '金';`;
