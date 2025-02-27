@@ -56,15 +56,13 @@ describe("process script plugin attributes", () => {
     it("work", () => {
       const { result } = parse(`let a = 0`, 'attributes="{ a: number }"');
       expect(result).toMatchInlineSnapshot(
-        `"function script   (){let a = 0};type ___VERTER___attributes={ a: number };"`
-      );
+      `";function script   (){let a = 0};type ___VERTER___attributes={ a: number };"`);
     });
 
     it("generic", () => {
       const { result } = parse(`let a = 0`, 'attributes="T" generic="T"');
       expect(result).toMatchInlineSnapshot(
-        `"function script    <T>(){let a = 0};type ___VERTER___attributes<T>=T;"`
-      );
+      `";function script    <T>(){let a = 0};type ___VERTER___attributes<T>=T;"`);
     });
 
     it("async", () => {
@@ -73,8 +71,7 @@ describe("process script plugin attributes", () => {
         'attributes="{ a: number }"'
       );
       expect(result).toMatchInlineSnapshot(
-        `"async function script   (){let a = await Promise.resolve(0)};type ___VERTER___attributes={ a: number };"`
-      );
+      `";async function script   (){let a = await Promise.resolve(0)};type ___VERTER___attributes={ a: number };"`);
     });
   });
 
@@ -85,8 +82,7 @@ describe("process script plugin attributes", () => {
     it("work", () => {
       const { result } = parse(`let a = 0`, 'attributes="{ a: number }"');
       expect(result).toMatchInlineSnapshot(
-        `"function script   (){let a = 0}/** @typedef {{ a: number }}___VERTER___attributes*/"`
-      );
+      `";function script   (){let a = 0}/** @typedef {{ a: number }}___VERTER___attributes*/"`);
     });
   });
 });

@@ -33,7 +33,12 @@ describe("process template", () => {
         `<div :style="{ color: 'red' }" class="color: green" :class="{ color: 'red', test, super: foo }" />`
       );
       expect(result).toMatchInlineSnapshot(
-        `"function template(){<div style={___VERTER___normalizeStyle([{ color: 'red' }])}  class={___VERTER___normalizeClass([{ color: 'red', test: ___VERTER___ctx.test, super: ___VERTER___ctx.foo },"color: green"])} />}"`
+        `
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
+        <><div style={___VERTER___normalizeStyle([{ color: 'red' }])}  class={___VERTER___normalizeClass([{ color: 'red', test: ___VERTER___ctx.test, super: ___VERTER___ctx.foo },"color: green"])} />
+        </>}"
+      `
       );
     });
   });
@@ -44,7 +49,12 @@ describe("process template", () => {
         `<div v-if="typeof test === 'string'" :test="()=>test" />`
       );
       expect(result).toMatchInlineSnapshot(
-        `"function template(){{()=>{if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}}}}"`
+        `
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(typeof ___VERTER___ctx.test === 'string'){
+        <><div  test={()=>___VERTER___ctx.test} />}}}
+        </>}"
+      `
       );
     });
 
@@ -56,10 +66,13 @@ describe("process template", () => {
         </div>`
       );
       expect(result).toMatchInlineSnapshot(`
-        "function template(){{()=>{if(___VERTER___ctx.test === 'app'){<div > 
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test === 'app'){
+        <><div > 
                    {()=>{if(!((___VERTER___ctx.test === 'app'))) return;/* @ts-expect-error no overlap */
-                 if(___VERTER___ctx.test === 'foo'){<div > {"Error"} </div>}}}
-                </div>}}}}"
+                 if(___VERTER___ctx.test === 'foo'){<div > Error </div>}}}
+                </div>}}}
+        </>}"
       `);
     });
   });

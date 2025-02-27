@@ -8,7 +8,7 @@ import {
 import { LoopPlugin } from "./index.js";
 import { parser } from "../../../../parser/parser.js";
 
-describe("process tempalte plugins loop", () => {
+describe("process template plugins loop", () => {
   function parse(content: string, options: Partial<TemplateContext> = {}) {
     const source = `<template>${content}</template>`;
     const parsed = parser(source);
@@ -34,30 +34,44 @@ describe("process tempalte plugins loop", () => {
   it('<div v-for="item in items"/>', () => {
     const { result } = parse(`<div v-for="item in items"/>`);
 
-    expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div />})}}}"`
-    );
+    expect(result).toMatchInlineSnapshot(`
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  
+      <><div />})}}
+      </>}"
+    `);
   });
 
   it('<div v-for="item in items">{{ item }}</div>', () => {
     const { result } = parse(`<div v-for="item in items">{{ item }}</div>`);
-    expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div >{ item }</div>})}}}"`
-    );
+    expect(result).toMatchInlineSnapshot(`
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  
+      <><div >{ item }</div>})}}
+      </>}"
+    `);
   });
 
   it('<div v-for="item in items">{{ item + 1 }}</div>', () => {
     const { result } = parse(`<div v-for="item in items">{{ item + 1 }}</div>`);
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div >{ item + 1 }</div>})}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  
+      <><div >{ item + 1 }</div>})}}
+      </>}"
+    `);
   });
 
   it('<div v-for="item of items">{{ item + 1 }}</div>', () => {
     const { result } = parse(`<div v-for="item of items">{{ item + 1 }}</div>`);
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div >{ item + 1 }</div>})}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  
+      <><div >{ item + 1 }</div>})}}
+      </>}"
+    `);
   });
 
   it('<div v-for="(item, index) in items">{{ item + index }}</div>', () => {
@@ -65,8 +79,12 @@ describe("process tempalte plugins loop", () => {
       `<div v-for="(item, index) in items">{{ item + index }}</div>`
     );
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item, index)=>{  <div >{ item + index }</div>})}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item, index)=>{  
+      <><div >{ item + index }</div>})}}
+      </>}"
+    `);
   });
 
   it('<div v-for="(item, index) of items">{{ item + index }}</div>', () => {
@@ -74,8 +92,12 @@ describe("process tempalte plugins loop", () => {
       `<div v-for="(item, index) of items">{{ item + index }}</div>`
     );
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item, index)=>{  <div >{ item + index }</div>})}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item, index)=>{  
+      <><div >{ item + index }</div>})}}
+      </>}"
+    `);
   });
 
   it('<div v-for="{obj} in items">{{ test + obj }}</div>', () => {
@@ -83,8 +105,12 @@ describe("process tempalte plugins loop", () => {
       `<div v-for="{obj} in items">{{ test + obj }}</div>`
     );
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,({obj})=>{  <div >{ ___VERTER___ctx.test + obj }</div>})}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,({obj})=>{  
+      <><div >{ ___VERTER___ctx.test + obj }</div>})}}
+      </>}"
+    `);
   });
 
   it('<div v-for="{obj} of items">{{ test + obj }}</div>', () => {
@@ -92,8 +118,12 @@ describe("process tempalte plugins loop", () => {
       `<div v-for="{obj} of items">{{ test + obj}}</div>`
     );
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,({obj})=>{  <div >{ ___VERTER___ctx.test + obj}</div>})}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,({obj})=>{  
+      <><div >{ ___VERTER___ctx.test + obj}</div>})}}
+      </>}"
+    `);
   });
 
   it('<div v-for="(item, key, index) of items">{{ item + key + index }}</div>', () => {
@@ -101,16 +131,24 @@ describe("process tempalte plugins loop", () => {
       `<div v-for="(item, key, index) of items">{{ item + key + index }}</div>`
     );
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item, key, index)=>{  <div >{ item + key + index }</div>})}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item, key, index)=>{  
+      <><div >{ item + key + index }</div>})}}
+      </>}"
+    `);
   });
   it('<div v-for="({obj}, key, index) in items">{{ item + obj + key + index }}</div>', () => {
     const { result } = parse(
       `<div v-for="({obj}, key, index) in items">{{ item + obj + key + index }}</div>`
     );
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,({obj}, key, index)=>{  <div >{ ___VERTER___ctx.item + obj + key + index }</div>})}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,({obj}, key, index)=>{  
+      <><div >{ ___VERTER___ctx.item + obj + key + index }</div>})}}
+      </>}"
+    `);
   });
 
   it("nested", () => {
@@ -120,11 +158,14 @@ describe("process tempalte plugins loop", () => {
   </span>
 </li>`);
     expect(result).toMatchInlineSnapshot(`
-      "function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <li >
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  
+      <><li >
         {()=>{___VERTER___renderList(item.children,(childItem)=>{  <span >
           { item.message } { childItem }
         </span>})}}
-      </li>})}}}"
+      </li>})}}
+      </>}"
     `);
   });
 
@@ -135,8 +176,12 @@ describe("process tempalte plugins loop", () => {
     );
 
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{if(___VERTER___ctx.item.active){{()=>{if(!((___VERTER___ctx.item.active))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.item.active))) return;<li  ></li>})}}}}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.item.active){{()=>{if(!((___VERTER___ctx.item.active))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.item.active))) return;
+      <><li  ></li>})}}}}}
+      </>}"
+    `);
   });
 
   it("template", () => {
@@ -146,10 +191,13 @@ describe("process tempalte plugins loop", () => {
 </template>`);
     // NOTE this double wrapps but should be fine
     expect(result).toMatchInlineSnapshot(`
-      "function template(){{()=>{{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <template >
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  
+      <><template >
           <li>{ item.msg }</li>
           <li class="divider" role={"presentation"}></li>
-      </template>})}}}}}"
+      </template>})}}}}
+      </>}"
     `);
   });
 
@@ -158,8 +206,12 @@ describe("process tempalte plugins loop", () => {
       `<div v-if="show"><div v-for="item in items">{{ item }}</div></div>`
     );
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{if(___VERTER___ctx.show){<div >{()=>{if(!((___VERTER___ctx.show))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.show))) return;<div >{ item }</div>})}}</div>}}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.show){
+      <><div >{()=>{if(!((___VERTER___ctx.show))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.show))) return;<div >{ item }</div>})}}</div>}}}
+      </>}"
+    `);
   });
 
   it("parent to narrow type", () => {
@@ -167,15 +219,23 @@ describe("process tempalte plugins loop", () => {
       `<div v-if="items === undefined"><div v-for="item in items">{{ item }}</div></div>`
     );
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{if(___VERTER___ctx.items === ___VERTER___ctx.undefined){<div >{()=>{if(!((___VERTER___ctx.items === ___VERTER___ctx.undefined))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.items === ___VERTER___ctx.undefined))) return;<div >{ item }</div>})}}</div>}}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.items === ___VERTER___ctx.undefined){
+      <><div >{()=>{if(!((___VERTER___ctx.items === ___VERTER___ctx.undefined))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.items === ___VERTER___ctx.undefined))) return;<div >{ item }</div>})}}</div>}}}
+      </>}"
+    `);
   });
 
   it("v-for with slots dynamic", () => {
     const { result } = parse(`<Comp v-for="item in items" #[item]></Comp>`);
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <___VERTER___COMPONENT_CTX.Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[item])(()=>{})}}></___VERTER___COMPONENT_CTX.Comp>})}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  
+      <><___VERTER___COMPONENT_CTX.Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[item])(()=>{})}}></___VERTER___COMPONENT_CTX.Comp>})}}
+      </>}"
+    `);
   });
 
   it("v-for with slots children", () => {
@@ -185,11 +245,14 @@ describe("process tempalte plugins loop", () => {
     </slot>
 </div>`);
     expect(result).toMatchInlineSnapshot(`
-      "function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div >
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  
+      <><div >
           {()=>{const ___VERTER___slotComponent=___VERTER___$slot[item];<___VERTER___slotComponent >
               <div>{ item }</div>
           </___VERTER___slotComponent>}}
-      </div>})}}}"
+      </div>})}}
+      </>}"
     `);
   });
 });

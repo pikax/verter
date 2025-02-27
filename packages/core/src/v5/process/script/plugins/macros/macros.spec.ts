@@ -60,7 +60,7 @@ describe("process script plugin script block", () => {
     it.only("test", () => {
       const { s } = parse(`let a = 0`, "js");
       expect(s.toString()).toMatchInlineSnapshot(`
-        "/** @returns {{}} */function ___VERTER___TemplateBindingFN  (){let a = 0;return{}}
+        "/** @returns {{}} */;function ___VERTER___TemplateBindingFN  (){let a = 0;return{}}
         /** @typedef {ReturnType<typeof ___VERTER___TemplateBindingFN>} ___VERTER___TemplateBinding */
         /** @type {___VERTER___TemplateBinding} */
         export const ___VERTER___TemplateBinding = null;

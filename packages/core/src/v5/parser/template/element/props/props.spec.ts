@@ -835,7 +835,7 @@ describe("parser template element props", () => {
               {
                 type: TemplateTypes.Binding,
                 name: "name",
-                ignore: true,
+                ignore: false,
               },
             ],
             exp: null,
@@ -848,7 +848,7 @@ describe("parser template element props", () => {
           {
             type: TemplateTypes.Binding,
             name: "name",
-            ignore: true,
+            ignore: false,
           },
         ]);
 
@@ -864,7 +864,7 @@ describe("parser template element props", () => {
               {
                 type: TemplateTypes.Binding,
                 name: "foo-bar",
-                ignore: true,
+                ignore: false,
               },
             ],
             exp: null,
@@ -877,7 +877,7 @@ describe("parser template element props", () => {
           {
             type: TemplateTypes.Binding,
             name: "foo-bar",
-            ignore: true,
+            ignore: false,
           },
         ]);
 

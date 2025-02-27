@@ -48,7 +48,8 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot/>`);
       expect(result).toMatchInlineSnapshot(
         `
-        "function template(){{()=>{
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
         <>const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent/>}}
         </>}"
       `
@@ -58,7 +59,8 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot name="test"/>`);
       expect(result).toMatchInlineSnapshot(
         `
-        "function template(){{()=>{
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
         <>const ___VERTER___slotComponent=___VERTER___$slot["test"];<___VERTER___slotComponent />}}
         </>}"
       `
@@ -69,7 +71,8 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot :name="test"/>`);
       expect(result).toMatchInlineSnapshot(
         `
-        "function template(){{()=>{
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
         <>const ___VERTER___slotComponent=___VERTER___$slot[___VERTER___ctx.test];<___VERTER___slotComponent />}}
         </>}"
       `
@@ -80,7 +83,8 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot :[msg]="test"/>`);
       expect(result).toMatchInlineSnapshot(
         `
-        "function template(){{()=>{
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
         <>const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent {...{[___VERTER___ctx.msg]:___VERTER___ctx.test}}/>}}
         </>}"
       `
@@ -93,7 +97,8 @@ describe("process template plugins slot", () => {
       );
       expect(result).toMatchInlineSnapshot(
         `
-        "function template(){{()=>{
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
         <>const ___VERTER___slotComponent=___VERTER___$slot[___VERTER___ctx.name];<___VERTER___slotComponent {...{[___VERTER___ctx.msg]:___VERTER___ctx.test}}  onTest={()=> ___VERTER___ctx.callMe()} onBind={___VERTER___ctx.bind}/>}}
         </>}"
       `
@@ -104,8 +109,9 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot v-if="test === 'app'"/>`);
       expect(result).toMatchInlineSnapshot(
         `
-        "function template(){{()=>{
-        <>if(___VERTER___ctx.test === 'app'){const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent />}}}
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test === 'app'){
+        <>const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent />}}}
         </>}"
       `
       );
@@ -115,8 +121,9 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<div v-if="test === 'app'"> <slot /> </div>`);
       expect(result).toMatchInlineSnapshot(
         `
-        "function template(){{()=>{
-        <>if(___VERTER___ctx.test === 'app'){<div > {()=>{const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent />}} </div>}}}
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test === 'app'){
+        <><div > {()=>{const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent />}} </div>}}}
         </>}"
       `
       );
@@ -126,7 +133,8 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot> <span>1</span> </slot>`);
       expect(result).toMatchInlineSnapshot(
         `
-        "function template(){{()=>{
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
         <>const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent> <span>1</span> </___VERTER___slotComponent>}}
         </>}"
       `
@@ -150,7 +158,8 @@ describe("process template plugins slot", () => {
 
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{<template><span>1</span></template>});}}></div>
           </>}"
         `
@@ -164,7 +173,8 @@ describe("process template plugins slot", () => {
 
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{ if(___VERTER___ctx.test==='app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{if(!((___VERTER___ctx.test==='app'))) return;<template><span>1{___VERTER___ctx.test}</span></template>});}}}></div>
           </>}"
         `
@@ -181,7 +191,8 @@ describe("process template plugins slot", () => {
           </div>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{
                        if(___VERTER___ctx.foo === 'test'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{if(!((___VERTER___ctx.foo === 'test'))) return;<template><span>1</span></template>});}
                        else if(___VERTER___ctx.foo === 'app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.app)(()=>{if(!(!((___VERTER___ctx.foo === 'test')) && (___VERTER___ctx.foo === 'app'))) return;<template><span>1</span></template>});}
@@ -199,7 +210,8 @@ describe("process template plugins slot", () => {
 
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{<template><span>1</span></template>});}}></div>
           </>}"
         `
@@ -213,7 +225,8 @@ describe("process template plugins slot", () => {
 
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots['foo-bar'])(()=>{<template><span>1</span></template>});}}></div>
           </>}"
         `
@@ -227,7 +240,8 @@ describe("process template plugins slot", () => {
 
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)((obj)=>{<template><span>1 { obj.test }</span></template>});}}></div>
           </>}"
         `
@@ -240,7 +254,8 @@ describe("process template plugins slot", () => {
 
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)((obj)=>{<template><span>1 { obj.test }</span></template>});}}></div>
           </>}"
         `
@@ -254,7 +269,8 @@ describe("process template plugins slot", () => {
 
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(({bar})=>{<template><span>1{bar}</span></template>});}}></div>
           </>}"
         `
@@ -267,7 +283,8 @@ describe("process template plugins slot", () => {
 
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(({bar})=>{<template><span>1{bar}</span></template>});}}></div>
           </>}"
         `
@@ -280,7 +297,8 @@ describe("process template plugins slot", () => {
         );
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(()=>{<template><span>1</span></template>});}}></div>
           </>}"
         `
@@ -292,7 +310,8 @@ describe("process template plugins slot", () => {
         );
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(()=>{<template><span>1</span></template>});}}></div>
           </>}"
         `
@@ -305,7 +324,8 @@ describe("process template plugins slot", () => {
         );
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(({obj})=>{<template><span>1{obj}</span></template>});}}></div>
           </>}"
         `
@@ -317,7 +337,8 @@ describe("process template plugins slot", () => {
         );
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
           <><div v-slot={(___VERTER___slotInstance)=>{ ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(({obj})=>{<template><span>1{obj}</span></template>});}}></div>
           </>}"
         `
@@ -331,8 +352,9 @@ describe("process template plugins slot", () => {
 
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){{()=>{
-          <>if(___VERTER___ctx.test === 'foo'){<div v-slot={(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.test === 'foo'))) return; ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(()=>{if(!((___VERTER___ctx.test === 'foo'))) return;<template>{___VERTER___ctx.test}</template>});}} ></div>}}}
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test === 'foo'){
+          <><div v-slot={(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.test === 'foo'))) return; ___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(()=>{if(!((___VERTER___ctx.test === 'foo'))) return;<template>{___VERTER___ctx.test}</template>});}} ></div>}}}
           </>}"
         `
         );
@@ -345,8 +367,9 @@ describe("process template plugins slot", () => {
           <template v-if="test==='app'" v-slot:foo><span>1{{test}}</span></template></div>`
         );
         expect(result).toMatchInlineSnapshot(`
-          "function template(){{()=>{
-          <>if(___VERTER___ctx.test === 'foo'){<div v-slot={(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.test === 'foo'))) return;
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test === 'foo'){
+          <><div v-slot={(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.test === 'foo'))) return;
                     // @ts-expect-error invalid app
                     if(!((___VERTER___ctx.test === 'foo'))) return; if(___VERTER___ctx.test==='app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{if(!((___VERTER___ctx.test === 'foo') && (___VERTER___ctx.test==='app'))) return;<template><span>1{___VERTER___ctx.test}</span></template>});}}} ></div>}}}
           </>}"
@@ -365,7 +388,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp v-slot></Comp>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{})}}></___VERTER___COMPONENT_CTX.Comp>
             </>}"
           `
@@ -376,7 +400,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp v-slot/>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{})}}/>
             </>}"
           `
@@ -387,7 +412,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp v-slot>{{foo}}</Comp>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(()=>{{___VERTER___ctx.foo}})}}></___VERTER___COMPONENT_CTX.Comp>
             </>}"
           `
@@ -398,7 +424,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp v-slot="{foo}">{{foo}}</Comp>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({foo})=>{{foo}})}}></___VERTER___COMPONENT_CTX.Comp>
             </>}"
           `
@@ -408,7 +435,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp #="{foo}">{{foo}}</Comp>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({foo})=>{{foo}})}}></___VERTER___COMPONENT_CTX.Comp>
             </>}"
           `
@@ -421,8 +449,9 @@ describe("process template plugins slot", () => {
           );
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){{()=>{
-            <>if(___VERTER___ctx.test === 'app'){<___VERTER___COMPONENT_CTX.Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></___VERTER___COMPONENT_CTX.Comp>}}}
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test === 'app'){
+            <><___VERTER___COMPONENT_CTX.Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></___VERTER___COMPONENT_CTX.Comp>}}}
             </>}"
           `
           );
@@ -434,7 +463,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp v-slot:test></Comp>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(()=>{})}}></___VERTER___COMPONENT_CTX.Comp>
             </>}"
           `
@@ -445,7 +475,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp v-slot:test/>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(()=>{})}}/>
             </>}"
           `
@@ -456,7 +487,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp v-slot:test>{{foo}}</Comp>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(()=>{{___VERTER___ctx.foo}})}}></___VERTER___COMPONENT_CTX.Comp>
             </>}"
           `
@@ -467,7 +499,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp v-slot:test="{foo}">{{foo}}</Comp>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(({foo})=>{{foo}})}}></___VERTER___COMPONENT_CTX.Comp>
             </>}"
           `
@@ -477,7 +510,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp #test="{foo}">{{foo}}</Comp>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(({foo})=>{{foo}})}}></___VERTER___COMPONENT_CTX.Comp>
             </>}"
           `
@@ -490,8 +524,9 @@ describe("process template plugins slot", () => {
           );
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){{()=>{
-            <>if(___VERTER___ctx.test === 'app'){<___VERTER___COMPONENT_CTX.Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></___VERTER___COMPONENT_CTX.Comp>}}}
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test === 'app'){
+            <><___VERTER___COMPONENT_CTX.Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots.test)(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></___VERTER___COMPONENT_CTX.Comp>}}}
             </>}"
           `
           );
@@ -503,7 +538,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp v-slot:[test]></Comp>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(()=>{})}}></___VERTER___COMPONENT_CTX.Comp>
             </>}"
           `
@@ -514,7 +550,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp v-slot:[test]/>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(()=>{})}}/>
             </>}"
           `
@@ -525,7 +562,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp v-slot:[test]>{{foo}}</Comp>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(()=>{{___VERTER___ctx.foo}})}}></___VERTER___COMPONENT_CTX.Comp>
             </>}"
           `
@@ -538,7 +576,8 @@ describe("process template plugins slot", () => {
           );
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>{{foo}})}}></___VERTER___COMPONENT_CTX.Comp>
             </>}"
           `
@@ -548,7 +587,8 @@ describe("process template plugins slot", () => {
           const { result } = parse(`<Comp #[test]="{foo}">{{foo}}</Comp>`);
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
             <><___VERTER___COMPONENT_CTX.Comp  v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>{{foo}})}}></___VERTER___COMPONENT_CTX.Comp>
             </>}"
           `
@@ -561,8 +601,9 @@ describe("process template plugins slot", () => {
           );
           expect(result).toMatchInlineSnapshot(
             `
-            "function template(){{()=>{
-            <>if(___VERTER___ctx.test === 'app'){<___VERTER___COMPONENT_CTX.Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></___VERTER___COMPONENT_CTX.Comp>}}}
+            "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+            export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test === 'app'){
+            <><___VERTER___COMPONENT_CTX.Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></___VERTER___COMPONENT_CTX.Comp>}}}
             </>}"
           `
           );
@@ -575,8 +616,9 @@ describe("process template plugins slot", () => {
         );
         expect(result).toMatchInlineSnapshot(
           `
-          "function template(){{()=>{
-          <>if(___VERTER___ctx.test === 'app'){<___VERTER___COMPONENT_CTX.Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></___VERTER___COMPONENT_CTX.Comp>}}}
+          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+          export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test === 'app'){
+          <><___VERTER___COMPONENT_CTX.Comp   v-slot={(___VERTER___slotInstance)=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>{if(!((___VERTER___ctx.test === 'app'))) return;{foo}})}}></___VERTER___COMPONENT_CTX.Comp>}}}
           </>}"
         `
         );

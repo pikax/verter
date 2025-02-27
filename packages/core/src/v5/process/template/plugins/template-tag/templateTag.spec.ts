@@ -38,7 +38,11 @@ describe("process template plugins comment", () => {
   it('should replace tag', ()=> {
     const { result } = parse("<div></div>");
 
-    expect(result).toMatchInlineSnapshot(`"function template(){<div></div>}"`);
+    expect(result).toMatchInlineSnapshot(`
+      "export function template(){
+      <><div></div>
+      </>}"
+    `);
   })
 
 

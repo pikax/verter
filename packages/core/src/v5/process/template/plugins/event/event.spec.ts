@@ -30,30 +30,46 @@ describe("process template plugins event", () => {
   it("should handle event", () => {
     const { result } = parse(`<div @click="test.toString()" />`);
     expect(result).toMatchInlineSnapshot(
-      `"function template(){<div onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:___VERTER___ctx.test.toString())} />}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
+      <><div onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:___VERTER___ctx.test.toString())} />
+      </>}"
+    `);
   });
 
   it("string", () => {
     const { result } = parse(`<div @click="'foo'" />`);
     expect(result).toMatchInlineSnapshot(
-      `"function template(){<div onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:'foo')} />}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
+      <><div onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:'foo')} />
+      </>}"
+    `);
   });
   it("string interpolation", () => {
     const { result } = parse(`<div @click="\`foo\${'test'}\`" />`);
 
     expect(result).toMatchInlineSnapshot(
-      `"function template(){<div onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:\`foo\${'test'}\`)} />}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
+      <><div onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:\`foo\${'test'}\`)} />
+      </>}"
+    `);
   });
 
   it("ternary", () => {
     const { result } = parse(`<div @click="foo ? 'bar' : 'baz'" />`);
 
     expect(result).toMatchInlineSnapshot(
-      `"function template(){<div onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:___VERTER___ctx.foo ? 'bar' : 'baz')} />}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
+      <><div onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:___VERTER___ctx.foo ? 'bar' : 'baz')} />
+      </>}"
+    `);
   });
 
   it("narrow", () => {
@@ -62,8 +78,12 @@ describe("process template plugins event", () => {
     );
 
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{if(typeof ___VERTER___ctx.msg === 'string'){<div  onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:!((typeof ___VERTER___ctx.msg === 'string'))? undefined :___VERTER___ctx.msg.toLowerCase())} onAuxclick={() => ___VERTER___ctx.msg.toLowerCase()}></div>}}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(typeof ___VERTER___ctx.msg === 'string'){
+      <><div  onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:!((typeof ___VERTER___ctx.msg === 'string'))? undefined :___VERTER___ctx.msg.toLowerCase())} onAuxclick={() => ___VERTER___ctx.msg.toLowerCase()}></div>}}}
+      </>}"
+    `);
   });
 
   it("deep narrow with narrow:true", () => {
@@ -73,16 +93,24 @@ describe("process template plugins event", () => {
     );
 
     expect(result).toMatchInlineSnapshot(
-      `"function template(){{()=>{if(typeof ___VERTER___ctx.msg === 'string'){<div  onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:!((typeof ___VERTER___ctx.msg === 'string'))? undefined :___VERTER___ctx.msg.toLowerCase())} onAuxclick={() => !((typeof ___VERTER___ctx.msg === 'string'))? undefined :___VERTER___ctx.msg.toLowerCase()}></div>}}}}"`
-    );
+    `
+      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(typeof ___VERTER___ctx.msg === 'string'){
+      <><div  onClick={(...___VERTER___eventArgs)=>___VERTER___eventCb(___VERTER___eventArgs,($event)=>$event&&0?undefined:!((typeof ___VERTER___ctx.msg === 'string'))? undefined :___VERTER___ctx.msg.toLowerCase())} onAuxclick={() => !((typeof ___VERTER___ctx.msg === 'string'))? undefined :___VERTER___ctx.msg.toLowerCase()}></div>}}}
+      </>}"
+    `);
   });
 
   describe("vue", () => {
     it("@vue:mounted", () => {
       const { result } = parse(`<div @vue:mounted="test" />`);
       expect(result).toMatchInlineSnapshot(
-        `"function template(){<div onVue:mounted={___VERTER___ctx.test} />}"`
-      );
+      `
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
+        <><div onVue:mounted={___VERTER___ctx.test} />
+        </>}"
+      `);
     });
   });
 
@@ -90,29 +118,45 @@ describe("process template plugins event", () => {
     test("no call", () => {
       const { result } = parse(`<div @click="test" />`);
       expect(result).toMatchInlineSnapshot(
-        `"function template(){<div onClick={___VERTER___ctx.test} />}"`
-      );
+      `
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
+        <><div onClick={___VERTER___ctx.test} />
+        </>}"
+      `);
     });
 
     test("partial", () => {
       const { result } = parse(`<div @click="test.foo" />`);
       expect(result).toMatchInlineSnapshot(
-        `"function template(){<div onClick={___VERTER___ctx.test.foo} />}"`
-      );
+      `
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
+        <><div onClick={___VERTER___ctx.test.foo} />
+        </>}"
+      `);
     });
 
     test("function", () => {
       const { result } = parse(`<div @click="()=>test" />`);
       expect(result).toMatchInlineSnapshot(
-        `"function template(){<div onClick={()=>___VERTER___ctx.test} />}"`
-      );
+      `
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
+        <><div onClick={()=>___VERTER___ctx.test} />
+        </>}"
+      `);
     });
 
     test("object", () => {
       const { result } = parse(`<div @click="{test}" />`);
       expect(result).toMatchInlineSnapshot(
-        `"function template(){<div onClick={{test: ___VERTER___ctx.test}} />}"`
-      );
+      `
+        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
+        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
+        <><div onClick={{test: ___VERTER___ctx.test}} />
+        </>}"
+      `);
     });
   });
 });
