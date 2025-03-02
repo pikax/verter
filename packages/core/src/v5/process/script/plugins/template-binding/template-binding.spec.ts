@@ -77,7 +77,7 @@ describe("process script plugin template-binding", () => {
       ""
     );
     expect(result).toMatchInlineSnapshot(`
-      "<template><div>{{ a }}</div></template>/** @returns {{a:typeof a}} */;function ___VERTER___TemplateBindingFN  (){let a = 0;return{a}}
+      "<template><div>{{ a }}</div></template>/** @returns {{a:typeof a}} */;function ___VERTER___TemplateBindingFN  (){let a = 0;return{a/*67,68*/: a}}
       /** @typedef {ReturnType<typeof ___VERTER___TemplateBindingFN>} ___VERTER___TemplateBinding */
       /** @type {___VERTER___TemplateBinding} */
       export const ___VERTER___TemplateBinding = null;
@@ -95,7 +95,7 @@ describe("process script plugin template-binding", () => {
     );
 
     expect(result).toMatchInlineSnapshot(
-      `"<template><div>{{ a }}</div></template>;function ___VERTER___TemplateBindingFN  (){let a = 0;return{a:a as typeof a}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>;"`
+      `"<template><div>{{ a }}</div></template>;function ___VERTER___TemplateBindingFN  (){let a = 0;return{a/*67,68*/: a as typeof a}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>;"`
     );
   });
 
@@ -108,7 +108,24 @@ describe("process script plugin template-binding", () => {
       ""
     );
     expect(result).toMatchInlineSnapshot(
-      `"<template><div>{{ a }}</div></template>;async function ___VERTER___TemplateBindingFN  (){let a = await Promise.resolve(0);return{a:a as typeof a}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN> extends Promise<infer R>?R:never;"`
+      `"<template><div>{{ a }}</div></template>;async function ___VERTER___TemplateBindingFN  (){let a = await Promise.resolve(0);return{a/*67,68*/: a as typeof a}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN> extends Promise<infer R>?R:never;"`
     );
+  });
+
+  it("Component", () => {
+    const { result } = parse(
+      `import Comp from './Comp.vue'; let a = 0`,
+      false,
+      "js",
+      "<template><Comp>{{ a }}</Comp></template>",
+      ""
+    );
+    expect(result).toMatchInlineSnapshot(`
+      "<template><Comp>{{ a }}</Comp></template>/** @returns {{Comp:typeof Comp,a:typeof a}} */;function ___VERTER___TemplateBindingFN  (){import Comp from './Comp.vue'; let a = 0;return{Comp/*72,76*/: Comp,a/*100,101*/: a}}
+      /** @typedef {ReturnType<typeof ___VERTER___TemplateBindingFN>} ___VERTER___TemplateBinding */
+      /** @type {___VERTER___TemplateBinding} */
+      export const ___VERTER___TemplateBinding = null;
+      "
+    `);
   });
 });

@@ -27,7 +27,7 @@ export const ElementPlugin = declareTemplatePlugin({
 
     const shouldWrap = item.tag.includes("-");
 
-    const componentAccessor = ctx.retrieveAccessor("COMPONENT_CTX");
+    const componentAccessor = ctx.retrieveAccessor("ctx");
     s.prependRight(
       node.loc.start.offset + 1,
       `${componentAccessor}${shouldWrap ? '["' : "."}`

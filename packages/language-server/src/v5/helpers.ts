@@ -119,20 +119,36 @@ export function mapDefinitionInfo(
     if (!subDoc) return;
 
     const text = subDoc.getText();
-    const textSpanStr = text.slice(
-      info.textSpan.start,
-      info.textSpan.start + info.textSpan.length
-    );
-    const contextRangeStr = text.slice(
-      info.contextSpan!.start,
-      info.contextSpan!.start + info.contextSpan!.length
-    );
-
-    if (info.contextSpan) {
-      contextRange = mapTextSpanToRange(info.contextSpan, subDoc);
-    }
 
     textSpan = mapTextSpanToRange(info.textSpan, subDoc);
+
+    if (info.contextSpan) {
+      const textSpanStr = text.slice(
+        info.textSpan.start,
+        info.textSpan.start + info.textSpan.length
+      );
+      const contextRangeStr = text.slice(
+        info.contextSpan!.start,
+        info.contextSpan!.start + info.contextSpan!.length
+      );
+
+      const rrr = contextRangeStr.split(":")[0].replace(textSpanStr, "");
+
+      if (rrr.startsWith("/*") && rrr.endsWith("*/")) {
+        const coords = rrr.slice(2, -2);
+        const [startOffset, endOffset] = coords.split(",");
+
+        const originalStartPos = doc.positionAt(+startOffset);
+        const originalEndPos = doc.positionAt(+endOffset);
+
+        textSpan = contextRange = Range.create(
+          originalStartPos,
+          originalEndPos
+        );
+      } else {
+        contextRange = mapTextSpanToRange(info.contextSpan, subDoc);
+      }
+    }
   }
   if (!textSpan) {
     if (!fallback) return undefined;

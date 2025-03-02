@@ -3,7 +3,7 @@ import { TemplatePlugin } from "../../template";
 export const BindingPlugin = {
   name: "VerterBinding",
   transformBinding(item, s, ctx) {
-    if (item.ignore || 'skip' in item) {
+    if (item.ignore || "skip" in item || item.isComponent) {
       return;
     }
 

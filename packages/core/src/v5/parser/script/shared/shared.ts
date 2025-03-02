@@ -83,7 +83,7 @@ export function createSharedContext(opts: {
         };
       }
       case "ImportDeclaration": {
-        return {
+        const importItem = {
           type: ScriptTypes.Import,
           node: node,
           bindings:
@@ -104,6 +104,8 @@ export function createSharedContext(opts: {
               })
               .filter((x) => !!x) ?? [],
         };
+
+        return [importItem, ...importItem.bindings];
       }
 
       case "TSTypeAssertion": {

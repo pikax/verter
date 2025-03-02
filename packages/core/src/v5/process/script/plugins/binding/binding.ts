@@ -12,6 +12,17 @@ export const BindingPlugin = definePlugin({
       name: item.name,
       originalName: item.name,
       item,
+      node: item.node,
+    });
+  },
+  transformBinding(item, _, ctx) {
+    if (!item.name) return;
+    ctx.items.push({
+      type: ProcessItemType.Binding,
+      name: item.name,
+      originalName: item.name,
+      item,
+      node: item.node,
     });
   },
 });

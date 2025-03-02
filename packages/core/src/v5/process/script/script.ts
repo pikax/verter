@@ -20,6 +20,7 @@ export function processScript(
   const context: ScriptContext = {
     generic: null,
     isAsync: false,
+    isTS: false,
     items: [],
     prefix: defaultPrefix,
     isSetup: false,

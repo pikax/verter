@@ -99,6 +99,7 @@ export type ProcessItemBinding = {
   originalName?: string;
 
   item: ScriptItem;
+  node: VerterASTNode;
 };
 
 export type ProcessItemOptions = {
@@ -132,10 +133,12 @@ export type ImportModule = {
   from: string;
   items: ImportItem[];
   asType?: boolean;
+  node: VerterASTNode;
 };
 
 export type ImportItem = {
   name: string;
   alias?: string;
   type?: boolean;
+  node: VerterASTNode;
 };

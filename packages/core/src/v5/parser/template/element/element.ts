@@ -1,6 +1,11 @@
-import { ElementNode, NodeTypes } from "@vue/compiler-core";
+import { ElementNode, ElementTypes, NodeTypes } from "@vue/compiler-core";
 import { handleConditions } from "./conditions";
-import { TemplateCondition, TemplateTypes, TemplateElement } from "../types";
+import {
+  TemplateCondition,
+  TemplateTypes,
+  TemplateElement,
+  TemplateBinding,
+} from "../types";
 import { handleLoopProp } from "./loops";
 import { handleProps } from "./props";
 import { handleSlotDeclaration, handleSlotProp } from "./slots";
@@ -51,7 +56,9 @@ export function handleElement(
     parent,
 
     // @ts-expect-error
-    ref: props?.find((x) => x.name === "ref" || x.node?.rawName === ':ref') ?? null,
+    ref:
+      props?.find((x) => x.name === "ref" || x.node?.rawName === ":ref") ??
+      null,
     // @ts-expect-error
     props: props ?? [],
 
@@ -65,6 +72,20 @@ export function handleElement(
   const items = [
     ...(conditions?.items ?? []),
     ...(loop?.items ?? []),
+    ...(node.tagType === ElementTypes.COMPONENT
+      ? [
+          {
+            type: TemplateTypes.Binding,
+            name: node.tag.split(".")[0],
+            node,
+            isComponent: true,
+            directive: null,
+            exp: null,
+            parent: null,
+          } as TemplateBinding,
+        ]
+      : []),
+
     element,
     ...(propBindings ?? []),
     ...(propSlot?.items ?? []),

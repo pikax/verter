@@ -395,6 +395,114 @@ describe("parser template element", () => {
     });
   });
 
+  describe("component", () => {
+    it("component binding", () => {
+      const { result } = parse(`<Main />`);
+      expect(result).toMatchObject({
+        items: [
+          {
+            type: TemplateTypes.Binding,
+            name: "Main",
+            isComponent: true,
+            node: {
+              loc: {
+                start: {
+                  offset: 10,
+                },
+                end: {
+                  offset: 18,
+                },
+              },
+            },
+          },
+          {
+            type: TemplateTypes.Element,
+            tag: "Main",
+          },
+        ],
+      });
+    });
+
+    it("Main.Sub", () => {
+      const { result } = parse(`<Main.Sub />`);
+      expect(result).toMatchObject({
+        items: [
+          {
+            type: TemplateTypes.Binding,
+            name: "Main",
+            isComponent: true,
+            node: {
+              loc: {
+                start: {
+                  offset: 10,
+                },
+                end: {
+                  offset: 22,
+                },
+              },
+            },
+          },
+          {
+            type: TemplateTypes.Element,
+            tag: "Main.Sub",
+          },
+        ],
+      });
+    });
+    it("Main.Sub.Sub", () => {
+      const { result } = parse(`<Main.Sub.Sub />`);
+      expect(result).toMatchObject({
+        items: [
+          {
+            type: TemplateTypes.Binding,
+            name: "Main",
+            isComponent: true,
+            node: {
+              loc: {
+                start: {
+                  offset: 10,
+                },
+                end: {
+                  offset: 26,
+                },
+              },
+            },
+          },
+          {
+            type: TemplateTypes.Element,
+            tag: "Main.Sub.Sub",
+          },
+        ],
+      });
+    });
+    it("invalid Main[foo]", () => {
+      const { result } = parse(`<Main[foo] />`);
+      expect(result).toMatchObject({
+        items: [
+          {
+            type: TemplateTypes.Binding,
+            name: "Main[foo]",
+            isComponent: true,
+            node: {
+              loc: {
+                start: {
+                  offset: 10,
+                },
+                end: {
+                  offset: 23,
+                },
+              },
+            },
+          },
+          {
+            type: TemplateTypes.Element,
+            tag: "Main[foo]",
+          },
+        ],
+      });
+    });
+  });
+
   describe("ref", () => {
     it('ref="name"', () => {
       const { result } = parse(`<div ref="name"></div>`);

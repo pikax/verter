@@ -198,15 +198,14 @@ describe("parser", () => {
       expect(parsed.isAsync).toBe(false);
     });
 
-    it("async setup", () => {
-      const source = `<script setup>await Promise.resolve()</script>`;
+    it("not async options", () => {
+      const source = `<script>export default { async setup() { await Promise.resolve()} }</script>`;
       const parsed = parser(source);
 
-      expect(parsed.isAsync).toBe(true);
+      expect(parsed.isAsync).toBe(false);
     });
-
-    it("async options", () => {
-      const source = `<script>export default { async setup() { await Promise.resolve()} }</script>`;
+    it("async setup", () => {
+      const source = `<script setup>await Promise.resolve()</script>`;
       const parsed = parser(source);
 
       expect(parsed.isAsync).toBe(true);

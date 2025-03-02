@@ -102,6 +102,7 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
       directive: null | DirectiveNode;
 
       exp: SimpleExpressionNode | null;
+      isComponent?: undefined;
     }
   | {
       node:
@@ -131,10 +132,21 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
 
       ignore: false;
       skip?: undefined;
+      isComponent?: undefined;
 
       exp: SimpleExpressionNode | null;
 
       // directive?: null;
+    }
+  | {
+      node:
+        | Node
+        | (Omit<babel_types.Node, "loc"> & {
+            loc: Node["loc"] & babel_types.Node["loc"];
+          });
+      name: string;
+
+      isComponent: true;
     }
 );
 

@@ -1,3 +1,4 @@
+import { VerterASTNode } from "../../../../parser";
 import { ProcessItemType } from "../../../types";
 import { definePlugin } from "../../types";
 import { generateTypeString } from "../utils";
@@ -11,11 +12,45 @@ export const TemplateBindingPlugin = definePlugin({
     const tag = ctx.block.block.tag;
     const name = ctx.prefix("TemplateBinding");
 
-    const bindings = new Set(
-      ctx.items
-        .filter((x) => x.type === ProcessItemType.Binding)
-        .map((x) => x.name)
-    );
+    // const bindings = new Set(
+    //   ctx.items
+    //     .filter(
+    //       (x) =>
+    //         x.type === ProcessItemType.Binding ||
+    //         x.type === ProcessItemType.Import
+    //     )
+    //     .flatMap((x) =>
+    //       x.type === ProcessItemType.Binding
+    //         ? x.name
+    //         : x.items.map((x) => x.alias ?? x.name)
+    //     )
+    // );
+    // const bindings = new Map(
+    //   ctx.items
+    //     .filter(
+    //       (x) =>
+    //         x.type === ProcessItemType.Binding ||
+    //         x.type === ProcessItemType.Import
+    //     )
+    //     .flatMap((x) => (x.type === ProcessItemType.Binding ? x : x.items))
+    //     .map((x) => '  [ x.name, x])
+    // );
+
+    const bindings = new Map<string, VerterASTNode>();
+    for (const item of ctx.items) {
+      switch (item.type) {
+        case ProcessItemType.Binding: {
+          bindings.set(item.name, item.node);
+          break;
+        }
+        // case ProcessItemType.Import: {
+        //   for (const importItem of item.items) {
+        //     bindings.set(importItem.alias ?? importItem.name, importItem.node);
+        //   }
+        //   break;
+        // }
+      }
+    }
 
     const macroBindings = ctx.items
       .filter((x) => x.type === ProcessItemType.MacroBinding)
@@ -33,19 +68,31 @@ export const TemplateBindingPlugin = definePlugin({
         }
         return acc;
       }, {} as Record<string, string | string[]>);
-    const usedBindings = ctx.templateBindings.filter(
-      (x) => x.name && bindings.has(x.name)
-    );
+    const usedBindings = ctx.templateBindings
+      .map((x) => {
+        if (!x.name) return;
+        const b = bindings.get(x.name);
+        if (!b) return;
+        // rebind path
+        return {
+          name: x.name,
+          start: b.start,
+          end: b.end,
+        };
+      })
+      // .map((x) => (x.name ? bindings.get(x.name) : undefined))
+      .filter((x) => !!x);
 
-    console.log("sadssa");
+    // .filter((x) => x.name && bindings.has(x.name));
+
     s.prependLeft(
       tag.pos.close.start,
       `;return{${usedBindings
         .map(
           (x) =>
-            `${x.name}/*${x.node.loc.start.offset},${
-              x.node.loc.end.offset
-            }*/: ${isTS ? `${x.name}  as typeof ${x.name}` : x.name}`
+            `${x.name}/*${x.start},${x.end}*/: ${
+              isTS ? `${x.name} as typeof ${x.name}` : x.name
+            }`
         )
         .concat(
           Object.entries(macroBindings).map(
@@ -69,7 +116,7 @@ export const TemplateBindingPlugin = definePlugin({
       s.prependLeft(
         tag.pos.open.start,
         `/** @returns {{${usedBindings
-          .map((x) => `${x}:typeof ${x}`)
+          .map((x) => `${x.name}:typeof ${x.name}`)
           .join(",")}}} */`
       );
     }
