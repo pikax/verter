@@ -32,6 +32,9 @@ export type ParserResult = {
   generic: GenericInfo | null;
 
   blocks: ParsedBlock[];
+
+  isTS: boolean;
+  isSetup: boolean;
 };
 
 export type VerterParserOptions = SFCParseOptions & {
@@ -62,6 +65,7 @@ export function parser(
   let generic: GenericInfo | null = null;
   let isAsync = false;
   let isTS = false;
+  let isSetup = false;
 
   const sfcParse = parse(source, {
     ...options,
@@ -115,6 +119,7 @@ export function parser(
           const ast = parseAST(content, filename + "." + languageId);
           const r = parseScriptBetter(ast, x.block.attrs);
           isAsync = r.isAsync;
+          isSetup = x.block === sfcParse.descriptor.scriptSetup;
 
           return {
             type: "script",
@@ -143,6 +148,7 @@ export function parser(
     generic,
     isAsync,
     isTS,
+    isSetup,
 
     blocks,
   };

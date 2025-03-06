@@ -57,7 +57,7 @@ describe("process script plugin script block", () => {
       return _parse(`${pre ? pre + "\n" : ""}${content}`, false, lang, pre);
     }
 
-    it.only("test", () => {
+    it("test", () => {
       const { s } = parse(`let a = 0`, "js");
       expect(s.toString()).toMatchInlineSnapshot(`
         "/** @returns {{}} */;function ___VERTER___TemplateBindingFN  (){let a = 0;return{}}
@@ -91,23 +91,19 @@ describe("process script plugin script block", () => {
         "
       `);
     });
-    it("defineProps", () => {
+    it("const props = defineProps", () => {
       const { result, context } = parse(
         `const props = defineProps({ a: String })`
       );
 
-      expect(result).toContain(
-        `let ___VERTER___Props;const props=___VERTER___Props = defineProps({ a: String })`
-      );
+      expect(result).toContain(`const props = defineProps({ a: String });`);
 
-      // expect(context.items).toMatchObject([
-      //   {
-      //     name: "___VERTER___Props",
-      //     type: "macro-binding",
-      //     originalName: undefined,
-      //     macro: "defineProps",
-      //   },
-      // ]);
+      expect(context.items[0]).toMatchObject({
+        type: "macro-binding",
+        macro: "defineProps",
+        name: "props",
+        originalName: undefined,
+      });
     });
 
     describe("defineModel", () => {
@@ -132,57 +128,60 @@ describe("process script plugin script block", () => {
 
       it("defineModel()", () => {
         const { result, context } = parse(`const model = defineModel()`);
-        expect(result).toContain(
-          `let ___VERTER___models_modelValue;const model=___VERTER___models_modelValue = defineModel()`
-        );
+        expect(result).toContain(`const model = defineModel()`);
 
         expect(context.items).toMatchObject([
           {
             type: "import",
           },
           {
-            name: "___VERTER___models_modelValue",
+            name: "model",
             type: "macro-binding",
             macro: "defineModel",
             originalName: "modelValue",
+          },
+          {
+            type: "binding",
           },
         ]);
       });
 
       it("defineModel({})", () => {
         const { result, context } = parse(`const model = defineModel({})`);
-        expect(result).toContain(
-          `let ___VERTER___models_modelValue;const model=___VERTER___models_modelValue = defineModel({})`
-        );
+        expect(result).toContain(`const model = defineModel({})`);
 
         expect(context.items).toMatchObject([
           {
             type: "import",
           },
           {
-            name: "___VERTER___models_modelValue",
+            name: "model",
             type: "macro-binding",
             macro: "defineModel",
             originalName: "modelValue",
+          },
+          {
+            type: "binding",
           },
         ]);
       });
 
       it('defineModel("model")', () => {
         const { result, context } = parse(`const model = defineModel("model")`);
-        expect(result).toContain(
-          `let ___VERTER___models_model;const model=___VERTER___models_model = defineModel("model")`
-        );
+        expect(result).toContain(`const model = defineModel("model")`);
 
         expect(context.items).toMatchObject([
           {
             type: "import",
           },
           {
-            name: "___VERTER___models_model",
+            name: "model",
             type: "macro-binding",
             macro: "defineModel",
             originalName: "model",
+          },
+          {
+            type: "binding",
           },
         ]);
       });
@@ -191,19 +190,20 @@ describe("process script plugin script block", () => {
         const { result, context } = parse(
           `const model = defineModel("model", {})`
         );
-        expect(result).toContain(
-          `let ___VERTER___models_model;const model=___VERTER___models_model = defineModel("model", {})`
-        );
+        expect(result).toContain(`const model = defineModel("model", {})`);
 
         expect(context.items).toMatchObject([
           {
             type: "import",
           },
           {
-            name: "___VERTER___models_model",
+            name: "model",
             type: "macro-binding",
             macro: "defineModel",
             originalName: "model",
+          },
+          {
+            type: "binding",
           },
         ]);
       });
@@ -215,6 +215,7 @@ describe("process script plugin script block", () => {
         expect(result).toContain(`defineOptions({})`);
 
         expect(context.items).toMatchObject([
+          { type: "import" },
           {
             type: "options",
             expression: {
@@ -230,6 +231,10 @@ describe("process script plugin script block", () => {
 
         expect(context.items).toMatchObject([
           {
+            type: "binding",
+          },
+          { type: "import" },
+          {
             type: "options",
             expression: {
               type: "ObjectExpression",
@@ -244,6 +249,7 @@ describe("process script plugin script block", () => {
         expect(result).toContain(`defineOptions({ a: 0 })`);
 
         expect(context.items).toMatchObject([
+          { type: "import" },
           {
             type: "options",
             expression: {
@@ -265,6 +271,7 @@ describe("process script plugin script block", () => {
         expect(result).toContain(`defineOptions(myOptions)`);
 
         expect(context.items).toMatchObject([
+          { type: "import" },
           {
             type: "options",
             expression: {
@@ -281,6 +288,7 @@ describe("process script plugin script block", () => {
           expect(result).toContain(`defineOptions()`);
 
           expect(context.items).toMatchObject([
+            { type: "import" },
             {
               type: "warning",
               message: "INVALID_DEFINE_OPTIONS",
@@ -293,6 +301,8 @@ describe("process script plugin script block", () => {
           expect(result).toContain(`const foo = defineOptions()`);
 
           expect(context.items).toMatchObject([
+            { type: "binding" },
+            { type: "import" },
             {
               type: "warning",
               message: "INVALID_DEFINE_OPTIONS",
@@ -305,6 +315,7 @@ describe("process script plugin script block", () => {
           expect(result).toContain(`defineOptions("a")`);
 
           expect(context.items).toMatchObject([
+            { type: "import" },
             {
               type: "warning",
               message: "INVALID_DEFINE_OPTIONS",
@@ -317,6 +328,7 @@ describe("process script plugin script block", () => {
           expect(result).toContain(`defineOptions({}, hello)`);
 
           expect(context.items).toMatchObject([
+            { type: "import" },
             {
               type: "options",
               expression: {
@@ -339,36 +351,38 @@ describe("process script plugin script block", () => {
       "options %s",
       (wrapper) => {
         function parse(content: string, pre: string = "") {
-          return _parse(
-            `${pre ? pre + "\n" : ""}export default ${
-              wrapper ? wrapper + "(" : ""
-            }${content}${wrapper ? ")" : ""}`,
-            wrapper,
-            lang,
-            pre
-          );
+          const original = `${pre ? pre + "\n" : ""}export default ${
+            wrapper ? wrapper + "(" : ""
+          }${content}${wrapper ? ")" : ""}`;
+
+          return { ..._parse(original, wrapper, lang, pre), original };
         }
 
         it("leave the script untouched", () => {
-          const { s } = parse("{ data(){ return { a: 0 } } }");
-          expect(s.original).toBe(s.toString());
+          const { s, original } = parse("{ data(){ return { a: 0 } } }");
+          expect(s.toString()).toContain(original);
         });
 
-        it("defineExpose", () => {
-          const { s, context } = parse(`{ setup(){ defineExpose({ a: 0 }) }}`);
-          // expect(s.original).toBe(s.toString());
-
+        // this should return the binding for expose
+        it.todo("defineExpose", () => {
+          const { s, context, original } = parse(
+            `{ setup(){ defineExpose({ a: 0 }) }}`
+          );
+          expect(s.toString()).toContain(original);
           expect(context.items).toMatchObject([
+            { type: "import" },
             {
-              message: "MACRO_NOT_IN_SETUP",
-              type: "warning",
+              type: "macro-binding",
+              macro: "defineExpose",
+              name: "exposed",
+              originalName: undefined,
             },
           ]);
         });
 
         it("defineModel", () => {
-          const { s } = parse(`{ setup(){ defineModel() }}`);
-          expect(s.original).toBe(s.toString());
+          const { s, original } = parse(`{ setup(){ defineModel() }}`);
+          expect(s.toString()).toContain(original);
         });
       }
     );

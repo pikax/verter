@@ -21,6 +21,7 @@ export interface ParsedBlockScript {
   lang: "js" | "jsx" | "ts" | "tsx";
 
   isMain: boolean;
+  isSetup: boolean;
   block: VerterSFCBlock<SFCScriptBlock>;
   result: ParsedScriptResult;
 }

@@ -52,6 +52,7 @@ export const TemplateBindingPlugin = definePlugin({
       }
     }
 
+    const ModelAccessor = ctx.prefix("models");
     const macroBindings = ctx.items
       .filter((x) => x.type === ProcessItemType.MacroBinding)
       .reduce((acc, x) => {

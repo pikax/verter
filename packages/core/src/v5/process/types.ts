@@ -84,6 +84,8 @@ export type ProcessItemMacroBinding = {
   name: string;
   macro: string;
   originalName?: string;
+
+  node: VerterASTNode;
 };
 
 export type ItemErrorString = "";
@@ -133,12 +135,12 @@ export type ImportModule = {
   from: string;
   items: ImportItem[];
   asType?: boolean;
-  node: VerterASTNode;
+  node?: VerterASTNode;
 };
 
 export type ImportItem = {
   name: string;
   alias?: string;
   type?: boolean;
-  node: VerterASTNode;
+  node?: VerterASTNode;
 };
