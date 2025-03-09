@@ -39,26 +39,40 @@ export const ContextPlugin = {
 
     const TemplateBindingName = ctx.prefix("TemplateBinding");
     const FullContextName = ctx.prefix("FullContext");
+    const DefaultName = ctx.prefix("default");
+    const ComponentInstanceName = ctx.prefix("ComponentInstance");
 
     const importStr = generateImport([
       {
         from: `./${options}`,
-        items: [{ name: TemplateBindingName }, { name: FullContextName }],
+        items: [
+          { name: TemplateBindingName },
+          { name: FullContextName },
+          {
+            name: DefaultName,
+          },
+        ],
       },
     ]);
 
     s.prepend(`${importStr}\n`);
 
+    const instanceStr = `const ${ComponentInstanceName} = new ${DefaultName}();`;
     const CTX = ctx.retrieveAccessor("ctx");
 
     // todo add generic information
     const ctxItems = [FullContextName, TemplateBindingName].map((x) =>
       ctx.isTS ? `...({} as ${x})` : `...${x}`
     );
+    const ctxStr = `const ${CTX} = {${[
+      `...${ComponentInstanceName}`,
+      ...ctxItems,
+    ].join(",")}};`;
 
-    const ctxStr = `const ${CTX} = {${ctxItems.join(",")}};`;
-
-    s.prependLeft(ctx.block.block.block.loc.start.offset, ctxStr);
+    s.prependLeft(
+      ctx.block.block.block.loc.start.offset,
+      [instanceStr, ctxStr].join("\n")
+    );
   },
   //   transformBinding(item, s, ctx) {
   //     if (item.ignore || "skip" in item) {

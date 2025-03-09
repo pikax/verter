@@ -8,21 +8,26 @@ export const ScriptBlockPlugin = definePlugin({
   pre(s, ctx) {
     const tag = ctx.block.block.tag;
 
-    // replace < with function
-    s.overwrite(
-      tag.pos.open.start,
-      tag.pos.open.start + 1,
-      `${ctx.isAsync ? "async " : ""}function `
-    );
-    s.appendRight(tag.pos.open.start, ";");
+    if (ctx.isSetup) {
+      // replace < with function
+      s.overwrite(
+        tag.pos.open.start,
+        tag.pos.open.start + 1,
+        `${ctx.isAsync ? "async " : ""}function `
+      );
+      s.appendRight(tag.pos.open.start, ";");
 
+      // replace > with (){
+      s.overwrite(tag.pos.open.end - 1, tag.pos.open.end, "(){");
 
-    // replace > with (){
-    s.overwrite(tag.pos.open.end - 1, tag.pos.open.end, "(){");
-
-    // replace </script> with }
-    s.update(tag.pos.close.start, tag.pos.close.end, "");
-    s.prependRight(tag.pos.close.start, "}");
+      // replace </script> with }
+      s.update(tag.pos.close.start, tag.pos.close.end, "");
+      s.prependRight(tag.pos.close.start, "}");
+    } else {
+      // NOTE we might need to move the generic elsewhere
+      s.overwrite(tag.pos.open.start, tag.pos.open.end, "");
+      s.overwrite(tag.pos.close.start, tag.pos.close.end, "");
+    }
   },
 
   post(s, ctx) {

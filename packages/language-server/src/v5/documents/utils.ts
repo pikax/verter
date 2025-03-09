@@ -66,7 +66,7 @@ export function uriToPath(uri: string) {
   let url = URI.parse(uri);
   if (url.scheme === VerterVirtualFileScheme) {
     const match = uri.match(VueSubDocRegex);
-    if (match) {
+    if (match && match[0].endsWith("bundler.ts")) {
       // url = URI.parse(uri.replace(match[1], ""));
       url = URI.parse(
         uri.replace(match[1], "").replace(VerterVirtualFileScheme, "file")

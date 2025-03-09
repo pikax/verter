@@ -38,6 +38,7 @@ export function processScript(
     [ScriptTypes.Binding]: [],
     [ScriptTypes.Declaration]: [],
     [ScriptTypes.Export]: [],
+    [ScriptTypes.DefaultExport]: [],
     [ScriptTypes.FunctionCall]: [],
     [ScriptTypes.Import]: [],
     [ScriptTypes.TypeAssertion]: [],
@@ -68,6 +69,18 @@ export function processScript(
       }
       if (a.enforce === "post" && b.enforce === "pre") {
         return 1;
+      }
+      if (a.enforce === "pre") {
+        return -1;
+      }
+      if (a.enforce === "post") {
+        return 1;
+      }
+      if (b.enforce === "pre") {
+        return 1;
+      }
+      if (b.enforce === "post") {
+        return -1;
       }
       return 0;
     })

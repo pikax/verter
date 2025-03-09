@@ -3,6 +3,7 @@ import {
   AwaitExpression,
   CallExpression,
   ExportAllDeclaration,
+  ExportDefaultDeclaration,
   ExportNamedDeclaration,
   ExpressionStatement,
   FunctionDeclaration,
@@ -30,6 +31,7 @@ export const enum ScriptTypes {
 
   Async = "Async",
   Export = "Export",
+  DefaultExport = "DefaultExport",
 
   // /**
   //  * Vue macro, eg: defineProps, defineEmits, withDefaults, defineExpose, etc
@@ -104,6 +106,11 @@ export type ScriptImport = {
 export type ScriptExport = {
   type: ScriptTypes.Export;
   node: ExportAllDeclaration | ExportNamedDeclaration;
+};
+
+export type ScriptDefaultExport = {
+  type: ScriptTypes.DefaultExport;
+  node: ExportDefaultDeclaration;
 };
 
 export type ScriptFunctionCall = {
@@ -182,6 +189,7 @@ export type ScriptItemByType = {
   [ScriptTypes.Import]: ScriptImport;
   [ScriptTypes.FunctionCall]: ScriptFunctionCall;
   [ScriptTypes.Export]: ScriptExport;
+  [ScriptTypes.DefaultExport]: ScriptDefaultExport;
   [ScriptTypes.Declaration]: ScriptDeclaration;
   [ScriptTypes.TypeAssertion]: ScriptTypeAssertion;
   [ScriptTypes.Error]: ScriptError;
@@ -194,6 +202,7 @@ export type ScriptItem =
   | ScriptImport
   | ScriptFunctionCall
   | ScriptExport
+  | ScriptDefaultExport
   | ScriptDeclaration
 
   // special

@@ -51,6 +51,10 @@ describe("parser script setup", () => {
             },
           ],
         },
+        {
+          type: ScriptTypes.Binding,
+          name: "a",
+        },
       ]);
     });
     test('import * as a from "b"', () => {
@@ -64,6 +68,10 @@ describe("parser script setup", () => {
               name: "a",
             },
           ],
+        },
+        {
+          type: ScriptTypes.Binding,
+          name: "a",
         },
       ]);
     });

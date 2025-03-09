@@ -79,12 +79,15 @@ export function buildBundle(
           ];
 
           const declaration = [
-            `declare const ${compName}: typeof ${defaultOptionsName} & {new():{`,
-            ...props,
-            ...slots,
-            `}};`,
+            // `declare const ${compName}: typeof ${defaultOptionsName} & {new():{`,
+            // ...props,
+            // ...slots,
+            // `}};`,
+            `declare const ${compName}: typeof ${defaultOptionsName};`,
+            // `declare const ${compName}: { a: string}`,
             `export default ${compName};`,
           ];
+          // const declaration = `declare const ${compName}: typeof ${defaultOptionsName};`;
 
           s.prepend(
             [importsStr, bundler.content, declaration.join("")].join("\n")

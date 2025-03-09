@@ -119,7 +119,7 @@ export function parser(
           const ast = parseAST(content, filename + "." + languageId);
           const r = parseScriptBetter(ast, x.block.attrs);
           isAsync = r.isAsync;
-          isSetup = x.block === sfcParse.descriptor.scriptSetup;
+          isSetup = x.block?.setup ?? false;
 
           return {
             type: "script",

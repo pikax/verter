@@ -12,6 +12,22 @@ export const TemplateBindingPlugin = definePlugin({
     const tag = ctx.block.block.tag;
     const name = ctx.prefix("TemplateBinding");
 
+    if (!ctx.isSetup) {
+      const declaration = `function ${name}FN(){return {}}`;
+
+      const typeStr = generateTypeString(
+        name,
+        {
+          from: `${name}FN`,
+          isFunction: true,
+        },
+        ctx
+      );
+
+      s.prependRight(tag.pos.close.end, [declaration, typeStr].join(";"));
+      return;
+    }
+
     // const bindings = new Set(
     //   ctx.items
     //     .filter(

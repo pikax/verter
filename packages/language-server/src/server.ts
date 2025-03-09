@@ -5,6 +5,7 @@ import {
   createConnection,
   ProposedFeatures,
   TextDocumentSyncKind,
+  WorkspaceFolder,
 } from "vscode-languageserver/node";
 import { DocumentManager } from "./v5/documents/manager/manager";
 import { VerterManager } from "./v5/documents/verter/manager";
@@ -71,7 +72,9 @@ export function startServer(options: LsConnectionOption = {}) {
 
   const documentManager = new DocumentManager();
   const verterManager = new VerterManager(documentManager);
+
   connection.onInitialize((params) => {
+    verterManager.init(params);
     return {
       capabilities: {
         textDocumentSync: {
@@ -108,8 +111,12 @@ export function startServer(options: LsConnectionOption = {}) {
             changeNotifications: true,
           },
           fileOperations: {
-            didCreate: { filters: ["*"] },
-            didDelete: { filters: ["*"] },
+            // didCreate: { filters: ["*"] },
+            // didDelete: { filters: ["*"] },
+            didCreate: {
+              filters: [{ pattern: { glob: "*" } }],
+            },
+            didDelete: [{ pattern: { glob: "*" } }],
           },
         },
         renameProvider: true,

@@ -17,25 +17,19 @@ describe("process template plugins comment", () => {
       (x) => x.type === "template"
     ) as ParsedBlockTemplate;
 
-    const r = processTemplate(
-      templateBlock.result.items,
-      [
-        TemplateTagPlugin
-      ],
-      {
-        s,
-        filename: "test.vue",
-        blocks: parsed.blocks,
-        block: templateBlock,
-        blockNameResolver: (name) => name,
-        generic: parsed.generic,
-      }
-    );
+    const r = processTemplate(templateBlock.result.items, [TemplateTagPlugin], {
+      s,
+      filename: "test.vue",
+      blocks: parsed.blocks,
+      block: templateBlock,
+      blockNameResolver: (name) => name,
+      generic: parsed.generic,
+    });
 
     return r;
   }
   // TODO add more tests
-  it('should replace tag', ()=> {
+  it("should replace tag", () => {
     const { result } = parse("<div></div>");
 
     expect(result).toMatchInlineSnapshot(`
@@ -43,7 +37,14 @@ describe("process template plugins comment", () => {
       <><div></div>
       </>}"
     `);
-  })
+  });
 
-
+  test("empty", () => {
+    const { result } = parse(``);
+    expect(result).toMatchInlineSnapshot(`
+      "export function template(){
+      <>
+      </>}"
+    `);
+  });
 });

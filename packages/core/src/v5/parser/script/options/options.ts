@@ -112,7 +112,10 @@ export function createOptionsContext(opts: {
   ): void | ScriptItem | ScriptItem[] {
     if (node.type === "ExportDefaultDeclaration") {
       track = true;
-      return;
+      return {
+        type: ScriptTypes.DefaultExport,
+        node,
+      };
     }
 
     if (!track) return;

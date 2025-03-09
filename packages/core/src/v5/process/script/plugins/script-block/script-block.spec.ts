@@ -28,6 +28,7 @@ describe("process script plugin script block", () => {
     ) as ParsedBlockScript;
 
     const r = processScript(scriptBlock.result.items, [ScriptBlockPlugin], {
+      ...parsed,
       s,
       filename: "test.vue",
       blocks: parsed.blocks,
@@ -92,12 +93,12 @@ describe("process script plugin script block", () => {
     );
   });
 
-  it('add ; before function', ()=> {
+  it("add ; before function", () => {
     const { result } = parse(
       `import {a} from 'b'
 let a = 0`,
       false,
-      "js",
+      "js"
     );
     expect(result).toMatchInlineSnapshot(
       `
@@ -105,5 +106,12 @@ let a = 0`,
       let a = 0}"
     `
     );
-  })
+  });
+
+  describe("options", () => {
+    test("remove tag", () => {
+      const { result } = parse(`export default {}`, "", "js");
+      expect(result).toMatchInlineSnapshot(`""`);
+    });
+  });
 });

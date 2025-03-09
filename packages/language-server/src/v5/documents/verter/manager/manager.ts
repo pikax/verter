@@ -1,4 +1,5 @@
 import type LSP from "vscode-languageserver-protocol";
+import { WorkspaceFolder } from "vscode-languageserver/node";
 import vscode from "vscode-languageserver";
 import ts, { sortAndDeduplicateDiagnostics } from "typescript";
 import fsPath from "path";
@@ -36,12 +37,15 @@ export class VerterManager {
 
   constructor(private readonly documentManager: DocumentManager) {}
 
+  workspaceFolders: Array<WorkspaceFolder> = [];
+
   init(params: {
-    workspaceFolders?: Array<{ uri: LSP.URI; name: string }>;
-    rootUri: LSP.DocumentUri | null;
+    workspaceFolders?: Array<WorkspaceFolder> | null | undefined;
+    // rootUri: LSP.DocumentUri | null;
   }) {
     // this.workspaceFolders = params.workspaceFolders;
     if (params.workspaceFolders) {
+      this.workspaceFolders = params.workspaceFolders;
       for (const workspace of params.workspaceFolders) {
         const filepath = uriToPath(workspace.uri);
         this.getTsService(filepath);
@@ -62,11 +66,20 @@ export class VerterManager {
           tsconfigPath = ts.findConfigFile(folder, ts.sys.fileExists);
         }
       }
+
+      const tsconfigUri = pathToUri(
+        tsconfigPath?.split("/").slice(0, -1).join("/") ?? ""
+      );
+      // check if tsconfigPath is part of the workspace
+      if (this.workspaceFolders.every((x) => !tsconfigUri.includes(x.uri))) {
+        tsconfigPath = "";
+      }
+
       if (tsconfigPath) {
         this.folderToTsConfigMap.set(folderOrPath, tsconfigPath);
       } else {
-        // tsconfig should have resolved by now
-        tsconfigPath = process.cwd();
+        // tsconfig should have resolved by now, otherwise make a fake one
+        tsconfigPath = process.cwd() + "/tsconfig.json";
       }
     }
 
@@ -88,10 +101,24 @@ export function getTypescriptService(
   documentManager: DocumentManager
 ) {
   let tsconfigOptions: ts.CompilerOptions = {
-    allowJs: true,
-    noImplicitAny: false,
-    noImplicitThis: false,
-    noImplicitReturns: false,
+    // allowJs: true,
+    // noImplicitAny: true,
+    // noImplicitThis: true,
+    // noImplicitReturns: true,
+    // declaration: true,
+    // strict: true,
+    // alwaysStrict: true,
+
+    // verbatimModuleSyntax: true,
+
+    // target: ts.ScriptTarget.ESNext,
+    // esModuleInterop: true,
+    // forceConsistentCasingInFileNames: true,
+    // skipLibCheck: true,
+
+    strict: true,
+
+    jsxFactory: "vue",
   };
 
   let parsedConfig: ts.ParsedCommandLine | null = null;

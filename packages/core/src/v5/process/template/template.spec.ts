@@ -27,6 +27,13 @@ describe("process template", () => {
     return r;
   }
 
+  test("empty", () => {
+    const { result } = parse(``);
+    expect(result).toMatchInlineSnapshot(
+      `"import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from \\"./options\\";export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};<></>}"`
+    );
+  });
+
   describe("props", () => {
     it("class with bindings", () => {
       const { result } = parse(

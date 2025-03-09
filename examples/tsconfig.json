@@ -1,0 +1,31 @@
+{
+  "extends": "@vue/tsconfig/tsconfig.dom.json",
+  "include": [
+    "./env.d.ts",
+    "./src/**/*.ts",
+    "./src/**/*.vue",
+    "./env.d.ts",
+    "./typed-router.d.ts",
+    "./auto-imports.d.ts",
+    "./components.d.ts",
+    "./global-components.d.ts"
+  ],
+  "compilerOptions": {
+    "noEmit": true,
+    "composite": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "baseUrl": ".",
+    // "types": ["unplugin-vue-router/runtime"],
+    "types": ["vitest/globals", "unplugin-icons/types/vue"],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "exclude": ["node_modules", "dist", "coverage", "test", "tests", "stub"],
+  // "references": [
+  //   {
+  //     "path": "./tsconfig.config.json"
+  //   }
+  // ]
+}
