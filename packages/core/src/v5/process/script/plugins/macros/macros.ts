@@ -38,43 +38,26 @@ export const MacrosPlugin = definePlugin({
       (x) => x.type === ProcessItemType.MacroBinding
     );
     for (const macro of Macros) {
-      if (macro === "withDefaults") continue;
+      if (macro === "withDefaults" || macro === 'defineOptions')  continue;
       const name = ctx.prefix(macro);
       const itemMacro = macroBindinds.find((x) => x.macro === macro);
       const TemplateBinding = ctx.prefix("TemplateBinding");
 
-      if (isTS) {
-        if (itemMacro) {
-          const str = generateTypeString(
-            name,
-            {
-              from: TemplateBinding,
-              key: name,
-              isType: true,
-            },
-            ctx
-          );
-          s.append(str);
-        } else {
-          const str = generateTypeDeclaration(name, "{}", undefined, true);
-          s.append(str);
-        }
+      if(itemMacro) {
+        const str = generateTypeString(
+          name,
+          {
+            from: TemplateBinding,
+            key: name,
+            isType: true,
+          },
+          ctx
+        );
+        s.append(str);
+
       } else {
-        if (itemMacro) {
-          const str = generateTypeString(
-            name,
-            {
-              from: TemplateBinding,
-              key: name,
-              isType: true,
-            },
-            ctx
-          );
-          s.append(str);
-        } else {
-          const str = generateTypeDeclaration(name, "{}", undefined, false);
-          s.append(str);
-        }
+        const str = generateTypeDeclaration(name, "{}", undefined, isTS);
+        s.append(str);
       }
     }
   },

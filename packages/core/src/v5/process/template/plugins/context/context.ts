@@ -41,6 +41,14 @@ export const ContextPlugin = {
     const FullContextName = ctx.prefix("FullContext");
     const DefaultName = ctx.prefix("default");
     const ComponentInstanceName = ctx.prefix("ComponentInstance");
+  
+
+    const macros = [
+      [ctx.prefix('defineProps'), '$props'],
+      [ctx.prefix('defineEmits'), '$emit'],
+      [ctx.prefix('defineSlots'), '$slots'],
+    ]
+
 
     const importStr = generateImport([
       {
@@ -51,6 +59,7 @@ export const ContextPlugin = {
           {
             name: DefaultName,
           },
+          ...macros.map(([name]) => ({ name })),
         ],
       },
     ]);
@@ -66,6 +75,8 @@ export const ContextPlugin = {
     );
     const ctxStr = `const ${CTX} = {${[
       `...${ComponentInstanceName}`,
+      // `...${macros.map(([name, prop]) => `${name}(${prop})`).join(",")}`,
+      ...macros.map(([name, prop]) => `${prop}: ${ctx.isTS ? `{} as ${name}` : name}`),
       ...ctxItems,
     ].join(",")}};`;
 

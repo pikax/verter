@@ -77,10 +77,6 @@ describe("process script plugin script block", () => {
         /** @type {___VERTER___defineExpose} */
         export const ___VERTER___defineExpose = null;
 
-        /** @typedef {{}} ___VERTER___defineOptions */
-        /** @type {___VERTER___defineOptions} */
-        export const ___VERTER___defineOptions = null;
-
         /** @typedef {{}} ___VERTER___defineModel */
         /** @type {___VERTER___defineModel} */
         export const ___VERTER___defineModel = null;

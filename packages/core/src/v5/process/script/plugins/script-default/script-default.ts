@@ -41,10 +41,8 @@ export const ScriptDefaultPlugin = definePlugin({
         options = s.slice(start, end);
       }
 
-      s.append(`;export const ${name}=${defineComponent}(${options});`);
-    }
-
-    if (!isSetup) {
+      s.append(`\n;export const ${name}=${defineComponent}(${options});`);
+    } else {
       const componentExport = ctx.block.result?.items.find(
         (x) => x.type === ScriptTypes.DefaultExport
       );
