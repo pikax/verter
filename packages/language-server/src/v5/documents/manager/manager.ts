@@ -44,6 +44,7 @@ export class DocumentManager implements Disposable {
   constructor() {
     this.textDocuments = new TextDocuments({
       create: (uri, languageId, version, content): VerterDocument => {
+        this.handleFileChange(uri, "create");
         let cached = this._files.get(uri);
 
         if (cached) {
@@ -57,6 +58,7 @@ export class DocumentManager implements Disposable {
       },
       update: (document, changes, version) => {
         console.log("update", document.uri, version);
+        this.handleFileChange(document.uri, "update");
         // return TextDocument.update(document, changes, version);
         return document.update(changes, version);
       },

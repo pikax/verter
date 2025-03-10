@@ -1,6 +1,5 @@
 import { DefineProps as $V_DefineProps } from "vue";
 
-
 /* __VERTER_IMPORTS__
 [
   {

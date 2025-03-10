@@ -79,7 +79,8 @@ export function startServer(options: LsConnectionOption = {}) {
       capabilities: {
         textDocumentSync: {
           openClose: true,
-          change: TextDocumentSyncKind.Incremental,
+          change: TextDocumentSyncKind.Full,
+          // change: TextDocumentSyncKind.Incremental,
           save: {
             includeText: false,
           },
@@ -199,73 +200,77 @@ export function startServer(options: LsConnectionOption = {}) {
   });
 
   connection.onCompletion((params) => {
-    console.log("oncompletion doc", params.textDocument);
-    const uri = params.textDocument.uri;
+    try {
+      console.log("oncompletion doc", params.textDocument);
+      const uri = params.textDocument.uri;
 
-    const doc = documentManager.getDocument(uri);
-    if (!doc || !isVueDocument(doc)) {
-      return undefined;
-    }
-
-    const subDocs = doc.docsForPos(params.position);
-
-    const items = [] as CompletionItem[];
-
-    for (const d of subDocs) {
-      const offset = d.offset;
-
-      switch (d.doc.languageId) {
-        case "tsx":
-        case "ts":
-        case "js":
-        case "jsx":
-          const tsService = verterManager.getTsService(d.doc.uri);
-          if (!tsService) {
-            return undefined;
-          }
-          const completions = tsService.getCompletionsAtPosition(
-            d.doc.uri,
-            offset,
-            {
-              triggerKind: params.context?.triggerKind,
-              triggerCharacter:
-                params.context?.triggerCharacter === "@"
-                  ? " "
-                  : (params.context
-                      ?.triggerCharacter as CompletionsTriggerCharacter),
-
-              // includeSymbol: true,
-              includeAutomaticOptionalChainCompletions: true,
-              jsxAttributeCompletionStyle: "auto",
-              // importModuleSpecifierEnding: "auto",
-              // disableSuggestions: true,
-              // allowIncompleteCompletions: true,
-            }
-          );
-          if (completions) {
-            items.push(
-              ...completions.entries
-                // TODO improve filter
-                .filter((x) => !x.name.startsWith("___VERTER___"))
-                .map((x) =>
-                  mapCompletion(x, {
-                    virtualUrl: d.doc.uri,
-                    index: offset,
-                    triggerKind: params.context?.triggerKind,
-                    triggerCharacter: params.context?.triggerCharacter,
-                  })
-                )
-            );
-          }
+      const doc = documentManager.getDocument(uri);
+      if (!doc || !isVueDocument(doc)) {
+        return undefined;
       }
+
+      const subDocs = doc.docsForPos(params.position);
+
+      const items = [] as CompletionItem[];
+
+      for (const d of subDocs) {
+        const offset = d.offset;
+
+        switch (d.doc.languageId) {
+          case "tsx":
+          case "ts":
+          case "js":
+          case "jsx":
+            const tsService = verterManager.getTsService(d.doc.uri);
+            if (!tsService) {
+              return undefined;
+            }
+            const completions = tsService.getCompletionsAtPosition(
+              d.doc.uri,
+              offset,
+              {
+                triggerKind: params.context?.triggerKind,
+                triggerCharacter:
+                  params.context?.triggerCharacter === "@"
+                    ? " "
+                    : (params.context
+                        ?.triggerCharacter as CompletionsTriggerCharacter),
+
+                // includeSymbol: true,
+                includeAutomaticOptionalChainCompletions: true,
+                jsxAttributeCompletionStyle: "auto",
+                // importModuleSpecifierEnding: "auto",
+                // disableSuggestions: true,
+                // allowIncompleteCompletions: true,
+              }
+            );
+            if (completions) {
+              items.push(
+                ...completions.entries
+                  // TODO improve filter
+                  .filter((x) => !x.name.startsWith("___VERTER___"))
+                  .map((x) =>
+                    mapCompletion(x, {
+                      virtualUrl: d.doc.uri,
+                      index: offset,
+                      triggerKind: params.context?.triggerKind,
+                      triggerCharacter: params.context?.triggerCharacter,
+                    })
+                  )
+              );
+            }
+        }
+      }
+
+      console.log("found docs", subDocs);
+
+      return {
+        isIncomplete: false,
+        items,
+      };
+    } catch (e) {
+      console.error("failed onCompletion", e);
     }
-
-    console.log("found docs", subDocs);
-
-    return {
-      isIncomplete: false,
-      items,
-    };
   });
 
   connection.onCompletionResolve((item) => {

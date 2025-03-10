@@ -1,11 +1,8 @@
 <script lang="ts">
-defineOptions({
-  data() {
-    return { foo: "hello" };
-  },
-});
-
 export default {
+  props: {
+    bar: String,
+  },
   data() {
     return {
       foo: "hello",
@@ -20,6 +17,6 @@ export default {
 const foo = 1;
 </script>
 <template>
-  <span>{{ $data.foo }}</span>
+  <span>{{ $data.foo + $props.bar }}</span>
   <span> {{ foo }} </span>
 </template>

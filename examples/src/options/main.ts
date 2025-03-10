@@ -17,3 +17,15 @@ const Foo = defineComponent({
 });
 
 const f = new Foo();
+
+const Parent = defineComponent({
+  components: {
+    Foo,
+  },
+});
+
+const ctx = {
+  ...({} as Required<(typeof Comp)["components"]>),
+};
+
+ctx.Child;
