@@ -75,16 +75,9 @@ export const TemplateBindingPlugin = definePlugin({
         const n = ctx.prefix(
           x.macro === "withDefaults" ? "defineProps" : x.macro
         );
-        if (x.macro === "defineModel") {
-          if (!acc[n]) {
-            acc[n] = [];
-          }
-          (acc[n] as string[]).push(x.name);
-        } else {
-          acc[n] = x.name;
-        }
+        acc[n] = x.name;
         return acc;
-      }, {} as Record<string, string | string[]>);
+      }, {} as Record<string, string>);
     const usedBindings = ctx.templateBindings
       .map((x) => {
         if (!x.name) return;
@@ -102,6 +95,10 @@ export const TemplateBindingPlugin = definePlugin({
 
     // .filter((x) => x.name && bindings.has(x.name));
 
+    const defineModels = ctx.items.filter(
+      (x) => x.type === ProcessItemType.DefineModel
+    );
+
     s.prependLeft(
       tag.pos.close.start,
       `;return{${usedBindings
@@ -113,19 +110,24 @@ export const TemplateBindingPlugin = definePlugin({
         )
         .concat(
           Object.entries(macroBindings).map(
-            ([k, x]) =>
-              `${k}:${
-                Array.isArray(x)
-                  ? `{${x
-                      .map((x) => `${x}: ${isTS ? `${x} as typeof ${x}` : x}`)
-                      .join(",")}}`
-                  : `${isTS ? `${x} as typeof ${x}` : ""}`
-              }`
+            ([k, x]) => `${k}:${`${isTS ? `${x} as typeof ${x}` : ""}`}`
           )
           // Object.entries(macroBindings).map(([k, v]) =>
           //   v.map((x) => `${k}:${k}`)
           // )
         )
+        .concat([
+          // defineModel regular props
+          `${ctx.prefix("defineModel")}:{${defineModels
+              .map(
+                (x) =>
+                  // TODO this should be either pointing to the variable or to the function itself
+                  `${x.name}/*${x.node.start},${x.node.end}*/: ${
+                    isTS ? `${x.varName} as typeof ${x.varName}` : x.varName
+                  }`
+              )
+              .join(",")}}`,
+        ])
         .join(",")}}`
     );
 

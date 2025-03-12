@@ -61,6 +61,12 @@ export const enum ProcessItemType {
    * Contains the component options, for example `defineOptions`
    */
   Options = "options",
+
+
+  /**
+   * Used to describe the defineModel variables
+   */
+  DefineModel = 'define-model'
 }
 
 export type ProcessItemImport = {
@@ -83,10 +89,25 @@ export type ProcessItemMacroBinding = {
   type: ProcessItemType.MacroBinding;
   name: string;
   macro: string;
-  originalName?: string;
+  // originalName?: string;
 
   node: VerterASTNode;
 };
+
+export type ProcessItemDefineModel = {
+  type: ProcessItemType.DefineModel,
+  /**
+   * model name
+   */
+  name: string;
+
+  /**
+   * variableName
+   */
+  varName: string
+
+  node: VerterASTNode;
+}
 
 export type ItemErrorString = "";
 export type ItemWarningString =
@@ -122,7 +143,8 @@ export type ProcessItem =
   | ProcessItemWarning
   | ProcessItemBinding
   | ProcessItemOptions
-  | ProcessItemMacroBinding;
+  | ProcessItemMacroBinding
+  | ProcessItemDefineModel;
 
 export type LocationProcessItem = {
   start: number;

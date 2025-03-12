@@ -16,6 +16,7 @@ import {
   TemplateBindingPlugin,
   SFCCleanerPlugin,
   ScriptDefaultPlugin,
+ScriptResolversPlugin,
 } from "../../plugins/";
 
 import { relative } from "node:path/posix";
@@ -48,7 +49,8 @@ export function buildOptions(
       MacrosPlugin,
       TemplateBindingPlugin,
       ScriptDefaultPlugin,
-      SFCCleanerPlugin,
+      SFCCleanerPlugin, 
+      ScriptResolversPlugin,
     ],
     {
       ...context,

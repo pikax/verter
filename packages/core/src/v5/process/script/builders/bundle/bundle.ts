@@ -66,24 +66,28 @@ export function buildBundle(
             : "";
 
           const props = [
-            `$props: (${ProcessPropsName}<ReturnType<typeof ${resolvePropsName}${sanitisedNames}>`,
-            `${ctx.isAsync ? " extends Promise<infer P> ? P : {}" : ""}>);`,
+            `$props: (${ProcessPropsName}<${resolvePropsName}${sanitisedNames}`,
+            `${ctx.isAsync ? " extends Promise<infer P> ? P : {}" : ""}>)`,
+            ' & {}'
           ];
 
           const slots = [
-            `$slots: ReturnType<typeof ${resolveSlotsName}${sanitisedNames}>`,
-            `extends ${ctx.isAsync ? "Promise<" : ""}infer P${
+            `$slots: ${resolveSlotsName}${sanitisedNames}`,
+            ` extends ${ctx.isAsync ? "Promise<" : ""}infer P${
               ctx.isAsync ? ">" : ""
             }`,
             `? P extends P & 1 ? {} : P : never;`,
           ];
 
           const declaration = [
-            // `declare const ${compName}: typeof ${defaultOptionsName} & {new():{`,
-            // ...props,
-            // ...slots,
-            // `}};`,
-            `declare const ${compName}: typeof ${defaultOptionsName};`,
+            ...(ctx.isSetup
+              ? [
+                  `declare const ${compName}: typeof ${defaultOptionsName} & {new():{`,
+                  ...props,
+                  ...slots,
+                  `}};`,
+                ]
+              : [`declare const ${compName}: typeof ${defaultOptionsName};`]),
             // `declare const ${compName}: { a: string}`,
             `export default ${compName};`,
           ];

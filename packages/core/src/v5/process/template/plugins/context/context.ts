@@ -25,8 +25,8 @@ export const ContextPlugin = {
 
     const macros = isSetup
       ? [
-          [ctx.prefix("defineProps"), "$props"],
-          [ctx.prefix("defineEmits"), "$emit"],
+          [ctx.prefix("resolveProps"), "$props"],
+          [ctx.prefix("resolveEmits"), "$emit"],
           [ctx.prefix("defineSlots"), "$slots"],
         ]
       : [];
@@ -51,7 +51,7 @@ export const ContextPlugin = {
     const CTX = ctx.retrieveAccessor("ctx");
 
     // todo add generic information
-    const ctxItems = [FullContextName, TemplateBindingName].map((x) =>
+    const ctxItems = [ctx.prefix('resolveProps'), FullContextName, TemplateBindingName].map((x) =>
       ctx.isTS ? `...({} as ${x})` : `...${x}`
     );
     const ctxStr = `const ${CTX} = {${[
@@ -59,7 +59,7 @@ export const ContextPlugin = {
       `...${DefaultName}.components`,
       // `...${macros.map(([name, prop]) => `${name}(${prop})`).join(",")}`,
       ...macros.map(
-        ([name, prop]) => `${prop}: ${ctx.isTS ? `{} as ${name}` : name}`
+        ([name, prop]) => `${prop}: ${ctx.isTS ? `{} as ${name} & {}` : name}`
       ),
       ...ctxItems,
     ].join(",")}};`;

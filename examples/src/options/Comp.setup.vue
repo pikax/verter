@@ -6,6 +6,10 @@ defineOptions({
   },
 });
 
+defineProps({
+  bar: String,
+})
+
 const foo = 1;
 </script>
 <template>

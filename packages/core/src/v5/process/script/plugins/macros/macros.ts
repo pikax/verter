@@ -38,12 +38,15 @@ export const MacrosPlugin = definePlugin({
       (x) => x.type === ProcessItemType.MacroBinding
     );
     for (const macro of Macros) {
-      if (macro === "withDefaults" || macro === 'defineOptions')  continue;
+      if (macro === "withDefaults" || macro === "defineOptions") continue;
       const name = ctx.prefix(macro);
-      const itemMacro = macroBindinds.find((x) => x.macro === macro);
+      const itemMacro =
+        macro === "defineModel"
+          ? ctx.items.find((x) => x.type === ProcessItemType.DefineModel)
+          : macroBindinds.find((x) => x.macro === macro);
       const TemplateBinding = ctx.prefix("TemplateBinding");
 
-      if(itemMacro) {
+      if (itemMacro) {
         const str = generateTypeString(
           name,
           {
@@ -54,7 +57,6 @@ export const MacrosPlugin = definePlugin({
           ctx
         );
         s.append(str);
-
       } else {
         const str = generateTypeDeclaration(name, "{}", undefined, isTS);
         s.append(str);
@@ -76,24 +78,35 @@ export const MacrosPlugin = definePlugin({
 
         let varName =
           item.parent.id.type === "Identifier" ? item.parent.id.name : "";
-        let originalName: string | undefined = undefined;
-        if (macroName === "defineModel") {
-          // const accessor = ctx.prefix("models");
-          const modelName = getModelName(item.parent.init);
-          // varName = `${accessor}_${modelName}`;
-          originalName = modelName;
-        }
+        // let originalName: string | undefined = undefined;
+        // if (macroName === "defineModel") {
+        //   // const accessor = ctx.prefix("models");
+        //   const modelName = getModelName(item.parent.init);
+
+        //   return
+        //   // varName = `${accessor}_${modelName}`;
+        //   originalName = modelName;
+        // }
 
         if (ctx.isSetup) {
           // s.prependLeft(item.declarator.end, `let ${varName} ;`);
           // s.prependLeft(item.parent.id.end, `=${varName}`);
-          ctx.items.push({
-            type: ProcessItemType.MacroBinding,
-            name: varName!,
-            macro: macroName,
-            originalName,
-            node: item.parent,
-          });
+
+          if (macroName === "defineModel") {
+            ctx.items.push({
+              type: ProcessItemType.DefineModel,
+              varName,
+              name: getModelName(item.parent.init),
+              node: item.parent,
+            });
+          } else {
+            ctx.items.push({
+              type: ProcessItemType.MacroBinding,
+              name: varName!,
+              macro: macroName,
+              node: item.parent,
+            });
+          }
         } else {
           ctx.items.push({
             type: ProcessItemType.Warning,
@@ -111,7 +124,8 @@ export const MacrosPlugin = definePlugin({
       !Macros.has(item.name) ||
       ctx.items.some(
         (x) =>
-          x.type === ProcessItemType.MacroBinding &&
+          (x.type === ProcessItemType.MacroBinding ||
+            x.type === ProcessItemType.DefineModel) &&
           // check if is inside another macro
           x.node.start <= item.node.start &&
           x.node.end >= item.node.end
@@ -120,19 +134,23 @@ export const MacrosPlugin = definePlugin({
       return;
     }
 
-    addMacroDependencies(item.name, ctx);
+    const macroName = item.name;
+
+    addMacroDependencies(macroName, ctx);
+
     let varName = "";
+
     let originalName: string | undefined = undefined;
     if (item.name === "defineModel") {
       const modelName = getModelName(item.node);
       const accessor = ctx.prefix("models");
       varName = `${accessor}_${modelName}`;
-      originalName = modelName;
-    } else if (item.name === "defineOptions") {
+      // originalName = modelName;
+    } else if (macroName === "defineOptions") {
       return handleDefineOptions(item.node, ctx);
     } else {
       varName = ctx.prefix(
-        (item.name === "withDefaults" ? "defineProps" : item.name).replace(
+        (macroName === "withDefaults" ? "defineProps" : macroName).replace(
           "define",
           ""
         )
@@ -141,13 +159,22 @@ export const MacrosPlugin = definePlugin({
 
     if (ctx.isSetup) {
       s.prependLeft(item.node.start, `const ${varName}=`);
-      ctx.items.push({
-        type: ProcessItemType.MacroBinding,
-        name: varName,
-        macro: item.name,
-        originalName,
-        node: item.node,
-      });
+
+      if (macroName === "defineModel") {
+        ctx.items.push({
+          type: ProcessItemType.DefineModel,
+          varName,
+          name: getModelName(item.node),
+          node: item.node,
+        });
+      } else {
+        ctx.items.push({
+          type: ProcessItemType.MacroBinding,
+          name: varName!,
+          macro: macroName,
+          node: item.node,
+        });
+      }
     } else {
       ctx.items.push({
         type: ProcessItemType.Warning,
@@ -220,7 +247,9 @@ function handleDefineOptions(node: CallExpression, ctx: ProcessContext) {
 function getModelName(node: CallExpression) {
   const nameArg = node.arguments[0];
   const modelName =
-    nameArg?.type === "Literal" ? nameArg.value?.toString() : "modelValue";
+    nameArg?.type === "Literal"
+      ? nameArg.value?.toString() ?? "modelValue"
+      : "modelValue";
 
   return modelName;
 }
