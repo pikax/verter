@@ -43,7 +43,7 @@ export function buildBundle(
 
           const defaultOptionsName = ctx.prefix("default");
           const resolvePropsName = ctx.prefix("resolveProps");
-          const resolveSlotsName = ctx.prefix("resolveSlots");
+          const resolveSlotsName = ctx.prefix("defineSlots");
           ctx.blockNameResolver;
           imports.push({
             from: `./${ResolveOptionsFilename(ctx).split("/").pop() ?? ""}`,
@@ -68,7 +68,7 @@ export function buildBundle(
           const props = [
             `$props: (${ProcessPropsName}<${resolvePropsName}${sanitisedNames}`,
             `${ctx.isAsync ? " extends Promise<infer P> ? P : {}" : ""}>)`,
-            ' & {}'
+            ' & {};'
           ];
 
           const slots = [
@@ -76,7 +76,7 @@ export function buildBundle(
             ` extends ${ctx.isAsync ? "Promise<" : ""}infer P${
               ctx.isAsync ? ">" : ""
             }`,
-            `? P extends P & 1 ? {} : P : never;`,
+            `? P extends P & 1 ? {} : P & {} : never;`,
           ];
 
           const declaration = [

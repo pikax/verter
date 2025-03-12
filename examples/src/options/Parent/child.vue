@@ -15,5 +15,7 @@ export default {
 };
 </script>
 <template>
-  <MyComp :foo="1" />
+  <!-- <MyComp :foo="1" /> -->
+
+  {{ My }}
 </template>

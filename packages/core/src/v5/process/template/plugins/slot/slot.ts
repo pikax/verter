@@ -170,7 +170,7 @@ export const SlotPlugin = declareTemplatePlugin({
     } else {
       pos = slot.prop.node!.loc.start.offset;
     }
-    s.prependLeft(pos, ` v-slot={(${slotInstance})=>{`);
+    s.prependLeft(pos, ` v-slot={(${slotInstance}):any=>{`);
 
     if (ctx.doNarrow && slot.context.conditions.length > 0) {
       ctx.doNarrow(

@@ -180,6 +180,10 @@ export function getTypescriptService(
 
     tsconfigOptions = {
       ...parsedConfig.options,
+
+      // it breaks the slots patch, if is 'vue'
+      jsxImportSource: undefined
+
       // allowArbitraryExtensions: true,
       // allowJs: true,
       // noImplicitAny: false,

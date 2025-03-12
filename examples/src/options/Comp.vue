@@ -13,6 +13,12 @@ export default {
       this.foo;
     },
   },
+
+  setup() {
+    return {
+      ... { a: ''}
+    }
+  }
 };
 const foo = 1;
 </script>
