@@ -11,14 +11,17 @@ defineProps({
   bar: String,
 });
 
-let value = defineModel('bar')
+let value = defineModel<string>('bar')
+
+value.value
 
 const foo = 1;
 
-// const $props = {jjj: true}
+new ___VERTER___default().$props
 </script>
 <template>
   <span>{{ $data.foo }}</span>
   <span> {{ $props.modelValue }} </span>
   <span> {{ foo }} </span>
+  <span>{{ $props}}</span>
 </template>

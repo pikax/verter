@@ -17,21 +17,24 @@ export const ContextPlugin = {
         (x) => x.type === "script" && x.block.tag.attributes.setup
       ) !== undefined;
 
+
+    const genericNames =ctx.generic ? '<'+ ctx.generic.names.join(',')+ '>' :''
     const options = ResolveOptionsFilename(ctx);
 
     const TemplateBindingName = ctx.prefix("TemplateBinding");
     const FullContextName = ctx.prefix("FullContext");
-    const DefaultName = ctx.prefix("default");
+    // const DefaultName = ctx.prefix("default");
     const ComponentInstanceName = ctx.prefix("ComponentInstance");
+    const ComponentName = ctx.prefix('Component');
 
-    const macros = isSetup
-      ? [
-          [ctx.prefix("resolveProps"), "$props"],
-          [ctx.prefix("resolveEmits"), "$emit"],
-          // [ctx.prefix('resolveSlots'), "$slots"],
-          [ctx.prefix('defineSlots'), "$slots"],
-        ]
-      : [];
+    // const macros = isSetup
+    //   ? [
+    //       [ctx.prefix("resolveProps"), "$props"],
+    //       [ctx.prefix("resolveEmits"), "$emit"],
+    //       // [ctx.prefix('resolveSlots'), "$slots"],
+    //       [ctx.prefix('defineSlots'), "$slots"],
+    //     ]
+    //   : [];
 
     const importStr = generateImport([
       {
@@ -40,56 +43,51 @@ export const ContextPlugin = {
           { name: TemplateBindingName },
           { name: FullContextName },
           {
-            name: DefaultName,
+            name: ComponentName,
           },
-          ...macros.map(([name]) => ({ name })),
+          // ...macros.map(([name]) => ({ name })),
         ],
       },
     ]);
+  
 
     s.prepend(`${importStr}\n`);
 
-    const instanceStr = `const ${ComponentInstanceName} = new ${DefaultName}();`;
+    const instanceStr = `const ${ComponentInstanceName} = new ${ComponentName}${genericNames}();`;
     const CTX = ctx.retrieveAccessor("ctx");
 
     // todo add generic information
     const ctxItems = [
-      ctx.prefix("resolveProps"),
+      // ctx.prefix("resolveProps"),
       FullContextName,
       TemplateBindingName,
-    ].map((x) => (ctx.isTS ? `...({} as ${x})` : `...${x}`));
+    ].map((x) => (ctx.isTS ? `...({} as ${x}${genericNames})` : `...${x}`));
     const ctxStr = `const ${CTX} = {${[
       `...${ComponentInstanceName}`,
       `...${
         ctx.isTS
-          ? `({} as Required<typeof ${DefaultName}.components> & {})`
-          : `${DefaultName}.components`
+          ? `({} as Required<typeof ${ComponentName}.components> & {})`
+          : `${ComponentName}.components`
       }`,
       // `...${macros.map(([name, prop]) => `${name}(${prop})`).join(",")}`,
-      ...macros.map(
-        ([name, prop]) => `${prop}: ${ctx.isTS ? `{} as ${name} & {}` : name}`
-      ),
+      // ...macros.map(
+      //   ([name, prop]) => `${prop}: ${ctx.isTS ? `{} as ${name} & {}` : name}`
+      // ),
       ...ctxItems,
     ].join(",")}};`;
 
     const slotsCtx = `const ${ctx.prefix('$slot')} = ${CTX}['$slots'];`;
 
-    const debuggerVerter = `const debuggerVerter = ${CTX};`
-
     s.prependLeft(
       ctx.block.block.block.loc.start.offset,
-      [instanceStr, ctxStr, slotsCtx,debuggerVerter].join("\n")
+      [instanceStr, ctxStr
+      ].join("\n")
     );
 
     // add slots Helper
     // s.append(Slots.withPrefix(ctx.prefix("")).content);
 
-    s.append(`
-      declare function ${ctx.prefix('slotRender')}<T extends (...args: any[]) => any>(slot: T): (cb: T)=>any;
-export declare function ${ctx.prefix('StrictRenderSlot')}<
-  T extends (...args: any[]) => any,
-  Single extends boolean = ReturnType<T> extends Array<any> ? false : true
->(slot: T, children: Single extends true ? [ReturnType<T>] : ReturnType<T>): any;`)
+    s.append(`declare function ${ctx.prefix('slotRender')}<T extends (...args: any[]) => any>(slot: T): (cb: T)=>any;`)
 
 // patch TSX
 s.prepend(`
