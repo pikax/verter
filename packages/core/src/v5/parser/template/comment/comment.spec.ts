@@ -28,4 +28,22 @@ describe("parser template comment", () => {
 
     expect(handleComment(node)).toBeNull();
   });
+
+  it("should support multi-line", () => {
+    const content = Array.from({ length: 20 })
+      .map((_, i) => "comment " + i)
+      .join("\n");
+    const node = {
+      content,
+      type: NodeTypes.COMMENT,
+      loc: {
+        source: `<!-- ${content} -->`,
+      },
+    } as CommentNode;
+
+    expect(handleComment(node)).toMatchObject({
+      content: `${content}`,
+      node,
+    });
+  });
 });

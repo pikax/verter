@@ -56,6 +56,12 @@ describe("process template plugins comment", () => {
   it("should keep <!-- if inside comment", () => {
     const { result } = parse("<!-- <!-- -->");
 
-    expect(result).toBe("/* <!-- */");
+    expect(result).toBe("{/* <!-- */}");
+  });
+
+  it("if containts < or > it should wrap in { }", () => {
+    const { result } = parse("<!-- <MyComp -->");
+
+    expect(result).toBe("{/* <MyComp */}");
   });
 });
