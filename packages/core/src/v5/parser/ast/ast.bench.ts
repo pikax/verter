@@ -99,11 +99,10 @@ describe("ast bench", () => {
       describe.each(Object.keys(validFiles))("single %s", (x) => {
         const source = validFiles[x];
 
-        bench("oxc", () => {
-          const parsed = parseOXC(source);
-
-          makeChanges(parsed.magicString as any, parsed.program);
-        });
+        // bench("oxc", () => {
+        //   const parsed = parseOXC(source);
+        //   makeChanges(parsed.magicString as any, parsed.program);
+        // });
 
         bench("oxc + magicstring", () => {
           const parsed = parseOXC(source);
@@ -147,13 +146,13 @@ describe("ast bench", () => {
     describe("multi", () => {
       const sources = Object.values(validFiles);
 
-      bench("oxc", () => {
-        sources.map((source) => {
-          const parsed = parseOXC(source);
+      // bench("oxc", () => {
+      //   sources.map((source) => {
+      //     const parsed = parseOXC(source);
 
-          makeChanges(parsed.magicString as any, parsed.program);
-        });
-      });
+      //     makeChanges(parsed.magicString as any, parsed.program);
+      //   });
+      // });
 
       bench("oxc + magicstring", () => {
         sources.map((source) => {
@@ -203,14 +202,14 @@ describe("ast bench", () => {
         });
       });
 
-      bench("async oxc", async () => {
-        await Promise.all(
-          sources.map(async (source) => {
-            const parsed = await parseAsync("test.ts", source);
-            makeChanges(parsed.magicString as any, parsed.program);
-          })
-        );
-      });
+      // bench("async oxc", async () => {
+      //   await Promise.all(
+      //     sources.map(async (source) => {
+      //       const parsed = await parseAsync("test.ts", source);
+      //       makeChanges(parsed.magicString as any, parsed.program);
+      //     })
+      //   );
+      // });
 
       bench("async oxc + magicstring", async () => {
         await Promise.all(

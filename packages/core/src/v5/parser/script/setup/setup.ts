@@ -1,4 +1,9 @@
-import { ExpressionStatement, VerterASTNode } from "../../ast";
+import {
+  ExpressionStatement,
+  IdentifierName,
+  VerterAST,
+  VerterASTNode,
+} from "../../ast";
 import { TemplateBinding, TemplateTypes } from "../../template/types";
 import { getASTBindings, retrieveBindings } from "../../template/utils";
 import { VerterNode } from "../../walk";
@@ -6,7 +11,7 @@ import { ScriptDeclaration, ScriptItem, ScriptTypes } from "../types";
 import { walk } from "@vue/compiler-sfc";
 
 export function handleSetupNode(
-  pnode: VerterASTNode,
+  pnode: VerterASTNode | VerterAST,
   shallowCb?: (node: VerterASTNode) => any,
   isOptions = false
 ): {
@@ -46,12 +51,12 @@ export function handleSetupNode(
           items.push({
             type: ScriptTypes.FunctionCall,
             node: node,
-            parent: parent,
+            parent: parent as ExpressionStatement,
             name:
               node.callee.type === "Identifier"
                 ? node.callee.name
                 : node.callee.type === "MemberExpression"
-                ? node.callee.property.name
+                ? (node.callee.property as IdentifierName)?.name
                 : "",
           });
           this.skip();
@@ -142,7 +147,7 @@ export function handleSetupNode(
         }
       }
     },
-    leave(node: VerterASTNode, parent: VerterASTNode | null, key) {
+    leave(node: VerterASTNode, parent: VerterASTNode | null) {
       switch (node.type) {
         case "ForInStatement":
         case "ForOfStatement":

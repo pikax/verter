@@ -1,5 +1,5 @@
 import { VerterASTNode } from "../../ast";
-import { ScriptBinding, ScriptItem, ScriptTypes } from "../types";
+import { ScriptBinding, ScriptImport, ScriptItem, ScriptTypes } from "../types";
 
 export function handleShared(node: VerterASTNode): ScriptItem[] | false {
   switch (node.type) {
@@ -83,7 +83,7 @@ export function createSharedContext(opts: {
         };
       }
       case "ImportDeclaration": {
-        const importItem = {
+        const importItem: ScriptImport = {
           type: ScriptTypes.Import,
           node: node,
           bindings:

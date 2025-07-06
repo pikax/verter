@@ -1,6 +1,7 @@
 import {
   MagicString,
   type SFCParseOptions,
+  SFCScriptBlock,
   SFCTemplateBlock,
   parse,
 } from "@vue/compiler-sfc";
@@ -119,7 +120,7 @@ export function parser(
           const ast = parseAST(content, filename + "." + languageId);
           const r = parseScriptBetter(ast, x.block.attrs);
           isAsync = r.isAsync;
-          isSetup = x.block?.setup ?? false;
+          isSetup = !!((x.block as SFCScriptBlock)?.setup ?? false);
 
           return {
             type: "script",

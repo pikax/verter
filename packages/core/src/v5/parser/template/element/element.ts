@@ -5,6 +5,7 @@ import {
   TemplateTypes,
   TemplateElement,
   TemplateBinding,
+  TemplateProp,
 } from "../types";
 import { handleLoopProp } from "./loops";
 import { handleProps } from "./props";
@@ -40,7 +41,9 @@ export function handleElement(
 
   const propBindings = handleProps(node, context);
   const props =
-    propBindings?.filter((x) => x.type === TemplateTypes.Prop) ?? [];
+    (propBindings?.filter(
+      (x) => x.type === TemplateTypes.Prop
+    ) as TemplateProp[]) ?? ([] as TemplateProp[]);
   const slot = handleSlotDeclaration(node, parent as ElementNode, context);
 
   const propSlot = handleSlotProp(node, parent, context, conditions?.condition);
@@ -55,11 +58,18 @@ export function handleElement(
     node,
     parent,
 
-    // @ts-expect-error
     ref:
-      props?.find((x) => x.name === "ref" || x.node?.rawName === ":ref") ??
-      null,
-    // @ts-expect-error
+      props?.find((x) => {
+        if (x.name === "ref") {
+          return true;
+        }
+        const node = x.node;
+
+        if (node?.type === NodeTypes.DIRECTIVE) {
+          return node.rawName === ":ref";
+        }
+        return false;
+      }) ?? null,
     props: props ?? [],
 
     condition: conditions?.condition ?? null,

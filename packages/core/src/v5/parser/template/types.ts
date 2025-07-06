@@ -81,7 +81,11 @@ export type TemplateFunction = {
   context: Record<string, any>;
 };
 
-export type TemplateBinding = { type: TemplateTypes.Binding } & (
+export type TemplateBinding = {
+  type: TemplateTypes.Binding;
+  ignore?: boolean;
+  skip?: boolean;
+} & (
   | {
       node:
         | Node
@@ -146,42 +150,58 @@ export type TemplateBinding = { type: TemplateTypes.Binding } & (
           });
       name: string;
 
+      parent?: undefined | null;
+
       isComponent: true;
+
+      directive?: null;
+      exp?: null;
     }
 );
 
+export type TemplatePropAttribute = {
+  type: TemplateTypes.Prop;
+
+  event: false;
+  node: AttributeNode;
+  name: string;
+
+  value: string | null;
+  static: true;
+  items: TemplateItem[];
+};
+export type TemplatePropDirective = {
+  type: TemplateTypes.Prop;
+
+  node: DirectiveNode;
+  event: boolean;
+  name: string;
+
+  arg: null | TemplateBinding[];
+  exp: null | TemplateBinding[];
+
+  static: false;
+  context: Record<string, any>;
+  items: TemplateItem[];
+};
+
+// used to merge styles and classes
+export type TemplatePropMerge = {
+  type: TemplateTypes.Prop;
+
+  node: null;
+  name: string;
+  event: false;
+  static: false;
+
+  props: TemplateProp[];
+  items: TemplateItem[];
+};
+
 export type TemplateProp = { type: TemplateTypes.Prop } & (
-  | {
-      event: false;
-      node: AttributeNode;
-      name: string;
-
-      value: string | null;
-      static: true;
-      items: TemplateItem[];
-    }
-  | {
-      node: DirectiveNode;
-      event: boolean;
-      name: string;
-
-      arg: null | TemplateBinding[];
-      exp: null | TemplateBinding[];
-
-      static: false;
-      context: Record<string, any>;
-      items: TemplateItem[];
-    }
-  | {
-      // used to merge styles and classes
-      node: null;
-      name: string;
-      event: false;
-      static: false;
-
-      props: TemplateProp[];
-      items: TemplateItem[];
-    }
+  | TemplatePropAttribute
+  | TemplatePropDirective
+  | TemplatePropMerge
 );
 
 export type TemplateDirective = {
