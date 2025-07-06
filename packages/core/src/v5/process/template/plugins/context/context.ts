@@ -29,7 +29,7 @@ export const ContextPlugin = {
           [ctx.prefix("resolveProps"), "$props"],
           [ctx.prefix("resolveEmits"), "$emit"],
           // [ctx.prefix('resolveSlots'), "$slots"],
-          [ctx.prefix('defineSlots'), "$slots"],
+          [ctx.prefix("defineSlots"), "$slots"],
         ]
       : [];
 
@@ -54,10 +54,12 @@ export const ContextPlugin = {
 
     // todo add generic information
     const ctxItems = [
-      ctx.prefix("resolveProps"),
+      isSetup ? ctx.prefix("resolveProps") : null,
       FullContextName,
       TemplateBindingName,
-    ].map((x) => (ctx.isTS ? `...({} as ${x})` : `...${x}`));
+    ]
+      .filter(Boolean)
+      .map((x) => (ctx.isTS ? `...({} as ${x})` : `...${x}`));
     const ctxStr = `const ${CTX} = {${[
       `...${ComponentInstanceName}`,
       `...${
@@ -72,27 +74,37 @@ export const ContextPlugin = {
       ...ctxItems,
     ].join(",")}};`;
 
-    const slotsCtx = `const ${ctx.prefix('$slot')} = ${CTX}['$slots'];`;
+    const slotsCtx = `const ${ctx.prefix("$slot")} = ${CTX}['$slots'];`;
 
-    const debuggerVerter = `const debuggerVerter = ${CTX};`
+    const debuggers = true
+      ? ""
+      : [
+          `const ___debuggerVerter = ${CTX};`,
+          "const ___debuggerDefault = ___VERTER___default;",
+          "const ___debuggerProps = ({} as ___VERTER___resolveProps);",
+          "const ___debuggerComponents = ({} as Required<typeof ___VERTER___default.components> & {});",
+          "const ___debuggerFullContext = ({} as ___VERTER___FullContext);",
+          "const ___debuggerBinding = ({} as ___VERTER___TemplateBinding);",
+        ].join("\n");
 
     s.prependLeft(
       ctx.block.block.block.loc.start.offset,
-      [instanceStr, ctxStr, slotsCtx,debuggerVerter].join("\n")
+      [instanceStr, ctxStr, slotsCtx, debuggers].join("\n")
     );
 
     // add slots Helper
     // s.append(Slots.withPrefix(ctx.prefix("")).content);
 
     s.append(`
-      declare function ${ctx.prefix('slotRender')}<T extends (...args: any[]) => any>(slot: T): (cb: T)=>any;
-export declare function ${ctx.prefix('StrictRenderSlot')}<
+      declare function ${ctx.prefix(
+        "slotRender"
+      )}<T extends (...args: any[]) => any>(slot: T): (cb: T)=>any;
+export declare function ${ctx.prefix("StrictRenderSlot")}<
   T extends (...args: any[]) => any,
   Single extends boolean = ReturnType<T> extends Array<any> ? false : true
->(slot: T, children: Single extends true ? [ReturnType<T>] : ReturnType<T>): any;`)
-
-// patch TSX
-s.prepend(`
+>(slot: T, children: Single extends true ? [ReturnType<T>] : ReturnType<T>): any;`);
+    // patch TSX
+    s.prepend(`
   import { VNode as $V_VNode, ComponentInternalInstance as $V_ComponentInternalInstance } from 'vue';
   import 'vue/jsx';
   declare module "vue" {
@@ -161,6 +173,6 @@ s.prepend(`
       }
     }
   }
-  `)
+  `);
   },
 } as TemplatePlugin;

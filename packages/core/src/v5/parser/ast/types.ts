@@ -1,6 +1,6 @@
-import type {
-  ParseResult,
+import type { ParseResult } from "oxc-parser";
 
+import type {
   // AST NODE
   Expression,
   PropertyKey,
@@ -26,14 +26,12 @@ import type {
   TSTupleElement,
   TSSignature,
   TSTypePredicateName,
-  TSModuleDeclarationBody,
   TSTypeQueryExprName,
   TSModuleReference,
   JSXExpression,
   JSXAttributeName,
   JSXAttributeValue,
   JSXChild,
-  CharacterClassContents,
   JSXElementName,
   JSXMemberExpressionObject,
   VariableDeclaration,
@@ -53,7 +51,7 @@ import type {
   ExportDefaultDeclaration,
   IdentifierName,
   AssignmentTargetRest,
-} from "oxc-parser";
+} from "@oxc-project/types";
 
 export type {
   VariableDeclaration,
@@ -83,7 +81,7 @@ export type {
   AwaitExpression,
   IdentifierName,
   AssignmentTargetRest,
-} from "oxc-parser";
+} from "@oxc-project/types";
 
 export type VerterAST = ParseResult["program"];
 
@@ -113,14 +111,12 @@ export type VerterASTNode =
   | TSTupleElement
   | TSSignature
   | TSTypePredicateName
-  | TSModuleDeclarationBody
   | TSTypeQueryExprName
   | TSModuleReference
   | JSXExpression
   | JSXAttributeName
   | JSXAttributeValue
   | JSXChild
-  | CharacterClassContents
   | JSXElementName
   | JSXMemberExpressionObject
   | VariableDeclaration

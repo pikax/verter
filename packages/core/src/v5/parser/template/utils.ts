@@ -160,8 +160,7 @@ export function getASTBindings(
             ? isAcorn
               ? // @ts-expect-error not correct type
                 patchAcornNodeLoc(n, exp)
-              : // @ts-expect-error not correct type
-                patchBabelNodeLoc(n, exp)
+              : patchBabelNodeLoc(n, exp)
             : n;
 
           bindings.push({

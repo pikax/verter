@@ -13,8 +13,8 @@
   "author": "Carlos Rodrigues <pikax>",
   "license": "MIT",
   "devDependencies": {
-    "typescript": "^5.8.2",
-    "vite": "^6.2.0",
-    "vite-plugin-dts": "^4.5.1"
+    "typescript": "^5.8.3",
+    "vite": "^7.0.2",
+    "vite-plugin-dts": "^4.5.4"
   }
 }

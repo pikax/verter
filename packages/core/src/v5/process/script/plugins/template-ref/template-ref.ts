@@ -48,7 +48,7 @@ function handleExpression(
   ctx: ScriptContext
 ) {
   // don't handle if there's explicit type parameters
-  if (node.typeParameters !== null) return;
+  if (node.typeArguments !== null) return;
   const templateItems = ctx.blocks
     .find((x) => x.type === "template")
     ?.result?.items.filter((x) => x.type === TemplateTypes.Element);

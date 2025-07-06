@@ -7,6 +7,10 @@ export const BindingPlugin = {
       return;
     }
 
+    if (item.name?.startsWith("___debugger")) {
+      return;
+    }
+
     const accessor = ctx.retrieveAccessor("ctx");
 
     if (item.parent?.type === "ObjectProperty" && item.parent.shorthand) {
