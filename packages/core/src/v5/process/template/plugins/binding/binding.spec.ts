@@ -3,11 +3,13 @@ import { parseTemplate } from "../../../../parser/template";
 import { ParsedBlockTemplate } from "../../../../parser/types";
 import { extractBlocksFromDescriptor } from "../../../../utils";
 import { processTemplate } from "../../template";
+import { ConditionalPlugin } from "../conditional";
+import { PropPlugin } from "../prop";
 import { BindingPlugin } from "./index";
 import { MagicString, parse as parseSFC } from "@vue/compiler-sfc";
 
 describe("process template plugins binding", () => {
-  function parse(content: string) {
+  function parse(content: string, plugins: any[] = []) {
     const source = `<template>${content}</template>`;
     const parsed = parser(source);
 
@@ -21,6 +23,7 @@ describe("process template plugins binding", () => {
       templateBlock.result.items,
       [
         BindingPlugin,
+        ...plugins,
         // clean template tag
         {
           post: (s) => {
@@ -114,6 +117,16 @@ describe("process template plugins binding", () => {
     const { result } = parse('<Comp v-model:[`${msg}ss`]="msg" />');
     expect(result).toMatchInlineSnapshot(
       `"<Comp v-model:[\`\${___VERTER___ctx.msg}ss\`]="___VERTER___ctx.msg" />"`
+    );
+  });
+
+  test("v-if + :class", () => {
+    const { result } = parse('<i v-if="icon" :class="icon" />', [
+      ConditionalPlugin,
+      PropPlugin,
+    ]);
+    expect(result).toMatchInlineSnapshot(
+      `"import { normalizeClass as ___VERTER___normalizeClass } from "vue";if(___VERTER___ctx.icon){<i  class={___VERTER___normalizeClass([___VERTER___ctx.icon])} />}"`
     );
   });
 

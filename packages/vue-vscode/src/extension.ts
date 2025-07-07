@@ -26,7 +26,10 @@ type GetClient = () => PatchClient<LanguageClient>;
 
 let getClient: GetClient | undefined;
 
+console.log('hello tghere')
+
 export function activate(context: ExtensionContext) {
+  console.log("activate");
   const server = activateVueLanguageServer(context);
   getClient = server.getClient;
 
@@ -51,6 +54,7 @@ export function deactivate(): Thenable<void> | undefined {
 }
 
 export function activateVueLanguageServer(context: ExtensionContext) {
+  console.log("activateVueLanguageServer");
   const runtimeConfig = workspace.getConfiguration("verter.language-server");
 
   const { workspaceFolders } = workspace;
@@ -150,6 +154,8 @@ export function activateVueLanguageServer(context: ExtensionContext) {
   addDidChangeTextDocumentListener(getClient);
   addCompilePreviewCommand(getClient, context);
 
+  addWriteVirtualFilesCommand(getClient, context);
+
   addNodeModulesChangedListener(getClient);
 
   return {
@@ -168,7 +174,8 @@ function addDidChangeTextDocumentListener(getClient: GetClient) {
   workspace.onDidChangeTextDocument((e) => {
     if (
       e.document.languageId !== "typescript" &&
-      e.document.languageId !== "javascript"
+      e.document.languageId !== "javascript" &&
+      e.document.languageId !== "vue"
     ) {
       return;
     }

@@ -32,7 +32,8 @@ export const ElementPlugin = declareTemplatePlugin({
       node.loc.start.offset + 1,
       `${componentAccessor}${shouldWrap ? '["' : "."}`
     );
-    if (!node.isSelfClosing) {
+    // if the component does not have a closing tag we should not apply double context
+    if (!node.isSelfClosing && closingTagStartIndex > node.tag.length) {
       s.prependRight(offset + closingTagStartIndex, `${componentAccessor}.`);
     }
 

@@ -16,13 +16,16 @@ export default {
 
   setup() {
     return {
-      ... { a: ''}
-    }
-  }
+      ...{ a: "" },
+    };
+  },
 };
 const foo = 1;
 </script>
 <template>
   <span>{{ $data.foo + $props.bar }}</span>
   <span> {{ foo }} </span>
+  <span>
+    {{ a.toString() }}
+  </span>
 </template>

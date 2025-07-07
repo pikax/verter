@@ -32,6 +32,11 @@ const MacroDependencies = new Map([
 export const MacrosPlugin = definePlugin({
   name: "VerterMacro",
 
+  hasWithDefaults: false,
+  pre() {
+    this.hasWithDefaults = false;
+  },
+
   post(s, ctx) {
     const isTS = ctx.block.lang.startsWith("ts");
     const macroBindinds = ctx.items.filter(
@@ -99,7 +104,40 @@ export const MacrosPlugin = definePlugin({
               name: getModelName(item.parent.init),
               node: item.parent,
             });
+          } else if (macroName == "withDefaults") {
+            const defineProps = item.parent.init.arguments[0];
+            const pName = ctx.prefix("Props");
+            if (
+              defineProps.type === "CallExpression" &&
+              defineProps.callee.type === "Identifier" &&
+              defineProps.callee.name === "defineProps"
+            ) {
+              addMacroDependencies("defineProps", ctx);
+              ctx.items.push({
+                type: ProcessItemType.MacroBinding,
+                name: pName,
+                macro: "defineProps",
+                node: defineProps,
+              });
+            }
+            // prepend props
+            s.appendLeft(item.declarator.start, `const ${pName}=`);
+            s.appendLeft(defineProps.end, ";");
+            s.appendRight(defineProps.end, pName);
+
+            s.move(defineProps.start, defineProps.end, item.declarator.start);
+            this.hasWithDefaults = true;
+
+            // ctx.items.push({
+            //   type: ProcessItemType.MacroBinding,
+            //   name: varName!,
+            //   macro: "defineProps",
+            //   node: item.parent,
+            // });
           } else {
+            if (macroName === "defineProps" && this.hasWithDefaults) {
+              return;
+            }
             ctx.items.push({
               type: ProcessItemType.MacroBinding,
               name: varName!,
@@ -140,21 +178,48 @@ export const MacrosPlugin = definePlugin({
 
     let varName = "";
 
-    let originalName: string | undefined = undefined;
     if (item.name === "defineModel") {
       const modelName = getModelName(item.node);
       const accessor = ctx.prefix("models");
       varName = `${accessor}_${modelName}`;
-      // originalName = modelName;
+    } else if (macroName === "withDefaults") {
+      if (this.hasWithDefaults) {
+        return;
+      }
+      // check if there's an defineProps inside
+
+      if (ctx.isSetup) {
+        const defineProps = item.node.arguments[0];
+        const pName = ctx.prefix("Props");
+        if (
+          defineProps.type === "CallExpression" &&
+          defineProps.callee.type === "Identifier" &&
+          defineProps.callee.name === "defineProps"
+        ) {
+          addMacroDependencies("defineProps", ctx);
+          ctx.items.push({
+            type: ProcessItemType.MacroBinding,
+            name: pName,
+            macro: "defineProps",
+            node: defineProps,
+          });
+        }
+        // prepend props
+        s.appendLeft(item.node.start, `const ${pName}=`);
+        s.appendLeft(defineProps.end, ";");
+        s.appendRight(defineProps.end, pName);
+
+        s.move(defineProps.start, defineProps.end, item.node.start);
+        this.hasWithDefaults = true;
+
+        return;
+      }
     } else if (macroName === "defineOptions") {
       return handleDefineOptions(item.node, ctx);
+    } else if (macroName === "defineProps" && this.hasWithDefaults) {
+      return;
     } else {
-      varName = ctx.prefix(
-        (macroName === "withDefaults" ? "defineProps" : macroName).replace(
-          "define",
-          ""
-        )
-      );
+      varName = ctx.prefix(macroName.replace("define", ""));
     }
 
     if (ctx.isSetup) {

@@ -8,6 +8,7 @@ import { ResolveOptionsFilename } from "../../../script";
 import { generateImport } from "../../../utils";
 import { TemplatePlugin } from "../../template";
 import { Slots } from "../../helpers/component";
+import { DEBUG } from "../../../../config";
 
 export const ContextPlugin = {
   name: "VerterContext",
@@ -76,17 +77,16 @@ export const ContextPlugin = {
 
     const slotsCtx = `const ${ctx.prefix("$slot")} = ${CTX}['$slots'];`;
 
-    const debuggers = true
-      ? ""
-      : [
-          `const ___debuggerVerter = ${CTX};`,
-          "const ___debuggerDefault = ___VERTER___default;",
-          "const ___debuggerProps = ({} as ___VERTER___resolveProps);",
-          "const ___debuggerComponents = ({} as Required<typeof ___VERTER___default.components> & {});",
-          "const ___debuggerFullContext = ({} as ___VERTER___FullContext);",
-          "const ___debuggerBinding = ({} as ___VERTER___TemplateBinding);",
-        ].join("\n");
-
+    const debuggers = DEBUG
+      ? [
+          `const ___DEBUG_Verter = ${CTX};`,
+          "const ___DEBUG_Default = ___VERTER___default;",
+          "const ___DEBUG_Props = ({} as ___VERTER___resolveProps);",
+          "const ___DEBUG_Components = ({} as Required<typeof ___VERTER___default.components> & {});",
+          "const ___DEBUG_FullContext = ({} as ___VERTER___FullContext);",
+          "const ___DEBUG_Binding = ({} as ___VERTER___TemplateBinding);",
+        ].join("\n")
+      : "";
     s.prependLeft(
       ctx.block.block.block.loc.start.offset,
       [instanceStr, ctxStr, slotsCtx, debuggers].join("\n")

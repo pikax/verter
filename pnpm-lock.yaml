@@ -145,9 +145,15 @@ importers:
       acorn-loose:
         specifier: ^8.5.2
         version: 8.5.2
+      glob:
+        specifier: ^11.0.3
+        version: 11.0.3
       magic-string:
         specifier: ^0.30.17
         version: 0.30.17
+      minimatch:
+        specifier: ^10.0.3
+        version: 10.0.3
       oxc-parser:
         specifier: ^0.75.1
         version: 0.75.1

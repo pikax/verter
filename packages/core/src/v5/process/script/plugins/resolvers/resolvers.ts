@@ -17,6 +17,11 @@ export const ScriptResolversPlugin = definePlugin({
       (x) => x.type === ProcessItemType.DefineModel
     );
 
+    const hasEmit = ctx.items.some(
+      (x) =>
+        x.type === ProcessItemType.MacroBinding && x.macro === "defineEmits"
+    );
+
     const definePropsName = ctx.prefix("defineProps");
     const defineEmitsName = ctx.prefix("defineEmits");
     const defineModelName = ctx.prefix("defineModel");
@@ -36,8 +41,10 @@ export const ScriptResolversPlugin = definePlugin({
 } : {})`;
 
     const resolveProps = [
-      `${definePropsName}`,
-      emitsToProps,
+      hasModel
+        ? `Omit<${definePropsName}, keyof ${modelToProp}>`
+        : `${definePropsName}`,
+      hasEmit && emitsToProps,
       hasModel && modelToProp,
     ]
       .filter(Boolean)
@@ -54,14 +61,17 @@ export const ScriptResolversPlugin = definePlugin({
           ctx.generic?.source,
           ctx.isTS
         ),
-        generateTypeDeclaration(
-          resolveEmitsName,
-          resolveEmits,
-          ctx.generic?.source,
-          ctx.isTS
-        ),
+        hasEmit &&
+          generateTypeDeclaration(
+            resolveEmitsName,
+            resolveEmits,
+            ctx.generic?.source,
+            ctx.isTS
+          ),
         ,
-      ].join(";")
+      ]
+        .filter(Boolean)
+        .join(";")
     );
   },
 });

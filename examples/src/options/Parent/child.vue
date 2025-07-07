@@ -17,5 +17,7 @@ export default {
 <template>
   <!-- <MyComp :foo="1" /> -->
 
-  {{ My }}
+  <MyComp foo="dd"></MyComp>
+
+  {{ foo }}
 </template>

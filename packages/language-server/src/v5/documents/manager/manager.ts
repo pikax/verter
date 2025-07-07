@@ -2,6 +2,7 @@ import {
   Connection,
   Disposable,
   TextDocuments,
+  TextEdit,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import {
@@ -58,7 +59,8 @@ export class DocumentManager implements Disposable {
       },
       update: (document, changes, version) => {
         console.log("update", document.uri, version);
-        this.handleFileChange(document.uri, "update");
+        // this.handleFileChange(document.uri, "update");
+
         // return TextDocument.update(document, changes, version);
         return document.update(changes, version);
       },
@@ -139,6 +141,7 @@ export class DocumentManager implements Disposable {
     // if (isVerterVirtual(filepath)) {
     // normalise path
     filepath = uriToPath(filepath);
+
     // }
     let d = this._files.get(filepath);
     if (!d) {
@@ -206,6 +209,35 @@ export class DocumentManager implements Disposable {
         this._files.delete(uri);
         break;
       }
+    }
+  }
+
+  applyFileChanges(
+    uri: string,
+    changes: Array<{
+      text: string;
+      range: {
+        start: {
+          line: number;
+          character: number;
+        };
+        end: {
+          line: number;
+          character: number;
+        };
+      };
+    }>
+  ) {
+    const path = normalisePath(uri);
+    uri = pathToUri(path);
+
+    const doc = this.getDocument(uri);
+    if (doc) {
+      // doc.applyEdits(changes.map((x) => TextEdit.replace(x.range, x.text)));
+      doc.update(changes);
+    } else {
+      // file does not exits
+      console.log("file does not exits", uri, path);
     }
   }
 }

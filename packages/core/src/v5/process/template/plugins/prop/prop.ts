@@ -10,6 +10,8 @@ import {
 import { camelize } from "vue";
 import { DirectivePlugin } from "../directive";
 import { ParseTemplateContext } from "../../../../parser/template";
+import { generateImport } from "../../../utils";
+import { ImportItem, ImportModule } from "../../../types";
 
 function overrideCamelCase(
   loc: SourceLocation,
@@ -40,6 +42,32 @@ export const PropPlugin = declareTemplatePlugin({
   pre() {
     this.used.normalizeStyle = false;
     this.used.normalizeClass = false;
+  },
+
+  post(s, ctx) {
+    if (!this.used.normalizeClass && !this.used.normalizeStyle) {
+      return;
+    }
+
+    const items = [
+      this.used.normalizeClass && {
+        name: "normalizeClass",
+        alias: ctx.retrieveAccessor("normalizeClass"),
+      },
+      this.used.normalizeStyle && {
+        name: "normalizeStyle",
+        alias: ctx.retrieveAccessor("normalizeStyle"),
+      },
+    ].filter(Boolean) as ImportItem[];
+
+    const importStr = generateImport([
+      {
+        from: "vue",
+        items,
+      },
+    ]);
+
+    s.prepend(importStr);
   },
 
   transformProp(prop, s, ctx) {
@@ -89,7 +117,7 @@ export const PropPlugin = declareTemplatePlugin({
         "}"
       );
 
-      s.prependRight(
+      s.prependLeft(
         firstDirective.exp.loc.start.offset,
         `${normaliseAccessor}([`
       );

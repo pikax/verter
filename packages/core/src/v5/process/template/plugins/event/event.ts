@@ -11,13 +11,21 @@ const IgnoredASTTypes = new Set([
 export const EventPlugin = declareTemplatePlugin({
   name: "VerterPropEvent",
 
+  inject: false,
+  pre() {
+    this.inject = false;
+  },
   /**
    * 
-   * 
-declare function ___VERTER___eventCb
-    <TArgs extends Array<any>, R extends ($event: TArgs[0]) => any>(event: TArgs, cb: R): R;
-
+declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event: TArgs[0]) => any>(event: TArgs, cb: R): R;
    */
+
+  post(s, ctx) {
+    if (!this.inject) return;
+    s.append(
+      "declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event: TArgs[0]) => any>(event: TArgs, cb: R): R;"
+    );
+  },
 
   transformProp(prop, s, ctx) {
     if (!prop.event) return;
@@ -31,6 +39,7 @@ declare function ___VERTER___eventCb
     if (IgnoredASTTypes.has(exp.ast.type)) {
       return;
     }
+    this.inject = true;
 
     const eventCb = ctx.retrieveAccessor("eventCb");
     const eventArgs = ctx.retrieveAccessor("eventArgs");

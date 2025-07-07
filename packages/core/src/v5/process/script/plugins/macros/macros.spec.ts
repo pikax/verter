@@ -87,20 +87,6 @@ describe("process script plugin script block", () => {
         "
       `);
     });
-    it("const props = defineProps", () => {
-      const { result, context } = parse(
-        `const props = defineProps({ a: String })`
-      );
-
-      expect(result).toContain(`const props = defineProps({ a: String });`);
-
-      expect(context.items[0]).toMatchObject({
-        type: "macro-binding",
-        macro: "defineProps",
-        name: "props",
-        originalName: undefined,
-      });
-    });
 
     describe("defineModel", () => {
       it("model without assignment", () => {
@@ -337,6 +323,67 @@ describe("process script plugin script block", () => {
               message: "INVALID_DEFINE_OPTIONS",
             },
           ]);
+        });
+      });
+    });
+
+    describe("defineProps", () => {
+      it("const props = defineProps", () => {
+        const { result, context } = parse(
+          `const props = defineProps({ a: String })`
+        );
+
+        expect(result).toContain(`const props = defineProps({ a: String });`);
+
+        expect(context.items[0]).toMatchObject({
+          type: "macro-binding",
+          macro: "defineProps",
+          name: "props",
+        });
+      });
+
+      it("defineProps", () => {
+        const { result, context } = parse(`defineProps({ a: String })`);
+
+        expect(result).toContain(`___Props=defineProps({ a: String });`);
+
+        expect(context.items[0]).toMatchObject({
+          type: "macro-binding",
+          macro: "defineProps",
+          name: "___VERTER___Props",
+        });
+      });
+
+      it("withDefaults(defineProps)", () => {
+        const { result, context } = parse(
+          `withDefaults(defineProps({ a: String }), {})`
+        );
+
+        expect(result).toContain(
+          `const ___VERTER___Props=defineProps({ a: String });withDefaults(___VERTER___Props, {})`
+        );
+
+        expect(context.items).toMatchObject([
+          {
+            type: "macro-binding",
+            macro: "defineProps",
+            name: "___VERTER___Props",
+          },
+        ]);
+      });
+      it.only("withDefaults(defineProps)", () => {
+        const { result, context } = parse(
+          `const props = withDefaults(defineProps({ a: String }), {})`
+        );
+
+        expect(result).toContain(
+          `const ___VERTER___Props=defineProps({ a: String });const props = withDefaults(___VERTER___Props, {})`
+        );
+
+        expect(context.items[0]).toMatchObject({
+          type: "macro-binding",
+          macro: "defineProps",
+          name: "___VERTER___Props",
         });
       });
     });
