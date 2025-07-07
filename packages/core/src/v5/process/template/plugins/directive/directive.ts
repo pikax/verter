@@ -241,6 +241,11 @@ export const DirectivePlugin = declareTemplatePlugin({
         );
         break;
       }
+      case "is": {
+        if (item.element.tag === "component") {
+          return;
+        }
+      }
       default: {
         const directiveAccessor = ctx.retrieveAccessor("directiveAccessor");
         const instancePropertySymbol = ctx.retrieveAccessor(

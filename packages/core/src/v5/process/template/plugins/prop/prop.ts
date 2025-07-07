@@ -154,6 +154,11 @@ export const PropPlugin = declareTemplatePlugin({
       }
 
       s.appendRight(firstDirective.exp.loc.end.offset, "])");
+    } else if (
+      (prop.name === "is" || prop.node.rawName === ":is") &&
+      prop.element.tag === "component"
+    ) {
+      return;
     } else if (prop.static) {
       // handle prop
       if (prop.node.value) {

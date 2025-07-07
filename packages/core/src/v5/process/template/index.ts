@@ -18,6 +18,7 @@ export const DefaultPlugins = [
   Plugins.ElementPlugin,
   Plugins.TemplateTagPlugin,
   Plugins.SFCCleanerPlugin,
+  Plugins.ConditionalPlugin,
 ];
 
 export const ScriptDefaultPlugins = [];

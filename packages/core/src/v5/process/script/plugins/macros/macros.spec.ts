@@ -371,7 +371,7 @@ describe("process script plugin script block", () => {
           },
         ]);
       });
-      it.only("withDefaults(defineProps)", () => {
+      it("withDefaults(defineProps)", () => {
         const { result, context } = parse(
           `const props = withDefaults(defineProps({ a: String }), {})`
         );

@@ -193,6 +193,27 @@ describe("process template plugins element", () => {
     );
   });
 
+  describe("component", () => {
+    test("is", () => {
+      const { result } = parse(`<component is="div"></component>`);
+
+      expect(result).toContain("<div ></div>");
+    });
+    test('is="div" tabindex="1"', () => {
+      const { result } = parse(`<component is="div" tabindex="1"></component>`);
+
+      expect(result).toContain('<div  tabindex={"1"}></div>');
+    });
+
+    test.only(":is", () => {
+      const { result } = parse(`<component :is="'div'"></component>`);
+
+      expect(result).toContain(
+        "{ ()=> { const ___VERTER___component = <___VERTER___component></___VERTER___component> }"
+      );
+    });
+  });
+
   describe("name casing", () => {
     it("item-render", () => {
       const { result } = parse(`<item-render></item-render>`);

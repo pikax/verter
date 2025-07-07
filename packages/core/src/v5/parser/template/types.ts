@@ -31,6 +31,8 @@ export const enum TemplateTypes {
   Function = "Function",
 
   Literal = "Literal",
+
+  DynamicComponent = "DynamicComponent",
 }
 
 export type TemplateComment = {
@@ -198,11 +200,10 @@ export type TemplatePropMerge = {
   items: TemplateItem[];
 };
 
-export type TemplateProp = { type: TemplateTypes.Prop } & (
-  | TemplatePropAttribute
-  | TemplatePropDirective
-  | TemplatePropMerge
-);
+export type TemplateProp = {
+  type: TemplateTypes.Prop;
+  element: ElementNode;
+} & (TemplatePropAttribute | TemplatePropDirective | TemplatePropMerge);
 
 export type TemplateDirective = {
   type: TemplateTypes.Directive;

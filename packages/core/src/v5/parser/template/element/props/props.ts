@@ -67,6 +67,10 @@ export function handleProps(node: VerterNode, context: PropsContext) {
         }
       }
       default:
+        if (prop.name === "is" && node.tag === "component") {
+          break;
+        }
+
         items.push(...propToTemplateProp(prop, node, context));
     }
   }
@@ -178,6 +182,7 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
         value: prop.value?.content ?? null,
         static: true,
         event: false,
+        element,
         items: [],
       },
     ];
@@ -211,6 +216,7 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
         event: prop.name === "on",
         name: prop.name,
         context,
+        element,
         items: [...nameBinding, ...valueBinding],
       },
       ...nameBinding,
