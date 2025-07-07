@@ -84,7 +84,7 @@ describe("process template plugins element", () => {
   });
 
   it("Component.Comp", () => {
-    const { result } = parse(`<Component.Comp></Component.Comp>`);
+    const { result, s } = parse(`<Component.Comp></Component.Comp>`);
 
     expect(result).toMatchInlineSnapshot(
       `

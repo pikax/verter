@@ -65,15 +65,18 @@ export const ElementPlugin = declareTemplatePlugin({
         node.loc.start.offset + 1
       );
 
+      if (!item.condition) {
+        BlockPlugin.addItem(node, item, item.context as ParseTemplateContext);
+      }
       // wrap
       s.update(
         node.loc.start.offset,
         node.loc.start.offset + 1,
-        `{()=> { const ${name}=`
+        `const ${name}=`
       );
 
       s.appendRight(node.loc.start.offset + 1, ";\n<");
-      s.appendLeft(node.loc.end.offset, "}}");
+      // s.appendLeft(node.loc.end.offset, "}}");
       s.update(tagNameStart, tagNameEnd, name);
 
       s.remove(isProp.loc.start.offset, isProp.exp!.loc.start.offset + 1);
@@ -142,22 +145,31 @@ function renameElementTag(
     delimiter === "."
       ? item.tag.replace(/\./g, Replacer)
       : item.tag.replace(/-/g, "").toUpperCase();
-  s.prependLeft(tagNameStart, newName);
+  s.appendLeft(tagNameStart, newName);
 
   s.prependRight(tagNameStart, `const ${newName}=`);
-  s.prependLeft(tagNameEnd, ";");
+  s.appendLeft(tagNameEnd, ";");
 
   if (!node.isSelfClosing) {
     // update closing tag
-    // add ; because this will also be moved
-    s.prependLeft(offset + closingTagStartIndex + item.tag.length, ";");
-    // move to beginning
+    // // add ; because this will also be moved
+    // s.appendLeft(offset + closingTagStartIndex + item.tag.length, ";");
+
+    // // move to beginning
+    // s.move(
+    //   offset + closingTagStartIndex,
+    //   offset + closingTagStartIndex + item.tag.length,
+    //   node.loc.start.offset
+    // );
+
+    s.appendLeft(offset + closingTagStartIndex, newName);
+
+    s.prependRight(offset + closingTagStartIndex, "{");
+    s.prependLeft(offset + closingTagStartIndex + item.tag.length, "}");
     s.move(
       offset + closingTagStartIndex,
       offset + closingTagStartIndex + item.tag.length,
-      node.loc.start.offset
+      offset + closingTagStartIndex - 2
     );
-
-    s.prependLeft(offset + closingTagStartIndex, newName);
   }
 }
