@@ -32,7 +32,6 @@ export const enum TemplateTypes {
 
   Literal = "Literal",
 
-  DynamicComponent = "DynamicComponent",
 }
 
 export type TemplateComment = {

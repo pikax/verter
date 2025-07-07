@@ -30,6 +30,7 @@ export const ElementPlugin = declareTemplatePlugin({
     const isProp = node.props.find(
       (x) => x.name === "is" || x.rawName === ":is"
     );
+    // dynamic component
     if (node.tag === "component" && isProp) {
       if (isProp.type === NodeTypes.ATTRIBUTE) {
         s.update(tagNameStart, tagNameEnd, "");

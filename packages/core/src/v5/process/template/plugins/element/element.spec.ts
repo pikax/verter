@@ -19,14 +19,18 @@ describe("process template plugins element", () => {
       (x) => x.type === "template"
     ) as ParsedBlockTemplate;
 
-    const r = processTemplate(templateBlock.result.items, [...DefaultPlugins], {
-      ...options,
-      s,
-      filename: "test.vue",
-      blocks: parsed.blocks,
-      block: templateBlock,
-      blockNameResolver: (name) => name,
-    });
+    const r = processTemplate(
+      templateBlock.result.items,
+      [...DefaultPlugins].filter((x) => x.name !== "VerterContext"),
+      {
+        ...options,
+        s,
+        filename: "test.vue",
+        blocks: parsed.blocks,
+        block: templateBlock,
+        blockNameResolver: (name) => name,
+      }
+    );
 
     return r;
   }
@@ -36,9 +40,8 @@ describe("process template plugins element", () => {
 
     expect(result).toMatchInlineSnapshot(
       `
-      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-      <><___VERTER___COMPONENT_CTX.Comp></___VERTER___COMPONENT_CTX.Comp>
+      "export function template(){
+      <><___VERTER___ctx.Comp></___VERTER___ctx.Comp>
       </>}"
     `
     );
@@ -49,9 +52,8 @@ describe("process template plugins element", () => {
 
     expect(result).toMatchInlineSnapshot(
       `
-      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test){
-      <><___VERTER___COMPONENT_CTX.Comp ></___VERTER___COMPONENT_CTX.Comp>}}}
+      "export function template(){{()=>{if(___VERTER___ctx.test){
+      <><___VERTER___ctx.Comp ></___VERTER___ctx.Comp>}}}
       </>}"
     `
     );
@@ -62,9 +64,8 @@ describe("process template plugins element", () => {
 
     expect(result).toMatchInlineSnapshot(
       `
-      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-      export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  
-      <><___VERTER___COMPONENT_CTX.Comp ></___VERTER___COMPONENT_CTX.Comp>})}}
+      "export function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  
+      <><___VERTER___ctx.Comp ></___VERTER___ctx.Comp>})}}
       </>}"
     `
     );
@@ -75,9 +76,8 @@ describe("process template plugins element", () => {
 
     expect(result).toMatchInlineSnapshot(
       `
-      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;
-      <><___VERTER___COMPONENT_CTX.Comp  ></___VERTER___COMPONENT_CTX.Comp>})}}}}}
+      "export function template(){{()=>{if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;
+      <><___VERTER___ctx.Comp  ></___VERTER___ctx.Comp>})}}}}}
       </>}"
     `
     );
@@ -88,8 +88,7 @@ describe("process template plugins element", () => {
 
     expect(result).toMatchInlineSnapshot(
       `
-      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;___VERTER___COMPONENT_CTX.Component.Comp;
+      "export function template(){{()=>{const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;___VERTER___ctx.Component.Comp;
       <><Componentl__verter__lComp></Componentl__verter__lComp>}}
       </>}"
     `
@@ -101,8 +100,7 @@ describe("process template plugins element", () => {
 
     expect(result).toMatchInlineSnapshot(
       `
-      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;___VERTER___COMPONENT_CTX.Component.Comp;
+      "export function template(){{()=>{if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;___VERTER___ctx.Component.Comp;
       <><Componentl__verter__lComp ></Componentl__verter__lComp>}}}
       </>}"
     `
@@ -116,8 +114,7 @@ describe("process template plugins element", () => {
 
     expect(result).toMatchInlineSnapshot(
       `
-      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;___VERTER___COMPONENT_CTX.Component.Comp;
+      "export function template(){{()=>{{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;___VERTER___ctx.Component.Comp;
       <><Componentl__verter__lComp ></Componentl__verter__lComp>})}}}}
       </>}"
     `
@@ -131,8 +128,7 @@ describe("process template plugins element", () => {
 
     expect(result).toMatchInlineSnapshot(
       `
-      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;___VERTER___COMPONENT_CTX.Component.Comp;
+      "export function template(){{()=>{if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;___VERTER___ctx.Component.Comp;
       <><Componentl__verter__lComp  ></Componentl__verter__lComp>})}}}}}
       </>}"
     `
@@ -144,8 +140,7 @@ describe("process template plugins element", () => {
 
     expect(result).toMatchInlineSnapshot(
       `
-      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;
+      "export function template(){{()=>{const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;
       <><Componentl__verter__lComp/>}}
       </>}"
     `
@@ -157,8 +152,7 @@ describe("process template plugins element", () => {
 
     expect(result).toMatchInlineSnapshot(
       `
-      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;
+      "export function template(){{()=>{if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;
       <><Componentl__verter__lComp />}}}
       </>}"
     `
@@ -170,8 +164,7 @@ describe("process template plugins element", () => {
 
     expect(result).toMatchInlineSnapshot(
       `
-      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;
+      "export function template(){{()=>{{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;
       <><Componentl__verter__lComp />})}}}}
       </>}"
     `
@@ -185,8 +178,7 @@ describe("process template plugins element", () => {
 
     expect(result).toMatchInlineSnapshot(
       `
-      "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-      export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;const Componentl__verter__lComp=___VERTER___COMPONENT_CTX.Component.Comp;
+      "export function template(){{()=>{if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;
       <><Componentl__verter__lComp  />})}}}}}
       </>}"
     `
@@ -205,11 +197,11 @@ describe("process template plugins element", () => {
       expect(result).toContain('<div  tabindex={"1"}></div>');
     });
 
-    test.only(":is", () => {
+    test(":is", () => {
       const { result } = parse(`<component :is="'div'"></component>`);
 
       expect(result).toContain(
-        "{ ()=> { const ___VERTER___component = <___VERTER___component></___VERTER___component> }"
+        "<___VERTER___component_render ></___VERTER___component_render>"
       );
     });
   });
@@ -220,8 +212,7 @@ describe("process template plugins element", () => {
 
       expect(result).toMatchInlineSnapshot(
         `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};const ITEMRENDER=___VERTER___COMPONENT_CTX["item-render"];___VERTER___COMPONENT_CTX.item-render;
+        "export function template(){{()=>{const ITEMRENDER=___VERTER___ctx["item-render"];___VERTER___ctx.item-render;
         <><ITEMRENDER></ITEMRENDER>}}
         </>}"
       `

@@ -9,7 +9,7 @@ export const DefaultPlugins = [
   Plugins.BindingPlugin,
   Plugins.CommentPlugin,
   // Plugins.TextPlugin,
-  Plugins.SlotPlugin,
+  // Plugins.SlotPlugin,
   Plugins.BlockPlugin,
   Plugins.ConditionalPlugin,
   Plugins.EventPlugin,
@@ -18,7 +18,6 @@ export const DefaultPlugins = [
   Plugins.ElementPlugin,
   Plugins.TemplateTagPlugin,
   Plugins.SFCCleanerPlugin,
-  Plugins.ConditionalPlugin,
 ];
 
 export const ScriptDefaultPlugins = [];
