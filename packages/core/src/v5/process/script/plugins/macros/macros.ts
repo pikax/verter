@@ -63,7 +63,7 @@ export const MacrosPlugin = definePlugin({
         );
         s.append(str);
       } else {
-        const str = generateTypeDeclaration(name, "{}", undefined, isTS);
+        const str = generateTypeDeclaration(name, "{}", ctx.generic?.source, isTS);
         s.append(str);
       }
     }

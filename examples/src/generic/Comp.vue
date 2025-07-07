@@ -1,6 +1,6 @@
-<script setup lang="ts" generic="T">
+<script setup lang="ts" generic="T extends string">
 defineProps<{
-  name: string;
+  name: T;
 }>();
 
 // const slots = defineSlots<{
@@ -13,6 +13,6 @@ defineSlots<
 </script>
 <template>
   <div>
-    <slot name="header"></slot>
+    <slot name="header"> {{ name }}</slot>
   </div>
 </template>

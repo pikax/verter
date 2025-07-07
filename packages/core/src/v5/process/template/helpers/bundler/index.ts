@@ -26,5 +26,5 @@ export const BundlerHelper = handleHelpers(
   
   export type $V_ProcessProps<T> = T extends $V_DefineProps<infer U, infer BKeys>
     ? $V_PartialUndefined<U>
-    : T;`
+    : $V_PartialUndefined<T>;`
 );

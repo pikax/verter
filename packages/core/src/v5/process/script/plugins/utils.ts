@@ -27,7 +27,7 @@ export function generateTypeString(
 
   const content = `${info.isFunction ? "ReturnType<" : ""}${
     info.isType ? "" : "typeof "
-  }${info.from}${generic ? `<${generic.source}>` : ""}${
+  }${info.from}${generic ? `<${generic.names.join(',')}>` : ""}${
     info.isFunction ? ">" : ""
   }${
     (isAsync && info.isFunction) || info.key

@@ -17,7 +17,7 @@ cs.$props.bar;
   <Comp bar="foo" />
   <Comp :bar="1" />
 
-  <CompSetup />
+  <CompSetup  />
   <CompSetup bar="foo" />
   <CompSetup :bar="1" />
 
