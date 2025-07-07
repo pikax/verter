@@ -69,6 +69,10 @@ export const TemplateBindingPlugin = definePlugin({
     }
 
     const ModelAccessor = ctx.prefix("models");
+
+    const unref = ctx.prefix("unref");
+    const unwrapRef = ctx.prefix("UnwrapRef");
+
     const macroBindings = ctx.items
       .filter((x) => x.type === ProcessItemType.MacroBinding)
       .reduce((acc, x) => {
@@ -105,7 +109,9 @@ export const TemplateBindingPlugin = definePlugin({
         .map(
           (x) =>
             `${x.name}/*${x.start},${x.end}*/: ${
-              isTS ? `${x.name} as typeof ${x.name}` : x.name
+              isTS
+                ? `${x.name} as unknown as ${unwrapRef}<typeof ${x.name}>`
+                : `${unref}(${x.name})`
             }`
         )
         .concat(
@@ -119,14 +125,14 @@ export const TemplateBindingPlugin = definePlugin({
         .concat([
           // defineModel regular props
           `${ctx.prefix("defineModel")}:{${defineModels
-              .map(
-                (x) =>
-                  // TODO this should be either pointing to the variable or to the function itself
-                  `${x.name}/*${x.node.start},${x.node.end}*/: ${
-                    isTS ? `${x.varName} as typeof ${x.varName}` : x.varName
-                  }`
-              )
-              .join(",")}}`,
+            .map(
+              (x) =>
+                // TODO this should be either pointing to the variable or to the function itself
+                `${x.name}/*${x.node.start},${x.node.end}*/: ${
+                  isTS ? `${x.varName} as typeof ${x.varName}` : x.varName
+                }`
+            )
+            .join(",")}}`,
         ])
         .join(",")}}`
     );
@@ -135,7 +141,7 @@ export const TemplateBindingPlugin = definePlugin({
       s.prependLeft(
         tag.pos.open.start,
         `/** @returns {{${usedBindings
-          .map((x) => `${x.name}:typeof ${x.name}`)
+          .map((x) => `${x.name}:${unwrapRef}<typeof ${x.name}>`)
           .join(",")}}} */`
       );
     }

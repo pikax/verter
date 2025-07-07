@@ -7,10 +7,24 @@ import { generateTypeString } from "../utils";
 export const FullContextPlugin = definePlugin({
   name: "VerterFullContext",
   enforce: "post",
+  pre(s, ctx) {
+    const importItem = ctx.isTS
+      ? { name: "UnwrapRef", alias: ctx.prefix("UnwrapRef") }
+      : { name: "unref", alias: ctx.prefix("unref") };
+    ctx.items.push({
+      type: ProcessItemType.Import,
+      from: "vue",
+      asType: ctx.isTS,
+      items: [importItem],
+    });
+  },
   post(s, ctx) {
     const isTS = ctx.block.lang === "ts";
     const isAsync = ctx.isAsync;
     const fullContext = ctx.prefix("FullContext");
+
+    const unref = ctx.prefix("unref");
+    const unwrapRef = ctx.prefix("UnwrapRef");
 
     const bindings = ctx.items.filter(
       (x) => x.type === ProcessItemType.Binding && x.item.node
@@ -47,7 +61,12 @@ export const FullContextPlugin = definePlugin({
     const str = `;${isAsync ? "async " : ""}function ${fullContext}FN${
       ctx.generic ? `<${ctx.generic.source}>` : ""
     }() {${[...content].join("\n")};return{${[...names]
-      .map((x) => `${x}${isTS ? `:${x} as typeof ${x}` : ""}`)
+      .map(
+        (x) =>
+          `${x}${
+            isTS ? `: {} as ${unwrapRef}<typeof ${x}>` : `: ${unref}(${x})"`
+          }`
+      )
       .join(",")}}};${typeStr}`;
 
     s.prependRight(ctx.block.block.tag.pos.close.end, str);
