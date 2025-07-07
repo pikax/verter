@@ -28,7 +28,7 @@ export const ElementPlugin = declareTemplatePlugin({
     const shouldWrap = item.tag.includes("-");
 
     const isProp = node.props.find(
-      (x) => x.name === "is" || x.rawName === ":is"
+      (x) => x.name === "is" || (x.type === NodeTypes.DIRECTIVE && x.rawName === ":is")
     );
     // dynamic component
     if (node.tag === "component" && isProp) {
