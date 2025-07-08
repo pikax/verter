@@ -77,11 +77,15 @@ export function buildBundle(
           //   `? P extends P & 1 ? {} : P & {} : never) => void | any | any[])=>void | any;`,
           // ].join("");
 
-          const vSlotProp = `'v-slot'?: (i: InstanceType<typeof ${compName}${sanitisedNames}>)  => any`;
+          const vSlotProp = `'${ctx.prefix(
+            "v-slot"
+          )}'?: (i: InstanceType<typeof ${compName}${sanitisedNames}>)  => any`;
 
           const props = [
             `$props: (${ProcessPropsName}<${resolvePropsName}${sanitisedNames}`,
             `${ctx.isAsync ? " extends Promise<infer P> ? P : {}" : ""}>)`,
+            // ` & { supa?: (i: InstanceType<typeof ${compName}${sanitisedNames}>)  => any}`,
+            // ` & { ___verter___slot?: (i: InstanceType<typeof ${compName}${sanitisedNames}>)  => any}`,
             ` & {${vSlotProp}};`,
           ];
 

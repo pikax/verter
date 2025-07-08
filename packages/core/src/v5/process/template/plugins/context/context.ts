@@ -107,9 +107,9 @@ export declare function ${ctx.prefix("StrictRenderSlot")}<
   Single extends boolean = ReturnType<T> extends Array<any> ? false : true
 >(slot: T, children: Single extends true ? [ReturnType<T>] : ReturnType<T>): any;`);
     // patch TSX
-    s.prepend(`
+    if (false)
+      s.prepend(`
   import { VNode as $V_VNode, ComponentInternalInstance as $V_ComponentInternalInstance } from 'vue';
-  import 'vue/jsx';
   declare module "vue" {
     interface HTMLAttributes {
       // "v-slot"?: (instance: HTMLElement) => any;

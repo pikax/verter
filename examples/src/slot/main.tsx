@@ -1,4 +1,4 @@
-import 'vue/jsx'
+import "vue/jsx";
 import type { SlotsType } from "vue";
 import {
   type VNode as $V_VNode,
@@ -6,9 +6,6 @@ import {
   defineComponent,
 } from "vue";
 declare module "vue" {
-  interface HTMLAttributes {
-    // "v-slot"?: (instance: HTMLElement) => any;
-  }
   interface HTMLAttributes {
     "v-slot"?: (instance: HTMLElement) => any;
   }
@@ -19,19 +16,20 @@ declare module "vue" {
   interface SelectHTMLAttributes {
     onInput?: (e: Event & { target: HTMLSelectElement }) => void;
   }
-
 }
 
 // patching elements
-declare global {
-  namespace JSX {
-    export interface IntrinsicClassAttributes<T> {
-      // $children: T extends { $slots: infer S } ? { default?: never } & { [K in keyof S]: S[K] extends (...args: infer Args) => any ? (...args: Args) => JSX.Element : () => JSX.Element } : { default?: never }
-      // $children?: T extends { $slots: infer S } ? S : undefined
-      'v-slot'?: (T extends { $slots: infer S } ? S : undefined) | ((c: T) => T extends { $slots: infer S } ? S : undefined)
-    }
-  }
-}
+// declare global {
+//   // namespace JSX {
+//   //   export interface IntrinsicClassAttributes<T> {
+//   //     // $children: T extends { $slots: infer S } ? { default?: never } & { [K in keyof S]: S[K] extends (...args: infer Args) => any ? (...args: Args) => JSX.Element : () => JSX.Element } : { default?: never }
+//   //     // $children?: T extends { $slots: infer S } ? S : undefined
+//   //     "v-slot"?:
+//   //       | (T extends { $slots: infer S } ? S : undefined)
+//   //       | ((c: T) => T extends { $slots: infer S } ? S : undefined);
+//   //   }
+//   // }
+// }
 // declare global {
 //   namespace JSX {
 //     // export interface IntrinsicClassAttributes<T> {
@@ -49,7 +47,6 @@ declare global {
 //     //     old: $V_ToVNode<T>
 //     //   ) => void;
 //     // }
-    
 
 //     interface LiHTMLAttributes {
 //       [$V_instancePropertySymbol]?(i: HTMLLIElement): any;
@@ -83,7 +80,6 @@ type $V_ToVNode<T> = $V_VNode & {
 };
 declare const $V_instancePropertySymbol: unique symbol;
 
-
 const Comp = defineComponent({
   props: {
     bar: String,
@@ -91,7 +87,7 @@ const Comp = defineComponent({
   slots: {} as SlotsType<{ header: (a: { foo: string }) => void }>,
 });
 
-declare const Foo: {new(): {$props: {bar: string}}};
+declare const Foo: { new (): { $props: { bar: string } } };
 
 <Comp
   v-slot={(x) => {
@@ -99,7 +95,6 @@ declare const Foo: {new(): {$props: {bar: string}}};
   }}
 />;
 
-<Foo bar='' v-slot={(x)=> {
-}}/>;
+<Foo bar="" v-slot={(x) => {}} />;
 
-<select v-slot={}/>;
+<select v-slot={} />;
