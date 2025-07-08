@@ -28,7 +28,9 @@ export const ElementPlugin = declareTemplatePlugin({
     const shouldWrap = item.tag.includes("-");
 
     const isProp = node.props.find(
-      (x) => x.name === "is" || (x.type === NodeTypes.DIRECTIVE && x.rawName === ":is")
+      (x) =>
+        x.name === "is" ||
+        (x.type === NodeTypes.DIRECTIVE && x.rawName === ":is")
     );
     // dynamic component
     if (node.tag === "component" && isProp) {
@@ -60,8 +62,8 @@ export const ElementPlugin = declareTemplatePlugin({
       const name = ctx.prefix("component_render");
 
       s.move(
-        isProp.exp!.loc.start.offset + 1,
-        isProp.exp!.loc.end.offset - 1,
+        isProp.exp!.loc.start.offset,
+        isProp.exp!.loc.end.offset,
         node.loc.start.offset + 1
       );
 
@@ -79,8 +81,8 @@ export const ElementPlugin = declareTemplatePlugin({
       // s.appendLeft(node.loc.end.offset, "}}");
       s.update(tagNameStart, tagNameEnd, name);
 
-      s.remove(isProp.loc.start.offset, isProp.exp!.loc.start.offset + 1);
-      s.remove(isProp.exp!.loc.end.offset - 1, isProp.loc.end.offset);
+      s.remove(isProp.loc.start.offset, isProp.exp!.loc.start.offset);
+      s.remove(isProp.exp!.loc.end.offset, isProp.loc.end.offset);
 
       if (closingTagStartIndex !== -1) {
         s.update(

@@ -204,6 +204,14 @@ describe("process template plugins element", () => {
         "<___VERTER___component_render ></___VERTER___component_render>"
       );
     });
+
+    test(`:is="as || 'div'"`, () => {
+      const { result } = parse(`<component :is="as || 'div'"></component>`);
+
+      expect(result).toContain(
+        "const ___VERTER___component_render=___VERTER___ctx.as || 'div';\n<___VERTER___component_render ></___VERTER___component_render>"
+      );
+    });
   });
 
   describe("name casing", () => {
