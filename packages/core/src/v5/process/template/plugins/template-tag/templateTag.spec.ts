@@ -34,8 +34,7 @@ describe("process template plugins comment", () => {
 
     expect(result).toMatchInlineSnapshot(`
       "export function template(){
-      <><div></div>
-      </>}"
+      <><div></div></>}"
     `);
   });
 
@@ -43,8 +42,7 @@ describe("process template plugins comment", () => {
     const { result } = parse(``);
     expect(result).toMatchInlineSnapshot(`
       "export function template(){
-      <>
-      </>}"
+      <></>}"
     `);
   });
 });

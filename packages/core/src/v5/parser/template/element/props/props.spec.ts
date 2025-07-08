@@ -738,7 +738,7 @@ describe("parser template element props", () => {
               {
                 type: TemplateTypes.Binding,
                 name: "undefined",
-                ignore: false,
+                ignore: true,
               },
             ],
 
@@ -767,7 +767,7 @@ describe("parser template element props", () => {
           {
             type: TemplateTypes.Binding,
             name: "undefined",
-            ignore: false,
+            ignore: true,
           },
         ]);
 

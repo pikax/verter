@@ -59,12 +59,7 @@ export const BlockPlugin = declareTemplatePlugin({
           s
         );
       }
-
-      if (conditions?.blockDirection === "Right") {
-        s[`appendLeft`](parent.loc.end.offset, "}}");
-      } else {
-        s[`${behaviour}Right`](last.loc.end.offset, "}}");
-      }
+      s[`${behaviour}Right`](last.loc.end.offset, "}}");
       // s.prependRight(last.loc.end.offset, "}}");
     }
   },

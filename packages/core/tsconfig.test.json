@@ -1,0 +1,25 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": ["./src", "**/*.spec.ts"],
+  "exclude": [
+    "dist",
+    "node_modules",
+    "src/generator/_tests_",
+    "src/**/*/_gen.ts",
+    "generated",
+    "./src/**/*.ignore.tsx",
+    "./src/**/*.ignore.ts",
+    "./src/**/__bench__/**/*",
+    // "./src/**/*.spec.ts",
+    "./src/bench/**/*"
+  ],
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "target": "ESNext",
+    "module": "esnext",
+    "types": ["vitest/importMeta", "vitest/globals", "vite/client"],
+    "jsx": "preserve",
+    "preserveConstEnums": true
+  }
+}

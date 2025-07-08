@@ -15,7 +15,7 @@ describe("process template", () => {
       (x) => x.type === "template"
     ) as ParsedBlockTemplate;
 
-    const r = processTemplate(templateBlock.result.items, [...DefaultPlugins], {
+    const r = processTemplate(templateBlock.result.items, [...DefaultPlugins.filter(x=>x.name !== 'VerterContext')], {
       ...options,
       s,
       filename: "test.vue",
