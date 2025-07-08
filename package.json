@@ -8,12 +8,14 @@
     "build": "pnpm --filter @verter/language-shared --filter @verter/language-server --filter @verter/core --filter verter-vscode --filter @verter/typescript-plugin  build",
     "watch": "pnpm --filter @verter/core --filter @verter/language-shared --filter @verter/language-server --filter verter-vscode --filter @verter/typescript-plugin watch",
     "dev-extension": "pnpm --filter @verter/language-server --filter verter-vscode watch",
-    "update-all": "pnpm up -r -i -L"
+    "update-all": "pnpm up -r -i -L",
+    "package": "node scripts/pack-vsix.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "glob": "^11.0.3",
     "vitest": "^3.2.4"
   },
   "pnpm": {

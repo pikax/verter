@@ -1,6 +1,7 @@
-.vscode
-!node_modules/
-out/
 src/
+test/
 tsconfig.json
-vite.config.ts
+pnpm-lock.yaml
+.github/
+*.ts
+*.map

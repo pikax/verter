@@ -40,16 +40,12 @@
     "typescript": "^5.8.3",
     "vite": "^7.0.2"
   },
-  "files": [
-    "dist",
-    "node_modules"
-  ],
   "vsce": {
-    "dependencies": false,
+    "dependencies": true,
     "yarn": false
   },
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.90.0"
   },
   "categories": [
     "Programming Languages"
@@ -62,6 +58,7 @@
     "onLanguage:typescriptreact",
     "onLanguage:javascriptreact"
   ],
+  "publisher": "pikax",
   "contributes": {
     "configuration": {
       "type": "object",
