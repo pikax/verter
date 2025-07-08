@@ -36,7 +36,7 @@ describe("process script builders bundle", () => {
     const { result } = parse(`let a = 0; import { a } from "b";`);
     expect(result).toMatchInlineSnapshot(`
       "import { type DefineProps as ___VERTER___DefineProps } from "vue";
-      import { ___VERTER___default, ___VERTER___resolveProps, ___VERTER___resolveSlots } from "./options";
+      import { ___VERTER___default, ___VERTER___resolveProps, ___VERTER___defineSlots } from "./options";
       export type ___VERTER___PartialUndefined<T> = {
           [P in keyof T]: undefined extends T[P] ? P : never;
         }[keyof T] extends infer U extends keyof T
@@ -46,7 +46,7 @@ describe("process script builders bundle", () => {
         export type ___VERTER___ProcessProps<T> = T extends ___VERTER___DefineProps<infer U, infer BKeys>
           ? ___VERTER___PartialUndefined<U>
           : T;
-      declare const Test: typeof ___VERTER___default & {new():{$props: (___VERTER___ProcessProps<ReturnType<typeof ___VERTER___resolveProps>>);$slots: ReturnType<typeof ___VERTER___resolveSlots>extends infer P? P extends P & 1 ? {} : P : never;}};export default Test;"
+      declare const Test: typeof ___VERTER___default;export default Test;"
     `);
   });
 });

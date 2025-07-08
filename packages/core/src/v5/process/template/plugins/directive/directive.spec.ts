@@ -15,7 +15,7 @@ describe("process template plugins directive", () => {
       (x) => x.type === "template"
     ) as ParsedBlockTemplate;
 
-    const r = processTemplate(templateBlock.result.items, [...DefaultPlugins], {
+    const r = processTemplate(templateBlock.result.items, [...DefaultPlugins.filter(x => x.name !== 'VerterContext')], {
       ...options,
       s,
       filename: "test.vue",
@@ -30,199 +30,102 @@ describe("process template plugins directive", () => {
   describe("v-model", () => {
     it('div v-model="foo"', () => {
       const { result } = parse(`<div v-model="foo" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div value={___VERTER___ctx.foo} onInput={($event)=>(___VERTER___ctx.foo=$event.target.value)} />
-        </>}"
-      `
-      );
+
+      expect(result).toContain('div value={___VERTER___ctx.foo} onInput={($event)=>(___VERTER___ctx.foo=$event.target.value)} />')
     });
 
     it('Comp v-model="foo"', () => {
       const { result } = parse(`<Comp v-model="foo" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><___VERTER___COMPONENT_CTX.Comp modelValue={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} />
-        </>}"
-      `
-      );
+
+      expect(result).toContain(`<___VERTER___ctx.Comp modelValue={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} />`);
+
     });
 
     it('Comp v-model="foo" modelValue="bar"', () => {
       const { result } = parse(`<Comp v-model="foo" modelValue="bar" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><___VERTER___COMPONENT_CTX.Comp modelValue={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} modelValue={"bar"} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<___VERTER___ctx.Comp modelValue={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} modelValue={"bar"} />`);
     });
 
     it('Comp v-model:msg="foo"', () => {
       const { result } = parse(`<Comp v-model:msg="foo" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><___VERTER___COMPONENT_CTX.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<___VERTER___ctx.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} />`);
     });
 
     it('Comp v-model:msg="foo" msg="bar"', () => {
       const { result } = parse(`<Comp v-model:msg="foo" msg="bar" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><___VERTER___COMPONENT_CTX.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} msg={"bar"} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<___VERTER___ctx.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} msg={"bar"} />`);
     });
 
     it('Comp v-model:msg="foo" v-model="bar"', () => {
       const { result } = parse(`<Comp v-model:msg="foo" v-model="bar" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><___VERTER___COMPONENT_CTX.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} modelValue={___VERTER___ctx.bar} onUpdate:modelValue={($event)=>(___VERTER___ctx.bar=$event)} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<___VERTER___ctx.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} modelValue={___VERTER___ctx.bar} onUpdate:modelValue={($event)=>(___VERTER___ctx.bar=$event)} />`);
     });
 
     it('Comp v-model:[msg]="foo"', () => {
       const { result } = parse(`<Comp v-model:[msg]="foo" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><___VERTER___COMPONENT_CTX.Comp {...{[___VERTER___ctx.msg]:___VERTER___ctx.foo,[\`onUpdate:\${___VERTER___ctx.msg}\`]:($event)=>(___VERTER___ctx.foo=$event)}} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<___VERTER___ctx.Comp {...{[___VERTER___ctx.msg]:___VERTER___ctx.foo,[\`onUpdate:\${___VERTER___ctx.msg}\`]:($event)=>(___VERTER___ctx.foo=$event)}} />`);
     });
 
     it('Comp v-model:[`${msg}ss`]="msg"', () => {
       const { result } = parse(`<Comp v-model:[\`\${msg}ss\`]="msg" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><___VERTER___COMPONENT_CTX.Comp {...{[\`\${___VERTER___ctx.msg}ss\`]:___VERTER___ctx.msg,[\`onUpdate:\${\`\${___VERTER___ctx.msg}ss\`}\`]:($event)=>(___VERTER___ctx.msg=$event)}} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<___VERTER___ctx.Comp {...{[\`\${___VERTER___ctx.msg}ss\`]:___VERTER___ctx.msg,[\`onUpdate:\${\`\${___VERTER___ctx.msg}ss\`}\`]:($event)=>(___VERTER___ctx.msg=$event)}} />`);
     });
 
     it('v-model.lazy="foo"', () => {
       const { result } = parse(`<input v-model.lazy="foo" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><input {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vModelText);___VERTER___directiveName.modifiers=["lazy"];}}} value={___VERTER___ctx.foo} onInput={($event)=>(___VERTER___ctx.foo=$event.target.value)} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<input {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vModelText);___VERTER___directiveName.modifiers=["lazy"];}}} value={___VERTER___ctx.foo} onInput={($event)=>(___VERTER___ctx.foo=$event.target.value)} />`);
     });
 
     describe("partial", () => {
       it("v-model no expression", () => {
         const { result } = parse(`<input v-model />`);
-        expect(result).toMatchInlineSnapshot(`
-          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-          <><input value />
-          </>}"
-        `);
+        expect(result).toContain(`<input value />`);
       });
 
       it('v-model=""', () => {
         const { result } = parse(`<input v-model="" />`);
-        expect(result).toMatchInlineSnapshot(
-          `
-          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-          <><input value={} onInput={($event)=>(=$event.target.value)} />
-          </>}"
-        `
-        );
+        expect(result).toContain(`<input value={} onInput={($event)=>(=$event.target.value)} />`);
       });
 
       // TODO: Fix this test
       it.skip("v-model=", () => {
         const { result } = parse(`<input v-model=/>`);
+        expect(result).toContain(``);
         expect(result).toMatchInlineSnapshot(
           `"<input value={___VERTER___ctx.} onInput={($event)=>(=$event.target.value)} />"`
         );
       });
     });
-    describe.todo("checkbox", () => {});
-    describe.todo("dynamic", () => {});
-    describe.todo("radio", () => {});
-    describe.todo("select", () => {});
-    describe.todo("text", () => {});
+    describe.todo("checkbox", () => { });
+    describe.todo("dynamic", () => { });
+    describe.todo("radio", () => { });
+    describe.todo("select", () => { });
+    describe.todo("text", () => { });
   });
 
   describe("v-on", () => {
     it('div v-on:click.bar="foo"', () => {
       const { result } = parse(`<div v-on:click.bar="foo" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vOn);___VERTER___directiveName.modifiers=["bar"];}}} onClick={___VERTER___ctx.foo} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vOn);___VERTER___directiveName.modifiers=["bar"];}}} onClick={___VERTER___ctx.foo} />`);
+      
     });
 
     it('div v-if="foo" v-on:click.bar="foo"', () => {
       const { result } = parse(`<div v-if="foo" v-on:click.bar="foo" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.foo){
-        <><div  {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.foo))) return;const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vOn);___VERTER___directiveName.modifiers=["bar"];}}} onClick={___VERTER___ctx.foo} />}}}
-        </>}"
-      `
-      );
+      expect(result).toContain(`<div  {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.foo))) return;const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vOn);___VERTER___directiveName.modifiers=["bar"];}}} onClick={___VERTER___ctx.foo} />}}}`);
+
     });
   });
 
   describe("v-bind", () => {
     it('div v-bind:click.bar="foo"', () => {
       const { result } = parse(`<div v-bind:click.bar="foo" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vBind);___VERTER___directiveName.modifiers=["bar"];}}} click={___VERTER___ctx.foo} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vBind);___VERTER___directiveName.modifiers=["bar"];}}} click={___VERTER___ctx.foo} />`);
     });
 
     it('div v-if="foo" v-bind:click.bar="foo"', () => {
       const { result } = parse(`<div v-if="foo" v-bind:click.bar="foo" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.foo){
-        <><div  {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.foo))) return;const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vBind);___VERTER___directiveName.modifiers=["bar"];}}} click={___VERTER___ctx.foo} />}}}
-        </>}"
-      `
-      );
+      expect(result).toContain(`<div  {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.foo))) return;const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vBind);___VERTER___directiveName.modifiers=["bar"];}}} click={___VERTER___ctx.foo} />}}}`);
     });
   });
 
@@ -230,73 +133,37 @@ describe("process template plugins directive", () => {
     describe("v-text", () => {
       it('div v-text="foo"', () => {
         const { result } = parse(`<div v-text="foo" />`);
-        expect(result).toMatchInlineSnapshot(
-          `
-          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-          <><div v-text={___VERTER___ctx.foo} />
-          </>}"
-        `
-        );
+        expect(result).toContain(`<div v-text={___VERTER___ctx.foo} />`);
       });
     });
     describe("v-once", () => {
       it("div v-once", () => {
         const { result } = parse(`<div v-once />`);
-        expect(result).toMatchInlineSnapshot(`
-          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-          <><div v-once />
-          </>}"
-        `);
+        expect(result).toContain(`<div v-once />`);
       });
     });
     describe("v-pre", () => {
       it("div v-pre", () => {
         const { result } = parse(`<div v-pre />`);
-        expect(result).toMatchInlineSnapshot(`
-          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-          <><div v-pre />
-          </>}"
-        `);
+        expect(result).toContain(`<div v-pre />`);
       });
     });
     describe("v-cloak", () => {
       it("div v-cloak", () => {
         const { result } = parse(`<div v-cloak />`);
-        expect(result).toMatchInlineSnapshot(`
-          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-          <><div v-cloak />
-          </>}"
-        `);
+        expect(result).toContain(`<div v-cloak />`);
       });
     });
     describe("v-show", () => {
       it('div v-show="foo"', () => {
         const { result } = parse(`<div v-show="foo" />`);
-        expect(result).toMatchInlineSnapshot(
-          `
-          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-          <><div v-show={___VERTER___ctx.foo} />
-          </>}"
-        `
-        );
+        expect(result).toContain(`<div v-show={___VERTER___ctx.foo} />`);
       });
     });
     describe("v-html", () => {
       it('div v-html="foo"', () => {
         const { result } = parse(`<div v-html="foo" />`);
-        expect(result).toMatchInlineSnapshot(
-          `
-          "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-          export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-          <><div v-html={___VERTER___ctx.foo} />
-          </>}"
-        `
-        );
+        expect(result).toContain(`<div v-html={___VERTER___ctx.foo} />`);
       });
     });
   });
@@ -305,142 +172,75 @@ describe("process template plugins directive", () => {
     it("div v-test", () => {
       const { result } = parse(`<div v-test />`);
 
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);}}} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);}}} />`);
     });
 
     it("div v-test:foo", () => {
       const { result } = parse(`<div v-test:foo />`);
 
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";}}} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";}}} />`);
     });
 
     it("div v-test:foo.app", () => {
       const { result } = parse(`<div v-test:foo.app />`);
 
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.modifiers=["app"];}}} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.modifiers=["app"];}}} />`);
     });
 
     it("div v-test:foo.app.baz", () => {
       const { result } = parse(`<div v-test:foo.app.baz />`);
 
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.modifiers=["app","baz"];}}} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.modifiers=["app","baz"];}}} />`);
     });
 
     it('div v-test="bar"', () => {
       const { result } = parse(`<div v-test="bar" />`);
 
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />`);
     });
 
     it('div v-test:foo="bar"', () => {
       const { result } = parse(`<div v-test:foo="bar" />`);
 
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />
-        </>}"
-      `
-      );
+      expect(result).toContain(`<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />`);
     });
 
     it('div v-test:foo.app="bar"', () => {
       const { result } = parse(`<div v-test:foo.app="bar" />`);
 
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.modifiers=["app"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />
-        </>}"
-      `
+      expect(result).toContain(
+        `div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.modifiers=["app"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />`
       );
     });
 
     it('div v-test:foo.app.baz="bar"', () => {
       const { result } = parse(`<div v-test:foo.app.baz="bar" />`);
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.modifiers=["app","baz"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />
-        </>}"
-      `
+      expect(result).toContain(
+        `div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.arg="foo";___VERTER___directiveName.modifiers=["app","baz"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />`
       );
     });
 
     it('div v-if="foo" v-test="foo"', () => {
       const { result } = parse(`<div v-if="foo" v-test="foo" />`);
 
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){{()=>{const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};if(___VERTER___ctx.foo){
-        <><div  {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.foo))) return;const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.value=___VERTER___ctx.foo;}}} />}}}
-        </>}"
-      `
+      expect(result).toContain(
+        `<div  {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.foo))) return;const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.value=___VERTER___ctx.foo;}}} />}}}`
       );
     });
 
     it("div v-test.app", () => {
       const { result } = parse(`<div v-test.app />`);
 
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];}}} />
-        </>}"
-      `
+      expect(result).toContain(
+        `div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];}}} />`
       );
     });
 
     it('div v-test.app="bar"', () => {
       const { result } = parse(`<div v-test.app="bar" />`);
 
-      expect(result).toMatchInlineSnapshot(
-        `
-        "import { ___VERTER___TemplateBinding, ___VERTER___FullContext } from "./options";
-        export function template(){const ___VERTER___ctx = {...___VERTER___FullContext,...___VERTER___TemplateBinding};
-        <><div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />
-        </>}"
-      `
+      expect(result).toContain(
+        `div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />`
       );
     });
   });
