@@ -16,7 +16,7 @@ const baz = defineModel<{ jjj: boolean }>("baz", {
 
 const foo = 1;
 
-// const $props = {jjj: true}
+new ___VERTER___default().$props
 </script>
 <template>
   <span>{{ $data.foo }}</span>

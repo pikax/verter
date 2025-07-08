@@ -12,6 +12,7 @@ export const ScriptResolversPlugin = definePlugin({
   post(s, ctx) {
     const tag = ctx.block.block.tag;
     const isTS = ctx.isTS;
+    const genericNames = ctx.generic ? `<${ctx.generic.names.join(",")}>` : "";
 
     const hasModel = ctx.items.some(
       (x) => x.type === ProcessItemType.DefineModel
@@ -29,10 +30,10 @@ export const ScriptResolversPlugin = definePlugin({
     const resolvePropsName = ctx.prefix("resolveProps");
     const resolveEmitsName = ctx.prefix("resolveEmits");
 
-    const modelToProp = `{ readonly [K in keyof ${defineModelName}]: ${defineModelName}[K] extends { value: infer V } ? V : never }`;
-    const modelToEmits = `{[K in keyof ${defineModelName}]?: ${defineModelName}[K] extends { value: infer V } ? (event: \`update:\${K}\`,value: V) => void : never }[keyof ${defineModelName}]`;
+    const modelToProp = `{ readonly [K in keyof ${defineModelName}]: ${defineModelName}${genericNames}[K] extends { value: infer V } ? V : never }`;
+    const modelToEmits = `{[K in keyof ${defineModelName}]?: ${defineModelName}${genericNames}[K] extends { value: infer V } ? (event: \`update:\${K}\`,value: V) => void : never }[keyof ${defineModelName}]`;
 
-    const emitsToProps = `(${resolveEmitsName} extends (...args: infer Args extends any[]) => void ? {
+    const emitsToProps = `(${resolveEmitsName}${genericNames} extends (...args: infer Args extends any[]) => void ? {
         [K in Args[0] as \`on\${Capitalize<Args[0]>}\`]?: (...args: Args extends [e: infer E, ...args: infer P]
                 ? K extends E
                 ? P
@@ -40,16 +41,17 @@ export const ScriptResolversPlugin = definePlugin({
                 : never) => any
 } : {})`;
 
+
     const resolveProps = [
       hasModel
-        ? `Omit<${definePropsName}, keyof ${modelToProp}>`
-        : `${definePropsName}`,
+        ? `Omit<${definePropsName}${genericNames}, keyof ${modelToProp}>`
+        : `${definePropsName}${genericNames}`,
       hasEmit && emitsToProps,
       hasModel && modelToProp,
     ]
       .filter(Boolean)
       .join(" & ");
-    const resolveEmits = [`${defineEmitsName}`, hasModel && modelToEmits]
+    const resolveEmits = [`${defineEmitsName}${genericNames}`, hasModel && modelToEmits]
       .filter(Boolean)
       .join(" & ");
 

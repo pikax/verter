@@ -17,6 +17,7 @@ import {
   SFCCleanerPlugin,
   ScriptDefaultPlugin,
 ScriptResolversPlugin,
+ComponentInstancePlugin,
 } from "../../plugins/";
 
 import { relative } from "node:path/posix";
@@ -51,6 +52,7 @@ export function buildOptions(
       ScriptDefaultPlugin,
       SFCCleanerPlugin, 
       ScriptResolversPlugin,
+      ComponentInstancePlugin,
     ],
     {
       ...context,
