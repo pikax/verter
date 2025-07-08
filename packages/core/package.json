@@ -5,8 +5,8 @@
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
-  "type": "commonjs",
-  "typeX": "module",
+  "typeX": "commonjs",
+  "type": "module",
   "scripts": {
     "build": "tsc -b",
     "dev": "tsc -b --watch",

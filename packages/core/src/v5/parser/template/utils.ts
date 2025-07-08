@@ -30,6 +30,18 @@ import { VerterASTNode } from "../ast/types.js";
 import { parseAcornLoose } from "../ast/ast.js";
 import type AcornTypes from "acorn";
 
+const Keywords =
+  "break,case,catch,class,const,continue,debugger,default,delete,do,else,export,extends,false,finally,for,function,if,import,in,instanceof,new,null,return,super,switch,this,throw,true,try,typeof,var,void,while,with,await".split(
+    ","
+  );
+// only in strict
+const KeywordsInStrict = ["let", "static", "yield"];
+
+const Literals = "undefined,null,true,false".split(",");
+
+const BindingIgnoreArray = [...Keywords, ...KeywordsInStrict, ...Literals];
+const BidningIgnoreSet = new Set(BindingIgnoreArray);
+
 export function retrieveBindings(
   exp: ExpressionNode,
   context: {
@@ -172,7 +184,8 @@ export function getASTBindings(
             parent,
             directive: null,
 
-            ignore: ignoredIdentifiers.includes(name),
+            ignore:
+              ignoredIdentifiers.includes(name) || BidningIgnoreSet.has(name),
             exp: exp as SimpleExpressionNode | null,
           });
           break;

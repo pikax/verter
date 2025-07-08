@@ -1,5 +1,7 @@
+import { ElementNode } from "@vue/compiler-core";
 import { ParseTemplateContext } from "../../../../parser/template";
 import { declareTemplatePlugin, TemplateContext } from "../../template";
+import { BlockPlugin } from "../block";
 
 export const LoopPlugin = declareTemplatePlugin({
   name: "VerterLoop",
@@ -23,23 +25,24 @@ export const LoopPlugin = declareTemplatePlugin({
       renderList
     );
 
-    // wrap in a block
-    if (item.context.conditions.length > 0 && ctx.doNarrow) {
-      ctx.doNarrow(
-        {
-          index: item.node.loc.start.offset,
-          inBlock: true,
-          conditions: item.context.conditions,
-          type: "prepend",
-          direction: "right",
-          condition: null,
-        },
-        s
-      );
-    }
-    s.prependRight(item.node.loc.start.offset, "{()=>{");
+    // // wrap in a block
+    // if (item.context.conditions.length > 0 && ctx.doNarrow) {
+    //   ctx.doNarrow(
+    //     {
+    //       index: item.node.loc.start.offset,
+    //       inBlock: true,
+    //       conditions: item.context.conditions,
+    //       type: "prepend",
+    //       direction: "right",
+    //       condition: null,
+    //     },
+    //     s
+    //   );
+    // }
 
-    s.prependLeft(item.element.loc.end.offset, "}}");
+    // s.prependRight(item.node.loc.start.offset, "{()=>{");
+
+    // s.prependLeft(item.element.loc.end.offset, "}}");
 
     // replace '=' with '('
     s.overwrite(
@@ -126,6 +129,19 @@ export const LoopPlugin = declareTemplatePlugin({
         s
       );
     }
+
+    if (
+      (item.element as ElementNode).props.every(
+        (x) => !["if", "else", "else-if"].includes(x.name)
+      )
+    ) {
+      BlockPlugin.addItem(
+        item.element,
+        item.parent,
+        item.context as ParseTemplateContext
+      );
+    }
+
     s.prependLeft(item.element.loc.end.offset, "})");
   },
 });

@@ -35,9 +35,12 @@ export const TemplateTagPlugin = {
     }
 
     // replace closing tag
-    s.overwrite(pos.close.start, pos.close.end, "}");
+    s.overwrite(pos.close.start, pos.close.end, "</>}");
 
-    s.prependRight(ctx.block.block.block.loc.end.offset, "\n</>");
-    s.prependRight(ctx.block.block.block.loc.start.offset, "\n<>");
+    s.appendLeft(pos.open.end, `\n<>`);
+
+    // s.appendRight(pos.close.start, `\n</>`)
+    // s.prependRight(ctx.block.block.block.loc.end.offset, "\n</>");
+    // s.prependRight(ctx.block.block.block.loc.start.offset, "\n<>");
   },
 } as TemplatePlugin;

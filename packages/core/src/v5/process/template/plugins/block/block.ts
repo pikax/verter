@@ -1,8 +1,11 @@
 import { VerterASTNode } from "../../../../parser/ast";
 import { ParseTemplateContext } from "../../../../parser/template";
-import { TemplateElement } from "../../../../parser/template/types";
+import {
+  TemplateElement,
+  TemplateTypes,
+} from "../../../../parser/template/types";
 import { declareTemplatePlugin, TemplateContext } from "../../template";
-import { Node } from "@vue/compiler-core";
+import { Node, NodeTypes } from "@vue/compiler-core";
 
 export const BlockPlugin = declareTemplatePlugin({
   name: "VerterBlock",
@@ -31,10 +34,14 @@ export const BlockPlugin = declareTemplatePlugin({
     for (const [parent, block] of this.conditions) {
       const first = block.shift()!;
       const last = block.pop() ?? first;
-
-      s.prependLeft(first.loc.start.offset, "{()=>{");
-
       const conditions = this.contexts.get(first);
+
+      const behaviour = parent.type === NodeTypes.ROOT ? "append" : "prepend";
+
+      s[`${behaviour}${conditions?.blockDirection ?? "Left"}`](
+        first.loc.start.offset,
+        "{()=>{"
+      );
 
       // TODO this is not 100% correct, since the child might have a v-if
       if (ctx.doNarrow && conditions?.conditions.length) {
@@ -43,8 +50,9 @@ export const BlockPlugin = declareTemplatePlugin({
             index: first.loc.end.offset,
             inBlock: true,
             conditions: conditions.conditions,
-            type: "prepend",
-            direction: "left",
+            type: behaviour,
+            direction:
+              conditions?.blockDirection === "Right" ? "right" : "left",
             condition: null,
             parent,
           },
@@ -52,7 +60,12 @@ export const BlockPlugin = declareTemplatePlugin({
         );
       }
 
-      s.prependRight(last.loc.end.offset, "}}");
+      if (conditions?.blockDirection === "Right") {
+        s[`appendLeft`](parent.loc.end.offset, "}}");
+      } else {
+        s[`${behaviour}Right`](last.loc.end.offset, "}}");
+      }
+      // s.prependRight(last.loc.end.offset, "}}");
     }
   },
 
@@ -69,6 +82,11 @@ export const BlockPlugin = declareTemplatePlugin({
       item.parent,
       item.context as ParseTemplateContext
     );
+    // this.addItem(
+    //   item.node,
+    //   item.element,
+    //   item.context as ParseTemplateContext
+    // );
   },
 
   transformLoop(item) {

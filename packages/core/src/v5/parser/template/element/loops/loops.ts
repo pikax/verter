@@ -77,7 +77,10 @@ export function handleLoopProp<T extends LoopsContext>(
     node: forProp,
     element: node,
     parent,
-    context: parentContext,
+    context: {
+      ...parentContext,
+      // blockDirection: "Right",
+    },
   };
 
   items.push(loop);

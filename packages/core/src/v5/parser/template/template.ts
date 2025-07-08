@@ -34,6 +34,8 @@ export type ParseTemplateContext = {
   conditions: TemplateCondition[];
   inFor: boolean;
   ignoredIdentifiers: string[];
+
+  blockDirection?: "Left" | "Right";
 };
 
 export function parseTemplate(
