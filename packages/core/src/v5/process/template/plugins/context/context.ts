@@ -88,6 +88,7 @@ export const ContextPlugin = {
           `const ___DEBUG_Components = ({} as Required<typeof ___VERTER___default.components> & {});`,
           `const ___DEBUG_FullContext = ({} as ___VERTER___FullContext${generic});`,
           `const ___DEBUG_Binding = ({} as ___VERTER___TemplateBinding${generic});`,
+          `const ___DEBUG_Slots = ___VERTER___ctx['$slots'];`,
         ].join("\n")
       : "";
     s.prependLeft(
