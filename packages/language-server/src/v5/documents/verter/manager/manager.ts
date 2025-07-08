@@ -191,7 +191,7 @@ function createService(
     ...config.options,
 
     // it breaks the slots patch, if is 'vue'
-    jsxImportSource: undefined,
+    // jsxImportSource: undefined,
   };
 
   const dir = fsPath.dirname(tsconfigPath);

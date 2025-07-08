@@ -7,7 +7,6 @@ import { generateImport } from "../../../utils";
 import { processScript } from "../../script";
 import { ScriptContext } from "../../types";
 
-import { relative } from "node:path/posix";
 import { ResolveOptionsFilename } from "../main";
 
 export function ResolveBundleFilename(
@@ -61,14 +60,29 @@ export function buildBundle(
             )
           );
 
+          const genericDeclaration = ctx.generic
+            ? `<${ctx.generic.declaration}>`
+            : "";
+
           const sanitisedNames = ctx.generic
             ? `<${ctx.generic.sanitisedNames.join(",")}>`
             : "";
 
+          // const vSlotProp = `'v-slot': (cb: (i: InstanceType<typeof ${compName}${sanitisedNames}>) => any) => any`;
+          // const vSlotProp = [
+          //   `'v-slot': (cb: (instance: ${resolveSlotsName}${sanitisedNames}`,
+          //   ` extends ${ctx.isAsync ? "Promise<" : ""}infer P${
+          //     ctx.isAsync ? ">" : ""
+          //   }`,
+          //   `? P extends P & 1 ? {} : P & {} : never) => void | any | any[])=>void | any;`,
+          // ].join("");
+
+          const vSlotProp = `'v-slot'?: (i: InstanceType<typeof ${compName}${sanitisedNames}>)  => any`;
+
           const props = [
             `$props: (${ProcessPropsName}<${resolvePropsName}${sanitisedNames}`,
             `${ctx.isAsync ? " extends Promise<infer P> ? P : {}" : ""}>)`,
-            ' & {};'
+            ` & {${vSlotProp}};`,
           ];
 
           const slots = [
@@ -82,7 +96,7 @@ export function buildBundle(
           const declaration = [
             ...(ctx.isSetup
               ? [
-                  `declare const ${compName}: typeof ${defaultOptionsName} & {new():{`,
+                  `declare const ${compName}: typeof ${defaultOptionsName} & {new${genericDeclaration}():{`,
                   ...props,
                   ...slots,
                   `}};`,

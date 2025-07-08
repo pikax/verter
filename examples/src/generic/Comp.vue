@@ -15,6 +15,6 @@ defineSlots<
 </script>
 <template>
   <div>
-    <slot name="header"> {{ name }}</slot>
+    <slot name="header" foo=""> {{ name }}</slot>
   </div>
 </template>
