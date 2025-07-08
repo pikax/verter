@@ -391,35 +391,35 @@ ${x.getText()}
     };
   });
 
-  patchedConnection.onNotification(
-    NotificationType.OnFileChanged,
-    async (params) => {
-      params.type;
-      params.uri;
+  // patchedConnection.onNotification(
+  //   NotificationType.OnFileChanged,
+  //   async (params) => {
+  //     params.type;
+  //     params.uri;
 
-      // TODO check why this is called here very odd
-      if ("changes" in params) {
-        console.log("applyed partial change", params);
-        // documentManager.applyFileChanges(params.uri, params.changes as any);
-      } else {
-        console.log("file changed", params);
-        documentManager.handleFileChange(params.uri, params.type);
-      }
+  //     // TODO check why this is called here very odd
+  //     if ("changes" in params) {
+  //       console.log("applyed partial change", params);
+  //       // documentManager.applyFileChanges(params.uri, params.changes as any);
+  //     } else {
+  //       console.log("file changed", params);
+  //       documentManager.handleFileChange(params.uri, params.type);
+  //     }
 
-      // documentManager.handleFileChange(params.uri, params.type);
-    }
-  );
+  //     // documentManager.handleFileChange(params.uri, params.type);
+  //   }
+  // );
 
-  patchedConnection.onNotification(
-    NotificationType.OnDidChangeTsOrJsFile,
-    async (params) => {
-      params.changes;
-      params.uri;
+  // patchedConnection.onNotification(
+  //   NotificationType.OnDidChangeTsOrJsFile,
+  //   async (params) => {
+  //     params.changes;
+  //     params.uri;
 
-      documentManager.applyFileChanges(params.uri, params.changes);
-      console.log("file changedXX", params);
-    }
-  );
+  //     documentManager.applyFileChanges(params.uri, params.changes);
+  //     console.log("file changedXX", params);
+  //   }
+  // );
 
   documentManager.listen(connection);
   connection.listen();

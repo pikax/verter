@@ -19,6 +19,7 @@ export abstract class VueTypescriptDocument extends VueSubDocument {
   get snapshot() {
     if (this.parent.version !== this.version) {
       this._snapshot = null;
+      this.sync(true);
     }
 
     return (

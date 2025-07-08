@@ -18,7 +18,7 @@ export const ScriptResolversPlugin = definePlugin({
       (x) => x.type === ProcessItemType.DefineModel
     );
 
-    const hasEmit = ctx.items.some(
+    const hasEmit = true || ctx.items.some(
       (x) =>
         x.type === ProcessItemType.MacroBinding && x.macro === "defineEmits"
     );

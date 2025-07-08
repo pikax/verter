@@ -52,6 +52,7 @@ export const ContextPlugin = {
 
     const instanceStr = `const ${ComponentInstanceName} = new ${DefaultName}();`;
     const CTX = ctx.retrieveAccessor("ctx");
+    const generic = ctx.generic ? `<${ctx.generic.names.join(",")}>` : "";
 
     // todo add generic information
     const ctxItems = [
@@ -60,6 +61,7 @@ export const ContextPlugin = {
       TemplateBindingName,
     ]
       .filter(Boolean)
+      .map((x) => (ctx.isTS ? `${x}${generic}` : x))
       .map((x) => (ctx.isTS ? `...({} as ${x})` : `...${x}`));
     const ctxStr = `const ${CTX} = {${[
       `...${ComponentInstanceName}`,
@@ -70,7 +72,8 @@ export const ContextPlugin = {
       }`,
       // `...${macros.map(([name, prop]) => `${name}(${prop})`).join(",")}`,
       ...macros.map(
-        ([name, prop]) => `${prop}: ${ctx.isTS ? `{} as ${name} & {}` : name}`
+        ([name, prop]) =>
+          `${prop}: ${ctx.isTS ? `{} as ${name}${generic} & {}` : name}`
       ),
       ...ctxItems,
     ].join(",")}};`;
@@ -81,10 +84,10 @@ export const ContextPlugin = {
       ? [
           `const ___DEBUG_Verter = ${CTX};`,
           "const ___DEBUG_Default = ___VERTER___default;",
-          "const ___DEBUG_Props = ({} as ___VERTER___resolveProps);",
-          "const ___DEBUG_Components = ({} as Required<typeof ___VERTER___default.components> & {});",
-          "const ___DEBUG_FullContext = ({} as ___VERTER___FullContext);",
-          "const ___DEBUG_Binding = ({} as ___VERTER___TemplateBinding);",
+          `const ___DEBUG_Props = ({} as ___VERTER___resolveProps${generic});`,
+          `const ___DEBUG_Components = ({} as Required<typeof ___VERTER___default.components> & {});`,
+          `const ___DEBUG_FullContext = ({} as ___VERTER___FullContext${generic});`,
+          `const ___DEBUG_Binding = ({} as ___VERTER___TemplateBinding${generic});`,
         ].join("\n")
       : "";
     s.prependLeft(

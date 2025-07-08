@@ -8,7 +8,9 @@ defineProps<{
 // }>();
 
 defineSlots<
-  Record<T & string, () => any> & { header: (a: { foo: string }) => any }
+  Record<T & string, (args: { name: T }) => any> & {
+    header: (a: { foo: string }) => any;
+  }
 >();
 </script>
 <template>

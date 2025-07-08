@@ -1,10 +1,10 @@
 import { definePlugin } from "../../types";
 import { BundlerHelper } from "../../../template/helpers/bundler";
 import { generateImport } from "../../../utils";
-import { camelize, capitalize } from "vue";
 
 export const ComponentInstancePlugin = definePlugin({
   name: "VerterComponentInstance",
+  enforce: "post",
 
   pre(s, ctx) {
     const prefix = ctx.prefix("");

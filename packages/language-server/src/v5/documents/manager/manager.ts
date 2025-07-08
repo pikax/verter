@@ -172,9 +172,9 @@ export class DocumentManager implements Disposable {
     if (isVueSubDocument(filename)) {
       filename = toVueParentDocument(filename);
     }
-    if (isVerterVirtual(filename)) {
-      filename = uriToPath(filename);
-    }
+    // if (isVerterVirtual(filename)) {
+    filename = uriToPath(filename);
+    // }
     let d = this._files.get(filename);
     if (!d) {
       if (this.fileExists(filename)) {

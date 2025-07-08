@@ -99,7 +99,7 @@ export const SlotPlugin = declareTemplatePlugin({
     const slotInstance = ctx.retrieveAccessor("slotInstance");
     const isTemplateSlot = !!slot.parent;
 
-    const children = parent.children;
+    const children = [...parent.children];
 
     // const pos = isTemplateSlot
     //   ? parent.loc.start.offset + parent.tag.length + 1
@@ -395,8 +395,8 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
               prop.node.arg.type === NodeTypes.SIMPLE_EXPRESSION &&
               prop.node.arg.isStatic
             ) {
-              // check if we can use . notation or if we need to use wrap in [''] 
-              if(/^\w+$/.test(prop.node.arg.content)) {
+              // check if we can use . notation or if we need to use wrap in ['']
+              if (/^\w+$/.test(prop.node.arg.content)) {
                 s.prependLeft(end, ".");
               } else {
                 s.prependLeft(end, `['`);
