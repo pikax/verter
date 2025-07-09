@@ -9,6 +9,7 @@ import { createSubDocumentUri, uriToVerterVirtual } from "../../utils";
 export type BlockId = "bundle" | "template" | "script" | "style";
 
 export interface ProcessedBlock {
+  id: string;
   type: BlockId | string;
   //   index: number;
   uri: string;
@@ -36,6 +37,7 @@ export function processBlocks(
   const result: ProcessedBlock[] = [];
 
   result.push({
+    id: `${uri}.bundle`,
     blocks,
     type: "bundle",
     languageId: "ts",
@@ -47,6 +49,7 @@ export function processBlocks(
     if (blocks) {
       byTag.delete("template");
       result.push({
+        id: `${uri}.template${result.length}`,
         blocks,
         type: "template",
         languageId: "tsx",
@@ -66,6 +69,7 @@ export function processBlocks(
       const languageId = lang === true ? "js" : lang ?? "js";
 
       result.push({
+        id: `${uri}.script${result.length}`,
         blocks,
         languageId,
         type: "script",
@@ -97,6 +101,7 @@ export function processBlocks(
 
       for (const [languageId, langBlocks] of byLang) {
         result.push({
+          id: `${uri}.style${result.length}`,
           languageId,
           type: "style",
           uri: uriToVerterVirtual(
@@ -117,6 +122,7 @@ export function processBlocks(
        * lang should be resolved by block.block.attrs.lang
        */
       result.push({
+        id: `${uri}.custom${result.length}`,
         type: "custom",
         blocks: Array.from(byTag.values()).flat(),
         languageId: "",

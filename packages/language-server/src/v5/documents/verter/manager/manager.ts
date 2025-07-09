@@ -2,6 +2,15 @@ import type LSP from "vscode-languageserver-protocol";
 import { WorkspaceFolder } from "vscode-languageserver/node";
 import vscode from "vscode-languageserver";
 import ts, { sortAndDeduplicateDiagnostics } from "typescript";
+
+import {
+  // core entry-points for each language flavor:
+  getCSSLanguageService,
+  getSCSSLanguageService,
+  getLESSLanguageService,
+  LanguageService as CSSLanguageService,
+} from "vscode-css-languageservice";
+
 import fsPath from "path";
 import { DocumentManager } from "../../manager";
 import { TypescriptDocument } from "../typescript/typescript";
@@ -57,6 +66,16 @@ export class VerterManager {
    * A map of tsconfig filepaths to ts.ParsedCommandLine instances.
    */
   readonly tsConfigMap = new Map<string, ts.ParsedCommandLine>();
+
+  // cache one service instance per folder root + language kind
+  readonly cssServices = new Map<
+    string,
+    {
+      css: CSSLanguageService;
+      scss: CSSLanguageService;
+      less: CSSLanguageService;
+    }
+  >();
 
   constructor(private readonly documentManager: DocumentManager) {}
 
@@ -126,8 +145,6 @@ export class VerterManager {
         const referencedTsConfigs = tsconfig.projectReferences.map((x) =>
           resolveTSConfig(x.path)
         );
-
-        console.log("f r", referencedTsConfigs);
 
         for (const c of referencedTsConfigs) {
           if (

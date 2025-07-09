@@ -16,7 +16,7 @@ const baz = defineModel<{ jjj: boolean }>("baz", {
 
 const foo = 1;
 
-new ___VERTER___default().$props
+new ___VERTER___default().$props;
 </script>
 <template>
   <span>{{ $data.foo }}</span>
@@ -39,3 +39,21 @@ new ___VERTER___default().$props
     {{ $props.baz.jjj }}
   </span>
 </template>
+<style>
+.foo {
+  background: red;
+  overflow: auto;
+
+  display: flex;
+}
+</style>
+<style lang="scss">
+.bar {
+  background: blue;
+}
+</style>
+<style lang="less">
+.baz {
+  display: contents;
+}
+</style>

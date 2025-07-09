@@ -1,8 +1,11 @@
 import {
   CompletionItem,
+  CompletionItemKind,
   CompletionTriggerKind,
   Connection,
   createConnection,
+  DefinitionLink,
+  InsertTextFormat,
   ProposedFeatures,
   TextDocumentSyncKind,
   WorkspaceFolder,
@@ -37,7 +40,10 @@ import {
 } from "@verter/language-shared";
 import { MagicString } from "vue/compiler-sfc";
 import { VueSubDocument } from "./v5/documents/verter/vue/sub/sub";
-import { VueBundleDocument } from "./v5/documents/verter/vue/sub";
+import {
+  VueBundleDocument,
+  VueStyleDocument,
+} from "./v5/documents/verter/vue/sub";
 
 export interface LsConnectionOption {
   /**
@@ -92,7 +98,7 @@ export function startServer(options: LsConnectionOption = {}) {
           completionItem: {
             labelDetailsSupport: true,
           },
-          triggerCharacters: [".", "@", "<"],
+          triggerCharacters: [".", "@", "<", ":", " "],
         },
 
         definitionProvider: true,
@@ -141,17 +147,34 @@ export function startServer(options: LsConnectionOption = {}) {
 
     const docs = doc.docsForPos(params.position);
 
-    const rrr = docs.flatMap(
-      (x) => tsService.getDefinitionAtPosition(x.doc.uri, x.offset) ?? []
-    );
+    let definitions: Array<DefinitionLink & { key: string }> = [];
 
-    // const definitions = docs
-    //   .flatMap(
-    //     (x) => tsService.getDefinitionAtPosition(x.doc.uri, x.offset) ?? []
-    //   )
-    const definitions = rrr.map((x) => {
-      return mapDefinitionInfo(x, documentManager, true);
-    });
+    // const rrr = docs.flatMap(
+    //   (x) => tsService.getDefinitionAtPosition(x.doc.uri, x.offset) ?? []
+    // );
+
+    // const definitions = rrr.map((x) => {
+    //   return mapDefinitionInfo(x, documentManager, true);
+    // });
+
+    for (const d of docs) {
+      if (d.doc instanceof VueStyleDocument) {
+        const r = d.doc.languageService.doValidation(d.doc, d.doc.stylesheet, {
+          hover: {},
+        });
+
+        console.log("ddd", r);
+      } else {
+        for (const x of tsService.getDefinitionAtPosition(
+          d.doc.uri,
+          d.offset
+        ) ?? []) {
+          const r = mapDefinitionInfo(x, documentManager, true);
+          if (!r) continue;
+          definitions.push(r);
+        }
+      }
+    }
 
     return definitions;
   });
@@ -179,13 +202,29 @@ export function startServer(options: LsConnectionOption = {}) {
       const quickInfo = docs
         .flatMap(({ doc, offset }) => {
           const ss = performance.now();
-          const qq = tsService.getQuickInfoAtPosition(doc.uri, offset);
-          console.log("quickinfo", performance.now() - ss, doc.uri);
-          if (qq) {
-            if (qq.kind) {
-              return formatQuickInfo(qq, doc);
-            } else if (!anyResult) {
-              anyResult = formatQuickInfo(qq, doc);
+
+          switch (doc.languageId) {
+            case "css":
+            case "scss":
+            case "less":
+            case "sass": {
+              if (doc instanceof VueStyleDocument) {
+                const pos = doc.toGeneratedPosition(params.position);
+
+                return doc.languageService.doHover(doc, pos, doc.stylesheet);
+              }
+              break;
+            }
+            default: {
+              const qq = tsService.getQuickInfoAtPosition(doc.uri, offset);
+              console.log("quickinfo", performance.now() - ss, doc.uri);
+              if (qq) {
+                if (qq.kind) {
+                  return formatQuickInfo(qq, doc);
+                } else if (!anyResult) {
+                  anyResult = formatQuickInfo(qq, doc);
+                }
+              }
             }
           }
         })
@@ -217,13 +256,38 @@ export function startServer(options: LsConnectionOption = {}) {
         const offset = d.offset;
 
         switch (d.doc.languageId) {
+          case "css":
+          case "scss":
+          case "less":
+          case "sass": {
+            // const s = d as unknown as VueStyleDocument;
+
+            if (!(d.doc instanceof VueStyleDocument)) {
+              console.error("not a valid style document");
+              continue;
+            }
+
+            const pos = d.doc.toGeneratedPosition(params.position);
+
+            const r = d.doc.languageService.doComplete(
+              d.doc,
+              pos,
+              d.doc.stylesheet
+            );
+
+            console.log("resoilved", r);
+
+            items.push(...r.items);
+
+            break;
+          }
           case "tsx":
           case "ts":
           case "js":
           case "jsx":
             const tsService = verterManager.getTsService(d.doc.uri);
             if (!tsService) {
-              return undefined;
+              continue;
             }
             const completions = tsService.getCompletionsAtPosition(
               d.doc.uri,
@@ -263,6 +327,33 @@ export function startServer(options: LsConnectionOption = {}) {
       }
 
       console.log("found docs", subDocs);
+
+      const cssProp = items.find(
+        (x) => x.kind === CompletionItemKind.Function && x.label === "var()"
+      );
+      if (cssProp || true) {
+        items.push({
+          ...(cssProp ?? {}),
+          label: "[WIP]v-bind() ",
+          kind: CompletionItemKind.Function,
+          insertTextFormat: InsertTextFormat.Snippet, // Use snippet format for dynamic arguments
+          insertText: "v-bind(${1|foo,bar,baz|})", // Add options as a snippet
+          textEdit: cssProp?.textEdit
+            ? "insert" in cssProp?.textEdit
+              ? {
+                  newText: "v-bind(${1|foo,bar,baz|})", // Ensure the snippet matches the insert text
+                  insert: cssProp?.textEdit.insert,
+                  replace: cssProp?.textEdit.replace,
+                }
+              : cssProp?.textEdit
+            : undefined,
+          documentation: {
+            kind: "markdown",
+            value:
+              "A Vue directive for binding dynamic values.\n\nArguments:\n- `foo`: Description of foo.\n- `bar`: Description of bar.\n- `baz`: Description of baz.",
+          },
+        });
+      }
 
       return {
         isIncomplete: false,
@@ -337,6 +428,12 @@ export function startServer(options: LsConnectionOption = {}) {
     }
 
     function getDiagnostics(doc: VueSubDocument) {
+      if (doc instanceof VueStyleDocument) {
+        return doc.languageService.doValidation(doc, doc.stylesheet, {
+          validate: true,
+        });
+      }
+
       const diagnostics = [
         ...tsService.getSemanticDiagnostics(doc.uri),
         ...tsService.getSyntacticDiagnostics(doc.uri),

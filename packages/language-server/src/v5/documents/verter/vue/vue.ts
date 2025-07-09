@@ -10,7 +10,7 @@ import { processBlocks, ProcessedBlock } from "./utils";
 import { VueSubDocument } from "./sub/sub";
 import { createSubDocument } from "./sub/utils";
 import { pathToUrl } from "../../../../utils";
-import { VueBundleDocument } from "./sub";
+import { VueBundleDocument, VueStyleDocument } from "./sub";
 
 export class VueDocument extends VerterDocument {
   static create(uri: string, content: string, version?: number) {
@@ -61,6 +61,8 @@ export class VueDocument extends VerterDocument {
             continue;
           }
           docs.push(s);
+        } else if (s instanceof VueStyleDocument) {
+          s.block = block;
         }
         processed.add(s);
       }

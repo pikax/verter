@@ -1,6 +1,12 @@
+import { getStyleLanguageService } from "../../../../services/style";
 import { ProcessedBlock } from "../utils";
 import { VueDocument } from "../vue";
-import { VueOptionsDocument, VueBundleDocument, VueRenderDocument } from "./typescript";
+import { VueStyleDocument } from "./style";
+import {
+  VueOptionsDocument,
+  VueBundleDocument,
+  VueRenderDocument,
+} from "./typescript";
 
 export function createSubDocument(parent: VueDocument, block: ProcessedBlock) {
   switch (block.type) {
@@ -20,12 +26,23 @@ export function createSubDocument(parent: VueDocument, block: ProcessedBlock) {
         parent.version
       );
     }
-    case 'template': {
+    case "template": {
       return VueRenderDocument.create(
         block.uri,
         parent,
         block.languageId as any,
         parent.version
+      );
+    }
+
+    case "style": {
+      return VueStyleDocument.create(
+        block.uri,
+        parent,
+        block.languageId,
+        getStyleLanguageService(block.uri, block.languageId as any),
+        parent.version,
+        block
       );
     }
   }
