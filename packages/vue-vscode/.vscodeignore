@@ -1,7 +1,0 @@
-src/
-test/
-tsconfig.json
-pnpm-lock.yaml
-.github/
-*.ts
-*.map

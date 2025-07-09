@@ -1,0 +1,213 @@
+{
+  "name": "verter-vscode",
+  "displayName": "Verter VSCode",
+  "version": "0.0.7",
+  "description": "Verter VSCode Extension",
+  "main": "dist/extension.js",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc -b",
+    "watch": "pnpm build --watch",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "package": "vsce package"
+  },
+  "keywords": [
+    "vue",
+    "verter",
+    "vetur"
+  ],
+  "repository": {
+    "url": "https://github.com/pikax/verter"
+  },
+  "author": "Carlos Rodrigues <pikax>",
+  "license": "MIT",
+  "dependencies": {
+    "@vue/compiler-core": "^3.5.17",
+    "@vue/compiler-sfc": "^3.5.17",
+    "@vue/shared": "^3.5.17",
+    "vue": "^3.5.17",
+    "oxc-parser": "^0.75.1",
+    "ts-node": "^10.9.2",
+    "vscode-css-languageservice": "^6.3.7",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12",
+    "vscode-jsonrpc": "^8.2.1",
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver-protocol": "^3.17.5",
+    "vscode-languageserver-types": "^3.17.5"
+  },
+  "files": [
+    "dist",
+    "languages",
+    "syntaxes",
+    "node_modules",
+    "LICENSE"
+  ],
+  "vsce": {
+    "dependencies": true,
+    "yarn": false
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:vue",
+    "onCommand:verter.restartLanguageServer",
+    "onLanguage:javascript",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:javascriptreact"
+  ],
+  "publisher": "foo",
+  "contributes": {
+    "configuration": {
+      "type": "object",
+      "title": "Verter",
+      "properties": {
+        "verter.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable/Disable Verter"
+        }
+      }
+    },
+    "typescriptServerPlugins": [
+      {
+        "name": "@verter/typescript-plugin",
+        "enableForWorkspaceTypeScriptVersions": true
+      }
+    ],
+    "languages": [
+      {
+        "id": "vue",
+        "aliases": [
+          "Vue",
+          "vue"
+        ],
+        "extensions": [
+          ".vue"
+        ],
+        "configuration": "./languages/vue-language-configuration.json"
+      },
+      {
+        "id": "vue-html",
+        "aliases": [
+          "Vue-html"
+        ],
+        "configuration": "./languages/vue-html-language-configuration.json"
+      },
+      {
+        "id": "vue-postcss",
+        "aliases": [
+          "Vue-PostCSS",
+          "Vue-POSTCSS",
+          "vue-postcss"
+        ],
+        "configuration": "./languages/vue-postcss-language-configuration.json"
+      },
+      {
+        "id": "vue-sugarss",
+        "aliases": [
+          "Vue-SugarSS",
+          "Vue-SUGARSS",
+          "vue-sugarss"
+        ],
+        "configuration": "./languages/vue-sugarss-language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "vue",
+        "scopeName": "source.vue",
+        "path": "./syntaxes/vue-generated.json",
+        "embeddedLanguages": {
+          "text.html.basic": "html",
+          "text.html.vue-html": "vue-html",
+          "text.jade.slm": "slm",
+          "text.pug": "jade",
+          "text.haml": "haml",
+          "text.slim": "slim",
+          "text.html.liquid": "liquid",
+          "source.css": "css",
+          "source.css.scss": "scss",
+          "source.css.less": "less",
+          "source.css.postcss": "vue-postcss",
+          "source.css.sugarss": "vue-sugarss",
+          "source.sass": "sass",
+          "source.stylus": "stylus",
+          "source.js": "javascript",
+          "source.ts": "typescript",
+          "source.coffee": "coffeescript",
+          "text.html.markdown": "md",
+          "source.yaml": "yaml",
+          "source.json": "json",
+          "source.php": "php",
+          "source.graphql": "graphql"
+        }
+      },
+      {
+        "language": "vue-postcss",
+        "scopeName": "source.css.postcss",
+        "path": "./syntaxes/vue-postcss.json"
+      },
+      {
+        "language": "vue-sugarss",
+        "scopeName": "source.css.sugarss",
+        "path": "./syntaxes/vue-sugarss.json"
+      },
+      {
+        "language": "vue-html",
+        "scopeName": "text.html.vue-html",
+        "path": "./syntaxes/vue-html.tmLanguage.json",
+        "embeddedLanguages": {
+          "source.js": "javascript"
+        }
+      },
+      {
+        "path": "./syntaxes/pug/directives.tmLanguage.json",
+        "scopeName": "vue.pug.directives",
+        "injectTo": [
+          "source.vue"
+        ]
+      },
+      {
+        "path": "./syntaxes/pug/interpolations.tmLanguage.json",
+        "scopeName": "vue.pug.interpolations",
+        "injectTo": [
+          "source.vue"
+        ]
+      },
+      {
+        "scopeName": "markdown.vue.codeblock",
+        "path": "./syntaxes/markdown-vue.json",
+        "injectTo": [
+          "text.html.markdown"
+        ],
+        "embeddedLanguages": {
+          "meta.embedded.block.vue": "vue"
+        }
+      }
+    ],
+    "commands": [
+      {
+        "command": "verter.helloWorld",
+        "title": "Hello World"
+      },
+      {
+        "command": "verter.restartLanguageServer",
+        "title": "Verter: Restart Language Server"
+      },
+      {
+        "command": "verter.showCompiledCodeToSide",
+        "title": "Verter: Show compiled Code to Side"
+      },
+      {
+        "command": "verter.writeVirtualFiles",
+        "title": "Verter: Write Virtual Files for File"
+      }
+    ]
+  }
+}

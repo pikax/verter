@@ -15,6 +15,10 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.6",
+    "esbuild-plugin-alias": "^0.2.1",
+    "esbuild-plugin-alias-path": "^2.0.2",
     "glob": "^11.0.3",
     "vitest": "^3.2.4"
   },
