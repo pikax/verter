@@ -72,6 +72,27 @@
         "${workspaceRoot}/packages/language-shared/dist/**/*.js"
       ],
       "autoAttachChildProcesses": false
-    }
-  ]
-}
+    },
+    
+    {
+      "type": "extensionHost",
+      "request": "launch",
+      "name": "Launch Client Prod",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceRoot}/extensions/vscode",
+
+        "--disable-extensions"
+        // "--extensionDevelopmentPath=${workspaceRoot}/extensions/vscode-vue",
+        // "--extensionDevelopmentPath=${workspaceRoot}/extensions/vscode-vue-language-features",
+        // "${workspaceRoot}/samples/vue3/typescript-diagnostics"
+      ],
+      "outFiles": [
+        "${workspaceRoot}/extensions/vscode/dist/**/*.js",
+      "autoAttachChildProcesses": true
+      //   "preLaunchTask": {
+      //     "type": "npm",
+      //     "script": "dev-extension"
+      //   }
+    },
+  ],}

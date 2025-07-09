@@ -1,7 +1,7 @@
 {
   "name": "verter-vscode",
-  "displayName": "Verter VSCode",
-  "version": "0.0.7",
+  "displayName": "Verter",
+  "version": "0.0.1-alpha.1",
   "description": "Verter VSCode Extension",
   "main": "dist/extension.js",
   "type": "commonjs",
@@ -27,20 +27,13 @@
     "@vue/shared": "^3.5.17",
     "vue": "^3.5.17",
     "oxc-parser": "^0.75.1",
-    "ts-node": "^10.9.2",
-    "vscode-css-languageservice": "^6.3.7",
-    "vscode-languageserver": "^9.0.1",
-    "vscode-languageserver-textdocument": "^1.0.12",
-    "vscode-jsonrpc": "^8.2.1",
-    "vscode-languageclient": "^9.0.1",
-    "vscode-languageserver-protocol": "^3.17.5",
-    "vscode-languageserver-types": "^3.17.5"
+    "ts-node": "^10.9.2"
   },
   "files": [
     "dist",
     "languages",
     "syntaxes",
-    "node_modules",
+    "node_modules/**",
     "LICENSE"
   ],
   "vsce": {
@@ -61,7 +54,7 @@
     "onLanguage:typescriptreact",
     "onLanguage:javascriptreact"
   ],
-  "publisher": "foo",
+  "publisher": "pikax",
   "contributes": {
     "configuration": {
       "type": "object",

@@ -9,17 +9,24 @@
     "watch": "pnpm --filter @verter/core --filter @verter/language-shared --filter @verter/language-server --filter verter-vscode --filter @verter/typescript-plugin watch",
     "dev-extension": "pnpm --filter @verter/language-server --filter verter-vscode watch",
     "update-all": "pnpm up -r -i -L",
-    "package": "node scripts/pack-vsix.js"
+    "build:package": "rollup -c rollup.config.js",
+    "package": "cd extensions/vscode && npm install --omit=dev && npx shx mkdir -p node_modules/@verter && npx shx cp -r ../typescript-plugin node_modules/@verter/typescript-plugin && npx vsce package",
+    "copy-plugin": "npx shx mkdir -p extensions/vue-vscode/node_modules/@verter && npx shx cp -r extensions/typescript-plugin extensions/vue-vscode/node_modules/@verter/typescript-plugin"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@hyrious/esbuild-plugin-commonjs": "^0.2.6",
+    "@rollup/plugin-commonjs": "^28.0.6",
+    "@rollup/plugin-node-resolve": "^16.0.1",
     "@vscode/vsce": "^3.6.0",
     "esbuild": "^0.25.6",
     "esbuild-plugin-alias": "^0.2.1",
     "esbuild-plugin-alias-path": "^2.0.2",
     "glob": "^11.0.3",
+    "rollup": "^4.44.2",
+    "rollup-plugin-esbuild": "^6.2.1",
     "vitest": "^3.2.4"
   },
   "pnpm": {

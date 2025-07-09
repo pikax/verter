@@ -431,10 +431,15 @@ function createService(
     },
   };
 
-  return ts.createLanguageService(
+  const service = ts.createLanguageService(
     host,
     ts.createDocumentRegistry(tsSystem.useCaseSensitiveFileNames)
   );
+
+  // @ts-expect-error to debug
+  service._host = host;
+
+  return service;
 }
 
 // const ServiceMap = new WeakMap<ts.LanguageService, ts.ParsedCommandLine>();

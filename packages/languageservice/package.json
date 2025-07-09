@@ -1,0 +1,23 @@
+{
+  "name": "@verter/languageservice",
+  "version": "1.0.0",
+  "description": "Contains shared information between the language server and typescript-plugin",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "Carlos Rodrigues <pikax>",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vite-plugin-dts": "^4.5.4"
+  },
+  "dependencies": {
+    "@verter/core": "workspace:^"
+  }
+}

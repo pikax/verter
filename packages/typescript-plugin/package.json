@@ -16,6 +16,7 @@
     "vue": "^3.5.17"
   },
   "devDependencies": {
+    "@types/node": "^24.0.12",
     "typescript": "^5.8.3",
     "vite": "^7.0.2"
   }

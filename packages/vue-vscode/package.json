@@ -190,10 +190,6 @@
     ],
     "commands": [
       {
-        "command": "verter.helloWorld",
-        "title": "Hello World"
-      },
-      {
         "command": "verter.restartLanguageServer",
         "title": "Verter: Restart Language Server"
       },

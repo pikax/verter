@@ -27,18 +27,9 @@ import {
   mapDefinitionInfo,
   mapDiagnostic,
 } from "./v5/helpers";
-import ts, {
-  CompletionsTriggerCharacter,
-  parseCommandLine,
-  QuickInfo,
-} from "typescript";
+import ts, { CompletionsTriggerCharacter } from "typescript";
 
-import {
-  NotificationType,
-  patchClient,
-  RequestType,
-} from "@verter/language-shared";
-import { MagicString } from "vue/compiler-sfc";
+import { patchClient, RequestType } from "@verter/language-shared";
 import { VueSubDocument } from "./v5/documents/verter/vue/sub/sub";
 import {
   VueBundleDocument,
@@ -238,7 +229,7 @@ export function startServer(options: LsConnectionOption = {}) {
     }
   });
 
-  connection.onCompletion((params) => {
+  connection.onCompletion(async (params) => {
     try {
       console.log("oncompletion doc", params.textDocument);
       const uri = params.textDocument.uri;
@@ -269,10 +260,15 @@ export function startServer(options: LsConnectionOption = {}) {
 
             const pos = d.doc.toGeneratedPosition(params.position);
 
-            const r = d.doc.languageService.doComplete(
+            const r = await d.doc.languageService.doComplete2(
               d.doc,
               pos,
-              d.doc.stylesheet
+              d.doc.stylesheet,
+              {
+                resolveReference: (_ref, _base) => {
+                  return undefined; // todo: implement
+                },
+              }
             );
 
             console.log("resoilved", r);
@@ -331,7 +327,7 @@ export function startServer(options: LsConnectionOption = {}) {
       const cssProp = items.find(
         (x) => x.kind === CompletionItemKind.Function && x.label === "var()"
       );
-      if (cssProp || true) {
+      if (cssProp) {
         items.push({
           ...(cssProp ?? {}),
           label: "[WIP]v-bind() ",
@@ -468,17 +464,30 @@ export function startServer(options: LsConnectionOption = {}) {
       return null;
     }
 
+    const ts = verterManager.getTsService(doc.uri);
+
+    const h = ts._host;
+
+    let s = "";
+    if (h) {
+      s = JSON.stringify(h.getCompilationSettings());
+    }
+
     return {
       js: {
-        code: doc.docs
-          .map(
-            (x) => `// start ${x.uri}\n
+        code:
+          "// " +
+          s +
+          "\n" +
+          doc.docs
+            .map(
+              (x) => `// start ${x.uri}\n
 ${x.getText()}
 //# sourceMappingURL=${x.sourceMapURL()}
 
 //end ${x.uri}\n`
-          )
-          .join("\n//-----\n"),
+            )
+            .join("\n//-----\n"),
         map: "map",
       },
       css: {

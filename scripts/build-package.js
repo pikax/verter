@@ -1,7 +1,4 @@
 const { build } = require("esbuild");
-const alias = require("esbuild-plugin-alias");
-const { aliasPath } = require("esbuild-plugin-alias-path");
-const { captureRejectionSymbol } = require("events");
 const path = require("path");
 const fs = require("node:fs");
 const { execSync } = require("child_process");
@@ -14,10 +11,16 @@ function run(cmd, opts = {}) {
 }
 
 (async () => {
+  let res;
+  const p = new Promise((r) => {
+    res = r;
+  });
+
   await build({
     entryPoints: ["packages/core/src/index.ts"],
     bundle: true,
     platform: "node",
+    format: "esm",
     target: "node16",
     outfile: `${outFolder}/core.js`,
     external: ["vscode", "@vue/*", "vue", "oxc-parser"], // never bundle the vscode module
@@ -28,10 +31,11 @@ function run(cmd, opts = {}) {
     bundle: true,
     platform: "node",
     target: "node16",
+    format: "esm",
     outfile: `${outFolder}/server.js`,
     external: [
       "vscode",
-      "vscode-languageserver",
+      // "vscode-languageserver",
       "@vue/*",
       "vue",
       "oxc-parser",
@@ -43,11 +47,12 @@ function run(cmd, opts = {}) {
     entryPoints: ["packages/typescript-plugin/src/index.ts"],
     bundle: true,
     platform: "node",
+    format: "esm",
     target: "node16",
     outfile: `${outFolder}/plugin.js`,
     external: [
       "vscode",
-      "vscode-languageserver",
+      // "vscode-languageserver",
       "@vue/*",
       "vue",
       "oxc-parser",
@@ -59,17 +64,18 @@ function run(cmd, opts = {}) {
     entryPoints: ["packages/vue-vscode/src/extension.ts"],
     bundle: true,
     platform: "node",
+    format: "esm",
     target: "node20",
     outfile: `${outFolder}/extension.js`,
     external: [
       "vscode",
-      "vscode-languageserver",
+      // "vscode-languageserver",
       // "vscode-languageclient",
 
-      "vscode-languageclient",
-      "vscode-jsonrpc",
-      "vscode-languageserver-protocol",
-      "vscode-languageserver-types",
+      // "vscode-languageclient",
+      // "vscode-jsonrpc",
+      // "vscode-languageserver-protocol",
+      // "vscode-languageserver-types",
 
       "@vue/*",
       "vue",
@@ -80,16 +86,6 @@ function run(cmd, opts = {}) {
       "@verter/language-server/dist/server.js",
     ],
 
-    // alias: {
-    //   "vscode-languageclient/node": path.resolve(
-    //     __dirname,
-    //     "../node_modules/vscode-languageclient/lib/node.js"
-    //   ),
-    // },
-    // alias: {
-    //   "@verter/typescript-plugin": "./plugin.js",
-    //   "@verter/language-server/dist/server.js": "./server.js",
-    // },
     plugins: [
       {
         name: "patch-verter",
@@ -110,6 +106,8 @@ function run(cmd, opts = {}) {
               );
 
               await fs.promises.writeFile(fp, text);
+              console.log("updated deps");
+              res();
             } catch (e) {
               console.error("failed", e);
             }
@@ -118,6 +116,8 @@ function run(cmd, opts = {}) {
       },
     ],
   }).catch(() => process.exit(1));
+
+  await p;
 
   process.chdir(path.resolve(outFolder, ".."));
   console.log("Running npm install...");
