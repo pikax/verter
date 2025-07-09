@@ -2,11 +2,11 @@
   "name": "@verter/typescript-plugin",
   "version": "1.0.0",
   "description": "Vue TypeScript Plugin powered by Verter",
-  "main": "dist/typescript-plugin.js",
-  "module": "dist/typescript-plugin.mjs",
+  "main": "dist/index.js",
   "keywords": [],
   "author": "Carlos Rodrigues <pikax>",
   "license": "MIT",
+  "type": "commonjs",
   "scripts": {
     "build": "tsc -b",
     "test": "echo \"Error: no test specified\" && exit 1"

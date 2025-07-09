@@ -10,3 +10,4 @@ export * from "./template-ref/index.js";
 export * from "./sfc-cleaner/index.js";
 export * from "./resolvers/index.js";
 export * from "./component-instance/index.js";
+export * from "./define-options/index.js";

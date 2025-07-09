@@ -5,6 +5,7 @@ import { generateTypeString } from "../utils";
 
 export const TemplateBindingPlugin = definePlugin({
   name: "VerterTemplateBinding",
+  enforce: "post",
 
   post(s, ctx) {
     const isTS = ctx.block.lang === "ts";
@@ -103,7 +104,7 @@ export const TemplateBindingPlugin = definePlugin({
       (x) => x.type === ProcessItemType.DefineModel
     );
 
-    s.prependLeft(
+    s.prependRight(
       tag.pos.close.start,
       `;return{${usedBindings
         .map(

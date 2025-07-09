@@ -5,6 +5,7 @@ import type {
 } from "../../../../parser/ast/types";
 import { ProcessContext, ProcessItemType } from "../../../types";
 import { generateTypeDeclaration, generateTypeString } from "../utils";
+import { ScriptTypes } from "../../../../parser";
 
 const Macros = new Set([
   "defineProps",
@@ -31,9 +32,8 @@ const MacroDependencies = new Map([
 
 export const MacrosPlugin = definePlugin({
   name: "VerterMacro",
-
   hasWithDefaults: false,
-  pre() {
+  pre(s, ctx) {
     this.hasWithDefaults = false;
   },
 
@@ -43,7 +43,10 @@ export const MacrosPlugin = definePlugin({
       (x) => x.type === ProcessItemType.MacroBinding
     );
     for (const macro of Macros) {
-      if (macro === "withDefaults" || macro === "defineOptions") continue;
+      if (macro === "withDefaults") continue;
+      if (macro === "defineOptions") {
+        continue;
+      }
       const name = ctx.prefix(macro);
       const itemMacro =
         macro === "defineModel"
@@ -63,7 +66,12 @@ export const MacrosPlugin = definePlugin({
         );
         s.append(str);
       } else {
-        const str = generateTypeDeclaration(name, "{}", ctx.generic?.source, isTS);
+        const str = generateTypeDeclaration(
+          name,
+          "{}",
+          ctx.generic?.source,
+          isTS
+        );
         s.append(str);
       }
     }
