@@ -26,6 +26,7 @@
     "@types/vscode": "^1.101.0",
     "@verter/language-server": "workspace:^",
     "@verter/language-shared": "workspace:^",
+    "@verter/oxc-bindings": "workspace:^",
     "@verter/typescript-plugin": "workspace:^",
     "brace-expansion": "^4.0.1",
     "lodash": "^4.17.21",

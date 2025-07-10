@@ -142,6 +142,20 @@ describe("process template plugins binding", () => {
       const { result } = parse(`{{ [ test ] }}`);
       expect(result).toMatchInlineSnapshot(`"{{ [ ___VERTER___ctx.test ] }}"`);
     });
+
+    test("{{ ()=> { const foo = 1; } }}", () => {
+      const { result } = parse(`{{ ()=> { const foo = 1; } }}`);
+      expect(result).toMatchInlineSnapshot(`"{{ ()=> { const foo = 1; } }}"`);
+    });
+
+    test(`{{  const c = new Comp<'foo'>().$props['___VERTER___v-slot'];c.$props; }}`, () => {
+      const { result } = parse(
+        `{{  const c = new Comp<'foo'>().$props['___VERTER___v-slot']; c.$props; }}`
+      );
+      expect(result).toMatchInlineSnapshot(
+        `"{{  const c = new ___VERTER___ctx.Comp<'foo'>().$props['___VERTER___v-slot']; c.$props; }}"`
+      );
+    });
   });
 
   describe("array", () => {

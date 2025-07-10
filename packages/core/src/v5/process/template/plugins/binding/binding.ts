@@ -10,7 +10,10 @@ export const BindingPlugin = {
     const accessor = ctx.retrieveAccessor("ctx");
 
     if (DEBUG) {
-      if (item.name?.startsWith("___DEBUG")) {
+      if (
+        item.name?.startsWith("___DEBUG") ||
+        item.name?.startsWith(ctx.prefix(""))
+      ) {
         return;
       }
     }

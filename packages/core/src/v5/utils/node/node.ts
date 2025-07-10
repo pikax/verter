@@ -42,8 +42,9 @@ export function patchAcornPosition(
 ) {
   pos.line = offsetPos.line + pos.line - 1;
   pos.column = offsetPos.column + pos.column - 1;
-  // @ts-expect-error not part of pos
-  pos.offset = offsetPos.offset + pos.index - 1;
+  pos.offset =
+    // @ts-expect-error not part of pos
+    offsetPos.offset + (pos.index == null ? pos.offset : pos.index - 1);
 
   return pos as babel_types.SourceLocation["start"] & Position;
 }
@@ -55,6 +56,14 @@ export function patchAcornNodeLoc<T extends AcornTypes.AnyNode>(
   if (node.loc) {
     patchAcornPosition(node.loc.start, templateNode.loc.start);
     patchAcornPosition(node.loc.end, templateNode.loc.start);
+
+    // @ts-expect-error not part of pos
+    const start = node.loc?.start.offset;
+    // @ts-expect-error not part of pos
+    const end = node.loc?.end.offset;
+
+    // @ts-expect-error not part of pos
+    node.loc.source = templateNode.content.slice(start, end);
   } else {
     node.loc = {
       start: { line: 0, column: 0, offset: node.start },
@@ -65,15 +74,6 @@ export function patchAcornNodeLoc<T extends AcornTypes.AnyNode>(
     patchAcornPosition(node.loc!.start, templateNode.loc.start);
     patchAcornPosition(node.loc!.end, templateNode.loc.start);
   }
-
-  // @ts-expect-error not part of loc
-  node.loc.source = // @ts-expect-error not part of loc
-    templateNode.content.slice(
-      // @ts-expect-error not part of loc
-      node.loc!.start.index - 1,
-      // @ts-expect-error not part of loc
-      node.loc!.end.index - 1
-    );
 
   return node as AcornTypes.AnyNode & {
     loc: Node["loc"] & AcornTypes.AnyNode["loc"];

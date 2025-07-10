@@ -10,11 +10,16 @@ defineOptions({
     };
   },
 });
+
+
+const c = new Comp<'foo'>().$props['___VERTER___v-slot'];
+}
 </script>
 
 <template>
   <Comp name="foo">
-    <template #foo="{ name }"> {{ name }}</template>
+    <template  #foo="{ name }"> {{ ___VERTER___slotInstance.$props }}</template>
+    <template #header></template>
   </Comp>
 
   <span>{{ $data.bar }}</span>

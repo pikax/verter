@@ -22,14 +22,18 @@ import type { PatchClient } from "@verter/language-shared";
 import { patchClient, NotificationType } from "@verter/language-shared";
 import CompiledCodeContentProvider from "./CompiledCodeContentProvider";
 
+import { resolveAndDownloadBinding } from "@verter/oxc-bindings";
+
 type GetClient = () => PatchClient<LanguageClient>;
 
 let getClient: GetClient | undefined;
 
-console.log('hello tghere')
+console.log("hello tghere");
 
-export function activate(context: ExtensionContext) {
-  console.log("activate");
+export async function activate(context: ExtensionContext) {
+  console.log("activate", __dirname, __filename, context.extensionPath);
+
+  await resolveAndDownloadBinding(context.extensionPath);
   const server = activateVueLanguageServer(context);
   getClient = server.getClient;
 

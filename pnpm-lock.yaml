@@ -250,6 +250,15 @@ importers:
         specifier: ^4.5.4
         version: 4.5.4(@types/node@24.0.12)(rollup@4.44.2)(typescript@5.8.3)(vite@6.3.5(@types/node@24.0.12))
 
+  packages/oxc-bindings:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.12
+        version: 24.0.12
+      typescript:
+        specifier: ^5.8.3
+        version: 5.8.3
+
   packages/typescript-plugin:
     dependencies:
       '@verter/core':
@@ -283,6 +292,9 @@ importers:
       '@verter/language-shared':
         specifier: workspace:^
         version: link:../language-shared
+      '@verter/oxc-bindings':
+        specifier: workspace:^
+        version: link:../oxc-bindings
       '@verter/typescript-plugin':
         specifier: workspace:^
         version: link:../typescript-plugin

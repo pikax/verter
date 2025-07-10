@@ -26,7 +26,7 @@ import {
 import { walk } from "@vue/compiler-sfc";
 import * as babel_types from "@babel/types";
 import { patchAcornNodeLoc, patchBabelNodeLoc } from "../../utils/node/node.js";
-import { VerterASTNode } from "../ast/types.js";
+import { BindingPattern, VerterASTNode } from "../ast/types.js";
 import { parseAcornLoose } from "../ast/ast.js";
 import type AcornTypes from "acorn";
 
@@ -143,6 +143,23 @@ export function getASTBindings(
           });
           break;
         }
+        case "VariableDeclaration": {
+          const toAdd = [] as string[];
+          // @ts-expect-error it's correct
+          n.declarations.forEach((x) => collectDeclaredIds(x.id, toAdd));
+
+          // collectDeclaredIds(n.id, toAdd);
+          if (ignoredIdentifiers) {
+            ignoredIdentifiers.push(...toAdd);
+          }
+          // @ts-expect-error not typed
+          if (parent?._ignoredIdentifiers) {
+            // @ts-expect-error not typed
+            parent!._ignoredIdentifiers.push(...toAdd);
+          }
+          break;
+        }
+
         case "Identifier": {
           const name = n.name;
           if (
@@ -158,16 +175,6 @@ export function getASTBindings(
             this.skip();
             return;
           }
-          // if (
-          //   (parent.type === "OptionalMemberExpression" &&
-          //     parent.property === n) ||
-          //   (parent.type === "MemberExpression" && parent.property === n) ||
-          //   (parent.type === "ObjectProperty" && parent.key === n) ||
-          //   (parent.type === "ClassMethod" && parent.key === n)
-          // ) {
-          //   this.skip();
-          //   return;
-          // }
           const pNode = exp
             ? isAcorn
               ? // @ts-expect-error not correct type
@@ -226,6 +233,41 @@ export function getASTBindings(
   });
 
   return bindings;
+}
+
+// Recursively collect all declared identifiers from the pattern
+function collectDeclaredIds(node: VerterASTNode, ignoredIdentifiers: string[]) {
+  switch (node.type) {
+    case "Identifier":
+      ignoredIdentifiers.push(node.name);
+      break;
+    case "RestElement":
+      if (node.argument.type === "Identifier") {
+        ignoredIdentifiers.push(node.argument.name);
+      } else {
+        collectDeclaredIds(node.argument, ignoredIdentifiers);
+      }
+      break;
+    case "AssignmentPattern":
+      collectDeclaredIds(node.left, ignoredIdentifiers);
+      break;
+    case "ArrayPattern":
+      for (const elem of node.elements) {
+        if (elem) collectDeclaredIds(elem, ignoredIdentifiers);
+      }
+      break;
+    case "ObjectPattern":
+      for (const prop of node.properties) {
+        if (prop.type === "Property") {
+          // { key: value } or shorthand
+          collectDeclaredIds(prop.value, ignoredIdentifiers);
+        } else if (prop.type === "RestElement") {
+          collectDeclaredIds(prop.argument, ignoredIdentifiers);
+        }
+      }
+      break;
+    // add more cases if you need to handle TS-specific patterns, etc.
+  }
 }
 
 export function createTemplateTypeMap() {
