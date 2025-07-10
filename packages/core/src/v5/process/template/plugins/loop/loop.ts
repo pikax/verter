@@ -2,6 +2,7 @@ import { ElementNode } from "@vue/compiler-core";
 import { ParseTemplateContext } from "../../../../parser/template";
 import { declareTemplatePlugin, TemplateContext } from "../../template";
 import { BlockPlugin } from "../block";
+import { ProcessItemType } from "../../../types";
 
 export const LoopPlugin = declareTemplatePlugin({
   name: "VerterLoop",
@@ -10,6 +11,12 @@ export const LoopPlugin = declareTemplatePlugin({
     const forParseResult = item.node.forParseResult;
 
     const renderList = ctx.retrieveAccessor("renderList");
+
+    ctx.items.push({
+      type: ProcessItemType.Import,
+      from: "vue",
+      items: [{ name: "renderList", alias: renderList }],
+    });
 
     // move v-for beginnning
     s.move(

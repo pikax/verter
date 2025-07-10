@@ -10,7 +10,7 @@
     "dev-extension": "pnpm --filter @verter/language-server --filter verter-vscode watch",
     "update-all": "pnpm up -r -i -L",
     "build:package": "rollup -c rollup.config.js",
-    "package": "cd extensions/vscode && npm install --omit=dev && npx shx mkdir -p node_modules/@verter && npx shx cp -r ../typescript-plugin node_modules/@verter/typescript-plugin && npx vsce package",
+    "package": "cd extensions/vscode && npm install --omit=dev && npx shx mkdir -p node_modules/@verter && npx shx cp -r ../typescript-plugin node_modules/@verter/typescript-plugin && npx shx rm -r node_modules/@oxc-parser && npx vsce package",
     "copy-plugin": "npx shx mkdir -p extensions/vue-vscode/node_modules/@verter && npx shx cp -r extensions/typescript-plugin extensions/vue-vscode/node_modules/@verter/typescript-plugin"
   },
   "keywords": [],

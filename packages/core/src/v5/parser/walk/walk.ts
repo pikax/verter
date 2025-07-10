@@ -20,26 +20,36 @@ import { TemplateCondition } from "../template/types.js";
 
 export function shallowWalk(
   root: VerterAST | Function | ArrowFunctionExpression | FunctionBody,
-  cb: (node: Statement | ModuleDeclaration) => void
+  cb: (node: VerterASTNode) => void,
+  leave?: (
+    node: VerterASTNode,
+    parent: VerterASTNode | null,
+    key: string
+  ) => void
 ) {
   if (root.type === "Program") {
     for (let i = 0; i < root.body.length; i++) {
       cb(root.body[i]);
+      // @ts-expect-error
+      leave?.(root.body[i], root, `${i}`);
     }
   } else if (root.type === "FunctionExpression") {
     if (root.body) {
       for (let i = 0; i < root.body.body.length; i++) {
         cb(root.body.body[i]);
+        leave?.(root.body.body[i], root.body, `${i}`);
       }
     }
   } else if (root.type === "BlockStatement") {
     for (let i = 0; i < root.body.length; i++) {
       cb(root.body[i]);
+      leave?.(root.body[i], root, `${i}`);
     }
   } else if (root.body) {
     if (root.body.type === "BlockStatement") {
       for (let i = 0; i < root.body.body.length; i++) {
         cb(root.body.body[i]);
+        leave?.(root.body.body[i], root.body, `${i}`);
       }
     }
   }
@@ -47,8 +57,16 @@ export function shallowWalk(
 
 export function deepWalk(
   root: VerterAST,
-  enter: (node: VerterASTNode, parent: VerterASTNode | null, key: string) => void,
-  leave?: (node: VerterASTNode, parent: VerterASTNode | null, key: string) => void
+  enter: (
+    node: VerterASTNode,
+    parent: VerterASTNode | null,
+    key: string
+  ) => void,
+  leave?: (
+    node: VerterASTNode,
+    parent: VerterASTNode | null,
+    key: string
+  ) => void
 ) {
   walk(root, {
     enter,

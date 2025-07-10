@@ -42,6 +42,7 @@ export function patchAcornPosition(
 ) {
   pos.line = offsetPos.line + pos.line - 1;
   pos.column = offsetPos.column + pos.column - 1;
+  // @ts-expect-error not part of pos
   pos.offset =
     // @ts-expect-error not part of pos
     offsetPos.offset + (pos.index == null ? pos.offset : pos.index - 1);

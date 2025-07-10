@@ -63,8 +63,11 @@ export function parseScriptBetter(
     }
   }
 
-  deepWalk(
+  const walk = isSetup ? shallowWalk : deepWalk;
+
+  walk(
     ast,
+    // @ts-expect-error
     (node, parent) => {
       const shared = sharedCtx.visit(node, parent);
       const visit = visitorCtx.visit(node, parent);
