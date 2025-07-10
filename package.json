@@ -5,24 +5,36 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev-extension": "pnpm --filter @verter/language-server --filter @verter/vue-vscode watch",
-    "update-all": "pnpm up -r -i -L"
+    "build": "pnpm --filter @verter/language-shared --filter @verter/language-server --filter @verter/core --filter verter-vscode --filter @verter/typescript-plugin  build",
+    "watch": "pnpm --filter @verter/core --filter @verter/language-shared --filter @verter/language-server --filter verter-vscode --filter @verter/typescript-plugin watch",
+    "dev-extension": "pnpm --filter @verter/language-server --filter verter-vscode watch",
+    "update-all": "pnpm up -r -i -L",
+    "build:package": "rollup -c rollup.config.js",
+    "package": "cd extensions/vscode && npm install --omit=dev && npx shx mkdir -p node_modules/@verter && npx shx cp -r ../typescript-plugin node_modules/@verter/typescript-plugin && npx shx rm -r node_modules/@oxc-parser && npx vsce package",
+    "copy-plugin": "npx shx mkdir -p extensions/vue-vscode/node_modules/@verter && npx shx cp -r extensions/typescript-plugin extensions/vue-vscode/node_modules/@verter/typescript-plugin"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "pnpmX": {
-    "patchedDependencies": {
-      "@vue/runtime-core@3.4.13": "patches/@vue__runtime-core@3.4.13.patch",
-      "@vue/shared@3.4.13": "patches/@vue__shared@3.4.13.patch"
-    }
-  },
   "devDependencies": {
-    "vitest": "^1.5.0"
+    "@hyrious/esbuild-plugin-commonjs": "^0.2.6",
+    "@rollup/plugin-commonjs": "^28.0.6",
+    "@rollup/plugin-node-resolve": "^16.0.1",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.25.6",
+    "esbuild-plugin-alias": "^0.2.1",
+    "esbuild-plugin-alias-path": "^2.0.2",
+    "glob": "^11.0.3",
+    "rollup": "^4.44.2",
+    "rollup-plugin-esbuild": "^6.2.1",
+    "vitest": "^3.2.4"
   },
   "pnpm": {
-    "patchedDependencies": {
-      "@vue/compiler-core@3.4.21": "patches/@vue__compiler-core@3.4.21.patch"
-    }
+    "onlyBuiltDependencies": [
+      "@swc/core",
+      "@vscode/vsce-sign",
+      "esbuild",
+      "keytar"
+    ]
   }
 }

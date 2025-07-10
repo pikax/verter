@@ -1,0 +1,157 @@
+import { VueDocument } from "../vue.js";
+import { VerterDocument } from "../../verter.js";
+import { ParserResult } from "@verter/core";
+import { SourceMapConsumer } from "source-map-js";
+import { Position, Range } from "vscode-languageserver-textdocument";
+import {
+  generatedPositionFor,
+  generatedRangeFor,
+  originalPositionFor,
+  originalRangeFor,
+} from "../utils.js";
+import { MagicString } from "vue/compiler-sfc";
+import { SourceMap } from "magic-string";
+
+export interface SubDocumentProcessContext extends ParserResult {}
+
+export abstract class VueSubDocument extends VerterDocument {
+  protected constructor(
+    uri: string,
+    private _parent: VueDocument,
+    languageId: string,
+    version: number
+  ) {
+    super(uri, languageId, version, "");
+  }
+
+  get parent() {
+    return this._parent;
+  }
+
+  private _sourceMapConsumer: SourceMapConsumer | null = null;
+  protected get sourceMapConsumer() {
+    if (this.version !== this._parent.version) {
+      this._sourceMapConsumer = null;
+    }
+    return (
+      this._sourceMapConsumer ?? (this._sourceMapConsumer = this.sync(true))
+    );
+  }
+
+  private _map: SourceMap | null = null;
+  get map() {
+    return this._map;
+  }
+
+  protected _isSynching = false;
+  protected sync(force?: boolean): SourceMapConsumer {
+    const parent = this._parent;
+
+    if (!force && this.sourceMapConsumer) {
+      return this.sourceMapConsumer;
+    }
+
+    try {
+      if (this._isSynching) return this.sourceMapConsumer;
+      this._isSynching = true;
+      const context = parent.context;
+
+      // const block = parent.blocks.find((x) => x.uri === this.uri);
+      // if (!block) {
+      //   throw new Error("Block not found!");
+      // }
+
+      const s = context.s.clone();
+      this.process({
+        ...context,
+        s,
+      });
+
+      this.update(s.toString(), this.parent.version);
+
+      this._map = s.generateMap({
+        // hires: true,
+        hires: 'boundary',
+        includeContent: true,
+      });
+
+      const consumer = new SourceMapConsumer(this._map as any);
+
+      consumer.computeColumnSpans();
+
+      return consumer;
+    } finally {
+      this._isSynching = false;
+    }
+  }
+
+  sourceMapURL() {
+    return this._map?.toUrl();
+  }
+
+  update(content: string, version?: number) {
+    this._sourceMapConsumer = null;
+    super.update(content, version);
+    return this;
+  }
+
+  toGeneratedPosition(pos: Position): Position {
+    const p = generatedPositionFor(this.sourceMapConsumer, pos);
+
+    if (!Number.isFinite(p.character)) {
+      p.character = this.getText().length;
+    }
+
+    return p;
+  }
+
+  toGeneratedRange(range: Range): Range {
+    const r = generatedRangeFor(this.sourceMapConsumer, range);
+    if (!Number.isFinite(r.start.character)) {
+      r.start.character = this.getText().length;
+    }
+    if (!Number.isFinite(r.end.character)) {
+      r.end.character = this.getText().length;
+    }
+
+    return r;
+  }
+
+  toGeneratedOffsetFromPosition(pos: Position): number {
+    const position = this.toGeneratedPosition(pos);
+    return this.offsetAt(position);
+  }
+
+  toOriginalPosition(pos: Position): Position {
+    return originalPositionFor(this.sourceMapConsumer, pos);
+  }
+  toOriginalOffset(offset: number): number {
+    const originalPosition = this.toOriginalPositionFromOffset(offset);
+    return this._parent.offsetAt(originalPosition);
+  }
+
+  toOriginalPositionFromOffset(offset: number): Position {
+    const position = this.positionAt(offset);
+    return this.toOriginalPosition(position);
+  }
+
+  toOriginalRange(range: Range): Range {
+    return originalRangeFor(this.sourceMapConsumer, range);
+  }
+
+  getText(range?: Range): string {
+    this.sync();
+    return super.getText(range);
+  }
+
+  offsetAt(position: Position): number {
+    this.sync();
+    return super.offsetAt(position);
+  }
+  positionAt(offset: number): Position {
+    this.sync();
+    return super.positionAt(offset);
+  }
+
+  protected abstract process(context: SubDocumentProcessContext): void;
+}

@@ -1,0 +1,297 @@
+import { parser } from "./index.js";
+
+describe("parser", () => {
+  describe("filename", () => {
+    it("should return filename", () => {
+      const parsed = parser("", "super.vue");
+
+      expect(parsed).toMatchObject({
+        filename: "super.vue",
+      });
+    });
+
+    it("should default filename", () => {
+      const parsed = parser("");
+
+      expect(parsed).toMatchObject({
+        filename: "temp.vue",
+      });
+    });
+  });
+
+  describe("magicstring", () => {
+    it("should have magicstring", () => {
+      const source = "<script></script>";
+      const parsed = parser(source);
+
+      expect(parsed.s.original).toBe(source);
+    });
+
+    it("magicstring should not have changes", () => {
+      const source = "<script></script>";
+      const parsed = parser(source);
+
+      expect(parsed.s.original).toBe(source);
+      expect(parsed.s.toString()).toBe(source);
+    });
+
+    it("should add empty script", () => {
+      const source = "<template></template>";
+      const parsed = parser(source);
+
+      expect(parsed.s.toString()).toContain(source);
+      expect(parsed.s.toString()).toContain("<script></script>");
+    });
+
+    it("should add empty if script is in comment", () => {
+      const source = `<template></template><!-- <script TEST></script> -->`;
+      const parsed = parser(source);
+
+      expect(parsed.s.toString()).toContain(source);
+      expect(parsed.s.toString()).toContain("<script></script>");
+    });
+
+    // TODO - NOTE this is a quite an edge case, but it should be handled
+    it.todo(
+      "should not interpret a script inside template as a valid script",
+      () => {
+        const source = `<template> <script test></script></template>`;
+        const parsed = parser(source);
+
+        expect(parsed.s.toString()).toContain(source);
+        expect(parsed.s.toString()).toContain("<script></script>");
+      }
+    );
+  });
+
+  describe("generic", () => {
+    it("not generic if empty", () => {
+      const source = ``;
+      const parsed = parser(source);
+
+      expect(parsed.generic).toBe(null);
+    });
+
+    it('generic="T"', () => {
+      const source = `<script lang="ts" generic="T"></script>`;
+      const parsed = parser(source);
+      expect(parsed.generic).toMatchInlineSnapshot(`
+        {
+          "declaration": "__VERTER__TS__T = any",
+          "names": [
+            "T",
+          ],
+          "position": {
+            "end": 28,
+            "start": 27,
+          },
+          "sanitisedNames": [
+            "__VERTER__TS__T",
+          ],
+          "source": "T",
+        }
+      `);
+    });
+
+    it('generic="T extends string"', () => {
+      const source = `<script lang="ts" generic="T extends string"></script>`;
+      const parsed = parser(source);
+      expect(parsed.generic).toMatchInlineSnapshot(`
+        {
+          "declaration": "__VERTER__TS__T extends string = any",
+          "names": [
+            "T",
+          ],
+          "position": {
+            "end": 43,
+            "start": 27,
+          },
+          "sanitisedNames": [
+            "__VERTER__TS__T",
+          ],
+          "source": "T extends string",
+        }
+      `);
+    });
+
+    it('generic="T extends string, U"', () => {
+      const source = `<script lang="ts" generic="T extends string, U"></script>`;
+      const parsed = parser(source);
+      expect(parsed.generic).toMatchInlineSnapshot(`
+        {
+          "declaration": "__VERTER__TS__T extends string = any, __VERTER__TS__U = any",
+          "names": [
+            "T",
+            "U",
+          ],
+          "position": {
+            "end": 46,
+            "start": 27,
+          },
+          "sanitisedNames": [
+            "__VERTER__TS__T",
+            "__VERTER__TS__U",
+          ],
+          "source": "T extends string, U",
+        }
+      `);
+    });
+
+    it('generic="T extends string, U extends number"', () => {
+      const source = `<script lang="ts" generic="T extends string, U extends number"></script>`;
+      const parsed = parser(source);
+      expect(parsed.generic).toMatchInlineSnapshot(`
+        {
+          "declaration": "__VERTER__TS__T extends string = any, __VERTER__TS__U extends number = any",
+          "names": [
+            "T",
+            "U",
+          ],
+          "position": {
+            "end": 61,
+            "start": 27,
+          },
+          "sanitisedNames": [
+            "__VERTER__TS__T",
+            "__VERTER__TS__U",
+          ],
+          "source": "T extends string, U extends number",
+        }
+      `);
+    });
+
+    it('generic="T extends Deep<U>, U extends Record<string, { sup: boolean }>"', () => {
+      const source = `<script lang="ts" generic="T extends Deep<U>, U extends Record<string, { sup: boolean }>"></script>`;
+      const parsed = parser(source);
+      expect(parsed.generic).toMatchInlineSnapshot(`
+        {
+          "declaration": "__VERTER__TS__T extends Deep<__VERTER__TS__U> = any, __VERTER__TS__U extends Record<string, { sup: boolean }> = any",
+          "names": [
+            "T",
+            "U",
+          ],
+          "position": {
+            "end": 88,
+            "start": 27,
+          },
+          "sanitisedNames": [
+            "__VERTER__TS__T",
+            "__VERTER__TS__U",
+          ],
+          "source": "T extends Deep<U>, U extends Record<string, { sup: boolean }>",
+        }
+      `);
+    });
+
+    it('not generic if not lang="ts"', () => {
+      const source = `<script generic="T"></script>`;
+      const parsed = parser(source);
+      expect(parsed.generic).toBe(null);
+    });
+  });
+
+  describe("isAsync", () => {
+    it("not async", () => {
+      const source = ``;
+      const parsed = parser(source);
+
+      expect(parsed.isAsync).toBe(false);
+    });
+
+    it("not async options", () => {
+      const source = `<script>export default { async setup() { await Promise.resolve()} }</script>`;
+      const parsed = parser(source);
+
+      expect(parsed.isAsync).toBe(false);
+    });
+    it("async setup", () => {
+      const source = `<script setup>await Promise.resolve()</script>`;
+      const parsed = parser(source);
+
+      expect(parsed.isAsync).toBe(true);
+    });
+  });
+
+  describe("template", () => {
+    it("should parse template", () => {
+      const source = `<template></template>`;
+      const parsed = parser(source);
+
+      expect(parsed.s.toString()).toContain(source);
+    });
+  });
+
+  describe("script", () => {
+    describe("isMain", () => {
+      it("single script", () => {
+        const source = `<script></script>`;
+        const parsed = parser(source);
+
+        expect(parsed.s.toString()).toContain(source);
+
+        expect(parsed.blocks).toMatchObject([
+          {
+            type: "script",
+            lang: "js",
+            isMain: true,
+          },
+        ]);
+      });
+
+      it("single script setup", () => {
+        const source = `<script setup></script>`;
+        const parsed = parser(source);
+
+        expect(parsed.s.toString()).toContain(source);
+
+        expect(parsed.blocks).toMatchObject([
+          {
+            type: "script",
+            lang: "js",
+            isMain: true,
+          },
+        ]);
+      });
+
+      it("multiple scripts", () => {
+        const source = `<script></script><script setup>const a = {}</script>`;
+        const parsed = parser(source);
+
+        expect(parsed.s.toString()).toContain(source);
+
+        expect(parsed.blocks).toMatchObject([
+          {
+            type: "script",
+            lang: "js",
+            isMain: false,
+          },
+          {
+            type: "script",
+            lang: "js",
+            isMain: true,
+          },
+        ]);
+      });
+
+      it("more than 2 scripts should have the last", () => {
+        const source = `<script></script><script setup>const a = {}</script><script>const b = {}</script>`;
+        const parsed = parser(source);
+
+        expect(parsed.s.toString()).toContain(source);
+
+        expect(parsed.blocks).toMatchObject([
+          {
+            type: "script",
+            lang: "js",
+            isMain: false,
+          },
+          {
+            type: "script",
+            lang: "js",
+            isMain: true,
+          },
+        ]);
+      });
+    });
+  });
+});

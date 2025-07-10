@@ -1,7 +1,8 @@
 // import { readFileSync } from "fs";
 import type tsModule from "typescript/lib/tsserverlibrary";
-import { createBuilder, mergeFull } from "@verter/core";
+// import { createBuilder, mergeFull } from "@verter/core";
 import { dirname, resolve, basename } from "node:path";
+import { parser, ParserResult } from "@verter/core";
 
 // export const getDtsSnapshot = (
 //   ts: typeof tsModule,
@@ -61,9 +62,7 @@ export const parseFile = (
 ) => {
   logger.info(`[Verter] parsing ${fileName}`);
 
-  const builder = createBuilder({});
-  const compiler = importVueCompiler(fileName)!;
-  const parsed = compiler.parse(content, {
+  const context = parser(content, basename(fileName), {
     filename: basename(fileName),
     sourceMap: true,
     ignoreEmpty: false,
@@ -72,10 +71,24 @@ export const parseFile = (
     },
   });
 
-  const { locations, context } = builder.fromCompiled(parsed);
-  const result = mergeFull(locations, context);
+  console.log("parsed", context);
 
-  return result.content;
+  // const builder = createBuilder({});
+  // const compiler = importVueCompiler(fileName)!;
+  // const parsed = compiler.parse(content, {
+  //   filename: basename(fileName),
+  //   sourceMap: true,
+  //   ignoreEmpty: false,
+  //   templateParseOptions: {
+  //     parseMode: "sfc",
+  //   },
+  // });
+
+  // const { locations, context } = builder.fromCompiled(parsed);
+  // const result = mergeFull(locations, context);
+
+  logger.msg("parsed context", "Err");
+  return "export default { foo: 1 }";
   // const p = builder.preProcess(fileName, content);
 
   // const merged = mergeFull(p.locations, p.context);

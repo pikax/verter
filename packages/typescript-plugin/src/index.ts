@@ -94,7 +94,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
             );
             if (resolvedModule) return resolvedModule;
           } catch (e) {
-              // @ts-expect-error
+            // @ts-expect-error
             logger.msg(e.toString(), "Err");
             return resolvedModules[index];
           }

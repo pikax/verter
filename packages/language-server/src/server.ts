@@ -1,36 +1,46 @@
-import lsp, {
-  LocationLink,
-  ProposedFeatures,
-  Range,
-  TextDocumentSyncKind,
+import {
+  CompletionItem,
+  CompletionItemKind,
+  CompletionTriggerKind,
+  Connection,
   createConnection,
+  DefinitionLink,
+  InsertTextFormat,
+  ProposedFeatures,
+  TextDocumentSyncKind,
+  WorkspaceFolder,
 } from "vscode-languageserver/node";
-import { RequestType, patchClient } from "@verter/language-shared";
-import logger from "./logger";
-import { DocumentManager } from "./v2/lib/documents/manager";
-import { VueDocument } from "./v2/lib/documents/document";
+import { DocumentManager } from "./v5/documents/manager/manager";
+import { VerterManager } from "./v5/documents/verter/manager";
+import {
+  isVueDocument,
+  isVueFile,
+  isVueSubDocument,
+  uriToPath,
+  VerterDocument,
+  VueDocument,
+} from "./v5/documents";
 import {
   formatQuickInfo,
-  getTypescriptService,
   itemToMarkdown,
   mapCompletion,
+  mapDefinitionInfo,
   mapDiagnostic,
-} from "./v2/lib/plugins/typescript";
-// import { uriToFilePath } from "vscode-languageserver/lib/node/files";
+} from "./v5/helpers";
+import ts, { CompletionsTriggerCharacter } from "typescript";
 
-import { uriToVerterVirtual, urlToFileUri } from "./v2/lib/documents/utils";
-import ts, {
-  Diagnostic,
-  DiagnosticWithLocation,
-  GetCompletionsAtPositionOptions,
-} from "typescript";
-import { uniqueArray } from "./utils";
+import { patchClient, RequestType } from "@verter/language-shared";
+import { VueSubDocument } from "./v5/documents/verter/vue/sub/sub";
+import {
+  VueBundleDocument,
+  VueStyleDocument,
+} from "./v5/documents/verter/vue/sub";
 
 export interface LsConnectionOption {
   /**
    * The connection to use. If not provided, a new connection will be created.
    */
-  connection?: lsp.Connection;
+  connection?: Connection;
 
   logErrorsOnly?: boolean;
 }
@@ -48,21 +58,26 @@ export function startServer(options: LsConnectionOption = {}) {
       // );
     }
   }
-  const connection = patchClient(originalConnection!);
+  //   const connection = patchClient(originalConnection!);
 
-  if (options?.logErrorsOnly !== undefined) {
-    logger.setLogErrorsOnly(options.logErrorsOnly);
-  }
+  //   if (options?.logErrorsOnly !== undefined) {
+  //     logger.setLogErrorsOnly(options.logErrorsOnly);
+  //   }
+  const connection = originalConnection;
+
+  const patchedConnection = patchClient(connection);
 
   const documentManager = new DocumentManager();
-  const tsService = getTypescriptService(process.cwd(), documentManager);
+  const verterManager = new VerterManager(documentManager);
 
-  connection.onInitialize((params): any => {
+  connection.onInitialize((params) => {
+    verterManager.init(params);
     return {
       capabilities: {
         textDocumentSync: {
           openClose: true,
-          change: TextDocumentSyncKind.Incremental,
+          change: TextDocumentSyncKind.Full,
+          // change: TextDocumentSyncKind.Incremental,
           save: {
             includeText: false,
           },
@@ -74,342 +89,289 @@ export function startServer(options: LsConnectionOption = {}) {
           completionItem: {
             labelDetailsSupport: true,
           },
-          triggerCharacters: [".", "@", "<"],
+          triggerCharacters: [".", "@", "<", ":", " "],
+        },
+
+        definitionProvider: true,
+        hoverProvider: true,
+        diagnosticProvider: {
+          documentSelector: "*.vue",
+          interFileDependencies: true,
+          workspaceDiagnostics: false,
         },
         referencesProvider: true,
         typeDefinitionProvider: true,
-        hoverProvider: true,
-        diagnosticProvider: true,
         declarationProvider: true,
-        definitionProvider: true,
-        // // inlayHintProvider: true,
+        workspace: {
+          //   fileOperations: {},
+          workspaceFolders: {
+            supported: true,
+            changeNotifications: true,
+          },
+          fileOperations: {
+            // didCreate: { filters: ["*"] },
+            // didDelete: { filters: ["*"] },
+            didCreate: {
+              filters: [{ pattern: { glob: "*" } }],
+            },
+            didDelete: [{ pattern: { glob: "*" } }],
+          },
+        },
         renameProvider: true,
       },
     };
   });
 
-  connection.onRequest(RequestType.GetCompiledCode, (uri): any => {
+  connection.onDefinition((params) => {
+    console.log("defintiona doc", params.textDocument);
+    const uri = params.textDocument.uri;
+
     const doc = documentManager.getDocument(uri);
+    if (!doc || !isVueDocument(doc)) {
+      return undefined;
+    }
+    const tsService = verterManager.getTsService(uri);
 
-    if (doc?.languageId === "vue") {
-      const vueDoc = doc as VueDocument;
-
-      return {
-        js: {
-          code: vueDoc.template.content,
-          map: vueDoc.template.map,
-        },
-        css: {
-          code: "",
-          map: "",
-        },
-      };
+    if (!tsService) {
+      return undefined;
     }
 
-    return {
-      js: {
-        code: doc?.getText() ?? "",
-        map: "",
-      },
-      css: {
-        code: "",
-        map: "",
-      },
-    };
+    const docs = doc.docsForPos(params.position);
+
+    let definitions: Array<DefinitionLink & { key: string }> = [];
+
+    // const rrr = docs.flatMap(
+    //   (x) => tsService.getDefinitionAtPosition(x.doc.uri, x.offset) ?? []
+    // );
+
+    // const definitions = rrr.map((x) => {
+    //   return mapDefinitionInfo(x, documentManager, true);
+    // });
+
+    for (const d of docs) {
+      if (d.doc instanceof VueStyleDocument) {
+        const r = d.doc.languageService.doValidation(d.doc, d.doc.stylesheet, {
+          hover: {},
+        });
+
+        console.log("ddd", r);
+      } else {
+        for (const x of tsService.getDefinitionAtPosition(
+          d.doc.uri,
+          d.offset
+        ) ?? []) {
+          const r = mapDefinitionInfo(x, documentManager, true);
+          if (!r) continue;
+          definitions.push(r);
+        }
+      }
+    }
+
+    return definitions;
   });
 
   connection.onHover((params) => {
-    if (!params.textDocument.uri.endsWith(".vue")) return null;
-    const doc = documentManager.getDocument<true>(params.textDocument.uri);
-    if (!doc) {
-      console.log("doc does not exist", params.textDocument.uri);
-      return null;
+    const start = performance.now();
+    console.log("doc hover", params.textDocument);
+    const uri = params.textDocument.uri;
+
+    const doc = documentManager.getDocument(uri);
+    if (!doc || !isVueDocument(doc)) {
+      return undefined;
+    }
+    const tsService = verterManager.getTsService(uri);
+    if (!tsService) {
+      return undefined;
     }
 
-    const offset = doc.parsedOffsetFromPosition(params.position);
-    const filepath = uriToVerterVirtual(params.textDocument.uri);
-    const quickInfo = tsService.getQuickInfoAtPosition(filepath, offset);
-    if (!quickInfo) {
-      return null;
-    }
-    return formatQuickInfo(quickInfo, doc);
-  });
-
-  connection.onReferences((params): any => {
-    if (!params.textDocument.uri.endsWith(".vue")) return null;
-    const doc = documentManager.getDocument<true>(params.textDocument.uri);
-    if (!doc) {
-      console.log("doc does not exist", params.textDocument.uri);
-      return null;
-    }
-
-    const offset = doc.parsedOffsetFromPosition(params.position);
-    const filepath = uriToVerterVirtual(params.textDocument.uri);
-    const references = tsService.getReferencesAtPosition(filepath, offset);
-    if (!references) {
-      return null;
-    }
-    return references;
-  });
-
-  connection.onTypeDefinition((params): any => {
-    if (!params.textDocument.uri.endsWith(".vue")) return null;
-    const doc = documentManager.getDocument<true>(params.textDocument.uri);
-    if (!doc) {
-      console.log("doc does not exist", params.textDocument.uri);
-      return null;
-    }
-
-    const offset = doc.parsedOffsetFromPosition(params.position);
-    const filepath = uriToVerterVirtual(params.textDocument.uri);
-    const definition = tsService.getTypeDefinitionAtPosition(filepath, offset);
-    if (!definition) {
-      return null;
-    }
-
-    return definition.map((x) => {
-      const doc = documentManager.getDocument(x.fileName);
-      if (!doc || doc.languageId !== "vue") {
-        const start = tsService.toLineColumnOffset!(
-          x.fileName,
-          x.textSpan.start
-        );
-        const end = tsService.toLineColumnOffset!(
-          x.fileName,
-          x.textSpan.start + x.textSpan.length
-        );
-
-        const contextStart = tsService.toLineColumnOffset!(
-          x.fileName,
-          x.contextSpan!.start
-        );
-        const contextEnd = tsService.toLineColumnOffset!(
-          x.fileName,
-          x.contextSpan!.start + x.contextSpan!.length
-        );
-
-        try {
-          return LocationLink.create(
-            urlToFileUri(x.fileName),
-            Range.create(start, end),
-            Range.create(contextStart, contextEnd)
-          );
-        } catch (e) {
-          console.error(e);
-          debugger;
-          return x;
-        }
-      }
-      const file = urlToFileUri(x.fileName)!;
-
-      let contextSpan: Range | undefined = undefined;
-      if (x.contextSpan) {
-        const startPos = doc.originalPosition(x.contextSpan.start);
-        const endPos = doc.originalPosition(
-          x.contextSpan.start + x.contextSpan.length
-        );
-        try {
-          contextSpan = Range.create(startPos, endPos);
-        } catch (e) {
-          console.error(e);
-          debugger;
-        }
-      }
-
-      try {
-        const textSpan = Range.create(
-          doc.originalPosition(x.textSpan.start),
-          doc.originalPosition(x.textSpan.start + x.textSpan.length)
-        );
-
-        return LocationLink.create(file, contextSpan ?? textSpan, textSpan);
-      } catch (e) {
-        console.error(e);
-        debugger;
-      }
-
-      return x;
-    });
-  });
-  connection.onDefinition((params): any => {
-    if (!params.textDocument.uri.endsWith(".vue")) return null;
-    const doc = documentManager.getDocument<true>(params.textDocument.uri);
-    if (!doc) {
-      console.log("doc does not exist", params.textDocument.uri);
-      return null;
-    }
-
-    const offset = doc.parsedOffsetFromPosition(params.position);
-    const filepath = uriToVerterVirtual(params.textDocument.uri);
-    const definition = tsService.getDefinitionAtPosition(filepath, offset);
-    console.log("def", definition);
-    if (!definition) {
-      return null;
-    }
-    return uniqueArray(
-      definition.map((x) => {
-        const doc = documentManager.getDocument(x.fileName);
-        if (!doc || doc.languageId !== "vue") {
-          console.log("geting defineiciton", doc?.virtualUri, x);
-          const start = tsService.toLineColumnOffset!(
-            x.fileName,
-            x.textSpan.start
-          );
-          const end = tsService.toLineColumnOffset!(
-            x.fileName,
-            x.textSpan.start + x.textSpan.length
-          );
-
-          let contextRange: Range | undefined = undefined;
-
-          if (x.contextSpan) {
-            const contextStart = tsService.toLineColumnOffset!(
-              x.fileName,
-              x.contextSpan.start
-            );
-            const contextEnd = tsService.toLineColumnOffset!(
-              x.fileName,
-              x.contextSpan.start + x.contextSpan!.length
-            );
-
-            console.log(
-              "resolved context start end ",
-              contextStart,
-              contextEnd
-            );
-
-            contextRange = Range.create(contextStart, contextEnd);
-          }
-
-          try {
-            const range = Range.create(start, end);
-            return LocationLink.create(
-              urlToFileUri(x.fileName),
-              range,
-              contextRange ?? range
-            );
-          } catch (e) {
-            console.error(e);
-            debugger;
-            return x;
-          }
-        }
-        const file = urlToFileUri(x.fileName)!;
-
-        let contextSpan: Range | undefined = undefined;
-        if (x.contextSpan) {
-          console.log("context span", x.contextSpan);
-          const startPos = doc.originalPosition(x.contextSpan.start);
-          const endPos = doc.originalPosition(
-            x.contextSpan.start + x.contextSpan.length
-          );
-          console.log("resovled ", startPos, endPos);
-          try {
-            if (startPos.line >= 0 && endPos.line >= 0) {
-              contextSpan = Range.create(startPos, endPos);
-            }
-          } catch (e) {
-            console.error(e);
-            debugger;
-          }
-        }
-
-        try {
-          console.log("textSpan", x.textSpan);
-
-          const startPos = doc.originalPosition(x.textSpan.start);
-          const endPos = doc.originalPosition(
-            x.textSpan.start + x.textSpan.length
-          );
-          console.log("rsolving with ", startPos, endPos);
-
-          if (startPos.line >= 0 && endPos.line >= 0) {
-            const textSpan = Range.create(startPos, endPos);
-
-            console.log("resolved ", file, textSpan);
-
-            return LocationLink.create(file, contextSpan ?? textSpan, textSpan);
-          } else {
-            const range = Range.create(
-              { character: 0, line: 1 },
-              { character: 0, line: 1 }
-            );
-
-            console.log("textSpan not found"), file, x.textSpan;
-            return LocationLink.create(file, range, range);
-          }
-        } catch (e) {
-          console.error(e);
-          debugger;
-        }
-
-        return x;
-      })
-    );
-  });
-
-  connection.onCompletion((params): any => {
-    if (!params.textDocument.uri.endsWith(".vue")) return null;
-
-    const document = documentManager.getDocument<true>(params.textDocument.uri);
-
-    if (!document) return null;
-
-    const offset = document.parsedOffsetFromPosition(params.position);
+    const docs = doc.docsForPos(params.position);
 
     try {
-      const results = tsService.getCompletionsAtPosition(
-        document._virtualUri,
-        offset,
-        {
-          triggerKind: params.context?.triggerKind,
-          triggerCharacter:
-            params.context?.triggerCharacter === "@"
-              ? ""
-              : params.context?.triggerCharacter,
+      let anyResult = undefined as
+        | ReturnType<typeof formatQuickInfo>
+        | undefined;
+      const quickInfo = docs
+        .flatMap(({ doc, offset }) => {
+          const ss = performance.now();
 
-          includeSymbol: true,
-          includeAutomaticOptionalChainCompletions: true,
-          jsxAttributeCompletionStyle: "auto",
-          importModuleSpecifierEnding: "auto",
-          disableSuggestions: true,
-        } as GetCompletionsAtPositionOptions
-      );
+          switch (doc.languageId) {
+            case "css":
+            case "scss":
+            case "less":
+            case "sass": {
+              if (doc instanceof VueStyleDocument) {
+                const pos = doc.toGeneratedPosition(params.position);
 
-      console.log("rrr", results);
+                return doc.languageService.doHover(doc, pos, doc.stylesheet);
+              }
+              break;
+            }
+            default: {
+              const qq = tsService.getQuickInfoAtPosition(doc.uri, offset);
+              console.log("quickinfo", performance.now() - ss, doc.uri);
+              if (qq) {
+                if (qq.kind) {
+                  return formatQuickInfo(qq, doc);
+                } else if (!anyResult) {
+                  anyResult = formatQuickInfo(qq, doc);
+                }
+              }
+            }
+          }
+        })
+        .find((x) => !!x);
 
-      if (results) {
-        return {
-          isIncomplete: results.isIncomplete,
-          items: results.entries.map((x) =>
-            mapCompletion(x, {
-              virtualUrl: document._virtualUri,
-              index: offset,
-              triggerKind: params.context?.triggerKind,
-              triggerCharacter: params.context?.triggerCharacter,
-            })
-          ),
-        };
+      console.log("completed at", performance.now() - start);
+      return quickInfo ?? anyResult;
+    } catch (e) {
+      console.error("hover", e);
+      return undefined;
+    }
+  });
+
+  connection.onCompletion(async (params) => {
+    try {
+      console.log("oncompletion doc", params.textDocument);
+      const uri = params.textDocument.uri;
+
+      const doc = documentManager.getDocument(uri);
+      if (!doc || !isVueDocument(doc)) {
+        return undefined;
       }
 
-      return results;
-    } catch (e) {
-      console.error("eeee", e);
-    }
+      const subDocs = doc.docsForPos(params.position);
 
-    return {
-      isIncomplete: false,
-      items: [],
-    };
+      const items = [] as CompletionItem[];
+
+      for (const d of subDocs) {
+        const offset = d.offset;
+
+        switch (d.doc.languageId) {
+          case "css":
+          case "scss":
+          case "less":
+          case "sass": {
+            // const s = d as unknown as VueStyleDocument;
+
+            if (!(d.doc instanceof VueStyleDocument)) {
+              console.error("not a valid style document");
+              continue;
+            }
+
+            const pos = d.doc.toGeneratedPosition(params.position);
+
+            const r = await d.doc.languageService.doComplete2(
+              d.doc,
+              pos,
+              d.doc.stylesheet,
+              {
+                resolveReference: (_ref, _base) => {
+                  return undefined; // todo: implement
+                },
+              }
+            );
+
+            console.log("resoilved", r);
+
+            items.push(...r.items);
+
+            break;
+          }
+          case "tsx":
+          case "ts":
+          case "js":
+          case "jsx":
+            const tsService = verterManager.getTsService(d.doc.uri);
+            if (!tsService) {
+              continue;
+            }
+            const completions = tsService.getCompletionsAtPosition(
+              d.doc.uri,
+              offset,
+              {
+                triggerKind: params.context?.triggerKind,
+                triggerCharacter:
+                  params.context?.triggerCharacter === "@"
+                    ? " "
+                    : (params.context
+                        ?.triggerCharacter as CompletionsTriggerCharacter),
+
+                // includeSymbol: true,
+                includeAutomaticOptionalChainCompletions: true,
+                jsxAttributeCompletionStyle: "auto",
+                // importModuleSpecifierEnding: "auto",
+                // disableSuggestions: true,
+                // allowIncompleteCompletions: true,
+              }
+            );
+            if (completions) {
+              items.push(
+                ...completions.entries
+                  // TODO improve filter
+                  .filter((x) => !x.name.startsWith("___VERTER___"))
+                  .map((x) =>
+                    mapCompletion(x, {
+                      virtualUrl: d.doc.uri,
+                      index: offset,
+                      triggerKind: params.context?.triggerKind,
+                      triggerCharacter: params.context?.triggerCharacter,
+                    })
+                  )
+              );
+            }
+        }
+      }
+
+      console.log("found docs", subDocs);
+
+      const cssProp = items.find(
+        (x) => x.kind === CompletionItemKind.Function && x.label === "var()"
+      );
+      if (cssProp) {
+        items.push({
+          ...(cssProp ?? {}),
+          label: "[WIP]v-bind() ",
+          kind: CompletionItemKind.Function,
+          insertTextFormat: InsertTextFormat.Snippet, // Use snippet format for dynamic arguments
+          insertText: "v-bind(${1|foo,bar,baz|})", // Add options as a snippet
+          textEdit: cssProp?.textEdit
+            ? "insert" in cssProp?.textEdit
+              ? {
+                  newText: "v-bind(${1|foo,bar,baz|})", // Ensure the snippet matches the insert text
+                  insert: cssProp?.textEdit.insert,
+                  replace: cssProp?.textEdit.replace,
+                }
+              : cssProp?.textEdit
+            : undefined,
+          documentation: {
+            kind: "markdown",
+            value:
+              "A Vue directive for binding dynamic values.\n\nArguments:\n- `foo`: Description of foo.\n- `bar`: Description of bar.\n- `baz`: Description of baz.",
+          },
+        });
+      }
+
+      return {
+        isIncomplete: false,
+        items,
+      };
+    } catch (e) {
+      console.error("failed onCompletion", e);
+    }
   });
 
   connection.onCompletionResolve((item) => {
+    if (!item.data) {
+      return item;
+    }
     const data: {
       virtualUrl: string;
       index: number;
-      triggerKind: lsp.CompletionTriggerKind | undefined;
+      triggerKind: CompletionTriggerKind | undefined;
       triggerCharacter: string | undefined;
     } = item.data ?? {};
+
+    const tsService = verterManager.getTsService(data.virtualUrl);
 
     const label = item.label.startsWith("@")
       ? `on${item.label[1].toLocaleUpperCase()}${item.label.slice(2)}`
@@ -434,80 +396,138 @@ export function startServer(options: LsConnectionOption = {}) {
     return item;
   });
 
-  // @ts-ignore
   connection.onRequest("textDocument/diagnostic", async (params) => {
-    // @ts-ignore
-    const doc = documentManager.getDocument(params.textDocument.uri);
-    if (doc) {
-      const diagnostics = await sendDiagnostics(doc);
-      return diagnostics;
+    const document = documentManager.getDocument(params.textDocument.uri);
+    if (!document || !isVueDocument(document)) {
+      return;
     }
-    // @ts-ignore
-    throw new Error(`No document found for URI ${params.textDocument.uri}`);
+    sendDiagnostics(document);
   });
 
-  async function sendDiagnostics(document: VueDocument) {
-    if (document.languageId !== "vue") return;
-
-    try {
-      const filename = document.virtualUri;
-
-      let syntacticDiagnostics: DiagnosticWithLocation[] = [];
-      try {
-        syntacticDiagnostics = tsService.getSyntacticDiagnostics(filename);
-      } catch (e) {
-        console.error("syntacticDiagnostics", e);
-      }
-      let semanticDiagnostics: Diagnostic[] = [];
-      try {
-        semanticDiagnostics = tsService.getSemanticDiagnostics(filename);
-      } catch (e) {
-        console.error("semanticDiagnostics", e);
-      }
-      let suggestionDiagnostics: DiagnosticWithLocation[] = [];
-      try {
-        suggestionDiagnostics = tsService.getSuggestionDiagnostics(filename);
-      } catch (e) {
-        console.error("tsService.getSuggestionDiagnostics", e);
-      }
-
-      const allDiagnostics = [
-        ...syntacticDiagnostics,
-        ...semanticDiagnostics,
-        ...suggestionDiagnostics,
-      ]
-        .map((x) => mapDiagnostic(x, document))
-        .filter(Boolean);
-
-      await connection.sendDiagnostics({
-        uri: document.uri,
-        diagnostics: allDiagnostics,
-        version: document.version,
-      });
-      return allDiagnostics;
-    } catch (e) {
-      console.error(e);
-      debugger;
+  connection.onDidOpenTextDocument((params) => {
+    const doc = documentManager.getDocument(params.textDocument.uri);
+    if (!doc) {
+      return;
     }
+    if (isVueDocument(doc)) {
+      sendDiagnostics(doc);
+    }
+  });
+
+  function sendDiagnostics(document: VueDocument) {
+    if (!isVueDocument(document)) return;
+
+    console.time("sendDiagnostics");
+    const tsService = verterManager.getTsService(document.uri);
+    if (!tsService) {
+      return;
+    }
+
+    function getDiagnostics(doc: VueSubDocument) {
+      if (doc instanceof VueStyleDocument) {
+        return doc.languageService.doValidation(doc, doc.stylesheet, {
+          validate: true,
+        });
+      }
+
+      const diagnostics = [
+        ...tsService.getSemanticDiagnostics(doc.uri),
+        ...tsService.getSyntacticDiagnostics(doc.uri),
+        ...tsService.getSuggestionDiagnostics(doc.uri),
+      ];
+      return diagnostics.map((x) => mapDiagnostic(x, doc));
+    }
+
+    const diagnostics = document.docs
+      .filter(
+        (x) =>
+          (x.languageId === "ts" || x.languageId === "tsx") &&
+          !(x instanceof VueBundleDocument)
+      )
+      .flatMap((x) => {
+        return getDiagnostics(x);
+      })
+      .filter((x) => !!x);
+
+    connection.sendDiagnostics({
+      uri: document.uri,
+      diagnostics,
+      version: document.version,
+    });
   }
 
-  documentManager._textDocuments.onDidOpen((params) => {
-    const doc = documentManager.getDocument(params.document.uri);
+  // connection.onRequest("$/getCompiledCode", async (params) => {
+  patchedConnection.onRequest(RequestType.GetCompiledCode, async (params) => {
+    const doc = documentManager.getDocument(params);
 
-    if (!doc) return;
-    if (doc.version !== params.document.version) {
-      doc.overrideDoc(params.document);
+    if (!doc || !isVueDocument(doc)) {
+      return null;
     }
-    sendDiagnostics(doc);
+
+    const ts = verterManager.getTsService(doc.uri);
+
+    const h = ts._host;
+
+    let s = "";
+    if (h) {
+      s = JSON.stringify(h.getCompilationSettings());
+    }
+
+    return {
+      js: {
+        code:
+          "// " +
+          s +
+          "\n" +
+          doc.docs
+            .map(
+              (x) => `// start ${x.uri}\n
+${x.getText()}
+//# sourceMappingURL=${x.sourceMapURL()}
+
+//end ${x.uri}\n`
+            )
+            .join("\n//-----\n"),
+        map: "map",
+      },
+      css: {
+        code: "code",
+        map: "map",
+      },
+    };
   });
 
-  documentManager._textDocuments.onDidClose((params) => {
-    const doc = documentManager.getDocument(params.document.uri);
-    if (!doc) return;
-    sendDiagnostics(doc);
-  });
+  // patchedConnection.onNotification(
+  //   NotificationType.OnFileChanged,
+  //   async (params) => {
+  //     params.type;
+  //     params.uri;
 
-  documentManager.listen(originalConnection);
+  //     // TODO check why this is called here very odd
+  //     if ("changes" in params) {
+  //       console.log("applyed partial change", params);
+  //       // documentManager.applyFileChanges(params.uri, params.changes as any);
+  //     } else {
+  //       console.log("file changed", params);
+  //       documentManager.handleFileChange(params.uri, params.type);
+  //     }
+
+  //     // documentManager.handleFileChange(params.uri, params.type);
+  //   }
+  // );
+
+  // patchedConnection.onNotification(
+  //   NotificationType.OnDidChangeTsOrJsFile,
+  //   async (params) => {
+  //     params.changes;
+  //     params.uri;
+
+  //     documentManager.applyFileChanges(params.uri, params.changes);
+  //     console.log("file changedXX", params);
+  //   }
+  // );
+
+  documentManager.listen(connection);
   connection.listen();
 }
 

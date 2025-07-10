@@ -35,7 +35,10 @@ export function createNotificationHelper<T extends GenericNotificationHelper>(
 
 export enum NotificationType {
   OnDidChangeTsOrJsFile = "$/onDidChangeTsOrJsFile",
+  OnFileChanged = "$/onFileChanged",
 }
+
+export type FileNotificationChange = "create" | "update" | "delete";
 
 export type NotificationParams = {
   [NotificationType.OnDidChangeTsOrJsFile]: {
@@ -53,5 +56,9 @@ export type NotificationParams = {
         };
       };
     }>;
+  };
+  [NotificationType.OnFileChanged]: {
+    uri: string;
+    type: FileNotificationChange;
   };
 };

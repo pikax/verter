@@ -1,0 +1,107 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`bench parser sanity tests > simple > new 1`] = `
+"<template>
+<div> { ___VERTER___ctx.foo } </div>
+</template>
+<script lang="ts">
+</script>"
+`;
+
+exports[`bench parser sanity tests > simple > old 1`] = `
+"import 'vue/jsx';
+  // import { defineComponent as ___VERTER___defineComponent, ShallowUnwrapRef as ___VERTER___ShallowUnwrapRef } from "vue";
+  import { renderList as ___VERTER___renderList,normalizeClass as ___VERTER___normalizeClass,normalizeStyle as ___VERTER___normalizeStyle,defineComponent as ___VERTER___defineComponent,type ShallowUnwrapRef as ___VERTER___ShallowUnwrapRef,type GlobalComponents as ___VERTER___GlobalComponents,type ComponentPublicInstance as ___VERTER___ComponentPublicInstance,type Ref as ___VERTER___Ref,type IntrinsicElementAttributes as ___VERTER___IntrinsicElementAttributes,type Component as ___VERTER___VueComponent } from "vue";
+  import { ___VERTER___default } from "test.options.ts";
+  
+  import type {Suspense as ___VERTER___Suspense,KeepAlive as ___VERTER___KeepAlive,Transition as ___VERTER___Transition,TransitionGroup as ___VERTER___TransitionGroup,Teleport as ___VERTER___Teleport } from "vue";
+declare module 'vue' {
+    interface GlobalComponents {
+  Suspense: typeof ___VERTER___Suspense;
+KeepAlive: typeof ___VERTER___KeepAlive;
+Transition: typeof ___VERTER___Transition;
+TransitionGroup: typeof ___VERTER___TransitionGroup;
+Teleport: typeof ___VERTER___Teleport;
+    }
+  
+    interface HTMLAttributes {
+      'v-slot'?: {
+        default: () => JSX.Element
+      }
+    }
+  }
+  
+  // patching elements
+  declare global {
+    namespace JSX {
+      export interface IntrinsicClassAttributes<T> {
+        'v-slot'?: (T extends { $slots: infer S } ? S : undefined) | ((c: T) => T extends { $slots: infer S } ? S : undefined)
+      }
+    }
+  }
+    
+  declare function ___VERTER_renderSlot<T extends Array<any>>(slot: (...args: T) => any, cb: (...cb: T) => any): void;
+  declare function ___VERTER___template(): JSX.Element;
+  
+  type ___VERTER___OmitNever<T> = {
+      [K in keyof T as T[K] extends never ? never : K]: T[K];
+  };
+  
+  type ___VERTER___ExtractComponent<T> = T extends ___VERTER___Ref<infer V>
+    ? ___VERTER___ExtractComponent<V>
+    : T extends ___VERTER___VueComponent<infer Props>
+    ? T & { new(): { $props: Props & import('vue').VNode['props'] } }
+    : T extends keyof ___VERTER___IntrinsicElementAttributes
+    ? { new (): { $props: ___VERTER___IntrinsicElementAttributes[T] } }
+    : never;
+  
+  type ___VERTER___ExtractRenderComponents<T> = ___VERTER___OmitNever<{
+    [K in keyof Omit<T, keyof ___VERTER___ComponentPublicInstance>]: ___VERTER___ExtractComponent<T[K]>;
+  }> & ___VERTER___GlobalComponents & {};
+  
+  
+
+  declare function ___VERTER___isConstructor<T extends { new(): Record<string, any> }>(o: T | unknown): true;
+  type ___VERTER___UnionToIntersection<U> =
+    (U extends any ? (x: U) => void : never) extends ((x: infer I) => void) ? I : never;
+  declare function ___VERTER___ExtractInstance<T>(o: T): T extends { new(): infer P } ? P : never;
+  
+  // Helper to retrieve slots definitions
+  declare function ___VERTER_extract_Slots<CompSlots>(comp: { new(): { $slots: CompSlots } }, slots?: undefined): CompSlots;
+  declare function ___VERTER_extract_Slots<CompSlots, Slots extends Record<string, any> = {}>(comp: { new(): { $slots: CompSlots } }, slots: Slots): Slots;
+  
+  declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb: ((...args: T[]) => any))=>void;
+  declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event: TArgs[0],) => any>(event: TArgs, cb: R): R;
+  declare function ___VERTER___AssertAny<T>(o: T): T extends T & 0 ? never : T;
+  declare function ___VERTER___SLOT_TO_COMPONENT<T>(o: T): T extends T & 0 ? never : [T] extends [{ [K in string]: {} }] ? (arg: T) => JSX.Element : [T] extends [(...args: infer A) => any] ? (scope: A[0]) => JSX.Element : T;
+  
+export function ___VERTER___Render() {
+
+  const ___VERTER___Options = ___VERTER___default;
+  const ___VERTER___Component = ___VERTER___ExtractInstance(___VERTER___Options)
+  
+  const ___VERTER___ctx = {
+      ...___VERTER___Component,
+      // TODO handle components
+  }
+  
+  const ___VERTER___ctx.$slots = ___VERTER___Component.$slots;
+  
+  const ___VERTER___comp =  {
+    // ...({} as { [K in keyof JSX.IntrinsicElements]: { new(): { $props: JSX.IntrinsicElements[K] } } }),
+    ...({} as ___VERTER___ExtractRenderComponents<typeof ___VERTER___ctx>),
+    // ...({} as ___VERTER___GlobalComponents),
+    // ...___VERTER___ctx
+  }
+  
+return <>
+
+<div> { ___VERTER___ctx.foo } </div>
+
+</>
+}
+
+"
+`;
+
+exports[`bench parser sanity tests > test file > new 1`] = `undefined`;

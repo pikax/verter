@@ -22,34 +22,31 @@
   "author": "Carlos Rodrigues <pikax>",
   "license": "MIT",
   "dependencies": {
-    "@types/lodash": "^4.17.0",
-    "@types/vscode": "^1.88.0",
+    "@types/lodash": "^4.17.20",
+    "@types/vscode": "^1.101.0",
     "@verter/language-server": "workspace:^",
     "@verter/language-shared": "workspace:^",
+    "@verter/oxc-bindings": "workspace:^",
     "@verter/typescript-plugin": "workspace:^",
-    "brace-expansion": "^4.0.0",
+    "brace-expansion": "^4.0.1",
     "lodash": "^4.17.21",
-    "minimatch": "^9.0.4",
-    "vscode-jsonrpc": "^8.2.0",
+    "minimatch": "^10.0.3",
+    "vscode-jsonrpc": "^8.2.1",
     "vscode-languageclient": "^9.0.1",
     "vscode-languageserver-protocol": "^3.17.5",
     "vscode-languageserver-types": "^3.17.5"
   },
   "devDependencies": {
-    "@vscode/vsce": "^2.25.0",
-    "vite": "^5.2.8",
-    "typescript": "^5.4.5"
+    "@vscode/vsce": "^3.6.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.2"
   },
-  "files": [
-    "dist",
-    "node_modules"
-  ],
   "vsce": {
-    "dependencies": false,
+    "dependencies": true,
     "yarn": false
   },
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.90.0"
   },
   "categories": [
     "Programming Languages"
@@ -62,6 +59,7 @@
     "onLanguage:typescriptreact",
     "onLanguage:javascriptreact"
   ],
+  "publisher": "pikax",
   "contributes": {
     "configuration": {
       "type": "object",
@@ -193,16 +191,16 @@
     ],
     "commands": [
       {
-        "command": "verter.helloWorld",
-        "title": "Hello World"
-      },
-      {
         "command": "verter.restartLanguageServer",
         "title": "Verter: Restart Language Server"
       },
       {
-        "command": "veter.showCompiledCodeToSide",
+        "command": "verter.showCompiledCodeToSide",
         "title": "Verter: Show compiled Code to Side"
+      },
+      {
+        "command": "verter.writeVirtualFiles",
+        "title": "Verter: Write Virtual Files for File"
       }
     ]
   }

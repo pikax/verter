@@ -54,6 +54,45 @@
         "${workspaceRoot}/packages/language-shared/dist/**/*.js"
       ],
       "autoAttachChildProcesses": true
-    }
-  ]
-}
+    },
+
+    {
+      "type": "extensionHost",
+      "request": "launch",
+      "name": "Launch Working Client Not attached",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceRoot}/packages/vue-vscode"
+      ],
+      "outFiles": [
+        "${workspaceRoot}/packages/vue-vscode/dist/**/*.js",
+        "${workspaceRoot}/packages/core/dist/**/*.js",
+        "${workspaceRoot}/packages/typescript-plugin/dist/**/*.js",
+        "${workspaceRoot}/packages/language-server/dist/**/*.js",
+        "${workspaceRoot}/packages/language-shared/dist/**/*.js"
+      ],
+      "autoAttachChildProcesses": false
+    },
+    
+    {
+      "type": "extensionHost",
+      "request": "launch",
+      "name": "Launch Client Prod",
+      "runtimeExecutable": "${execPath}",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceRoot}/extensions/vscode",
+
+        "--disable-extensions"
+        // "--extensionDevelopmentPath=${workspaceRoot}/extensions/vscode-vue",
+        // "--extensionDevelopmentPath=${workspaceRoot}/extensions/vscode-vue-language-features",
+        // "${workspaceRoot}/samples/vue3/typescript-diagnostics"
+      ],
+      "outFiles": [
+        "${workspaceRoot}/extensions/vscode/dist/**/*.js",
+      "autoAttachChildProcesses": true
+      //   "preLaunchTask": {
+      //     "type": "npm",
+      //     "script": "dev-extension"
+      //   }
+    },
+  ],}

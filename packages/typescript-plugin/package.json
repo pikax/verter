@@ -2,21 +2,22 @@
   "name": "@verter/typescript-plugin",
   "version": "1.0.0",
   "description": "Vue TypeScript Plugin powered by Verter",
-  "main": "dist/typescript-plugin.js",
-  "module": "dist/typescript-plugin.mjs",
+  "main": "dist/index.js",
   "keywords": [],
   "author": "Carlos Rodrigues <pikax>",
   "license": "MIT",
+  "type": "commonjs",
   "scripts": {
     "build": "tsc -b",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
     "@verter/core": "workspace:^",
-    "vue": "^3.4.21"
+    "vue": "^3.5.17"
   },
   "devDependencies": {
-    "typescript": "^5.4.5",
-    "vite": "^5.2.8"
+    "@types/node": "^24.0.12",
+    "typescript": "^5.8.3",
+    "vite": "^7.0.2"
   }
 }

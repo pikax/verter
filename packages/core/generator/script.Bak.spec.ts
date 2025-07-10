@@ -1,7 +1,7 @@
 import { compileScript, parse } from "@vue/compiler-sfc";
 import { generateScript, resolveModels } from "./script.Bak.js";
 
-describe("Generator script", () => {
+describe.skip("Generator script", () => {
   it("should render multiple defineModel", () => {
     const parsed = compileScript(
       parse(`

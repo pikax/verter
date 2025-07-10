@@ -5,6 +5,8 @@ import {
   ExtensionContext,
   ProgressLocation,
   ViewColumn,
+  FileSystemWatcher,
+  WorkspaceFolder,
 } from "vscode";
 import {
   LanguageClient,
@@ -14,15 +16,24 @@ import {
   RevealOutputChannelOn,
 } from "vscode-languageclient/node";
 
+import { normalize } from "path";
+
 import type { PatchClient } from "@verter/language-shared";
 import { patchClient, NotificationType } from "@verter/language-shared";
 import CompiledCodeContentProvider from "./CompiledCodeContentProvider";
+
+import { resolveAndDownloadBinding } from "@verter/oxc-bindings";
 
 type GetClient = () => PatchClient<LanguageClient>;
 
 let getClient: GetClient | undefined;
 
-export function activate(context: ExtensionContext) {
+console.log("hello tghere");
+
+export async function activate(context: ExtensionContext) {
+  console.log("activate", __dirname, __filename, context.extensionPath);
+
+  await resolveAndDownloadBinding(context.extensionPath);
   const server = activateVueLanguageServer(context);
   getClient = server.getClient;
 
@@ -32,7 +43,7 @@ export function activate(context: ExtensionContext) {
   if (workspace.textDocuments.some((doc) => doc.languageId === "vue")) {
     commands.executeCommand(
       "_typescript.configurePlugin",
-      "@verter/typescript-plugin",
+      require.resolve("@verter/typescript-plugin"),
       {
         enable: true,
       }
@@ -47,6 +58,7 @@ export function deactivate(): Thenable<void> | undefined {
 }
 
 export function activateVueLanguageServer(context: ExtensionContext) {
+  console.log("activateVueLanguageServer");
   const runtimeConfig = workspace.getConfiguration("verter.language-server");
 
   const { workspaceFolders } = workspace;
@@ -146,6 +158,10 @@ export function activateVueLanguageServer(context: ExtensionContext) {
   addDidChangeTextDocumentListener(getClient);
   addCompilePreviewCommand(getClient, context);
 
+  addWriteVirtualFilesCommand(getClient, context);
+
+  addNodeModulesChangedListener(getClient);
+
   return {
     getClient,
   };
@@ -162,7 +178,8 @@ function addDidChangeTextDocumentListener(getClient: GetClient) {
   workspace.onDidChangeTextDocument((e) => {
     if (
       e.document.languageId !== "typescript" &&
-      e.document.languageId !== "javascript"
+      e.document.languageId !== "javascript" &&
+      e.document.languageId !== "vue"
     ) {
       return;
     }
@@ -203,7 +220,7 @@ function addCompilePreviewCommand(
 
   context.subscriptions.push(
     commands.registerTextEditorCommand(
-      "veter.showCompiledCodeToSide",
+      "verter.showCompiledCodeToSide",
       async (editor) => {
         if (editor?.document?.languageId !== "vue") {
           window.showInformationMessage("Not a Vue file");
@@ -228,4 +245,94 @@ function addCompilePreviewCommand(
       }
     )
   );
+}
+function addWriteVirtualFilesCommand(
+  getClient: GetClient,
+  context: ExtensionContext
+) {
+  const compiledCodeContentProvider = new CompiledCodeContentProvider(
+    getClient
+  );
+
+  context.subscriptions.push(
+    // Register the content provider for "vue-compiled://" files
+    workspace.registerTextDocumentContentProvider(
+      CompiledCodeContentProvider.scheme,
+      compiledCodeContentProvider
+    ),
+    compiledCodeContentProvider
+  );
+
+  context.subscriptions.push(
+    commands.registerTextEditorCommand(
+      "verter.writeVirtualFiles",
+      async (editor) => {
+        if (editor?.document?.languageId !== "vue") {
+          window.showInformationMessage("Not a Vue file");
+          return;
+        }
+
+        window.withProgress(
+          { location: ProgressLocation.Window, title: "Compiling..." },
+          async () => {
+            // Open a new preview window for the compiled code
+            return await window.showTextDocument(
+              CompiledCodeContentProvider.previewWindowUri,
+              {
+                preview: true,
+                viewColumn: ViewColumn.Beside,
+                // TODO add selection to the window, it needs to be resolved
+                // selection: editor.selection,
+              }
+            );
+          }
+        );
+      }
+    )
+  );
+}
+
+function addNodeModulesChangedListener(getClient: GetClient) {
+  const watchers = new Map<string, FileSystemWatcher>();
+  function watchFolder(folder: WorkspaceFolder) {
+    // const fp = normalize(folder.uri.fsPath + "/node_modules/**/*").replace(
+    //   /\\/g,
+    //   "/"
+    // );
+    const fp = folder.uri.fsPath + "/node_modules/**/*";
+    const watcher = workspace.createFileSystemWatcher(fp);
+    watcher.onDidChange((e) => {
+      console.log("changed", e.fsPath);
+      getClient().sendNotification(NotificationType.OnFileChanged, {
+        type: "update",
+        uri: e.fsPath,
+      });
+    });
+    watcher.onDidCreate((e) => {
+      console.log("created", e.fsPath);
+      getClient().sendNotification(NotificationType.OnFileChanged, {
+        type: "create",
+        uri: e.fsPath,
+      });
+    });
+    watcher.onDidDelete((e) => {
+      console.log("deleted", e.fsPath);
+      getClient().sendNotification(NotificationType.OnFileChanged, {
+        type: "delete",
+        uri: e.fsPath,
+      });
+    });
+    watchers.set(folder.uri.fsPath, watcher);
+  }
+
+  if (workspace.workspaceFolders) {
+    workspace.workspaceFolders.forEach(watchFolder);
+  }
+  workspace.onDidChangeWorkspaceFolders((e) => {
+    e.removed.forEach((folder) => {
+      watchers.get(folder.uri.fsPath)?.dispose();
+      watchers.delete(folder.uri.fsPath);
+    });
+    e.added.forEach(watchFolder);
+  });
 }

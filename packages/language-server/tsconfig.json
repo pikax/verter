@@ -6,7 +6,7 @@
     "node_modules",
     "src/generator/_tests_",
     "src/**/*/_gen.ts",
-    "generated"
+    "generated",
   ],
   "compilerOptions": {
     "outDir": "./dist",
