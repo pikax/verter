@@ -12,6 +12,10 @@ defineSlots<
     header: (a: { foo: string }) => any;
   }
 >();
+
+async () => {
+  await Promise.resolve();
+};
 </script>
 <template>
   <div>

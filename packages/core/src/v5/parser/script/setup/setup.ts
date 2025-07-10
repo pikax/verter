@@ -1,3 +1,4 @@
+import { NOOP } from "@vue/shared";
 import {
   ExpressionStatement,
   IdentifierName,
@@ -193,12 +194,19 @@ export function createSetupContext(opts: {
   function visit(
     node: VerterASTNode,
     parent: VerterASTNode | null,
-    key?: string
+    key?: string,
+    context: { skip: () => void } = { skip: NOOP }
   ): void | ScriptItem | ScriptItem[] {
     if (ignore) {
       return;
     }
     switch (node.type) {
+      case "ImportDeclaration":
+      case "FunctionDeclaration":
+      case "FunctionExpression":
+      case "ArrowFunctionExpression":
+        context.skip();
+        return;
       case "AwaitExpression": {
         isAsync = true;
         return {

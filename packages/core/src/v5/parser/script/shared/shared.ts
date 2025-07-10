@@ -1,3 +1,4 @@
+import { NOOP } from "@vue/shared";
 import { VerterASTNode } from "../../ast";
 import { ScriptBinding, ScriptImport, ScriptItem, ScriptTypes } from "../types";
 
@@ -72,7 +73,8 @@ export function createSharedContext(opts: {
   function visit(
     node: VerterASTNode,
     parent: VerterASTNode | null,
-    key?: string
+    key?: string,
+    context: { skip: () => void } = { skip: NOOP }
   ): void | ScriptItem | ScriptItem[] {
     switch (node.type) {
       case "ExportNamedDeclaration":

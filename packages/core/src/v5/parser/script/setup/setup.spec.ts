@@ -7,6 +7,7 @@ import { handleSetupNode } from "./index.js";
 describe("parser script setup", () => {
   function parse(source: string) {
     const items: ScriptItem[] = [];
+    let isAsync = false;
     const ast = parseAST(source);
 
     shallowWalk(ast, (node) => {
@@ -15,6 +16,9 @@ describe("parser script setup", () => {
       //     items.push(...shared);
       //   }
       const result = handleSetupNode(node);
+      if (result.isAsync) {
+        isAsync = result.isAsync;
+      }
       if (Array.isArray(result)) {
         items.push(...result);
       } else {
@@ -23,6 +27,7 @@ describe("parser script setup", () => {
     });
 
     return {
+      isAsync,
       items,
     };
   }
@@ -262,6 +267,23 @@ describe("parser script setup", () => {
           name: "resolve",
         },
       ]);
+    });
+  });
+
+  describe("async", () => {
+    it("async function", () => {
+      const { isAsync } = parse(`<script setup lang="ts">
+async function bindGesture(el?: HTMLElement | null) {
+  if (!el) {
+    return;
+  }
+  await waitUntilNotBusy();
+}
+</script>
+<template></template>
+`);
+
+      expect(isAsync).toBe(false);
     });
   });
 });
