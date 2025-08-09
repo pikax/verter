@@ -3,7 +3,7 @@ async function bindGesture(el?: HTMLElement | null) {
   if (!el) {
     return;
   }
-  await waitUntilNotBusy();
+  await Promise.resolve();
 }
 </script>
 

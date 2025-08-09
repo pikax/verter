@@ -39,7 +39,7 @@ export const FullContextPlugin = definePlugin({
         case ScriptTypes.Declaration: {
           const name = b.item.name;
           const node = b.item.declarator;
-          if (name) {
+          if (name && node) {
             names.add(name);
             content.add(source.slice(node.start, node.end));
           }

@@ -135,6 +135,8 @@ export const TemplateBindingPlugin = definePlugin({
             )
             .join(",")}}`,
         ])
+        .filter(Boolean)
+
         .join(",")}}`
     );
 

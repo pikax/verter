@@ -1,320 +1,326 @@
 import { definePlugin, ScriptContext } from "../../types";
 import type {
   CallExpression,
-  ObjectExpression,
+  VariableDeclarator,
 } from "../../../../parser/ast/types";
-import { ProcessContext, ProcessItemType } from "../../../types";
-import { generateTypeDeclaration, generateTypeString } from "../utils";
-import { ScriptTypes } from "../../../../parser";
+import { ProcessItemMacroBinding, ProcessItemType } from "../../../types";
+import { ScriptBinding, ScriptTypes } from "../../../../parser";
+import type { MagicString } from "@vue/compiler-sfc";
 
-const Macros = new Set([
+export const SupportedMacros = [
+  "withDefaults",
   "defineProps",
   "defineEmits",
+  "defineSlots",
   "defineExpose",
   "defineOptions",
   "defineModel",
-  "defineSlots",
-  "withDefaults",
+] as const;
 
-  // useSlots()/useAttrs()
-]);
+type SupportedMacrosType = typeof SupportedMacros extends readonly (infer T)[]
+  ? T
+  : never;
 
-const HelperLocation = "$verter/options.helper.ts";
+const Macros = new Set<string>(SupportedMacros);
 
-const MacroDependencies = new Map([
-  [
-    "defineEmits",
-    ["UnionToIntersection", "EmitMapToProps", "OverloadParameters"],
-  ],
-  ["defineModel", ["ModelToProps", "UnionToIntersection", "ModelToEmits"]],
-  ["defineOptions", ["DefineOptions"]],
-]);
+const NonReturningMacros = new Set<string>([
+  "defineExpose",
+  "defineOptions",
+] as SupportedMacrosType[]);
 
 export const MacrosPlugin = definePlugin({
   name: "VerterMacro",
-  hasWithDefaults: false,
-  pre(s, ctx) {
-    this.hasWithDefaults = false;
-  },
-
-  post(s, ctx) {
-    const isTS = ctx.block.lang.startsWith("ts");
-    const macroBindinds = ctx.items.filter(
-      (x) => x.type === ProcessItemType.MacroBinding
-    );
-    for (const macro of Macros) {
-      if (macro === "withDefaults") continue;
-      if (macro === "defineOptions") {
-        continue;
-      }
-      const name = ctx.prefix(macro);
-      const itemMacro =
-        macro === "defineModel"
-          ? ctx.items.find((x) => x.type === ProcessItemType.DefineModel)
-          : macroBindinds.find((x) => x.macro === macro);
-      const TemplateBinding = ctx.prefix("TemplateBinding");
-
-      if (itemMacro) {
-        const str = generateTypeString(
-          name,
-          {
-            from: TemplateBinding,
-            key: name,
-            isType: true,
-          },
-          ctx
-        );
-        s.append(str);
-      } else {
-        const str = generateTypeDeclaration(
-          name,
-          "{}",
-          ctx.generic?.source,
-          isTS
-        );
-        s.append(str);
-      }
-    }
-  },
 
   transformDeclaration(item, s, ctx) {
     if (
-      item.parent.type === "VariableDeclarator" &&
-      item.parent.init?.type === "CallExpression"
-    ) {
-      if (item.parent.init.callee.type === "Identifier") {
-        const macroName = item.parent.init.callee.name;
-        if (!Macros.has(macroName) || macroName === "defineOptions") {
-          return;
-        }
-        addMacroDependencies(macroName, ctx);
-
-        let varName =
-          item.parent.id.type === "Identifier" ? item.parent.id.name : "";
-        // let originalName: string | undefined = undefined;
-        // if (macroName === "defineModel") {
-        //   // const accessor = ctx.prefix("models");
-        //   const modelName = getModelName(item.parent.init);
-
-        //   return
-        //   // varName = `${accessor}_${modelName}`;
-        //   originalName = modelName;
-        // }
-
-        if (ctx.isSetup) {
-          // s.prependLeft(item.declarator.end, `let ${varName} ;`);
-          // s.prependLeft(item.parent.id.end, `=${varName}`);
-
-          if (macroName === "defineModel") {
-            ctx.items.push({
-              type: ProcessItemType.DefineModel,
-              varName,
-              name: getModelName(item.parent.init),
-              node: item.parent,
-            });
-          } else if (macroName == "withDefaults") {
-            const defineProps = item.parent.init.arguments[0];
-            const pName = ctx.prefix("Props");
-            if (
-              defineProps.type === "CallExpression" &&
-              defineProps.callee.type === "Identifier" &&
-              defineProps.callee.name === "defineProps"
-            ) {
-              addMacroDependencies("defineProps", ctx);
-              ctx.items.push({
-                type: ProcessItemType.MacroBinding,
-                name: pName,
-                macro: "defineProps",
-                node: defineProps,
-              });
-            }
-            // prepend props
-            s.appendLeft(item.declarator.start, `const ${pName}=`);
-            s.appendLeft(defineProps.end, ";");
-            s.appendRight(defineProps.end, pName);
-
-            s.move(defineProps.start, defineProps.end, item.declarator.start);
-            this.hasWithDefaults = true;
-
-            // ctx.items.push({
-            //   type: ProcessItemType.MacroBinding,
-            //   name: varName!,
-            //   macro: "defineProps",
-            //   node: item.parent,
-            // });
-          } else {
-            if (macroName === "defineProps" && this.hasWithDefaults) {
-              return;
-            }
-            ctx.items.push({
-              type: ProcessItemType.MacroBinding,
-              name: varName!,
-              macro: macroName,
-              node: item.parent,
-            });
-          }
-        } else {
-          ctx.items.push({
-            type: ProcessItemType.Warning,
-            message: "MACRO_NOT_IN_SETUP",
-            node: item.node,
-            start: item.node.start,
-            end: item.node.end,
-          });
-        }
-      }
-    }
-  },
-  transformFunctionCall(item, s, ctx) {
-    if (
-      !Macros.has(item.name) ||
-      ctx.items.some(
-        (x) =>
-          (x.type === ProcessItemType.MacroBinding ||
-            x.type === ProcessItemType.DefineModel) &&
-          // check if is inside another macro
-          x.node.start <= item.node.start &&
-          x.node.end >= item.node.end
+      !ctx.isSetup ||
+      !(
+        item.parent.type === "VariableDeclarator" &&
+        item.parent.init?.type === "CallExpression" &&
+        item.parent.init.callee.type === "Identifier"
       )
     ) {
       return;
     }
 
-    const macroName = item.name;
+    const name = item.parent.init.callee.name;
+    const varName =
+      item.parent.id.type === "Identifier" ? item.parent.id.name : undefined;
 
-    addMacroDependencies(macroName, ctx);
-
-    let varName = "";
-
-    if (item.name === "defineModel") {
-      const modelName = getModelName(item.node);
-      const accessor = ctx.prefix("models");
-      varName = `${accessor}_${modelName}`;
-    } else if (macroName === "withDefaults") {
-      if (this.hasWithDefaults) {
-        return;
-      }
-      // check if there's an defineProps inside
-
-      if (ctx.isSetup) {
-        const defineProps = item.node.arguments[0];
-        const pName = ctx.prefix("Props");
-        if (
-          defineProps.type === "CallExpression" &&
-          defineProps.callee.type === "Identifier" &&
-          defineProps.callee.name === "defineProps"
-        ) {
-          addMacroDependencies("defineProps", ctx);
-          ctx.items.push({
-            type: ProcessItemType.MacroBinding,
-            name: pName,
-            macro: "defineProps",
-            node: defineProps,
-          });
-        }
-        // prepend props
-        s.appendLeft(item.node.start, `const ${pName}=`);
-        s.appendLeft(defineProps.end, ";");
-        s.appendRight(defineProps.end, pName);
-
-        s.move(defineProps.start, defineProps.end, item.node.start);
-        this.hasWithDefaults = true;
-
-        return;
-      }
-    } else if (macroName === "defineOptions") {
-      return handleDefineOptions(item.node, ctx);
-    } else if (macroName === "defineProps" && this.hasWithDefaults) {
+    if (handleOptionsMacro(name, item.parent, ctx)) {
       return;
-    } else {
-      varName = ctx.prefix(macroName.replace("define", ""));
     }
 
-    if (ctx.isSetup) {
-      s.prependLeft(item.node.start, `const ${varName}=`);
+    this._handleMacro(
+      name,
+      item.parent.init,
+      s,
+      ctx,
+      item.declarator!.start,
+      false,
+      varName
+    );
+  },
 
-      if (macroName === "defineModel") {
-        ctx.items.push({
-          type: ProcessItemType.DefineModel,
-          varName,
-          name: getModelName(item.node),
-          node: item.node,
-        });
-      } else {
-        ctx.items.push({
-          type: ProcessItemType.MacroBinding,
-          name: varName!,
-          macro: macroName,
-          node: item.node,
-        });
+  transformFunctionCall(item, s, ctx) {
+    if (!ctx.isSetup) {
+      return;
+    }
+
+    const varName =
+      isValidMacro(item.name) && item.name !== "defineModel"
+        ? ctx.prefix(
+            item.name === "withDefaults"
+              ? "PropsValue"
+              : item.name.slice("define".length) + "Value"
+          )
+        : undefined;
+
+    if (handleOptionsMacro(item.name, item.node, ctx)) {
+      return;
+    }
+
+    const hasValueVariable = !NonReturningMacros.has(item.name);
+
+    this._handleMacro(
+      item.name,
+      item.node,
+      s,
+      ctx,
+      item.parent.start,
+      hasValueVariable,
+      hasValueVariable ? varName : undefined
+    );
+  },
+
+  _handleMacro(
+    macro: string,
+    node: CallExpression,
+    s: MagicString,
+    ctx: ScriptContext,
+    toPos: number,
+    needsDeclarator: boolean,
+    varName?: string
+  ) {
+    if (
+      !isValidMacro(macro) ||
+      ctx.items.some(
+        (x) =>
+          (x.type === ProcessItemType.MacroBinding ||
+            x.type === ProcessItemType.DefineModel) &&
+          // check if is inside another macro
+          x.node.start <= node.start &&
+          x.node.end >= node.end
+      ) ||
+      hasOutsideMacroDeclaration(macro, ctx)
+    ) {
+      return;
+    }
+
+    if (needsDeclarator && varName) {
+      s.prependRight(node.start, `const ${varName}=`);
+    }
+
+    let processDeclarationType = true;
+
+    const declarationType =
+      node.typeArguments?.type === "TSTypeParameterInstantiation" &&
+      node.typeArguments.params.length > 0
+        ? "type"
+        : node.arguments.length > 0
+        ? "object"
+        : "empty";
+
+    if (macro === "defineModel") {
+      if (!varName) {
+        const modelName = getModelName(node);
+        const accessor = ctx.prefix("models");
+        varName = `${accessor}_${modelName}`;
+
+        s.prependLeft(node.start, `const ${varName}=`);
       }
-    } else {
+
       ctx.items.push({
-        type: ProcessItemType.Warning,
-        message: "MACRO_NOT_IN_SETUP",
-        node: item.node,
-        start: item.node.start,
-        end: item.node.end,
+        type: ProcessItemType.DefineModel,
+        varName,
+        name: getModelName(node),
+        node: node,
       });
+
+      createRawBinding(macro, declarationType, node, toPos, s, ctx);
+
+      return;
     }
+
+    if (macro === "withDefaults") {
+      const definePropsNode = node.arguments[0];
+      // if is defaults we don't need to transform the declaration
+      if (
+        definePropsNode.type === "CallExpression" &&
+        definePropsNode.callee.type === "Identifier" &&
+        definePropsNode.callee.name === "defineProps"
+      ) {
+        this._handleMacro("defineProps", definePropsNode, s, ctx, toPos, false);
+        processDeclarationType = false;
+      }
+    }
+
+    const binding = {
+      type: ProcessItemType.MacroBinding,
+      name: varName,
+      macro,
+      node,
+
+      declarationType,
+    } as ProcessItemMacroBinding;
+
+    ctx.items.push(binding);
+
+    if (!processDeclarationType) {
+      return;
+    }
+
+    binding.declarationName = createRawBinding(
+      macro,
+      declarationType,
+      node,
+      toPos,
+      s,
+      ctx
+    );
   },
 });
 
-function addMacroDependencies(macroName: string, ctx: ScriptContext) {
-  if (!ctx.block.lang.startsWith("ts")) return;
-  const dependencies = MacroDependencies.get(macroName);
-  if (dependencies) {
-    ctx.items.push({
-      type: ProcessItemType.Import,
-      asType: true,
-      from: HelperLocation,
-      items: dependencies.map((dep) => ({ name: ctx.prefix(dep) })),
-    });
+function isValidMacro(name: string): name is SupportedMacrosType {
+  return Macros.has(name);
+}
+
+function createRawBinding(
+  macro: SupportedMacrosType,
+  declarationType: "object" | "type" | "empty",
+  node: CallExpression,
+  toPos: number,
+  s: MagicString,
+  ctx: ScriptContext
+) {
+  switch (declarationType) {
+    case "type": {
+      const typeName = ctx.prefix(macro.slice("define".length) + "Type");
+
+      const typeNode = node.typeArguments!.params[0];
+      s.move(typeNode.start, typeNode.end, toPos);
+
+      s.prependRight(typeNode.start, `type ${typeName}=`);
+      s.prependLeft(typeNode.end, `;`);
+      s.prependLeft(typeNode.start, typeName);
+
+      return typeName;
+    }
+    case "object": {
+      const helperName = ctx.prefix(macro);
+      const varName = ctx.prefix(macro.slice("define".length) + "Raw");
+
+      const argNode = node.arguments[0];
+      s.move(argNode.start, argNode.end, toPos);
+
+      s.prependRight(argNode.start, `const ${varName}=${helperName}(`);
+      s.prependLeft(argNode.end, `);`);
+      s.prependLeft(argNode.start, varName);
+
+      return varName;
+    }
+    default:
+      return undefined;
   }
 }
 
-function handleDefineOptions(node: CallExpression, ctx: ProcessContext) {
-  if (node.arguments.length > 0) {
-    const [arg] = node.arguments;
-    switch (arg.type) {
-      case "Identifier":
-      case "ObjectExpression": {
-        ctx.items.push({
-          type: ProcessItemType.Options,
-          node: node,
-          expression: arg,
-        });
-        break;
+function hasOutsideMacroDeclaration(
+  macro: SupportedMacrosType,
+  ctx: ScriptContext
+) {
+  const items = ctx.processedItems.filter(
+    (x) =>
+      (x.type === ScriptTypes.Import &&
+        (x.bindings as ScriptBinding[]).some((x) => x.name === macro) &&
+        x.node.source.value !== "vue") ||
+      (x.type === ScriptTypes.Declaration && x.name === macro)
+  );
+
+  return items.length > 0;
+}
+
+// Options are a bit different because they must be moved outside the setup
+function handleOptionsMacro(
+  macro: string,
+  node: CallExpression | VariableDeclarator,
+  ctx: ScriptContext
+) {
+  if (macro === "defineOptions") {
+    // don't add new item if there's already an warning
+    if (
+      ctx.items.some(
+        (x) =>
+          (x.type === ProcessItemType.Warning &&
+            x.message === "INVALID_DEFINE_OPTIONS") ||
+          (x.type === ProcessItemType.Options &&
+            x.node.start <= node.start &&
+            x.node.end >= node.end)
+      )
+    ) {
+      return;
+    }
+    const callNode =
+      node.type === "CallExpression"
+        ? node
+        : node.init?.type === "CallExpression"
+        ? node.init
+        : undefined;
+
+    if (callNode && callNode.arguments.length > 0) {
+      const [arg] = callNode.arguments;
+      switch (arg.type) {
+        case "Identifier":
+        case "ObjectExpression": {
+          ctx.items.push({
+            type: ProcessItemType.Options,
+            node: node,
+            expression: arg,
+          });
+          break;
+        }
+        default: {
+          ctx.items.push({
+            type: ProcessItemType.Warning,
+            message: "INVALID_DEFINE_OPTIONS",
+            node: node,
+            start: node.start,
+            end: node.end,
+          });
+        }
       }
-      default: {
+      if (callNode.arguments.length > 1) {
         ctx.items.push({
           type: ProcessItemType.Warning,
           message: "INVALID_DEFINE_OPTIONS",
           node: node,
-          start: node.start,
+          start: arg.end,
           end: node.end,
         });
       }
-    }
-    if (node.arguments.length > 1) {
+    } else {
       ctx.items.push({
         type: ProcessItemType.Warning,
         message: "INVALID_DEFINE_OPTIONS",
         node: node,
-        start: arg.end,
+        start: node.start,
         end: node.end,
       });
     }
-    return;
-  } else {
-    ctx.items.push({
-      type: ProcessItemType.Warning,
-      message: "INVALID_DEFINE_OPTIONS",
-      node: node,
-      start: node.start,
-      end: node.end,
-    });
+
+    return true;
   }
+
+  return false;
 }
 
 function getModelName(node: CallExpression) {

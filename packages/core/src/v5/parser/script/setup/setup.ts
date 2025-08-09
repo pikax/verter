@@ -200,13 +200,24 @@ export function createSetupContext(opts: {
     if (ignore) {
       return;
     }
+
     switch (node.type) {
       case "ImportDeclaration":
-      case "FunctionDeclaration":
       case "FunctionExpression":
       case "ArrowFunctionExpression":
         context.skip();
         return;
+      case "FunctionDeclaration":
+      case "ClassDeclaration":
+        context.skip();
+        return {
+          type: ScriptTypes.Declaration,
+          node: node,
+          name: node.id?.name ?? '',
+          declarator: node,
+          parent: parent!,
+          rest: false,
+        };
       case "AwaitExpression": {
         isAsync = true;
         return {

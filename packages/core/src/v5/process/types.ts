@@ -62,11 +62,10 @@ export const enum ProcessItemType {
    */
   Options = "options",
 
-
   /**
    * Used to describe the defineModel variables
    */
-  DefineModel = 'define-model'
+  DefineModel = "define-model",
 }
 
 export type ProcessItemImport = {
@@ -92,10 +91,12 @@ export type ProcessItemMacroBinding = {
   // originalName?: string;
 
   node: VerterASTNode;
-};
 
+  declarationType: "object" | "type" | "empty";
+  declarationName?: string;
+};
 export type ProcessItemDefineModel = {
-  type: ProcessItemType.DefineModel,
+  type: ProcessItemType.DefineModel;
   /**
    * model name
    */
@@ -104,10 +105,10 @@ export type ProcessItemDefineModel = {
   /**
    * variableName
    */
-  varName: string
+  varName: string;
 
   node: VerterASTNode;
-}
+};
 
 export type ItemErrorString = "";
 export type ItemWarningString =

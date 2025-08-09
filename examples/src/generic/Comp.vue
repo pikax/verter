@@ -1,6 +1,8 @@
 <script setup lang="ts" generic="T extends string">
 defineProps<{
   name: T;
+
+  onName?: (n: T) => void;
 }>();
 
 // const slots = defineSlots<{

@@ -100,13 +100,18 @@ export const ContextPlugin = {
     // s.append(Slots.withPrefix(ctx.prefix("")).content);
 
     s.append(`
-      declare function ${ctx.prefix(
-        "slotRender"
-      )}<T extends (...args: any[]) => any>(slot: T): (cb: T)=>any;
-export declare function ${ctx.prefix("StrictRenderSlot")}<
-  T extends (...args: any[]) => any,
-  Single extends boolean = ReturnType<T> extends Array<any> ? false : true
->(slot: T, children: Single extends true ? [ReturnType<T>] : ReturnType<T>): any;`);
+declare function ${ctx.prefix(
+      "slotRender"
+    )}<T extends (...args: any[]) => any>(slot: T): T extends (arg: infer A) => any ? (arg: A) => JSX.Element : null`);
+
+    //     s.append(`
+    //       declare function ${ctx.prefix(
+    //         "slotRender"
+    //       )}<T extends (...args: any[]) => any>(slot: T): (cb: T)=>any;
+    // export declare function ${ctx.prefix("StrictRenderSlot")}<
+    //   T extends (...args: any[]) => any,
+    //   Single extends boolean = ReturnType<T> extends Array<any> ? false : true
+    // >(slot: T, children: Single extends true ? [ReturnType<T>] : ReturnType<T>): any;`);
     // patch TSX
     if (false)
       s.prepend(`

@@ -145,7 +145,6 @@ export class DocumentManager implements Disposable {
     // }
     let d = this._files.get(filepath);
     if (!d) {
-      console.log("reading file sync", filepath);
       const c = readFileSync(filepath, { encoding });
       const uri = pathToUri(filepath);
 

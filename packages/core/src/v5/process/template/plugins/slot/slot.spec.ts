@@ -268,7 +268,7 @@ describe("process template plugins slot", () => {
           if(!((___VERTER___ctx.test === 'foo'))) return; if(___VERTER___ctx.test==='app'){ ___VERTER___slotRender(___VERTER___slotInstance.$slots.foo)(()=>{if(!((___VERTER___ctx.test === 'foo') && (___VERTER___ctx.test==='app'))) return;<template><span>1{___VERTER___ctx.test}</span></template>});}}} ></div>}}}`);
       });
 
-      it.only("short no children", () => {
+      it("short no children", () => {
         const { result } = parse(`<Comp>
           <template #test></template>
 </Comp>`);

@@ -87,7 +87,7 @@ export const parseFile = (
   // const { locations, context } = builder.fromCompiled(parsed);
   // const result = mergeFull(locations, context);
 
-  logger.msg("parsed context", "Err");
+  // logger.msg("parsed context", "Err");
   return "export default { foo: 1 }";
   // const p = builder.preProcess(fileName, content);
 

@@ -28,6 +28,8 @@ export function processScript(
     templateBindings: [],
     handledAttributes: new Set(),
 
+    processedItems: items,
+
     ..._context,
   };
 
