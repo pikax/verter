@@ -137,7 +137,7 @@ export const MacrosPlugin = definePlugin({
         const accessor = ctx.prefix("models");
         varName = `${accessor}_${modelName}`;
 
-        s.prependLeft(node.start, `const ${varName}=`);
+        s.prependRight(node.start, `const ${varName}=`);
       }
 
       ctx.items.push({
@@ -212,12 +212,14 @@ function createRawBinding(
 
       s.prependRight(typeNode.start, `type ${typeName}=`);
       s.prependLeft(typeNode.end, `;`);
-      s.prependLeft(typeNode.start, typeName);
+      // also prettify the type, otherwise it will be define*<typename>
+      s.prependLeft(typeNode.start, typeName + "&{}");
 
       return typeName;
     }
     case "object": {
       const helperName = ctx.prefix(macro);
+      const extractRaw = ctx.prefix("extractRaw");
       const varName = ctx.prefix(macro.slice("define".length) + "Raw");
 
       const argNode = node.arguments[0];
@@ -225,7 +227,7 @@ function createRawBinding(
 
       s.prependRight(argNode.start, `const ${varName}=${helperName}(`);
       s.prependLeft(argNode.end, `);`);
-      s.prependLeft(argNode.start, varName);
+      s.prependLeft(argNode.start, `${extractRaw}(${varName})`);
 
       return varName;
     }

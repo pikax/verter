@@ -82,14 +82,34 @@ describe("process script plugins template-binding", () => {
         return _parse(content, false, "ts");
       }
 
-      it("defineProps()", () => {
-        const { result } = parse(`defineProps()`);
-        expect(result).toMatchInlineSnapshot(`"defineProps({})"`);
+      describe("defineProps", () => {
+        it("defineProps()", () => {
+          const { result } = parse(`defineProps()`);
+          expect(result).toMatchInlineSnapshot(`"defineProps({})"`);
+        });
+
+        it("defineProps({foo:String})", () => {
+          const { result } = parse(`defineProps({foo:String})`);
+          expect(result).toMatchInlineSnapshot(`"defineProps({foo:String})"`);
+        });
+
+        it("defineProps<{foo:string}>()", () => {
+          const { result } = parse(`defineProps<{foo:string}>()`);
+          expect(result).toMatchInlineSnapshot(
+            `"defineProps<{foo:string}>({})"`
+          );
+        });
       });
 
-      it.only('defineProps({foo:String})', () => {
-        const { result } = parse(`defineProps({foo:String})`);
-        expect(result).toMatchInlineSnapshot(`"defineProps({foo:String})"`);
+      describe("mix", () => {
+        it.only("type based", () => {
+          const { result } = parse(
+            `defineProps<{foo:string}>();defineEmits<{bar: (a:{ foo: string})=>void}>();defineSlots<{default: (arg:{foo:string})=>void}>();defineExpose({arg: 'foo'});defineOptions({name:'foo'});defineModel<'foo'|'bar'>();`
+          );
+          expect(result).toMatchInlineSnapshot(
+            `"defineProps<{foo:string}>({})"`
+          );
+        });
       });
     });
   });

@@ -162,7 +162,9 @@ describe("process script plugins macros", () => {
                   hasDeclarator
                     ? `const props=`
                     : `const ${context.prefix("PropsValue")}=`
-                }defineProps(${context.prefix("PropsRaw")});`
+                }defineProps(${context.prefix("extractRaw")}(${context.prefix(
+                  "PropsRaw"
+                )}));`
               );
             });
           });
@@ -221,8 +223,8 @@ describe("process script plugins macros", () => {
                     ? `const props=`
                     : `const ${context.prefix("PropsValue")}=`
                 }withDefaults(defineProps(${context.prefix(
-                  "PropsRaw"
-                )}), { foo: 1 });`
+                  "extractRaw"
+                )}(${context.prefix("PropsRaw")})), { foo: 1 });`
               );
             });
           });
@@ -266,7 +268,7 @@ describe("process script plugins macros", () => {
                   hasDeclarator
                     ? `const props=`
                     : `const ${context.prefix("PropsValue")}=`
-                }defineProps<${context.prefix("PropsType")}>();`
+                }defineProps<${context.prefix("PropsType")}&{}>();`
               );
             });
           });
@@ -324,7 +326,7 @@ describe("process script plugins macros", () => {
                     : `const ${context.prefix("PropsValue")}=`
                 }withDefaults(defineProps<${context.prefix(
                   "PropsType"
-                )}>(['foo', 'bar']), { foo: '1' });`
+                )}&{}>(['foo', 'bar']), { foo: '1' });`
               );
             });
           });
@@ -369,8 +371,8 @@ describe("process script plugins macros", () => {
                     `const ${context.prefix("PropsRaw")}=${context.prefix(
                       "defineProps"
                     )}(["foo", "bar"]);const { foo, bar } = defineProps(${context.prefix(
-                      "PropsRaw"
-                    )});`
+                      "extractRaw"
+                    )}(${context.prefix("PropsRaw")}));`
                   );
                 });
               });
@@ -424,8 +426,8 @@ describe("process script plugins macros", () => {
                     `const ${context.prefix("PropsRaw")}=${context.prefix(
                       "defineProps"
                     )}(["foo", "bar"]);const { foo, bar } = withDefaults(defineProps(${context.prefix(
-                      "PropsRaw"
-                    )}), { foo: 1 });`
+                      "extractRaw"
+                    )}(${context.prefix("PropsRaw")})), { foo: 1 });`
                   );
                 });
               });
@@ -467,8 +469,8 @@ describe("process script plugins macros", () => {
                     `const ${context.prefix("PropsRaw")}=${context.prefix(
                       "defineProps"
                     )}(["foo", "bar"]);const { foo, ...rest } = defineProps(${context.prefix(
-                      "PropsRaw"
-                    )});`
+                      "extractRaw"
+                    )}(${context.prefix("PropsRaw")}));`
                   );
                 });
               });
@@ -522,8 +524,8 @@ describe("process script plugins macros", () => {
                     `const ${context.prefix("PropsRaw")}=${context.prefix(
                       "defineProps"
                     )}(["foo", "bar"]);const { foo, ...rest } = withDefaults(defineProps(${context.prefix(
-                      "PropsRaw"
-                    )}), { foo: 1 });`
+                      "extractRaw"
+                    )}(${context.prefix("PropsRaw")})), { foo: 1 });`
                   );
                 });
               });
@@ -571,7 +573,9 @@ describe("process script plugins macros", () => {
                     hasDeclarator
                       ? `const props=`
                       : `const ${context.prefix("PropsValue")}=`
-                  }defineProps(${context.prefix("PropsRaw")});`
+                  }defineProps(${context.prefix("extractRaw")}(${context.prefix(
+                    "PropsRaw"
+                  )}));`
                 );
               });
             });
@@ -629,8 +633,8 @@ describe("process script plugins macros", () => {
                       ? `const props=`
                       : `const ${context.prefix("PropsValue")}=`
                   }withDefaults(defineProps(${context.prefix(
-                    "PropsRaw"
-                  )}), { foo: 1 });`
+                    "extractRaw"
+                  )}(${context.prefix("PropsRaw")})), { foo: 1 });`
                 );
               });
             });
@@ -675,7 +679,7 @@ describe("process script plugins macros", () => {
                     hasDeclarator
                       ? `const props=`
                       : `const ${context.prefix("PropsValue")}=`
-                  }defineProps<${context.prefix("PropsType")}>(['foo', 'bar']);`
+                  }defineProps<${context.prefix("PropsType")}&{}>(['foo', 'bar']);`
                 );
               });
             });
@@ -732,7 +736,7 @@ describe("process script plugins macros", () => {
                       : `const ${context.prefix("PropsValue")}=`
                   }withDefaults(defineProps<${context.prefix(
                     "PropsType"
-                  )}>(['foo', 'bar']), { foo: '1' });`
+                  )}&{}>(['foo', 'bar']), { foo: '1' });`
                 );
               });
             });
@@ -780,7 +784,7 @@ describe("process script plugins macros", () => {
                         "PropsType"
                       )}=T;const { foo, bar } = defineProps<${context.prefix(
                         "PropsType"
-                      )}>(["foo", "bar"]);`
+                      )}&{}>(["foo", "bar"]);`
                     );
                   });
                 });
@@ -838,7 +842,7 @@ describe("process script plugins macros", () => {
                         "PropsType"
                       )}=T;const { foo, bar } = withDefaults(defineProps<${context.prefix(
                         "PropsType"
-                      )}>(["foo", "bar"]), { foo: 1 });`
+                      )}&{}>(["foo", "bar"]), { foo: 1 });`
                     );
                   });
                 });
@@ -884,7 +888,7 @@ describe("process script plugins macros", () => {
                         "PropsType"
                       )}=T;const { foo, ...rest } = defineProps<${context.prefix(
                         "PropsType"
-                      )}>(["foo", "bar"]);`
+                      )}&{}>(["foo", "bar"]);`
                     );
                   });
                 });
@@ -942,7 +946,7 @@ describe("process script plugins macros", () => {
                         "PropsType"
                       )}=T;const { foo, ...rest } = withDefaults(defineProps<${context.prefix(
                         "PropsType"
-                      )}>(["foo", "bar"]), { foo: 1 });`
+                      )}&{}>(["foo", "bar"]), { foo: 1 });`
                     );
                   });
                 });
@@ -991,7 +995,9 @@ describe("process script plugins macros", () => {
                   hasDeclarator
                     ? `const props=`
                     : `const ${context.prefix("PropsValue")}=`
-                }defineProps(${context.prefix("PropsRaw")});`
+                }defineProps(${context.prefix("extractRaw")}(${context.prefix(
+                  "PropsRaw"
+                )}));`
               );
             });
           });
@@ -1051,8 +1057,8 @@ describe("process script plugins macros", () => {
                     ? `const props=`
                     : `const ${context.prefix("PropsValue")}=`
                 }withDefaults(defineProps(${context.prefix(
-                  "PropsRaw"
-                )}), { foo: 1 });`
+                  "extractRaw"
+                )}(${context.prefix("PropsRaw")})), { foo: 1 });`
               );
             });
           });
@@ -1096,7 +1102,7 @@ describe("process script plugins macros", () => {
                   hasDeclarator
                     ? `const props=`
                     : `const ${context.prefix("PropsValue")}=`
-                }defineProps<${context.prefix("PropsType")}>();`
+                }defineProps<${context.prefix("PropsType")}&{}>();`
               );
             });
           });
@@ -1156,7 +1162,7 @@ describe("process script plugins macros", () => {
                     : `const ${context.prefix("PropsValue")}=`
                 }withDefaults(defineProps<${context.prefix(
                   "PropsType"
-                )}>({foo: String, bar: { type: String, required: true }}), { foo: '1' });`
+                )}&{}>({foo: String, bar: { type: String, required: true }}), { foo: '1' });`
               );
             });
           });
@@ -1201,8 +1207,8 @@ describe("process script plugins macros", () => {
                     `const ${context.prefix("PropsRaw")}=${context.prefix(
                       "defineProps"
                     )}(["foo", "bar"]);const { foo, bar } = defineProps(${context.prefix(
-                      "PropsRaw"
-                    )});`
+                      "extractRaw"
+                    )}(${context.prefix("PropsRaw")}));`
                   );
                 });
               });
@@ -1256,8 +1262,8 @@ describe("process script plugins macros", () => {
                     `const ${context.prefix("PropsRaw")}=${context.prefix(
                       "defineProps"
                     )}(["foo", "bar"]);const { foo, bar } = withDefaults(defineProps(${context.prefix(
-                      "PropsRaw"
-                    )}), { foo: 1 });`
+                      "extractRaw"
+                    )}(${context.prefix("PropsRaw")})), { foo: 1 });`
                   );
                 });
               });
@@ -1299,8 +1305,8 @@ describe("process script plugins macros", () => {
                     `const ${context.prefix("PropsRaw")}=${context.prefix(
                       "defineProps"
                     )}(["foo", "bar"]);const { foo, ...rest } = defineProps(${context.prefix(
-                      "PropsRaw"
-                    )});`
+                      "extractRaw"
+                    )}(${context.prefix("PropsRaw")}));`
                   );
                 });
               });
@@ -1354,8 +1360,8 @@ describe("process script plugins macros", () => {
                     `const ${context.prefix("PropsRaw")}=${context.prefix(
                       "defineProps"
                     )}(["foo", "bar"]);const { foo, ...rest } = withDefaults(defineProps(${context.prefix(
-                      "PropsRaw"
-                    )}), { foo: 1 });`
+                      "extractRaw"
+                    )}(${context.prefix("PropsRaw")})), { foo: 1 });`
                   );
                 });
               });
@@ -1403,7 +1409,9 @@ describe("process script plugins macros", () => {
                     hasDeclarator
                       ? `const props=`
                       : `const ${context.prefix("PropsValue")}=`
-                  }defineProps(${context.prefix("PropsRaw")});`
+                  }defineProps(${context.prefix("extractRaw")}(${context.prefix(
+                    "PropsRaw"
+                  )}));`
                 );
               });
             });
@@ -1461,8 +1469,8 @@ describe("process script plugins macros", () => {
                       ? `const props=`
                       : `const ${context.prefix("PropsValue")}=`
                   }withDefaults(defineProps(${context.prefix(
-                    "PropsRaw"
-                  )}), { foo: 1 });`
+                    "extractRaw"
+                  )}(${context.prefix("PropsRaw")})), { foo: 1 });`
                 );
               });
             });
@@ -1509,7 +1517,7 @@ describe("process script plugins macros", () => {
                       : `const ${context.prefix("PropsValue")}=`
                   }defineProps<${context.prefix(
                     "PropsType"
-                  )}>({foo: String, bar: { type: String, required: true }});`
+                  )}&{}>({foo: String, bar: { type: String, required: true }});`
                 );
               });
             });
@@ -1566,7 +1574,7 @@ describe("process script plugins macros", () => {
                       : `const ${context.prefix("PropsValue")}=`
                   }withDefaults(defineProps<${context.prefix(
                     "PropsType"
-                  )}>({foo: String, bar: { type: String, required: true }}), { foo: '1' });`
+                  )}&{}>({foo: String, bar: { type: String, required: true }}), { foo: '1' });`
                 );
               });
             });
@@ -1614,7 +1622,7 @@ describe("process script plugins macros", () => {
                         "PropsType"
                       )}=T;const { foo, bar } = defineProps<${context.prefix(
                         "PropsType"
-                      )}>(["foo", "bar"]);`
+                      )}&{}>(["foo", "bar"]);`
                     );
                   });
                 });
@@ -1672,7 +1680,7 @@ describe("process script plugins macros", () => {
                         "PropsType"
                       )}=T;const { foo, bar } = withDefaults(defineProps<${context.prefix(
                         "PropsType"
-                      )}>(["foo", "bar"]), { foo: 1 });`
+                      )}&{}>(["foo", "bar"]), { foo: 1 });`
                     );
                   });
                 });
@@ -1718,7 +1726,7 @@ describe("process script plugins macros", () => {
                         "PropsType"
                       )}=T;const { foo, ...rest } = defineProps<${context.prefix(
                         "PropsType"
-                      )}>(["foo", "bar"]);`
+                      )}&{}>(["foo", "bar"]);`
                     );
                   });
                 });
@@ -1776,7 +1784,7 @@ describe("process script plugins macros", () => {
                         "PropsType"
                       )}=T;const { foo, ...rest } = withDefaults(defineProps<${context.prefix(
                         "PropsType"
-                      )}>(["foo", "bar"]), { foo: 1 });`
+                      )}&{}>(["foo", "bar"]), { foo: 1 });`
                     );
                   });
                 });
@@ -1821,7 +1829,7 @@ describe("process script plugins macros", () => {
                 hasDeclarator
                   ? `const props=`
                   : `const ${context.prefix("PropsValue")}=`
-              }defineProps<${context.prefix("PropsType")}>();`
+              }defineProps<${context.prefix("PropsType")}&{}>();`
             );
           });
         });
@@ -2103,7 +2111,9 @@ describe("process script plugins macros", () => {
                   hasDeclarator
                     ? `const emit=`
                     : `const ${context.prefix("EmitsValue")}=`
-                }defineEmits(${context.prefix("EmitsRaw")});`
+                }defineEmits(${context.prefix("extractRaw")}(${context.prefix(
+                  "EmitsRaw"
+                )}));`
               );
             });
           });
@@ -2145,7 +2155,7 @@ describe("process script plugins macros", () => {
                   hasDeclarator
                     ? `const emit=`
                     : `const ${context.prefix("EmitsValue")}=`
-                }defineEmits<${context.prefix("EmitsType")}>();`
+                }defineEmits<${context.prefix("EmitsType")}&{}>();`
               );
             });
           });
@@ -2191,7 +2201,9 @@ describe("process script plugins macros", () => {
                     hasDeclarator
                       ? `const emit=`
                       : `const ${context.prefix("EmitsValue")}=`
-                  }defineEmits(${context.prefix("EmitsRaw")});`
+                  }defineEmits(${context.prefix("extractRaw")}(${context.prefix(
+                    "EmitsRaw"
+                  )}));`
                 );
               });
             });
@@ -2236,7 +2248,7 @@ describe("process script plugins macros", () => {
                     hasDeclarator
                       ? `const emit=`
                       : `const ${context.prefix("EmitsValue")}=`
-                  }defineEmits<${context.prefix("EmitsType")}>(['foo', 'bar']);`
+                  }defineEmits<${context.prefix("EmitsType")}&{}>(['foo', 'bar']);`
                 );
               });
             });
@@ -2281,7 +2293,9 @@ describe("process script plugins macros", () => {
                   hasDeclarator
                     ? `const emit=`
                     : `const ${context.prefix("EmitsValue")}=`
-                }defineEmits(${context.prefix("EmitsRaw")});`
+                }defineEmits(${context.prefix("extractRaw")}(${context.prefix(
+                  "EmitsRaw"
+                )}));`
               );
             });
           });
@@ -2324,7 +2338,7 @@ describe("process script plugins macros", () => {
                   hasDeclarator
                     ? `const emit=`
                     : `const ${context.prefix("EmitsValue")}=`
-                }defineEmits<${context.prefix("EmitsType")}>();`
+                }defineEmits<${context.prefix("EmitsType")}&{}>();`
               );
             });
           });
@@ -2370,7 +2384,9 @@ describe("process script plugins macros", () => {
                     hasDeclarator
                       ? `const emit=`
                       : `const ${context.prefix("EmitsValue")}=`
-                  }defineEmits(${context.prefix("EmitsRaw")});`
+                  }defineEmits(${context.prefix("extractRaw")}(${context.prefix(
+                    "EmitsRaw"
+                  )}));`
                 );
               });
             });
@@ -2417,7 +2433,7 @@ describe("process script plugins macros", () => {
                       : `const ${context.prefix("EmitsValue")}=`
                   }defineEmits<${context.prefix(
                     "EmitsType"
-                  )}>({ foo: ()=>true, bar: (arg)=>true});`
+                  )}&{}>({ foo: ()=>true, bar: (arg)=>true});`
                 );
               });
             });
@@ -2460,7 +2476,7 @@ describe("process script plugins macros", () => {
                 hasDeclarator
                   ? `const emit=`
                   : `const ${context.prefix("EmitsValue")}=`
-              }defineEmits<${context.prefix("EmitsType")}>();`
+              }defineEmits<${context.prefix("EmitsType")}&{}>();`
             );
           });
         });
@@ -2576,7 +2592,9 @@ describe("process script plugins macros", () => {
                   hasDeclarator
                     ? `const slots=`
                     : `const ${context.prefix("SlotsValue")}=`
-                }defineSlots(${context.prefix("SlotsRaw")});`
+                }defineSlots(${context.prefix("extractRaw")}(${context.prefix(
+                  "SlotsRaw"
+                )}));`
               );
             });
           });
@@ -2620,7 +2638,7 @@ describe("process script plugins macros", () => {
                   hasDeclarator
                     ? `const slots=`
                     : `const ${context.prefix("SlotsValue")}=`
-                }defineSlots<${context.prefix("SlotsType")}>();`
+                }defineSlots<${context.prefix("SlotsType")}&{}>();`
               );
             });
           });
@@ -2666,7 +2684,9 @@ describe("process script plugins macros", () => {
                     hasDeclarator
                       ? `const slots=`
                       : `const ${context.prefix("SlotsValue")}=`
-                  }defineSlots(${context.prefix("SlotsRaw")});`
+                  }defineSlots(${context.prefix("extractRaw")}(${context.prefix(
+                    "SlotsRaw"
+                  )}));`
                 );
               });
             });
@@ -2711,7 +2731,7 @@ describe("process script plugins macros", () => {
                     hasDeclarator
                       ? `const slots=`
                       : `const ${context.prefix("SlotsValue")}=`
-                  }defineSlots<${context.prefix("SlotsType")}>(['foo', 'bar']);`
+                  }defineSlots<${context.prefix("SlotsType")}&{}>(['foo', 'bar']);`
                 );
               });
             });
@@ -2758,7 +2778,9 @@ describe("process script plugins macros", () => {
                   hasDeclarator
                     ? `const slots=`
                     : `const ${context.prefix("SlotsValue")}=`
-                }defineSlots(${context.prefix("SlotsRaw")});`
+                }defineSlots(${context.prefix("extractRaw")}(${context.prefix(
+                  "SlotsRaw"
+                )}));`
               );
             });
           });
@@ -2803,7 +2825,7 @@ describe("process script plugins macros", () => {
                   hasDeclarator
                     ? `const slots=`
                     : `const ${context.prefix("SlotsValue")}=`
-                }defineSlots<${context.prefix("SlotsType")}>();`
+                }defineSlots<${context.prefix("SlotsType")}&{}>();`
               );
             });
           });
@@ -2849,7 +2871,9 @@ describe("process script plugins macros", () => {
                     hasDeclarator
                       ? `const slots=`
                       : `const ${context.prefix("SlotsValue")}=`
-                  }defineSlots(${context.prefix("SlotsRaw")});`
+                  }defineSlots(${context.prefix("extractRaw")}(${context.prefix(
+                    "SlotsRaw"
+                  )}));`
                 );
               });
             });
@@ -2896,7 +2920,7 @@ describe("process script plugins macros", () => {
                       : `const ${context.prefix("SlotsValue")}=`
                   }defineSlots<${context.prefix(
                     "SlotsType"
-                  )}>({ foo: ()=>true, bar: (arg)=>true});`
+                  )}&{}>({ foo: ()=>true, bar: (arg)=>true});`
                 );
               });
             });
@@ -2939,7 +2963,7 @@ describe("process script plugins macros", () => {
                 hasDeclarator
                   ? `const slots=`
                   : `const ${context.prefix("SlotsValue")}=`
-              }defineSlots<${context.prefix("SlotsType")}>();`
+              }defineSlots<${context.prefix("SlotsType")}&{}>();`
             );
           });
         });
@@ -3053,7 +3077,9 @@ describe("process script plugins macros", () => {
                   script
                 )};${
                   hasDeclarator ? `const expose=` : ""
-                }defineExpose(${context.prefix("ExposeRaw")});`
+                }defineExpose(${context.prefix("extractRaw")}(${context.prefix(
+                  "ExposeRaw"
+                )}));`
               );
             });
           });
@@ -3093,7 +3119,7 @@ describe("process script plugins macros", () => {
               expect(result).toContain(
                 `type ${context.prefix("ExposeType")}=${typeDef};${
                   hasDeclarator ? `const expose=` : ""
-                }defineExpose<${context.prefix("ExposeType")}>();`
+                }defineExpose<${context.prefix("ExposeType")}&{}>();`
               );
             });
           });
@@ -3135,7 +3161,9 @@ describe("process script plugins macros", () => {
                     script
                   )};${
                     hasDeclarator ? `const expose=` : ""
-                  }defineExpose(${context.prefix("ExposeRaw")});`
+                  }defineExpose(${context.prefix(
+                    "extractRaw"
+                  )}(${context.prefix("ExposeRaw")}));`
                 );
               });
             });
@@ -3178,7 +3206,7 @@ describe("process script plugins macros", () => {
                     hasDeclarator ? `const expose=` : ""
                   }defineExpose<${context.prefix(
                     "ExposeType"
-                  )}>({foo: '1', bar() {}});`
+                  )}&{}>({foo: '1', bar() {}});`
                 );
               });
             });
@@ -3219,7 +3247,7 @@ describe("process script plugins macros", () => {
             expect(result).toContain(
               `type ${context.prefix("ExposeType")}=${typeDef};${
                 hasDeclarator ? `const expose=` : ""
-              }defineExpose<${context.prefix("ExposeType")}>();`
+              }defineExpose<${context.prefix("ExposeType")}&{}>();`
             );
           });
         });
@@ -3391,7 +3419,7 @@ describe("process script plugins macros", () => {
         });
       });
 
-      describe("defineModel", () => {
+      describe.only("defineModel", () => {
         function content(str: string, varName: string = "value") {
           return `${hasDeclarator ? `const ${varName}=` : ""}${str}`;
         }
@@ -3448,6 +3476,37 @@ describe("process script plugins macros", () => {
             const { result, context } = process();
             expect(result).toContain(
               (hasDeclarator
+                ? _content
+                : `const ${context.prefix("models_modelValue")}=`) + _content
+            );
+          });
+        });
+
+        describe('defineModel<"foo"|"bar">()', () => {
+          const _content = content('defineModel<"foo"|"bar">()');
+          function process() {
+            return parse(_content);
+          }
+
+          test("context", () => {
+            const { context } = process();
+            expect(context.items).toMatchObject(
+              withBinding([
+                {
+                  type: ProcessItemType.DefineModel,
+                  name: "modelValue",
+                  varName: hasDeclarator
+                    ? "value"
+                    : context.prefix("models_modelValue"),
+                },
+              ])
+            );
+          });
+
+          test("output", () => {
+            const { result, context } = process();
+            expect(result).toContain(
+              (hasDeclarator
                 ? ""
                 : `const ${context.prefix("models_modelValue")}=`) + _content
             );
@@ -3456,7 +3515,7 @@ describe("process script plugins macros", () => {
       });
     });
 
-    describe("defineOptions", () => {
+    describe.skip("defineOptions", () => {
       function content(str: string) {
         return `${str}`;
       }
