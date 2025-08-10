@@ -2,6 +2,7 @@ import { VerterASTNode } from "../../../../parser";
 import {
   ProcessItem,
   ProcessItemBinding,
+  ProcessItemDefineModel,
   ProcessItemMacroBinding,
   ProcessItemType,
 } from "../../../types";
@@ -46,7 +47,7 @@ export const TemplateBindingPlugin = definePlugin({
       .map((x) => macroBindingToReturnStatement(x, ctx));
     const models = ctx.items.filter(
       (x) => x.type === ProcessItemType.DefineModel
-    );
+    ).map(x => modelToReturnStatement(x, ctx));
     const options = ctx.items.find((x) => x.type === ProcessItemType.Options);
 
     // known bindings
@@ -101,6 +102,15 @@ function macroBindingToReturnStatement(
   return `${item.macro}/*${item.node.start},${item.node.end}*/:{${items.join(
     ","
   )}}`;
+}
+
+function modelToReturnStatement(
+  item: ProcessItemDefineModel,
+  ctx: ScriptContext
+) {
+  return `${item.name}/*${item.node.start},${item.node.end}*/: ${
+    ctx.isTS ? `${item.varName} as typeof ${item.varName}` : item.varName
+  }`;
 }
 
 function isUsedBinding(
