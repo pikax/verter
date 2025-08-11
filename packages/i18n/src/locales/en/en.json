@@ -1,0 +1,7 @@
+{
+  "warning": {
+    "NO_EXPRESSION_VMODEL": "No v-model expression found.",
+    "MACRO_NOT_IN_SETUP": "Macro cannot be used outside of setup.",
+    "INVALID_DEFINE_OPTIONS": "DefineOption is invalid"
+  }
+}

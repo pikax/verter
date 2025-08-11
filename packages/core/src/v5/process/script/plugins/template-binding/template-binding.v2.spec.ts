@@ -78,8 +78,8 @@ describe("process script plugins template-binding", () => {
 
   describe("setup", () => {
     describe("ts", () => {
-      function parse(content: string) {
-        return _parse(content, false, "ts");
+      function parse(content: string, pre = "") {
+        return _parse(content, false, "ts", pre);
       }
 
       describe("defineProps", () => {
@@ -104,7 +104,8 @@ describe("process script plugins template-binding", () => {
       describe("mix", () => {
         it.only("type based", () => {
           const { result } = parse(
-            `defineProps<{foo:string}>();defineEmits<{bar: (a:{ foo: string})=>void}>();defineSlots<{default: (arg:{foo:string})=>void}>();defineExpose({arg: 'foo'});defineOptions({name:'foo'});defineModel<'foo'|'bar'>();`
+            `let a = {foo: 1};defineProps<{foo:string}>();defineEmits<{bar: (a:{ foo: string})=>void}>();defineSlots<{default: (arg:{foo:string})=>void}>();defineExpose({arg: 'foo'});defineOptions({name:'foo'});defineModel<'foo'|'bar'>();`,
+            "<template><div>{{a}}</div></template>"
           );
           expect(result).toMatchInlineSnapshot(
             `"defineProps<{foo:string}>({})"`

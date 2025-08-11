@@ -45,12 +45,19 @@ export const TemplateBindingPlugin = definePlugin({
     const macros = ctx.items
       .filter((x) => x.type === ProcessItemType.MacroBinding)
       .map((x) => macroBindingToReturnStatement(x, ctx));
-    const models = ctx.items.filter(
-      (x) => x.type === ProcessItemType.DefineModel
-    ).map(x => modelToReturnStatement(x, ctx));
+    const models = ctx.items
+      .filter((x) => x.type === ProcessItemType.DefineModel)
+      .map((x) => modelToReturnStatement(x, ctx));
     const options = ctx.items.find((x) => x.type === ProcessItemType.Options);
 
+    // raw vars
+    const model = `{${models.join(",")}}`;
+    const rawVars = `{${macros.join(",")},_model:${model}}`;
     // known bindings
+
+    const returnStatement = `return {${usedBindings.join(",")},...${ctx.prefix(
+      "toRaw"
+    )}(${rawVars})}`;
   },
 });
 
@@ -63,7 +70,7 @@ export function bindingToReturnStatement(
   },
   ctx: ScriptContext
 ) {
-  const unref = ctx.prefix(ctx.isTS ? "unref" : "UnwrapRef");
+  const unref = ctx.prefix(ctx.isTS ? "UnwrapRef" : "unref");
 
   const value = ctx.isTS
     ? `${name} as unknown as ${unref}<typeof ${name}>`
@@ -80,7 +87,7 @@ function macroBindingToReturnStatement(
   const ExtractRawType = ctx.prefix("ExtractRawType");
 
   const value = ctx.isTS
-    ? `value/*${item.node.start},${item.node.end}*/:typeof ${item.name}`
+    ? `value/*${item.node.start},${item.node.end}*/:{} as typeof ${item.name}`
     : `value/*${item.node.start},${item.node.end}*/:${item.name}`;
 
   const items = [value];
@@ -92,7 +99,7 @@ function macroBindingToReturnStatement(
         ? `object:${ExtractRawType}<typeof ${item.declarationName}>`
         : `object:${item.declarationName}`;
     } else if (item.declarationType === "type") {
-      declaration = `type:${item.declarationName}`;
+      declaration = `type:{} as ${item.declarationName}`;
     }
     if (declaration) {
       items.push(declaration);
@@ -123,8 +130,9 @@ function isUsedBinding(
 function generateHelpers(prefix: (s: string) => string) {
   const RawTypeSymbol = prefix("RawTypeSymbol");
   const ToRawType = prefix("ToRawType");
-  const ExtractRawType = prefix("ExtractRawType");
+  const toRaw = prefix("toRaw");
   const extractRaw = prefix("extractRaw");
+  const extractValue = prefix("extractValue");
 
   const defineEmits = prefix("defineEmits");
   const defineProps = prefix("defineProps");
@@ -134,8 +142,9 @@ function generateHelpers(prefix: (s: string) => string) {
 
   return `declare const ${RawTypeSymbol}: unique symbol
 type ${ToRawType}<T, O = T> = T & { [${RawTypeSymbol}]: O }
-type ${ExtractRawType}<T> = T extends { [${RawTypeSymbol}]: infer R } ? R : never
-declare function ${extractRaw}<T>(o: T): T extends ${ToRawType}<infer V> ? V : T
+declare function ${toRaw}<T>(o: T): ${ToRawType}<T>
+declare function ${extractValue}<T>(o: T): T extends ${ToRawType}<infer V> ? V : T
+declare function ${extractRaw}<T>(o: T): T extends ${ToRawType}<unknown,infer V> ? V : T
 
 declare function ${defineEmits}<EE extends string = string>(
   emitOptions: EE[],

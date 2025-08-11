@@ -219,7 +219,7 @@ function createRawBinding(
     }
     case "object": {
       const helperName = ctx.prefix(macro);
-      const extractRaw = ctx.prefix("extractRaw");
+      const extractValue = ctx.prefix("extractValue");
       const varName = ctx.prefix(macro.slice("define".length) + "Raw");
 
       const argNode = node.arguments[0];
@@ -227,7 +227,7 @@ function createRawBinding(
 
       s.prependRight(argNode.start, `const ${varName}=${helperName}(`);
       s.prependLeft(argNode.end, `);`);
-      s.prependLeft(argNode.start, `${extractRaw}(${varName})`);
+      s.prependLeft(argNode.start, `${extractValue}(${varName})`);
 
       return varName;
     }
