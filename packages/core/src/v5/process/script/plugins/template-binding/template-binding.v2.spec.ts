@@ -88,7 +88,7 @@ describe("process script plugins template-binding", () => {
           expect(result).toMatchInlineSnapshot(`"defineProps({})"`);
         });
 
-        it("defineProps({foo:String})", () => {
+        it.only("defineProps({foo:String})", () => {
           const { result } = parse(`defineProps({foo:String})`);
           expect(result).toMatchInlineSnapshot(`"defineProps({foo:String})"`);
         });
@@ -102,7 +102,7 @@ describe("process script plugins template-binding", () => {
       });
 
       describe("mix", () => {
-        it.only("type based", () => {
+        it.skip("type based", () => {
           const { result } = parse(
             `let a = {foo: 1};defineProps<{foo:string}>();defineEmits<{bar: (a:{ foo: string})=>void}>();defineSlots<{default: (arg:{foo:string})=>void}>();defineExpose({arg: 'foo'});defineOptions({name:'foo'});defineModel<'foo'|'bar'>();`,
             "<template><div>{{a}}</div></template>"

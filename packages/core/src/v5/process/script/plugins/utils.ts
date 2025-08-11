@@ -4,11 +4,13 @@ export function generateTypeDeclaration(
   name: string,
   content: string,
   generic: string | undefined,
-  typescript: boolean
+  typescript: boolean,
+isExport: boolean
 ) {
+  const exportStr = isExport ? `export` : ``;
   return typescript
-    ? `;export type ${name}${generic ? `<${generic}>` : ""}=${content};`
-    : `\n/** @typedef {${content}} ${name} */\n/** @type {${name}} */\nexport const ${name} = null;\n`;
+    ? `;${exportStr} type ${name}${generic ? `<${generic}>` : ""}=${content};`
+    : `\n/** @typedef {${content}} ${name} */\n/** @type {${name}} */\n${exportStr} const ${name} = null;\n`;
 }
 
 export function generateTypeString(
@@ -18,12 +20,14 @@ export function generateTypeString(
     key?: string;
     isFunction?: boolean;
     isType?: boolean;
+    export?: boolean;
   },
   ctx: ScriptContext
 ) {
   const isTS = ctx.block.lang.startsWith("ts");
   const isAsync = ctx.isAsync;
   const generic = ctx.generic;
+  const isExport = info.export || false;
 
   const content = `${info.isFunction ? "ReturnType<" : ""}${
     info.isType ? "" : "typeof "
@@ -37,5 +41,5 @@ export function generateTypeString(
       : ""
   }`;
 
-  return generateTypeDeclaration(name, content, generic?.source, isTS);
+  return generateTypeDeclaration(name, content, generic?.source, isTS, isExport);
 }

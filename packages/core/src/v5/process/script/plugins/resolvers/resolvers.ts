@@ -61,14 +61,16 @@ export const ScriptResolversPlugin = definePlugin({
           resolvePropsName,
           resolveProps,
           ctx.generic?.source,
-          ctx.isTS
+          ctx.isTS,
+          true
         ),
         hasEmit &&
           generateTypeDeclaration(
             resolveEmitsName,
             resolveEmits,
             ctx.generic?.source,
-            ctx.isTS
+            ctx.isTS,
+            true
           ),
         ,
       ]

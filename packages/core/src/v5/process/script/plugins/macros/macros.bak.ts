@@ -76,7 +76,8 @@ export const MacrosPlugin = definePlugin({
           name,
           "{}",
           ctx.generic?.source,
-          isTS
+          isTS,
+          true
         );
         s.append(str);
       }

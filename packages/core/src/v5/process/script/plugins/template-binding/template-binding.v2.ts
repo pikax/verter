@@ -55,9 +55,24 @@ export const TemplateBindingPlugin = definePlugin({
     const rawVars = `{${macros.join(",")},_model:${model}}`;
     // known bindings
 
-    const returnStatement = `return {${usedBindings.join(",")},...${ctx.prefix(
-      "toRaw"
-    )}(${rawVars})}`;
+    const returnStatement = `return {${usedBindings
+      .concat([`...${ctx.prefix("toRaw")}(${rawVars})`])
+      .join(",")}}`;
+
+    const typeStr = generateTypeString(
+      name,
+      {
+        from: `${name}FN`,
+        isFunction: true,
+        export: false
+      },
+      ctx
+    );
+    s.prependRight(tag.pos.close.start, `;${returnStatement}`);
+    
+    s.prependRight(tag.pos.close.end, typeStr);
+
+    s.overwrite(tag.pos.open.start + 1, tag.pos.content.start, `${name}FN`);
   },
 });
 
@@ -84,7 +99,7 @@ function macroBindingToReturnStatement(
   ctx: ScriptContext
 ) {
   const unref = ctx.prefix(ctx.isTS ? "UnwrapRef" : "unref");
-  const ExtractRawType = ctx.prefix("ExtractRawType");
+  const extractRaw = ctx.prefix("extractRaw");
 
   const value = ctx.isTS
     ? `value/*${item.node.start},${item.node.end}*/:{} as typeof ${item.name}`
@@ -95,9 +110,7 @@ function macroBindingToReturnStatement(
   if (item.declarationName) {
     let declaration = "";
     if (item.declarationType === "object") {
-      declaration = ctx.isTS
-        ? `object:${ExtractRawType}<typeof ${item.declarationName}>`
-        : `object:${item.declarationName}`;
+      declaration = `object:${extractRaw}(${item.declarationName})`;
     } else if (item.declarationType === "type") {
       declaration = `type:{} as ${item.declarationName}`;
     }
