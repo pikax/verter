@@ -280,6 +280,22 @@ describe("parser template", () => {
         ],
       });
     });
+
+    it("prop binding literal", () => {
+      const result = parse(`<div :id="false"></div>`);
+      expect(result).toMatchObject({
+        Binding: [
+          {
+            name: "id",
+            ignore: true,
+          },
+          {
+            name: "false",
+            ignore: true,
+          },
+        ],
+      });
+    });
   });
 
   // pug is not supported

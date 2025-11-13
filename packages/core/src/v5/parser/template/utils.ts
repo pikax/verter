@@ -40,7 +40,7 @@ const KeywordsInStrict = ["let", "static", "yield"];
 const Literals = "undefined,null,true,false".split(",");
 
 const BindingIgnoreArray = [...Keywords, ...KeywordsInStrict, ...Literals];
-const BidningIgnoreSet = new Set(BindingIgnoreArray);
+const BindingIgnoreSet = new Set(BindingIgnoreArray);
 
 export function retrieveBindings(
   exp: ExpressionNode,
@@ -62,7 +62,10 @@ export function retrieveBindings(
       node: exp,
       name,
       parent: null,
-      ignore: context.ignoredIdentifiers.includes(name) || exp.isStatic,
+      ignore:
+        context.ignoredIdentifiers.includes(name) ||
+        BindingIgnoreSet.has(name) ||
+        exp.isStatic,
       directive,
       exp,
     });
@@ -192,7 +195,7 @@ export function getASTBindings(
             directive: null,
 
             ignore:
-              ignoredIdentifiers.includes(name) || BidningIgnoreSet.has(name),
+              ignoredIdentifiers.includes(name) || BindingIgnoreSet.has(name),
             exp: exp as SimpleExpressionNode | null,
           });
           break;
