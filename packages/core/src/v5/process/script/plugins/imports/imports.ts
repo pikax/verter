@@ -15,6 +15,13 @@ export const ImportsPlugin = definePlugin({
     s.prepend(importStr);
   },
   transformImport(item, s) {
-    s.move(item.node.start, item.node.end, 0);
+    let end = item.node.end;
+    const ending = s.original[end - 1];
+    if (ending !== ";" && ending !== "\n") {
+      // import the extra character after the import statement
+      end += 1;
+    }
+
+    s.move(item.node.start, end, 0);
   },
 });

@@ -61,12 +61,25 @@ describe("process script plugins imports", () => {
   });
   it("should only generate 1 import", () => {
     const { s } = parse(
-      `defineModel(); defineModel('foo); defineEmits()`,
+      `defineModel(); defineModel('foo'); defineEmits()`,
       false,
       "ts"
     );
     expect(s.toString()).toContain(
-      `import { type ___VERTER___ModelToProps, type ___VERTER___UnionToIntersection, type ___VERTER___ModelToEmits } from "$verter/options.helper.ts";defineModel(); defineModel('foo); defineEmits()`
+      `import { type ___VERTER___ModelToProps, type ___VERTER___UnionToIntersection, type ___VERTER___ModelToEmits, type ___VERTER___EmitMapToProps, type ___VERTER___OverloadParameters } from "$verter/options.helper.ts";defineModel(); defineModel('foo'); defineEmits();`
+    );
+  });
+
+  it("should add move an extra character at the end", () => {
+    const { s } = parse(
+      `import { a } from "b"\nimport { a } from "c";import { a } from "d"`,
+      false,
+      "ts"
+    );
+
+    expect(s.toString()).toContain(
+      `import { a } from "b"
+import { a } from "c";import { a } from "d"`
     );
   });
 });
