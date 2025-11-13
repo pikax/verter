@@ -27,7 +27,7 @@ export interface ParsedBlockScript {
 }
 
 export interface ParsedBlockUnknown {
-  type: Omit<string, "template" | "script">;
+  type: string;
   lang: string;
   block: VerterSFCBlock<SFCBlock>;
   result: null;

@@ -41,8 +41,9 @@ export const ScriptBlockPlugin = definePlugin({
       for (const script of notMainScripts) {
         const start = script.block.tag.pos.open.start;
         const end = script.block.tag.pos.close.end;
-        if (start === 0) continue;
-        s.move(start, end, 0);
+        if (start !== 0) {
+          s.move(start, end, 0);
+        }
 
         // clean tags, the main script will be handled by other plugin
         s.remove(
