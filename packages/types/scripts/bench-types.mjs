@@ -68,6 +68,13 @@ function parseDiagnostics(output) {
     const m = output.match(re);
     return m ? parseFloat(m[1]) : NaN;
   };
+  // Memory can be reported in MB or K; normalize to MB
+  let memoryMB = NaN;
+  const mMB = output.match(/Memory used:\s+(\d+\.?\d*)MB/);
+  const mK = output.match(/Memory used:\s+(\d+\.?\d*)K/);
+  if (mMB) memoryMB = parseFloat(mMB[1]);
+  else if (mK) memoryMB = parseFloat(mK[1]) / 1024;
+
   return {
     files: getNumber(/Files:\s+(\d+)/),
     lines: getNumber(/Lines:\s+(\d+)/),
@@ -75,7 +82,7 @@ function parseDiagnostics(output) {
     identifiers: getNumber(/Identifiers:\s+(\d+)/),
     symbols: getNumber(/Symbols:\s+(\d+)/),
     types: getNumber(/Types:\s+(\d+)/),
-    memoryMB: getNumber(/Memory used:\s+(\d+\.?\d*)MB/),
+    memoryMB,
     parseMs: getNumber(/Parse time:\s+(\d+\.?\d*)s/)*1000,
     bindMs: getNumber(/Bind time:\s+(\d+\.?\d*)s/)*1000,
     checkMs: getNumber(/Check time:\s+(\d+\.?\d*)s/)*1000,

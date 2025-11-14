@@ -21,13 +21,19 @@
     "build:string": "node scripts/build-string.mjs",
     "dev": "tsc -b --watch",
     "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
-    "test": "vitest",
+    "test": "vitest --typecheck --run",
     "bench": "node scripts/bench-types.mjs",
     "bench:trace": "node scripts/bench-types.mjs --trace"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "readme.md",
+    "LICENSE"
+  ],
   "dependencies": {},
   "devDependencies": {
     "typescript": "^5.8.3",
