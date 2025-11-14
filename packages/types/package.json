@@ -21,11 +21,13 @@
     "build:string": "node scripts/build-string.mjs",
     "dev": "tsc -b --watch",
     "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
-    "test": "vitest"
+    "test": "vitest",
+    "bench": "node scripts/bench-types.mjs",
+    "bench:trace": "node scripts/bench-types.mjs --trace"
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {},
   "devDependencies": {
     "typescript": "^5.8.3",

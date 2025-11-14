@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["./src/**/*.ts", "./bench/generated/**/*.ts"],
+  "exclude": ["dist", "node_modules", "**/*.spec.ts"],
+  "compilerOptions": {
+    "skipLibCheck": true,
+    "noEmit": true,
+    "rootDir": "."
+  }
+}
