@@ -13,7 +13,7 @@ export type PatchHidden<T, E> = { [UniqueKey]?: E } & T;
 export type ExtractHidden<T, R = never> = T extends {
   [UniqueKey]?: infer U;
 }
-  ? U
+  ? U 
   : R;
 
 /**

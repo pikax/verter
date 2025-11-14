@@ -27,6 +27,7 @@
     "@babel/types": "^7.28.0",
     "@oxc-project/types": "^0.75.1",
     "@types/ts-expose-internals": "npm:ts-expose-internals@5.2.2",
+    "@verter/types": "workspace:*",
     "@vue/compiler-core": "^3.5.17",
     "@vue/compiler-sfc": "^3.5.17",
     "@vue/shared": "^3.5.17",

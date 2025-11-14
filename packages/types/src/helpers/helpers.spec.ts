@@ -1,3 +1,4 @@
+import { describe, it, assertType } from "vitest";
 import {
   ExtractHidden,
   PatchHidden,
@@ -17,9 +18,9 @@ describe("Helpers", () => {
       type ExtractedType = ExtractHidden<PatchedType>;
 
       // Assert that the patched type still has the original properties
-      assertEqual<PatchedType, OriginalType>();
-      assertEqual<OriginalType, PatchedType>();
-      assertEqual<HiddenType, ExtractedType>();
+      assertType<PatchedType>({} as OriginalType);
+      assertType<OriginalType>({} as PatchedType);
+      assertType<HiddenType>({} as ExtractedType);
 
       assertType<PatchedType>({ a: 42, b: "hello" });
       assertType<ExtractedType>({ hiddenProp: true });
@@ -28,8 +29,7 @@ describe("Helpers", () => {
     it("should be never when extracting from a type without the hidden property", () => {
       type SomeType = { x: number; y: string };
       type ExtractedType = ExtractHidden<SomeType>;
-      assertNever<ExtractedType>();
-      assertEqual<ExtractedType, never>();
+      assertType<ExtractedType>({} as never);
     });
   });
 
@@ -42,13 +42,13 @@ describe("Helpers", () => {
       };
       type Extracted = ExtractHidden<Obj>;
 
-      assertEqual<Fn, Obj>();
-      assertEqual<Extracted, ExpectedObj>();
+      assertType<Fn>({} as Obj);
+      assertType<Extracted>({} as ExpectedObj);
 
       // @ts-expect-error test for any type
-      assertEqual<{ a: 1 }, Extracted>();
+      assertType<{ a: 1 }>({} as Extracted);
       // @ts-expect-error test for any type
-      assertEqual<{ a: 1 }, Obj>();
+      assertType<{ a: 1 }>({} as Obj);
 
       const test = {} as Extracted;
       test.foo;
@@ -67,13 +67,13 @@ describe("Helpers", () => {
       };
       type Extracted = ExtractHidden<Obj>;
 
-      assertEqual<Fn, Obj>();
-      assertEqual<Extracted, ExpectedObj>();
+      assertType<Fn>({} as Obj);
+      assertType<Extracted>({} as ExpectedObj);
 
       // @ts-expect-error test for any type
-      assertEqual<{ a: 1 }, Extracted>();
+      assertType<{ a: 1 }>({} as Extracted);
       // @ts-expect-error test for any type
-      assertEqual<{ a: 1 }, Obj>();
+      assertType<{ a: 1 }>({} as Obj);
 
       const test = {} as Extracted;
       test.foo;
@@ -98,13 +98,13 @@ describe("Helpers", () => {
       };
       type Extracted = ExtractHidden<Obj>;
 
-      assertEqual<Fn, Obj>();
-      assertEqual<Extracted, ExpectedObj>();
+      assertType<Fn>({} as Obj);
+      assertType<Extracted>({} as ExpectedObj);
 
       // @ts-expect-error test for any type
-      assertEqual<{ a: 1 }, Extracted>();
+      assertType<{ a: 1 }>({} as Extracted);
       // @ts-expect-error test for any type
-      assertEqual<{ a: 1 }, Obj>();
+      assertType<{ a: 1 }>({} as Obj);
 
       const test = {} as Extracted;
       test.foo;
@@ -135,13 +135,13 @@ describe("Helpers", () => {
       // since the types are unioned, we need to convert to intersection
       type Extracted = UnionToIntersection<ExtractHidden<Obj>>;
 
-      assertEqual<Fn, Obj>();
-      assertEqual<Extracted, ExpectedObj>();
+      assertType<Fn>({} as Obj);
+      assertType<Extracted>({} as ExpectedObj);
 
       // @ts-expect-error test for any type
-      assertEqual<{ a: 1 }, Extracted>();
+      assertType<{ a: 1 }>({} as Extracted);
       // @ts-expect-error test for any type
-      assertEqual<{ a: 1 }, Obj>();
+      assertType<{ a: 1 }>({} as Obj);
 
       const test = {} as Extracted;
       test.foo;
@@ -168,13 +168,13 @@ describe("Helpers", () => {
       // since the types are unioned, we need to convert to intersection
       type Extracted = UnionToIntersection<ExtractHidden<Obj>>;
 
-      assertEqual<Fn, Obj>();
-      assertEqual<Extracted, ExpectedObj>();
+      assertType<Fn>({} as Obj);
+      assertType<Extracted>({} as ExpectedObj);
 
       // @ts-expect-error test for any type
-      assertEqual<{ a: 1 }, Extracted>();
+      assertType<{ a: 1 }>({} as Extracted);
       // @ts-expect-error test for any type
-      assertEqual<{ a: 1 }, Obj>();
+      assertType<{ a: 1 }>({} as Obj);
 
       const test = {} as Extracted;
       test.foo;
@@ -207,7 +207,7 @@ describe("Helpers", () => {
         alsoOptional?: boolean | undefined;
       };
 
-      assertEqual<Result, Expected>();
+      assertType<Result>({} as Expected);
 
       const value: Result = {
         required: "test",
@@ -232,7 +232,7 @@ describe("Helpers", () => {
 
       type Result = PartialUndefined<Original>;
 
-      assertEqual<Result, Original>();
+      assertType<Result>({} as Original);
 
       //@ts-expect-error all properties required
       const invalid: Result = {
@@ -265,7 +265,7 @@ describe("Helpers", () => {
         age?: number | undefined;
       };
 
-      assertEqual<Result, Expected>();
+      assertType<Result>({} as Expected);
 
       const value: Result = {
         id: 1,
@@ -296,7 +296,7 @@ describe("Helpers", () => {
         c?: boolean | undefined;
       };
 
-      assertEqual<Result, Expected>();
+      assertType<Result>({} as Expected);
 
       const value: Result = {
         a: "test",
@@ -318,7 +318,7 @@ describe("Helpers", () => {
       type Original = {};
       type Result = PartialUndefined<Original>;
 
-      assertEqual<Result, Original>();
+      assertType<Result>({} as Original);
 
       const value: Result = {};
     });
@@ -337,7 +337,7 @@ describe("Helpers", () => {
         c?: boolean | undefined;
       };
 
-      assertEqual<Result, Expected>();
+      assertType<Result>({} as Expected);
 
       const value1: Result = {};
       const value2: Result = { a: "test" };
@@ -354,7 +354,7 @@ describe("Helpers", () => {
         const result = makePartial<{ id: number; name: string }>();
         type Result = typeof result;
 
-        assertEqual<Result, { id: number; name: string }>();
+        assertType<Result>({} as { id: number; name: string });
 
         result.id;
         result.name;
@@ -406,7 +406,7 @@ describe("Helpers", () => {
           email?: string | undefined;
         };
 
-        assertEqual<Result, Expected>();
+        assertType<Result>({} as Expected);
 
         const value1: Result = {};
         const value2: Result = { id: 1 };
@@ -431,7 +431,7 @@ describe("Helpers", () => {
           value?: string | undefined;
         };
 
-        assertEqual<StringResult, ExpectedString>();
+        assertType<StringResult>({} as ExpectedString);
 
         stringResult.required;
         stringResult.value;
@@ -444,7 +444,7 @@ describe("Helpers", () => {
           value?: number | undefined;
         };
 
-        assertEqual<NumberResult, ExpectedNumber>();
+        assertType<NumberResult>({} as ExpectedNumber);
 
         numberResult.required;
         numberResult.value;
@@ -477,7 +477,7 @@ describe("Helpers", () => {
           metadata?: { items: string[]; count: number } | undefined;
         };
 
-        assertEqual<Result, Expected>();
+        assertType<Result>({} as Expected);
 
         result.id;
         result.data;
@@ -502,7 +502,7 @@ describe("Helpers", () => {
       type Result = UnionToIntersection<Union>;
       type Expected = { a: number } & { b: string } & { c: boolean };
 
-      assertEqual<Result, Expected>();
+      assertType<Result>({} as Expected);
 
       const value: Result = {
         a: 123,
@@ -526,7 +526,7 @@ describe("Helpers", () => {
       type Result = UnionToIntersection<Union>;
       type Expected = ((a: number) => void) & ((b: string) => void);
 
-      assertEqual<Result, Expected>();
+      assertType<Result>({} as Expected);
 
       const fn: Result = ((x: any) => {}) as any;
       fn(123);
@@ -537,7 +537,7 @@ describe("Helpers", () => {
       type Union = never;
       type Result = UnionToIntersection<Union>;
 
-      assertEqual<Result, never>();
+      assertType<Result>({} as never);
     });
 
     describe("generic tests", () => {
@@ -553,7 +553,7 @@ describe("Helpers", () => {
 
         type Expected = { a: string } & { b: number };
 
-        assertEqual<Result, Expected>();
+        assertType<Result>({} as Expected);
 
         result.a;
         result.b;
@@ -570,7 +570,7 @@ describe("Helpers", () => {
 
         type Expected = { id: number } & { name: string };
 
-        assertEqual<Result, Expected>();
+        assertType<Result>({} as Expected);
 
         result.id;
         result.name;

@@ -1,0 +1,35 @@
+{
+  "name": "@verter/types",
+  "version": "1.0.0",
+  "description": "Type helpers for Verter",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "commonjs",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./string": {
+      "types": "./dist/string-export.d.ts",
+      "default": "./dist/string-export.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b --force && node scripts/build-string.mjs",
+    "build:string": "node scripts/build-string.mjs",
+    "dev": "tsc -b --watch",
+    "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
+    "test": "vitest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4",
+    "vue": "^3.5.17"
+  }
+}
