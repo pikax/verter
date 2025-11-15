@@ -65,9 +65,7 @@ describe("process script plugin full context", () => {
           "",
           '<template><div @click="foo"></div></template>'
         );
-        expect(result).toMatchInlineSnapshot(
-          `"<template><div @click="foo"></div></template>;function script   (){function foo(a) { return a }};export type ___VERTER___defineProps={};;export type ___VERTER___defineEmits={};;export type ___VERTER___defineExpose={};;export type ___VERTER___defineModel={};;export type ___VERTER___defineSlots={};"`
-        );
+        expect(result).toContain(`function foo(...[a]: [HTMLElementEventMap["click"]]) { return a }`);
       });
     });
   });
