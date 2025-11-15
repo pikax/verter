@@ -22,7 +22,6 @@ import {
   DefineOptionsPlugin,
 } from "../../plugins/";
 
-import { relative } from "node:path/posix";
 import { TemplateTypes } from "../../../../parser/template/types";
 
 export function ResolveOptionsFilename(

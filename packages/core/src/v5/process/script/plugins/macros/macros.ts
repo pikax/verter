@@ -1,11 +1,8 @@
 import { definePlugin, ScriptContext } from "../../types";
-import type {
-  CallExpression,
-  ObjectExpression,
-} from "../../../../parser/ast/types";
+import type { CallExpression } from "../../../../parser/ast/types";
 import { ProcessContext, ProcessItemType } from "../../../types";
 import { generateTypeDeclaration, generateTypeString } from "../utils";
-import { ScriptTypes } from "../../../../parser";
+import type { AvailableExports } from "@verter/types/string";
 
 const Macros = new Set([
   "defineProps",
@@ -19,14 +16,11 @@ const Macros = new Set([
   // useSlots()/useAttrs()
 ]);
 
-const HelperLocation = "$verter/options.helper.ts";
+const HelperLocation = "$verter/types";
 
-const MacroDependencies = new Map([
-  [
-    "defineEmits",
-    ["UnionToIntersection", "EmitMapToProps", "OverloadParameters"],
-  ],
-  ["defineModel", ["ModelToProps", "UnionToIntersection", "ModelToEmits"]],
+const MacroDependencies = new Map<string, AvailableExports[]>([
+  ["defineEmits", ["EmitsToProps"]],
+  ["defineModel", ["ModelToProps", "ModelToEmits"]],
   ["defineOptions", ["DefineOptions"]],
 ]);
 

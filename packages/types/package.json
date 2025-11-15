@@ -5,15 +5,27 @@
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
-  "type": "commonjs",
+  "type": "module",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
     "./string": {
       "types": "./dist/string-export.d.ts",
+      "import": "./dist/string-export.js",
       "default": "./dist/string-export.js"
+    },
+    "./tsx": {
+      "types": "./dist/tsx-export.d.ts",
+      "import": "./dist/tsx-export.js",
+      "default": "./dist/tsx-export.js"
+    },
+    "./tsx-string": {
+      "types": "./dist/tsx-string-export.d.ts",
+      "import": "./dist/tsx-string-export.js",
+      "default": "./dist/tsx-string-export.js"
     }
   },
   "scripts": {

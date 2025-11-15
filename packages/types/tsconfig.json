@@ -1,11 +1,12 @@
 {
   "extends": "../../tsconfig.base.json",
   "include": ["./src"],
-  "exclude": ["dist", "node_modules", "**/*.spec.ts"],
+  "exclude": ["dist", "node_modules", "**/*.spec.ts", "**/*.spec.tsx"],
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
     "target": "ESNext",
-    "module": "CommonJS"
+    "module": "ESNext",
+    "moduleResolution": "Bundler"
   }
 }

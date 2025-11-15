@@ -18,6 +18,7 @@
     "rootDir": "./src",
     "target": "ESNext",
     "module": "CommonJS",
+    "moduleResolution": "nodenext",
     "types": ["vitest/importMeta", "vitest/globals", "vite/client"],
     "jsx": "preserve",
     "preserveConstEnums": true
