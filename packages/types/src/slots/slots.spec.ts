@@ -14,6 +14,7 @@ describe("StrictRenderSlot", () => {
     slots: {} as SlotsType<{
       default: () => (typeof TabItem)[];
       single: () => typeof TabItem;
+      notEmpty: () => [typeof TabItem, ...Array<typeof TabItem>];
 
       tuple: () => [typeof TabItem, typeof TabItem];
 
@@ -56,6 +57,16 @@ describe("StrictRenderSlot", () => {
     // @ts-expect-error wrong child type
     StrictRenderSlot(c.$slots.single, [UnpatchedTabItems]);
   });
+
+  it("requires non-empty array for notEmpty-returning slot", () => {
+    StrictRenderSlot(c.$slots.notEmpty, [TabItem]);
+    StrictRenderSlot(c.$slots.notEmpty, [TabItem, TabItem]);
+    // @ts-expect-error empty array not allowed
+    StrictRenderSlot(c.$slots.notEmpty, []);
+    // @ts-expect-error wrong child type
+    StrictRenderSlot(c.$slots.notEmpty, [UnpatchedTabItems]);
+  });
+
   it("supports tuple-returning slot", () => {
     StrictRenderSlot(c.$slots.tuple, [TabItem, TabItem]);
     // @ts-expect-error wrong number of children
