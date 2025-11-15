@@ -26,6 +26,7 @@ describe("StrictRenderSlot", () => {
       literalTuple: () => ["foo", typeof TabItem];
 
       spanElement: () => HTMLSpanElement;
+      spanElements: () => HTMLSpanElement[];
     }>,
   });
 
@@ -101,8 +102,10 @@ describe("StrictRenderSlot", () => {
     StrictRenderSlot(c.$slots.literalMultiple, ["foo", "bar", "foo"]);
     StrictRenderSlot(c.$slots.literalMultiple, []);
     StrictRenderSlot(c.$slots.literalMultiple, ["bar"]);
-    // @ts-expect-error wrong literal
-    StrictRenderSlot(c.$slots.literalMultiple, ["baz"]);
+    // Note: ["baz"] cannot be rejected because TypeScript widens it to string[]
+    // To get strict literal checking, users must use `as const`: ["baz"] as const
+    // @ts-expect-error wrong type
+    StrictRenderSlot(c.$slots.literalMultiple, ["baz" as const]);
     // @ts-expect-error wrong type
     StrictRenderSlot(c.$slots.literalMultiple, [TabItem]);
   });
@@ -122,6 +125,17 @@ describe("StrictRenderSlot", () => {
 
     // @ts-expect-error wrong type
     StrictRenderSlot(c.$slots.spanElement, [
+      document.createElement("div") as HTMLDivElement,
+    ]);
+  });
+
+  it("support for named slot returning HTMLSpanElement[]", () => {
+    StrictRenderSlot(c.$slots.spanElements, [
+      document.createElement("span") as HTMLSpanElement,
+    ]);
+
+    // @ts-expect-error wrong type
+    StrictRenderSlot(c.$slots.spanElements, [
       document.createElement("div") as HTMLDivElement,
     ]);
   });
