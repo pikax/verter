@@ -20,15 +20,15 @@ function getSourceFilesFromIndex(indexPath) {
   );
 
   const sourceFiles = [];
-  
+
   ts.forEachChild(indexFile, (node) => {
     if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
       if (ts.isStringLiteral(node.moduleSpecifier)) {
         const modulePath = node.moduleSpecifier.text;
         // Convert "./helpers" to "helpers/helpers.ts" or similar
         const relativePath = modulePath.replace(/^\.\//, "");
-        const folderName = relativePath.split('/').pop();
-        
+        const folderName = relativePath.split("/").pop();
+
         // Try to resolve the actual implementation file (not index.ts)
         // Check for <folder>/<folder>.ts first, then <name>.ts, then index.ts as fallback
         const possiblePaths = [
@@ -78,7 +78,40 @@ function collectAllTypes(sourceFiles) {
   return allTypes;
 }
 
-function transformSourceFile(sourceFile, allTypes, prefix = "$V_", keepComments = false) {
+// Collect exported type/function names to build an automatic AvailableTypes union
+function collectExportedNames(sourceFiles) {
+  const names = new Set();
+
+  const add = (id) => {
+    if (id && typeof id.text === "string") names.add(id.text);
+  };
+
+  const hasExport = (node) =>
+    Array.isArray(node.modifiers) &&
+    node.modifiers.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+
+  function visit(node) {
+    if (ts.isTypeAliasDeclaration(node) && hasExport(node)) add(node.name);
+    else if (ts.isInterfaceDeclaration(node) && hasExport(node)) add(node.name);
+    else if (ts.isClassDeclaration(node) && node.name && hasExport(node))
+      add(node.name);
+    else if (ts.isEnumDeclaration(node) && hasExport(node)) add(node.name);
+    else if (ts.isFunctionDeclaration(node) && node.name && hasExport(node))
+      add(node.name);
+    // variables are intentionally excluded
+    return ts.forEachChild(node, visit);
+  }
+
+  sourceFiles.forEach((sf) => visit(sf));
+  return names;
+}
+
+function transformSourceFile(
+  sourceFile,
+  allTypes,
+  prefix = "$V_",
+  keepComments = false
+) {
   const rewriteIdentifier = (ident) => {
     if (allTypes.has(ident.text) && !ident.text.startsWith(prefix)) {
       return ts.factory.createIdentifier(prefix + ident.text);
@@ -251,7 +284,10 @@ function build() {
     process.exit(1);
   }
 
-  console.log("Found source files:", sourceFilePaths.map(p => path.relative(srcDir, p)).join(", "));
+  console.log(
+    "Found source files:",
+    sourceFilePaths.map((p) => path.relative(srcDir, p)).join(", ")
+  );
 
   // Read and parse all source files
   const sourceFiles = sourceFilePaths.map((filePath) => {
@@ -267,28 +303,52 @@ function build() {
   // CLI flag: keep comments in the output string
   const keepComments = process.argv.includes("--keep-comments");
 
-  // Collect all declarations (exported and internal)
+  // Collect all declarations (exported and internal) and exported names list
   const allTypes = collectAllTypes(sourceFiles);
+  const exportedNames = collectExportedNames(sourceFiles);
 
   // Transform all files
   const transformedSources = sourceFiles.map((sourceFile, index) => {
-    let transformed = transformSourceFile(sourceFile, allTypes, "$V_", keepComments);
-    
+    let transformed = transformSourceFile(
+      sourceFile,
+      allTypes,
+      "$V_",
+      keepComments
+    );
+
     // Remove imports from all files except the first one (to avoid duplicate imports)
     if (index > 0) {
-      transformed = transformed.replace(/import\s*{[^}]+}\s*from\s*["'][^"']+["'];?\s*/g, "");
+      transformed = transformed.replace(
+        /import\s*{[^}]+}\s*from\s*["'][^"']+["'];?\s*/g,
+        ""
+      );
     }
-    
+
     return transformed;
   });
 
   // Combine all transformed sources
-  const combined = transformedSources.join("\n\n");
+  let combined = transformedSources.join("\n\n");
+
+  // Append auto-generated AvailableTypes from exported names (unprefixed string literals)
+  const available = Array.from(exportedNames);
+  if (available.length) {
+    combined +=
+      "\n\nexport type AvailableTypes = " +
+      available.map((n) => `"${n}"`).join(" | ") +
+      ";\n";
+  }
 
   // Create output
+  const processed = combined.replace(/`/g, "\\`").replace(/\$/g, "\\$");
+  // const availableJson = JSON.stringify(available);
   const output = `// Generated file - do not edit directly
-const typeHelpersSource = \`${combined.replace(/`/g, "\\`").replace(/\$/g, "\\$")}\`;
+const typeHelpersSource = \`${processed}\`;
 export default typeHelpersSource;
+export function prefixWith(prefix) {
+  return typeHelpersSource
+    .replaceAll("$V_", prefix);
+}
 `;
 
   // Ensure dist exists
@@ -300,7 +360,9 @@ export default typeHelpersSource;
   fs.writeFileSync(path.join(distDir, "string-export.js"), output);
   fs.writeFileSync(
     path.join(distDir, "string-export.d.ts"),
-    `declare const typeHelpersSource: string;\nexport default typeHelpersSource;\n`
+    `declare const typeHelpersSource: string;\nexport default typeHelpersSource;\nexport type AvailableExports = ${
+      available.map((n) => `"${n}"`).join(" | ") || "never"
+    };\nexport function prefixWith(prefix: string): string;\n`
   );
 
   console.log("✓ Built string export successfully");
