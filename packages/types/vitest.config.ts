@@ -7,7 +7,7 @@ export default defineConfig({
     typecheck: {
       enabled: true,
       only: true,
-      include: ["**/*.spec.ts"],
+      include: ["**/*.spec.ts", "**/*.spec.tsx"],
       checker: "tsc",
       tsconfig: "./tsconfig.test.json",
       ignoreSourceErrors: false,

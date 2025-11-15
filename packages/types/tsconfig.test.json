@@ -1,6 +1,6 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["src/**/*.spec.ts", "src/test-utils.d.ts"],
+  "include": ["src/**/*.spec.ts", "src/**/*.spec.tsx", "src/test-utils.d.ts"],
   "exclude": [],
   "compilerOptions": {
     "composite": false,
@@ -9,6 +9,7 @@
     "noEmit": true,
     "skipLibCheck": true,
     "module": "ESNext",
-    "moduleResolution": "bundler"
+    "moduleResolution": "bundler",
+    "jsx": "preserve"
   }
 }
