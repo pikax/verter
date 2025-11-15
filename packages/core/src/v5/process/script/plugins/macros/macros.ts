@@ -16,7 +16,7 @@ const Macros = new Set([
   // useSlots()/useAttrs()
 ]);
 
-const HelperLocation = "$verter/types";
+const HelperLocation = "$verter/types$";
 
 const MacroDependencies = new Map<string, AvailableExports[]>([
   ["defineEmits", ["EmitsToProps"]],

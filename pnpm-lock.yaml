@@ -169,6 +169,9 @@ importers:
       '@verter/language-shared':
         specifier: workspace:^
         version: link:../language-shared
+      '@verter/types':
+        specifier: workspace:^
+        version: link:../types
       '@vue/compiler-core':
         specifier: ^3.5.17
         version: 3.5.17

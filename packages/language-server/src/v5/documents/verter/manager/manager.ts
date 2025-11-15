@@ -234,6 +234,9 @@ function createService(
     },
     fileExists: (filepath) => {
       if (filepath.endsWith("/react/index.d.ts")) return false;
+      if (filepath.indexOf("$verter/types$") > 0) {
+        return true;
+      }
 
       return documentManager.fileExists(normalisePath(filepath));
     },
