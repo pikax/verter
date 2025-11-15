@@ -17,7 +17,7 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "target": "ESNext",
-    "module": "CommonJS",
+    "module": "nodenext",
     "moduleResolution": "nodenext",
     "types": ["vitest/importMeta", "vitest/globals", "vite/client"],
     "jsx": "preserve",

@@ -4,6 +4,7 @@
     "baseUrl": "'.",
     // "lib": ["WebWorker", "ES2021"],
     "module": "NodeNext",
+    "moduleResolution": "nodenext",
     "sourceMap": true,
     "composite": true,
     "declarationMap": true,
