@@ -5,6 +5,7 @@ TypeScript-first utility types and Vue emits helpers for Verter. Includes a stri
 Features
 - Type helpers: `PatchHidden`, `ExtractHidden`, `PartialUndefined`, `UnionToIntersection`.
 - Vue emits helpers: `FunctionToObject`, `IntersectionFunctionToObject`, `EmitsToProps`, `ComponentEmitsToProps`.
+- **Slots helpers**: `StrictRenderSlot` for type-safe slot content validation ([RFC 733](https://github.com/vuejs/rfcs/discussions/733)).
 - String export for embedding in tooling: all declarations prefixed with `$V_` to avoid collisions, comments removable by flag.
 - Bench harness to measure TypeScript checker performance for these helpers.
 
@@ -71,6 +72,38 @@ type Merged = IntersectionFunctionToObject<Overloads>;
 // Props from emits signature
 type PropsFromEmits = EmitsToProps<Overloads>; // { onOpen: (path: string) => void; onClose: () => void }
 ```
+
+Usage (Slots helpers)
+
+```ts
+import { defineComponent, SlotsType } from 'vue';
+import { StrictRenderSlot } from '@verter/types/slots';
+
+const TabItem = defineComponent({
+  props: { id: { type: String, required: true } }
+});
+
+const Tabs = defineComponent({
+  slots: {} as SlotsType<{
+    default: () => (typeof TabItem)[];
+    // Non-empty pattern: at least one item required
+    items: () => [typeof TabItem, ...Array<typeof TabItem>];
+  }>
+});
+
+const tabs = new Tabs();
+
+// ✅ Valid: array of TabItem
+StrictRenderSlot(tabs.$slots.default, [TabItem, TabItem]);
+StrictRenderSlot(tabs.$slots.default, []); // Empty allowed
+
+// ✅ Valid: non-empty enforced by tuple type
+StrictRenderSlot(tabs.$slots.items, [TabItem, TabItem]);
+// ❌ Error: empty array not allowed for items slot
+StrictRenderSlot(tabs.$slots.items, []);
+```
+
+For comprehensive documentation including non-empty slots pattern, literal types, HTML elements, and limitations, see [src/slots/readme.md](src/slots/readme.md).
 
 String Export (for language servers / tooling)
 - Import the prebuilt TypeScript source as a string with all declarations prefixed (`$V_…`).
