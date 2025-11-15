@@ -34,8 +34,24 @@ function genBenchFile(size) {
     (_, i) => `((e: '${`evt${i + 1}`}', ...args: [number, string]) => void)`
   ).join(" & ");
 
+  // Generate some model entries to exercise ModelToProps/ModelToEmits
+  const modelCount = Math.min(size, 12);
+  const modelEntries = Array.from({ length: modelCount }, (_, i) => {
+    const idx = i + 1;
+    if (idx % 3 === 1) {
+      // named numeric model
+      return `  M${idx}: ModelRef<number, 'm${idx}', number, (v: number) => void>;`;
+    } else if (idx % 3 === 2) {
+      // default name via string
+      return `  M${idx}: ModelRef<string, string, string, (v: string) => void>;`;
+    }
+    // undefined branch to cover union behavior
+    return `  M${idx}: undefined;`;
+  }).join("\n");
+
   const content = `
-import type { PartialUndefined, UnionToIntersection, FunctionToObject, IntersectionFunctionToObject } from '../../src/helpers/helpers.ts';
+import type { PartialUndefined, UnionToIntersection, FunctionToObject, IntersectionFunctionToObject, PatchHidden, ExtractHidden, EmitsToProps, ComponentEmitsToProps, ModelToEmits, ModelToProps } from '../../src';
+import type { ModelRef } from 'vue';
 
 type LargeObj_${size} = {
 ${props}
@@ -54,6 +70,29 @@ const _r2_${size}: R2_${size} | null = null as any;
 type EvtFns_${size} = ${eventSigs};
 type R3_${size} = IntersectionFunctionToObject<EvtFns_${size}>;
 const _r3_${size}: R3_${size} | null = null as any;
+
+// Exercise EmitsToProps from event function signatures
+type R3b_${size} = EmitsToProps<EvtFns_${size}>;
+const _r3b_${size}: R3b_${size} | null = null as any;
+
+// Exercise ComponentEmitsToProps with a dummy constructor
+type DummyCtor_${size} = new (...args: any[]) => { $emit: EvtFns_${size} };
+type R3c_${size} = ComponentEmitsToProps<DummyCtor_${size}>;
+const _r3c_${size}: R3c_${size} | null = null as any;
+
+// Exercise PatchHidden / ExtractHidden
+type WithHidden_${size} = PatchHidden<LargeObj_${size}, { secret: 1 }>;
+type RHidden_${size} = ExtractHidden<WithHidden_${size}, never>;
+const _rHidden_${size}: RHidden_${size} | null = null as any;
+
+// Model shapes for ModelToProps / ModelToEmits
+type Models_${size} = {
+${modelEntries}
+};
+type R4_${size} = ModelToProps<Models_${size}>;
+const _r4_${size}: R4_${size} | null = null as any;
+type R5_${size} = ModelToEmits<Models_${size}>;
+const _r5_${size}: R5_${size} | null = null as any;
 `;
 
   fs.writeFileSync(file, content);
