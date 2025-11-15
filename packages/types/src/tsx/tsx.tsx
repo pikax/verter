@@ -1,4 +1,3 @@
-import "vue/jsx";
 import "./tsx.attributes";
 
 type VNode<T> = import("vue").VNode & {

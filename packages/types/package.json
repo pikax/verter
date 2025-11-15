@@ -17,7 +17,8 @@
     }
   },
   "scripts": {
-    "build": "tsc -b --force && node scripts/build-string.mjs",
+    "build": "tsc -b --force && node scripts/build-string.mjs && node scripts/build-tsx.mjs",
+    "build:tsx": "node scripts/build-tsx.mjs",
     "build:string": "node scripts/build-string.mjs",
     "dev": "tsc -b --watch",
     "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
