@@ -9,6 +9,47 @@ const __dirname = path.dirname(__filename);
 const srcDir = path.join(__dirname, "../src");
 const distDir = path.join(__dirname, "../dist");
 
+// Parse exports from index.ts to discover source files
+function getSourceFilesFromIndex(indexPath) {
+  const indexSource = fs.readFileSync(indexPath, "utf-8");
+  const indexFile = ts.createSourceFile(
+    "index.ts",
+    indexSource,
+    ts.ScriptTarget.Latest,
+    true
+  );
+
+  const sourceFiles = [];
+  
+  ts.forEachChild(indexFile, (node) => {
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
+      if (ts.isStringLiteral(node.moduleSpecifier)) {
+        const modulePath = node.moduleSpecifier.text;
+        // Convert "./helpers" to "helpers/helpers.ts" or similar
+        const relativePath = modulePath.replace(/^\.\//, "");
+        const folderName = relativePath.split('/').pop();
+        
+        // Try to resolve the actual implementation file (not index.ts)
+        // Check for <folder>/<folder>.ts first, then <name>.ts, then index.ts as fallback
+        const possiblePaths = [
+          path.join(srcDir, `${relativePath}/${folderName}.ts`),
+          path.join(srcDir, `${relativePath}.ts`),
+          path.join(srcDir, `${relativePath}/index.ts`),
+        ];
+
+        for (const filePath of possiblePaths) {
+          if (fs.existsSync(filePath)) {
+            sourceFiles.push(filePath);
+            break;
+          }
+        }
+      }
+    }
+  });
+
+  return sourceFiles;
+}
+
 // Collect all declared names (types, interfaces, classes, enums, functions, variables, namespaces)
 function collectAllTypes(sourceFiles) {
   const allTypes = new Set();
@@ -201,42 +242,48 @@ function transformSourceFile(sourceFile, allTypes, prefix = "$V_", keepComments 
 }
 
 function build() {
-  // Read source files
-  const helpersPath = path.join(srcDir, "helpers/helpers.ts");
-  const emitsPath = path.join(srcDir, "emits/emits.ts");
+  // Discover source files from index.ts
+  const indexPath = path.join(srcDir, "index.ts");
+  const sourceFilePaths = getSourceFilesFromIndex(indexPath);
 
-  const helpersSource = fs.readFileSync(helpersPath, "utf-8");
-  const emitsSource = fs.readFileSync(emitsPath, "utf-8");
+  if (sourceFilePaths.length === 0) {
+    console.error("No source files found in index.ts exports");
+    process.exit(1);
+  }
 
-  // Parse TypeScript files
-  const helpersFile = ts.createSourceFile(
-    "helpers.ts",
-    helpersSource,
-    ts.ScriptTarget.Latest,
-    true
-  );
-  const emitsFile = ts.createSourceFile(
-    "emits.ts",
-    emitsSource,
-    ts.ScriptTarget.Latest,
-    true
-  );
+  console.log("Found source files:", sourceFilePaths.map(p => path.relative(srcDir, p)).join(", "));
+
+  // Read and parse all source files
+  const sourceFiles = sourceFilePaths.map((filePath) => {
+    const source = fs.readFileSync(filePath, "utf-8");
+    return ts.createSourceFile(
+      path.basename(filePath),
+      source,
+      ts.ScriptTarget.Latest,
+      true
+    );
+  });
 
   // CLI flag: keep comments in the output string
   const keepComments = process.argv.includes("--keep-comments");
 
   // Collect all declarations (exported and internal)
-  const allTypes = collectAllTypes([helpersFile, emitsFile]);
+  const allTypes = collectAllTypes(sourceFiles);
 
-  // Transform files
-  let transformedHelpers = transformSourceFile(helpersFile, allTypes, "$V_", keepComments);
-  let transformedEmits = transformSourceFile(emitsFile, allTypes, "$V_", keepComments);
+  // Transform all files
+  const transformedSources = sourceFiles.map((sourceFile, index) => {
+    let transformed = transformSourceFile(sourceFile, allTypes, "$V_", keepComments);
+    
+    // Remove imports from all files except the first one (to avoid duplicate imports)
+    if (index > 0) {
+      transformed = transformed.replace(/import\s*{[^}]+}\s*from\s*["'][^"']+["'];?\s*/g, "");
+    }
+    
+    return transformed;
+  });
 
-  // Remove imports from emits
-  transformedEmits = transformedEmits.replace(/import\s*{[^}]+}\s*from\s*["'][^"']+["'];?\s*/g, "");
-
-  // Combine
-  const combined = transformedHelpers + "\n\n" + transformedEmits;
+  // Combine all transformed sources
+  const combined = transformedSources.join("\n\n");
 
   // Create output
   const output = `// Generated file - do not edit directly

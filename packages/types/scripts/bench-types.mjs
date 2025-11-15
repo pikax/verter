@@ -1,11 +1,14 @@
-import fs from 'fs';
-import path from 'path';
-import { execSync } from 'child_process';
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { execSync } from "child_process";
 
-const pkgRoot = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
-const benchDir = path.join(pkgRoot, 'bench');
-const genDir = path.join(benchDir, 'generated');
-const tsconfigBench = path.join(pkgRoot, 'tsconfig.bench.json');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const pkgRoot = path.resolve(__dirname, "..");
+const benchDir = path.join(pkgRoot, "bench");
+const genDir = path.join(benchDir, "generated");
+const tsconfigBench = path.join(pkgRoot, "tsconfig.bench.json");
 
 function ensureDirs() {
   if (!fs.existsSync(genDir)) fs.mkdirSync(genDir, { recursive: true });
@@ -14,13 +17,22 @@ function ensureDirs() {
 function genBenchFile(size) {
   const file = path.join(genDir, `bench-size-${size}.ts`);
   // Generate a large object type with many keys
-  const props = Array.from({ length: size }, (_, i) => `  P${i + 1}: number | undefined;`).join('\n');
+  const props = Array.from(
+    { length: size },
+    (_, i) => `  P${i + 1}: number | undefined;`
+  ).join("\n");
   // Generate a union with many types
   const unionCount = Math.min(size, 40);
-  const unionParts = Array.from({ length: unionCount }, (_, i) => `{ K${i + 1}: ${i + 1} }`).join(' | ');
+  const unionParts = Array.from(
+    { length: unionCount },
+    (_, i) => `{ K${i + 1}: ${i + 1} }`
+  ).join(" | ");
   // Generate many event signatures for IntersectionFunctionToObject
   const evtCount = Math.min(size, 20);
-  const eventSigs = Array.from({ length: evtCount }, (_, i) => `((e: '${`evt${i + 1}`}', ...args: [number, string]) => void)`).join(' & ');
+  const eventSigs = Array.from(
+    { length: evtCount },
+    (_, i) => `((e: '${`evt${i + 1}`}', ...args: [number, string]) => void)`
+  ).join(" & ");
 
   const content = `
 import type { PartialUndefined, UnionToIntersection, FunctionToObject, IntersectionFunctionToObject } from '../../src/helpers/helpers.ts';
@@ -50,16 +62,20 @@ const _r3_${size}: R3_${size} | null = null as any;
 
 function runTsc({ traceDir } = {}) {
   const args = [
-    'pnpm', 'exec', 'tsc',
-    '-p', tsconfigBench,
-    '--extendedDiagnostics',
-    '--pretty', 'false',
+    "pnpm",
+    "exec",
+    "tsc",
+    "-p",
+    tsconfigBench,
+    "--extendedDiagnostics",
+    "--pretty",
+    "false",
   ];
   if (traceDir) {
-    args.push('--generateTrace', traceDir);
+    args.push("--generateTrace", traceDir);
   }
-  const cmd = args.join(' ');
-  const out = execSync(cmd, { cwd: pkgRoot, stdio: 'pipe', encoding: 'utf8' });
+  const cmd = args.join(" ");
+  const out = execSync(cmd, { cwd: pkgRoot, stdio: "pipe", encoding: "utf8" });
   return out;
 }
 
@@ -83,46 +99,68 @@ function parseDiagnostics(output) {
     symbols: getNumber(/Symbols:\s+(\d+)/),
     types: getNumber(/Types:\s+(\d+)/),
     memoryMB,
-    parseMs: getNumber(/Parse time:\s+(\d+\.?\d*)s/)*1000,
-    bindMs: getNumber(/Bind time:\s+(\d+\.?\d*)s/)*1000,
-    checkMs: getNumber(/Check time:\s+(\d+\.?\d*)s/)*1000,
-    emitMs: getNumber(/Emit time:\s+(\d+\.?\d*)s/)*1000,
-    totalMs: getNumber(/Total time:\s+(\d+\.?\d*)s/)*1000,
+    parseMs: getNumber(/Parse time:\s+(\d+\.?\d*)s/) * 1000,
+    bindMs: getNumber(/Bind time:\s+(\d+\.?\d*)s/) * 1000,
+    checkMs: getNumber(/Check time:\s+(\d+\.?\d*)s/) * 1000,
+    emitMs: getNumber(/Emit time:\s+(\d+\.?\d*)s/) * 1000,
+    totalMs: getNumber(/Total time:\s+(\d+\.?\d*)s/) * 1000,
   };
 }
 
 function main() {
   ensureDirs();
   const args = process.argv.slice(2);
-  const trace = args.includes('--trace');
-  const sizesArg = args.find(a => a.startsWith('--sizes='));
-  const sizes = sizesArg ? sizesArg.replace('--sizes=','').split(',').map(s=>parseInt(s,10)) : [10, 50, 100, 200, 500];
+  const trace = args.includes("--trace");
+  const sizesArg = args.find((a) => a.startsWith("--sizes="));
+  const sizes = sizesArg
+    ? sizesArg
+        .replace("--sizes=", "")
+        .split(",")
+        .map((s) => parseInt(s, 10))
+    : [10, 50, 100, 200, 500];
 
   const results = [];
   for (const size of sizes) {
     genBenchFile(size);
     const traceDir = trace ? path.join(benchDir, `trace-${size}`) : undefined;
-    if (traceDir && !fs.existsSync(traceDir)) fs.mkdirSync(traceDir, { recursive: true });
-    let out = '';
+    if (traceDir && !fs.existsSync(traceDir))
+      fs.mkdirSync(traceDir, { recursive: true });
+    let out = "";
     let failed = false;
     try {
       out = runTsc({ traceDir });
     } catch (e) {
       failed = true;
-      out = (e && e.stdout) ? String(e.stdout) : String(e);
+      out = e && e.stdout ? String(e.stdout) : String(e);
     }
     const stats = parseDiagnostics(out);
     results.push({ size, failed, ...stats });
-    const prefix = failed ? '✗' : '✓';
-    console.log(`${prefix} size=${size} total=${(stats.totalMs||0).toFixed(0)}ms check=${(stats.checkMs||0).toFixed(0)}ms mem=${(stats.memoryMB||0).toFixed(1)}MB types=${stats.types}`);
+    const prefix = failed ? "✗" : "✓";
+    console.log(
+      `${prefix} size=${size} total=${(stats.totalMs || 0).toFixed(
+        0
+      )}ms check=${(stats.checkMs || 0).toFixed(0)}ms mem=${(
+        stats.memoryMB || 0
+      ).toFixed(1)}MB types=${stats.types}`
+    );
   }
 
   // Print a Markdown table
-  console.log('\nBenchmark results (TypeScript extendedDiagnostics)');
-  console.log('| Size | Status | Total ms | Check ms | Memory MB | Types | Nodes |');
-  console.log('|-----:|:------:|---------:|---------:|----------:|------:|------:|');
+  console.log("\nBenchmark results (TypeScript extendedDiagnostics)");
+  console.log(
+    "| Size | Status | Total ms | Check ms | Memory MB | Types | Nodes |"
+  );
+  console.log(
+    "|-----:|:------:|---------:|---------:|----------:|------:|------:|"
+  );
   for (const r of results) {
-    console.log(`| ${r.size} | ${r.failed ? 'fail' : 'ok'} | ${(r.totalMs||0).toFixed(0)} | ${(r.checkMs||0).toFixed(0)} | ${(r.memoryMB||0).toFixed(1)} | ${r.types||''} | ${r.nodes||''} |`);
+    console.log(
+      `| ${r.size} | ${r.failed ? "fail" : "ok"} | ${(r.totalMs || 0).toFixed(
+        0
+      )} | ${(r.checkMs || 0).toFixed(0)} | ${(r.memoryMB || 0).toFixed(1)} | ${
+        r.types || ""
+      } | ${r.nodes || ""} |`
+    );
   }
 }
 
