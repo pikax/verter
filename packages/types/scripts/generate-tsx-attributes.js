@@ -108,7 +108,7 @@ function mapInterfaceToElement(ifaceName, elementsSet) {
   if (elementsSet.has(direct)) return direct;
 
   // Heuristic variants for known casing peculiarities
-  const variants = [];
+  const variants = [""];
   // Textarea -> TextArea
   if (base.toLowerCase() === "textarea") variants.push("HTMLTextAreaElement");
   // Iframe -> IFrame
