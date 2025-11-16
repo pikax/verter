@@ -48,9 +48,6 @@
     "readme.md",
     "LICENSE"
   ],
-  "dependencies": {
-    "@vue/shared": "^3.5.24"
-  },
   "devDependencies": {
     "typescript": "^5.9.3",
     "vitest": "^4.0.9",
