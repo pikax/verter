@@ -32,6 +32,7 @@
     "build": "tsc -b --force && node scripts/build-string.mjs && node scripts/build-tsx.mjs",
     "build:tsx": "node scripts/build-tsx.mjs",
     "build:string": "node scripts/build-string.mjs",
+    "generate:vue": "node scripts/generate-vue-overrides.mjs",
     "dev": "tsc -b --watch",
     "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
     "test": "vitest --typecheck --run",
@@ -47,7 +48,9 @@
     "readme.md",
     "LICENSE"
   ],
-  "dependencies": {},
+  "dependencies": {
+    "@vue/shared": "^3.5.24"
+  },
   "devDependencies": {
     "typescript": "^5.9.3",
     "vitest": "^4.0.9",

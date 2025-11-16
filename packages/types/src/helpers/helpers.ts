@@ -13,8 +13,14 @@ export type PatchHidden<T, E> = { [UniqueKey]?: E } & T;
 export type ExtractHidden<T, R = never> = T extends {
   [UniqueKey]?: infer U;
 }
-  ? U 
+  ? U
   : R;
+
+export declare function removeHiddenPatch<T>(
+  t: T
+): Omit<T, typeof UniqueKey> & {};
+
+export declare function extractHiddenPatch<T>(t: T): ExtractHidden<T>;
 
 /**
  * A utility type that converts a function type representing event emissions
@@ -46,7 +52,6 @@ export type PartialUndefined<T> = {
 }[keyof T] extends infer U extends keyof T
   ? Omit<T, U> & Partial<Pick<T, U>>
   : T;
-
 
 //  --- External Sources ---
 
