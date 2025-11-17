@@ -14,6 +14,7 @@ import {
   ExtractOptions,
   ExtractModel,
   ExtractExpose,
+  NormaliseMacroReturn,
 } from "./setup";
 
 describe("Setup helpers", () => {
@@ -234,6 +235,340 @@ describe("Setup helpers", () => {
       type Extracted = ExtractMacroReturn<NotMacro>;
 
       assertType<Extracted>({} as never);
+    });
+  });
+
+  describe("ExtractMacro", () => {
+    it("extracts a specific macro when present", () => {
+      type Macros = { props: { value: string; type: string } };
+      type Props = ExtractMacro<Macros, "props">;
+
+      assertType<Props>({} as { value: string; type: string });
+    });
+
+    it("returns never for missing macro without fallback", () => {
+      type Macros = { props: { value: string; type: string } };
+      type Emits = ExtractMacro<Macros, "emits">;
+
+      assertType<Emits>({} as never);
+    });
+
+    it("returns fallback for missing macro with fallback", () => {
+      type Macros = { props: { value: string; type: string } };
+      type Emits = ExtractMacro<Macros, "emits", () => void>;
+
+      assertType<Emits>({} as () => void);
+    });
+
+    it("extracts model structure", () => {
+      type Macros = {
+        model: {
+          value: { value: string; type: string };
+          count: { value: number; type: number };
+        };
+      };
+      type Model = ExtractMacro<Macros, "model">;
+
+      assertType<Model["value"]>({} as { value: string; type: string });
+      assertType<Model["count"]>({} as { value: number; type: number });
+    });
+  });
+
+  describe("ExtractProps", () => {
+    it("extracts props macro with defaults field", () => {
+      type Macros = { props: { value: { id: number }; type: string } };
+      type Props = ExtractProps<Macros>;
+
+      assertType<Props["value"]>({} as { id: number });
+      assertType<Props["type"]>({} as string);
+      assertType<Props["defaults"]>({} as {});
+    });
+
+    it("returns empty object with defaults when props not present", () => {
+      type Macros = { emits: { value: () => void; type: string } };
+      type Props = ExtractProps<Macros>;
+
+      assertType<Props>({} as { defaults: {} });
+    });
+
+    it("extracts withDefaults into defaults field", () => {
+      type Macros = {
+        props: { value: { id: number }; type: string };
+        withDefaults: { id: 1 };
+      };
+      type Props = ExtractProps<Macros>;
+
+      assertType<Props["defaults"]>({} as { id: 1 });
+    });
+  });
+
+  describe("ExtractEmits", () => {
+    it("extracts emits macro", () => {
+      type Macros = { emits: { value: () => void; object: string } };
+      type Emits = ExtractEmits<Macros>;
+
+      assertType<Emits>({} as { value: () => void; object: string });
+    });
+
+    it("returns default emit function when emits not present", () => {
+      type Macros = { props: { value: {}; type: string } };
+      type Emits = ExtractEmits<Macros>;
+
+      assertType<Emits>({} as () => void);
+    });
+
+    it("handles complex emit types", () => {
+      type EmitFn = (event: "update", value: string) => void;
+      type Macros = { emits: { value: EmitFn; type: string } };
+      type Emits = ExtractEmits<Macros>;
+
+      assertType<Emits["value"]>({} as EmitFn);
+    });
+  });
+
+  describe("ExtractSlots", () => {
+    it("extracts slots macro", () => {
+      type Macros = {
+        slots: { value: { default: () => void }; type: string };
+      };
+      type Slots = ExtractSlots<Macros>;
+
+      assertType<Slots>({} as { value: { default: () => void }; type: string });
+    });
+
+    it("returns empty object when slots not present", () => {
+      type Macros = { props: { value: {}; type: string } };
+      type Slots = ExtractSlots<Macros>;
+
+      assertType<Slots>({} as {});
+    });
+
+    it("handles multiple slot types", () => {
+      type Macros = {
+        slots: {
+          value: { default: () => void; header: () => void; footer: () => void };
+          type: string;
+        };
+      };
+      type Slots = ExtractSlots<Macros>;
+
+      assertType<Slots["value"]["default"]>({} as () => void);
+      assertType<Slots["value"]["header"]>({} as () => void);
+      assertType<Slots["value"]["footer"]>({} as () => void);
+    });
+  });
+
+  describe("ExtractOptions", () => {
+    it("extracts options macro", () => {
+      type Macros = {
+        options: { value: { name: string; version: number }; type: string };
+      };
+      type Options = ExtractOptions<Macros>;
+
+      assertType<Options>({} as {
+        value: { name: string; version: number };
+        type: string;
+      });
+    });
+
+    it("returns empty object when options not present", () => {
+      type Macros = { props: { value: {}; type: string } };
+      type Options = ExtractOptions<Macros>;
+
+      assertType<Options>({} as {});
+    });
+  });
+
+  describe("ExtractModel", () => {
+    it("extracts model macro with nested keys", () => {
+      type Macros = {
+        model: {
+          modelValue: { value: string; type: string };
+          count: { value: number; type: number };
+        };
+      };
+      type Model = ExtractModel<Macros>;
+
+      assertType<Model["modelValue"]>({} as { value: string; type: string });
+      assertType<Model["count"]>({} as { value: number; type: number });
+    });
+
+    it("returns empty object when model not present", () => {
+      type Macros = { props: { value: {}; type: string } };
+      type Model = ExtractModel<Macros>;
+
+      assertType<Model>({} as {});
+    });
+
+    it("handles single model value", () => {
+      type Macros = {
+        model: {
+          value: { value: string; type: string };
+        };
+      };
+      type Model = ExtractModel<Macros>;
+
+      assertType<Model["value"]>({} as { value: string; type: string });
+    });
+  });
+
+  describe("ExtractExpose", () => {
+    it("extracts expose macro", () => {
+      type Macros = {
+        expose: {
+          value: { focus: () => void; blur: () => void };
+          type: string;
+        };
+      };
+      type Expose = ExtractExpose<Macros>;
+
+      assertType<Expose>({} as {
+        value: { focus: () => void; blur: () => void };
+        type: string;
+      });
+    });
+
+    it("returns empty object when expose not present", () => {
+      type Macros = { props: { value: {}; type: string } };
+      type Expose = ExtractExpose<Macros>;
+
+      assertType<Expose>({} as {});
+    });
+
+    it("handles complex exposed API", () => {
+      type Macros = {
+        expose: {
+          value: {
+            focus: () => void;
+            getValue: () => string;
+            setValue: (val: string) => void;
+          };
+          type: string;
+        };
+      };
+      type Expose = ExtractExpose<Macros>;
+
+      assertType<Expose["value"]["focus"]>({} as () => void);
+      assertType<Expose["value"]["getValue"]>({} as () => string);
+      assertType<Expose["value"]["setValue"]>({} as (val: string) => void);
+    });
+  });
+
+  describe("NormaliseMacroReturn", () => {
+    it("normalizes macro return with all macros present", () => {
+      const result = createMacroReturn({
+        props: { value: { id: 1 }, type: "Props" },
+        emits: { value: () => {}, type: "Emits" },
+        slots: { value: {}, type: "Slots" },
+        options: { value: { name: "Test" }, type: "Options" },
+        model: { value: { value: "test", type: "string" } },
+        expose: { value: { focus: () => {} }, type: "Expose" },
+      });
+
+      type Normalized = NormaliseMacroReturn<typeof result>;
+
+      assertType<Normalized["props"]["value"]>({} as { id: number });
+      assertType<Normalized["props"]["defaults"]>({} as {});
+      assertType<Normalized["emits"]["value"]>({} as () => void);
+      assertType<Normalized["slots"]["value"]>({} as {});
+      assertType<Normalized["options"]["value"]>({} as { name: string });
+      assertType<Normalized["model"]["value"]["value"]>({} as string);
+      assertType<Normalized["expose"]["value"]["focus"]>({} as () => void);
+    });
+
+    it("provides defaults for missing macros", () => {
+      const result = createMacroReturn({
+        props: { value: { id: 1 }, type: "Props" },
+      });
+
+      type Normalized = NormaliseMacroReturn<typeof result>;
+
+      assertType<Normalized["props"]["value"]>({} as { id: number });
+      assertType<Normalized["emits"]>({} as () => void);
+      assertType<Normalized["slots"]>({} as {});
+      assertType<Normalized["options"]>({} as {});
+      assertType<Normalized["model"]>({} as {});
+      assertType<Normalized["expose"]>({} as {});
+    });
+
+    it("normalizes empty macro return", () => {
+      const result = createMacroReturn({});
+      type Normalized = NormaliseMacroReturn<typeof result>;
+
+      assertType<Normalized["props"]>({} as { defaults: {} });
+      assertType<Normalized["emits"]>({} as () => void);
+      assertType<Normalized["slots"]>({} as {});
+      assertType<Normalized["options"]>({} as {});
+      assertType<Normalized["model"]>({} as {});
+      assertType<Normalized["expose"]>({} as {});
+    });
+
+    it("normalizes partial macro return", () => {
+      const result = createMacroReturn({
+        props: { value: { count: 0 }, type: "number" },
+        model: {
+          modelValue: { value: "test", type: "string" },
+        },
+      });
+
+      type Normalized = NormaliseMacroReturn<typeof result>;
+
+      assertType<Normalized["props"]["value"]>({} as { count: number });
+      assertType<Normalized["model"]["modelValue"]["value"]>({} as string);
+      assertType<Normalized["emits"]>({} as () => void);
+      assertType<Normalized["slots"]>({} as {});
+      assertType<Normalized["options"]>({} as {});
+      assertType<Normalized["expose"]>({} as {});
+    });
+
+    it("preserves complex prop types", () => {
+      type ComplexProps = {
+        user: { id: number; name: string };
+        settings: { theme: "light" | "dark" };
+      };
+
+      const result = createMacroReturn({
+        props: {
+          value: {
+            user: { id: 1, name: "John" },
+            settings: { theme: "dark" as "light" | "dark" },
+          },
+          type: "ComplexProps",
+        },
+      });
+
+      type Normalized = NormaliseMacroReturn<typeof result>;
+      assertType<Normalized["props"]["value"]>({} as ComplexProps);
+    });
+
+    it("preserves multiple model keys", () => {
+      const result = createMacroReturn({
+        model: {
+          firstName: { value: "John", type: "string" },
+          lastName: { value: "Doe", type: "string" },
+          age: { value: 30, type: "number" },
+        },
+      });
+
+      type Normalized = NormaliseMacroReturn<typeof result>;
+      type Model = Normalized["model"];
+
+      assertType<Model["firstName"]["value"]>({} as string);
+      assertType<Model["lastName"]["value"]>({} as string);
+      assertType<Model["age"]["value"]>({} as number);
+    });
+
+    it("handles non-macro type", () => {
+      type NonMacro = { foo: string };
+      type Normalized = NormaliseMacroReturn<NonMacro>;
+
+      // Non-macro types result in never for all fields since ExtractMacroReturn returns never
+      assertType<Normalized["props"]>({} as never);
+      assertType<Normalized["emits"]>({} as never);
+      assertType<Normalized["slots"]>({} as never);
+      assertType<Normalized["options"]>({} as never);
+      assertType<Normalized["model"]>({} as never);
+      assertType<Normalized["expose"]>({} as never);
     });
   });
 

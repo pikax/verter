@@ -179,3 +179,48 @@ export type ExtractModel<T> = ExtractMacro<T, "model", {}>;
  * ```
  */
 export type ExtractExpose<T> = ExtractMacro<T, "expose", {}>;
+
+/**
+ * Normalizes a macro return type into a structured object with all macro types.
+ * 
+ * This utility extracts and organizes all macros from a `createMacroReturn` result
+ * into a consistent object shape, providing defaults for missing macros.
+ *
+ * @template T - The return type from `createMacroReturn`
+ * @returns An object containing all extracted macro types:
+ *   - `props`: Extracted props with defaults (default: `{}`)
+ *   - `emits`: Extracted emits function (default: `() => void`)
+ *   - `slots`: Extracted slots (default: `{}`)
+ *   - `options`: Extracted options (default: `{}`)
+ *   - `model`: Extracted model bindings (default: `{}`)
+ *   - `expose`: Extracted exposed methods/properties (default: `{}`)
+ *
+ * @example
+ * ```ts
+ * const setup = () => createMacroReturn({
+ *   props: { value: { id: number }, type: PropsType },
+ *   emits: { value: emitFn, type: EmitsType },
+ *   model: { modelValue: { value: ref, type: string } }
+ * });
+ * 
+ * type Normalized = NormaliseMacroReturn<ReturnType<typeof setup>>;
+ * // {
+ * //   props: { value: { id: number }, type: PropsType, defaults: {} },
+ * //   emits: { value: emitFn, type: EmitsType },
+ * //   slots: {},
+ * //   options: {},
+ * //   model: { modelValue: { value: ref, type: string } },
+ * //   expose: {}
+ * // }
+ * ```
+ */
+export type NormaliseMacroReturn<T> = ExtractMacroReturn<T> extends infer R
+  ? {
+      props: ExtractProps<R>;
+      emits: ExtractEmits<R>;
+      slots: ExtractSlots<R>;
+      options: ExtractOptions<R>;
+      model: ExtractModel<R>;
+      expose: ExtractExpose<R>;
+    }
+  : {};
