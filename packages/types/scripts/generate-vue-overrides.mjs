@@ -22,6 +22,15 @@ const FUNCTIONS_TO_OVERRIDE = [
   "defineSlots",
 ];
 
+// Helper types to import/inline from Vue (may be internal types not exported by 'vue')
+// These will be copied as local type definitions with their dependencies
+const HELPERS_TO_IMPORT = [
+  "PropsWithDefaults",
+  "MappedOmit",
+  "NotUndefined",
+  "IfAny",
+];
+
 const NAME_APPEND = "_Box";
 const NAME_PREPEND = "";
 
@@ -183,10 +192,16 @@ function collectUsedInternalTypes(
   declsMap,
   internalTypes,
   exportedTypes,
-  exportedInVue
+  exportedInVue,
+  helpersToImport
 ) {
   const usedInternal = new Set();
   const neededLocalExternal = new Set();
+  
+  // Add explicitly requested helpers to neededLocalExternal
+  for (const helperName of helpersToImport) {
+    neededLocalExternal.add(helperName);
+  }
 
   // Only collect internal types that are directly referenced in function parameters or type parameters
   for (const [, decls] of declsMap.entries()) {
@@ -560,11 +575,17 @@ function generateOverrideFileFromDeclarations(
 
   // Add locally inlined external types first (e.g., IfAny)
   header += `\n// Local copies of external Vue utility types (not exported by 'vue')\n`;
-  if (usesIfAny) {
-    header += `type IfAny<T, Y, N> = 0 extends 1 & T ? Y : N;\n`;
-  }
+  // Add IfAny if used and not already in localExternalDefinitions
+  // if (usesIfAny && !localExternalDefinitions.has("IfAny")) {
+  //   header += `type IfAny<T, Y, N> = 0 extends 1 & T ? Y : N;\n`;
+  // }
   if (localExternalDefinitions.size > 0) {
     const sortedLocal = Array.from(localExternalDefinitions.keys()).sort();
+    // Include all local external definitions in helper types so they don't get qualified
+    const allHelperTypes = new Set([
+      ...helperTypes,
+      ...localExternalDefinitions.keys(),
+    ]);
     for (const typeName of sortedLocal) {
       const originalDef = localExternalDefinitions.get(typeName);
       const sf = ts.createSourceFile(
@@ -578,9 +599,13 @@ function generateOverrideFileFromDeclarations(
         sf,
         exportedTypes,
         exportedInVue,
-        helperTypes
+        allHelperTypes
       );
-      header += qualifiedDef + "\n";
+      // Add export keyword if not already present
+      const exportedDef = qualifiedDef.startsWith('export ') 
+        ? qualifiedDef 
+        : 'export ' + qualifiedDef;
+      header += exportedDef + "\n";
     }
   }
 
@@ -672,7 +697,8 @@ function main() {
       decls,
       internalTypes,
       exportedTypes,
-      exportedInVue
+      exportedInVue,
+      HELPERS_TO_IMPORT
     );
   console.log(
     `🔍 Found ${
