@@ -1,32 +1,57 @@
-import { ExtractHidden } from "../helpers";
-import { defineProps_Box, withDefaults_Box } from "../vue/vue.macros";
 import { MacroReturn, MacroReturnObject, MacroReturnType } from "../setup";
 
-type FindDefaultsKey<T> = {
+/**
+ * Extracts the keys of properties that can be undefined (optional properties).
+ * 
+ * @template T - The object type to extract optional keys from
+ * @returns Union of keys for properties where undefined is in the type
+ * 
+ * @example
+ * ```ts
+ * type Props = { foo?: string; bar: number; baz?: boolean };
+ * type Optional = FindDefaultsKey<Props>; // 'foo' | 'baz'
+ * ```
+ */
+export type FindDefaultsKey<T> = {
   [K in keyof T]-?: undefined extends T[K] ? K : never;
 }[keyof T];
 
-/** -- test for FindDefaultsKey --
-type AA = {
-  foo?: string;
-  test?: number;
-  bar: number;
-};
-
-// 'foo' | 'test'
-type R = FindDefaultsKey<AA>
-
-declare const r  : FindDefaultsKey<AA>;
-
-*/
-
-type ResolveFromMacroReturn<T> = T extends MacroReturnType<any, infer TT>
+/**
+ * Resolves the underlying type from a MacroReturn wrapper.
+ * Extracts the type parameter from MacroReturnType or the value from MacroReturnObject.
+ * 
+ * @template T - The type to unwrap
+ * @returns The unwrapped type, or T if not a MacroReturn
+ * 
+ * @example
+ * ```ts
+ * type Wrapped = MacroReturnType<{ foo: string }, "Props">;
+ * type Unwrapped = ResolveFromMacroReturn<Wrapped>; // { foo: string }
+ * ```
+ */
+export type ResolveFromMacroReturn<T> = T extends MacroReturnType<any, infer TT>
   ? TT
   : T extends MacroReturnObject<infer V, any>
   ? V
   : T;
 
-type ResolveDefaultsPropsFromMacro<T> = T extends MacroReturn<any, any>
+/**
+ * Resolves props and defaults information from a macro return type.
+ * Analyzes the macro structure to determine which properties have defaults.
+ * 
+ * @template T - The macro return type to analyze
+ * @returns Object with 'type' (props type) and 'defaults' (keys with defaults)
+ * 
+ * @example
+ * ```ts
+ * const setup = () => createMacroReturn({
+ *   props: { value: { foo: '', bar: 0 }, type: {} as { foo?: string; bar: number } }
+ * });
+ * type Info = ResolveDefaultsPropsFromMacro<ExtractProps<...>>;
+ * // { type: { foo?: string; bar: number }, defaults: 'foo' }
+ * ```
+ */
+export type ResolveDefaultsPropsFromMacro<T> = T extends MacroReturn<any, any>
   ? T extends {
       value: infer V;
       defaults: {
@@ -84,79 +109,4 @@ export type MakeInternalProps<T extends Record<PropertyKey, any>> =
       ? P & Required<Pick<P, K>>
       : T
     : T;
-
-// --- Test ---
-
-import { createMacroReturn, ExtractMacroReturn, ExtractProps } from "../setup";
-
-const setupReturn = createMacroReturn({
-  props: {
-    value: {
-      foo: "" as string,
-      bar: 0 as number,
-    },
-    type: {} as {
-      foo?: string;
-      bar: number;
-    },
-  },
-});
-
-type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
-type Props = MakePublicProps<Extracted>;
-declare const aaa: ResolveDefaultsPropsFromMacro<Extracted>;
-declare const foo: Props;
-
-foo.bar; // number
-foo.foo; // string | undefined
-
-const propsBoxed = defineProps_Box<{
-  foo?: string;
-  bar: number | undefined;
-}>();
-
-const dd = withDefaults(
-  defineProps<{
-    foo?: string;
-    bar: number | undefined;
-  }>(),
-  {
-    foo: "default",
-  }
-);
-
-const defaultsBoxed = withDefaults_Box(
-  defineProps<ExtractHidden<typeof propsBoxed>>(),
-  {
-    foo: "default",
-  }
-);
-const props = withDefaults(defaultsBoxed[0], defaultsBoxed[1]);
-
-type A = typeof props extends import("vue").DefineProps<any, any> ? {} : never;
-
-const setupReturn2 = createMacroReturn({
-  props: {
-    value: props,
-    type: props as typeof props,
-    defaults: {
-      value: props,
-      type: {} as ExtractHidden<typeof defaultsBoxed>,
-    },
-  },
-});
-
-type Extracted2 = ExtractProps<ExtractMacroReturn<typeof setupReturn2>>;
-
-declare const e: Extracted2;
-
-e.defaults.type;
-
-type Props2 = MakePublicProps<Extracted2>;
-declare const fff: ResolveDefaultsPropsFromMacro<Extracted2>;
-
-declare const foo2: Props2;
-
-foo2.bar; // number
-foo2.foo; // string | undefined
 

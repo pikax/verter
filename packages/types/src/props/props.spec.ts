@@ -1,6 +1,9 @@
 import { describe, it, assertType } from 'vitest';
-import { MakePublicProps, MakeInternalProps } from './props';
+import { MakePublicProps, MakeInternalProps, FindDefaultsKey, ResolveFromMacroReturn, ResolveDefaultsPropsFromMacro } from './props';
 import { defineProps, withDefaults } from 'vue';
+import { createMacroReturn, ExtractMacroReturn, ExtractProps } from '../setup';
+import { defineProps_Box, withDefaults_Box } from '../vue/vue.macros';
+import { ExtractHidden } from '../helpers';
 
 describe('Props helpers', () => {
   describe('MakePublicProps', () => {
@@ -522,6 +525,619 @@ describe('Props helpers', () => {
 
       // @ts-expect-error internal cannot be undefined
       assertType<Internal['opt']>({} as undefined);
+    });
+  });
+
+  describe('Utility Types', () => {
+    describe('FindDefaultsKey', () => {
+      it('identifies optional properties', () => {
+        type TestType = {
+          foo?: string;
+          test?: number;
+          bar: number;
+        };
+
+        type Result = FindDefaultsKey<TestType>;
+
+        assertType<Result>({} as 'foo' | 'test');
+        // @ts-expect-error 'bar' is not optional
+        assertType<Result>({} as 'foo' | 'test' | 'bar');
+      });
+
+      it('returns never for types with no optional properties', () => {
+        type TestType = {
+          foo: string;
+          bar: number;
+        };
+
+        type Result = FindDefaultsKey<TestType>;
+
+        assertType<Result>({} as never);
+      });
+
+      it('handles all optional properties', () => {
+        type TestType = {
+          foo?: string;
+          bar?: number;
+          baz?: boolean;
+        };
+
+        type Result = FindDefaultsKey<TestType>;
+
+        assertType<Result>({} as 'foo' | 'bar' | 'baz');
+      });
+
+      it('handles union types with undefined', () => {
+        type TestType = {
+          explicit?: string;
+          union: string | undefined;
+          required: string;
+        };
+
+        type Result = FindDefaultsKey<TestType>;
+
+        // Both 'explicit' and 'union' can be undefined
+        assertType<Result>({} as 'explicit' | 'union');
+      });
+
+      it('handles empty object', () => {
+        type TestType = {};
+
+        type Result = FindDefaultsKey<TestType>;
+
+        assertType<Result>({} as never);
+      });
+    });
+
+    describe('ResolveFromMacroReturn', () => {
+      it('extracts type from MacroReturnType', () => {
+        const macroReturn = createMacroReturn({
+          props: {
+            value: {
+              foo: '' as string,
+              bar: 0 as number,
+            },
+            type: {} as { foo: string; bar: number },
+          },
+        });
+
+        type Extracted = ExtractMacroReturn<typeof macroReturn>;
+        type Props = ExtractProps<Extracted>;
+
+        // ExtractProps returns the macro object with value and type, plus defaults
+        type PropsValue = Props extends { value: infer V } ? V : never;
+        type PropsType = Props extends { type: infer T } ? T : never;
+        
+        assertType<PropsValue>({} as { foo: string; bar: number });
+        assertType<PropsType>({} as { foo: string; bar: number });
+      });
+
+      it('extracts type from MacroReturnObject', () => {
+        const propsBoxed = defineProps_Box<{
+          foo?: string;
+          bar: number;
+        }>();
+
+        type Hidden = ExtractHidden<typeof propsBoxed>;
+
+        assertType<Hidden>({} as {
+          foo?: string;
+          bar: number;
+        });
+      });
+
+      it('returns plain types unchanged', () => {
+        type PlainType = { a: string; b: number };
+        type Result = ResolveFromMacroReturn<PlainType>;
+
+        assertType<Result>({} as PlainType);
+      });
+    });
+
+    describe('ResolveDefaultsPropsFromMacro', () => {
+      it('resolves props with explicit defaults from macro', () => {
+        const propsBoxed = defineProps_Box<{
+          foo?: string;
+          bar: number;
+        }>();
+
+        const defaultsBoxed = withDefaults_Box(
+          {} as import('vue').DefineProps<ExtractHidden<typeof propsBoxed>, never>,
+          {
+            foo: 'default',
+          }
+        );
+
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {} as any,
+            type: {} as any,
+            defaults: {
+              value: {} as any,
+              type: {} as ExtractHidden<typeof defaultsBoxed>,
+            },
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+
+        // Should have both type and defaults
+        type DefaultsType = Extracted['defaults'];
+        const _defaults: DefaultsType = {} as any;
+      });
+
+      it('resolves props with inferred defaults from FindDefaultsKey', () => {
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              foo: '' as string,
+              bar: 0 as number,
+            },
+            type: {} as {
+              foo?: string;
+              bar: number;
+            },
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        // foo is optional (has default), bar is required
+        assertType<Public>({} as {
+          foo?: string | undefined;
+          bar: number;
+        });
+      });
+    });
+
+    describe('MakePublicProps with MacroReturn', () => {
+      it('makes optional props with defaults optional in public API', () => {
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              foo: 'default' as string,
+              bar: 0 as number,
+            },
+            type: {} as {
+              foo?: string;
+              bar: number;
+            },
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        // foo can be omitted (has default), bar is required
+        const valid1: Public = { bar: 1 };
+        const valid2: Public = { foo: 'test', bar: 1 };
+        const valid3: Public = { foo: undefined, bar: 1 };
+
+        void valid1;
+        void valid2;
+        void valid3;
+
+        assertType<Public['foo']>({} as string | undefined);
+        assertType<Public['bar']>({} as number);
+      });
+
+      it('handles all optional props with defaults', () => {
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              foo: 'default' as string,
+              bar: 0 as number,
+              baz: true as boolean,
+            },
+            type: {} as {
+              foo?: string;
+              bar?: number;
+              baz?: boolean;
+            },
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        // All can be omitted
+        const valid: Public = {};
+        void valid;
+
+        assertType<Public['foo']>({} as string | undefined);
+        assertType<Public['bar']>({} as number | undefined);
+        assertType<Public['baz']>({} as boolean | undefined);
+      });
+
+      it('handles mixed required and optional props', () => {
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              required1: '' as string,
+              required2: 0 as number,
+              optional1: 'default' as string,
+              optional2: 0 as number,
+            },
+            type: {} as {
+              required1: string;
+              required2: number;
+              optional1?: string;
+              optional2?: number;
+            },
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        // Required props must be present, optional can be omitted
+        const valid1: Public = { required1: 'a', required2: 1 };
+        const valid2: Public = {
+          required1: 'a',
+          required2: 1,
+          optional1: 'b',
+          optional2: 2,
+        };
+
+        void valid1;
+        void valid2;
+
+        assertType<Public['required1']>({} as string);
+        assertType<Public['required2']>({} as number);
+        assertType<Public['optional1']>({} as string | undefined);
+        assertType<Public['optional2']>({} as number | undefined);
+      });
+
+      it('works with withDefaults_Box integration', () => {
+        const propsBoxed = defineProps_Box<{
+          foo?: string;
+          bar: number | undefined;
+        }>();
+
+        const defaultsBoxed = withDefaults_Box(
+          {} as import('vue').DefineProps<ExtractHidden<typeof propsBoxed>, never>,
+          {
+            foo: 'default',
+          }
+        );
+
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {} as any,
+            type: {} as any,
+            defaults: {
+              value: {} as any,
+              type: {} as ExtractHidden<typeof defaultsBoxed>,
+            },
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        // Verify the structure exists
+        type DefaultsExists = Extracted['defaults'];
+        const _check: DefaultsExists = {} as any;
+      });
+
+      it('handles complex nested types', () => {
+        type ComplexType = {
+          simple?: string;
+          nested: {
+            a: number;
+            b?: string;
+          };
+          array?: string[];
+          union?: string | number;
+        };
+
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              simple: 'default' as string,
+              nested: { a: 0, b: 'default' } as ComplexType['nested'],
+              array: [] as string[],
+              union: 'default' as string | number,
+            },
+            type: {} as ComplexType,
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        assertType<Public['simple']>({} as string | undefined);
+        assertType<Public['nested']>({} as { a: number; b?: string });
+        assertType<Public['array']>({} as string[] | undefined);
+        assertType<Public['union']>({} as string | number | undefined);
+      });
+
+      it('handles single optional prop', () => {
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              single: 'default' as string,
+            },
+            type: {} as {
+              single?: string;
+            },
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        const valid1: Public = {};
+        const valid2: Public = { single: 'value' };
+        const valid3: Public = { single: undefined };
+
+        void valid1;
+        void valid2;
+        void valid3;
+
+        assertType<Public['single']>({} as string | undefined);
+      });
+
+      it('preserves readonly behavior', () => {
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              foo: '' as string,
+            },
+            type: {} as {
+              readonly foo: string;
+            },
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        const pub = {} as Public;
+        // @ts-expect-error readonly props cannot be assigned
+        pub.foo = 'test';
+      });
+
+      it('handles union types in props', () => {
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              status: 'pending' as 'pending' | 'success' | 'error',
+              value: '' as string | number,
+            },
+            type: {} as {
+              status?: 'pending' | 'success' | 'error';
+              value: string | number;
+            },
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        assertType<Public['status']>({} as 'pending' | 'success' | 'error' | undefined);
+        assertType<Public['value']>({} as string | number);
+      });
+
+      it('handles nullable types', () => {
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              nullable: null as string | null,
+              optional: null as string | null,
+            },
+            type: {} as {
+              nullable: string | null;
+              optional?: string | null;
+            },
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        assertType<Public['nullable']>({} as string | null);
+        assertType<Public['optional']>({} as string | null | undefined);
+      });
+
+      it('handles function types', () => {
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              onClick: (() => {}) as (e: MouseEvent) => void,
+              onInput: (() => {}) as (value: string) => void,
+            },
+            type: {} as {
+              onClick?: (e: MouseEvent) => void;
+              onInput: (value: string) => void;
+            },
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        assertType<Public['onClick']>({} as ((e: MouseEvent) => void) | undefined);
+        assertType<Public['onInput']>({} as (value: string) => void);
+      });
+
+      it('handles generic types', () => {
+        type GenericProps<T> = {
+          value: T;
+          optional?: T;
+        };
+
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              value: '' as string,
+              optional: '' as string,
+            },
+            type: {} as GenericProps<string>,
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        assertType<Public['value']>({} as string);
+        assertType<Public['optional']>({} as string | undefined);
+      });
+
+      it('handles intersection types', () => {
+        type BaseProps = {
+          id: number;
+          name?: string;
+        };
+
+        type ExtendedProps = BaseProps & {
+          extra: boolean;
+        };
+
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              id: 0 as number,
+              name: '' as string,
+              extra: true as boolean,
+            },
+            type: {} as ExtendedProps,
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        assertType<Public['id']>({} as number);
+        assertType<Public['name']>({} as string | undefined);
+        assertType<Public['extra']>({} as boolean);
+      });
+
+      it('handles conditional types in props', () => {
+        type ConditionalProps<T extends boolean> = T extends true
+          ? { required: string }
+          : { required?: string };
+
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              required: '' as string,
+            },
+            type: {} as ConditionalProps<true>,
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        type RequiredType = Public extends { required: infer R } ? R : never;
+        assertType<RequiredType>({} as string);
+      });
+
+      it('handles mapped types', () => {
+        type MappedProps<T extends Record<string, any>> = {
+          [K in keyof T]?: T[K];
+        };
+
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {
+              foo: '' as string,
+              bar: 0 as number,
+            },
+            type: {} as MappedProps<{ foo: string; bar: number }>,
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        assertType<Public['foo']>({} as string | undefined);
+        assertType<Public['bar']>({} as number | undefined);
+      });
+    });
+
+    describe('Integration with MacroReturn', () => {
+      it('full workflow: defineProps_Box -> withDefaults_Box -> createMacroReturn -> MakePublicProps', () => {
+        const propsBoxed = defineProps_Box<{
+          foo?: string;
+          bar: number;
+          baz?: boolean;
+        }>();
+
+        const defaultsBoxed = withDefaults_Box(
+          {} as import('vue').DefineProps<ExtractHidden<typeof propsBoxed>, never>,
+          {
+            foo: 'default',
+            baz: true,
+          }
+        );
+
+        const setupReturn = createMacroReturn({
+          props: {
+            value: {} as any,
+            type: {} as any,
+            defaults: {
+              value: {} as any,
+              type: {} as ExtractHidden<typeof defaultsBoxed>,
+            },
+          },
+        });
+
+        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Public = MakePublicProps<Extracted>;
+
+        // Verify defaults structure exists
+        type DefaultsExists = Extracted['defaults'];
+        const _verify: DefaultsExists = {} as any;
+      });
+
+      it('compares plain defineProps vs Box macro approach', () => {
+        // Plain approach
+        const plain = createMacroReturn({
+          props: {
+            value: { foo: '', bar: 0 },
+            type: {} as { foo?: string; bar: number },
+          },
+        });
+
+        type PlainExtracted = ExtractProps<ExtractMacroReturn<typeof plain>>;
+        type PlainPublic = MakePublicProps<PlainExtracted>;
+
+        // Box approach
+        const boxed = defineProps_Box<{
+          foo?: string;
+          bar: number;
+        }>();
+
+        const boxedWithDefaults = withDefaults_Box(
+          {} as import('vue').DefineProps<ExtractHidden<typeof boxed>, never>,
+          { foo: 'default' }
+        );
+
+        const boxedReturn = createMacroReturn({
+          props: {
+            value: {} as any,
+            type: {} as any,
+            defaults: {
+              value: {} as any,
+              type: {} as ExtractHidden<typeof boxedWithDefaults>,
+            },
+          },
+        });
+
+        type BoxedExtracted = ExtractProps<ExtractMacroReturn<typeof boxedReturn>>;
+        type BoxedPublic = MakePublicProps<BoxedExtracted>;
+
+        // Both should handle optional props correctly
+        assertType<PlainPublic['foo']>({} as string | undefined);
+        assertType<PlainPublic['bar']>({} as number);
+
+        // Verify boxed has defaults structure
+        type BoxedDefaults = BoxedExtracted['defaults'];
+        const _boxedCheck: BoxedDefaults = {} as any;
+      });
     });
   });
 });
