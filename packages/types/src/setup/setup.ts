@@ -9,7 +9,8 @@ export type ReturnMacros =
   | "slots"
   | "options"
   | "model"
-  | "expose";
+  | "expose"
+  | "withDefaults";
 /**
  * Normal macros, model holds special structure
  */
@@ -92,7 +93,9 @@ export type ExtractMacro<T, R extends ReturnMacros, F = never> = T extends {
  * type Props = ExtractProps<ExtractMacroReturn<ReturnType<typeof setup>>>;
  * ```
  */
-export type ExtractProps<T> = ExtractMacro<T, "props", {}>;
+export type ExtractProps<T> = ExtractMacro<T, "props", {}> & {
+  defaults: ExtractMacro<T, "withDefaults", {}>;
+};
 
 /**
  * Extracts the emits macro from macro metadata.

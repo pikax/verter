@@ -3,19 +3,7 @@
 
 import type { UniqueKey } from '../helpers/helpers';
 
-// Local copies of external Vue utility types (not exported by 'vue')
-export type IfAny<T, Y, N> = 0 extends 1 & T ? Y : N;
-export type MappedOmit<T, K extends keyof any> = {
-    [P in keyof T as P extends K ? never : P]: T[P];
-};
-export type NotUndefined<T> = T extends undefined ? never : T;
-export type PropsWithDefaults<T, Defaults extends InferDefaults<T>, BKeys extends keyof T> = T extends unknown ? Readonly<MappedOmit<T, keyof Defaults>> & {
-    readonly [K in keyof Defaults as K extends keyof T ? K : never]-?: K extends keyof T ? Defaults[K] extends undefined ? IfAny<Defaults[K], NotUndefined<T[K]>, T[K]> : NotUndefined<T[K]> : never;
-} & {
-    readonly [K in BKeys]-?: K extends keyof Defaults ? Defaults[K] extends undefined ? boolean | undefined : boolean : boolean;
-} : never;
-
-// Internal Vue types used in signatures
+// Local copies of Vue utility types
 type Data = Record<string, unknown>;
 type DefaultFactory<T> = (props: Data) => T | null | undefined;
 type DefineModelOptions<T = any, G = T, S = T> = {

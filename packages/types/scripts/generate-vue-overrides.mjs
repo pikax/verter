@@ -24,12 +24,7 @@ const FUNCTIONS_TO_OVERRIDE = [
 
 // Helper types to import/inline from Vue (may be internal types not exported by 'vue')
 // These will be copied as local type definitions with their dependencies
-const HELPERS_TO_IMPORT = [
-  "PropsWithDefaults",
-  "MappedOmit",
-  "NotUndefined",
-  "IfAny",
-];
+const HELPERS_TO_IMPORT = [];
 
 const NAME_APPEND = "_Box";
 const NAME_PREPEND = "";
@@ -197,7 +192,7 @@ function collectUsedInternalTypes(
 ) {
   const usedInternal = new Set();
   const neededLocalExternal = new Set();
-  
+
   // Add explicitly requested helpers to neededLocalExternal
   for (const helperName of helpersToImport) {
     neededLocalExternal.add(helperName);
@@ -573,63 +568,58 @@ function generateOverrideFileFromDeclarations(
     ", "
   )} } from '../helpers/helpers';\n`;
 
-  // Add locally inlined external types first (e.g., IfAny)
-  header += `\n// Local copies of external Vue utility types (not exported by 'vue')\n`;
-  // Add IfAny if used and not already in localExternalDefinitions
-  // if (usesIfAny && !localExternalDefinitions.has("IfAny")) {
-  //   header += `type IfAny<T, Y, N> = 0 extends 1 & T ? Y : N;\n`;
-  // }
-  if (localExternalDefinitions.size > 0) {
-    const sortedLocal = Array.from(localExternalDefinitions.keys()).sort();
-    // Include all local external definitions in helper types so they don't get qualified
+  // Merge all type definitions into a single set to avoid duplication
+  const allTypeDefinitions = new Map();
+
+  // Add local external definitions first (these will be exported)
+  for (const [typeName, def] of localExternalDefinitions.entries()) {
+    allTypeDefinitions.set(typeName, { def, isExported: true });
+  }
+
+  // Add internal definitions (these will NOT be exported, unless they're in localExternal)
+  for (const [typeName, def] of internalTypeDefinitions.entries()) {
+    if (!allTypeDefinitions.has(typeName)) {
+      allTypeDefinitions.set(typeName, { def, isExported: false });
+    }
+  }
+
+  // Generate all type definitions in a single pass
+  if (allTypeDefinitions.size > 0) {
+    // Include all type definitions in helper types so they don't get qualified
     const allHelperTypes = new Set([
       ...helperTypes,
-      ...localExternalDefinitions.keys(),
+      ...allTypeDefinitions.keys(),
     ]);
-    for (const typeName of sortedLocal) {
-      const originalDef = localExternalDefinitions.get(typeName);
+
+    // Sort keys to ensure consistent output
+    const sortedTypes = Array.from(allTypeDefinitions.keys()).sort();
+
+    header += `\n// Local copies of Vue utility types\n`;
+    for (const typeName of sortedTypes) {
+      const { def, isExported } = allTypeDefinitions.get(typeName);
       const sf = ts.createSourceFile(
         "temp.ts",
-        originalDef,
+        def,
         ts.ScriptTarget.Latest,
         true
       );
       const qualifiedDef = qualifyExportedTypesInText(
-        originalDef,
+        def,
         sf,
         exportedTypes,
         exportedInVue,
         allHelperTypes
       );
-      // Add export keyword if not already present
-      const exportedDef = qualifiedDef.startsWith('export ') 
-        ? qualifiedDef 
-        : 'export ' + qualifiedDef;
-      header += exportedDef + "\n";
-    }
-  }
 
-  // Add internal type definitions if any are used
-  if (internalTypeDefinitions.size > 0) {
-    const sortedInternal = Array.from(internalTypeDefinitions.keys()).sort();
-    header += `\n// Internal Vue types used in signatures\n`;
-    for (const typeName of sortedInternal) {
-      const originalDef = internalTypeDefinitions.get(typeName);
-      // Qualify exported types within internal type definitions
-      const sf = ts.createSourceFile(
-        "temp.ts",
-        originalDef,
-        ts.ScriptTarget.Latest,
-        true
-      );
-      const qualifiedDef = qualifyExportedTypesInText(
-        originalDef,
-        sf,
-        exportedTypes,
-        exportedInVue,
-        helperTypes
-      );
-      header += qualifiedDef + "\n";
+      // Add export keyword only for types in localExternalDefinitions
+      if (isExported) {
+        const exportedDef = qualifiedDef.startsWith("export ")
+          ? qualifiedDef
+          : "export " + qualifiedDef;
+        header += exportedDef + "\n";
+      } else {
+        header += qualifiedDef + "\n";
+      }
     }
   }
 
