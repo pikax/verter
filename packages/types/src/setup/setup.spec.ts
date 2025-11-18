@@ -451,6 +451,9 @@ describe("Setup helpers", () => {
       type Emits = ExtractEmits<Macros>;
       assertType<Emits["value"]>((event: "update", value: string) => {});
 
+
+      assertType<Emits["type"]>("EmitsType");
+
       // @ts-expect-error nonExistent property
       assertType<Emits["nonExistent"]>("");
       // @ts-expect-error incorrect type

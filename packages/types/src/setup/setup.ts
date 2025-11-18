@@ -1,3 +1,6 @@
+import { ModelToEmits, ModelToProps } from "../model";
+import { MakeInternalProps, MakePublicProps } from "../props";
+
 declare const MacroKey: unique symbol;
 
 /**
@@ -39,7 +42,9 @@ export declare function createMacroReturn<
       model: Record<string, MacroReturn<any, any>>;
     }
   >
->(o: T): { [MacroKey]: T };
+>(o: T): CreateMacroReturn<T>;
+
+export type CreateMacroReturn<T> = { [MacroKey]: T };
 
 /**
  * Extracts the macro metadata from a return type created by `createMacroReturn`.
@@ -114,6 +119,8 @@ export type ExtractProps<T> = (ExtractMacro<T, "props", {}> extends infer P
  */
 export type ExtractEmits<T> = ExtractMacro<T, "emits", () => void>;
 
+export type ToEmitValue<T> = T extends { value: infer V } ? V : () => void;
+
 /**
  * Extracts the slots macro from macro metadata.
  *
@@ -129,6 +136,14 @@ export type ExtractEmits<T> = ExtractMacro<T, "emits", () => void>;
  * ```
  */
 export type ExtractSlots<T> = ExtractMacro<T, "slots", {}>;
+
+export type SlotsToSlotType<T> = T extends {
+  type: infer ST extends Record<string, any>;
+}
+  ? import("vue").SlotsType<ST>
+  : T extends { value: infer SV extends Record<string, any> }
+  ? import("vue").SlotsType<SV>
+  : {};
 
 /**
  * Extracts the options macro from macro metadata.
@@ -165,6 +180,14 @@ export type ExtractOptions<T> = ExtractMacro<T, "options", {}>;
  */
 export type ExtractModel<T> = ExtractMacro<T, "model", {}>;
 
+export type ToModelType<T> = T extends {
+  type: infer TT extends Record<string, any>;
+}
+  ? TT
+  : T extends { value: infer TV extends Record<string, any> }
+  ? TV
+  : {};
+
 /**
  * Extracts the expose macro from macro metadata.
  *
@@ -180,6 +203,14 @@ export type ExtractModel<T> = ExtractMacro<T, "model", {}>;
  * ```
  */
 export type ExtractExpose<T> = ExtractMacro<T, "expose", {}>;
+
+export type ExposeToVueExposeKey<T> = T extends {
+  type: infer TT extends Record<string, any>;
+}
+  ? keyof TT
+  : T extends { value: infer TV extends Record<string, any> }
+  ? keyof TV
+  : keyof {};
 
 /**
  * Normalizes a macro return type into a structured object with all macro types.
@@ -225,3 +256,83 @@ export type NormaliseMacroReturn<T> = ExtractMacroReturn<T> extends infer R
       expose: ExtractExpose<R>;
     }
   : {};
+
+export type MacroReturnToInstance<
+  T,
+  Public extends boolean = false
+> = NormaliseMacroReturn<T> extends {
+  props: infer P extends ExtractProps<any>;
+  emits: infer E extends ExtractEmits<any>;
+  slots: infer S extends ExtractSlots<any>;
+  options: infer O extends ExtractOptions<any>;
+  model: infer M extends ExtractModel<any>;
+  expose: infer X extends ExtractExpose<any>;
+}
+  ? //import("vue").ComponentPublicInstance & 
+  {
+      // todo data should be the bindings from setup, unless is production build
+      $data: {};
+      $props: P
+         /* &
+        ModelToProps<ToModelType<M>>;
+      $emit: ToEmitValue<E> & ModelToEmits<ToModelType<M>>;
+      $slots: S; */
+    }
+  : //   P["props"],
+    //   {},
+    //   {},
+    //   {},
+    //   {},
+    //   {},
+    //   {},
+    //   P["defaults"],
+    //   Public,
+    //   O["value"],
+    //   {},
+    //   SlotsToSlotType<S>,
+    //   ExposeToVueExposeKey<X>,
+    //   // todo check what's typeRef
+    //   {},
+    //   //todo check typeEl
+    //   any
+    // > & { $emits: E["value"] }
+    false;
+
+export type MacroToInternalInstance<T> = NormaliseMacroReturn<T> extends {
+  props: infer P extends ExtractProps<any>;
+  emits: infer E extends ExtractEmits<any>;
+  slots: infer S extends ExtractSlots<any>;
+  options: infer O extends ExtractOptions<any>;
+  model: infer M extends ExtractModel<any>;
+  expose: infer X extends ExtractExpose<any>;
+}
+  ? import("vue").ComponentInternalInstance & {
+      emit: Emit;
+      // todo others
+    }
+  : import("vue").ComponentInternalInstance;
+
+type T = MacroReturnToInstance<CreateMacroReturn<{
+  props: { value: { foo: string }; type: { foo: string } };
+  emits: (e: "update", val: number) => void;
+  slots: { value: { default: () => string } };
+  options: { value: { customOption: boolean } };
+  model: { modelValue: { value: string; type: string } };
+  expose: { value: { focus: () => void }; type: { focus: () => void } };
+}>>;
+
+const t = {} as T;
+t.$props.foo
+
+
+
+declare const P: {
+  props: { value: { foo: string }; type: { foo: string } };
+};
+
+declare const PP: MakePublicProps<typeof P>;
+
+PP
+
+
+
