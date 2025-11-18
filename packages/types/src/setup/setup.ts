@@ -93,9 +93,10 @@ export type ExtractMacro<T, R extends ReturnMacros, F = never> = T extends {
  * type Props = ExtractProps<ExtractMacroReturn<ReturnType<typeof setup>>>;
  * ```
  */
-export type ExtractProps<T> = ExtractMacro<T, "props", {}> & {
-  defaults: ExtractMacro<T, "withDefaults", {}>;
-};
+export type ExtractProps<T> = (ExtractMacro<T, "props", {}> extends infer P
+  ? { props: P }
+  : {}) &
+  (ExtractMacro<T, "withDefaults", {}> extends infer D ? { defaults: D } : {});
 
 /**
  * Extracts the emits macro from macro metadata.
@@ -182,7 +183,7 @@ export type ExtractExpose<T> = ExtractMacro<T, "expose", {}>;
 
 /**
  * Normalizes a macro return type into a structured object with all macro types.
- * 
+ *
  * This utility extracts and organizes all macros from a `createMacroReturn` result
  * into a consistent object shape, providing defaults for missing macros.
  *
@@ -202,7 +203,7 @@ export type ExtractExpose<T> = ExtractMacro<T, "expose", {}>;
  *   emits: { value: emitFn, type: EmitsType },
  *   model: { modelValue: { value: ref, type: string } }
  * });
- * 
+ *
  * type Normalized = NormaliseMacroReturn<ReturnType<typeof setup>>;
  * // {
  * //   props: { value: { id: number }, type: PropsType, defaults: {} },
