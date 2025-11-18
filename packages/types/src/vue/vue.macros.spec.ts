@@ -11,7 +11,6 @@ import {
 } from "./vue.macros";
 import {
   removeHiddenPatch,
-  type UniqueKey,
 } from "../helpers/helpers";
 import type {
   ComponentObjectPropsOptions,
@@ -132,9 +131,7 @@ describe("vue macros _Box usage", () => {
         // @ts-expect-error should not be any type
         assertType<{ randomProp: 123 }>(boxed);
         
-        type Box = P & { [UniqueKey]?: P };
-        assertType<P>({} as Box);
-        assertType<Box>({} as P);
+        assertType<P>(boxed);
       });
 
       it("handles optional properties", () => {
@@ -192,10 +189,6 @@ describe("vue macros _Box usage", () => {
       const wdBox = withDefaults_Box(props, defaults);
       
       assertNotAny(wdBox);
-      type Result = typeof wdBox;
-      type Expected = [DefineProps<P, never>, typeof defaults] & {
-        [UniqueKey]?: [DefineProps<P, never>, typeof defaults];
-      };
       
       assertType<[any, any]>(wdBox);
       wdBox[0];
@@ -237,12 +230,10 @@ describe("vue macros _Box usage", () => {
         assertEquivalent(emitFn, emitFromBox);
       });
 
-      it("preserves array type with UniqueKey", () => {
+      it("preserves array type", () => {
         const boxParam = defineEmits_Box(["foo", "bar"]);
         
         assertNotAny(boxParam);
-        type Result = typeof boxParam;
-        type Expected = string[] & { [UniqueKey]?: string[] & [string[]] };
         
         assertType<string[]>(boxParam);
       });
@@ -626,22 +617,17 @@ describe("vue macros _Box usage", () => {
       assertNotAny(emitsBox);
     });
 
-    it("all macros preserve UniqueKey metadata", () => {
+    it("all macros return correct types", () => {
       const props = defineProps_Box(["foo"]);
       const emits = defineEmits_Box(["change"]);
       const expose = defineExpose_Box({ method: () => {} });
       const slots = defineSlots_Box<{ default: () => any }>();
       
-      type PropsKey = ExtractHidden<typeof props>;
-      type EmitsKey = ExtractHidden<typeof emits>;
-      type ExposeKey = ExtractHidden<typeof expose>;
-      type SlotsKey = ExtractHidden<typeof slots>;
-      
-      // Ensure UniqueKey is present
-      assertNotAny({} as PropsKey);
-      assertNotAny({} as EmitsKey);
-      assertNotAny({} as ExposeKey);
-      assertNotAny({} as SlotsKey);
+      // Ensure types are correct
+      assertNotAny(props);
+      assertNotAny(emits);
+      assertNotAny(expose);
+      assertNotAny(slots);
     });
 
     it("complex component setup", () => {

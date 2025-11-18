@@ -1,4 +1,4 @@
-import { describe, it, assertType } from "vitest";
+﻿import { describe, it, assertType } from "vitest";
 import {
   MakePublicProps,
   MakeInternalProps,
@@ -55,7 +55,7 @@ describe("Props helpers", () => {
         d?: string;
       }>();
       const defaultsBoxed = withDefaults_Box(
-        {} as DefineProps<ExtractHidden<typeof propsBoxed>, never>,
+        {} as DefineProps<typeof propsBoxed, never>,
         { d: "baz" }
       );
       type D = typeof defaultsBoxed;
@@ -444,7 +444,7 @@ describe("Props helpers", () => {
     it("handles tuple return from withDefaults_Box", () => {
       const propsBoxed = defineProps_Box<{ name: string; active: boolean }>();
       const defaultsBoxed = withDefaults_Box(
-        {} as DefineProps<ExtractHidden<typeof propsBoxed>, never>,
+        {} as DefineProps<typeof propsBoxed, never>,
         { active: true }
       );
 
@@ -489,7 +489,7 @@ describe("Props helpers", () => {
         c?: boolean;
       }>();
       const defaultsBoxed = withDefaults_Box(
-        {} as DefineProps<ExtractHidden<typeof propsBoxed>, never>,
+        {} as DefineProps<typeof propsBoxed, never>,
         {
           a: "default",
         }
@@ -516,7 +516,7 @@ describe("Props helpers", () => {
         optional?: number;
       }>();
       const defaultsBoxed = withDefaults_Box(
-        {} as DefineProps<ExtractHidden<typeof propsBoxed>, never>,
+        {} as DefineProps<typeof propsBoxed, never>,
         {
           optional: 42,
         }
@@ -760,7 +760,7 @@ describe("Props helpers", () => {
       });
       const p = defineProps(removeHiddenPatch(props_boxed));
       type Macro = ExtractProps<{
-        props: MacroReturnObject<typeof p, ExtractHidden<typeof props_boxed>>;
+        props: MacroReturnObject<typeof p, typeof props_boxed>;
       }>;
       type Public = MakePublicProps<Macro>;
       type Internal = MakeInternalProps<Macro>;
@@ -776,7 +776,7 @@ describe("Props helpers", () => {
       });
       const p = defineProps(removeHiddenPatch(props_boxed));
       type Macro = ExtractProps<{
-        props: MacroReturnObject<typeof p, ExtractHidden<typeof props_boxed>>;
+        props: MacroReturnObject<typeof p, typeof props_boxed>;
       }>;
       type Public = MakePublicProps<Macro>;
 
@@ -791,7 +791,7 @@ describe("Props helpers", () => {
         withDefault?: boolean;
       }>();
       const defaultsBoxed = withDefaults_Box(
-        {} as DefineProps<ExtractHidden<typeof propsBoxed>, never>,
+        {} as DefineProps<typeof propsBoxed, never>,
         {
           withDefault: true,
         }
@@ -1097,7 +1097,7 @@ describe("Props helpers", () => {
           bar: number;
         }>();
 
-        type Hidden = ExtractHidden<typeof propsBoxed>;
+        type Hidden = typeof propsBoxed;
 
         assertType<Hidden>(
           {} as {
@@ -1124,7 +1124,7 @@ describe("Props helpers", () => {
 
         const defaultsBoxed = withDefaults_Box(
           {} as import("vue").DefineProps<
-            ExtractHidden<typeof propsBoxed>,
+            typeof propsBoxed,
             never
           >,
           {
@@ -1138,7 +1138,7 @@ describe("Props helpers", () => {
             type: {} as any,
             defaults: {
               value: {} as any,
-              type: {} as ExtractHidden<typeof defaultsBoxed>,
+              type: {} as typeof defaultsBoxed,
             },
           },
         });
@@ -1283,7 +1283,7 @@ describe("Props helpers", () => {
 
         const defaultsBoxed = withDefaults_Box(
           {} as import("vue").DefineProps<
-            ExtractHidden<typeof propsBoxed>,
+            typeof propsBoxed,
             never
           >,
           {
@@ -1297,7 +1297,7 @@ describe("Props helpers", () => {
             type: {} as any,
             defaults: {
               value: {} as any,
-              type: {} as ExtractHidden<typeof defaultsBoxed>,
+              type: {} as typeof defaultsBoxed,
             },
           },
         });
@@ -1561,7 +1561,7 @@ describe("Props helpers", () => {
 
         const defaultsBoxed = withDefaults_Box(
           {} as import("vue").DefineProps<
-            ExtractHidden<typeof propsBoxed>,
+            typeof propsBoxed,
             never
           >,
           {
@@ -1576,7 +1576,7 @@ describe("Props helpers", () => {
             type: {} as any,
             defaults: {
               value: {} as any,
-              type: {} as ExtractHidden<typeof defaultsBoxed>,
+              type: {} as typeof defaultsBoxed,
             },
           },
         });
@@ -1608,7 +1608,7 @@ describe("Props helpers", () => {
         }>();
 
         const boxedWithDefaults = withDefaults_Box(
-          {} as import("vue").DefineProps<ExtractHidden<typeof boxed>, never>,
+          {} as import("vue").DefineProps<typeof boxed, never>,
           { foo: "default" }
         );
 
@@ -1618,7 +1618,7 @@ describe("Props helpers", () => {
             type: {} as any,
             defaults: {
               value: {} as any,
-              type: {} as ExtractHidden<typeof boxedWithDefaults>,
+              type: {} as typeof boxedWithDefaults,
             },
           },
         });
