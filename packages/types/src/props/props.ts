@@ -84,6 +84,33 @@ export type ResolveDefaultsPropsFromMacro<T> = T extends ExtractProps<infer M>
     : T
   : T;
 
+/**
+ * Extracts the keys of properties that have default values from a props object definition.
+ *
+ * This helper is used to identify which properties in a Vue props object have defaults,
+ * which affects their optionality in the component's public API.
+ *
+ * @template T - The props object type to analyze (can be string array or object with default properties)
+ * @returns Union of property keys that have defaults, or `string` for string array format
+ *
+ * @example
+ * ```ts
+ * // Object format with defaults
+ * type PropsObj = {
+ *   name: { type: String; default: 'Anonymous' };
+ *   age: { type: Number };
+ *   active: { type: Boolean; default: true };
+ * };
+ * type WithDefaults = PropsObjectExtractDefaults<PropsObj>; // 'name' | 'active'
+ * ```
+ *
+ * @example
+ * ```ts
+ * // String array format (simplified props)
+ * type PropsArray = ['name', 'age'];
+ * type Defaults = PropsObjectExtractDefaults<PropsArray>; // string
+ * ```
+ */
 export type PropsObjectExtractDefaults<T> = T extends string[]
   ? string
   : {
@@ -133,6 +160,30 @@ export type MakePublicProps<T extends Record<PropertyKey, any>> =
     ? MakeBooleanOptional<PP>
     : MakeBooleanOptional<T>;
 
+/**
+ * Makes boolean props with defaults optional in the type system.
+ *
+ * Vue automatically provides a default value of `false` for boolean props that aren't passed,
+ * so they should be optional in the public API. This type takes a DefineProps type and makes
+ * the boolean props (indicated by the BKeys parameter) optional with `| undefined`.
+ *
+ * @template T - The DefineProps type to transform
+ * @returns Type with boolean props made optional, or T if not DefineProps
+ *
+ * @example
+ * ```ts
+ * type Props = DefineProps<
+ *   { name: string; active: boolean; visible: boolean },
+ *   'active' | 'visible'
+ * >;
+ * type Result = MakeBooleanOptional<Props>;
+ * // Result: { name: string; active?: boolean | undefined; visible?: boolean | undefined }
+ * ```
+ *
+ * @remarks
+ * This is used internally by MakePublicProps to handle Vue's special boolean prop behavior.
+ * If T is not a DefineProps type, it returns T unchanged.
+ */
 export type MakeBooleanOptional<T> = T extends import("vue").DefineProps<
   T,
   infer BKeys extends keyof T
@@ -177,10 +228,48 @@ export type ExtractBooleanKeys<T> = T extends import("vue").DefineProps<
   : never;
 
 /**
- * These are the internal props of the component.
- * They have all props required.
+ * Transforms component props for internal usage within the component implementation.
  *
- * They are accessed inside the component implementation.
+ * Unlike the public API (MakePublicProps), internal props have different requirements:
+ * - Props with defaults are **required** (always defined, never undefined)
+ * - Props without defaults are **required** (must be present, though may be undefined)
+ * - All props are accessible and type-safe within the component
+ *
+ * This ensures that inside the component, TypeScript knows which props have been
+ * populated by Vue (either from user input or defaults) vs which might be undefined.
+ *
+ * @template T - The props type (from defineProps or macro)
+ * @returns Transformed props suitable for internal component implementation
+ *
+ * @example
+ * ```ts
+ * const props = defineProps({
+ *   id: Number,                                   // No default
+ *   name: { type: String, default: 'Anonymous' }, // With default
+ * });
+ * type Internal = MakeInternalProps<typeof props>;
+ * // Internal usage: { readonly id: number; readonly name: string }
+ * // id is required (number, not undefined), name is required (always string)
+ * ```
+ *
+ * @example
+ * ```ts
+ * // Inside component implementation
+ * const props = defineProps({
+ *   count: { type: Number, default: 0 },
+ *   label: String,
+ * });
+ * // props.count is always number (has default)
+ * // props.label is string (required prop)
+ * console.log(props.count.toFixed(2)); // Safe - always defined
+ * console.log(props.label.toUpperCase()); // Safe - always string
+ * ```
+ *
+ * @remarks
+ * This type is used for the internal component implementation perspective,
+ * whereas MakePublicProps is used for the external component usage perspective.
+ * The key difference is that props with defaults are required internally (always defined)
+ * but optional externally (can be omitted when using the component).
  */
 export type MakeInternalProps<T extends Record<PropertyKey, any>> =
   ResolveDefaultsPropsFromMacro<T> extends {

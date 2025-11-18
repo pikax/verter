@@ -5,6 +5,7 @@ import {
   FindDefaultsKey,
   ResolveFromMacroReturn,
   ResolveDefaultsPropsFromMacro,
+  PropsObjectExtractDefaults,
   ExtractBooleanKeys,
   MakeBooleanOptional,
 } from "./props";
@@ -921,6 +922,147 @@ describe("Props helpers", () => {
         type Result = FindDefaultsKey<TestType>;
 
         assertType<Result>({} as never);
+      });
+    });
+
+    describe("PropsObjectExtractDefaults", () => {
+      it("extracts keys with default values from object format", () => {
+        type PropsObj = {
+          name: { type: string; default: "Anonymous" };
+          age: { type: number };
+          active: { type: boolean; default: true };
+          count: { type: number; default: 0 };
+        };
+
+        type Result = PropsObjectExtractDefaults<PropsObj>;
+
+        // Should extract 'name', 'active', and 'count' (have defaults)
+        assertType<Result>({} as "name" | "active" | "count");
+
+        // @ts-expect-error 'age' doesn't have a default
+        assertType<Result>({} as "name" | "age" | "active" | "count");
+      });
+
+      it("returns string for string array format", () => {
+        type PropsArray = string[];
+        type Result = PropsObjectExtractDefaults<PropsArray>;
+
+        assertType<Result>({} as string);
+      });
+
+      it("handles props with no defaults", () => {
+        type PropsObj = {
+          name: { type: string };
+          age: { type: number };
+        };
+
+        type Result = PropsObjectExtractDefaults<PropsObj>;
+
+        // Should return empty string union (no defaults)
+        assertType<Result>({} as "");
+      });
+
+      it("handles props with all defaults", () => {
+        type PropsObj = {
+          a: { type: string; default: "a" };
+          b: { type: number; default: 0 };
+          c: { type: boolean; default: false };
+        };
+
+        type Result = PropsObjectExtractDefaults<PropsObj>;
+
+        assertType<Result>({} as "a" | "b" | "c");
+      });
+
+      it("handles single prop with default", () => {
+        type PropsObj = {
+          single: { type: string; default: "value" };
+        };
+
+        type Result = PropsObjectExtractDefaults<PropsObj>;
+
+        assertType<Result>({} as "single");
+      });
+
+      it("handles single prop without default", () => {
+        type PropsObj = {
+          single: { type: string };
+        };
+
+        type Result = PropsObjectExtractDefaults<PropsObj>;
+
+        assertType<Result>({} as "");
+      });
+
+      it("handles mixed prop types with defaults", () => {
+        type PropsObj = {
+          str: { type: string; default: "default" };
+          num: { type: number };
+          bool: { type: boolean; default: true };
+          obj: { type: object; default: () => ({}) };
+          arr: { type: any[] };
+        };
+
+        type Result = PropsObjectExtractDefaults<PropsObj>;
+
+        assertType<Result>({} as "str" | "bool" | "obj");
+
+        // @ts-expect-error 'num' and 'arr' don't have defaults
+        assertType<Result>({} as "str" | "num" | "bool" | "obj" | "arr");
+      });
+
+      it("handles complex default values", () => {
+        type PropsObj = {
+          simpleDefault: { type: string; default: "value" };
+          functionDefault: { type: object; default: () => ({ x: 1 }) };
+          nullDefault: { type: any; default: null };
+          zeroDefault: { type: number; default: 0 };
+          falseDefault: { type: boolean; default: false };
+          emptyArrayDefault: { type: any[]; default: () => [] };
+        };
+
+        type Result = PropsObjectExtractDefaults<PropsObj>;
+
+        // All have defaults (including falsy values)
+        assertType<Result>(
+          {} as
+            | "simpleDefault"
+            | "functionDefault"
+            | "nullDefault"
+            | "zeroDefault"
+            | "falseDefault"
+            | "emptyArrayDefault"
+        );
+      });
+
+      it("handles empty object", () => {
+        type PropsObj = {};
+
+        type Result = PropsObjectExtractDefaults<PropsObj>;
+
+        assertType<Result>({} as never);
+      });
+
+      it("handles tuple-like string arrays", () => {
+        type PropsArray = ["name", "age", "email"];
+
+        type Result = PropsObjectExtractDefaults<PropsArray>;
+
+        assertType<Result>({} as string);
+      });
+
+      it("differentiates between default: any and no default", () => {
+        type PropsObj = {
+          withDefault: { type: string; default: any };
+          withoutDefault: { type: string };
+        };
+
+        type Result = PropsObjectExtractDefaults<PropsObj>;
+
+        assertType<Result>({} as "withDefault");
+
+        // @ts-expect-error withoutDefault doesn't have default property
+        assertType<Result>({} as "withDefault" | "withoutDefault");
       });
     });
 
