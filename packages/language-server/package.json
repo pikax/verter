@@ -24,7 +24,7 @@
     "glob": "^11.0.3",
     "magic-string": "^0.30.17",
     "minimatch": "^10.0.3",
-    "oxc-parser": "^0.75.1",
+    "oxc-parser": "^0.98.0",
     "source-map-js": "^1.2.1",
     "sucrase": "^3.35.0",
     "typescript": "^5.8.3",
