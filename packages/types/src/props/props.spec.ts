@@ -9,9 +9,14 @@ import {
   MakeBooleanOptional,
 } from "./props";
 import { defineProps, withDefaults, DefineProps } from "vue";
-import { createMacroReturn, ExtractMacroReturn, ExtractProps } from "../setup";
+import {
+  createMacroReturn,
+  ExtractMacroReturn,
+  ExtractProps,
+  MacroReturnObject,
+} from "../setup";
 import { defineProps_Box, withDefaults_Box } from "../vue/vue.macros";
-import { ExtractHidden } from "../helpers";
+import { ExtractHidden, removeHiddenPatch } from "../helpers";
 
 describe("Props helpers", () => {
   describe("MakePublicProps", () => {
@@ -567,7 +572,7 @@ describe("Props helpers", () => {
         }>(),
         { d: "baz" }
       );
-      const d = withDefaults(...withDefaults_Boxed[0]);
+      const d = withDefaults(withDefaults_Boxed[0], withDefaults_Boxed[1]);
       type D = typeof d;
       type Internal = MakeInternalProps<D>;
       // Both props required internally
@@ -752,10 +757,13 @@ describe("Props helpers", () => {
             ["pending", "success", "error"].includes(value),
         },
       });
-      const p = defineProps(props_boxed);
-      type P = typeof props_boxed;
-      type Public = MakePublicProps<P>;
-      type Internal = MakeInternalProps<P>;
+      const p = defineProps(removeHiddenPatch(props_boxed));
+      type Macro = ExtractProps<{
+        props: MacroReturnObject<typeof p, ExtractHidden<typeof props_boxed>>;
+      }>;
+      type Public = MakePublicProps<Macro>;
+      type Internal = MakeInternalProps<Macro>;
+      const px = {} as ResolveDefaultsPropsFromMacro<Macro>;
 
       assertType<Public["status"]>({} as string | undefined);
       assertType<Internal["status"]>({} as string);
@@ -766,9 +774,11 @@ describe("Props helpers", () => {
         required: { type: String, required: true },
         notRequired: { type: String, required: false },
       });
-      const p = defineProps(props_boxed);
-      type P = typeof props_boxed;
-      type Public = MakePublicProps<P>;
+      const p = defineProps(removeHiddenPatch(props_boxed));
+      type Macro = ExtractProps<{
+        props: MacroReturnObject<typeof p, ExtractHidden<typeof props_boxed>>;
+      }>;
+      type Public = MakePublicProps<Macro>;
 
       assertType<Public["required"]>({} as string);
       assertType<Public["notRequired"]>({} as string | undefined);

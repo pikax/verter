@@ -1,4 +1,13 @@
-import { MacroReturn, MacroReturnObject, MacroReturnType } from "../setup";
+import { extractHiddenPatch, UniqueKey } from "../helpers/helpers";
+import {
+  createMacroReturn,
+  ExtractMacroReturn,
+  ExtractProps,
+  MacroReturn,
+  MacroReturnObject,
+  MacroReturnType,
+} from "../setup";
+import { withDefaults_Box } from "../vue";
 
 /**
  * Extracts the keys of properties that can be undefined (optional properties).
@@ -51,22 +60,36 @@ export type ResolveFromMacroReturn<T> = T extends MacroReturnType<any, infer TT>
  * // { type: { foo?: string; bar: number }, defaults: 'foo' }
  * ```
  */
-export type ResolveDefaultsPropsFromMacro<T> = T extends MacroReturn<any, any>
-  ? T extends {
-      value: infer V;
-      defaults: {
-        type: [any, infer D];
-      };
+export type ResolveDefaultsPropsFromMacro<T> = T extends ExtractProps<infer M>
+  ? M extends {
+      props: infer PM extends MacroReturnType<any, any>;
     }
+    ? M extends {
+        withDefaults: {
+          type: [any, infer D];
+        };
+      }
+      ? { type: ResolveFromMacroReturn<PM>; defaults: keyof D }
+      : {
+          type: ResolveFromMacroReturn<PM>;
+          defaults: FindDefaultsKey<ResolveFromMacroReturn<PM>>;
+          dd: M;
+        }
+    : T extends {
+        props: MacroReturnObject<infer V, infer O>;
+      }
     ? {
         type: V;
-        defaults: keyof D;
+        defaults: PropsObjectExtractDefaults<O>;
       }
-    : {
-        type: ResolveFromMacroReturn<T>;
-        defaults: FindDefaultsKey<ResolveFromMacroReturn<T>>;
-      }
+    : T
   : T;
+
+export type PropsObjectExtractDefaults<T> = T extends string[]
+  ? string
+  : {
+      [K in keyof T]: T[K] extends { default: any } ? K : "";
+    }[keyof T];
 
 /**
  * Transforms component props for the public API (component usage).
@@ -106,7 +129,7 @@ export type MakePublicProps<T extends Record<PropertyKey, any>> =
       ? Omit<P, D> & {
           [K in keyof P as K extends D ? K : never]?: P[K] | undefined;
         }
-      : never
+      : P
     : T extends [infer PP, any]
     ? MakeBooleanOptional<PP>
     : MakeBooleanOptional<T>;
