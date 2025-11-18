@@ -73,7 +73,6 @@ export type ResolveDefaultsPropsFromMacro<T> = T extends ExtractProps<infer M>
       : {
           type: ResolveFromMacroReturn<PM>;
           defaults: FindDefaultsKey<ResolveFromMacroReturn<PM>>;
-          dd: M;
         }
     : T extends {
         props: MacroReturnObject<infer V, infer O>;
@@ -184,8 +183,13 @@ export type ExtractBooleanKeys<T> = T extends import("vue").DefineProps<
  * They are accessed inside the component implementation.
  */
 export type MakeInternalProps<T extends Record<PropertyKey, any>> =
-  T extends import("vue").DefineProps<infer P, any>
-    ? T extends import("vue").DefineProps<P, infer K extends keyof P>
-      ? P & Required<Pick<P, K>>
-      : T
+  ResolveDefaultsPropsFromMacro<T> extends {
+    type: infer P;
+    defaults: infer D;
+  }
+    ? D extends keyof P
+      ? Omit<P, D> & {
+          [K in keyof P as K extends D ? K : never]-?: P[K] | undefined;
+        }
+      : P
     : T;

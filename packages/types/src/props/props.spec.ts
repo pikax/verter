@@ -763,7 +763,6 @@ describe("Props helpers", () => {
       }>;
       type Public = MakePublicProps<Macro>;
       type Internal = MakeInternalProps<Macro>;
-      const px = {} as ResolveDefaultsPropsFromMacro<Macro>;
 
       assertType<Public["status"]>({} as string | undefined);
       assertType<Internal["status"]>({} as string);
@@ -941,8 +940,10 @@ describe("Props helpers", () => {
         type Props = ExtractProps<Extracted>;
 
         // ExtractProps returns the macro object with value and type, plus defaults
-        type PropsValue = Props extends { value: infer V } ? V : never;
-        type PropsType = Props extends { type: infer T } ? T : never;
+        type PropsValue = Props extends { props: { value: infer V } }
+          ? V
+          : never;
+        type PropsType = Props extends { props: { type: infer T } } ? T : never;
 
         assertType<PropsValue>({} as { foo: string; bar: number });
         assertType<PropsType>({} as { foo: string; bar: number });
