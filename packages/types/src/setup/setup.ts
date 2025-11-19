@@ -17,7 +17,8 @@ export type ReturnMacros =
   | "options"
   | "model"
   | "expose"
-  | "withDefaults";
+  | "withDefaults"
+  | "templateRef";
 /**
  * Normal macros, model holds special structure
  */
@@ -44,11 +45,14 @@ export declare function createMacroReturn<
   T extends Partial<
     Record<RegularMacros, MacroReturn<any, any>> & {
       model: Record<string, MacroReturn<any, any>>;
+    } & {
+      templateRef: Record<string, any>;
     }
   >
 >(o: T): CreateMacroReturn<T>;
 
 export type CreateMacroReturn<T> = { [MacroKey]: T };
+export type OmitMacroReturn<T> = Omit<T, typeof MacroKey>;
 
 /**
  * Extracts the macro metadata from a return type created by `createMacroReturn`.
@@ -87,6 +91,8 @@ export type ExtractMacro<T, R extends ReturnMacros, F = never> = T extends {
 }
   ? M
   : F;
+
+export type ExtractTemplateRef<T> = ExtractMacro<T, "templateRef", {}>;
 
 /**
  * Extracts the props macro from macro metadata.
@@ -195,7 +201,7 @@ PXO.eee;
  */
 export type ExtractEmits<T> = ExtractMacro<T, "emits", () => void>;
 
-export type ToEmitValue<T> = T extends { value: infer V } ? V : () => void;
+export type MacroToEmitValue<T> = T extends { value: infer V } ? V : () => void;
 
 /**
  * Extracts the slots macro from macro metadata.
@@ -256,13 +262,18 @@ export type ExtractOptions<T> = ExtractMacro<T, "options", {}>;
  */
 export type ExtractModel<T> = ExtractMacro<T, "model", {}>;
 
-export type ToModelType<T> = T extends {
+export type MacroToModelType<T> = T extends {
   type: infer TT extends Record<string, any>;
 }
   ? TT
   : T extends { value: infer TV extends Record<string, any> }
   ? TV
-  : {};
+  : {
+      a: T;
+    };
+export type MacroToModelRecord<T> = {
+  [K in keyof T]: MacroToModelType<T[K]>;
+};
 
 /**
  * Extracts the expose macro from macro metadata.
@@ -322,57 +333,19 @@ export type ExposeToVueExposeKey<T> = T extends {
  * // }
  * ```
  */
-export type NormaliseMacroReturn<T> = ExtractMacroReturn<T> extends infer R
-  ? {
-      props: ExtractMacroProps<R>;
-      emits: ExtractEmits<R>;
-      slots: ExtractSlots<R>;
-      options: ExtractOptions<R>;
-      model: ExtractModel<R>;
-      expose: ExtractExpose<R>;
-    }
-  : {};
+export type NormaliseMacroReturn<T> = NormalisedMacroReturn<
+  ExtractMacroReturn<T>
+>;
 
-// export type MacroReturnToInstance<
-//   T,
-//   Public extends boolean = false
-// > = NormaliseMacroReturn<T> extends {
-//   props: infer P extends ExtractMacroProps<any>;
-//   emits: infer E extends ExtractEmits<any>;
-//   slots: infer S extends ExtractSlots<any>;
-//   options: infer O extends ExtractOptions<any>;
-//   model: infer M extends ExtractModel<any>;
-//   expose: infer X extends ExtractExpose<any>;
-// }
-//   ? //import("vue").ComponentPublicInstance &
-//     {
-//       // todo data should be the bindings from setup, unless is production build
-//       $data: {};
-//       $props: P;
-//       /* &
-//         ModelToProps<ToModelType<M>>;
-//       $emit: ToEmitValue<E> & ModelToEmits<ToModelType<M>>;
-//       $slots: S; */
-//     }
-//   : //   P["props"],
-//     //   {},
-//     //   {},
-//     //   {},
-//     //   {},
-//     //   {},
-//     //   {},
-//     //   P["defaults"],
-//     //   Public,
-//     //   O["value"],
-//     //   {},
-//     //   SlotsToSlotType<S>,
-//     //   ExposeToVueExposeKey<X>,
-//     //   // todo check what's typeRef
-//     //   {},
-//     //   //todo check typeEl
-//     //   any
-//     // > & { $emits: E["value"] }
-//     false;
+export type NormalisedMacroReturn<T = {}> = {
+  props: ExtractMacroProps<T>;
+  emits: ExtractEmits<T>;
+  slots: ExtractSlots<T>;
+  options: ExtractOptions<T>;
+  model: ExtractModel<T>;
+  expose: ExtractExpose<T>;
+  templateRef: ExtractTemplateRef<T>;
+};
 
 // export type MacroToInternalInstance<T> = NormaliseMacroReturn<T> extends {
 //   props: infer P extends ExtractMacroProps<any>;

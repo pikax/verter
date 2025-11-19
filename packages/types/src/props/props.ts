@@ -1,6 +1,5 @@
-import { extractHiddenPatch, UniqueKey } from "../helpers/helpers";
-
-export type PropsWithDefaults<P, D extends keyof P> = P & { [UniqueKey]?: D };
+declare const DefaultsKey: unique symbol;
+export type PropsWithDefaults<P, D extends keyof P> = P & { [DefaultsKey]?: D };
 
 // /**
 //  * Extracts the keys of properties that can be undefined (optional properties).
