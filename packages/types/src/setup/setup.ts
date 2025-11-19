@@ -243,6 +243,16 @@ export type SlotsToSlotType<T> = T extends {
  */
 export type ExtractOptions<T> = ExtractMacro<T, "options", {}>;
 
+export type MacroOptionsToOptions<T> = T extends {
+  type: infer TT extends Record<string, any>;
+}
+  ? TT
+  : T extends { object: infer TV extends Record<string, any> }
+  ? TV
+  : T extends { value: infer TV extends Record<string, any> }
+  ? TV
+  : {};
+
 /**
  * Extracts the model macro from macro metadata.
  *
@@ -334,10 +344,11 @@ export type ExposeToVueExposeKey<T> = T extends {
  * ```
  */
 export type NormaliseMacroReturn<T> = NormalisedMacroReturn<
-  ExtractMacroReturn<T>
+  ExtractMacroReturn<T>,
+  OmitMacroReturn<T>
 >;
 
-export type NormalisedMacroReturn<T = {}> = {
+export type NormalisedMacroReturn<T = {}, D = {}> = {
   props: ExtractMacroProps<T>;
   emits: ExtractEmits<T>;
   slots: ExtractSlots<T>;
@@ -345,6 +356,8 @@ export type NormalisedMacroReturn<T = {}> = {
   model: ExtractModel<T>;
   expose: ExtractExpose<T>;
   templateRef: ExtractTemplateRef<T>;
+
+  $data: D;
 };
 
 // export type MacroToInternalInstance<T> = NormaliseMacroReturn<T> extends {
