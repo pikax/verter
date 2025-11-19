@@ -8,7 +8,7 @@ import { ExtractHidden, IntersectionFunctionToObject } from "../helpers";
 export type EmitsToProps<T> = IntersectionFunctionToObject<T> extends infer O
   ? ExtractHidden<O> extends infer E extends Record<PropertyKey, any>
     ? {
-        [K in keyof E as `on${Capitalize<K & string>}`]: (
+        [K in keyof E as `on${Capitalize<K & string>}`]?: (
           ...args: E[K]
         ) => void;
       }

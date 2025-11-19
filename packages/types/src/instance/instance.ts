@@ -1,4 +1,5 @@
 import {
+  createMacroReturn,
   CreateMacroReturn,
   ExtractMacroProps,
   ExtractPropsFromMacro,
@@ -15,6 +16,7 @@ import {
 import { MakePublicProps, MakeInternalProps } from "../props";
 import { ModelToEmits, ModelToModelInfo, ModelToProps } from "../model";
 import { ModelRef, useTemplateRef } from "vue";
+import { EmitsToProps } from "../emits";
 
 export type CreateTypedInternalInstanceFromNormalisedMacro<
   T extends NormalisedMacroReturn<any>,
@@ -85,7 +87,8 @@ export type CreateTypedPublicInstanceFromNormalisedMacro<
 
   $data: DEV extends true ? T["$data"] : {};
   $props: ToInstanceProps<T["props"], MakeDefaultsOptional> &
-    ModelToProps<MacroToModelRecord<T["model"]>>;
+    ModelToProps<MacroToModelRecord<T["model"]>> &
+    EmitsToProps<MacroToEmitValue<T["emits"]>>;
 
   $attrs: Attrs;
   $refs: T["templateRef"];

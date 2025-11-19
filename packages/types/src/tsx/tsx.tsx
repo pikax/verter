@@ -1,3 +1,5 @@
+import { PublicInstanceFromMacro } from "../instance/instance";
+import { createMacroReturn } from "../setup";
 import "./tsx.attributes";
 
 type VNode<T> = import("vue").VNode & {
