@@ -1,5 +1,3 @@
-import { PublicInstanceFromMacro } from "../instance/instance";
-import { createMacroReturn } from "../setup";
 import "./tsx.attributes";
 
 type VNode<T> = import("vue").VNode & {
@@ -9,9 +7,18 @@ type VNode<T> = import("vue").VNode & {
 declare global {
   namespace JSX {
     export interface IntrinsicClassAttributes<T> {
-      "v-slot"?:
-        | (T extends { $slots: infer S } ? S : undefined)
-        | ((c: T) => T extends { $slots: infer S } ? S : undefined);
+      // // Vue TSX style, in verter only the argument is needed.
+      // // leaving this here just in case we want to compile to TSX for other usages
+      // "v-slot"?:
+      //   | (T extends { $slots: infer S } ? S : undefined)
+      //   | ((c: T) => T extends { $slots: infer S } ? S : undefined);
+
+      /**
+       * Helper to retrieve the current instance in TSX/JSX
+       * ONLY TO BE USED in Verter
+       * @param c Type of the component instance
+       */
+      "v-slot"?: (c: T) => any;
 
       "onVue:before-create"?: (vnode: VNode<T>) => void;
       "onVue:created"?: (vnode: VNode<T>) => void;

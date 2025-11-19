@@ -208,10 +208,10 @@ describe("TSX type augmentations", () => {
         <Tabs
           v-slot={(c) => {
             assertType<string>(c.tabsId);
-            return {
-              default: ({ activeTab }) => <div>Active: {activeTab}</div>,
-              header: () => <div>Tabs Header</div>,
-            };
+            c.$slots.default({ activeTab: "tab1" });
+            c.$slots.header();
+            // @ts-expect-error missing property
+            c.$slots.default();
           }}
         />;
       });
@@ -230,7 +230,10 @@ describe("TSX type augmentations", () => {
             assertType<(props: { value: number }) => any>(
               instance.$slots.content
             );
-            return { content: ({ value }) => <span>{value}</span> };
+
+            instance.$slots.content({ value: 42 });
+            // @ts-expect-error missing property
+            instance.$slots.content();
           }}
         />;
       });
@@ -249,12 +252,14 @@ describe("TSX type augmentations", () => {
         <Layout
           v-slot={(c) => {
             assertType<string>(c.layoutId);
-            return {
-              header: ({ title }) => <h1>{title}</h1>,
-              default: () => <main>Content</main>,
-              footer: ({ year }) => <footer>{year}</footer>,
-              sidebar: ({ width }) => <aside style={{ width }}>Sidebar</aside>,
-            };
+
+            c.$slots.header({ title: "Welcome" });
+            c.$slots.default();
+            c.$slots.footer({ year: 2024 });
+            c.$slots.sidebar({ width: "250px" });
+
+            // @ts-expect-error missing property
+            c.$slots.header();
           }}
         />;
       });
@@ -267,17 +272,20 @@ describe("TSX type augmentations", () => {
           }>,
         });
         <Panel
-          v-slot={() => {
-            return { default: () => <div>Content</div> };
+          v-slot={(c) => {
+            c.$slots.default();
+            // @ts-expect-error nonexistent slot
+            c.$slots.nonexistent;
           }}
         />;
         <Panel
-          v-slot={() => {
-            return {
-              header: () => <div>Header</div>,
-              default: () => <div>Content</div>,
-              footer: () => <div>Footer</div>,
-            };
+          v-slot={(c) => {
+            c.$slots.default();
+            c.$slots.header?.();
+            c.$slots.footer?.();
+
+            // @ts-expect-error nonexistent slot
+            c.$slots.nonexistent();
           }}
         />;
       });
@@ -294,19 +302,11 @@ describe("TSX type augmentations", () => {
           }>,
         });
         <DataTable
-          v-slot={() => {
-            return {
-              item: ({ item, index }) => {
-                assertType<{ id: number; name: string }>(item);
-                assertType<number>(index);
-                return (
-                  <div>
-                    {index}: {item.name}
-                  </div>
-                );
-              },
-              empty: () => <div>No items</div>,
-            };
+          v-slot={(c) => {
+            c.$slots.empty();
+            c.$slots.item({ item: { id: 1, name: "Test" }, index: 0 });
+            // @ts-expect-error missing property
+            c.$slots.item();
           }}
         />;
       });
@@ -318,19 +318,16 @@ describe("TSX type augmentations", () => {
           }>,
         });
         <UserList
-          v-slot={() => {
-            return {
-              user: ({ user, actions }) => {
-                assertType<User>(user);
-                assertType<{ edit: () => void }>(actions);
-                return (
-                  <div>
-                    {user.email} - {user.role}
-                    <button onClick={actions.edit}>Edit</button>
-                  </div>
-                );
-              },
-            };
+          v-slot={(c) => {
+            c.$slots.user({
+              user: { id: "1", email: "test@example.com", role: "admin" },
+              actions: { edit: () => {} },
+            });
+            // @ts-expect-error wrong type for user
+            c.$slots.user({
+              user: { id: 1, email: "test@example.com", role: "admin" },
+              actions: { edit: () => {} },
+            });
           }}
         />;
       });
@@ -341,14 +338,17 @@ describe("TSX type augmentations", () => {
           slots: {} as SlotsType<{ tab: (props: { id: string }) => any }>,
         });
         <Tabs
-          v-slot={() => {
-            return { tab: ({ id }) => <div>{id}</div> };
+          v-slot={(c) => {
+            c.$slots.tab({ id: "tab1" });
+            // @ts-expect-error wrong slot name
+            c.$slots.wrongSlot();
           }}
         />;
-        // @ts-expect-error wrong slot name
         <Tabs
-          v-slot={() => {
-            return { wrongSlot: () => <div /> };
+          v-slot={(c) => {
+            c.$slots.tab({ id: "tab1" });
+            // @ts-expect-error wrong slot name
+            c.$slots.wrongSlot();
           }}
         />;
       });
@@ -356,15 +356,19 @@ describe("TSX type augmentations", () => {
         const RequiredSlots = defineComponent({
           slots: {} as SlotsType<{ header: () => any; content: () => any }>,
         });
-        // @ts-expect-error missing required slot
         <RequiredSlots
-          v-slot={() => {
-            return { header: () => <div /> };
+          v-slot={(c) => {
+            c.$slots.header();
+            // @ts-expect-error wrong arg
+            c.$slots.content({ s: 1 });
           }}
         />;
         <RequiredSlots
-          v-slot={() => {
-            return { header: () => <div />, content: () => <div /> };
+          v-slot={(c) => {
+            c.$slots.header();
+            c.$slots.content();
+            // @ts-expect-error wrong arg
+            c.$slots.content({ a: 1 });
           }}
         />;
       });
@@ -498,7 +502,7 @@ describe("TSX type augmentations", () => {
       <TestComp
         v-slot={(c) => {
           assertType<string>(c.componentId);
-          return { default: ({ data }) => <div>{data}</div> };
+          c.$slots.default({ data: "slot data" });
         }}
         onVue:mounted={(vnode) => {
           assertType<string>(vnode.ctx.proxy.componentId);
