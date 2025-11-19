@@ -152,70 +152,20 @@ export type PublicInstanceFromNormalisedMacro<
     InternalInstance
   >;
 
-const model = defineModel<{
-  a: number;
-}>({});
-type T = PublicInstanceFromMacro<
-  CreateMacroReturn<{
-    props: { value: { foo: string }; type: { foo: string } };
-    emits: {
-      value: (e: "update", val: number) => void;
-    };
-    slots: { value: { default: () => string } };
-    options: { value: { customOption: boolean } };
-    model: { modelValue: { value: typeof model; type: typeof model } };
-    expose: { value: { focus: () => void }; type: { focus: () => void } };
-    withDefaults: { value: { foo: "default foo" }; type: { foo: string } };
+export type CreateExportedInstanceFromNormalisedMacro<
+  T extends NormalisedMacroReturn<any>,
+  Attrs = {},
+  El extends Element = Element,
+  DEV extends boolean = false
+> = PublicInstanceFromNormalisedMacro<T, Attrs, El, true, DEV> extends infer I
+  ? I
+  : {};
 
-    templateRef: {
-      someRef: ReturnType<typeof useTemplateRef<HTMLDivElement>>;
-    };
-  }> & {
-    someData: string;
-  },
-  {},
-  Element,
-  true,
-  true
->;
-
-declare const TT: T;
-
-TT.$props.foo = undefined;
-TT.$props.foo = "";
-// @ts-expect-error wrong type
-TT.$props.foo = 123;
-TT.$emit("update", 123);
-// @ts-expect-error wrong type
-TT.$emit("update:modelValue", 123);
-
-TT.$data.someData;
-TT.$data.foo;
-TT.$data.a;
-
-TT.$refs.someRef.value?.focus();
-
-TT.$slots.default()?.toLowerCase();
-TT.$slots;
-
-TT.$options.customOption;
-TT.$options.beforeUpdate;
-
-TT.$.attrs;
-TT.$.uid;
-
-TT.$.proxy.$.proxy?.$data.someData;
-TT.$.proxy.$data.someData;
-
-// very very deep access while maintaining types
-TT.$.proxy.$props.foo;
-TT.$.proxy.$.props.foo;
-TT.$.proxy.$.proxy.$props.foo;
-TT.$.proxy.$.proxy.$.props.foo;
-TT.$.proxy.$.proxy.$.proxy.$props.foo;
-
-type UU = import("vue").ComponentInstance;
-
-const a = TT.kk;
-
-// if(a === 'host')
+export type CreateExportedInstanceFromMacro<
+  T,
+  Attrs = {},
+  El extends Element = Element,
+  DEV extends boolean = false
+> = NormaliseMacroReturn<T> extends infer NT extends NormalisedMacroReturn<any>
+  ? CreateExportedInstanceFromNormalisedMacro<NT, Attrs, El, DEV>
+  : {};
