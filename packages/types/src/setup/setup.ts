@@ -1,5 +1,9 @@
 import { ModelToEmits, ModelToProps } from "../model";
-import { MakeInternalProps, MakePublicProps } from "../props";
+import {
+  MakeInternalProps,
+  MakePublicProps,
+  PropsWithDefaults,
+} from "../props";
 
 declare const MacroKey: unique symbol;
 
@@ -98,10 +102,82 @@ export type ExtractMacro<T, R extends ReturnMacros, F = never> = T extends {
  * type Props = ExtractProps<ExtractMacroReturn<ReturnType<typeof setup>>>;
  * ```
  */
-export type ExtractProps<T> = (ExtractMacro<T, "props", {}> extends infer P
+export type ExtractMacroProps<T> = (ExtractMacro<T, "props", {}> extends infer P
   ? { props: P }
   : {}) &
-  (ExtractMacro<T, "withDefaults", {}> extends infer D ? { defaults: D } : {});
+  (ExtractMacro<T, "withDefaults", {}> extends infer D extends { value: any }
+    ? { defaults: D }
+    : {
+        defaults: {
+          value: {};
+        };
+      });
+
+export type ExtractPropsFromMacro<T> = T extends {
+  props: {
+    type: infer PT;
+  };
+  defaults: {
+    value: infer DT;
+  };
+}
+  ? keyof DT extends keyof PT
+    ? PropsWithDefaults<PT, keyof DT>
+    : PT
+  : T extends {
+      props: {
+        object: infer PO;
+      };
+    }
+  ? import("vue").ExtractPropTypes<PO> extends infer PE
+    ? keyof import("vue").ExtractDefaultPropTypes<PO> extends infer PODK extends keyof PE
+      ? PropsWithDefaults<PE, PODK>
+      : PE
+    : PO
+  : T extends {
+      props: {
+        value: infer PT;
+      };
+      defaults: {
+        value: infer DT;
+      };
+    }
+  ? keyof DT extends keyof PT
+    ? PropsWithDefaults<PT, keyof DT>
+    : PT
+  : T;
+
+const macro = createMacroReturn({
+  props: { value: { foo: "" }, type: {} as { foo: string } },
+  withDefaults: { value: { foo: "default" }, type: {} as { foo: string } },
+});
+
+declare const MP: ExtractMacroProps<ExtractMacroReturn<typeof macro>>;
+declare const PX: ExtractPropsFromMacro<typeof MP>;
+PX.foo;
+
+const macroO = createMacroReturn({
+  props: {
+    value: { foo: "" },
+    object: {
+      foo: String,
+      bar: { type: Number, default: 0 },
+      baz: {
+        type: Boolean,
+      },
+      eee: {
+        type: String,
+        required: true,
+      },
+    },
+  },
+} as const);
+declare const MPO: ExtractMacroProps<ExtractMacroReturn<typeof macroO>>;
+declare const PXO: ExtractPropsFromMacro<typeof MPO>;
+PXO.foo;
+PXO.bar;
+PXO.baz;
+PXO.eee;
 
 /**
  * Extracts the emits macro from macro metadata.
@@ -248,7 +324,7 @@ export type ExposeToVueExposeKey<T> = T extends {
  */
 export type NormaliseMacroReturn<T> = ExtractMacroReturn<T> extends infer R
   ? {
-      props: ExtractProps<R>;
+      props: ExtractMacroProps<R>;
       emits: ExtractEmits<R>;
       slots: ExtractSlots<R>;
       options: ExtractOptions<R>;
@@ -257,82 +333,79 @@ export type NormaliseMacroReturn<T> = ExtractMacroReturn<T> extends infer R
     }
   : {};
 
-export type MacroReturnToInstance<
-  T,
-  Public extends boolean = false
-> = NormaliseMacroReturn<T> extends {
-  props: infer P extends ExtractProps<any>;
-  emits: infer E extends ExtractEmits<any>;
-  slots: infer S extends ExtractSlots<any>;
-  options: infer O extends ExtractOptions<any>;
-  model: infer M extends ExtractModel<any>;
-  expose: infer X extends ExtractExpose<any>;
-}
-  ? //import("vue").ComponentPublicInstance & 
-  {
-      // todo data should be the bindings from setup, unless is production build
-      $data: {};
-      $props: P
-         /* &
-        ModelToProps<ToModelType<M>>;
-      $emit: ToEmitValue<E> & ModelToEmits<ToModelType<M>>;
-      $slots: S; */
-    }
-  : //   P["props"],
-    //   {},
-    //   {},
-    //   {},
-    //   {},
-    //   {},
-    //   {},
-    //   P["defaults"],
-    //   Public,
-    //   O["value"],
-    //   {},
-    //   SlotsToSlotType<S>,
-    //   ExposeToVueExposeKey<X>,
-    //   // todo check what's typeRef
-    //   {},
-    //   //todo check typeEl
-    //   any
-    // > & { $emits: E["value"] }
-    false;
+// export type MacroReturnToInstance<
+//   T,
+//   Public extends boolean = false
+// > = NormaliseMacroReturn<T> extends {
+//   props: infer P extends ExtractMacroProps<any>;
+//   emits: infer E extends ExtractEmits<any>;
+//   slots: infer S extends ExtractSlots<any>;
+//   options: infer O extends ExtractOptions<any>;
+//   model: infer M extends ExtractModel<any>;
+//   expose: infer X extends ExtractExpose<any>;
+// }
+//   ? //import("vue").ComponentPublicInstance &
+//     {
+//       // todo data should be the bindings from setup, unless is production build
+//       $data: {};
+//       $props: P;
+//       /* &
+//         ModelToProps<ToModelType<M>>;
+//       $emit: ToEmitValue<E> & ModelToEmits<ToModelType<M>>;
+//       $slots: S; */
+//     }
+//   : //   P["props"],
+//     //   {},
+//     //   {},
+//     //   {},
+//     //   {},
+//     //   {},
+//     //   {},
+//     //   P["defaults"],
+//     //   Public,
+//     //   O["value"],
+//     //   {},
+//     //   SlotsToSlotType<S>,
+//     //   ExposeToVueExposeKey<X>,
+//     //   // todo check what's typeRef
+//     //   {},
+//     //   //todo check typeEl
+//     //   any
+//     // > & { $emits: E["value"] }
+//     false;
 
-export type MacroToInternalInstance<T> = NormaliseMacroReturn<T> extends {
-  props: infer P extends ExtractProps<any>;
-  emits: infer E extends ExtractEmits<any>;
-  slots: infer S extends ExtractSlots<any>;
-  options: infer O extends ExtractOptions<any>;
-  model: infer M extends ExtractModel<any>;
-  expose: infer X extends ExtractExpose<any>;
-}
-  ? import("vue").ComponentInternalInstance & {
-      emit: Emit;
-      // todo others
-    }
-  : import("vue").ComponentInternalInstance;
+// export type MacroToInternalInstance<T> = NormaliseMacroReturn<T> extends {
+//   props: infer P extends ExtractMacroProps<any>;
+//   emits: infer E extends ExtractEmits<any>;
+//   slots: infer S extends ExtractSlots<any>;
+//   options: infer O extends ExtractOptions<any>;
+//   model: infer M extends ExtractModel<any>;
+//   expose: infer X extends ExtractExpose<any>;
+// }
+//   ? import("vue").ComponentInternalInstance & {
+//       emit: Emit;
+//       // todo others
+//     }
+//   : import("vue").ComponentInternalInstance;
 
-type T = MacroReturnToInstance<CreateMacroReturn<{
-  props: { value: { foo: string }; type: { foo: string } };
-  emits: (e: "update", val: number) => void;
-  slots: { value: { default: () => string } };
-  options: { value: { customOption: boolean } };
-  model: { modelValue: { value: string; type: string } };
-  expose: { value: { focus: () => void }; type: { focus: () => void } };
-}>>;
+// type T = MacroReturnToInstance<
+//   CreateMacroReturn<{
+//     props: { value: { foo: string }; type: { foo: string } };
+//     emits: (e: "update", val: number) => void;
+//     slots: { value: { default: () => string } };
+//     options: { value: { customOption: boolean } };
+//     model: { modelValue: { value: string; type: string } };
+//     expose: { value: { focus: () => void }; type: { focus: () => void } };
+//   }>
+// >;
 
-const t = {} as T;
-t.$props.foo
+// const t = {} as T;
+// t.$props.foo;
 
+// declare const P: {
+//   props: { value: { foo: string }; type: { foo: string } };
+// };
 
+// declare const PP: MakePublicProps<typeof P>;
 
-declare const P: {
-  props: { value: { foo: string }; type: { foo: string } };
-};
-
-declare const PP: MakePublicProps<typeof P>;
-
-PP
-
-
-
+// PP;

@@ -1,121 +1,97 @@
 import { extractHiddenPatch, UniqueKey } from "../helpers/helpers";
-import {
-  createMacroReturn,
-  ExtractMacroReturn,
-  ExtractProps,
-  MacroReturn,
-  MacroReturnObject,
-  MacroReturnType,
-} from "../setup";
-import { withDefaults_Box } from "../vue";
 
-/**
- * Extracts the keys of properties that can be undefined (optional properties).
- *
- * @template T - The object type to extract optional keys from
- * @returns Union of keys for properties where undefined is in the type
- *
- * @example
- * ```ts
- * type Props = { foo?: string; bar: number; baz?: boolean };
- * type Optional = FindDefaultsKey<Props>; // 'foo' | 'baz'
- * ```
- */
-export type FindDefaultsKey<T> = {
-  [K in keyof T]-?: undefined extends T[K] ? K : never;
-}[keyof T];
+export type PropsWithDefaults<P, D extends keyof P> = P & { [UniqueKey]?: D };
 
-/**
- * Resolves the underlying type from a MacroReturn wrapper.
- * Extracts the type parameter from MacroReturnType or the value from MacroReturnObject.
- *
- * @template T - The type to unwrap
- * @returns The unwrapped type, or T if not a MacroReturn
- *
- * @example
- * ```ts
- * type Wrapped = MacroReturnType<{ foo: string }, "Props">;
- * type Unwrapped = ResolveFromMacroReturn<Wrapped>; // { foo: string }
- * ```
- */
-export type ResolveFromMacroReturn<T> = T extends MacroReturnType<any, infer TT>
-  ? TT
-  : T extends MacroReturnObject<infer V, any>
-  ? V
-  : T;
+// /**
+//  * Extracts the keys of properties that can be undefined (optional properties).
+//  *
+//  * @template T - The object type to extract optional keys from
+//  * @returns Union of keys for properties where undefined is in the type
+//  *
+//  * @example
+//  * ```ts
+//  * type Props = { foo?: string; bar: number; baz?: boolean };
+//  * type Optional = FindDefaultsKey<Props>; // 'foo' | 'baz'
+//  * ```
+//  */
+// export type FindDefaultsKey<T> = {
+//   [K in keyof T]-?: undefined extends T[K] ? K : never;
+// }[keyof T];
 
-/**
- * Resolves props and defaults information from a macro return type.
- * Analyzes the macro structure to determine which properties have defaults.
- *
- * @template T - The macro return type to analyze
- * @returns Object with 'type' (props type) and 'defaults' (keys with defaults)
- *
- * @example
- * ```ts
- * const setup = () => createMacroReturn({
- *   props: { value: { foo: '', bar: 0 }, type: {} as { foo?: string; bar: number } }
- * });
- * type Info = ResolveDefaultsPropsFromMacro<ExtractProps<...>>;
- * // { type: { foo?: string; bar: number }, defaults: 'foo' }
- * ```
- */
-export type ResolveDefaultsPropsFromMacro<T> = T extends ExtractProps<infer M>
-  ? M extends {
-      props: infer PM extends MacroReturnType<any, any>;
-    }
-    ? M extends {
-        withDefaults: {
-          type: [any, infer D];
-        };
-      }
-      ? { type: ResolveFromMacroReturn<PM>; defaults: keyof D }
-      : {
-          type: ResolveFromMacroReturn<PM>;
-          defaults: FindDefaultsKey<ResolveFromMacroReturn<PM>>;
-        }
-    : T extends {
-        props: MacroReturnObject<infer V, infer O>;
-      }
-    ? {
-        type: V;
-        defaults: PropsObjectExtractDefaults<O>;
-      }
-    : T
-  : T;
+// /**
+//  * Resolves props and defaults information from a macro return type.
+//  * Analyzes the macro structure to determine which properties have defaults.
+//  *
+//  * @template T - The macro return type to analyze
+//  * @returns Object with 'type' (props type) and 'defaults' (keys with defaults)
+//  *
+//  * @example
+//  * ```ts
+//  * const setup = () => createMacroReturn({
+//  *   props: { value: { foo: '', bar: 0 }, type: {} as { foo?: string; bar: number } }
+//  * });
+//  * type Info = ResolveDefaultsPropsFromMacro<ExtractProps<...>>;
+//  * // { type: { foo?: string; bar: number }, defaults: 'foo' }
+//  * ```
+//  */
+// export type ResolveDefaultsPropsFromMacro<T> = T extends ExtractMacroProps<
+//   infer M
+// >
+//   ? M extends {
+//       props: infer PM extends MacroReturnType<any, any>;
+//     }
+//     ? M extends {
+//         withDefaults: {
+//           type: [any, infer D];
+//         };
+//       }
+//       ? { type: ResolveFromMacroReturn<PM>; defaults: keyof D }
+//       : {
+//           type: ResolveFromMacroReturn<PM>;
+//           defaults: FindDefaultsKey<ResolveFromMacroReturn<PM>>;
+//         }
+//     : T extends {
+//         props: MacroReturnObject<infer V, infer O>;
+//       }
+//     ? {
+//         type: V;
+//         defaults: PropsObjectExtractDefaults<O>;
+//       }
+//     : T
+//   : T;
 
-/**
- * Extracts the keys of properties that have default values from a props object definition.
- *
- * This helper is used to identify which properties in a Vue props object have defaults,
- * which affects their optionality in the component's public API.
- *
- * @template T - The props object type to analyze (can be string array or object with default properties)
- * @returns Union of property keys that have defaults, or `string` for string array format
- *
- * @example
- * ```ts
- * // Object format with defaults
- * type PropsObj = {
- *   name: { type: String; default: 'Anonymous' };
- *   age: { type: Number };
- *   active: { type: Boolean; default: true };
- * };
- * type WithDefaults = PropsObjectExtractDefaults<PropsObj>; // 'name' | 'active'
- * ```
- *
- * @example
- * ```ts
- * // String array format (simplified props)
- * type PropsArray = ['name', 'age'];
- * type Defaults = PropsObjectExtractDefaults<PropsArray>; // string
- * ```
- */
-export type PropsObjectExtractDefaults<T> = T extends string[]
-  ? string
-  : {
-      [K in keyof T]: T[K] extends { default: any } ? K : "";
-    }[keyof T];
+// /**
+//  * Extracts the keys of properties that have default values from a props object definition.
+//  *
+//  * This helper is used to identify which properties in a Vue props object have defaults,
+//  * which affects their optionality in the component's public API.
+//  *
+//  * @template T - The props object type to analyze (can be string array or object with default properties)
+//  * @returns Union of property keys that have defaults, or `string` for string array format
+//  *
+//  * @example
+//  * ```ts
+//  * // Object format with defaults
+//  * type PropsObj = {
+//  *   name: { type: String; default: 'Anonymous' };
+//  *   age: { type: Number };
+//  *   active: { type: Boolean; default: true };
+//  * };
+//  * type WithDefaults = PropsObjectExtractDefaults<PropsObj>; // 'name' | 'active'
+//  * ```
+//  *
+//  * @example
+//  * ```ts
+//  * // String array format (simplified props)
+//  * type PropsArray = ['name', 'age'];
+//  * type Defaults = PropsObjectExtractDefaults<PropsArray>; // string
+//  * ```
+//  */
+// export type PropsObjectExtractDefaults<T> = T extends string[]
+//   ? string
+//   : {
+//       [K in keyof T]: T[K] extends { default: any } ? K : "";
+//     }[keyof T];
 
 /**
  * Transforms component props for the public API (component usage).
@@ -147,18 +123,25 @@ export type PropsObjectExtractDefaults<T> = T extends string[]
  * ```
  */
 export type MakePublicProps<T extends Record<PropertyKey, any>> =
-  ResolveDefaultsPropsFromMacro<T> extends {
-    type: infer P;
-    defaults: infer D;
-  }
-    ? D extends keyof P
-      ? Omit<P, D> & {
-          [K in keyof P as K extends D ? K : never]?: P[K] | undefined;
-        }
-      : P
-    : T extends [infer PP, any]
-    ? MakeBooleanOptional<PP>
-    : MakeBooleanOptional<T>;
+  T extends PropsWithDefaults<infer P, infer D>
+    ? MakeBooleanOptional<Omit<P, D>> & {
+        [K in keyof P as K extends D ? K : never]?: P[K] | undefined;
+      }
+    : // TODO handle `defineComponent` and other types
+      MakeBooleanOptional<T>;
+
+// ResolveDefaultsPropsFromMacro<T> extends {
+//   type: infer P;
+//   defaults: infer D;
+// }
+//   ? D extends keyof P
+//     ? Omit<P, D> & {
+//         [K in keyof P as K extends D ? K : never]?: P[K] | undefined;
+//       }
+//     : P
+//   : T extends [infer PP, any]
+//   ? MakeBooleanOptional<PP>
+//   : MakeBooleanOptional<T>;
 
 /**
  * Makes boolean props with defaults optional in the type system.
@@ -272,13 +255,9 @@ export type ExtractBooleanKeys<T> = T extends import("vue").DefineProps<
  * but optional externally (can be omitted when using the component).
  */
 export type MakeInternalProps<T extends Record<PropertyKey, any>> =
-  ResolveDefaultsPropsFromMacro<T> extends {
-    type: infer P;
-    defaults: infer D;
-  }
-    ? D extends keyof P
-      ? Omit<P, D> & {
-          [K in keyof P as K extends D ? K : never]-?: P[K] | undefined;
-        }
-      : P
-    : T;
+  T extends PropsWithDefaults<infer P, infer D>
+    ? Omit<P, D> & {
+        [K in keyof P as K extends D ? K : never]-?: P[K] | undefined;
+      }
+    : // TODO handle `defineComponent` and other types
+      MakeBooleanOptional<T>;

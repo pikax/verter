@@ -8,7 +8,7 @@ import {
   createMacroReturn,
   ExtractMacroReturn,
   ExtractMacro,
-  ExtractProps,
+  ExtractMacroProps,
   ExtractEmits,
   ExtractSlots,
   ExtractOptions,
@@ -376,7 +376,7 @@ describe("Setup helpers", () => {
   describe("ExtractProps", () => {
     it("extracts props macro without defaults field", () => {
       type Macros = { props: { value: { id: number }; type: string } };
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
 
       assertType<Props["props"]["value"]>({ id: 1 });
       assertType<Props["props"]["type"]>("string");
@@ -391,7 +391,7 @@ describe("Setup helpers", () => {
 
     it("returns empty object with defaults when props not present", () => {
       type Macros = { emits: { value: () => void; type: string } };
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
 
       assertType<Props["props"]>({});
 
@@ -408,7 +408,7 @@ describe("Setup helpers", () => {
         props: { value: { id: number }; type: string };
         withDefaults: { id: 1 };
       };
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
       assertType<Props["props"]>({ value: { id: 1 }, type: "string" });
       assertType<Props["defaults"]>({ id: 1 });
 
@@ -1232,7 +1232,7 @@ describe("Setup helpers", () => {
         props: MacroReturn<{ id: number; name: string }, "Props">;
       };
 
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
       assertType<Props>(
         {} as { props: MacroReturn<{ id: number; name: string }, "Props"> } & {
           defaults: {};
@@ -1248,7 +1248,7 @@ describe("Setup helpers", () => {
         emits: MacroReturn<() => void, "Emits">;
       };
 
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
       assertType<Props>({} as { props: {} } & { defaults: {} });
 
       // @ts-expect-error incorrect type
@@ -1266,7 +1266,7 @@ describe("Setup helpers", () => {
         props: MacroReturnType<ComplexProps, "ComplexPropsType">;
       };
 
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
       assertType<Props>(
         {} as { props: MacroReturnType<ComplexProps, "ComplexPropsType"> } & {
           defaults: {};
@@ -1285,8 +1285,8 @@ describe("Setup helpers", () => {
         props: MacroReturnObject<{ id: number }, { id: "number" }>;
       };
 
-      type Props1 = ExtractProps<Macros1>;
-      type Props2 = ExtractProps<Macros2>;
+      type Props1 = ExtractMacroProps<Macros1>;
+      type Props2 = ExtractMacroProps<Macros2>;
 
       assertType<Props1>(
         {} as { props: MacroReturnType<{ id: number }, "PropsType"> } & {
@@ -1308,7 +1308,7 @@ describe("Setup helpers", () => {
 
     it("works with empty metadata", () => {
       type Macros = {};
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
       assertType<Props>({} as { props: {} } & { defaults: {} });
 
       // @ts-expect-error incorrect type
@@ -1321,7 +1321,7 @@ describe("Setup helpers", () => {
         withDefaults: MacroReturn<{ name: string }, "Defaults">;
       };
 
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
       assertType<Props>(
         {} as { props: MacroReturn<{ id: number; name?: string }, "Props"> } & {
           defaults: MacroReturn<{ name: string }, "Defaults">;
@@ -1337,7 +1337,7 @@ describe("Setup helpers", () => {
         props: MacroReturn<{ id: number }, "Props">;
       };
 
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
       assertType<Props>(
         {} as { props: MacroReturn<{ id: number }, "Props"> } & { defaults: {} }
       );
@@ -1363,7 +1363,7 @@ describe("Setup helpers", () => {
         withDefaults: MacroReturnType<DefaultsType, "DefaultsType">;
       };
 
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
 
       assertType<Props>(
         {} as { props: MacroReturnType<PropsType, "PropsType"> } & {
@@ -1387,7 +1387,7 @@ describe("Setup helpers", () => {
         >;
       };
 
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
 
       assertType<Props>(
         {} as {
@@ -1508,7 +1508,7 @@ describe("Setup helpers", () => {
         });
 
       type Macros = ExtractMacroReturn<ReturnType<typeof setup>>;
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
 
       // Props should have both the props macro and the defaults property
       assertType<Props["defaults"]>(
@@ -1534,7 +1534,7 @@ describe("Setup helpers", () => {
         };
       };
 
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
 
       // Access the props part
       assertType<Props["props"]["value"]>({} as { foo: number; bar?: string });
@@ -1575,7 +1575,7 @@ describe("Setup helpers", () => {
         });
 
       type Macros = ExtractMacroReturn<ReturnType<typeof setup>>;
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
 
       assertType<Props["defaults"]["value"]>(
         {} as {
@@ -1601,7 +1601,7 @@ describe("Setup helpers", () => {
         });
 
       type Macros = ExtractMacroReturn<ReturnType<typeof setup>>;
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
 
       assertType<Props["defaults"]>(
         {} as {
@@ -1987,7 +1987,7 @@ describe("Setup helpers", () => {
         expose: MacroReturn<{ focus: () => void }, "Expose">;
       };
 
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
       type Emits = ExtractEmits<Macros>;
       type Slots = ExtractSlots<Macros>;
       type Options = ExtractOptions<Macros>;
@@ -2023,7 +2023,7 @@ describe("Setup helpers", () => {
         emits: MacroReturn<() => void, "Emits">;
       };
 
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
       type Emits = ExtractEmits<Macros>;
       type Slots = ExtractSlots<Macros>; // missing, should return {}
       type Options = ExtractOptions<Macros>; // missing, should return {}
@@ -2056,7 +2056,7 @@ describe("Setup helpers", () => {
       type SetupReturn = ReturnType<typeof setup>;
       type Macros = ExtractMacroReturn<SetupReturn>;
 
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
       type Emits = ExtractEmits<Macros>;
       type Slots = ExtractSlots<Macros>;
       type Model = ExtractModel<Macros>;
@@ -2084,7 +2084,7 @@ describe("Setup helpers", () => {
         });
 
       type Macros = ExtractMacroReturn<ReturnType<typeof setup>>;
-      type Props = ExtractProps<Macros>;
+      type Props = ExtractMacroProps<Macros>;
       type Expose = ExtractExpose<Macros>;
 
       assertType<Props["props"]["value"]>(
@@ -2117,7 +2117,7 @@ describe("Setup helpers", () => {
         };
       };
 
-      type Props = ExtractProps<SetupReturn>;
+      type Props = ExtractMacroProps<SetupReturn>;
       type Emits = ExtractEmits<SetupReturn>;
       type Expose = ExtractExpose<SetupReturn>;
       type Model = ExtractModel<SetupReturn>;
@@ -2174,7 +2174,7 @@ describe("Setup helpers", () => {
       }
 
       type Test<T> = ReturnType<typeof setup<T>>;
-      type Props<T> = ExtractProps<ExtractMacroReturn<Test<T>>>;
+      type Props<T> = ExtractMacroProps<ExtractMacroReturn<Test<T>>>;
       const foo = {} as Props<number>;
 
       assertType<number>(foo.props.value.value);
@@ -2352,7 +2352,7 @@ describe("Setup helpers", () => {
       }
 
       type Test<T, U> = ReturnType<typeof setup<T, U>>;
-      type Props<T, U> = ExtractProps<ExtractMacroReturn<Test<T, U>>>;
+      type Props<T, U> = ExtractMacroProps<ExtractMacroReturn<Test<T, U>>>;
 
       const props = {} as Props<number, string>;
       assertType<number>(props.props.value.value);
@@ -2383,7 +2383,7 @@ describe("Setup helpers", () => {
       type Test<T extends { id: number; name: string }> = ReturnType<
         typeof setup<T>
       >;
-      type Props<T extends { id: number; name: string }> = ExtractProps<
+      type Props<T extends { id: number; name: string }> = ExtractMacroProps<
         ExtractMacroReturn<Test<T>>
       >;
 
@@ -2415,7 +2415,7 @@ describe("Setup helpers", () => {
       }
 
       type Test<T> = ReturnType<typeof setup<T>>;
-      type Props<T> = ExtractProps<ExtractMacroReturn<Test<T>>>;
+      type Props<T> = ExtractMacroProps<ExtractMacroReturn<Test<T>>>;
 
       const props = {} as Props<number>;
       assertType<number | null>(props.props.value.value);
@@ -2441,7 +2441,7 @@ describe("Setup helpers", () => {
       }
 
       type Test<T> = ReturnType<typeof setup<T>>;
-      type Props<T> = ExtractProps<ExtractMacroReturn<Test<T>>>;
+      type Props<T> = ExtractMacroProps<ExtractMacroReturn<Test<T>>>;
 
       const propsNumber = {} as Props<number>;
       assertType<number>(propsNumber.props.value.value);
@@ -2476,7 +2476,7 @@ describe("Setup helpers", () => {
       type Test<T> = ReturnType<typeof setup<T>>;
       type Macros<T> = ExtractMacroReturn<Test<T>>;
 
-      type Props<T> = ExtractProps<Macros<T>>;
+      type Props<T> = ExtractMacroProps<Macros<T>>;
       type Emits<T> = ExtractEmits<Macros<T>>;
       type Slots<T> = ExtractSlots<Macros<T>>;
       type Expose<T> = ExtractExpose<Macros<T>>;
@@ -2528,7 +2528,7 @@ describe("Setup helpers", () => {
       }
 
       type Test<T> = ReturnType<typeof setup<T>>;
-      type Props<T> = ExtractProps<ExtractMacroReturn<Test<T>>>;
+      type Props<T> = ExtractMacroProps<ExtractMacroReturn<Test<T>>>;
 
       const props = {} as Props<number>;
       assertType<number>(props.props.value.data.nested.value);
@@ -2556,7 +2556,7 @@ describe("Setup helpers", () => {
       }
 
       type Test<T extends Record<string, any>> = ReturnType<typeof setup<T>>;
-      type Props<T extends Record<string, any>> = ExtractProps<
+      type Props<T extends Record<string, any>> = ExtractMacroProps<
         ExtractMacroReturn<Test<T>>
       >;
 

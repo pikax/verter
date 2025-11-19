@@ -13,8 +13,9 @@ import { defineProps, withDefaults, DefineProps } from "vue";
 import {
   createMacroReturn,
   ExtractMacroReturn,
-  ExtractProps,
+  ExtractMacroProps,
   MacroReturnObject,
+  ExtractPropsFromMacro,
 } from "../setup";
 import { defineProps_Box, withDefaults_Box } from "../vue/vue.macros";
 import { ExtractHidden, removeHiddenPatch } from "../helpers";
@@ -759,7 +760,7 @@ describe("Props helpers", () => {
         },
       });
       const p = defineProps(removeHiddenPatch(props_boxed));
-      type Macro = ExtractProps<{
+      type Macro = ExtractMacroProps<{
         props: MacroReturnObject<typeof p, typeof props_boxed>;
       }>;
       type Public = MakePublicProps<Macro>;
@@ -775,7 +776,7 @@ describe("Props helpers", () => {
         notRequired: { type: String, required: false },
       });
       const p = defineProps(removeHiddenPatch(props_boxed));
-      type Macro = ExtractProps<{
+      type Macro = ExtractMacroProps<{
         props: MacroReturnObject<typeof p, typeof props_boxed>;
       }>;
       type Public = MakePublicProps<Macro>;
@@ -999,7 +1000,7 @@ describe("Props helpers", () => {
           str: { type: string; default: "default" };
           num: { type: number };
           bool: { type: boolean; default: true };
-          obj: { type: object; default: () => ({}) };
+          obj: { type: object; default: () => {} };
           arr: { type: any[] };
         };
 
@@ -1014,7 +1015,7 @@ describe("Props helpers", () => {
       it("handles complex default values", () => {
         type PropsObj = {
           simpleDefault: { type: string; default: "value" };
-          functionDefault: { type: object; default: () => ({ x: 1 }) };
+          functionDefault: { type: object; default: () => { x: 1 } };
           nullDefault: { type: any; default: null };
           zeroDefault: { type: number; default: 0 };
           falseDefault: { type: boolean; default: false };
@@ -1079,7 +1080,7 @@ describe("Props helpers", () => {
         });
 
         type Extracted = ExtractMacroReturn<typeof macroReturn>;
-        type Props = ExtractProps<Extracted>;
+        type Props = ExtractMacroProps<Extracted>;
 
         // ExtractProps returns the macro object with value and type, plus defaults
         type PropsValue = Props extends { props: { value: infer V } }
@@ -1123,10 +1124,7 @@ describe("Props helpers", () => {
         }>();
 
         const defaultsBoxed = withDefaults_Box(
-          {} as import("vue").DefineProps<
-            typeof propsBoxed,
-            never
-          >,
+          {} as import("vue").DefineProps<typeof propsBoxed, never>,
           {
             foo: "default",
           }
@@ -1143,7 +1141,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
 
         // Should have both type and defaults
         type DefaultsType = Extracted["defaults"];
@@ -1164,7 +1164,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         // foo is optional (has default), bar is required
@@ -1192,7 +1194,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractPropsFromMacro<
+          ExtractMacroProps<ExtractMacroReturn<typeof setupReturn>>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         // foo can be omitted (has default), bar is required
@@ -1224,7 +1228,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         // All can be omitted
@@ -1254,7 +1260,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         // Required props must be present, optional can be omitted
@@ -1282,10 +1290,7 @@ describe("Props helpers", () => {
         }>();
 
         const defaultsBoxed = withDefaults_Box(
-          {} as import("vue").DefineProps<
-            typeof propsBoxed,
-            never
-          >,
+          {} as import("vue").DefineProps<typeof propsBoxed, never>,
           {
             foo: "default",
           }
@@ -1302,7 +1307,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         // Verify the structure exists
@@ -1333,7 +1340,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         assertType<Public["simple"]>({} as string | undefined);
@@ -1354,7 +1363,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         const valid1: Public = {};
@@ -1380,7 +1391,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         const pub = {} as Public;
@@ -1402,7 +1415,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         assertType<Public["status"]>(
@@ -1425,7 +1440,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         assertType<Public["nullable"]>({} as string | null);
@@ -1446,7 +1463,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         assertType<Public["onClick"]>(
@@ -1471,7 +1490,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         assertType<Public["value"]>({} as string);
@@ -1499,7 +1520,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         assertType<Public["id"]>({} as number);
@@ -1521,7 +1544,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         type RequiredType = Public extends { required: infer R } ? R : never;
@@ -1543,7 +1568,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         assertType<Public["foo"]>({} as string | undefined);
@@ -1560,10 +1587,7 @@ describe("Props helpers", () => {
         }>();
 
         const defaultsBoxed = withDefaults_Box(
-          {} as import("vue").DefineProps<
-            typeof propsBoxed,
-            never
-          >,
+          {} as import("vue").DefineProps<typeof propsBoxed, never>,
           {
             foo: "default",
             baz: true,
@@ -1581,7 +1605,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type Extracted = ExtractProps<ExtractMacroReturn<typeof setupReturn>>;
+        type Extracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof setupReturn>
+        >;
         type Public = MakePublicProps<Extracted>;
 
         // Verify defaults structure exists
@@ -1598,7 +1624,9 @@ describe("Props helpers", () => {
           },
         });
 
-        type PlainExtracted = ExtractProps<ExtractMacroReturn<typeof plain>>;
+        type PlainExtracted = ExtractMacroProps<
+          ExtractMacroReturn<typeof plain>
+        >;
         type PlainPublic = MakePublicProps<PlainExtracted>;
 
         // Box approach
@@ -1623,7 +1651,7 @@ describe("Props helpers", () => {
           },
         });
 
-        type BoxedExtracted = ExtractProps<
+        type BoxedExtracted = ExtractMacroProps<
           ExtractMacroReturn<typeof boxedReturn>
         >;
         type BoxedPublic = MakePublicProps<BoxedExtracted>;
