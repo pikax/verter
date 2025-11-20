@@ -15,9 +15,18 @@ function hasTar(): boolean {
   return spawnSync("tar", ["--version"], { stdio: "ignore" }).status === 0;
 }
 
-export async function downloadPackage(pkg: string, toPath: string) {
+export async function downloadPackage(
+  pkg: string,
+  toPath: string,
+  currentVersion: string
+) {
   const m = await fetchJson(`https://registry.npmjs.org/${pkg}`);
   const v = m["dist-tags"].latest;
+
+  // same version ignore
+  if (v === currentVersion) {
+    return;
+  }
   const t = m.versions[v].dist.tarball;
   mkdirSync(toPath, { recursive: true });
   const tgz = `${toPath}.tgz`;

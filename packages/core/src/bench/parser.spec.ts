@@ -18,7 +18,7 @@ describe("bench parser sanity tests", () => {
     });
   });
 
-  describe("test file", () => {
+  describe.only("test file", () => {
     // console.log(Object.keys(ValidFiles));
     const content = ValidFiles["ContactInformation.vue"];
 
@@ -27,7 +27,7 @@ describe("bench parser sanity tests", () => {
 
       expect(render.content).toMatchSnapshot();
     });
-    it.only("new", () => {
+    it("new", () => {
       const { render } = parse(content);
       expect(render.result).toMatchSnapshot();
     });

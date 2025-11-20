@@ -5,18 +5,22 @@ export async function resolveAndDownloadBinding(toPath: string) {
   const binding = resolveBinding();
   console.log("trying to resolve binding", binding);
 
-  let exists = false;
+  let version = "";
 
   try {
-    exists = !!require.resolve(binding);
+    const pkg = require(`${binding}/package.json`);
+    version = pkg?.version;
   } catch (e) {}
-  console.log("binding", binding, "found", exists);
 
-  if (!exists) {
-    await import("./download").then((x) =>
-      x.downloadPackage(binding, resolve(toPath, "node_modules", binding))
+  await import("./download").then((x) => {
+    x.downloadPackage(
+      binding,
+      resolve(toPath, "node_modules", binding),
+      version
     );
+  });
 
-    console.log("Verter: downloaded and extracted", binding);
-  }
+  console.log("Verter: downloaded and extracted", binding);
 }
+
+resolveAndDownloadBinding("./");
