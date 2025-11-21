@@ -1,5 +1,6 @@
 import { launchServer } from '@typescript/server-harness';
-import { ConfigurationRequest, PublishDiagnosticsNotification, type TextDocument } from '@volar/language-server';
+import { ConfigurationRequest, PublishDiagnosticsNotification } from '@volar/language-server';
+import { TextDocument } from 'vscode-languageserver-textdocument';
 import type { LanguageServerHandle } from '@volar/test-utils';
 import { startLanguageServer } from '@volar/test-utils';
 import * as path from 'node:path';
@@ -91,7 +92,8 @@ export async function getLanguageServer(): Promise<{
 				throw new Error(res.body);
 			}
 
-			return await serverHandle!.openInMemoryDocument(uri, languageId, content);
+			// return await serverHandle!.openInMemoryDocument(uri, languageId, content);
+			return TextDocument.create(uri, languageId, 1, content);
 		},
 		close: async (uri: string) => {
 			const res = await tsserver.message({
@@ -107,14 +109,15 @@ export async function getLanguageServer(): Promise<{
 				throw new Error(res.body);
 			}
 
-			await serverHandle!.closeTextDocument(uri);
+			// await serverHandle!.closeTextDocument(uri);
 		},
 	};
 }
 
 export async function closeLanguageServer() {
 	if (serverHandle) {
-		await serverHandle.close();
+		// await serverHandle.close();
+		serverHandle.process.kill();
 		serverHandle = undefined;
 	}
 }
