@@ -229,7 +229,7 @@ export function parserAcornLoose(
           const content = prepend + x.block.content;
 
           const ast = parseAcornLoose(content);
-          const r = parseScriptBetter(ast, x.block.attrs);
+          const r = parseScriptBetter(ast as any, x.block.attrs);
           isAsync = r.isAsync;
           isSetup = !!((x.block as SFCScriptBlock)?.setup ?? false);
 

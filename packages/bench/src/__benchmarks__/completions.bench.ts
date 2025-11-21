@@ -8,32 +8,28 @@ import {
   getVerterServer,
   testWorkspacePath as verterWorkspacePath,
 } from "../server/verter-server-direct";
+import {
+  parseContentWithCursor,
+  createTestUri,
+} from "../helpers/test-helpers";
 
 describe("Completions Benchmark: Volar vs Verter", () => {
   describe("Script setup completions", async () => {
     const volarServer = await getVolarServer();
     const verterServer = await getVerterServer();
-    bench("Volar - Script setup completions", async () => {
-      const server = volarServer;
-      const fileName = "fixture.vue";
-      const content = `<script setup lang="ts">
+    const testContent = `<script setup lang="ts">
 const msg = 'Hello World'
 $|
 </script>`;
 
-      const [contentBefore, contentAfter] = content.split("|");
-      const position = {
-        line: contentBefore.split("\n").length - 1,
-        character: contentBefore.split("\n").pop()!.length,
-      };
+    bench("Volar - Script setup completions", async () => {
+      const fileName = "fixture.vue";
+      const { content, position, offset } = parseContentWithCursor(testContent);
+      const uri = createTestUri(volarWorkspacePath, fileName);
 
-      const fullContent = contentBefore + contentAfter;
-      const uri = URI.file(`${volarWorkspacePath}/${fileName}`).toString();
-
-      const doc = await server.open(uri, "vue", fullContent);
-      const offset = doc.offsetAt(position);
-      await server.tsserver.message({
-        seq: server.nextSeq(),
+      const doc = await volarServer.open(uri, "vue", content);
+      await volarServer.tsserver.message({
+        seq: volarServer.nextSeq(),
         command: "completions",
         arguments: {
           file: URI.parse(doc.uri).fsPath,
@@ -41,59 +37,38 @@ $|
         },
       });
 
-      await server.close(doc.uri);
+      await volarServer.close(doc.uri);
     });
 
     bench("Verter - Script setup completions", async () => {
-      const server = verterServer;
       const fileName = "fixture.vue";
-      const content = `<script setup lang="ts">
-const msg = 'Hello World'
-$|
-</script>`;
+      const { content, position } = parseContentWithCursor(testContent);
+      const uri = createTestUri(verterWorkspacePath, fileName);
 
-      const [contentBefore, contentAfter] = content.split("|");
-      const position = {
-        line: contentBefore.split("\n").length - 1,
-        character: contentBefore.split("\n").pop()!.length,
-      };
-
-      const fullContent = contentBefore + contentAfter;
-      const uri = URI.file(`${verterWorkspacePath}/${fileName}`).toString();
-
-      await server.openDocument(uri, "vue", fullContent);
-      await server.getCompletions(uri, position);
-      await server.closeDocument(uri);
+      await verterServer.openDocument(uri, "vue", content);
+      await verterServer.getCompletions(uri, position);
+      await verterServer.closeDocument(uri);
     });
   });
 
   describe("TypeScript completions in script", async () => {
     const volarServer = await getVolarServer();
     const verterServer = await getVerterServer();
-
-    bench(
-      "Volar - TypeScript completions",
-      async () => {
-        const server = volarServer;
-        const fileName = "fixture.vue";
-        const content = `<script setup lang="ts">
+    const testContent = `<script setup lang="ts">
 const msg = 'Hello World'
 msg.|
 </script>`;
 
-        const [contentBefore, contentAfter] = content.split("|");
-        const position = {
-          line: contentBefore.split("\n").length - 1,
-          character: contentBefore.split("\n").pop()!.length,
-        };
+    bench(
+      "Volar - TypeScript completions",
+      async () => {
+        const fileName = "fixture.vue";
+        const { content, position, offset } = parseContentWithCursor(testContent);
+        const uri = createTestUri(volarWorkspacePath, fileName);
 
-        const fullContent = contentBefore + contentAfter;
-        const uri = URI.file(`${volarWorkspacePath}/${fileName}`).toString();
-
-        const doc = await server.open(uri, "vue", fullContent);
-        const offset = doc.offsetAt(position);
-        await server.tsserver.message({
-          seq: server.nextSeq(),
+        const doc = await volarServer.open(uri, "vue", content);
+        await volarServer.tsserver.message({
+          seq: volarServer.nextSeq(),
           command: "completions",
           arguments: {
             file: URI.parse(doc.uri).fsPath,
@@ -101,7 +76,7 @@ msg.|
           },
         });
 
-        await server.close(doc.uri);
+        await volarServer.close(doc.uri);
       },
       { time: 5000 }
     );
@@ -109,25 +84,13 @@ msg.|
     bench(
       "Verter - TypeScript completions",
       async () => {
-        const server = verterServer;
         const fileName = "fixture.vue";
-        const content = `<script setup lang="ts">
-const msg = 'Hello World'
-msg.|
-</script>`;
+        const { content, position } = parseContentWithCursor(testContent);
+        const uri = createTestUri(verterWorkspacePath, fileName);
 
-        const [contentBefore, contentAfter] = content.split("|");
-        const position = {
-          line: contentBefore.split("\n").length - 1,
-          character: contentBefore.split("\n").pop()!.length,
-        };
-
-        const fullContent = contentBefore + contentAfter;
-        const uri = URI.file(`${verterWorkspacePath}/${fileName}`).toString();
-
-        await server.openDocument(uri, "vue", fullContent);
-        await server.getCompletions(uri, position);
-        await server.closeDocument(uri);
+        await verterServer.openDocument(uri, "vue", content);
+        await verterServer.getCompletions(uri, position);
+        await verterServer.closeDocument(uri);
       },
       { time: 5000 }
     );
@@ -136,29 +99,20 @@ msg.|
   describe("Auto import component", async () => {
     const volarServer = await getVolarServer();
     const verterServer = await getVerterServer();
+    const testContent = `<script setup lang="ts">
+import componentFor|
+</script>`;
 
     bench(
       "Volar - Auto import component",
       async () => {
-        const server = volarServer;
         const fileName = "tsconfigProject/fixture.vue";
-        const content = `<script setup lang="ts">
-import componentFor|
-</script>`;
+        const { content, position, offset } = parseContentWithCursor(testContent);
+        const uri = createTestUri(volarWorkspacePath, fileName);
 
-        const [contentBefore, contentAfter] = content.split("|");
-        const position = {
-          line: contentBefore.split("\n").length - 1,
-          character: contentBefore.split("\n").pop()!.length,
-        };
-
-        const fullContent = contentBefore + contentAfter;
-        const uri = URI.file(`${volarWorkspacePath}/${fileName}`).toString();
-
-        const doc = await server.open(uri, "vue", fullContent);
-        const offset = doc.offsetAt(position);
-        await server.tsserver.message({
-          seq: server.nextSeq(),
+        const doc = await volarServer.open(uri, "vue", content);
+        await volarServer.tsserver.message({
+          seq: volarServer.nextSeq(),
           command: "completions",
           arguments: {
             file: URI.parse(doc.uri).fsPath,
@@ -166,7 +120,7 @@ import componentFor|
           },
         });
 
-        await server.close(doc.uri);
+        await volarServer.close(doc.uri);
       },
       { time: 5000 }
     );
@@ -174,24 +128,13 @@ import componentFor|
     bench(
       "Verter - Auto import component",
       async () => {
-        const server = verterServer;
         const fileName = "tsconfigProject/fixture.vue";
-        const content = `<script setup lang="ts">
-import componentFor|
-</script>`;
+        const { content, position } = parseContentWithCursor(testContent);
+        const uri = createTestUri(verterWorkspacePath, fileName);
 
-        const [contentBefore, contentAfter] = content.split("|");
-        const position = {
-          line: contentBefore.split("\n").length - 1,
-          character: contentBefore.split("\n").pop()!.length,
-        };
-
-        const fullContent = contentBefore + contentAfter;
-        const uri = URI.file(`${verterWorkspacePath}/${fileName}`).toString();
-
-        await server.openDocument(uri, "vue", fullContent);
-        await server.getCompletions(uri, position);
-        await server.closeDocument(uri);
+        await verterServer.openDocument(uri, "vue", content);
+        await verterServer.getCompletions(uri, position);
+        await verterServer.closeDocument(uri);
       },
       { time: 5000 }
     );
@@ -200,31 +143,20 @@ import componentFor|
   describe.only("template completion", async () => {
     const volarServer = await getVolarServer();
     const verterServer = await getVerterServer();
-
-    bench("Volar", async () => {
-      const fileName = "fixtureTemplate.vue";
-      const content = `<template>
+    const testContent = `<template>
     <div>{{ mess| }}</div>
 </template>
 <script setup lang="ts">
 const message = 'Hello';
 </script>`;
-      const [contentBefore, contentAfter] = content.split("|");
-      const position = {
-        line: contentBefore.split("\n").length - 1,
-        character: contentBefore.split("\n").pop()!.length,
-      };
 
-      const fullContent = contentBefore + contentAfter;
-      const uri = URI.file(`${volarWorkspacePath}/${fileName}`).toString();
+    bench("Volar", async () => {
+      const fileName = "fixtureTemplate.vue";
+      const { content, position, offset } = parseContentWithCursor(testContent);
+      const uri = createTestUri(volarWorkspacePath, fileName);
 
-      const doc = await volarServer.open(
-        URI.parse(uri).fsPath,
-        "vue",
-        fullContent
-      );
-      const offset = doc.offsetAt(position);
-      const rr = await volarServer.tsserver.message({
+      const doc = await volarServer.open(URI.parse(uri).fsPath, "vue", content);
+      await volarServer.tsserver.message({
         seq: volarServer.nextSeq(),
         command: "completions",
         arguments: {
@@ -234,41 +166,22 @@ const message = 'Hello';
       });
       await volarServer.close(doc.uri);
     });
+
     bench("Verter", async () => {
-      const server = verterServer;
       const fileName = "fixture.vue";
-      const content = `<template>
-    <div>{{ mess| }}</div>
-</template>
-<script setup lang="ts">
-const message = 'Hello';
-</script>`;
+      const { content, position } = parseContentWithCursor(testContent);
+      const uri = createTestUri(verterWorkspacePath, fileName);
 
-      const [contentBefore, contentAfter] = content.split("|");
-      const position = {
-        line: contentBefore.split("\n").length - 1,
-        character: contentBefore.split("\n").pop()!.length,
-      };
-
-      const fullContent = contentBefore + contentAfter;
-      const uri = URI.file(`${verterWorkspacePath}/${fileName}`).toString();
-
-      await server.openDocument(uri, "vue", fullContent);
-      const c = await server.getCompletions(uri, position);
-      await server.closeDocument(uri);
+      await verterServer.openDocument(uri, "vue", content);
+      await verterServer.getCompletions(uri, position);
+      await verterServer.closeDocument(uri);
     });
   });
 
   describe("Complex TypeScript inference", async () => {
     const volarServer = await getVolarServer();
     const verterServer = await getVerterServer();
-
-    bench(
-      "Volar - Complex TypeScript inference",
-      async () => {
-        const server = volarServer;
-        const fileName = "fixture.vue";
-        const content = `<script setup lang="ts">
+    const testContent = `<script setup lang="ts">
 import { ref } from 'vue'
 
 interface User {
@@ -281,19 +194,16 @@ const user = ref<User>({ id: 1, name: 'John', email: 'john@example.com' })
 user.value.|
 </script>`;
 
-        const [contentBefore, contentAfter] = content.split("|");
-        const position = {
-          line: contentBefore.split("\n").length - 1,
-          character: contentBefore.split("\n").pop()!.length,
-        };
+    bench(
+      "Volar - Complex TypeScript inference",
+      async () => {
+        const fileName = "fixture.vue";
+        const { content, position, offset } = parseContentWithCursor(testContent);
+        const uri = createTestUri(volarWorkspacePath, fileName);
 
-        const fullContent = contentBefore + contentAfter;
-        const uri = URI.file(`${volarWorkspacePath}/${fileName}`).toString();
-
-        const doc = await server.open(uri, "vue", fullContent);
-        const offset = doc.offsetAt(position);
-        const r = await server.tsserver.message({
-          seq: server.nextSeq(),
+        const doc = await volarServer.open(uri, "vue", content);
+        const r = await volarServer.tsserver.message({
+          seq: volarServer.nextSeq(),
           command: "completions",
           arguments: {
             file: URI.parse(doc.uri).fsPath,
@@ -303,7 +213,7 @@ user.value.|
 
         console.log(r);
 
-        await server.close(doc.uri);
+        await volarServer.close(doc.uri);
       },
       { time: 5000 }
     );
@@ -311,34 +221,14 @@ user.value.|
     bench(
       "Verter - Complex TypeScript inference",
       async () => {
-        const server = verterServer;
         const fileName = "fixture.vue";
-        const content = `<script setup lang="ts">
-import { ref } from 'vue'
+        const { content, position } = parseContentWithCursor(testContent);
+        const uri = createTestUri(verterWorkspacePath, fileName);
 
-interface User {
-  id: number;
-  name: string;
-  email: string;
-}
-
-const user = ref<User>({ id: 1, name: 'John', email: 'john@example.com' })
-user.value.|
-</script>`;
-
-        const [contentBefore, contentAfter] = content.split("|");
-        const position = {
-          line: contentBefore.split("\n").length - 1,
-          character: contentBefore.split("\n").pop()!.length,
-        };
-
-        const fullContent = contentBefore + contentAfter;
-        const uri = URI.file(`${verterWorkspacePath}/${fileName}`).toString();
-
-        await server.openDocument(uri, "vue", fullContent);
-        const r = await server.getCompletions(uri, position);
+        await verterServer.openDocument(uri, "vue", content);
+        const r = await verterServer.getCompletions(uri, position);
         console.log(r);
-        await server.closeDocument(uri);
+        await verterServer.closeDocument(uri);
       },
       { time: 5000 }
     );
@@ -351,7 +241,6 @@ user.value.|
     bench(
       "Volar - Open and complete 5 files",
       async () => {
-        const server = volarServer;
         const files = Array.from({ length: 5 }, (_, i) => ({
           name: `file${i}.vue`,
           content: `<script setup lang="ts">
@@ -361,19 +250,12 @@ msg${i}.|
         }));
 
         for (const file of files) {
-          const [contentBefore, contentAfter] = file.content.split("|");
-          const position = {
-            line: contentBefore.split("\n").length - 1,
-            character: contentBefore.split("\n").pop()!.length,
-          };
+          const { content, position, offset } = parseContentWithCursor(file.content);
+          const uri = createTestUri(volarWorkspacePath, file.name);
 
-          const fullContent = contentBefore + contentAfter;
-          const uri = URI.file(`${volarWorkspacePath}/${file.name}`).toString();
-
-          const doc = await server.open(uri, "vue", fullContent);
-          const offset = doc.offsetAt(position);
-          await server.tsserver.message({
-            seq: server.nextSeq(),
+          const doc = await volarServer.open(uri, "vue", content);
+          await volarServer.tsserver.message({
+            seq: volarServer.nextSeq(),
             command: "completions",
             arguments: {
               file: URI.parse(doc.uri).fsPath,
@@ -381,7 +263,7 @@ msg${i}.|
             },
           });
 
-          await server.close(doc.uri);
+          await volarServer.close(doc.uri);
         }
       },
       { time: 10000 }
@@ -390,7 +272,6 @@ msg${i}.|
     bench(
       "Verter - Open and complete 5 files",
       async () => {
-        const server = verterServer;
         const files = Array.from({ length: 5 }, (_, i) => ({
           name: `file${i}.vue`,
           content: `<script setup lang="ts">
@@ -400,20 +281,12 @@ msg${i}.|
         }));
 
         for (const file of files) {
-          const [contentBefore, contentAfter] = file.content.split("|");
-          const position = {
-            line: contentBefore.split("\n").length - 1,
-            character: contentBefore.split("\n").pop()!.length,
-          };
+          const { content, position } = parseContentWithCursor(file.content);
+          const uri = createTestUri(verterWorkspacePath, file.name);
 
-          const fullContent = contentBefore + contentAfter;
-          const uri = URI.file(
-            `${verterWorkspacePath}/${file.name}`
-          ).toString();
-
-          await server.openDocument(uri, "vue", fullContent);
-          await server.getCompletions(uri, position);
-          await server.closeDocument(uri);
+          await verterServer.openDocument(uri, "vue", content);
+          await verterServer.getCompletions(uri, position);
+          await verterServer.closeDocument(uri);
         }
       },
       { time: 10000 }

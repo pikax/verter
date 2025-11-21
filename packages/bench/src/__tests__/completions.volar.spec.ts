@@ -6,6 +6,12 @@ import {
   testWorkspacePath,
   closeLanguageServer,
 } from "../server/volar-server";
+import {
+  parseContentWithCursor,
+  createTestUri,
+  assertCompletionExists,
+  getCompletionLabels,
+} from "../helpers/test-helpers";
 
 const openedDocuments: TextDocument[] = [];
 
@@ -18,9 +24,8 @@ afterEach(async () => {
 });
 
 test("Vue tags", async () => {
-  const labels = (
-    await requestCompletionListToVueServer("fixture.vue", "vue", `<|`)
-  ).items.map((item) => item.label);
+  const completions = await requestCompletionListToVueServer("fixture.vue", "vue", `<|`);
+  const labels = getCompletionLabels(completions);
 
   // Check that essential Vue tags are present
   expect(labels).toContain("template");
@@ -32,17 +37,14 @@ test("Vue tags", async () => {
 });
 
 test("HTML tags and built-in components", async () => {
-  expect(
-    (
-      await requestCompletionListToVueServer(
-        "fixture.vue",
-        "vue",
-        `<template><|</template>`
-      )
-    ).items
-      .map((item) => item.label)
-      .slice(0, 20)
-  ).toMatchInlineSnapshot(`
+  const completions = await requestCompletionListToVueServer(
+    "fixture.vue",
+    "vue",
+    `<template><|</template>`
+  );
+  const labels = getCompletionLabels(completions).slice(0, 20);
+  
+  expect(labels).toMatchInlineSnapshot(`
 		[
 		  "!DOCTYPE",
 		  "html",
@@ -69,21 +71,16 @@ test("HTML tags and built-in components", async () => {
 });
 
 test("HTML events", async () => {
-  const labels = (
-    await requestCompletionListToVueServer(
-      "fixture.vue",
-      "vue",
-      `<template><div @cl|></div></template>`
-    )
-  ).items
-    .map((item) => item.label)
-    .filter((label) => label.includes("click"));
+  const completions = await requestCompletionListToVueServer(
+    "fixture.vue",
+    "vue",
+    `<template><div @cl|></div></template>`
+  );
+  const labels = getCompletionLabels(completions).filter((label) => label.includes("click"));
 
   // Check that click-related events are present
   expect(labels).toContain("onclick");
-  expect(labels.some((l) => l === "ondblclick" || l.includes("dblclick"))).toBe(
-    true
-  );
+  expect(labels.some((l) => l === "ondblclick" || l.includes("dblclick"))).toBe(true);
 });
 
 test("Vue directives", async () => {
@@ -254,13 +251,10 @@ async function requestCompletionListToVueServer(
   languageId: string,
   content: string
 ) {
-  const offset = content.indexOf("|");
-  expect(offset).toBeGreaterThanOrEqual(0);
-  content = content.slice(0, offset) + content.slice(offset + 1);
+  const { content: cleanContent, position, offset } = parseContentWithCursor(content);
 
   const server = await getLanguageServer();
-  let document = await prepareDocument(fileName, languageId, content);
-  const position = document.positionAt(offset);
+  let document = await prepareDocument(fileName, languageId, cleanContent);
 
   const completions = await server.vueserver.sendCompletionRequest(
     document.uri,
@@ -293,12 +287,10 @@ async function requestCompletionListToTsServer(
   languageId: string,
   content: string
 ) {
-  const offset = content.indexOf("|");
-  expect(offset).toBeGreaterThanOrEqual(0);
-  content = content.slice(0, offset) + content.slice(offset + 1);
+  const { content: cleanContent, offset } = parseContentWithCursor(content);
 
   const server = await getLanguageServer();
-  let document = await prepareDocument(fileName, languageId, content);
+  let document = await prepareDocument(fileName, languageId, cleanContent);
 
   const res = await server.tsserver.message({
     seq: server.nextSeq(),
@@ -319,8 +311,8 @@ async function prepareDocument(
   content: string
 ) {
   const server = await getLanguageServer();
-  const uri = URI.file(`${testWorkspacePath}/${fileName}`);
-  const document = await server.open(uri.toString(), languageId, content);
+  const uri = createTestUri(testWorkspacePath, fileName);
+  const document = await server.open(uri, languageId, content);
 
   if (openedDocuments.every((d) => d.uri !== document.uri)) {
     openedDocuments.push(document);
