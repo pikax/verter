@@ -323,8 +323,8 @@ describe("TSX type augmentations", () => {
               user: { id: "1", email: "test@example.com", role: "admin" },
               actions: { edit: () => {} },
             });
-            // @ts-expect-error wrong type for user
             c.$slots.user({
+              // @ts-expect-error wrong type for user
               user: { id: 1, email: "test@example.com", role: "admin" },
               actions: { edit: () => {} },
             });

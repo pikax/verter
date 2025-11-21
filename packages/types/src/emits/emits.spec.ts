@@ -21,9 +21,13 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onFoo;
+        props.onFoo?.(123);
+
+        // @ts-expect-error optional
         props.onFoo(123);
+
         // @ts-expect-error wrong arg type
-        props.onFoo("test");
+        props.onFoo?.("test");
         // @ts-expect-error non-existent prop
         props.onBar;
         // @ts-expect-error original event name not allowed
@@ -44,9 +48,11 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onFoo;
-        props.onFoo();
-        // @ts-expect-error wrong number of args
+        props.onFoo?.();
+        // @ts-expect-error optional
         props.onFoo(123);
+        // @ts-expect-error wrong number of args
+        props.onFoo?.(123);
         // @ts-expect-error non-existent prop
         props.onBar;
       });
@@ -70,17 +76,19 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onFoo;
-        props.onFoo(123);
+        props.onFoo?.(123);
         props.onBar;
-        props.onBar("test");
+        props.onBar?.("test");
         props.onBaz;
-        props.onBaz();
+        props.onBaz?.();
+        // @ts-expect-error optional
+        props.onFoo(123);
         // @ts-expect-error wrong arg type
-        props.onFoo("test");
+        props.onFoo?.("test");
         // @ts-expect-error wrong arg type
-        props.onBar(123);
+        props.onBar?.(123);
         // @ts-expect-error wrong number of args
-        props.onBaz(123);
+        props.onBaz?.(123);
         // @ts-expect-error non-existent prop
         props.onQux;
       });
@@ -105,17 +113,19 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onFoo;
-        props.onFoo(123);
+        props.onFoo?.(123);
         props.onBar;
-        props.onBar("test");
+        props.onBar?.("test");
         props.onBaz;
-        props.onBaz();
+        props.onBaz?.();
+        // @ts-expect-error optional
+        props.onFoo(123);
         // @ts-expect-error wrong arg type
-        props.onFoo("test");
+        props.onFoo?.("test");
         // @ts-expect-error wrong arg type
-        props.onBar(123);
+        props.onBar?.(123);
         // @ts-expect-error wrong number of args
-        props.onBaz(123);
+        props.onBaz?.(123);
         // @ts-expect-error non-existent prop
         props.onQux;
       });
@@ -135,13 +145,15 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onFoo;
-        props.onFoo(123);
+        props.onFoo?.(123);
         props.onBar;
-        props.onBar(456);
+        props.onBar?.(456);
+        // @ts-expect-error optional
+        props.onFoo(123);
         // @ts-expect-error wrong arg type
-        props.onFoo("test");
+        props.onFoo?.("test");
         // @ts-expect-error wrong arg type
-        props.onBar("test");
+        props.onBar?.("test");
         // @ts-expect-error non-existent prop
         props.onBaz;
       });
@@ -160,13 +172,16 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props["onUpdate-value"];
-        props["onUpdate-value"]("test");
+        props["onUpdate-value"]?.("test");
         props["onClick-item"];
-        props["onClick-item"](123);
+        props["onClick-item"]?.(123);
+
+        // @ts-expect-error optional
+        props["onUpdate-value"]("test");
         // @ts-expect-error wrong arg type
-        props["onUpdate-value"](123);
+        props["onUpdate-value"]?.(123);
         // @ts-expect-error wrong arg type
-        props["onClick-item"]("test");
+        props["onClick-item"]?.("test");
       });
 
       it("multiple arguments", () => {
@@ -185,13 +200,15 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onChange;
+        props.onChange?.("test", 123, true);
+        // @ts-expect-error optional
         props.onChange("test", 123, true);
         // @ts-expect-error missing args
-        props.onChange("test");
+        props.onChange?.("test");
         // @ts-expect-error missing args
-        props.onChange("test", 123);
+        props.onChange?.("test", 123);
         // @ts-expect-error wrong arg types
-        props.onChange(123, "test", true);
+        props.onChange?.(123, "test", true);
       });
     });
 
@@ -215,18 +232,18 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onFoo;
-        props.onFoo();
-        props.onFoo(123);
+        props.onFoo?.();
+        props.onFoo?.(123);
         props.onBar;
-        props.onBar(123);
+        props.onBar?.(123);
         props.onBaz;
-        props.onBaz("test", 456);
+        props.onBaz?.("test", 456);
         // @ts-expect-error wrong arg type
-        props.onBar("test");
+        props.onBar?.("test");
         // @ts-expect-error missing args
-        props.onBaz("test");
+        props.onBaz?.("test");
         // @ts-expect-error wrong arg type
-        props.onBaz(123, 456);
+        props.onBaz?.(123, 456);
       });
 
       it("array syntax", () => {
@@ -243,10 +260,12 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onFoo;
-        props.onFoo();
-        props.onFoo(123);
+        props.onFoo?.();
+        props.onFoo?.(123);
         props.onBar;
-        props.onBar("test", 456);
+        props.onBar?.("test", 456);
+        // @ts-expect-error optional
+        props.onFoo();
         // @ts-expect-error non-existent prop
         props.onBaz;
       });
@@ -269,15 +288,15 @@ describe('"emits" helper', () => {
 
           const props = {} as Props;
           props.onFoo;
-          props.onFoo(123);
+          props.onFoo?.(123);
           props.onBar;
-          props.onBar("test", true);
+          props.onBar?.("test", true);
           // @ts-expect-error wrong arg type
-          props.onFoo("test");
+          props.onFoo?.("test");
           // @ts-expect-error missing args
-          props.onBar("test");
+          props.onBar?.("test");
           // @ts-expect-error wrong arg type
-          props.onBar(123, true);
+          props.onBar?.(123, true);
         });
 
         it("object syntax", () => {
@@ -299,17 +318,17 @@ describe('"emits" helper', () => {
 
           const props = {} as Props;
           props.onFoo;
-          props.onFoo(123);
+          props.onFoo?.(123);
           props.onBar;
-          props.onBar("test", true);
+          props.onBar?.("test", true);
           props.onBaz;
-          props.onBaz();
+          props.onBaz?.();
           // @ts-expect-error wrong arg type
-          props.onFoo("test");
+          props.onFoo?.("test");
           // @ts-expect-error missing args
-          props.onBar("test");
+          props.onBar?.("test");
           // @ts-expect-error wrong number of args
-          props.onBaz(123);
+          props.onBaz?.(123);
         });
       });
     });
@@ -335,14 +354,18 @@ describe('"emits" helper', () => {
         type Result = typeof result;
 
         // Should have onCustomEvent property
-        assertType<Result>({} as {
+        assertType<Result>(
+          {} as {
             onCustomEvent: (value: number) => void;
-          });
+          }
+        );
 
         result.onCustomEvent;
+        result.onCustomEvent?.(123);
+        // @ts-expect-error not optional
         result.onCustomEvent(123);
         // @ts-expect-error wrong arg type
-        result.onCustomEvent("test");
+        result.onCustomEvent?.("test");
       });
 
       it("EmitsToProps with generic event types", () => {
@@ -355,26 +378,34 @@ describe('"emits" helper', () => {
         const stringProps = createEmitProps<"update", string>();
         type StringProps = typeof stringProps;
 
-        assertType<StringProps>({} as {
+        assertType<StringProps>(
+          {} as {
             onUpdate: (value: string) => void;
-          });
+          }
+        );
 
         stringProps.onUpdate;
+        stringProps.onUpdate?.("test");
+        // @ts-expect-error not optional
         stringProps.onUpdate("test");
         // @ts-expect-error wrong arg type
-        stringProps.onUpdate(123);
+        stringProps.onUpdate?.(123);
 
         const numberProps = createEmitProps<"change", number>();
         type NumberProps = typeof numberProps;
 
-        assertType<NumberProps>({} as {
+        assertType<NumberProps>(
+          {} as {
             onChange: (value: number) => void;
-          });
+          }
+        );
 
         numberProps.onChange;
+        numberProps.onChange?.(123);
+        // @ts-expect-error not optional
         numberProps.onChange(123);
         // @ts-expect-error wrong arg type
-        numberProps.onChange("test");
+        numberProps.onChange?.("test");
       });
 
       it("EmitsToProps with union of generic events", () => {
@@ -387,19 +418,23 @@ describe('"emits" helper', () => {
         const props = createMultiEmitProps<"foo" | "bar", boolean>();
         type Props = typeof props;
 
-        assertType<Props>({} as {
+        assertType<Props>(
+          {} as {
             onFoo: (value: boolean) => void;
             onBar: (value: boolean) => void;
-          });
+          }
+        );
 
         props.onFoo;
-        props.onFoo(true);
+        props.onFoo?.(true);
         props.onBar;
-        props.onBar(false);
+        props.onBar?.(false);
+        // @ts-expect-error not optional
+        props.onFoo(true);
         // @ts-expect-error wrong arg type
-        props.onFoo("test");
+        props.onFoo?.("test");
         // @ts-expect-error wrong arg type
-        props.onBar(123);
+        props.onBar?.(123);
       });
 
       it("EmitsToProps with complex generic types", () => {
@@ -442,17 +477,19 @@ describe('"emits" helper', () => {
         assertType<Props>({} as ExpectedProps);
 
         props.onUpdate;
-        props.onUpdate("test");
+        props.onUpdate?.("test");
         props.onChange;
-        props.onChange(123);
+        props.onChange?.(123);
         props.onSubmit;
+        props.onSubmit?.(true);
+        // @ts-expect-error not optional
         props.onSubmit(true);
         // @ts-expect-error wrong arg type
-        props.onUpdate(123);
+        props.onUpdate?.(123);
         // @ts-expect-error wrong arg type
-        props.onChange("test");
+        props.onChange?.("test");
         // @ts-expect-error wrong arg type
-        props.onSubmit("test");
+        props.onSubmit?.("test");
       });
 
       it("EmitsToProps with generic intersection types", () => {
@@ -476,19 +513,23 @@ describe('"emits" helper', () => {
         >();
         type Props = typeof props;
 
-        assertType<Props>({} as {
+        assertType<Props>(
+          {} as {
             onInput: (value: string) => void;
             onChange: (value: number) => void;
-          });
+          }
+        );
 
         props.onInput;
-        props.onInput("test");
+        props.onInput?.("test");
         props.onChange;
-        props.onChange(123);
+        props.onChange?.(123);
+        // @ts-expect-error not optional
+        props.onInput("test");
         // @ts-expect-error wrong arg type
-        props.onInput(123);
+        props.onInput?.(123);
         // @ts-expect-error wrong arg type
-        props.onChange("test");
+        props.onChange?.("test");
       });
     });
   });
@@ -516,18 +557,18 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onFoo;
-        props.onFoo();
-        props.onFoo(123);
+        props.onFoo?.();
+        props.onFoo?.(123);
         props.onBar;
-        props.onBar(123);
+        props.onBar?.(123);
         props.onBaz;
-        props.onBaz("test", 456);
+        props.onBaz?.("test", 456);
         // @ts-expect-error wrong arg type
-        props.onBar("test");
+        props.onBar?.("test");
         // @ts-expect-error missing args
-        props.onBaz("test");
+        props.onBaz?.("test");
         // @ts-expect-error wrong arg type
-        props.onBaz(123, 456);
+        props.onBaz?.(123, 456);
       });
 
       it("array syntax", () => {
@@ -546,10 +587,10 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onFoo;
-        props.onFoo();
-        props.onFoo(123);
+        props.onFoo?.();
+        props.onFoo?.(123);
         props.onBar;
-        props.onBar("test", 456);
+        props.onBar?.("test", 456);
         // @ts-expect-error non-existent prop
         props.onBaz;
       });
@@ -582,15 +623,15 @@ describe('"emits" helper', () => {
 
           const props = {} as Props;
           props.onFoo;
-          props.onFoo(123);
+          props.onFoo?.(123);
           props.onBar;
-          props.onBar("test", true);
+          props.onBar?.("test", true);
           // @ts-expect-error wrong arg type
-          props.onFoo("test");
+          props.onFoo?.("test");
           // @ts-expect-error missing args
-          props.onBar("test");
+          props.onBar?.("test");
           // @ts-expect-error wrong arg type
-          props.onBar(123, true);
+          props.onBar?.(123, true);
         });
       });
 
@@ -613,13 +654,13 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props["onUpdate-value"];
-        props["onUpdate-value"]("test");
+        props["onUpdate-value"]?.("test");
         props["onClick-item"];
-        props["onClick-item"](123);
+        props["onClick-item"]?.(123);
         // @ts-expect-error wrong arg type
-        props["onUpdate-value"](123);
+        props["onUpdate-value"]?.(123);
         // @ts-expect-error wrong arg type
-        props["onClick-item"]("test");
+        props["onClick-item"]?.("test");
       });
 
       it("multiple arguments", () => {
@@ -639,13 +680,13 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onChange;
-        props.onChange("test", 123, true);
+        props.onChange?.("test", 123, true);
         // @ts-expect-error missing args
-        props.onChange("test");
+        props.onChange?.("test");
         // @ts-expect-error missing args
-        props.onChange("test", 123);
+        props.onChange?.("test", 123);
         // @ts-expect-error wrong arg types
-        props.onChange(123, "test", true);
+        props.onChange?.(123, "test", true);
       });
 
       it("no args event", () => {
@@ -667,13 +708,15 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onClick;
-        props.onClick();
+        props.onClick?.();
         props.onSubmit;
-        props.onSubmit();
+        props.onSubmit?.();
+        // @ts-expect-error not optional
+        props.onClick();
         // @ts-expect-error wrong number of args
-        props.onClick(123);
+        props.onClick?.(123);
         // @ts-expect-error wrong number of args
-        props.onSubmit("test");
+        props.onSubmit?.("test");
       });
 
       it("component with props and emits", () => {
@@ -699,13 +742,17 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props["onUpdate:value"];
-        props["onUpdate:value"]("test");
+        props["onUpdate:value"]?.("test");
         props["onUpdate:count"];
+        props["onUpdate:count"]?.(123);
+        // @ts-expect-error not optional
+        props["onUpdate:value"]("test");
+        // @ts-expect-error not optional
         props["onUpdate:count"](123);
         // @ts-expect-error wrong arg type
-        props["onUpdate:value"](123);
+        props["onUpdate:value"]?.(123);
         // @ts-expect-error wrong arg type
-        props["onUpdate:count"]("test");
+        props["onUpdate:count"]?.("test");
       });
     });
 
@@ -738,9 +785,9 @@ describe('"emits" helper', () => {
         );
 
         stringProps.onUpdate;
-        stringProps.onUpdate("test");
+        stringProps.onUpdate?.("test");
         // @ts-expect-error wrong arg type
-        stringProps.onUpdate(123);
+        stringProps.onUpdate?.(123);
 
         const numberProps = testComponentProps(
           "change",
@@ -748,9 +795,9 @@ describe('"emits" helper', () => {
         );
 
         numberProps.onChange;
-        numberProps.onChange(123);
+        numberProps.onChange?.(123);
         // @ts-expect-error wrong arg type
-        numberProps.onChange("test");
+        numberProps.onChange?.("test");
       });
 
       it("ComponentEmitsToProps with generic payload types", () => {
@@ -781,15 +828,15 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onUpdate;
-        props.onUpdate({ id: 1, name: "test" });
+        props.onUpdate?.({ id: 1, name: "test" });
         props.onChange;
-        props.onChange({ id: 2, name: "test2" });
+        props.onChange?.({ id: 2, name: "test2" });
         // @ts-expect-error wrong arg type
-        props.onUpdate("test");
+        props.onUpdate?.("test");
         // @ts-expect-error wrong arg type
-        props.onChange(123);
+        props.onChange?.(123);
         // @ts-expect-error missing properties
-        props.onUpdate({ id: 1 });
+        props.onUpdate?.({ id: 1 });
       });
 
       it("ComponentEmitsToProps with multiple generic types", () => {
@@ -821,17 +868,23 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onFirst;
-        props.onFirst("test");
+        props.onFirst?.("test");
         props.onSecond;
-        props.onSecond(123);
+        props.onSecond?.(123);
         props.onThird;
+        props.onThird?.(true);
+        // @ts-expect-error not optional
+        props.onFirst("test");
+        // @ts-expect-error not optional
+        props.onSecond(123);
+        // @ts-expect-error not optional
         props.onThird(true);
         // @ts-expect-error wrong arg type
-        props.onFirst(123);
+        props.onFirst?.(123);
         // @ts-expect-error wrong arg type
-        props.onSecond("test");
+        props.onSecond?.("test");
         // @ts-expect-error wrong arg type
-        props.onThird("test");
+        props.onThird?.("test");
       });
 
       it("ComponentEmitsToProps with constrained generics", () => {
@@ -865,13 +918,15 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onUpdate;
-        props.onUpdate({ id: 1, name: "John", email: "john@example.com" });
+        props.onUpdate?.({ id: 1, name: "John", email: "john@example.com" });
         props.onDelete;
+        props.onDelete?.(1);
+        // @ts-expect-error not optional
         props.onDelete(1);
         // @ts-expect-error missing properties
-        props.onUpdate({ id: 1, name: "John" });
+        props.onUpdate?.({ id: 1, name: "John" });
         // @ts-expect-error wrong arg type
-        props.onDelete("test");
+        props.onDelete?.("test");
       });
 
       it("ComponentEmitsToProps with array generic types", () => {
@@ -899,17 +954,21 @@ describe('"emits" helper', () => {
 
         const props = {} as Props;
         props.onUpdate;
-        props.onUpdate(["a", "b", "c"]);
+        props.onUpdate?.(["a", "b", "c"]);
         props.onAdd;
-        props.onAdd("test");
+        props.onAdd?.("test");
         props.onRemove;
+        props.onRemove?.("test");
+        // @ts-expect-error not optional
+        props.onAdd("test");
+        // @ts-expect-error not optional
         props.onRemove("test");
         // @ts-expect-error wrong arg type
-        props.onUpdate([1, 2, 3]);
+        props.onUpdate?.([1, 2, 3]);
         // @ts-expect-error wrong arg type
-        props.onAdd(123);
+        props.onAdd?.(123);
         // @ts-expect-error wrong arg type
-        props.onRemove(123);
+        props.onRemove?.(123);
       });
     });
   });

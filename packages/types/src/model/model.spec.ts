@@ -99,7 +99,6 @@ describe("Model helpers", () => {
         title: string;
         count: number;
       };
-
       type Props = ModelToProps<Model>;
       type Expected = {};
 

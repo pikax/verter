@@ -19,7 +19,7 @@ type ExtractModelInfo<T, D extends string> = T extends import("vue").ModelRef<
   ? { type: undefined }
   : T extends import("vue").ModelRef<infer TT>
   ? { type: TT; name: "modelValue" }
-  : { a: T };
+  : never;
 
 /**
  * Maps an object type T of ModelRef properties to their model information.
