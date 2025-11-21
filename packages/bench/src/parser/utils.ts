@@ -97,3 +97,7 @@ export function parseStringVerter(content: string) {
   const parsed = verter.parser(content);
   return parsed;
 }
+export function parseVerterLoose(content: string) {
+  const parsed = verter.parserAcornLoose(content);
+  return parsed;
+}

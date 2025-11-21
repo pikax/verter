@@ -1,4 +1,4 @@
-import oxc, { ParserOptions } from "oxc-parser";
+import oxc, { parseSync, ParserOptions } from "oxc-parser";
 import { parse as acornLooseParse, LooseParser } from "acorn-loose";
 
 import { parse as acornParse } from "acorn";
@@ -26,13 +26,13 @@ export function parseAcorn(source: string) {
 }
 
 export function parseOXC(source: string, options?: ParserOptions) {
-  return oxc.parseSync("index.ts", source, options);
+  return parseSync("index.ts", source, options);
 }
 
 export function parseBabel(
   source: string,
   options?: Parameters<typeof babelParse>[1]
-) {
+): ReturnType<typeof babelParse> {
   return babelParse(source, options);
 }
 
