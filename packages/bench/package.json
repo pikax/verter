@@ -5,7 +5,13 @@
   "main": "index.js",
   "private": true,
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:volar": "vitest run src/__tests__/completions.volar.spec.ts",
+    "test:verter": "vitest run src/__tests__/completions.verter.spec.ts",
+    "bench": "vitest bench --config vitest.bench.config.ts",
+    "bench:watch": "vitest bench --config vitest.bench.config.ts --watch",
+    "bench:compare": "vitest bench --config vitest.bench.config.ts --reporter=verbose"
   },
   "keywords": [],
   "author": "",
@@ -17,5 +23,13 @@
     "@vue/language-core": "^3.1.4",
     "typescript": "^5.9.3",
     "vitest": "^4.0.12"
+  },
+  "devDependencies": {
+    "@typescript/server-harness": "^0.3.5",
+    "@verter/language-server": "workspace:*",
+    "@volar/language-server": "^2.4.23",
+    "@volar/test-utils": "^2.4.23",
+    "@vue/language-server": "^3.1.4",
+    "@vue/language-service": "^3.1.4"
   }
 }

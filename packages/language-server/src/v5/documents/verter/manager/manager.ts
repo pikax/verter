@@ -221,7 +221,8 @@ function createService(
   );
 
   const host: ts.LanguageServiceHost = {
-    log: (message) => console.info(`[ts] ${message}`),
+    // log: (message) =>  console.info(`[ts] ${message}`),
+    log: (message) => {},
     getCompilationSettings: () => options,
     getCurrentDirectory: () => dir,
     getDefaultLibFileName: ts.getDefaultLibFilePath,

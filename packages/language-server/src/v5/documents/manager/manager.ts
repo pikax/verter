@@ -88,7 +88,7 @@ export class DocumentManager implements Disposable {
     content: string,
     version: number = 1
   ) {
-    console.log("createDocument doc", uri);
+    // console.log("createDocument doc", uri);
     const filepath = uriToPath(uri);
     if (isVueFile(uri)) {
       const doc = VueDocument.create(uri, content, version);
@@ -145,7 +145,7 @@ export class DocumentManager implements Disposable {
     // }
     let d = this._files.get(filepath);
     if (!d) {
-      console.log("reading file sync", filepath);
+      // console.log("reading file sync", filepath);
       const c = readFileSync(filepath, { encoding });
       const uri = pathToUri(filepath);
 
