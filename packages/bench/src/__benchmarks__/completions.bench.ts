@@ -7,7 +7,7 @@ import {
 import {
   getVerterServer,
   testWorkspacePath as verterWorkspacePath,
-} from "../server/verter-server-direct";
+} from "../server/verter-server";
 import {
   parseContentWithCursor,
   createTestUri,

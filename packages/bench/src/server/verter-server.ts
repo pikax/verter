@@ -1,58 +1,38 @@
-import { createConnection } from 'vscode-languageserver/node';
-import { startServer } from '@verter/language-server/dist/server';
+import { createConnection, IPCMessageReader, IPCMessageWriter } from 'vscode-languageserver/node';
 import type { Connection } from 'vscode-languageserver';
 import * as path from 'node:path';
 import { URI } from 'vscode-uri';
 import { TextDocument } from 'vscode-languageserver-textdocument';
-import { StreamMessageReader, StreamMessageWriter } from 'vscode-languageserver/node';
-import { Duplex } from 'stream';
+import { fork, type ChildProcess } from 'node:child_process';
 
 let connection: Connection | undefined;
+let childProcess: ChildProcess | undefined;
 let documents: Map<string, TextDocument> = new Map();
 
 export const testWorkspacePath = path.resolve(__dirname, '../../test-workspace');
+const serverPath = path.resolve(__dirname, '../../../language-server/dist/server.js');
 
 export interface VerterServer {
 	connection: Connection;
 	openDocument: (uri: string, languageId: string, content: string) => Promise<TextDocument>;
 	closeDocument: (uri: string) => Promise<void>;
-	sendCompletionRequest: (uri: string, position: { line: number; character: number }) => Promise<any>;
-	sendHoverRequest: (uri: string, position: { line: number; character: number }) => Promise<any>;
-	sendDefinitionRequest: (uri: string, position: { line: number; character: number }) => Promise<any>;
+	getCompletions: (uri: string, position: { line: number; character: number }) => Promise<any>;
+	getHover: (uri: string, position: { line: number; character: number }) => Promise<any>;
+	getDefinition: (uri: string, position: { line: number; character: number }) => Promise<any>;
 }
 
 export async function getVerterServer(): Promise<VerterServer> {
 	if (!connection) {
-		// Create duplex streams for client-server communication
-		const up = new Duplex({
-			write(chunk, _encoding, callback) {
-				setImmediate(() => down.push(chunk));
-				callback();
-			},
-			read() {}
+		// Spawn the server process
+		childProcess = fork(serverPath, ['--node-ipc'], {
+			cwd: testWorkspacePath,
+			// silent: true // Uncomment to suppress server output
 		});
 
-		const down = new Duplex({
-			write(chunk, _encoding, callback) {
-				setImmediate(() => up.push(chunk));
-				callback();
-			},
-			read() {}
-		});
-
-		// Create server connection using streams
-		const serverConnection = createConnection(
-			new StreamMessageReader(up),
-			new StreamMessageWriter(down)
-		);
-
-		// Start the server with our connection
-		startServer({ connection: serverConnection });
-
-		// Create client connection
+		// Create client connection using IPC
 		const clientConnection = createConnection(
-			new StreamMessageReader(down),
-			new StreamMessageWriter(up)
+			new IPCMessageReader(childProcess),
+			new IPCMessageWriter(childProcess)
 		);
 
 		clientConnection.listen();
@@ -118,19 +98,19 @@ export async function getVerterServer(): Promise<VerterServer> {
 				textDocument: { uri }
 			});
 		},
-		sendCompletionRequest: async (uri: string, position: { line: number; character: number }) => {
+		getCompletions: async (uri: string, position: { line: number; character: number }) => {
 			return await connection!.sendRequest('textDocument/completion', {
 				textDocument: { uri },
 				position
 			});
 		},
-		sendHoverRequest: async (uri: string, position: { line: number; character: number }) => {
+		getHover: async (uri: string, position: { line: number; character: number }) => {
 			return await connection!.sendRequest('textDocument/hover', {
 				textDocument: { uri },
 				position
 			});
 		},
-		sendDefinitionRequest: async (uri: string, position: { line: number; character: number }) => {
+		getDefinition: async (uri: string, position: { line: number; character: number }) => {
 			return await connection!.sendRequest('textDocument/definition', {
 				textDocument: { uri },
 				position
@@ -150,5 +130,10 @@ export async function closeVerterServer() {
 		connection.dispose();
 		connection = undefined;
 		documents.clear();
+	}
+	
+	if (childProcess) {
+		childProcess.kill();
+		childProcess = undefined;
 	}
 }

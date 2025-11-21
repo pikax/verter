@@ -9,7 +9,7 @@
     "test:watch": "vitest",
     "test:volar": "vitest run src/__tests__/completions.volar.spec.ts",
     "test:verter": "vitest run src/__tests__/completions.verter.spec.ts",
-    "bench": "vitest bench --config vitest.bench.config.ts",
+    "bench": "vitest bench --run --config vitest.bench.config.ts",
     "bench:watch": "vitest bench --config vitest.bench.config.ts --watch",
     "bench:compare": "vitest bench --config vitest.bench.config.ts --reporter=verbose",
     "bench:report": "node scripts/generate-results.mjs"
@@ -31,9 +31,11 @@
   "devDependencies": {
     "@typescript/server-harness": "^0.3.5",
     "@verter/language-server": "workspace:*",
+    "@verter/language-shared": "workspace:*",
     "@volar/language-server": "^2.4.23",
     "@volar/test-utils": "^2.4.23",
     "@vue/language-server": "^3.1.4",
-    "@vue/language-service": "^3.1.4"
+    "@vue/language-service": "^3.1.4",
+    "vscode-languageserver": "^9.0.1"
   }
 }

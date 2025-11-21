@@ -75,6 +75,9 @@ importers:
       '@verter/language-server':
         specifier: workspace:*
         version: link:../language-server
+      '@verter/language-shared':
+        specifier: workspace:*
+        version: link:../language-shared
       '@volar/language-server':
         specifier: ^2.4.23
         version: 2.4.23
@@ -87,6 +90,9 @@ importers:
       '@vue/language-service':
         specifier: ^3.1.4
         version: 3.1.4(typescript@5.9.3)
+      vscode-languageserver:
+        specifier: ^9.0.1
+        version: 9.0.1
 
   packages/compiler:
     dependencies:

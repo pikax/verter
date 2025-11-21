@@ -1,6 +1,6 @@
 # Verter Benchmark Results
 
-**Generated:** 2025-11-21 23:13 UTC
+**Generated:** 2025-11-21 23:37 UTC
 
 ## System Information
 
@@ -36,28 +36,28 @@
 
 ```
      name          hz     min      max    mean     p75      p99     p995     p999     rme  samples
-   · verter  4,366.44  0.2098   0.8355  0.2290  0.2219   0.6546   0.7340   0.8114  ±1.15%     2184
-   · Volar     162.70  4.2195  11.9311  6.1464  7.1016  11.9311  11.9311  11.9311  ±6.12%       82
+   · verter  4,388.68  0.2115   0.8578  0.2279  0.2228   0.5974   0.6702   0.7636  ±0.96%     2195
+   · Volar     163.22  4.2214  18.2569  6.1266  6.9333  18.2569  18.2569  18.2569  ±8.61%       82
 ```
 
-**Result:** Verter is **26.84x faster** than Volar
+**Result:** Verter is **26.89x faster** than Volar
 
 ### single avatar.vue
 
 ```
      name          hz     min     max    mean     p75     p99    p995    p999     rme  samples
-   · verter  3,545.27  0.2529  2.7957  0.2821  0.2632  1.7076  2.0520  2.6750  ±3.08%     1773
-   · Volar     687.30  1.0671  6.1133  1.4550  1.3710  4.8923  5.2335  6.1133  ±5.44%      344
+   · verter  3,614.34  0.2488  2.2883  0.2767  0.2597  0.5117  1.9985  2.2691  ±2.94%     1808
+   · Volar     683.36  1.0713  8.7421  1.4633  1.3475  5.2024  6.0825  8.7421  ±6.09%      342
 ```
 
-**Result:** Verter is **5.16x faster** than Volar
+**Result:** Verter is **5.29x faster** than Volar
 
 ### single button.vue
 
 ```
      name          hz     min     max    mean     p75     p99    p995    p999     rme  samples
-   · verter  5,215.11  0.1741  1.8248  0.1918  0.1802  0.2945  1.6347  1.7833  ±2.57%     2608
-   · Volar     659.53  1.2280  4.7052  1.5162  1.4259  4.2503  4.6556  4.7052  ±4.33%      331
+   · verter  5,205.94  0.1735  1.9647  0.1921  0.1805  0.2516  1.6180  1.8661  ±2.67%     2603
+   · Volar     657.89  1.2170  5.5651  1.5200  1.4037  4.1052  5.2562  5.5651  ±4.60%      329
 ```
 
 **Result:** Verter is **7.91x faster** than Volar
@@ -66,71 +66,71 @@
 
 ```
      name           hz     min     max    mean     p75     p99    p995    p999     rme  samples
-   · verter  27,208.56  0.0321  4.5414  0.0368  0.0343  0.0707  0.0988  0.9460  ±2.59%    13626
-   · Volar    3,111.39  0.2308  4.9028  0.3214  0.2783  2.5385  2.7863  3.9169  ±5.30%     1556
+   · verter  27,943.64  0.0315  1.5693  0.0358  0.0339  0.0494  0.0738  1.0223  ±2.03%    13972
+   · Volar    3,137.46  0.2305  3.8786  0.3187  0.2744  2.4787  2.7858  3.8431  ±5.15%     1569
 ```
 
-**Result:** Verter is **8.74x faster** than Volar
+**Result:** Verter is **8.91x faster** than Volar
 
 ### single dynamicInput.vue
 
 ```
      name           hz     min     max    mean     p75     p99    p995    p999     rme  samples
-   · verter  11,602.33  0.0786  1.3972  0.0862  0.0816  0.1269  0.1609  1.2721  ±2.15%     5802
-   · Volar    1,473.31  0.5245  4.9932  0.6787  0.6340  2.7738  2.9480  4.9932  ±4.32%      737
+   · verter  11,585.33  0.0789  1.6042  0.0863  0.0820  0.1098  0.1575  1.2918  ±2.11%     5793
+   · Volar    1,431.93  0.5165  5.3523  0.6984  0.6587  2.9412  3.2422  5.3523  ±4.69%      716
 ```
 
-**Result:** Verter is **7.88x faster** than Volar
+**Result:** Verter is **8.09x faster** than Volar
 
 ### single icon.vue
 
 ```
      name          hz     min     max    mean     p75     p99    p995    p999     rme  samples
-   · verter  5,358.52  0.1665  3.5422  0.1866  0.1716  0.3214  1.9555  2.4068  ±3.40%     2680
-   · Volar   2,407.61  0.3155  4.1118  0.4154  0.3660  2.7585  3.0678  3.7428  ±5.13%     1204
+   · verter  5,451.27  0.1655  2.6221  0.1834  0.1705  0.2688  1.8760  2.3421  ±3.13%     2726
+   · Volar   2,401.45  0.3194  4.7468  0.4164  0.3597  2.6118  2.8292  3.1224  ±5.04%     1202
 ```
 
-**Result:** Verter is **2.23x faster** than Volar
+**Result:** Verter is **2.27x faster** than Volar
 
 ### single index.story.vue
 
 ```
      name        hz     min      max    mean     p75      p99     p995     p999     rme  samples
-   · verter  959.51  0.9208   4.2706  1.0422  0.9487   3.2724   3.3229   4.2706  ±3.69%      480
-   · Volar   172.86  4.3556  14.3912  5.7850  6.8736  14.3912  14.3912  14.3912  ±5.75%       87
+   · verter  985.37  0.9194   3.3985  1.0148  0.9415   2.9243   3.0191   3.3985  ±3.25%      493
+   · Volar   187.43  4.3730  11.8595  5.3354  6.0193  11.8595  11.8595  11.8595  ±4.60%       94
 ```
 
-**Result:** Verter is **5.55x faster** than Volar
+**Result:** Verter is **5.26x faster** than Volar
 
 ### single medium.vue
 
 ```
-     name           hz     min      max    mean     p75     p99    p995    p999     rme  samples
-   · verter  47,719.13  0.0184   1.0240  0.0210  0.0200  0.0320  0.0567  0.6534  ±1.53%    23860
-   · Volar    5,542.84  0.1151  10.7230  0.1804  0.1267  2.4245  2.8935  6.8568  ±9.12%     2772
+     name           hz     min     max    mean     p75     p99    p995    p999     rme  samples
+   · verter  48,943.22  0.0182  0.9861  0.0204  0.0196  0.0254  0.0329  0.6547  ±1.64%    24472
+   · Volar    5,205.03  0.1154  6.9231  0.1921  0.1507  2.5553  3.4016  4.3130  ±7.61%     2610
 ```
 
-**Result:** Verter is **8.61x faster** than Volar
+**Result:** Verter is **9.40x faster** than Volar
 
 ### single small.vue
 
 ```
      name           hz     min     max    mean     p75     p99    p995    p999     rme  samples
-   · verter  49,547.43  0.0179  0.8803  0.0202  0.0194  0.0257  0.0351  0.6687  ±1.55%    24774
-   · Volar    6,340.55  0.1194  3.7795  0.1577  0.1284  2.1819  2.3307  2.6967  ±5.50%     3171
+   · verter  50,646.48  0.0176  0.9921  0.0197  0.0189  0.0263  0.0336  0.6591  ±1.55%    25324
+   · Volar    6,278.97  0.1192  3.8666  0.1593  0.1290  2.1904  2.3170  2.7501  ±5.56%     3140
 ```
 
-**Result:** Verter is **7.81x faster** than Volar
+**Result:** Verter is **8.07x faster** than Volar
 
 ### single table.vue
 
 ```
      name        hz     min     max    mean     p75     p99    p995    p999     rme  samples
-   · verter  858.43  1.0390  4.4220  1.1649  1.0795  3.1700  3.5752  4.4220  ±3.37%      430
-   · Volar   211.38  3.9226  7.3338  4.7308  4.7485  7.1698  7.3338  7.3338  ±3.66%      106
+   · verter  880.96  1.0397  3.1792  1.1351  1.0706  3.0163  3.1472  3.1792  ±2.88%      441
+   · Volar   211.34  3.9020  7.4130  4.7318  4.7609  7.2170  7.4130  7.4130  ±3.87%      106
 ```
 
-**Result:** Verter is **4.06x faster** than Volar
+**Result:** Verter is **4.17x faster** than Volar
 
 ## completions.bench.ts
 
@@ -139,12 +139,12 @@
 ### template completion
 
 ```
-     name          hz     min     max    mean     p75     p99    p995    p999     rme  samples
-   · Volar     169.35  5.2207  8.2182  5.9048  6.0656  8.2182  8.2182  8.2182  ±2.47%       85
-   · Verter  1,349.07  0.5717  6.2244  0.7413  0.7543  1.7859  2.0620  6.2244  ±3.08%      675
+     name          hz     min      max    mean     p75      p99     p995     p999     rme  samples
+   · Volar     163.43  5.2170  11.5712  6.1190  6.3573  11.5712  11.5712  11.5712  ±4.06%       82
+   · Verter  1,226.76  0.6178   3.6863  0.8152  0.8354   1.6923   2.1063   3.6863  ±2.48%      614
 ```
 
-**Result:** Verter is **7.97x faster** than Volar
+**Result:** Verter is **7.51x faster** than Volar
 
 ## real-world-components.bench.ts
 
@@ -153,12 +153,12 @@
 ### Real world editing workflow
 
 ```
-     name                                     hz      min      max     mean      p75      p99     p995     p999     rme  samples
-   · Volar - complete editing workflow   29.9568  31.0575  35.5886  33.3814  34.7853  35.5886  35.5886  35.5886  ±2.40%       15
-   · Verter - complete editing workflow   173.04   4.9445   7.8132   5.7790   6.2670   7.8132   7.8132   7.8132  ±2.23%       87
+     name                                     hz      min      max     mean      p75      p99     p995     p999      rme  samples
+   · Volar - complete editing workflow   30.3553  28.8633  36.7468  32.9431  34.6228  36.7468  36.7468  36.7468   ±3.44%       16
+   · Verter - complete editing workflow   296.99   2.4268  42.9822   3.3671   3.3393  11.0282  42.9822  42.9822  ±16.18%      149
 ```
 
-**Result:** Verter is **5.78x faster** than Volar
+**Result:** Verter is **9.78x faster** than Volar
 
 
 ---
@@ -199,15 +199,15 @@ pnpm bench:compare
 
 | Benchmark | Verter | Volar | Performance |
 |-----------|--------|-------|-------------|
-| single ContactInformation.vue | 4,366.44 ops/sec | 162.7 ops/sec | ✅ 26.84x faster |
-| single avatar.vue | 3,545.27 ops/sec | 687.3 ops/sec | ✅ 5.16x faster |
-| single button.vue | 5,215.11 ops/sec | 659.53 ops/sec | ✅ 7.91x faster |
-| single card.vue | 27,208.56 ops/sec | 3,111.39 ops/sec | ✅ 8.74x faster |
-| single dynamicInput.vue | 11,602.33 ops/sec | 1,473.31 ops/sec | ✅ 7.88x faster |
-| single icon.vue | 5,358.52 ops/sec | 2,407.61 ops/sec | ✅ 2.23x faster |
-| single index.story.vue | 959.51 ops/sec | 172.86 ops/sec | ✅ 5.55x faster |
-| single medium.vue | 47,719.13 ops/sec | 5,542.84 ops/sec | ✅ 8.61x faster |
-| single small.vue | 49,547.43 ops/sec | 6,340.55 ops/sec | ✅ 7.81x faster |
-| single table.vue | 858.43 ops/sec | 211.38 ops/sec | ✅ 4.06x faster |
-| template completion | 1,349.07 ops/sec | 169.35 ops/sec | ✅ 7.97x faster |
-| Real world editing workflow | 173.04 ops/sec | 29.96 ops/sec | ✅ 5.78x faster |
+| single ContactInformation.vue | 4,388.68 ops/sec | 163.22 ops/sec | ✅ 26.89x faster |
+| single avatar.vue | 3,614.34 ops/sec | 683.36 ops/sec | ✅ 5.29x faster |
+| single button.vue | 5,205.94 ops/sec | 657.89 ops/sec | ✅ 7.91x faster |
+| single card.vue | 27,943.64 ops/sec | 3,137.46 ops/sec | ✅ 8.91x faster |
+| single dynamicInput.vue | 11,585.33 ops/sec | 1,431.93 ops/sec | ✅ 8.09x faster |
+| single icon.vue | 5,451.27 ops/sec | 2,401.45 ops/sec | ✅ 2.27x faster |
+| single index.story.vue | 985.37 ops/sec | 187.43 ops/sec | ✅ 5.26x faster |
+| single medium.vue | 48,943.22 ops/sec | 5,205.03 ops/sec | ✅ 9.40x faster |
+| single small.vue | 50,646.48 ops/sec | 6,278.97 ops/sec | ✅ 8.07x faster |
+| single table.vue | 880.96 ops/sec | 211.34 ops/sec | ✅ 4.17x faster |
+| template completion | 1,226.76 ops/sec | 163.43 ops/sec | ✅ 7.51x faster |
+| Real world editing workflow | 296.99 ops/sec | 30.36 ops/sec | ✅ 9.78x faster |
