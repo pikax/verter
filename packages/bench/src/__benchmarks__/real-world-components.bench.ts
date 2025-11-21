@@ -501,4 +501,110 @@ describe("Real World Components Benchmarks", () => {
       await verterServer.getCompletions(uriVerter, position);
     });
   });
+
+  describe.only("Real world editing workflow", async () => {
+    const volarServer = await getVolarServer();
+    const verterServer = await getVerterServer();
+    const filePath = "components/button.vue";
+    const fileContent = fs.readFileSync(
+      path.resolve(volarWorkspacePath, filePath),
+      "utf-8"
+    );
+
+    bench("Volar - complete editing workflow", async () => {
+      const uri = URI.file(path.resolve(volarWorkspacePath, filePath)).toString();
+      
+      // 1. Open document
+      let doc = await volarServer.open(uri, "vue", fileContent);
+      
+      // 2. Get completions after "props." (simulating typing)
+      const searchText = "props.label";
+      const offset = fileContent.indexOf(searchText);
+      const targetOffset = fileContent.indexOf("props.", offset) + "props.".length;
+      await volarServer.tsserver.message({
+        seq: volarServer.nextSeq(),
+        command: "completions",
+        arguments: {
+          file: URI.parse(doc.uri).fsPath,
+          position: targetOffset,
+        },
+      });
+      
+      // 3. Simulate file edit by closing and reopening with modified content
+      await volarServer.close(doc.uri);
+      const edit1Offset = fileContent.indexOf("const color") - 1;
+      const edit1Content = fileContent.slice(0, edit1Offset) + "\n  // Edit 1\n" + fileContent.slice(edit1Offset);
+      doc = await volarServer.open(uri, "vue", edit1Content);
+      
+      // 4. Get completions after "action?." (simulating more typing)
+      const actionOffset = fileContent.indexOf("action?.label");
+      const actionTargetOffset = fileContent.indexOf("action?.", actionOffset) + "action?.".length;
+      await volarServer.tsserver.message({
+        seq: volarServer.nextSeq(),
+        command: "completions",
+        arguments: {
+          file: URI.parse(doc.uri).fsPath,
+          position: actionTargetOffset,
+        },
+      });
+      
+      // 5. Simulate another edit
+      await volarServer.close(doc.uri);
+      const edit2Offset = edit1Content.indexOf("const buttonClasses") - 1;
+      const edit2Content = edit1Content.slice(0, edit2Offset) + "\n  // Edit 2\n" + edit1Content.slice(edit2Offset);
+      doc = await volarServer.open(uri, "vue", edit2Content);
+      
+      // 6. Get completions one more time
+      await volarServer.tsserver.message({
+        seq: volarServer.nextSeq(),
+        command: "completions",
+        arguments: {
+          file: URI.parse(doc.uri).fsPath,
+          position: targetOffset,
+        },
+      });
+      
+      // 7. Close document
+      await volarServer.close(doc.uri);
+    });
+
+    bench("Verter - complete editing workflow", async () => {
+      const uri = URI.file(path.resolve(verterWorkspacePath, filePath)).toString();
+      
+      // 1. Open document
+      let doc = await verterServer.openDocument(uri, "vue", fileContent);
+      
+      // 2. Get completions after "props." (simulating typing)
+      const searchText = "props.label";
+      const offset = fileContent.indexOf(searchText);
+      const targetOffset = fileContent.indexOf("props.", offset) + "props.".length;
+      let position = doc.positionAt(targetOffset);
+      await verterServer.getCompletions(uri, position);
+      
+      // 3. Simulate file edit by closing and reopening with modified content
+      await verterServer.closeDocument(uri);
+      const edit1Offset = fileContent.indexOf("const color") - 1;
+      const edit1Content = fileContent.slice(0, edit1Offset) + "\n  // Edit 1\n" + fileContent.slice(edit1Offset);
+      doc = await verterServer.openDocument(uri, "vue", edit1Content);
+      
+      // 4. Get completions after "action?." (simulating more typing)
+      const actionOffset = fileContent.indexOf("action?.label");
+      const actionTargetOffset = fileContent.indexOf("action?.", actionOffset) + "action?.".length;
+      position = doc.positionAt(actionTargetOffset);
+      await verterServer.getCompletions(uri, position);
+      
+      // 5. Simulate another edit
+      await verterServer.closeDocument(uri);
+      const edit2Offset = edit1Content.indexOf("const buttonClasses") - 1;
+      const edit2Content = edit1Content.slice(0, edit2Offset) + "\n  // Edit 2\n" + edit1Content.slice(edit2Offset);
+      doc = await verterServer.openDocument(uri, "vue", edit2Content);
+      
+      // 6. Get completions one more time
+      position = doc.positionAt(targetOffset);
+      await verterServer.getCompletions(uri, position);
+      
+      // 7. Close document
+      await verterServer.closeDocument(uri);
+    });
+  });
 });

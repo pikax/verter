@@ -11,7 +11,8 @@
     "test:verter": "vitest run src/__tests__/completions.verter.spec.ts",
     "bench": "vitest bench --config vitest.bench.config.ts",
     "bench:watch": "vitest bench --config vitest.bench.config.ts --watch",
-    "bench:compare": "vitest bench --config vitest.bench.config.ts --reporter=verbose"
+    "bench:compare": "vitest bench --config vitest.bench.config.ts --reporter=verbose",
+    "bench:report": "node scripts/generate-results.mjs"
   },
   "keywords": [],
   "author": "",

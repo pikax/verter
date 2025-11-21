@@ -16,8 +16,8 @@ describe("benchmark parser", () => {
       parseStringVolar(file).embeddedCodes.flatMap((x) => x.embeddedCodes);
     });
 
-    bench("verter AcornLoose", () => {
-      parseVerterLoose(file).isTS;
-    });
+    // bench("verter AcornLoose", () => {
+    //   parseVerterLoose(file).isTS;
+    // });
   });
 });
