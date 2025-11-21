@@ -121,5 +121,25 @@ describe("components helpers", () => {
       assertType<ExpectedSig>({} as typeof DefineOptions);
       assertType<typeof DefineOptions>({} as ExpectedSig);
     });
+
+      it("preserves name type", () => {
+        type Options = ReturnType<typeof DefineOptions<{ name: "MyComponent" }, "MyComponent", never>>;
+        assertType<Options>({} as { name: "MyComponent" });
+      });
+
+      it("preserves inheritAttrs type", () => {
+        type Options = ReturnType<typeof DefineOptions<{ inheritAttrs: false }, never, false>>;
+        assertType<Options>({} as { inheritAttrs: false });
+      });
+
+      it("preserves both name and inheritAttrs", () => {
+        type Options = ReturnType<typeof DefineOptions<{ name: "MyComponent"; inheritAttrs: false }, "MyComponent", false>>;
+        assertType<Options>({} as { name: "MyComponent"; inheritAttrs: false });
+      });
+
+      it("allows empty object", () => {
+        type Options = ReturnType<typeof DefineOptions<{}, never, never>>;
+        assertType<Options>({} as {});
+      });
   });
 });

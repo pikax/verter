@@ -3,3 +3,7 @@ export * from "./emits";
 export * from "./model";
 export * from "./components";
 export * from "./slots";
+export * from "./props";
+export * from "./setup";
+export * from "./name";
+export * from "./instance";
