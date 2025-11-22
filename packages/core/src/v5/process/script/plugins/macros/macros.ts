@@ -141,27 +141,80 @@ export const MacrosPlugin = definePlugin({
             // });
 
             // move argument to boxed
-            const call = item.parent.init;
-            const argumentStart = call.arguments[0].start;
-            const argumentEnd = call.arguments[call.arguments.length - 1].end;
+            // const call = item.parent.init;
+            // const argumentStart = call.arguments[0].start;
+            // const argumentEnd = call.arguments[call.arguments.length - 1].end;
 
-            const boxedName = ctx.prefix("withDefaults_Boxed");
-            const boxName = ctx.prefix("withDefaults_Box" as AvailableExports);
-            ctx.items.push(
-              createHelperImport(["withDefaults_Box"], ctx.prefix)
+            // const boxedName = ctx.prefix("withDefaults_Boxed");
+            // const boxName = ctx.prefix("withDefaults_Box" as AvailableExports);
+            // ctx.items.push(
+            //   createHelperImport(["withDefaults_Box"], ctx.prefix)
+            // );
+
+            // s.appendLeft(
+            //   item.declarator.start!,
+            //   `;const ${boxedName}=${boxName}(`
+            // );
+            // // s.appendLeft(argumentStart, `${boxedName}`);
+            // s.appendRight(item.declarator.start!, ");");
+            // s.appendLeft(
+            //   argumentStart,
+            //   [1, 2].map((_, i) => `${boxedName}[${i}]`).join(",")
+            // );
+            // s.move(argumentStart, argumentEnd, item.declarator.start!);
+
+            // let move;
+            // const definePropsCall = item.parent.init.arguments[0];
+            // if (definePropsCall.type === "CallExpression") {
+            //   move = boxMacro(definePropsCall, item.declarator.start!, s, ctx);
+            // }
+            // const move2 = boxMacro(
+            //   item.parent.init,
+            //   item.declarator.start!,
+            //   s,
+            //   ctx
+            // );
+
+            let splitFromOffset = -1;
+            let splitToOffset = -1;
+
+            const ops = [];
+
+            if (defineProps.type === "CallExpression") {
+              splitFromOffset = defineProps.typeArguments
+                ? defineProps.typeArguments.start
+                : defineProps.arguments[0].start;
+              splitToOffset = defineProps.typeArguments
+                ? defineProps.typeArguments.end
+                : defineProps.arguments[defineProps.arguments.length - 1].end;
+
+              ops.push(boxMacro(defineProps, item.declarator.start!, s, ctx));
+            }
+
+            ops.push(
+              boxMacro(
+                item.parent.init,
+                item.declarator.start!,
+                s,
+                ctx,
+                splitFromOffset !== -1 && splitToOffset !== -1
+                  ? { from: splitFromOffset, to: splitToOffset }
+                  : null
+              )
             );
 
-            s.appendLeft(
-              item.declarator.start!,
-              `;const ${boxedName}=${boxName}(`
-            );
-            // s.appendLeft(argumentStart, `${boxedName}`);
-            s.appendRight(item.declarator.start!, ");");
-            s.appendLeft(
-              argumentStart,
-              [1, 2].map((_, i) => `${boxedName}[${i}]`).join(",")
-            );
-            s.move(argumentStart, argumentEnd, item.declarator.start!);
+            for (const op of ops) {
+              op?.start();
+            }
+
+            for (const op of ops) {
+              op?.end();
+            }
+            for (const op of ops) {
+              op?.move();
+            }
+
+            this.hasWithDefaults = true;
           } else {
             if (macroName === "defineProps" && this.hasWithDefaults) {
               return;
@@ -172,6 +225,7 @@ export const MacrosPlugin = definePlugin({
               macro: macroName,
               node: item.parent,
             });
+            boxMacro(item.parent.init, item.declarator.start!, s, ctx);
           }
         } else {
           ctx.items.push({
@@ -188,7 +242,6 @@ export const MacrosPlugin = definePlugin({
     }
   },
   transformFunctionCall(item, s, ctx) {
-    return;
     if (
       !Macros.has(item.name) ||
       ctx.items.some(
@@ -352,4 +405,110 @@ function getModelName(node: CallExpression) {
       : "modelValue";
 
   return modelName;
+}
+
+function boxInfo(macroName: string, ctx: ScriptContext) {
+  const boxedName = ctx.prefix(`${macroName}_Boxed`);
+  const name = `${macroName}_Box` as AvailableExports;
+  const boxName = ctx.prefix(name);
+  return { boxedName, boxName, name };
+}
+
+function boxMacro(
+  caller: CallExpression,
+  toOffset: number,
+  s: any,
+  ctx: ScriptContext,
+  split: { from: number; to: number } | null = null
+) {
+  const name: AvailableExports | undefined =
+    caller.callee.type === "Identifier"
+      ? (caller.callee.name as AvailableExports)
+      : undefined;
+  if (!name) {
+    console.warn("boxMacro: callee is not an identifier", caller.callee);
+    return;
+  }
+  const { boxedName, boxName } = boxInfo(name, ctx);
+  ctx.items.push(
+    createHelperImport([`${name}_Box` as AvailableExports], ctx.prefix)
+  );
+
+  if (caller.typeArguments) {
+    const args = caller.typeArguments;
+  } else {
+    const args = caller.arguments;
+    const multiple = args.length > 1;
+    const start = args[0].start;
+    const end = args[args.length - 1].end;
+
+    const doStart = (method = "appendLeft") => {
+      s[method](toOffset, `;const ${boxedName}=${boxName}(`);
+
+      s[method](
+        start!,
+        multiple
+          ? [1, 2].map((_, i) => `${boxedName}[${i}]`).join(",")
+          : boxedName
+      );
+    };
+    const doEnd = (method = "appendRight") => {
+      s.appendRight(toOffset, `);`);
+      // s.prependLeft(end, `);`);
+    };
+
+    // s.prependLeft(toOffset, `;const ${boxedName}=${boxName}(`);
+    // s.prependRight(toOffset, `);`);
+    // s.prependLeft(
+    //   start!,
+    //   multiple
+    //     ? [1, 2].map((_, i) => `${boxedName}[${i}]`).join(",")
+    //     : boxedName
+    // );
+
+    const doMove = () => {
+      if (split) {
+        s.move(start!, split.from, toOffset);
+        s.move(split.to, end!, toOffset);
+      } else {
+        s.move(start!, end!, toOffset);
+      }
+    };
+
+    const move = () => {
+      doStart();
+      doEnd();
+      doMove();
+    };
+    move.start = doStart;
+    move.end = doEnd;
+    move.move = doMove;
+
+    return move;
+  }
+
+  // const isType = caller.typeArguments !== undefined;
+  // const moveStart = isType
+  //   ? caller.typeArguments!.start
+  //   : caller.arguments[0].start;
+  // const moveEnd = isType
+  //   ? caller.typeArguments!.end
+  //   : caller.arguments[caller.arguments.length - 1].end;
+
+  // const multiple = isType
+  //   ? caller.typeArguments!.params.length > 1
+  //   : caller.arguments.length > 1;
+
+  // s.appendLeft(
+  //   toOffset,
+  //   `;${isType ? "type" : "const"} ${boxedName}=${
+  //     multiple ? "[" : ""
+  //   }${boxName}(`
+  // );
+  // s.appendRight(toOffset, ");");
+  // s.appendLeft(
+  //   caller.start!,
+  //   [1, 2].map((_, i) => `${boxedName}[${i}]`).join(",")
+  // );
+  // s.move(caller.start!, caller.end!, toOffset);
 }

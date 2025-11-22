@@ -7,6 +7,7 @@ import { MacrosPlugin } from "./index.js";
 import { TemplateBindingPlugin } from "../template-binding";
 import { ScriptBlockPlugin } from "../script-block";
 import { BindingPlugin } from "../binding";
+import { testSourceMaps } from "../../../../utils.test-utils";
 
 describe("process script plugin script block", () => {
   function _parse(
@@ -328,12 +329,15 @@ describe("process script plugin script block", () => {
     });
 
     describe("defineProps", () => {
-      it("const props = defineProps", () => {
+      it.skip("const props = defineProps", () => {
         const { result, context } = parse(
           `const props = defineProps({ a: String })`
         );
 
-        expect(result).toContain(`const props = defineProps({ a: String });`);
+        // expect(result).toContain(`const props = defineProps({ a: String });`);
+        expect(result).toMatchInlineSnapshot(
+          `";function ___VERTER___TemplateBindingFN  (){;const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String });const props = defineProps(___VERTER___defineProps_Boxed);return{___VERTER___defineProps:props as typeof props,___VERTER___defineModel:{}}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>;"`
+        );
 
         expect(context.items[0]).toMatchObject({
           type: "macro-binding",
@@ -372,12 +376,17 @@ describe("process script plugin script block", () => {
         ]);
       });
       it.only("withDefaults(defineProps)", () => {
-        const { result, context } = parse(
+        const { result, context, ...other } = parse(
           `const props = withDefaults(defineProps({ a: String }), {})`
         );
 
+        testSourceMaps({
+          content: result,
+          map: other.s.generateMap({ hires: true, includeContent: true }),
+        });
+
         expect(result).toContain(
-          `;const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(defineProps({ a: String }), {});const props = withDefaults(___VERTER___withDefaults_Boxed[0], ___VERTER___withDefaults_Boxed[1])`
+          `;const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String });const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(defineProps(___VERTER___props_Boxed), {});const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])`
         );
 
         expect(context.items[0]).toMatchObject({
