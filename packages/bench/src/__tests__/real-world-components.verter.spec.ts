@@ -3,7 +3,8 @@ import { URI } from "vscode-uri";
 import {
   getVerterServer,
   testWorkspacePath,
-} from "../server/verter-server-direct";
+  closeVerterServer,
+} from "../server/verter-server";
 import {
   getCompletionLabels,
 } from "../helpers/test-helpers";
@@ -38,6 +39,7 @@ afterEach(async () => {
     for (const document of openedDocuments) {
       await server.closeDocument(document.uri);
     }
+    await closeVerterServer();
   } catch (e) {
     // Ignore cleanup errors
   }

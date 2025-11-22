@@ -6,7 +6,9 @@ This package contains tests and benchmarks for Vue language services, comparing 
 
 **Latest benchmark results:** See [results.md](./results.md) for detailed performance comparisons.
 
-**Quick Summary:** Verter demonstrates 5-9x faster completions in real-world Vue development scenarios.
+**Quick Summary:** Verter demonstrates faster completions in real-world Vue development scenarios.
+
+**⚠️ Important:** Both implementations use LSP+IPC architecture for fair comparison. Parser benchmarks measure different scopes (AST parsing vs. virtual code generation).
 
 ## Structure
 
@@ -17,8 +19,10 @@ src/
   reporters/
     markdown-reporter.ts               - Custom reporter for benchmark results (WIP)
   server/
-    volar-server.ts                    - Language server setup helper for Volar
-    verter-server-direct.ts            - Direct API setup helper for Verter
+    volar-server-lsp.ts                - LSP server setup for Volar (used in benchmarks)
+    volar-server.ts                    - Alternative Volar server setup
+    verter-server.ts                   - LSP server setup for Verter (used in benchmarks)
+    verter-server-direct.ts            - Direct API setup for Verter (not used in benchmarks)
   __tests__/
     completions.volar.spec.ts          - Completion tests for Volar (9 passing)
     completions.verter.spec.ts         - Completion tests for Verter (5 passing, 4 skipped)
@@ -88,8 +92,22 @@ pnpm bench:compare
 
 ## Benchmark Categories
 
+### Parser Benchmarks (`parser/parser.bench.ts`)
+**Purpose:** Measure Vue file parsing performance
+
+**What's measured:**
+- **Verter**: Lightweight AST parsing to extract script/template/style blocks
+- **Volar**: Full virtual code generation (transforms Vue SFC into TypeScript virtual files)
+
+**Important Note:** These measure different scopes of work:
+- Verter performs minimal parsing for structure identification
+- Volar performs full transformation into virtual TypeScript code
+- Results are informative but not directly comparable due to different processing depths
+
 ### Basic Completions (`completions.bench.ts`)
 Simple template completion performance in a minimal component.
+
+**Both use LSP+IPC architecture for fair comparison.**
 
 ### Real-World Components (`real-world-components.bench.ts`)
 Comprehensive benchmarks using actual Vue components:
@@ -102,6 +120,8 @@ Comprehensive benchmarks using actual Vue components:
    - Simulates actual developer workflow
 
 This benchmark is the most representative of real-world performance, testing the complete interaction pattern developers experience during coding.
+
+**Both use LSP+IPC architecture for fair comparison.**
 
 ## Test Categories
 

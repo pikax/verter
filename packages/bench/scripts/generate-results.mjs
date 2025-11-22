@@ -177,7 +177,8 @@ function parseBenchmarkOutput(output) {
     markdown += `>\n`;
     markdown += `> These benchmarks are **simulated tests** and may not fully represent real-world performance characteristics:\n`;
     markdown += `>\n`;
-    markdown += `> - The Volar implementation used here is a test harness and may introduce overhead not present in production VS Code environments\n`;
+    markdown += `> - **Both systems use LSP+IPC architecture** for fair comparison in completion benchmarks\n`;
+    markdown += `> - **Parser benchmarks measure different scopes**: Verter does AST parsing, Volar does full virtual code generation\n`;
     markdown += `> - **Verter is in heavy development** and currently lacks many features required for real-world usage (template completions, Vue directives, HTML tag completions, etc.)\n`;
     markdown += `> - These results primarily demonstrate TypeScript completion performance within Vue files\n`;
     markdown += `> - Production performance will vary based on project size, configuration, and usage patterns\n`;
@@ -211,8 +212,9 @@ function extractSuiteName(line) {
 
 function getBenchmarkDescription(file) {
   const descriptions = {
-    "completions.bench.ts": "Tests Vue.js template completion performance in a simple component.",
-    "real-world-components.bench.ts": "Measures completion performance in real-world Vue components with multiple edits and completion requests, simulating actual development workflows.",
+    "parser.bench.ts": "Vue file parsing performance comparison. Note: Verter parses to AST while Volar generates full virtual TypeScript code.",
+    "completions.bench.ts": "Tests Vue.js template completion performance in a simple component. Both use LSP+IPC architecture.",
+    "real-world-components.bench.ts": "Measures completion performance in real-world Vue components with multiple edits and completion requests, simulating actual development workflows. Both use LSP+IPC architecture.",
   };
   return descriptions[file] || "Benchmark comparison between Volar and Verter.";
 }

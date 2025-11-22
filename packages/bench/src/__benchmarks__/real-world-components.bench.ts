@@ -502,7 +502,7 @@ describe("Real World Components Benchmarks", () => {
     });
   });
 
-  describe.only("Real world editing workflow", async () => {
+  describe("Real world editing workflow", async () => {
     const volarServer = await getVolarServer();
     const verterServer = await getVerterServer();
     const filePath = "components/button.vue";

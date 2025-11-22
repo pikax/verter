@@ -3,7 +3,7 @@ import { URI } from "vscode-uri";
 import {
   getLanguageServer as getVolarServer,
   testWorkspacePath as volarWorkspacePath,
-} from "../server/volar-server";
+} from "../server/volar-server-lsp";
 import {
   getVerterServer,
   testWorkspacePath as verterWorkspacePath,
@@ -140,7 +140,7 @@ import componentFor|
     );
   });
 
-  describe.only("template completion", async () => {
+  describe("template completion", async () => {
     const volarServer = await getVolarServer();
     const verterServer = await getVerterServer();
     const testContent = `<template>
@@ -211,8 +211,6 @@ user.value.|
           },
         });
 
-        console.log(r);
-
         await volarServer.close(doc.uri);
       },
       { time: 5000 }
@@ -227,7 +225,6 @@ user.value.|
 
         await verterServer.openDocument(uri, "vue", content);
         const r = await verterServer.getCompletions(uri, position);
-        console.log(r);
         await verterServer.closeDocument(uri);
       },
       { time: 5000 }

@@ -323,7 +323,6 @@ export function startServer(options: LsConnectionOption = {}) {
         }
       }
 
-      console.log("found docs", subDocs);
 
       const cssProp = items.find(
         (x) => x.kind === CompletionItemKind.Function && x.label === "var()"

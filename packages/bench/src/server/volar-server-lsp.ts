@@ -208,9 +208,15 @@ export async function getLanguageServer() {
 
             await responsePromise;
 
-            // We don't open in Vue LS here because we want to simulate "fresh" state where only TS knows about the file initially?
-            // Wait, in the previous edit I removed openInMemoryDocument from the 'open' function in volar-server.ts.
-            // So I should do the same here.
+            // Send didOpen to Vue LS
+            await connection!.sendNotification('textDocument/didOpen', {
+                textDocument: {
+                    uri,
+                    languageId,
+                    version: 1,
+                    text: content
+                }
+            });
             
             return TextDocument.create(uri, languageId, 1, content);
         },
@@ -230,6 +236,11 @@ export async function getLanguageServer() {
             });
 
             await responsePromise;
+
+            // Send didClose to Vue LS
+            await connection!.sendNotification('textDocument/didClose', {
+                textDocument: { uri }
+            });
         },
     };
 }

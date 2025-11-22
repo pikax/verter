@@ -4,7 +4,7 @@ import {
   getVerterServer,
   testWorkspacePath,
   closeVerterServer,
-} from "../server/verter-server-direct";
+} from "../server/verter-server";
 import type { TextDocument } from "vscode-languageserver-textdocument";
 import {
   parseContentWithCursor,

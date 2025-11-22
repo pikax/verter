@@ -5,7 +5,7 @@ import {
   getLanguageServer,
   testWorkspacePath,
   closeLanguageServer,
-} from "../server/volar-server";
+} from "../server/volar-server-lsp";
 import {
   parseContentWithCursor,
   createTestUri,
@@ -231,17 +231,9 @@ async function requestCompletionItemToVueServer(
     fileName,
     languageId,
     content
-  );
-  let completion = completions.items.find((item) => item.label === itemLabel);
+  ) as any;
+  const completion = completions?.items?.find((item: any) => item.label === itemLabel);
   expect(completion).toBeDefined();
-
-  if (completion!.data) {
-    const server = await getLanguageServer();
-    completion = await server.vueserver.sendCompletionResolveRequest(
-      completion!
-    );
-    expect(completion).toBeDefined();
-  }
 
   return completion!;
 }
