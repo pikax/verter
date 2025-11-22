@@ -28,7 +28,9 @@
     "glob": "^11.0.3",
     "rollup": "^4.44.2",
     "rollup-plugin-esbuild": "^6.2.1",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "vscode-jsonrpc": "^8.2.1",
+    "vscode-languageserver-protocol": "^3.17.5"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

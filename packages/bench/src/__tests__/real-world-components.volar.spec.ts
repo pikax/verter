@@ -1,7 +1,7 @@
 import type { TextDocument } from "@volar/language-server";
 import { afterEach, beforeAll, expect, test, describe } from "vitest";
 import { URI } from "vscode-uri";
-import { getLanguageServer, testWorkspacePath } from "../server/volar-server";
+import { getLanguageServer, testWorkspacePath, closeLanguageServer } from "../server/volar-server-lsp";
 import { getCompletionLabels } from "../helpers/test-helpers";
 import * as fs from "fs";
 import * as path from "path";
@@ -33,6 +33,7 @@ afterEach(async () => {
     await server.close(document.uri);
   }
   openedDocuments.length = 0;
+  await closeLanguageServer();
 });
 
 describe("Real World Components - button.vue", () => {

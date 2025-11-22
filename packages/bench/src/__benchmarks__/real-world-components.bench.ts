@@ -3,7 +3,7 @@ import { URI } from "vscode-uri";
 import {
   getLanguageServer as getVolarServer,
   testWorkspacePath as volarWorkspacePath,
-} from "../server/volar-server";
+} from "../server/volar-server-lsp";
 import {
   getVerterServer,
   testWorkspacePath as verterWorkspacePath,

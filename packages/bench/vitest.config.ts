@@ -5,6 +5,6 @@ export default defineConfig({
     // ...
     globals: true,
     benchmark: {},
-    testTimeout: 200000,
+    // testTimeout: 200000,
   },
 });
