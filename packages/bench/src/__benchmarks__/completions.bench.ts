@@ -10,10 +10,7 @@ import {
   testWorkspacePath as verterWorkspacePath,
   closeVerterServer,
 } from "../server/verter-server";
-import {
-  parseContentWithCursor,
-  createTestUri,
-} from "../helpers/test-helpers";
+import { parseContentWithCursor, createTestUri } from "../helpers/test-helpers";
 
 describe("Completions Benchmark: Volar vs Verter", () => {
   let volarServer: Awaited<ReturnType<typeof getVolarServer>>;
@@ -39,33 +36,50 @@ describe("Completions Benchmark: Volar vs Verter", () => {
         </script>
       `;
 
-    bench("Volar - Script setup completions", async () => {
-      const fileName = "fixture.vue";
-      const { content, position, offset } = parseContentWithCursor(testContent);
-      const uri = createTestUri(volarWorkspacePath, fileName);
+    bench(
+      "Verter - Script setup completions",
+      async () => {
+        const fileName = "fixture.vue";
+        const { content, position } = parseContentWithCursor(testContent);
+        const uri = createTestUri(verterWorkspacePath, fileName);
 
-      const doc = await volarServer.open(uri, "vue", content);
-      await volarServer.tsserver.message({
-        seq: volarServer.nextSeq(),
-        command: "completions",
-        arguments: {
-          file: URI.parse(doc.uri).fsPath,
-          position: offset,
+        await verterServer.openDocument(uri, "vue", content);
+        await verterServer.getCompletions(uri, position);
+        await verterServer.closeDocument(uri);
+      },
+      {
+        async setup() {
+          verterServer = await getVerterServer();
         },
-      });
+      }
+    );
 
-      await volarServer.close(doc.uri);
-    });
+    bench(
+      "Volar - Script setup completions",
+      async () => {
+        const fileName = "fixture.vue";
+        const { content, position, offset } =
+          parseContentWithCursor(testContent);
+        const uri = createTestUri(volarWorkspacePath, fileName);
 
-    bench("Verter - Script setup completions", async () => {
-      const fileName = "fixture.vue";
-      const { content, position } = parseContentWithCursor(testContent);
-      const uri = createTestUri(verterWorkspacePath, fileName);
+        const doc = await volarServer.open(uri, "vue", content);
+        await volarServer.tsserver.message({
+          seq: volarServer.nextSeq(),
+          command: "completions",
+          arguments: {
+            file: URI.parse(doc.uri).fsPath,
+            position: offset,
+          },
+        });
 
-      await verterServer.openDocument(uri, "vue", content);
-      await verterServer.getCompletions(uri, position);
-      await verterServer.closeDocument(uri);
-    });
+        await volarServer.close(doc.uri);
+      },
+      {
+        async setup() {
+          volarServer = await getVolarServer();
+        },
+      }
+    );
   });
 
   describe("TypeScript completions in script", () => {
@@ -78,28 +92,6 @@ describe("Completions Benchmark: Volar vs Verter", () => {
       `;
 
     bench(
-      "Volar - TypeScript completions",
-      async () => {
-        const fileName = "fixture.vue";
-        const { content, position, offset } = parseContentWithCursor(testContent);
-        const uri = createTestUri(volarWorkspacePath, fileName);
-
-        const doc = await volarServer.open(uri, "vue", content);
-        await volarServer.tsserver.message({
-          seq: volarServer.nextSeq(),
-          command: "completions",
-          arguments: {
-            file: URI.parse(doc.uri).fsPath,
-            position: offset,
-          },
-        });
-
-        await volarServer.close(doc.uri);
-      },
-      { time: 5000 }
-    );
-
-    bench(
       "Verter - TypeScript completions",
       async () => {
         const fileName = "fixture.vue";
@@ -110,22 +102,19 @@ describe("Completions Benchmark: Volar vs Verter", () => {
         await verterServer.getCompletions(uri, position);
         await verterServer.closeDocument(uri);
       },
-      { time: 5000 }
+      {
+        async setup() {
+          verterServer = await getVerterServer();
+        },
+      }
     );
-  });
-
-  describe("Auto import component", () => {
-    const testContent = `
-        <script setup lang="ts">
-        import componentFor|
-        </script>
-      `;
 
     bench(
-      "Volar - Auto import component",
+      "Volar - TypeScript completions",
       async () => {
-        const fileName = "tsconfigProject/fixture.vue";
-        const { content, position, offset } = parseContentWithCursor(testContent);
+        const fileName = "fixture.vue";
+        const { content, position, offset } =
+          parseContentWithCursor(testContent);
         const uri = createTestUri(volarWorkspacePath, fileName);
 
         const doc = await volarServer.open(uri, "vue", content);
@@ -140,8 +129,20 @@ describe("Completions Benchmark: Volar vs Verter", () => {
 
         await volarServer.close(doc.uri);
       },
-      { time: 5000 }
+      {
+        async setup() {
+          volarServer = await getVolarServer();
+        },
+      }
     );
+  });
+
+  describe("Auto import component", () => {
+    const testContent = `
+        <script setup lang="ts">
+        import componentFor|
+        </script>
+      `;
 
     bench(
       "Verter - Auto import component",
@@ -154,7 +155,38 @@ describe("Completions Benchmark: Volar vs Verter", () => {
         await verterServer.getCompletions(uri, position);
         await verterServer.closeDocument(uri);
       },
-      { time: 5000 }
+      {
+        async setup() {
+          verterServer = await getVerterServer();
+        },
+      }
+    );
+
+    bench(
+      "Volar - Auto import component",
+      async () => {
+        const fileName = "tsconfigProject/fixture.vue";
+        const { content, position, offset } =
+          parseContentWithCursor(testContent);
+        const uri = createTestUri(volarWorkspacePath, fileName);
+
+        const doc = await volarServer.open(uri, "vue", content);
+        await volarServer.tsserver.message({
+          seq: volarServer.nextSeq(),
+          command: "completions",
+          arguments: {
+            file: URI.parse(doc.uri).fsPath,
+            position: offset,
+          },
+        });
+
+        await volarServer.close(doc.uri);
+      },
+      {
+        async setup() {
+          volarServer = await getVolarServer();
+        },
+      }
     );
   });
 
@@ -167,32 +199,53 @@ describe("Completions Benchmark: Volar vs Verter", () => {
         const message = 'Hello';
 </script>`;
 
-    bench("Volar", async () => {
-      const fileName = "fixtureTemplate.vue";
-      const { content, position, offset } = parseContentWithCursor(testContent);
-      const uri = createTestUri(volarWorkspacePath, fileName);
+    bench(
+      "Verter",
+      async () => {
+        const fileName = "fixture.vue";
+        const { content, position } = parseContentWithCursor(testContent);
+        const uri = createTestUri(verterWorkspacePath, fileName);
 
-      const doc = await volarServer.open(URI.parse(uri).fsPath, "vue", content);
-      await volarServer.tsserver.message({
-        seq: volarServer.nextSeq(),
-        command: "completions",
-        arguments: {
-          file: URI.parse(doc.uri).fsPath,
-          position: offset,
+        await verterServer.openDocument(uri, "vue", content);
+        await verterServer.getCompletions(uri, position);
+        await verterServer.closeDocument(uri);
+      },
+      {
+        async setup() {
+          verterServer = await getVerterServer();
         },
-      });
-      await volarServer.close(doc.uri);
-    });
+      }
+    );
 
-    bench("Verter", async () => {
-      const fileName = "fixture.vue";
-      const { content, position } = parseContentWithCursor(testContent);
-      const uri = createTestUri(verterWorkspacePath, fileName);
+    bench(
+      "Volar",
+      async () => {
+        const fileName = "fixtureTemplate.vue";
+        const { content, position, offset } =
+          parseContentWithCursor(testContent);
+        const uri = createTestUri(volarWorkspacePath, fileName);
 
-      await verterServer.openDocument(uri, "vue", content);
-      await verterServer.getCompletions(uri, position);
-      await verterServer.closeDocument(uri);
-    });
+        const doc = await volarServer.open(
+          URI.parse(uri).fsPath,
+          "vue",
+          content
+        );
+        await volarServer.tsserver.message({
+          seq: volarServer.nextSeq(),
+          command: "completions",
+          arguments: {
+            file: URI.parse(doc.uri).fsPath,
+            position: offset,
+          },
+        });
+        await volarServer.close(doc.uri);
+      },
+      {
+        async setup() {
+          volarServer = await getVolarServer();
+        },
+      }
+    );
   });
 
   describe("Complex TypeScript inference", () => {
@@ -210,10 +263,29 @@ user.value.|
 </script>`;
 
     bench(
+      "Verter - Complex TypeScript inference",
+      async () => {
+        const fileName = "fixture.vue";
+        const { content, position } = parseContentWithCursor(testContent);
+        const uri = createTestUri(verterWorkspacePath, fileName);
+
+        await verterServer.openDocument(uri, "vue", content);
+        const r = await verterServer.getCompletions(uri, position);
+        await verterServer.closeDocument(uri);
+      },
+      {
+        async setup() {
+          verterServer = await getVerterServer();
+        },
+      }
+    );
+
+    bench(
       "Volar - Complex TypeScript inference",
       async () => {
         const fileName = "fixture.vue";
-        const { content, position, offset } = parseContentWithCursor(testContent);
+        const { content, position, offset } =
+          parseContentWithCursor(testContent);
         const uri = createTestUri(volarWorkspacePath, fileName);
 
         const doc = await volarServer.open(uri, "vue", content);
@@ -228,57 +300,15 @@ user.value.|
 
         await volarServer.close(doc.uri);
       },
-      { time: 5000 }
-    );
-
-    bench(
-      "Verter - Complex TypeScript inference",
-      async () => {
-        const fileName = "fixture.vue";
-        const { content, position } = parseContentWithCursor(testContent);
-        const uri = createTestUri(verterWorkspacePath, fileName);
-
-        await verterServer.openDocument(uri, "vue", content);
-        const r = await verterServer.getCompletions(uri, position);
-        await verterServer.closeDocument(uri);
-      },
-      { time: 5000 }
+      {
+        async setup() {
+          volarServer = await getVolarServer();
+        },
+      }
     );
   });
 
   describe("Multiple file operations", () => {
-
-    bench(
-      "Volar - Open and complete 5 files",
-      async () => {
-        const files = Array.from({ length: 5 }, (_, i) => ({
-          name: `file${i}.vue`,
-          content: `<script setup lang="ts">
-const msg${i} = 'Hello ${i}'
-msg${i}.|
-</script>`,
-        }));
-
-        for (const file of files) {
-          const { content, position, offset } = parseContentWithCursor(file.content);
-          const uri = createTestUri(volarWorkspacePath, file.name);
-
-          const doc = await volarServer.open(uri, "vue", content);
-          await volarServer.tsserver.message({
-            seq: volarServer.nextSeq(),
-            command: "completions",
-            arguments: {
-              file: URI.parse(doc.uri).fsPath,
-              position: offset,
-            },
-          });
-
-          await volarServer.close(doc.uri);
-        }
-      },
-      { time: 10000 }
-    );
-
     bench(
       "Verter - Open and complete 5 files",
       async () => {
@@ -299,7 +329,48 @@ msg${i}.|
           await verterServer.closeDocument(uri);
         }
       },
-      { time: 10000 }
+      {
+        async setup() {
+          verterServer = await getVerterServer();
+        },
+      }
+    );
+
+    bench(
+      "Volar - Open and complete 5 files",
+      async () => {
+        const files = Array.from({ length: 5 }, (_, i) => ({
+          name: `file${i}.vue`,
+          content: `<script setup lang="ts">
+const msg${i} = 'Hello ${i}'
+msg${i}.|
+</script>`,
+        }));
+
+        for (const file of files) {
+          const { content, position, offset } = parseContentWithCursor(
+            file.content
+          );
+          const uri = createTestUri(volarWorkspacePath, file.name);
+
+          const doc = await volarServer.open(uri, "vue", content);
+          await volarServer.tsserver.message({
+            seq: volarServer.nextSeq(),
+            command: "completions",
+            arguments: {
+              file: URI.parse(doc.uri).fsPath,
+              position: offset,
+            },
+          });
+
+          await volarServer.close(doc.uri);
+        }
+      },
+      {
+        async setup() {
+          volarServer = await getVolarServer();
+        },
+      }
     );
   });
 });

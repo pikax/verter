@@ -90,16 +90,9 @@ export async function getVerterServer(): Promise<VerterServer> {
     });
 
     await clientConnection.sendNotification("initialized", {});
+
     // Give the server a moment to fully initialize
-    await Promise.race([
-      new Promise<void>((resolve) => {
-        clientConnection.onNotification("serverReady", () => {
-          console.log("Verter server initialized");
-          resolve();
-        });
-      }),
-      new Promise((resolve) => setTimeout(resolve, 5000)), // Timeout after 5 seconds
-    ]);
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     // Replace the connection with clientConnection for sending requests
     connection = clientConnection;
@@ -111,27 +104,22 @@ export async function getVerterServer(): Promise<VerterServer> {
       const document = TextDocument.create(uri, languageId, 1, content);
       documents.set(uri, document);
 
-      await connection!.sendNotification("textDocument/didOpen", {
+      await connection!.sendNotification('textDocument/didOpen', {
         textDocument: {
           uri,
           languageId,
           version: document.version,
-          text: content,
-        },
+          text: content
+        }
       });
 
       // Some server flows rely on an explicit didChange after open to populate caches
-      await connection!.sendNotification("textDocument/didChange", {
+      await connection!.sendNotification('textDocument/didChange', {
         textDocument: { uri, version: document.version + 1 },
-        contentChanges: [{ text: content }],
+        contentChanges: [{ text: content }]
       });
 
-      return TextDocument.create(
-        uri,
-        languageId,
-        document.version + 1,
-        content
-      );
+      return TextDocument.create(uri, languageId, document.version + 1, content);
     },
     closeDocument: async (uri: string) => {
       documents.delete(uri);

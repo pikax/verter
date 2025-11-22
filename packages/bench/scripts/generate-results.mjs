@@ -285,7 +285,6 @@ function parseBenchmarkOutput(output) {
     markdown += `> These benchmarks are **simulated tests** and may not fully represent real-world performance characteristics:\n`;
     markdown += `>\n`;
     markdown += `> - **Both systems use LSP+IPC architecture** for fair comparison in completion benchmarks\n`;
-    markdown += `> - **Parser benchmarks measure different scopes**: Verter does AST parsing, Volar does full virtual code generation\n`;
     markdown += `> - **Verter is in heavy development** and currently lacks many features required for real-world usage (template completions, Vue directives, HTML tag completions, etc.)\n`;
     markdown += `> - These results primarily demonstrate TypeScript completion performance within Vue files\n`;
     markdown += `> - Production performance will vary based on project size, configuration, and usage patterns\n`;
