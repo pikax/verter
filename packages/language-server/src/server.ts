@@ -232,7 +232,6 @@ export function startServer(options: LsConnectionOption = {}) {
 
   connection.onCompletion(async (params) => {
     try {
-      console.log("oncompletion doc", params.textDocument);
       const uri = params.textDocument.uri;
 
       const doc = documentManager.getDocument(uri);
@@ -271,8 +270,6 @@ export function startServer(options: LsConnectionOption = {}) {
                 },
               }
             );
-
-            console.log("resoilved", r);
 
             items.push(...r.items);
 
@@ -322,7 +319,6 @@ export function startServer(options: LsConnectionOption = {}) {
             }
         }
       }
-
 
       const cssProp = items.find(
         (x) => x.kind === CompletionItemKind.Function && x.label === "var()"
@@ -467,7 +463,7 @@ export function startServer(options: LsConnectionOption = {}) {
 
     const ts = verterManager.getTsService(doc.uri);
 
-  // @ts-expect-error TODO fix this with proper types
+    // @ts-expect-error TODO fix this with proper types
     const h = ts._host;
 
     let s = "";
@@ -531,6 +527,7 @@ ${x.getText()}
 
   documentManager.listen(connection);
   connection.listen();
+  connection.sendNotification("serverReady", {});
 }
 
 startServer();

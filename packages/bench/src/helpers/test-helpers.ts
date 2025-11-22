@@ -77,6 +77,22 @@ export function assertCompletionExists(
  * Get completion labels
  */
 export function getCompletionLabels(completions: CompletionList | any): string[] {
+  if(completions == null) {
+    return [];
+  }
   const items = completions.items || completions;
   return items.map((item: any) => item.label || item.name);
+}
+
+/**
+ * Normalize unknown errors into a printable message
+ */
+export function toErrorMessage(e: unknown): string {
+  if (e instanceof Error) return e.stack || e.message || String(e.name);
+  try {
+    if (typeof e === 'string') return e;
+    return JSON.stringify(e);
+  } catch {
+    return Object.prototype.toString.call(e);
+  }
 }

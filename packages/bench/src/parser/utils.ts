@@ -101,3 +101,45 @@ export function parseVerterLoose(content: string) {
   const parsed = verter.parserAcornLoose(content);
   return parsed;
 }
+export function processVerterScript(result: verter.ParserResult) {
+  // Simulate Verter processing
+  result.blocks.forEach((block) => {
+    switch (block.type) {
+      case "script":
+        const b = block as verter.ParsedBlockScript;
+        if (b.isMain) {
+          verter.buildBundle(b.result?.items as verter.ScriptItem[], {
+            ...result,
+            block,
+            filename: "test.vue",
+            override: true,
+            blockNameResolver: (name) => name + "_bundle.ts",
+          });
+
+          verter.buildOptions(
+            (block.result?.items as verter.ScriptItem[]) ?? [],
+            {
+              ...result,
+              block,
+              filename: "test.vue",
+              override: true,
+              blockNameResolver: (name) => name + "_options.ts",
+            }
+          );
+        }
+        // verter.processScriptBlock(block);
+        break;
+      case "template":
+        const t = block as verter.ParsedBlockTemplate;
+        verter.buildTemplate(t.result?.items ?? [], {
+          ...result,
+          block,
+          filename: "test.vue",
+          override: true,
+          blockNameResolver: (name) => name + "_template.ts",
+        });
+        break;
+    }
+  });
+  return result;
+}
