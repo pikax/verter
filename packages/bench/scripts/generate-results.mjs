@@ -20,11 +20,15 @@ function runBenchmarks() {
   console.log("🏃 Running benchmarks...\n");
 
   return new Promise((resolve, reject) => {
-    const vitest = spawn("pnpm", ["vitest", "bench", "--run", "--reporter=verbose"], {
-      cwd: path.resolve(__dirname, ".."),
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: process.platform === 'win32',
-    });
+    const vitest = spawn(
+      "pnpm",
+      ["vitest", "bench", "--run", "--reporter=verbose"],
+      {
+        cwd: path.resolve(__dirname, ".."),
+        stdio: ["ignore", "pipe", "pipe"],
+        shell: process.platform === "win32",
+      }
+    );
 
     let buffer = "";
     let processedSuites = 0;
@@ -50,20 +54,20 @@ function runBenchmarks() {
       for (const line of lines) {
         // Strip ANSI codes for matching
         const cleanLine = line.replace(/\x1b\[[0-9;]*m/g, "");
-        
+
         // Try to detect total from lines like "❯ src/parser/parser.bench.ts 74/80"
         const totalMatch = cleanLine.match(/(\d+)\/(\d+)\s*$/);
         if (totalMatch && !totalSuites) {
           totalSuites = parseInt(totalMatch[2], 10);
         }
-        
+
         // Real-time detection of suite line: starts with optional spaces then ✓ and ends with ms
         if (/^\s*✓\s+.*\b\d+ms\b/.test(cleanLine)) {
           if (!seenSuiteLines.has(cleanLine)) {
             seenSuiteLines.add(cleanLine);
             processedSuites++;
             suiteTimes.push(Date.now());
-            
+
             // Extract suite name if possible (everything after the last >)
             let suiteName = "";
             const parts = cleanLine.split(">");
@@ -74,11 +78,12 @@ function runBenchmarks() {
             // Calculate elapsed and estimate remaining
             const elapsed = Date.now() - startTime;
             const elapsedStr = formatTime(elapsed);
-            
+
             let remainingStr = "";
             if (totalSuites && processedSuites > 1) {
               const avgTimePerSuite = elapsed / processedSuites;
-              const remaining = avgTimePerSuite * (totalSuites - processedSuites);
+              const remaining =
+                avgTimePerSuite * (totalSuites - processedSuites);
               remainingStr = ` | ETA: ${formatTime(remaining)}`;
             }
 
@@ -93,7 +98,9 @@ function runBenchmarks() {
               // Unknown total, show spinner-style progress
               filled = processedSuites % barLength;
             }
-            const bar = `[${"#".repeat(filled)}${"-".repeat(barLength - filled)}]`;
+            const bar = `[${"#".repeat(filled)}${"-".repeat(
+              barLength - filled
+            )}]`;
 
             // Format total display
             const totalDisplay = totalSuites ? `/${totalSuites}` : "";
@@ -101,7 +108,9 @@ function runBenchmarks() {
 
             // Clear line and write progress
             const suffix = suiteName ? ` - ${suiteName}` : "";
-            process.stdout.write(`\r\x1b[K${bar} ${processedSuites}${totalDisplay}${pctDisplay} | ${elapsedStr}${remainingStr}${suffix}`);
+            process.stdout.write(
+              `\r\x1b[K${bar} ${processedSuites}${totalDisplay}${pctDisplay} | ${elapsedStr}${remainingStr}${suffix}`
+            );
           }
         }
       }
@@ -129,8 +138,8 @@ function runBenchmarks() {
 
 function getSystemInfo() {
   const cpus = os.cpus();
-  const totalMemory = (os.totalmem() / (1024 ** 3)).toFixed(2);
-  
+  const totalMemory = (os.totalmem() / 1024 ** 3).toFixed(2);
+
   return {
     platform: os.platform(),
     arch: os.arch(),
@@ -145,19 +154,19 @@ function parseBenchmarkOutput(output) {
   // Strip ANSI color codes
   const cleaned = output.replace(/\x1b\[[0-9;]*m/g, "");
   const lines = cleaned.split("\n");
-  
+
   let markdown = `# Verter Benchmark Results\n\n`;
 
   const now = new Date();
   const year = now.getUTCFullYear();
-  const month = String(now.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(now.getUTCDate()).padStart(2, '0');
-  const hours = String(now.getUTCHours()).padStart(2, '0');
-  const minutes = String(now.getUTCMinutes()).padStart(2, '0');
+  const month = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(now.getUTCDate()).padStart(2, "0");
+  const hours = String(now.getUTCHours()).padStart(2, "0");
+  const minutes = String(now.getUTCMinutes()).padStart(2, "0");
   const date = `${year}-${month}-${day} ${hours}:${minutes} UTC`;
 
   markdown += `**Generated:** ${date}\n\n`;
-  
+
   // Add system information
   const sysInfo = getSystemInfo();
   markdown += `## System Information\n\n`;
@@ -178,7 +187,7 @@ function parseBenchmarkOutput(output) {
     markdown += `| ${name} | ${version || "(not found)"} |\n`;
   }
   markdown += `\n`;
-  
+
   markdown += `---\n\n`;
 
   // Group benchmarks by suite and collect all comparisons
@@ -193,7 +202,11 @@ function parseBenchmarkOutput(output) {
     const line = lines[i];
 
     // Detect suite headers (lines start with ✓ and end with duration like 1234ms)
-    if (line.includes("✓") && /\b\d+ms\b/.test(line) && !line.trim().startsWith("·")) {
+    if (
+      line.includes("✓") &&
+      /\b\d+ms\b/.test(line) &&
+      !line.trim().startsWith("·")
+    ) {
       if (benchmarkData.length > 0 && currentSuite) {
         if (!benchmarkGroups.has(currentFile)) {
           benchmarkGroups.set(currentFile, []);
@@ -209,7 +222,7 @@ function parseBenchmarkOutput(output) {
       if (fileMatch) {
         currentFile = fileMatch[1];
       } else if (!currentFile) {
-        currentFile = 'unknown.bench.ts';
+        currentFile = "unknown.bench.ts";
       }
 
       currentSuite = extractSuiteName(line);
@@ -218,7 +231,11 @@ function parseBenchmarkOutput(output) {
     }
 
     // Collect benchmark data lines (starts with · or contains column headers)
-    if (inBenchmark && (line.trim().startsWith("·") || line.includes("name") && line.includes("hz"))) {
+    if (
+      inBenchmark &&
+      (line.trim().startsWith("·") ||
+        (line.includes("name") && line.includes("hz")))
+    ) {
       benchmarkData.push(line);
     }
 
@@ -256,7 +273,12 @@ function parseBenchmarkOutput(output) {
 
   // Format grouped benchmarks with progress indicators
   for (const [file, benchmarks] of benchmarkGroups) {
-    const result = formatBenchmarkFile(file, benchmarks, suiteIndexRef, totalSuites);
+    const result = formatBenchmarkFile(
+      file,
+      benchmarks,
+      suiteIndexRef,
+      totalSuites
+    );
     markdown += result.markdown;
     allComparisons.push(...result.comparisons);
   }
@@ -276,9 +298,9 @@ function parseBenchmarkOutput(output) {
     markdown += `# Run benchmarks with verbose output\n`;
     markdown += `pnpm bench:compare\n`;
     markdown += `\`\`\`\n\n`;
-    
+
     markdown += `---\n\n## Performance Summary\n\n`;
-    
+
     // Add disclaimer
     markdown += `> **⚠️ Important Disclaimer**\n`;
     markdown += `>\n`;
@@ -290,18 +312,23 @@ function parseBenchmarkOutput(output) {
     markdown += `> - Production performance will vary based on project size, configuration, and usage patterns\n`;
     markdown += `>\n`;
     markdown += `> Use these benchmarks as **relative indicators** rather than absolute performance guarantees.\n\n`;
-    
-    markdown += `| Benchmark | Verter | Volar | Performance |\n`;
-    markdown += `|-----------|--------|-------|-------------|\n`;
-    
+
+    markdown += `| File | Benchmark | Verter | Volar | Performance |\n`;
+    markdown += `|------|-----------|--------|-------|-------------|\n`;
+
     for (const comp of allComparisons) {
-      const verterOps = comp.verterHz.toLocaleString('en-US', { maximumFractionDigits: 2 });
-      const volarOps = comp.volarHz.toLocaleString('en-US', { maximumFractionDigits: 2 });
-      const perfIndicator = comp.ratio > 1 
-        ? `✅ ${comp.ratio.toFixed(2)}x faster`
-        : `⚠️ ${(1 / comp.ratio).toFixed(2)}x slower`;
-      
-      markdown += `| ${comp.name} | ${verterOps} ops/sec | ${volarOps} ops/sec | ${perfIndicator} |\n`;
+      const verterOps = comp.verterHz.toLocaleString("en-US", {
+        maximumFractionDigits: 2,
+      });
+      const volarOps = comp.volarHz.toLocaleString("en-US", {
+        maximumFractionDigits: 2,
+      });
+      const perfIndicator =
+        comp.ratio > 1
+          ? `✅ ${comp.ratio.toFixed(2)}x faster`
+          : `⚠️ ${(1 / comp.ratio).toFixed(2)}x slower`;
+
+      markdown += `| ${comp.file} | ${comp.name} | ${verterOps} ops/sec | ${volarOps} ops/sec | ${perfIndicator} |\n`;
     }
   }
 
@@ -318,13 +345,16 @@ function extractSuiteName(line) {
 
 function getBenchmarkDescription(file) {
   const descriptions = {
-    "parser.bench.ts": "Vue file parsing and processing performance comparison with three distinct benchmarks:\n\n" +
+    "parser.bench.ts":
+      "Vue file parsing and processing performance comparison with three distinct benchmarks:\n\n" +
       "- **parser**: Raw parsing to AST (Verter) vs full virtual code generation (Volar)\n" +
       "- **process**: Processing parsed AST into usable structures (Verter) vs extracting embedded codes (Volar)\n" +
       "- **parser + process**: End-to-end parsing and processing combined\n\n" +
       "Note: Verter uses a two-stage approach (parse AST → process), while Volar generates virtual TypeScript code directly during parsing.",
-    "completions.bench.ts": "Tests Vue.js template completion performance in a simple component. Both use LSP+IPC architecture.",
-    "real-world-components.bench.ts": "Measures completion performance in real-world Vue components with multiple edits and completion requests, simulating actual development workflows. Both use LSP+IPC architecture.",
+    "completions.bench.ts":
+      "Tests Vue.js template completion performance in a simple component. Both use LSP+IPC architecture.",
+    "real-world-components.bench.ts":
+      "Measures completion performance in real-world Vue components with multiple edits and completion requests, simulating actual development workflows. Both use LSP+IPC architecture.",
   };
   return descriptions[file] || "Benchmark comparison between Volar and Verter.";
 }
@@ -333,7 +363,7 @@ function formatBenchmarkFile(file, benchmarks, suiteIndexRef, totalSuites) {
   let section = `## ${file}\n\n`;
   section += `**Description:** ${getBenchmarkDescription(file)}\n\n`;
   // File-level progress summary
-  const uniqueNames = new Set(benchmarks.map(b => b.suite));
+  const uniqueNames = new Set(benchmarks.map((b) => b.suite));
   section += `Suites: ${uniqueNames.size}\n\n`;
 
   const comparisons = [];
@@ -353,9 +383,11 @@ function formatBenchmarkFile(file, benchmarks, suiteIndexRef, totalSuites) {
     const pct = Math.round((current / totalSuites) * 100);
     const barLength = 20;
     const filled = Math.round((current / totalSuites) * barLength);
-    const bar = `[${"#".repeat(filled)}${"-".repeat(barLength - filled)}] ${current}/${totalSuites} (${pct}%)`;
+    const bar = `[${"#".repeat(filled)}${"-".repeat(
+      barLength - filled
+    )}] ${current}/${totalSuites} (${pct}%)`;
     section += `### ${bench.suite} ${bar}\n\n`;
-    
+
     // Add context for parser.bench.ts suites
     if (file === "parser.bench.ts") {
       const suiteContext = getParserSuiteContext(bench.suite);
@@ -363,8 +395,8 @@ function formatBenchmarkFile(file, benchmarks, suiteIndexRef, totalSuites) {
         section += `${suiteContext}\n\n`;
       }
     }
-    
-    const result = formatBenchmarkTable(bench.suite, bench.data);
+
+    const result = formatBenchmarkTable(file, bench.suite, bench.data);
     section += result.markdown;
     if (result.comparison) {
       comparisons.push(result.comparison);
@@ -376,36 +408,47 @@ function formatBenchmarkFile(file, benchmarks, suiteIndexRef, totalSuites) {
 
 function getParserSuiteContext(suiteName) {
   const lower = suiteName.toLowerCase();
-  
+
   if (lower.includes("parser + process")) {
     return "**Full Pipeline:** Complete end-to-end operation including both parsing and processing steps.";
   } else if (lower.includes("process") && !lower.includes("parser")) {
-    return "**Processing Only:** Takes already-parsed AST and processes it into usable structures. " +
-           "Verter extracts script blocks and metadata; Volar extracts embedded code segments.";
+    return (
+      "**Processing Only:** Takes already-parsed AST and processes it into usable structures. " +
+      "Verter extracts script blocks and metadata; Volar extracts embedded code segments."
+    );
   } else if (lower.includes("parser")) {
-    return "**Parsing Only:** Raw parsing performance. " +
-           "Verter parses Vue files into AST using OXC parser; Volar generates complete virtual TypeScript code.";
+    return (
+      "**Parsing Only:** Raw parsing performance. " +
+      "Verter parses Vue files into AST using OXC parser; Volar generates complete virtual TypeScript code."
+    );
   }
-  
+
   return null;
 }
 
-function formatBenchmarkTable(suiteName, data) {
+function formatBenchmarkTable(file, suiteName, data) {
   if (data.length === 0) return { markdown: "", comparison: null };
 
   let section = `\`\`\`\n`;
-  
+
   for (const line of data) {
     section += line + "\n";
   }
-  
+
   section += `\`\`\`\n\n`;
 
   let comparison = null;
 
   // Try to extract and format comparison - check for both naming patterns
-  const volarLine = data.find((l) => (l.includes("Volar") || l.includes("volar")) && !l.includes("name"));
-  const verterLine = data.find((l) => (l.includes("Verter") || l.includes("verter")) && !l.includes("name") && !l.includes("AcornLoose"));
+  const volarLine = data.find(
+    (l) => (l.includes("Volar") || l.includes("volar")) && !l.includes("name")
+  );
+  const verterLine = data.find(
+    (l) =>
+      (l.includes("Verter") || l.includes("verter")) &&
+      !l.includes("name") &&
+      !l.includes("AcornLoose")
+  );
 
   if (volarLine && verterLine) {
     const volarHz = extractHz(volarLine);
@@ -414,14 +457,17 @@ function formatBenchmarkTable(suiteName, data) {
     if (volarHz && verterHz) {
       const ratio = verterHz / volarHz;
       section += `**Result:** `;
-      
+
       if (ratio > 1) {
         section += `Verter is **${ratio.toFixed(2)}x faster** than Volar\n\n`;
       } else {
-        section += `Volar is **${(1 / ratio).toFixed(2)}x faster** than Verter\n\n`;
+        section += `Volar is **${(1 / ratio).toFixed(
+          2
+        )}x faster** than Verter\n\n`;
       }
 
       comparison = {
+        file,
         name: suiteName,
         verterHz,
         volarHz,
@@ -451,7 +497,7 @@ function getLibraryVersions() {
     "vitest",
     "@vue/language-server",
     "@vue/language-core",
-    "@vue/language-service"
+    "@vue/language-service",
   ];
 
   const results = [];
