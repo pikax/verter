@@ -113,7 +113,10 @@ export async function getVerterServer(): Promise<VerterServer> {
         }
       });
 
-      // Some server flows rely on an explicit didChange after open to populate caches
+      // NOTE: Verter's language server may rely on an explicit didChange after open
+      // to populate caches. Volar's LSP setup doesn't send this extra notification.
+      // This could give Verter a slight advantage in benchmarks by pre-warming caches.
+      // If this becomes problematic for fair comparison, consider removing this.
       await connection!.sendNotification('textDocument/didChange', {
         textDocument: { uri, version: document.version + 1 },
         contentChanges: [{ text: content }]

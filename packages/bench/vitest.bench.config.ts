@@ -6,6 +6,7 @@ export default defineConfig({
     benchmark: {
       include: ["src/__benchmarks__/**/*.bench.ts"],
       exclude: ["node_modules", "dist"],
+      outputJson: "benchmark-results.json",
     },
   },
 });
