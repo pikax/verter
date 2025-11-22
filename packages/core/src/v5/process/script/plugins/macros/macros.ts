@@ -1,10 +1,15 @@
 import { definePlugin, ScriptContext } from "../../types";
 import type { CallExpression } from "../../../../parser/ast/types";
-import { ProcessContext, ProcessItemType } from "../../../types";
+import {
+  ProcessContext,
+  ProcessItemImport,
+  ProcessItemType,
+} from "../../../types";
 import { generateTypeDeclaration, generateTypeString } from "../utils";
 import type { AvailableExports } from "@verter/types/string";
+import { createHelperImport } from "../../../utils";
 
-const Macros = new Set([
+const MacrosNames = [
   "defineProps",
   "defineEmits",
   "defineExpose",
@@ -14,15 +19,10 @@ const Macros = new Set([
   "withDefaults",
 
   // useSlots()/useAttrs()
-]);
+] as const;
+type MacroNames = (typeof MacrosNames)[number];
 
-const HelperLocation = "$verter/types$";
-
-const MacroDependencies = new Map<string, AvailableExports[]>([
-  ["defineEmits", ["EmitsToProps"]],
-  ["defineModel", ["ModelToProps", "ModelToEmits"]],
-  ["defineOptions", ["DefineOptions"]],
-]);
+const Macros = new Set<string>(MacrosNames);
 
 export const MacrosPlugin = definePlugin({
   name: "VerterMacro",
@@ -32,6 +32,8 @@ export const MacrosPlugin = definePlugin({
   },
 
   post(s, ctx) {
+    // not needed anymore
+    return;
     const isTS = ctx.block.lang.startsWith("ts");
     const macroBindinds = ctx.items.filter(
       (x) => x.type === ProcessItemType.MacroBinding
@@ -122,14 +124,14 @@ export const MacrosPlugin = definePlugin({
                 node: defineProps,
               });
             }
-            // prepend props
-            // @ts-expect-error TODO improve this, this shouldn't be necessary
-            s.appendLeft(item.declarator.start, `const ${pName}=`);
-            s.appendLeft(defineProps.end, ";");
-            s.appendRight(defineProps.end, pName);
-            // @ts-expect-error TODO improve this, this shouldn't be necessary
-            s.move(defineProps.start, defineProps.end, item.declarator.start);
-            this.hasWithDefaults = true;
+            // // prepend props
+            // // @ts-expect-error TODO improve this, this shouldn't be necessary
+            // s.appendLeft(item.declarator.start, `const ${pName}=`);
+            // s.appendLeft(defineProps.end, ";");
+            // s.appendRight(defineProps.end, pName);
+            // // @ts-expect-error TODO improve this, this shouldn't be necessary
+            // s.move(defineProps.start, defineProps.end, item.declarator.start);
+            // this.hasWithDefaults = true;
 
             // ctx.items.push({
             //   type: ProcessItemType.MacroBinding,
@@ -137,6 +139,29 @@ export const MacrosPlugin = definePlugin({
             //   macro: "defineProps",
             //   node: item.parent,
             // });
+
+            // move argument to boxed
+            const call = item.parent.init;
+            const argumentStart = call.arguments[0].start;
+            const argumentEnd = call.arguments[call.arguments.length - 1].end;
+
+            const boxedName = ctx.prefix("withDefaults_Boxed");
+            const boxName = ctx.prefix("withDefaults_Box" as AvailableExports);
+            ctx.items.push(
+              createHelperImport(["withDefaults_Box"], ctx.prefix)
+            );
+
+            s.appendLeft(
+              item.declarator.start!,
+              `;const ${boxedName}=${boxName}(`
+            );
+            // s.appendLeft(argumentStart, `${boxedName}`);
+            s.appendRight(item.declarator.start!, ");");
+            s.appendLeft(
+              argumentStart,
+              [1, 2].map((_, i) => `${boxedName}[${i}]`).join(",")
+            );
+            s.move(argumentStart, argumentEnd, item.declarator.start!);
           } else {
             if (macroName === "defineProps" && this.hasWithDefaults) {
               return;
@@ -163,6 +188,7 @@ export const MacrosPlugin = definePlugin({
     }
   },
   transformFunctionCall(item, s, ctx) {
+    return;
     if (
       !Macros.has(item.name) ||
       ctx.items.some(
@@ -260,16 +286,18 @@ export const MacrosPlugin = definePlugin({
 });
 
 function addMacroDependencies(macroName: string, ctx: ScriptContext) {
-  if (!ctx.block.lang.startsWith("ts")) return;
-  const dependencies = MacroDependencies.get(macroName);
-  if (dependencies) {
-    ctx.items.push({
-      type: ProcessItemType.Import,
-      asType: true,
-      from: HelperLocation,
-      items: dependencies.map((dep) => ({ name: ctx.prefix(dep) })),
-    });
-  }
+  return createHelperImport([`${macroName as MacroNames}_Box`], ctx.prefix);
+  // if (!ctx.block.lang.startsWith("ts")) return;
+
+  // const dependencies = MacroDependencies.get(macroName);
+  // if (dependencies) {
+  //   ctx.items.push({
+  //     type: ProcessItemType.Import,
+  //     asType: true,
+  //     from: HelperLocation,
+  //     items: dependencies.map((dep) => ({ name: ctx.prefix(dep) })),
+  //   });
+  // }
 }
 
 function handleDefineOptions(node: CallExpression, ctx: ProcessContext) {

@@ -1,22 +1,18 @@
 import {
   createMacroReturn,
   CreateMacroReturn,
-  ExtractMacroProps,
   ExtractPropsFromMacro,
-  ExtractTemplateRef,
   MacroOptionsToOptions,
   MacroToEmitValue,
   MacroToModelRecord,
-  MacroToModelType,
   NormalisedMacroReturn,
   NormaliseMacroReturn,
-  OmitMacroReturn,
   SlotsToSlotType,
 } from "../setup";
 import { MakePublicProps, MakeInternalProps } from "../props";
-import { ModelToEmits, ModelToModelInfo, ModelToProps } from "../model";
-import { ModelRef, useTemplateRef } from "vue";
+import { ModelToEmits, ModelToProps } from "../model";
 import { EmitsToProps } from "../emits";
+import { defineComponent } from "vue";
 
 export type CreateTypedInternalInstanceFromNormalisedMacro<
   T extends NormalisedMacroReturn<any>,

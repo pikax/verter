@@ -2,22 +2,31 @@
 // Do not edit manually
 
 // Local copies of Vue utility types
-type Data = Record<string, unknown>;
-type DefaultFactory<T> = (props: Data) => T | null | undefined;
-type DefineModelOptions<T = any, G = T, S = T> = {
-    get?: (v: T) => G;
-    set?: (v: S) => any;
+export type Data = Record<string, unknown>;
+export type DefaultFactory<T> = (props: Data) => T | null | undefined;
+export type DefineModelOptions<T = any, G = T, S = T> = {
+  get?: (v: T) => G;
+  set?: (v: S) => any;
 };
-type InferDefault<P, T> = ((props: P) => T & {}) | (T extends NativeType ? T : never);
-type InferDefaults<T> = {
-    [K in keyof T]?: InferDefault<T, T[K]>;
+export type InferDefault<P, T> =
+  | ((props: P) => T & {})
+  | (T extends NativeType ? T : never);
+export type InferDefaults<T> = {
+  [K in keyof T]?: InferDefault<T, T[K]>;
 };
-type NativeType = null | undefined | number | string | boolean | symbol | Function;
-interface PropOptions<T = any, D = T> {
-    type?: import("vue").PropType<T> | true | null;
-    required?: boolean;
-    default?: D | DefaultFactory<D> | null | undefined | object;
-    validator?(value: unknown, props: Data): boolean;
+export type NativeType =
+  | null
+  | undefined
+  | number
+  | string
+  | boolean
+  | symbol
+  | Function;
+export interface PropOptions<T = any, D = T> {
+  type?: import("vue").PropType<T> | true | null;
+  required?: boolean;
+  default?: D | DefaultFactory<D> | null | undefined | object;
+  validator?(value: unknown, props: Data): boolean;
 }
 
 // Overrides for defineProps
@@ -53,9 +62,13 @@ interface PropOptions<T = any, D = T> {
  * This is only usable inside `<script setup>`, is compiled away in the
  * output and should **not** be actually called at runtime.
  */
-export declare function defineProps_Box<PropNames extends string = string>(props: PropNames[]): PropNames[];
+export declare function defineProps_Box<PropNames extends string = string>(
+  props: PropNames[]
+): PropNames[];
 
-export declare function defineProps_Box<PP extends import("vue").ComponentObjectPropsOptions = import("vue").ComponentObjectPropsOptions>(props: PP): PP;
+export declare function defineProps_Box<
+  PP extends import("vue").ComponentObjectPropsOptions = import("vue").ComponentObjectPropsOptions
+>(props: PP): PP;
 
 export declare function defineProps_Box<TypeProps>(): TypeProps;
 
@@ -80,10 +93,14 @@ export declare function defineProps_Box<TypeProps>(): TypeProps;
  *
  * @see {@link https://vuejs.org/guide/typescript/composition-api.html#typing-component-props}
  */
-export declare function withDefaults_Box<T, BKeys extends keyof T, Defaults extends InferDefaults<T>>(props: import("vue").DefineProps<T, BKeys>, defaults: Defaults): [
-    import("vue").DefineProps<T, BKeys>,
-    Defaults
-];
+export declare function withDefaults_Box<
+  T,
+  BKeys extends keyof T,
+  Defaults extends InferDefaults<T>
+>(
+  props: import("vue").DefineProps<T, BKeys>,
+  defaults: Defaults
+): [import("vue").DefineProps<T, BKeys>, Defaults];
 
 // Overrides for defineEmits
 /**
@@ -112,11 +129,17 @@ export declare function withDefaults_Box<T, BKeys extends keyof T, Defaults exte
  *
  * @see {@link https://vuejs.org/api/sfc-script-setup.html#defineprops-defineemits}
  */
-export declare function defineEmits_Box<EE extends string = string>(emitOptions: EE[]): EE[];
+export declare function defineEmits_Box<EE extends string = string>(
+  emitOptions: EE[]
+): EE[];
 
-export declare function defineEmits_Box<E extends import("vue").EmitsOptions = import("vue").EmitsOptions>(emitOptions: E): E;
+export declare function defineEmits_Box<
+  E extends import("vue").EmitsOptions = import("vue").EmitsOptions
+>(emitOptions: E): E;
 
-export declare function defineEmits_Box<T extends import("vue").ComponentTypeEmits>(): T;
+export declare function defineEmits_Box<
+  T extends import("vue").ComponentTypeEmits
+>(): T;
 
 // Overrides for defineOptions
 /**
@@ -126,16 +149,43 @@ export declare function defineEmits_Box<T extends import("vue").ComponentTypeEmi
  *
  * @see {@link https://vuejs.org/api/sfc-script-setup.html#defineoptions}
  */
-export declare function defineOptions_Box<RawBindings = {}, D = {}, C extends import("vue").ComputedOptions = {}, M extends import("vue").MethodOptions = {}, Mixin extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin, Extends extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin>(options?: import("vue").ComponentOptionsBase<{}, RawBindings, D, C, M, Mixin, Extends, {}> & {
+export declare function defineOptions_Box<
+  RawBindings = {},
+  D = {},
+  C extends import("vue").ComputedOptions = {},
+  M extends import("vue").MethodOptions = {},
+  Mixin extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin,
+  Extends extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin
+>(
+  options?: import("vue").ComponentOptionsBase<
+    {},
+    RawBindings,
+    D,
+    C,
+    M,
+    Mixin,
+    Extends,
+    {}
+  > & {
     props?: never;
     emits?: never;
     expose?: never;
     slots?: never;
-}): import("vue").ComponentOptionsBase<{}, RawBindings, D, C, M, Mixin, Extends, {}> & {
-    props?: never;
-    emits?: never;
-    expose?: never;
-    slots?: never;
+  }
+): import("vue").ComponentOptionsBase<
+  {},
+  RawBindings,
+  D,
+  C,
+  M,
+  Mixin,
+  Extends,
+  {}
+> & {
+  props?: never;
+  emits?: never;
+  expose?: never;
+  slots?: never;
 };
 
 // Overrides for defineModel
@@ -172,35 +222,82 @@ export declare function defineOptions_Box<RawBindings = {}, D = {}, C extends im
  * const count = defineModel<number>('count', { default: 0 })
  * ```
  */
-export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(options: ({
-    default: any;
-} | {
-    required: true;
-}) & PropOptions<T> & DefineModelOptions<T, G, S>): ({
-    default: any;
-} | {
-    required: true;
-}) & PropOptions<T> & DefineModelOptions<T, G, S>;
-
-export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(options?: PropOptions<T> & DefineModelOptions<T, G, S>): PropOptions<T> & DefineModelOptions<T, G, S>;
-
-export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(name: string, options: ({
-    default: any;
-} | {
-    required: true;
-}) & PropOptions<T> & DefineModelOptions<T, G, S>): [
-    string,
-    ({
+export declare function defineModel_Box<
+  T,
+  M extends PropertyKey = string,
+  G = T,
+  S = T
+>(
+  options: (
+    | {
         default: any;
-    } | {
+      }
+    | {
         required: true;
-    }) & PropOptions<T> & DefineModelOptions<T, G, S>
+      }
+  ) &
+    PropOptions<T> &
+    DefineModelOptions<T, G, S>
+): (
+  | {
+      default: any;
+    }
+  | {
+      required: true;
+    }
+) &
+  PropOptions<T> &
+  DefineModelOptions<T, G, S>;
+
+export declare function defineModel_Box<
+  T,
+  M extends PropertyKey = string,
+  G = T,
+  S = T
+>(
+  options?: PropOptions<T> & DefineModelOptions<T, G, S>
+): PropOptions<T> & DefineModelOptions<T, G, S>;
+
+export declare function defineModel_Box<
+  T,
+  M extends PropertyKey = string,
+  G = T,
+  S = T
+>(
+  name: string,
+  options: (
+    | {
+        default: any;
+      }
+    | {
+        required: true;
+      }
+  ) &
+    PropOptions<T> &
+    DefineModelOptions<T, G, S>
+): [
+  string,
+  (
+    | {
+        default: any;
+      }
+    | {
+        required: true;
+      }
+  ) &
+    PropOptions<T> &
+    DefineModelOptions<T, G, S>
 ];
 
-export declare function defineModel_Box<T, M extends PropertyKey = string, G = T, S = T>(name: string, options?: PropOptions<T> & DefineModelOptions<T, G, S>): [
-    string,
-    PropOptions<T> & DefineModelOptions<T, G, S>
-];
+export declare function defineModel_Box<
+  T,
+  M extends PropertyKey = string,
+  G = T,
+  S = T
+>(
+  name: string,
+  options?: PropOptions<T> & DefineModelOptions<T, G, S>
+): [string, PropOptions<T> & DefineModelOptions<T, G, S>];
 
 // Overrides for defineExpose
 /**
@@ -217,8 +314,11 @@ export declare function defineModel_Box<T, M extends PropertyKey = string, G = T
  *
  * @see {@link https://vuejs.org/api/sfc-script-setup.html#defineexpose}
  */
-export declare function defineExpose_Box<Exposed extends Record<string, any> = Record<string, any>>(exposed?: Exposed): Exposed;
+export declare function defineExpose_Box<
+  Exposed extends Record<string, any> = Record<string, any>
+>(exposed?: Exposed): Exposed;
 
 // Overrides for defineSlots
-export declare function defineSlots_Box<S extends Record<string, any> = Record<string, any>>(): S;
-
+export declare function defineSlots_Box<
+  S extends Record<string, any> = Record<string, any>
+>(): S;

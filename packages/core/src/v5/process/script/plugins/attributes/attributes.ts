@@ -1,4 +1,3 @@
-import { ProcessItemType } from "../../../types";
 import { definePlugin } from "../../types";
 
 export const AttributesPlugin = definePlugin({

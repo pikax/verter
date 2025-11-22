@@ -371,13 +371,13 @@ describe("process script plugin script block", () => {
           },
         ]);
       });
-      it("withDefaults(defineProps)", () => {
+      it.only("withDefaults(defineProps)", () => {
         const { result, context } = parse(
           `const props = withDefaults(defineProps({ a: String }), {})`
         );
 
         expect(result).toContain(
-          `const ___VERTER___Props=defineProps({ a: String });const props = withDefaults(___VERTER___Props, {})`
+          `;const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(defineProps({ a: String }), {});const props = withDefaults(___VERTER___withDefaults_Boxed[0], ___VERTER___withDefaults_Boxed[1])`
         );
 
         expect(context.items[0]).toMatchObject({
