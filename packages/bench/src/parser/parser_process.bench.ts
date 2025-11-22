@@ -7,19 +7,20 @@ import {
   processVerterScript,
 } from "./utils.js";
 
-describe("parser", () => {
+describe("parser + process", () => {
   describe.each(Object.keys(ValidFiles))("single %s", (x) => {
     const file = ValidFiles[x];
+
     bench("Verter", () => {
-      parseStringVerter(file).isTS;
+      processVerterScript(parseStringVerter(file));
     });
 
     bench("verter AcornLoose", () => {
-      parseVerterLoose(file).isTS;
+      processVerterScript(parseVerterLoose(file));
     });
 
     bench("Volar", () => {
-      parseStringVolar(file);
+      parseStringVolar(file).embeddedCodes.flatMap((x) => x.embeddedCodes);
     });
   });
 });

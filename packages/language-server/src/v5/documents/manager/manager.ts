@@ -58,7 +58,7 @@ export class DocumentManager implements Disposable {
         return this.createDocument(uri, languageId, content, version);
       },
       update: (document, changes, version) => {
-        console.log("update", document.uri, version);
+        // console.log("update", document.uri, version);
         // this.handleFileChange(document.uri, "update");
 
         // return TextDocument.update(document, changes, version);

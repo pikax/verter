@@ -124,7 +124,6 @@ export function startServer(options: LsConnectionOption = {}) {
   });
 
   connection.onDefinition((params) => {
-    console.log("defintiona doc", params.textDocument);
     const uri = params.textDocument.uri;
 
     const doc = documentManager.getDocument(uri);
@@ -155,7 +154,6 @@ export function startServer(options: LsConnectionOption = {}) {
           hover: {},
         });
 
-        console.log("ddd", r);
       } else {
         for (const x of tsService.getDefinitionAtPosition(
           d.doc.uri,
@@ -173,7 +171,6 @@ export function startServer(options: LsConnectionOption = {}) {
 
   connection.onHover((params) => {
     const start = performance.now();
-    console.log("doc hover", params.textDocument);
     const uri = params.textDocument.uri;
 
     const doc = documentManager.getDocument(uri);
@@ -209,7 +206,6 @@ export function startServer(options: LsConnectionOption = {}) {
             }
             default: {
               const qq = tsService.getQuickInfoAtPosition(doc.uri, offset);
-              console.log("quickinfo", performance.now() - ss, doc.uri);
               if (qq) {
                 if (qq.kind) {
                   return formatQuickInfo(qq, doc);
@@ -222,10 +218,8 @@ export function startServer(options: LsConnectionOption = {}) {
         })
         .find((x) => !!x);
 
-      console.log("completed at", performance.now() - start);
       return quickInfo ?? anyResult;
     } catch (e) {
-      console.error("hover", e);
       return undefined;
     }
   });
@@ -352,7 +346,7 @@ export function startServer(options: LsConnectionOption = {}) {
         items,
       };
     } catch (e) {
-      console.error("failed onCompletion", e);
+      // console.error("failed onCompletion", e);
     }
   });
 

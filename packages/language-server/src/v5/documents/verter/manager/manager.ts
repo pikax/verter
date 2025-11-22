@@ -243,7 +243,6 @@ function createService(
     getNewLine: () => tsSystem.newLine,
 
     readDirectory(path, extensions, exclude, include, depth) {
-      console.log("reading dir", path);
       return tsSystem.readDirectory(
         path,
         [...(extensions ?? []), ".vue"],
@@ -594,7 +593,7 @@ function getTypescriptServiceOld(
   );
 
   const host: ts.LanguageServiceHost = {
-    log: (message) => console.info(`[ts] ${message}`),
+    // log: (message) => console.info(`[ts] ${message}`),
     getCompilationSettings: () => compilerOptions,
     getCurrentDirectory: () => workspacePath,
     getDefaultLibFileName: ts.getDefaultLibFilePath,
@@ -613,7 +612,6 @@ function getTypescriptServiceOld(
     getNewLine: () => tsSystem.newLine,
 
     readDirectory(path, extensions, exclude, include, depth) {
-      console.log("reading dir", path);
       return tsSystem.readDirectory(
         path,
         [...(extensions ?? []), ".vue"],
