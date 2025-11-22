@@ -212,7 +212,11 @@ function extractSuiteName(line) {
 
 function getBenchmarkDescription(file) {
   const descriptions = {
-    "parser.bench.ts": "Vue file parsing performance comparison. Note: Verter parses to AST while Volar generates full virtual TypeScript code.",
+    "parser.bench.ts": "Vue file parsing and processing performance comparison with three distinct benchmarks:\n\n" +
+      "- **parser**: Raw parsing to AST (Verter) vs full virtual code generation (Volar)\n" +
+      "- **process**: Processing parsed AST into usable structures (Verter) vs extracting embedded codes (Volar)\n" +
+      "- **parser + process**: End-to-end parsing and processing combined\n\n" +
+      "Note: Verter uses a two-stage approach (parse AST → process), while Volar generates virtual TypeScript code directly during parsing.",
     "completions.bench.ts": "Tests Vue.js template completion performance in a simple component. Both use LSP+IPC architecture.",
     "real-world-components.bench.ts": "Measures completion performance in real-world Vue components with multiple edits and completion requests, simulating actual development workflows. Both use LSP+IPC architecture.",
   };
@@ -235,6 +239,15 @@ function formatBenchmarkFile(file, benchmarks) {
 
   for (const bench of uniqueBenchmarks.values()) {
     section += `### ${bench.suite}\n\n`;
+    
+    // Add context for parser.bench.ts suites
+    if (file === "parser.bench.ts") {
+      const suiteContext = getParserSuiteContext(bench.suite);
+      if (suiteContext) {
+        section += `${suiteContext}\n\n`;
+      }
+    }
+    
     const result = formatBenchmarkTable(bench.suite, bench.data);
     section += result.markdown;
     if (result.comparison) {
@@ -243,6 +256,22 @@ function formatBenchmarkFile(file, benchmarks) {
   }
 
   return { markdown: section, comparisons };
+}
+
+function getParserSuiteContext(suiteName) {
+  const lower = suiteName.toLowerCase();
+  
+  if (lower.includes("parser + process")) {
+    return "**Full Pipeline:** Complete end-to-end operation including both parsing and processing steps.";
+  } else if (lower.includes("process") && !lower.includes("parser")) {
+    return "**Processing Only:** Takes already-parsed AST and processes it into usable structures. " +
+           "Verter extracts script blocks and metadata; Volar extracts embedded code segments.";
+  } else if (lower.includes("parser")) {
+    return "**Parsing Only:** Raw parsing performance. " +
+           "Verter parses Vue files into AST using OXC parser; Volar generates complete virtual TypeScript code.";
+  }
+  
+  return null;
 }
 
 function formatBenchmarkTable(suiteName, data) {

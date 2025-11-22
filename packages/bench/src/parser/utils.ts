@@ -81,10 +81,12 @@ const VolarPlugins = core.createPlugins({
   vueCompilerOptions: VolarCompilerOptions,
   compilerOptions: {},
 });
+
+let filename = 0;
 export function parseStringVolar(content: string) {
   const snap = ts.ScriptSnapshot.fromString(content);
   return new core.VueVirtualCode(
-    "foo.vue",
+    `foo${filename++}.vue`,
     "vue",
     snap,
     VolarCompilerOptions,

@@ -1,12 +1,14 @@
-import { bench, beforeAll, describe } from "vitest";
+import { bench, beforeAll, afterAll, describe } from "vitest";
 import { URI } from "vscode-uri";
 import {
   getLanguageServer as getVolarServer,
   testWorkspacePath as volarWorkspacePath,
+  closeLanguageServer,
 } from "../server/volar-server-lsp";
 import {
   getVerterServer,
   testWorkspacePath as verterWorkspacePath,
+  closeVerterServer,
 } from "../server/verter-server";
 import * as fs from "fs";
 import * as path from "path";
@@ -34,9 +36,20 @@ beforeAll(async () => {
 });
 
 describe("Real World Components Benchmarks", () => {
-  describe("button.vue - Props in computed (fresh document)", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  let volarServer: Awaited<ReturnType<typeof getVolarServer>>;
+  let verterServer: Awaited<ReturnType<typeof getVerterServer>>;
+
+  beforeAll(async () => {
+    volarServer = await getVolarServer();
+    verterServer = await getVerterServer();
+  });
+
+  afterAll(async () => {
+    await closeLanguageServer();
+    await closeVerterServer();
+  });
+
+  describe("button.vue - Props in computed (fresh document)", () => {
     const filePath = "components/button.vue";
     const fileContent = fs.readFileSync(
       path.resolve(volarWorkspacePath, filePath),
@@ -75,9 +88,7 @@ describe("Real World Components Benchmarks", () => {
     });
   });
 
-  describe("button.vue - Props in computed (cached document)", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("button.vue - Props in computed (cached document)", () => {
     const filePath = "components/button.vue";
     const fileContent = fs.readFileSync(
       path.resolve(volarWorkspacePath, filePath),
@@ -112,9 +123,7 @@ describe("Real World Components Benchmarks", () => {
     });
   });
 
-  describe("button.vue - Action object properties (fresh document)", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("button.vue - Action object properties (fresh)", () => {
     const filePath = "components/button.vue";
     const fileContent = fs.readFileSync(
       path.resolve(volarWorkspacePath, filePath),
@@ -153,9 +162,7 @@ describe("Real World Components Benchmarks", () => {
     });
   });
 
-  describe("button.vue - Action object properties (cached document)", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("button.vue - Action object properties (cached)", () => {
     const filePath = "components/button.vue";
     const fileContent = fs.readFileSync(
       path.resolve(volarWorkspacePath, filePath),
@@ -190,9 +197,7 @@ describe("Real World Components Benchmarks", () => {
     });
   });
 
-  describe("avatar.vue - Props in computed (fresh document)", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("avatar.vue - Props in computed (fresh)", () => {
     const filePath = "components/avatar.vue";
     const fileContent = fs.readFileSync(
       path.resolve(volarWorkspacePath, filePath),
@@ -231,9 +236,7 @@ describe("Real World Components Benchmarks", () => {
     });
   });
 
-  describe("avatar.vue - Props in computed (cached document)", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("avatar.vue - Props in computed (cached)", () => {
     const filePath = "components/avatar.vue";
     const fileContent = fs.readFileSync(
       path.resolve(volarWorkspacePath, filePath),
@@ -268,9 +271,7 @@ describe("Real World Components Benchmarks", () => {
     });
   });
 
-  describe("avatar.vue - Ref properties (fresh document)", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("avatar.vue - Ref properties (fresh)", () => {
     const filePath = "components/avatar.vue";
     const fileContent = fs.readFileSync(
       path.resolve(volarWorkspacePath, filePath),
@@ -309,9 +310,7 @@ describe("Real World Components Benchmarks", () => {
     });
   });
 
-  describe("avatar.vue - Ref properties (cached document)", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("avatar.vue - Ref properties (cached)", () => {
     const filePath = "components/avatar.vue";
     const fileContent = fs.readFileSync(
       path.resolve(volarWorkspacePath, filePath),
@@ -346,9 +345,7 @@ describe("Real World Components Benchmarks", () => {
     });
   });
 
-  describe("avatar.vue - HTMLElement properties (fresh document)", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("avatar.vue - HTMLElement properties (fresh)", () => {
     const filePath = "components/avatar.vue";
     const fileContent = fs.readFileSync(
       path.resolve(volarWorkspacePath, filePath),
@@ -387,9 +384,7 @@ describe("Real World Components Benchmarks", () => {
     });
   });
 
-  describe("avatar.vue - HTMLElement properties (cached document)", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("avatar.vue - HTMLElement properties (cached)", () => {
     const filePath = "components/avatar.vue";
     const fileContent = fs.readFileSync(
       path.resolve(volarWorkspacePath, filePath),
@@ -424,9 +419,7 @@ describe("Real World Components Benchmarks", () => {
     });
   });
 
-  describe("icon.vue - Ref element (fresh document)", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("icon.vue - Ref element (fresh)", () => {
     const filePath = "components/icon.vue";
     const fileContent = fs.readFileSync(
       path.resolve(volarWorkspacePath, filePath),
@@ -465,9 +458,7 @@ describe("Real World Components Benchmarks", () => {
     });
   });
 
-  describe("icon.vue - Ref element (cached document)", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("icon.vue - Ref element (cached)", () => {
     const filePath = "components/icon.vue";
     const fileContent = fs.readFileSync(
       path.resolve(volarWorkspacePath, filePath),

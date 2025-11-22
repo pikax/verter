@@ -1,12 +1,14 @@
-import { bench, describe } from "vitest";
+import { bench, describe, beforeAll, afterAll } from "vitest";
 import { URI } from "vscode-uri";
 import {
   getLanguageServer as getVolarServer,
   testWorkspacePath as volarWorkspacePath,
+  closeLanguageServer,
 } from "../server/volar-server-lsp";
 import {
   getVerterServer,
   testWorkspacePath as verterWorkspacePath,
+  closeVerterServer,
 } from "../server/verter-server";
 import {
   parseContentWithCursor,
@@ -14,13 +16,28 @@ import {
 } from "../helpers/test-helpers";
 
 describe("Completions Benchmark: Volar vs Verter", () => {
-  describe("Script setup completions", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
-    const testContent = `<script setup lang="ts">
-const msg = 'Hello World'
-$|
-</script>`;
+  let volarServer: Awaited<ReturnType<typeof getVolarServer>>;
+  let verterServer: Awaited<ReturnType<typeof getVerterServer>>;
+
+  beforeAll(async () => {
+    volarServer = await getVolarServer();
+    verterServer = await getVerterServer();
+  });
+
+  afterAll(async () => {
+    await closeLanguageServer();
+    await closeVerterServer();
+  });
+
+  describe("Script setup completions", () => {
+    const testContent = `
+        <template>
+          <div>{{ mess| }}</div>
+        </template>
+        <script setup lang="ts">
+        const message = 'Hello';
+        </script>
+      `;
 
     bench("Volar - Script setup completions", async () => {
       const fileName = "fixture.vue";
@@ -51,13 +68,14 @@ $|
     });
   });
 
-  describe("TypeScript completions in script", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
-    const testContent = `<script setup lang="ts">
-const msg = 'Hello World'
-msg.|
-</script>`;
+  describe("TypeScript completions in script", () => {
+    const testContent = `
+        <template></template>
+        <script setup lang="ts">
+        const msg = 'hello';
+        msg.toLowerCase().to|;
+        </script>
+      `;
 
     bench(
       "Volar - TypeScript completions",
@@ -96,12 +114,12 @@ msg.|
     );
   });
 
-  describe("Auto import component", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
-    const testContent = `<script setup lang="ts">
-import componentFor|
-</script>`;
+  describe("Auto import component", () => {
+    const testContent = `
+        <script setup lang="ts">
+        import componentFor|
+        </script>
+      `;
 
     bench(
       "Volar - Auto import component",
@@ -140,14 +158,13 @@ import componentFor|
     );
   });
 
-  describe("template completion", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
-    const testContent = `<template>
-    <div>{{ mess| }}</div>
-</template>
-<script setup lang="ts">
-const message = 'Hello';
+  describe("template completion", () => {
+    const testContent = `
+        <template>
+          <div>{{ mess| }}</div>
+        </template>
+        <script setup lang="ts">
+        const message = 'Hello';
 </script>`;
 
     bench("Volar", async () => {
@@ -178,9 +195,7 @@ const message = 'Hello';
     });
   });
 
-  describe("Complex TypeScript inference", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("Complex TypeScript inference", () => {
     const testContent = `<script setup lang="ts">
 import { ref } from 'vue'
 
@@ -231,9 +246,7 @@ user.value.|
     );
   });
 
-  describe("Multiple file operations", async () => {
-    const volarServer = await getVolarServer();
-    const verterServer = await getVerterServer();
+  describe("Multiple file operations", () => {
 
     bench(
       "Volar - Open and complete 5 files",
