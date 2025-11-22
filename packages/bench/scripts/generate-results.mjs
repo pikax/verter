@@ -4,7 +4,7 @@
  * Script to run benchmarks and generate a markdown report
  */
 
-import { exec } from "child_process";
+import { exec, spawn } from "child_process";
 import { promisify } from "util";
 import * as fs from "fs";
 import * as path from "path";
@@ -16,25 +16,115 @@ const execAsync = promisify(exec);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
-async function runBenchmarks() {
+function runBenchmarks() {
   console.log("🏃 Running benchmarks...\n");
 
-  try {
-    const { stdout, stderr } = await execAsync(
-      "pnpm vitest bench --run --reporter=verbose",
-      {
-        cwd: path.resolve(__dirname, ".."),
-        maxBuffer: 10 * 1024 * 1024, // 10MB buffer
-      }
-    );
+  return new Promise((resolve, reject) => {
+    const vitest = spawn("pnpm", ["vitest", "bench", "--run", "--reporter=verbose"], {
+      cwd: path.resolve(__dirname, ".."),
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: process.platform === 'win32',
+    });
 
-    const output = stdout + stderr;
-    return parseBenchmarkOutput(output);
-  } catch (error) {
-    // Vitest may exit with non-zero even on success
-    const output = error.stdout + error.stderr;
-    return parseBenchmarkOutput(output);
-  }
+    let buffer = "";
+    let processedSuites = 0;
+    let totalSuites = null;
+    const seenSuiteLines = new Set();
+    const startTime = Date.now();
+    const suiteTimes = [];
+
+    function formatTime(ms) {
+      const seconds = Math.floor(ms / 1000);
+      const minutes = Math.floor(seconds / 60);
+      const remainingSeconds = seconds % 60;
+      if (minutes > 0) {
+        return `${minutes}m ${remainingSeconds}s`;
+      }
+      return `${seconds}s`;
+    }
+
+    function handleChunk(chunk, isErr = false) {
+      const text = chunk.toString();
+      buffer += text;
+      const lines = text.split(/\r?\n/);
+      for (const line of lines) {
+        // Strip ANSI codes for matching
+        const cleanLine = line.replace(/\x1b\[[0-9;]*m/g, "");
+        
+        // Try to detect total from lines like "❯ src/parser/parser.bench.ts 74/80"
+        const totalMatch = cleanLine.match(/(\d+)\/(\d+)\s*$/);
+        if (totalMatch && !totalSuites) {
+          totalSuites = parseInt(totalMatch[2], 10);
+        }
+        
+        // Real-time detection of suite line: starts with optional spaces then ✓ and ends with ms
+        if (/^\s*✓\s+.*\b\d+ms\b/.test(cleanLine)) {
+          if (!seenSuiteLines.has(cleanLine)) {
+            seenSuiteLines.add(cleanLine);
+            processedSuites++;
+            suiteTimes.push(Date.now());
+            
+            // Extract suite name if possible (everything after the last >)
+            let suiteName = "";
+            const parts = cleanLine.split(">");
+            if (parts.length > 1) {
+              suiteName = parts[parts.length - 1].replace(/\d+ms$/, "").trim();
+            }
+
+            // Calculate elapsed and estimate remaining
+            const elapsed = Date.now() - startTime;
+            const elapsedStr = formatTime(elapsed);
+            
+            let remainingStr = "";
+            if (totalSuites && processedSuites > 1) {
+              const avgTimePerSuite = elapsed / processedSuites;
+              const remaining = avgTimePerSuite * (totalSuites - processedSuites);
+              remainingStr = ` | ETA: ${formatTime(remaining)}`;
+            }
+
+            // Progress bar
+            const barLength = 20;
+            let pct = 0;
+            let filled = 0;
+            if (totalSuites) {
+              pct = Math.round((processedSuites / totalSuites) * 100);
+              filled = Math.round((processedSuites / totalSuites) * barLength);
+            } else {
+              // Unknown total, show spinner-style progress
+              filled = processedSuites % barLength;
+            }
+            const bar = `[${"#".repeat(filled)}${"-".repeat(barLength - filled)}]`;
+
+            // Format total display
+            const totalDisplay = totalSuites ? `/${totalSuites}` : "";
+            const pctDisplay = totalSuites ? ` (${pct}%)` : "";
+
+            // Clear line and write progress
+            const suffix = suiteName ? ` - ${suiteName}` : "";
+            process.stdout.write(`\r\x1b[K${bar} ${processedSuites}${totalDisplay}${pctDisplay} | ${elapsedStr}${remainingStr}${suffix}`);
+          }
+        }
+      }
+    }
+
+    vitest.stdout.on("data", (chunk) => handleChunk(chunk));
+    vitest.stderr.on("data", (chunk) => handleChunk(chunk, true));
+
+    vitest.on("error", (err) => {
+      process.stdout.write("\n❌ Benchmark process error.\n");
+      reject(err);
+    });
+
+    vitest.on("close", (code) => {
+      process.stdout.write("\n");
+      try {
+        const markdown = parseBenchmarkOutput(buffer);
+        resolve(markdown);
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
 }
 
 function getSystemInfo() {
@@ -102,8 +192,8 @@ function parseBenchmarkOutput(output) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
-    // Detect suite headers (e.g., "✓ src/__benchmarks__/completions.bench.ts > ...")
-    if (line.includes("✓") && line.includes("ms") && !line.trim().startsWith("·")) {
+    // Detect suite headers (lines start with ✓ and end with duration like 1234ms)
+    if (line.includes("✓") && /\b\d+ms\b/.test(line) && !line.trim().startsWith("·")) {
       if (benchmarkData.length > 0 && currentSuite) {
         if (!benchmarkGroups.has(currentFile)) {
           benchmarkGroups.set(currentFile, []);
@@ -114,10 +204,12 @@ function parseBenchmarkOutput(output) {
         });
         benchmarkData = [];
       }
-
-      const fileMatch = line.match(/src\/__benchmarks__\/([^>]+\.bench\.ts)/);
+      // Extract just the benchmark file name (last segment ending with .bench.ts)
+      const fileMatch = line.match(/([A-Za-z0-9_.-]+\.bench\.ts)\s*>/);
       if (fileMatch) {
         currentFile = fileMatch[1];
+      } else if (!currentFile) {
+        currentFile = 'unknown.bench.ts';
       }
 
       currentSuite = extractSuiteName(line);
@@ -147,9 +239,24 @@ function parseBenchmarkOutput(output) {
     });
   }
 
-  // Format grouped benchmarks
+  // Compute total number of unique suites across all files for progress display
+  let totalSuites = 0;
   for (const [file, benchmarks] of benchmarkGroups) {
-    const result = formatBenchmarkFile(file, benchmarks);
+    const seen = new Set();
+    for (const b of benchmarks) {
+      if (!seen.has(b.suite)) {
+        seen.add(b.suite);
+      }
+    }
+    totalSuites += seen.size;
+  }
+
+  // Running counter for suites
+  const suiteIndexRef = { value: 0 };
+
+  // Format grouped benchmarks with progress indicators
+  for (const [file, benchmarks] of benchmarkGroups) {
+    const result = formatBenchmarkFile(file, benchmarks, suiteIndexRef, totalSuites);
     markdown += result.markdown;
     allComparisons.push(...result.comparisons);
   }
@@ -223,9 +330,12 @@ function getBenchmarkDescription(file) {
   return descriptions[file] || "Benchmark comparison between Volar and Verter.";
 }
 
-function formatBenchmarkFile(file, benchmarks) {
+function formatBenchmarkFile(file, benchmarks, suiteIndexRef, totalSuites) {
   let section = `## ${file}\n\n`;
   section += `**Description:** ${getBenchmarkDescription(file)}\n\n`;
+  // File-level progress summary
+  const uniqueNames = new Set(benchmarks.map(b => b.suite));
+  section += `Suites: ${uniqueNames.size}\n\n`;
 
   const comparisons = [];
 
@@ -238,7 +348,14 @@ function formatBenchmarkFile(file, benchmarks) {
   }
 
   for (const bench of uniqueBenchmarks.values()) {
-    section += `### ${bench.suite}\n\n`;
+    // Progress bar + counter
+    suiteIndexRef.value += 1;
+    const current = suiteIndexRef.value;
+    const pct = Math.round((current / totalSuites) * 100);
+    const barLength = 20;
+    const filled = Math.round((current / totalSuites) * barLength);
+    const bar = `[${"#".repeat(filled)}${"-".repeat(barLength - filled)}] ${current}/${totalSuites} (${pct}%)`;
+    section += `### ${bench.suite} ${bar}\n\n`;
     
     // Add context for parser.bench.ts suites
     if (file === "parser.bench.ts") {
