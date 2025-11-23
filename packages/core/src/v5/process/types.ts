@@ -98,6 +98,19 @@ export type ProcessItemMacroBinding = {
    */
   isType?: boolean;
 
+  /**
+   * variable name for type
+   */
+  typeName?: string;
+  /**
+   * variable name for value
+   */
+  valueName?: string;
+  /**
+   * variable name for object
+   */
+  objectName?: string;
+
   node: VerterASTNode;
 };
 

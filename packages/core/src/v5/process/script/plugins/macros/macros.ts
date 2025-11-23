@@ -108,21 +108,6 @@ export const MacrosPlugin = definePlugin({
             });
           } else if (macroName == "withDefaults") {
             const defineProps = item.parent.init.arguments[0];
-            const pName = ctx.prefix("Props");
-            if (
-              defineProps.type === "CallExpression" &&
-              defineProps.callee.type === "Identifier" &&
-              defineProps.callee.name === "defineProps"
-            ) {
-              addMacroDependencies("defineProps", ctx);
-              ctx.items.push({
-                type: ProcessItemType.MacroBinding,
-                name: pName,
-                isType: defineProps.typeArguments !== undefined,
-                macro: "defineProps",
-                node: defineProps,
-              });
-            }
 
             let splitFromOffset = -1;
             let splitToOffset = -1;
@@ -156,28 +141,13 @@ export const MacrosPlugin = definePlugin({
                   defineProps.typeArguments?.params[
                     defineProps.typeArguments.params.length - 1
                   ].end!;
-                // s.prependRight(
-                //   paramsStart,
-                //   `type ${propsBoxInfo.boxedName}_TYPE=`
-                // );
-                // s.prependLeft(paramEnd, ";");
 
-                // s.move(paramsStart, paramEnd, item.declarator.start! - 1);
-
-                const propsType = ctx.prefix("defineProps_Type");
-
-                s.appendLeft(paramsStart, propsType);
+                s.appendLeft(paramsStart, propsBoxInfo.type);
                 // create type and prettify it with "{}&" otherwise on hover it will
                 // show `defineProps_Type` only
-                s.appendRight(paramsStart, `;type ${propsType}={}&`);
+                s.appendRight(paramsStart, `;type ${propsBoxInfo.type}={}&`);
 
                 s.move(paramsStart, paramEnd, item.declarator.end!);
-
-                // s.move(
-                //   defineProps.typeArguments!.start!,
-                //   defineProps.typeArguments!.end!,
-                //   item.declarator.start!
-                // );
               } else {
                 s.appendLeft(
                   item.declarator.start!,
@@ -195,28 +165,44 @@ export const MacrosPlugin = definePlugin({
               ctx.items.push(
                 createHelperImport([propsBoxInfo.name], ctx.prefix)
               );
+
+              ctx.items.push({
+                type: ProcessItemType.MacroBinding,
+                name: varName,
+                macro: "defineProps",
+                node: defineProps,
+                isType,
+                valueName: varName,
+                typeName: isType ? propsBoxInfo.type : undefined,
+                objectName: !isType ? propsBoxInfo.boxedName : undefined,
+              });
             }
 
             const withDefaultOps = boxMacro(
               item.parent.init,
               item.declarator.start!,
               s,
-              ctx,
-              // { from: 63, to: 77 }
-              null
-              /*   splitFromOffset !== -1 && splitToOffset !== -1
-                ? { from: splitFromOffset, to: splitToOffset }
-                : null*/
+              ctx
             );
 
-            // withDefaultOps!();
-            withDefaultOps!.start();
-            withDefaultOps!.end();
+            withDefaultOps!();
 
-            withDefaultOps!.move();
+            const isTypeModel = item.parent.init.typeArguments !== undefined;
 
-            // // temp move type
-            // s.move(63, 77, item.declarator.start! -1);
+            ctx.items.push({
+              type: ProcessItemType.MacroBinding,
+              name: varName,
+              macro: macroName,
+              node: item.parent,
+              isType:isTypeModel !== undefined,
+              objectName: !isTypeModel
+                ? propsBoxInfo.boxedName
+                : undefined,
+              typeName: isTypeModel
+                ? propsBoxInfo.type
+                : undefined,
+            });
+
             this.hasWithDefaults = true;
           } else {
             if (macroName === "defineProps" && this.hasWithDefaults) {
@@ -426,8 +412,9 @@ function getModelName(node: CallExpression) {
 function boxInfo(macroName: string, ctx: ScriptContext) {
   const boxedName = ctx.prefix(`${macroName}_Boxed`);
   const name = `${macroName}_Box` as AvailableExports;
+  const type = ctx.prefix(`${macroName}_Type`);
   const boxName = ctx.prefix(name);
-  return { boxedName, boxName, name };
+  return { boxedName, boxName, name, type };
 }
 
 function boxMacro(
@@ -450,6 +437,7 @@ function boxMacro(
     createHelperImport([`${name}_Box` as AvailableExports], ctx.prefix)
   );
 
+  // TODO types and arguments both must be passed to the box function
   if (caller.typeArguments) {
     const args = caller.typeArguments;
   } else {

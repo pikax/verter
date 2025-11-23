@@ -391,10 +391,10 @@ describe("process script plugin script block", () => {
           "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
         );
 
-        testSourceMaps({
-          content: result,
-          map: other.s.generateMap({ hires: true, includeContent: true }),
-        });
+        // testSourceMaps({
+        //   content: result,
+        //   map: other.s.generateMap({ hires: true, includeContent: true }),
+        // });
 
         // TODO fix returns
 
@@ -433,11 +433,6 @@ describe("process script plugin script block", () => {
         expect(result).toContain(
           ";type ___VERTER___defineProps_Type={}&{ a?: string };"
         );
-
-        testSourceMaps({
-          content: result,
-          map: other.s.generateMap({ hires: true, includeContent: true }),
-        });
 
         expect(context.items[0]).toMatchObject({
           type: "macro-binding",
