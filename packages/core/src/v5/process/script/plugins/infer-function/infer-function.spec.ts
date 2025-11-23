@@ -1,6 +1,9 @@
 import { MagicString } from "@vue/compiler-sfc";
 import { parser, TemplateTypes } from "../../../../parser";
-import { ParsedBlockScript } from "../../../../parser/types";
+import {
+  ParsedBlockScript,
+  ParsedBlockTemplate,
+} from "../../../../parser/types";
 import { processScript } from "../../script";
 
 import { MacrosPlugin } from "../macros";
@@ -45,6 +48,7 @@ describe("process script plugin full context", () => {
         block: scriptBlock,
         generic: parsed.generic,
         isAsync: parsed.isAsync,
+        blockNameResolver: (n) => n,
         templateBindings:
           template?.result?.items.filter(
             (x) => x.type === TemplateTypes.Binding
@@ -65,7 +69,9 @@ describe("process script plugin full context", () => {
           "",
           '<template><div @click="foo"></div></template>'
         );
-        expect(result).toContain(`function foo(...[a]: [HTMLElementEventMap["click"]]) { return a }`);
+        expect(result).toContain(
+          `function foo(...[a]: [HTMLElementEventMap["click"]]) { return a }`
+        );
       });
     });
   });

@@ -12,7 +12,7 @@ export async function resolveAndDownloadBinding(toPath: string) {
     version = pkg?.version;
   } catch (e) {}
 
-  await import("./download").then((x) => {
+  await import("./download.js").then((x) => {
     x.downloadPackage(
       binding,
       resolve(toPath, "node_modules", binding),

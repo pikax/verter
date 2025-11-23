@@ -38,7 +38,9 @@ describe("VueStyleDocument", () => {
       parentDoc,
       "css",
       mockLanguageService,
-      1
+      1,
+      // TODO fix this
+      {} as any
     );
     expect(styleDoc.uri).toBe(styleUri);
     expect(styleDoc.languageId).toBe("css");
@@ -51,7 +53,9 @@ describe("VueStyleDocument", () => {
       parentDoc,
       "css",
       mockLanguageService,
-      1
+      1,
+      // TODO fix this
+      {} as any
     );
     // No parse yet
     expect(mockLanguageService.parseStylesheet).not.toHaveBeenCalled();
@@ -73,7 +77,9 @@ describe("VueStyleDocument", () => {
       parentDoc,
       "css",
       mockLanguageService,
-      1
+      1,
+      // TODO fix this
+      {} as any
     );
 
     // The first time we call getText(), it runs sync() => process()
@@ -93,7 +99,9 @@ describe("VueStyleDocument", () => {
       parentDoc,
       "css",
       mockLanguageService,
-      1
+      1,
+      // TODO fix this
+      {} as any
     );
     // First get => triggers parse
     styleDoc.getText();
@@ -117,7 +125,9 @@ describe("VueStyleDocument", () => {
       parentDoc,
       "css",
       mockLanguageService,
-      1
+      1,
+      // TODO fix this
+      {} as any
     );
     // Access => sync once
     styleDoc.getText();
@@ -140,7 +150,9 @@ describe("VueStyleDocument", () => {
         parentDoc,
         "css",
         mockLanguageService,
-        1
+        1,
+        // TODO fix this
+        {} as any
       ).getText();
     }).toThrowError("Block not found!");
   });

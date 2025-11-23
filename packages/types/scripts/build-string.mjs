@@ -78,7 +78,7 @@ function collectAllTypes(sourceFiles) {
   return allTypes;
 }
 
-// Collect exported type/function names to build an automatic AvailableTypes union
+// Collect exported type/interface names to build an automatic AvailableTypes union
 function collectExportedNames(sourceFiles) {
   const names = new Set();
 
@@ -93,12 +93,8 @@ function collectExportedNames(sourceFiles) {
   function visit(node) {
     if (ts.isTypeAliasDeclaration(node) && hasExport(node)) add(node.name);
     else if (ts.isInterfaceDeclaration(node) && hasExport(node)) add(node.name);
-    else if (ts.isClassDeclaration(node) && node.name && hasExport(node))
-      add(node.name);
-    else if (ts.isEnumDeclaration(node) && hasExport(node)) add(node.name);
-    else if (ts.isFunctionDeclaration(node) && node.name && hasExport(node))
-      add(node.name);
-    // variables are intentionally excluded
+    // Only type aliases and interfaces are included.
+    // variables, functions, classes, enums are intentionally excluded
     return ts.forEachChild(node, visit);
   }
 
@@ -349,6 +345,7 @@ export function prefixWith(prefix) {
   return typeHelpersSource
     .replaceAll("$V_", prefix);
 }
+export const ExportedTypes = new Set([${available.map((n) => `"${n}"`).join(", ")}]);
 `;
 
   // Ensure dist exists
@@ -362,7 +359,7 @@ export function prefixWith(prefix) {
     path.join(distDir, "string-export.d.ts"),
     `declare const typeHelpersSource: string;\nexport default typeHelpersSource;\nexport type AvailableExports = ${
       available.map((n) => `"${n}"`).join(" | ") || "never"
-    };\nexport function prefixWith(prefix: string): string;\n`
+    };\nexport function prefixWith(prefix: string): string;\nexport const ExportedTypes: Set<string>;\n`
   );
 
   console.log("✓ Built string export successfully");

@@ -62,11 +62,10 @@ export const enum ProcessItemType {
    */
   Options = "options",
 
-
   /**
    * Used to describe the defineModel variables
    */
-  DefineModel = 'define-model'
+  DefineModel = "define-model",
 }
 
 export type ProcessItemImport = {
@@ -95,7 +94,7 @@ export type ProcessItemMacroBinding = {
 };
 
 export type ProcessItemDefineModel = {
-  type: ProcessItemType.DefineModel,
+  type: ProcessItemType.DefineModel;
   /**
    * model name
    */
@@ -104,16 +103,17 @@ export type ProcessItemDefineModel = {
   /**
    * variableName
    */
-  varName: string
+  varName: string;
 
   node: VerterASTNode;
-}
+};
 
 export type ItemErrorString = "";
 export type ItemWarningString =
   | "NO_EXPRESSION_VMODEL"
   | "MACRO_NOT_IN_SETUP"
-  | "INVALID_DEFINE_OPTIONS";
+  | "INVALID_DEFINE_OPTIONS"
+  | "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG";
 
 export type ProcessItemBinding = {
   type: ProcessItemType.Binding;

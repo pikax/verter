@@ -358,26 +358,37 @@ describe("process script plugin script block", () => {
         });
       });
 
-      it("withDefaults(defineProps)", () => {
-        const { result, context } = parse(
-          `withDefaults(defineProps({ a: String }), {})`
+      // it("withDefaults(defineProps)", () => {
+      //   const { result, context } = parse(
+      //     `withDefaults(defineProps({ a: String }), {})`
+      //   );
+
+      //   expect(result).toContain(
+      //     `const ___VERTER___Props=defineProps({ a: String });withDefaults(___VERTER___Props, {})`
+      //   );
+
+      //   expect(context.items).toMatchObject([
+      //     {
+      //       type: "macro-binding",
+      //       macro: "defineProps",
+      //       name: "___VERTER___Props",
+      //     },
+      //   ]);
+      // });
+      it.only("withDefaults(defineProps({a: String}))", () => {
+        const { result, context, ...other } = parse(
+          `const props = withDefaults(defineProps({ a: String }), {})`
         );
 
         expect(result).toContain(
-          `const ___VERTER___Props=defineProps({ a: String });withDefaults(___VERTER___Props, {})`
+          [
+            "let ___VERTER___defineProps_Boxed;",
+            "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
+            "defineProps(___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })), {});",
+          ].join("")
         );
-
-        expect(context.items).toMatchObject([
-          {
-            type: "macro-binding",
-            macro: "defineProps",
-            name: "___VERTER___Props",
-          },
-        ]);
-      });
-      it.only("withDefaults(defineProps)", () => {
-        const { result, context, ...other } = parse(
-          `const props = withDefaults(defineProps({ a: String }), {})`
+        expect(result).toContain(
+          "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
         );
 
         testSourceMaps({
@@ -385,14 +396,18 @@ describe("process script plugin script block", () => {
           map: other.s.generateMap({ hires: true, includeContent: true }),
         });
 
-        expect(result).toContain(
-          `;const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String });const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(defineProps(___VERTER___props_Boxed), {});const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])`
-        );
-
         expect(context.items[0]).toMatchObject({
           type: "macro-binding",
           macro: "defineProps",
           name: "___VERTER___Props",
+        });
+
+        expect(context.items[1]).toMatchObject({
+          type: "warning",
+          message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
+          // this is bound to defineProps, but maybe it could be withDefaults, to be investigated and confirmed
+          start: 51,
+          end: 77,
         });
       });
     });

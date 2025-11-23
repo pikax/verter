@@ -178,9 +178,20 @@ export const MacrosPlugin = definePlugin({
             let splitFromOffset = -1;
             let splitToOffset = -1;
 
-            const ops = [];
+            const propsBoxInfo = boxInfo("defineProps", ctx);
 
             if (defineProps.type === "CallExpression") {
+              if (defineProps.arguments.length > 0) {
+                // add a warning if there's arguments, since we are using withDefaults
+                ctx.items.push({
+                  type: ProcessItemType.Warning,
+                  message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
+                  node: defineProps,
+                  start: defineProps.start,
+                  end: defineProps.end,
+                });
+              }
+
               splitFromOffset = defineProps.typeArguments
                 ? defineProps.typeArguments.start
                 : defineProps.arguments[0].start;
@@ -188,31 +199,33 @@ export const MacrosPlugin = definePlugin({
                 ? defineProps.typeArguments.end
                 : defineProps.arguments[defineProps.arguments.length - 1].end;
 
-              ops.push(boxMacro(defineProps, item.declarator.start!, s, ctx));
+              ctx.items.push(
+                createHelperImport([propsBoxInfo.name], ctx.prefix)
+              );
             }
 
-            ops.push(
-              boxMacro(
-                item.parent.init,
-                item.declarator.start!,
-                s,
-                ctx,
-                splitFromOffset !== -1 && splitToOffset !== -1
-                  ? { from: splitFromOffset, to: splitToOffset }
-                  : null
-              )
+            const withDefaultOps = boxMacro(
+              item.parent.init,
+              item.declarator.start!,
+              s,
+              ctx,
+              null /*   splitFromOffset !== -1 && splitToOffset !== -1
+                ? { from: splitFromOffset, to: splitToOffset }
+                : null*/
             );
 
-            for (const op of ops) {
-              op?.start();
+            s.appendLeft(
+              item.declarator.start!,
+              `let ${propsBoxInfo.boxedName}`
+            );
+            if (splitFromOffset !== -1 && splitToOffset !== -1) {
+              s.appendLeft(
+                splitFromOffset,
+                `${propsBoxInfo.boxedName}=${propsBoxInfo.boxName}(`
+              );
+              s.appendRight(splitToOffset, `)`);
             }
-
-            for (const op of ops) {
-              op?.end();
-            }
-            for (const op of ops) {
-              op?.move();
-            }
+            withDefaultOps!();
 
             this.hasWithDefaults = true;
           } else {
@@ -339,8 +352,20 @@ export const MacrosPlugin = definePlugin({
 });
 
 function addMacroDependencies(macroName: string, ctx: ScriptContext) {
-  return createHelperImport([`${macroName as MacroNames}_Box`], ctx.prefix);
-  // if (!ctx.block.lang.startsWith("ts")) return;
+  if (!ctx.block.lang.startsWith("ts")) return;
+
+  // @ts-expect-error fix this later
+  createHelperImport([`${macroName as MacroNames}_Box`], ctx.prefix);
+
+  ctx.items.push({
+    type: ProcessItemType.Import,
+    from: "vue",
+    items: [
+      {
+        name: macroName,
+      },
+    ],
+  });
 
   // const dependencies = MacroDependencies.get(macroName);
   // if (dependencies) {

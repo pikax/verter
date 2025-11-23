@@ -150,7 +150,7 @@ export class DocumentManager implements Disposable {
     let d = this._files.get(filepath);
     if (!d) {
       if (filepath === "$verter/types$") {
-        const content = prefixWith("___VERTER___");
+        const content = prefixWith("");
         const doc = TypescriptDocument.create(filepath, "ts", 0, content);
         this._files.set(filepath, doc);
         this._files.set(pathToUri(filepath), doc);

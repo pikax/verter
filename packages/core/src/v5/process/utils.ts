@@ -4,6 +4,7 @@ import {
   type ImportItem,
   type ImportModule,
 } from "./types";
+import { ExportedTypes } from "@verter/types/string";
 import type { AvailableExports } from "@verter/types/string";
 
 export function defaultPrefix<T>(str: string) {
@@ -19,9 +20,9 @@ export function createHelperImport(
   return {
     type: ProcessItemType.Import,
     from: VERTER_HELPERS_IMPORT,
-    asType: true,
     items: items.map((name) => ({
       name: name,
+      type: ExportedTypes.has(name),
       alias: prefix(name),
     })),
   };
