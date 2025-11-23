@@ -90,6 +90,14 @@ export type ProcessItemMacroBinding = {
   macro: string;
   // originalName?: string;
 
+  /**
+   * Is the macro type only or is object.
+   * For example, `defineProps<Type>()` vs `defineProps({})`
+   * if has both then it's `type` eg: `defineProps<Type>({a: string})`
+   * will be isType = true
+   */
+  isType?: boolean;
+
   node: VerterASTNode;
 };
 

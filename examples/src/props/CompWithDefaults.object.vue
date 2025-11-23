@@ -8,12 +8,11 @@ const props = withDefaults(
   {}
 );
 
-const props = defineProps({
-  a: String,
-});
+___VERTER___defineProps_Boxed.a = String;
+// @ts-expect-error
+___VERTER___defineProps_Boxed.a = Number;
 
-const pp = ___VERTER___defineProps_Box<{ a: string }>();
-const dd = ___VERTER___withDefaults_Box(defineProps<{ a: string }>(), {});
+___VERTER___withDefaults_Boxed[1] = {};
 </script>
 
 <template>

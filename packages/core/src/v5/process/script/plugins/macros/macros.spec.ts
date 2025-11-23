@@ -375,7 +375,7 @@ describe("process script plugin script block", () => {
       //     },
       //   ]);
       // });
-      it.only("withDefaults(defineProps({a: String}))", () => {
+      it.skip("withDefaults(defineProps({a: String}), {})", () => {
         const { result, context, ...other } = parse(
           `const props = withDefaults(defineProps({ a: String }), {})`
         );
@@ -389,6 +389,49 @@ describe("process script plugin script block", () => {
         );
         expect(result).toContain(
           "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
+        );
+
+        testSourceMaps({
+          content: result,
+          map: other.s.generateMap({ hires: true, includeContent: true }),
+        });
+
+        // TODO fix returns
+
+        expect(context.items).toContain(
+          expect.objectContaining({
+            type: "macro-binding",
+            macro: "defineProps",
+            name: "___VERTER___Props",
+          })
+        );
+
+        expect(context.items[1]).toMatchObject({
+          type: "warning",
+          message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
+          // this is bound to defineProps, but maybe it could be withDefaults, to be investigated and confirmed
+          start: 51,
+          end: 77,
+        });
+      });
+
+      it.only("withDefaults(defineProps<{ a?: string }>(), {})", () => {
+        const { result, context, ...other } = parse(
+          `const props = withDefaults(defineProps<{ a?: string }>(), {})`,
+          "ts"
+        );
+
+        expect(result).toContain(
+          [
+            "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
+            "defineProps<___VERTER___defineProps_Type>(), {});",
+          ].join("")
+        );
+        expect(result).toContain(
+          "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
+        );
+        expect(result).toContain(
+          ";type ___VERTER___defineProps_Type={}&{ a?: string };"
         );
 
         testSourceMaps({

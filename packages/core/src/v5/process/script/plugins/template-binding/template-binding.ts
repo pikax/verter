@@ -80,7 +80,7 @@ export const TemplateBindingPlugin = definePlugin({
         const n = ctx.prefix(
           x.macro === "withDefaults" ? "defineProps" : x.macro
         );
-        acc[n] = x.name;
+        acc[x.macro] = x.name;
         return acc;
       }, {} as Record<string, string>);
     const usedBindings = ctx.templateBindings
