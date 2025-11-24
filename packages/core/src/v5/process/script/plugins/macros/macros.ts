@@ -1,5 +1,10 @@
 import { definePlugin, ScriptContext } from "../../types";
-import type { CallExpression } from "../../../../parser/ast/types";
+import type {
+  CallExpression,
+  VariableDeclarator,
+  VerterAST,
+  VerterASTNode,
+} from "../../../../parser/ast/types";
 import {
   ProcessContext,
   ProcessItemImport,
@@ -8,6 +13,7 @@ import {
 import { generateTypeDeclaration, generateTypeString } from "../utils";
 import type { AvailableExports } from "@verter/types/string";
 import { createHelperImport } from "../../../utils";
+import { MagicString } from "@vue/compiler-sfc";
 
 const MacrosNames = [
   "defineProps",
@@ -130,6 +136,13 @@ export const MacrosPlugin = definePlugin({
       item.parent.init?.type === "CallExpression"
     ) {
       if (item.parent.init.callee.type === "Identifier") {
+        return processMacroCall(
+          item.parent.init,
+          item.parent.id.type === "Identifier" ? item.parent.id.name : null,
+          item.declarator,
+          s,
+          ctx
+        );
         const macroName = item.parent.init.callee.name;
         if (!Macros.has(macroName) || macroName === "defineOptions") {
           return;
@@ -288,6 +301,8 @@ export const MacrosPlugin = definePlugin({
       return;
     }
 
+    return processMacroCall(item.node, null, null, s, ctx);
+
     const macroName = item.name;
 
     addMacroDependencies(macroName, ctx);
@@ -367,6 +382,134 @@ export const MacrosPlugin = definePlugin({
     }
   },
 });
+
+function processMacroCall(
+  node: CallExpression,
+  varName: string | null,
+  declarator: VerterASTNode | null,
+  s: MagicString,
+  ctx: ScriptContext
+) {
+  const macroName =
+    node.callee.type === "Identifier" ? node.callee.name : undefined;
+  if (!macroName || !Macros.has(macroName) || macroName === "defineOptions") {
+    return;
+  }
+  if (!ctx.isSetup) {
+    ctx.items.push({
+      type: ProcessItemType.Warning,
+      message: "MACRO_NOT_IN_SETUP",
+      node: node,
+      start: node.start,
+      end: node.end,
+    });
+    return;
+  }
+
+  const start = declarator?.start ?? node.start;
+  const end = declarator?.end ?? node.end;
+  const box = boxMacro(node, start, s, ctx);
+
+  switch (macroName) {
+    case "defineModel": {
+      ctx.items.push({
+        type: ProcessItemType.DefineModel,
+        varName: varName ?? box.info.boxedName,
+        name: getModelName(node),
+        node: node,
+      });
+      break;
+    }
+    case "withDefaults": {
+      const defineProps = node.arguments[0];
+      if (defineProps.type === "CallExpression") {
+        if (defineProps.arguments.length > 0) {
+          // add a warning if there's arguments, since we are using withDefaults
+          ctx.items.push({
+            type: ProcessItemType.Warning,
+            message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
+            node: defineProps,
+            start: defineProps.start,
+            end: defineProps.end,
+          });
+        }
+
+        let splitFromOffset = -1;
+        let splitToOffset = -1;
+
+        const propsBoxInfo = boxInfo("defineProps", ctx);
+
+        const isType = !!defineProps.typeArguments;
+
+        splitFromOffset = defineProps.typeArguments
+          ? defineProps.typeArguments.start
+          : defineProps.arguments[0].start;
+        splitToOffset = defineProps.typeArguments
+          ? defineProps.typeArguments.end
+          : defineProps.arguments[defineProps.arguments.length - 1].end;
+
+        if (isType) {
+          const paramsStart = defineProps.typeArguments?.params[0].start!;
+          const paramEnd =
+            defineProps.typeArguments?.params[
+              defineProps.typeArguments.params.length - 1
+            ].end!;
+
+          s.appendLeft(paramsStart, propsBoxInfo.type);
+          // create type and prettify it with "{}&" otherwise on hover it will
+          // show `defineProps_Type` only
+          s.appendRight(paramsStart, `;type ${propsBoxInfo.type}={}&`);
+
+          s.move(paramsStart, paramEnd, end);
+        } else {
+          s.appendLeft(start, `let ${propsBoxInfo.boxedName}`);
+          if (splitFromOffset !== -1 && splitToOffset !== -1) {
+            s.appendLeft(
+              splitFromOffset,
+              `${propsBoxInfo.boxedName}=${propsBoxInfo.boxName}(`
+            );
+            s.appendRight(splitToOffset, `)`);
+          }
+        }
+
+        ctx.items.push(createHelperImport([propsBoxInfo.name], ctx.prefix));
+
+        ctx.items.push({
+          type: ProcessItemType.MacroBinding,
+          name: varName ?? propsBoxInfo.boxedName,
+          macro: "defineProps",
+          node: defineProps,
+          isType,
+          valueName: varName ?? propsBoxInfo.boxedName,
+          typeName: isType ? propsBoxInfo.type : undefined,
+          objectName: !isType ? propsBoxInfo.boxedName : undefined,
+        });
+      }
+
+      box();
+
+      if (!varName) {
+        varName = ctx.prefix(macroName);
+        s.appendRight(node.start, `const ${varName}=`);
+      }
+
+      const isTypeModel = !!node.typeArguments;
+
+      ctx.items.push({
+        type: ProcessItemType.MacroBinding,
+        name: varName ?? box.info.boxedName,
+        macro: macroName,
+        node: declarator ?? node,
+        isType: isTypeModel !== undefined,
+        valueName: varName,
+        objectName: !isTypeModel ? box!.info.boxedName : undefined,
+        typeName: isTypeModel ? box!.info.type : undefined,
+      });
+
+      break;
+    }
+  }
+}
 
 function addMacroDependencies(macroName: string, ctx: ScriptContext) {
   if (!ctx.block.lang.startsWith("ts")) return;
