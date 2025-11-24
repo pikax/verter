@@ -58,6 +58,10 @@ export const enum ProcessItemType {
    */
   MacroBinding = "macro-binding",
   /**
+   * Contains Macro return information
+   */
+  MacroReturn = "macro-return",
+  /**
    * Contains the component options, for example `defineOptions`
    */
   Options = "options",
@@ -83,6 +87,12 @@ export type ProcessItemWarning = {
 
   message: ItemWarningString;
 } & LocationProcessItem;
+
+export type ProcessItemMacroReturn = {
+  type: ProcessItemType.MacroReturn;
+
+  content: string;
+};
 
 export type ProcessItemMacroBinding = {
   type: ProcessItemType.MacroBinding;
@@ -165,7 +175,8 @@ export type ProcessItem =
   | ProcessItemBinding
   | ProcessItemOptions
   | ProcessItemMacroBinding
-  | ProcessItemDefineModel;
+  | ProcessItemDefineModel
+  | ProcessItemMacroReturn;
 
 export type LocationProcessItem = {
   start: number;

@@ -32,6 +32,59 @@ export const MacrosPlugin = definePlugin({
   },
 
   post(s, ctx) {
+    type MacroInfo = {
+      start: number;
+      end: number;
+
+      typeName?: string;
+      valueName?: string;
+      objectName?: string;
+    };
+
+    const modelReturn = {} as Record<string, MacroInfo>;
+    const result = {} as Record<string, MacroInfo>;
+
+    for (const macro of ctx.items) {
+      switch (macro.type) {
+        case ProcessItemType.DefineModel: {
+          // modelReturn[macro.name] = {
+          //   typeName: macro.varName,
+          // };
+          break;
+        }
+        case ProcessItemType.MacroBinding: {
+          result[macro.macro] = {
+            start: macro.node.start!,
+            end: macro.node.end!,
+
+            typeName: macro.typeName,
+            valueName: macro.valueName,
+            objectName: macro.objectName,
+          };
+          break;
+        }
+      }
+    }
+
+    const content = Object.entries(result).map(([macro, info]) => {
+      const value = info.valueName
+        ? `"value":{} as typeof ${info.valueName}`
+        : ``;
+      const type = info.typeName ? `"type":{} as ${info.typeName}` : ``;
+      const object = info.objectName
+        ? `"object":{} as typeof ${info.objectName}`
+        : ``;
+
+      return `${macro}:{${[value, type, object]
+        .filter((x) => x !== "")
+        .join(",")}}`;
+    });
+
+    ctx.items.push({
+      type: ProcessItemType.MacroReturn,
+      content: `{${content.join(",")}}`,
+    });
+
     // // not needed anymore
     // const isTS = ctx.block.lang.startsWith("ts");
     // const macroBindinds = ctx.items.filter(
@@ -85,20 +138,8 @@ export const MacrosPlugin = definePlugin({
 
         let varName =
           item.parent.id.type === "Identifier" ? item.parent.id.name : "";
-        // let originalName: string | undefined = undefined;
-        // if (macroName === "defineModel") {
-        //   // const accessor = ctx.prefix("models");
-        //   const modelName = getModelName(item.parent.init);
-
-        //   return
-        //   // varName = `${accessor}_${modelName}`;
-        //   originalName = modelName;
-        // }
 
         if (ctx.isSetup) {
-          // s.prependLeft(item.declarator.end, `let ${varName} ;`);
-          // s.prependLeft(item.parent.id.end, `=${varName}`);
-
           if (macroName === "defineModel") {
             ctx.items.push({
               type: ProcessItemType.DefineModel,
@@ -126,7 +167,7 @@ export const MacrosPlugin = definePlugin({
                 });
               }
 
-              const isType = defineProps.typeArguments !== undefined;
+              const isType = !!defineProps.typeArguments;
 
               splitFromOffset = defineProps.typeArguments
                 ? defineProps.typeArguments.start
@@ -187,20 +228,19 @@ export const MacrosPlugin = definePlugin({
 
             withDefaultOps!();
 
-            const isTypeModel = item.parent.init.typeArguments !== undefined;
+            const isTypeModel = !!item.parent.init.typeArguments;
 
             ctx.items.push({
               type: ProcessItemType.MacroBinding,
               name: varName,
               macro: macroName,
               node: item.parent,
-              isType:isTypeModel !== undefined,
+              isType: isTypeModel !== undefined,
+              valueName: varName,
               objectName: !isTypeModel
-                ? propsBoxInfo.boxedName
+                ? withDefaultOps!.info.boxedName
                 : undefined,
-              typeName: isTypeModel
-                ? propsBoxInfo.type
-                : undefined,
+              typeName: isTypeModel ? withDefaultOps!.info.type : undefined,
             });
 
             this.hasWithDefaults = true;
@@ -432,7 +472,8 @@ function boxMacro(
     console.warn("boxMacro: callee is not an identifier", caller.callee);
     return;
   }
-  const { boxedName, boxName } = boxInfo(name, ctx);
+  const info = boxInfo(name, ctx);
+  const { boxedName, boxName } = info;
   ctx.items.push(
     createHelperImport([`${name}_Box` as AvailableExports], ctx.prefix)
   );
@@ -487,6 +528,11 @@ function boxMacro(
     move.start = doStart;
     move.end = doEnd;
     move.move = doMove;
+    move.info = info;
+    // move.boxedName = boxedName;
+    // move.boxName = boxName;
+    // move.name = info.name;
+    // move.type = info.type;
 
     return move;
   }
