@@ -1,16 +1,6 @@
 import { definePlugin, ScriptContext } from "../../types";
-import type {
-  CallExpression,
-  VariableDeclarator,
-  VerterAST,
-  VerterASTNode,
-} from "../../../../parser/ast/types";
-import {
-  ProcessContext,
-  ProcessItemImport,
-  ProcessItemType,
-} from "../../../types";
-import { generateTypeDeclaration, generateTypeString } from "../utils";
+import type { CallExpression, VerterASTNode } from "../../../../parser/ast/types";
+import { ProcessContext, ProcessItemType } from "../../../types";
 import type { AvailableExports } from "@verter/types/string";
 import { createHelperImport } from "../../../utils";
 import { MagicString } from "@vue/compiler-sfc";
@@ -31,39 +21,40 @@ type MacroNames = (typeof MacrosNames)[number];
 const Macros = new Set<string>(MacrosNames);
 const NoReturnMacros = new Set<string>(["defineOptions", "defineExpose"]);
 
+type MacroInfo = {
+  typeName?: string;
+  valueName?: string;
+  objectName?: string;
+};
+
+function generateMacroInfoString(info: MacroInfo): string {
+  const parts = [
+    info.valueName && `"value":{} as typeof ${info.valueName}`,
+    info.typeName && `"type":{} as ${info.typeName}`,
+    info.objectName && `"object":{} as typeof ${info.objectName}`,
+  ].filter(Boolean);
+  return parts.join(",");
+}
+
 export const MacrosPlugin = definePlugin({
   name: "VerterMacro",
-  hasWithDefaults: false,
-  pre(s, ctx) {
-    this.hasWithDefaults = false;
-  },
 
   post(s, ctx) {
-    type MacroInfo = {
-      start: number;
-      end: number;
-
-      typeName?: string;
-      valueName?: string;
-      objectName?: string;
-    };
-
     const modelReturn = {} as Record<string, MacroInfo>;
-    const result = {} as Record<string, MacroInfo>;
+    const macroBindings = {} as Record<string, MacroInfo>;
 
     for (const macro of ctx.items) {
       switch (macro.type) {
         case ProcessItemType.DefineModel: {
-          // modelReturn[macro.name] = {
-          //   typeName: macro.varName,
-          // };
+          modelReturn[macro.name] = {
+            typeName: macro.typeName,
+            valueName: macro.valueName,
+            objectName: macro.objectName,
+          };
           break;
         }
         case ProcessItemType.MacroBinding: {
-          result[macro.macro] = {
-            start: macro.node.start!,
-            end: macro.node.end!,
-
+          macroBindings[macro.macro] = {
             typeName: macro.typeName,
             valueName: macro.valueName,
             objectName: macro.objectName,
@@ -73,21 +64,18 @@ export const MacrosPlugin = definePlugin({
       }
     }
 
-    const content = Object.entries(result).map(([macro, info]) => {
-      const value = info.valueName
-        ? `"value":{} as typeof ${info.valueName}`
-        : ``;
-      const type = info.typeName ? `"type":{} as ${info.typeName}` : ``;
-      const object = info.objectName
-        ? `"object":{} as typeof ${info.objectName}`
-        : ``;
-
+    const content = Object.entries(macroBindings).map(([macro, info]) => {
       const name = normaliseDefineFromMacro(macro);
-
-      return `${name}:{${[value, type, object]
-        .filter((x) => x !== "")
-        .join(",")}}`;
+      return `${name}:{${generateMacroInfoString(info)}}`;
     });
+
+    const modelEntries = Object.entries(modelReturn);
+    if (modelEntries.length > 0) {
+      const modelContent = modelEntries.map(
+        ([modelName, info]) => `${modelName}:{${generateMacroInfoString(info)}}`
+      );
+      content.push(`model:{${modelContent.join(",")}}`);
+    }
 
     ctx.items.push({
       type: ProcessItemType.MacroReturn,

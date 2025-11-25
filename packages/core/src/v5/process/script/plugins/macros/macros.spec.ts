@@ -684,22 +684,101 @@ defineExpose({ focus: () => {} })
       });
 
       describe("macro return tracking", () => {
+        function getMacroReturnContent(context: any): string {
+          const macroReturn = context.items.find(
+            (item: any) => item.type === "macro-return"
+          );
+          return macroReturn?.content ?? "";
+        }
+
         it("tracks macro return content correctly", () => {
-          const { result, context } = parseTS(`
+          const { context } = parseTS(`
 const props = defineProps<{ msg: string }>()
 const emit = defineEmits<{ change: [] }>()
           `);
 
-          const macroReturn = context.items.find(
-            (item: any) => item.type === "macro-return"
+          expect(getMacroReturnContent(context)).toMatchInlineSnapshot(
+            `"{props:{"value":{} as typeof props,"type":{} as ___VERTER___defineProps_Type},emits:{"value":{} as typeof emit,"type":{} as ___VERTER___defineEmits_Type}}"`
           );
+        });
 
-          expect(macroReturn).toBeDefined();
-          expect(macroReturn).toHaveProperty("content");
-          expect((macroReturn as any).content).toContain("defineProps");
-          expect((macroReturn as any).content).toContain("defineEmits");
-          expect((macroReturn as any).content).toContain("___VERTER___defineProps_Type");
-          expect((macroReturn as any).content).toContain("___VERTER___defineEmits_Type");
+        it("includes defineModel in macro return with type", () => {
+          const { context } = parseTS(`
+const model = defineModel<string>()
+          `);
+
+          expect(getMacroReturnContent(context)).toMatchInlineSnapshot(
+            `"{model:{modelValue:{"value":{} as typeof model,"type":{} as ___VERTER___modelValue_defineModel_Type}}}"`
+          );
+        });
+
+        it("includes defineModel in macro return with object", () => {
+          const { context } = parseTS(`
+const model = defineModel({ default: 'hello' })
+          `);
+
+          expect(getMacroReturnContent(context)).toMatchInlineSnapshot(
+            `"{model:{modelValue:{"value":{} as typeof model,"object":{} as typeof ___VERTER___modelValue_defineModel_Boxed}}}"`
+          );
+        });
+
+        it("includes multiple defineModel calls in macro return", () => {
+          const { context } = parseTS(`
+const firstName = defineModel<string>('firstName')
+const lastName = defineModel<string>('lastName')
+          `);
+
+          expect(getMacroReturnContent(context)).toMatchInlineSnapshot(
+            `"{model:{firstName:{"value":{} as typeof firstName,"type":{} as ___VERTER___firstName_defineModel_Type,"object":{} as typeof ___VERTER___firstName_defineModel_Boxed},lastName:{"value":{} as typeof lastName,"type":{} as ___VERTER___lastName_defineModel_Type,"object":{} as typeof ___VERTER___lastName_defineModel_Boxed}}}"`
+          );
+        });
+
+        it("includes named defineModel with options in macro return", () => {
+          const { context } = parseTS(`
+const count = defineModel<number>('count', { required: true })
+          `);
+
+          expect(getMacroReturnContent(context)).toMatchInlineSnapshot(
+            `"{model:{count:{"value":{} as typeof count,"type":{} as ___VERTER___count_defineModel_Type,"object":{} as typeof ___VERTER___count_defineModel_Boxed}}}"`
+          );
+        });
+
+        it("includes both macros and defineModel in macro return", () => {
+          const { context } = parseTS(`
+const props = defineProps<{ msg: string }>()
+const emit = defineEmits<{ change: [] }>()
+const model = defineModel<string>()
+          `);
+
+          expect(getMacroReturnContent(context)).toMatchInlineSnapshot(
+            `"{props:{"value":{} as typeof props,"type":{} as ___VERTER___defineProps_Type},emits:{"value":{} as typeof emit,"type":{} as ___VERTER___defineEmits_Type},model:{modelValue:{"value":{} as typeof model,"type":{} as ___VERTER___modelValue_defineModel_Type}}}"`
+          );
+        });
+
+        it("does not include model key when no defineModel is used", () => {
+          const { context } = parseTS(`
+const props = defineProps<{ msg: string }>()
+          `);
+
+          expect(getMacroReturnContent(context)).toMatchInlineSnapshot(
+            `"{props:{"value":{} as typeof props,"type":{} as ___VERTER___defineProps_Type}}"`
+          );
+        });
+
+        it("handles defineModel without assignment correctly", () => {
+          const { context } = parseTS(`
+defineModel<string>()
+          `);
+
+          expect(getMacroReturnContent(context)).toMatchInlineSnapshot(
+            `"{model:{modelValue:{"value":{} as typeof ___VERTER___models_modelValue,"type":{} as ___VERTER___modelValue_defineModel_Type}}}"`
+          );
+        });
+
+        it("empty macro return when no macros used", () => {
+          const { context } = parseTS(`const foo = 'bar'`);
+
+          expect(getMacroReturnContent(context)).toMatchInlineSnapshot(`"{}"`);
         });
       });
 
