@@ -81,7 +81,11 @@ export const MacrosPlugin = definePlugin({
         ? `"object":{} as typeof ${info.objectName}`
         : ``;
 
-      return `${macro}:{${[value, type, object]
+      const name = macro.startsWith("define")
+        ? macro[6].toLowerCase() + macro.slice(7)
+        : macro;
+
+      return `${name}:{${[value, type, object]
         .filter((x) => x !== "")
         .join(",")}}`;
     });
@@ -143,144 +147,144 @@ export const MacrosPlugin = definePlugin({
           s,
           ctx
         );
-        const macroName = item.parent.init.callee.name;
-        if (!Macros.has(macroName) || macroName === "defineOptions") {
-          return;
-        }
-        addMacroDependencies(macroName, ctx);
+        // const macroName = item.parent.init.callee.name;
+        // if (!Macros.has(macroName) || macroName === "defineOptions") {
+        //   return;
+        // }
+        // addMacroDependencies(macroName, ctx);
 
-        let varName =
-          item.parent.id.type === "Identifier" ? item.parent.id.name : "";
+        // let varName =
+        //   item.parent.id.type === "Identifier" ? item.parent.id.name : "";
 
-        if (ctx.isSetup) {
-          if (macroName === "defineModel") {
-            ctx.items.push({
-              type: ProcessItemType.DefineModel,
-              varName,
-              name: getModelName(item.parent.init),
-              node: item.parent,
-            });
-          } else if (macroName == "withDefaults") {
-            const defineProps = item.parent.init.arguments[0];
+        // if (ctx.isSetup) {
+        //   if (macroName === "defineModel") {
+        //     ctx.items.push({
+        //       type: ProcessItemType.DefineModel,
+        //       varName,
+        //       name: getModelName(item.parent.init),
+        //       node: item.parent,
+        //     });
+        //   } else if (macroName == "withDefaults") {
+        //     const defineProps = item.parent.init.arguments[0];
 
-            let splitFromOffset = -1;
-            let splitToOffset = -1;
+        //     let splitFromOffset = -1;
+        //     let splitToOffset = -1;
 
-            const propsBoxInfo = boxInfo("defineProps", ctx);
+        //     const propsBoxInfo = boxInfo("defineProps", ctx);
 
-            if (defineProps.type === "CallExpression") {
-              if (defineProps.arguments.length > 0) {
-                // add a warning if there's arguments, since we are using withDefaults
-                ctx.items.push({
-                  type: ProcessItemType.Warning,
-                  message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
-                  node: defineProps,
-                  start: defineProps.start,
-                  end: defineProps.end,
-                });
-              }
+        //     if (defineProps.type === "CallExpression") {
+        //       if (defineProps.arguments.length > 0) {
+        //         // add a warning if there's arguments, since we are using withDefaults
+        //         ctx.items.push({
+        //           type: ProcessItemType.Warning,
+        //           message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
+        //           node: defineProps,
+        //           start: defineProps.start,
+        //           end: defineProps.end,
+        //         });
+        //       }
 
-              const isType = !!defineProps.typeArguments;
+        //       const isType = !!defineProps.typeArguments;
 
-              splitFromOffset = defineProps.typeArguments
-                ? defineProps.typeArguments.start
-                : defineProps.arguments[0].start;
-              splitToOffset = defineProps.typeArguments
-                ? defineProps.typeArguments.end
-                : defineProps.arguments[defineProps.arguments.length - 1].end;
+        //       splitFromOffset = defineProps.typeArguments
+        //         ? defineProps.typeArguments.start
+        //         : defineProps.arguments[0].start;
+        //       splitToOffset = defineProps.typeArguments
+        //         ? defineProps.typeArguments.end
+        //         : defineProps.arguments[defineProps.arguments.length - 1].end;
 
-              if (isType) {
-                const paramsStart = defineProps.typeArguments?.params[0].start!;
-                const paramEnd =
-                  defineProps.typeArguments?.params[
-                    defineProps.typeArguments.params.length - 1
-                  ].end!;
+        //       if (isType) {
+        //         const paramsStart = defineProps.typeArguments?.params[0].start!;
+        //         const paramEnd =
+        //           defineProps.typeArguments?.params[
+        //             defineProps.typeArguments.params.length - 1
+        //           ].end!;
 
-                s.appendLeft(paramsStart, propsBoxInfo.type);
-                // create type and prettify it with "{}&" otherwise on hover it will
-                // show `defineProps_Type` only
-                s.appendRight(paramsStart, `;type ${propsBoxInfo.type}={}&`);
+        //         s.appendLeft(paramsStart, propsBoxInfo.type);
+        //         // create type and prettify it with "{}&" otherwise on hover it will
+        //         // show `defineProps_Type` only
+        //         s.appendRight(paramsStart, `;type ${propsBoxInfo.type}={}&`);
 
-                s.move(paramsStart, paramEnd, item.declarator.end!);
-              } else {
-                s.appendLeft(
-                  item.declarator.start!,
-                  `let ${propsBoxInfo.boxedName}`
-                );
-                if (splitFromOffset !== -1 && splitToOffset !== -1) {
-                  s.appendLeft(
-                    splitFromOffset,
-                    `${propsBoxInfo.boxedName}=${propsBoxInfo.boxName}(`
-                  );
-                  s.appendRight(splitToOffset, `)`);
-                }
-              }
+        //         s.move(paramsStart, paramEnd, item.declarator.end!);
+        //       } else {
+        //         s.appendLeft(
+        //           item.declarator.start!,
+        //           `let ${propsBoxInfo.boxedName}`
+        //         );
+        //         if (splitFromOffset !== -1 && splitToOffset !== -1) {
+        //           s.appendLeft(
+        //             splitFromOffset,
+        //             `${propsBoxInfo.boxedName}=${propsBoxInfo.boxName}(`
+        //           );
+        //           s.appendRight(splitToOffset, `)`);
+        //         }
+        //       }
 
-              ctx.items.push(
-                createHelperImport([propsBoxInfo.name], ctx.prefix)
-              );
+        //       ctx.items.push(
+        //         createHelperImport([propsBoxInfo.name], ctx.prefix)
+        //       );
 
-              ctx.items.push({
-                type: ProcessItemType.MacroBinding,
-                name: varName,
-                macro: "defineProps",
-                node: defineProps,
-                isType,
-                valueName: varName,
-                typeName: isType ? propsBoxInfo.type : undefined,
-                objectName: !isType ? propsBoxInfo.boxedName : undefined,
-              });
-            }
+        //       ctx.items.push({
+        //         type: ProcessItemType.MacroBinding,
+        //         name: varName,
+        //         macro: "defineProps",
+        //         node: defineProps,
+        //         isType,
+        //         valueName: varName,
+        //         typeName: isType ? propsBoxInfo.type : undefined,
+        //         objectName: !isType ? propsBoxInfo.boxedName : undefined,
+        //       });
+        //     }
 
-            const withDefaultOps = boxMacro(
-              item.parent.init,
-              item.declarator.start!,
-              s,
-              ctx
-            );
+        //     const withDefaultOps = boxMacro(
+        //       item.parent.init,
+        //       item.declarator.start!,
+        //       s,
+        //       ctx
+        //     );
 
-            withDefaultOps!();
+        //     withDefaultOps!();
 
-            const isTypeModel = !!item.parent.init.typeArguments;
+        //     const isTypeModel = !!item.parent.init.typeArguments;
 
-            ctx.items.push({
-              type: ProcessItemType.MacroBinding,
-              name: varName,
-              macro: macroName,
-              node: item.parent,
-              isType: isTypeModel !== undefined,
-              valueName: varName,
-              objectName: !isTypeModel
-                ? withDefaultOps!.info.boxedName
-                : undefined,
-              typeName: isTypeModel ? withDefaultOps!.info.type : undefined,
-            });
+        //     ctx.items.push({
+        //       type: ProcessItemType.MacroBinding,
+        //       name: varName,
+        //       macro: macroName,
+        //       node: item.parent,
+        //       isType: isTypeModel !== undefined,
+        //       valueName: varName,
+        //       objectName: !isTypeModel
+        //         ? withDefaultOps!.info.boxedName
+        //         : undefined,
+        //       typeName: isTypeModel ? withDefaultOps!.info.type : undefined,
+        //     });
 
-            this.hasWithDefaults = true;
-          } else {
-            if (macroName === "defineProps" && this.hasWithDefaults) {
-              return;
-            }
-            ctx.items.push({
-              type: ProcessItemType.MacroBinding,
-              name: varName!,
-              macro: macroName,
-              node: item.parent,
-              isType: item.parent.init.typeArguments !== undefined,
-            });
-            boxMacro(item.parent.init, item.declarator.start!, s, ctx);
-          }
-        } else {
-          ctx.items.push({
-            type: ProcessItemType.Warning,
-            message: "MACRO_NOT_IN_SETUP",
-            node: item.node,
-            // @ts-expect-error TODO improve this, this shouldn't be necessary
-            start: item.node.start,
-            // @ts-expect-error TODO improve this, this shouldn't be necessary
-            end: item.node.end,
-          });
-        }
+        //     this.hasWithDefaults = true;
+        //   } else {
+        //     if (macroName === "defineProps" && this.hasWithDefaults) {
+        //       return;
+        //     }
+        //     ctx.items.push({
+        //       type: ProcessItemType.MacroBinding,
+        //       name: varName!,
+        //       macro: macroName,
+        //       node: item.parent,
+        //       isType: item.parent.init.typeArguments !== undefined,
+        //     });
+        //     boxMacro(item.parent.init, item.declarator.start!, s, ctx);
+        //   }
+        // } else {
+        //   ctx.items.push({
+        //     type: ProcessItemType.Warning,
+        //     message: "MACRO_NOT_IN_SETUP",
+        //     node: item.node,
+        //     // @ts-expect-error TODO improve this, this shouldn't be necessary
+        //     start: item.node.start,
+        //     // @ts-expect-error TODO improve this, this shouldn't be necessary
+        //     end: item.node.end,
+        //   });
+        // }
       }
     }
   },
@@ -303,83 +307,83 @@ export const MacrosPlugin = definePlugin({
 
     return processMacroCall(item.node, null, null, s, ctx);
 
-    const macroName = item.name;
+    // const macroName = item.name;
 
-    addMacroDependencies(macroName, ctx);
+    // addMacroDependencies(macroName, ctx);
 
-    let varName = "";
+    // let varName = "";
 
-    if (item.name === "defineModel") {
-      const modelName = getModelName(item.node);
-      const accessor = ctx.prefix("models");
-      varName = `${accessor}_${modelName}`;
-    } else if (macroName === "withDefaults") {
-      if (this.hasWithDefaults) {
-        return;
-      }
-      // check if there's an defineProps inside
+    // if (item.name === "defineModel") {
+    //   const modelName = getModelName(item.node);
+    //   const accessor = ctx.prefix("models");
+    //   varName = `${accessor}_${modelName}`;
+    // } else if (macroName === "withDefaults") {
+    //   if (this.hasWithDefaults) {
+    //     return;
+    //   }
+    //   // check if there's an defineProps inside
 
-      if (ctx.isSetup) {
-        const defineProps = item.node.arguments[0];
-        const pName = ctx.prefix("Props");
-        if (
-          defineProps.type === "CallExpression" &&
-          defineProps.callee.type === "Identifier" &&
-          defineProps.callee.name === "defineProps"
-        ) {
-          addMacroDependencies("defineProps", ctx);
-          ctx.items.push({
-            type: ProcessItemType.MacroBinding,
-            name: pName,
-            macro: "defineProps",
-            node: defineProps,
-          });
-        }
-        // prepend props
-        s.appendLeft(item.node.start, `const ${pName}=`);
-        s.appendLeft(defineProps.end, ";");
-        s.appendRight(defineProps.end, pName);
+    //   if (ctx.isSetup) {
+    //     const defineProps = item.node.arguments[0];
+    //     const pName = ctx.prefix("Props");
+    //     if (
+    //       defineProps.type === "CallExpression" &&
+    //       defineProps.callee.type === "Identifier" &&
+    //       defineProps.callee.name === "defineProps"
+    //     ) {
+    //       addMacroDependencies("defineProps", ctx);
+    //       ctx.items.push({
+    //         type: ProcessItemType.MacroBinding,
+    //         name: pName,
+    //         macro: "defineProps",
+    //         node: defineProps,
+    //       });
+    //     }
+    //     // prepend props
+    //     s.appendLeft(item.node.start, `const ${pName}=`);
+    //     s.appendLeft(defineProps.end, ";");
+    //     s.appendRight(defineProps.end, pName);
 
-        s.move(defineProps.start, defineProps.end, item.node.start);
-        this.hasWithDefaults = true;
+    //     s.move(defineProps.start, defineProps.end, item.node.start);
+    //     this.hasWithDefaults = true;
 
-        return;
-      }
-    } else if (macroName === "defineOptions") {
-      return handleDefineOptions(item.node, ctx);
-    } else if (macroName === "defineProps" && this.hasWithDefaults) {
-      return;
-    } else {
-      varName = ctx.prefix(macroName.replace("define", ""));
-    }
+    //     return;
+    //   }
+    // } else if (macroName === "defineOptions") {
+    //   return handleDefineOptions(item.node, ctx);
+    // } else if (macroName === "defineProps" && this.hasWithDefaults) {
+    //   return;
+    // } else {
+    //   varName = ctx.prefix(macroName.replace("define", ""));
+    // }
 
-    if (ctx.isSetup) {
-      s.prependLeft(item.node.start, `const ${varName}=`);
+    // if (ctx.isSetup) {
+    //   s.prependLeft(item.node.start, `const ${varName}=`);
 
-      if (macroName === "defineModel") {
-        ctx.items.push({
-          type: ProcessItemType.DefineModel,
-          varName,
-          name: getModelName(item.node),
-          node: item.node,
-        });
-      } else {
-        ctx.items.push({
-          type: ProcessItemType.MacroBinding,
-          name: varName!,
-          macro: macroName,
-          node: item.node,
-        });
-      }
-    } else {
-      ctx.items.push({
-        type: ProcessItemType.Warning,
-        message: "MACRO_NOT_IN_SETUP",
-        node: item.node,
-        start: item.node.start,
-        end: item.node.end,
-      });
-    }
+    //   if (macroName === "defineModel") {
+    //     ctx.items.push({
+    //       type: ProcessItemType.DefineModel,
+    //       varName,
+    //       name: getModelName(item.node),
+    //       node: item.node,
+    //     });
+    //   } else {
+    //     ctx.items.push({
+    //       type: ProcessItemType.MacroBinding,
+    //       name: varName!,
+    //       macro: macroName,
+    //       node: item.node,
+    //     });
+    //   }
+    // } else {
+    //   ctx.items.push({
+    //     type: ProcessItemType.Warning,
+    //     message: "MACRO_NOT_IN_SETUP",
+    //     node: item.node,
+    //     start: item.node.start,
+    //     end: item.node.end,
+    //   });
+    // }
   },
 });
 
@@ -408,15 +412,41 @@ function processMacroCall(
 
   const start = declarator?.start ?? node.start;
   const end = declarator?.end ?? node.end;
-  const box = boxMacro(node, start, s, ctx);
+
+  let prependName = macroName === "defineModel" ? getModelName(node) : null;
+
+  const box = boxMacro(node, start, end, prependName, s, ctx);
+  addMacroDependencies(macroName as MacroNames, box.info.name, ctx);
+
+  if (!varName) {
+    varName = ctx.prefix(macroName);
+  }
 
   switch (macroName) {
     case "defineModel": {
+      const name = getModelName(node);
+      const accessor = ctx.prefix("models");
+
+      box.box();
+
+      // override `varName` since it should be based on defineModel
+      if (!declarator) {
+        varName = `${accessor}_${name}`;
+        s.appendRight(node.start, `const ${varName}=`);
+      }
+
+      const isType = !!node.typeArguments;
+
       ctx.items.push({
         type: ProcessItemType.DefineModel,
-        varName: varName ?? box.info.boxedName,
-        name: getModelName(node),
+        varName: varName,
+        name: name,
         node: node,
+
+        isType,
+        valueName: varName,
+        typeName: isType ? box.info.type : undefined,
+        objectName: node.arguments.length > 0 ? box.info.boxedName : undefined,
       });
       break;
     }
@@ -437,7 +467,7 @@ function processMacroCall(
         let splitFromOffset = -1;
         let splitToOffset = -1;
 
-        const propsBoxInfo = boxInfo("defineProps", ctx);
+        const propsBoxInfo = boxInfo("defineProps", null, ctx);
 
         const isType = !!defineProps.typeArguments;
 
@@ -476,20 +506,22 @@ function processMacroCall(
 
         ctx.items.push({
           type: ProcessItemType.MacroBinding,
-          name: varName ?? propsBoxInfo.boxedName,
+          name: varName,
           macro: "defineProps",
           node: defineProps,
           isType,
-          valueName: varName ?? propsBoxInfo.boxedName,
+          valueName: varName,
           typeName: isType ? propsBoxInfo.type : undefined,
-          objectName: !isType ? propsBoxInfo.boxedName : undefined,
+          objectName:
+            defineProps.arguments.length > 0
+              ? propsBoxInfo.boxedName
+              : undefined,
         });
       }
 
-      box();
+      box.box();
 
-      if (!varName) {
-        varName = ctx.prefix(macroName);
+      if (!declarator) {
         s.appendRight(node.start, `const ${varName}=`);
       }
 
@@ -500,7 +532,7 @@ function processMacroCall(
         name: varName ?? box.info.boxedName,
         macro: macroName,
         node: declarator ?? node,
-        isType: isTypeModel !== undefined,
+        isType: isTypeModel,
         valueName: varName,
         objectName: !isTypeModel ? box!.info.boxedName : undefined,
         typeName: isTypeModel ? box!.info.type : undefined,
@@ -511,11 +543,14 @@ function processMacroCall(
   }
 }
 
-function addMacroDependencies(macroName: string, ctx: ScriptContext) {
-  if (!ctx.block.lang.startsWith("ts")) return;
+function addMacroDependencies(
+  macroName: MacroNames,
+  importBox: AvailableExports,
+  ctx: ScriptContext
+) {
+  // if (!ctx.block.lang.startsWith("ts")) return;
 
-  // @ts-expect-error fix this later
-  createHelperImport([`${macroName as MacroNames}_Box`], ctx.prefix);
+  createHelperImport([importBox], ctx.prefix);
 
   ctx.items.push({
     type: ProcessItemType.Import,
@@ -526,16 +561,6 @@ function addMacroDependencies(macroName: string, ctx: ScriptContext) {
       },
     ],
   });
-
-  // const dependencies = MacroDependencies.get(macroName);
-  // if (dependencies) {
-  //   ctx.items.push({
-  //     type: ProcessItemType.Import,
-  //     asType: true,
-  //     from: HelperLocation,
-  //     items: dependencies.map((dep) => ({ name: ctx.prefix(dep) })),
-  //   });
-  // }
 }
 
 function handleDefineOptions(node: CallExpression, ctx: ProcessContext) {
@@ -592,116 +617,140 @@ function getModelName(node: CallExpression) {
   return modelName;
 }
 
-function boxInfo(macroName: string, ctx: ScriptContext) {
-  const boxedName = ctx.prefix(`${macroName}_Boxed`);
+function boxInfo(
+  macroName: string,
+  prependName: string | null,
+  ctx: ScriptContext
+) {
+  const prepend = prependName ? `${prependName}_` : "";
+  const boxedName = ctx.prefix(`${prepend}${macroName}_Boxed`);
   const name = `${macroName}_Box` as AvailableExports;
-  const type = ctx.prefix(`${macroName}_Type`);
-  const boxName = ctx.prefix(name);
+  const type = ctx.prefix(`${prepend}${macroName}_Type`);
+  const boxName = ctx.prefix(`${name}`);
   return { boxedName, boxName, name, type };
 }
 
 function boxMacro(
   caller: CallExpression,
   toOffset: number,
+  end: number,
+  prependName: string | null,
   s: any,
-  ctx: ScriptContext,
-  split: { from: number; to: number } | null = null
-) {
+  ctx: ScriptContext
+): {
+  box(): void;
+  info: ReturnType<typeof boxInfo>;
+} {
   const name: AvailableExports | undefined =
     caller.callee.type === "Identifier"
       ? (caller.callee.name as AvailableExports)
       : undefined;
   if (!name) {
-    console.warn("boxMacro: callee is not an identifier", caller.callee);
-    return;
+    throw new Error("boxMacro: callee is not an identifier: " + caller.callee);
   }
-  const info = boxInfo(name, ctx);
-  const { boxedName, boxName } = info;
+  const info = boxInfo(name, prependName, ctx);
   ctx.items.push(
     createHelperImport([`${name}_Box` as AvailableExports], ctx.prefix)
   );
 
-  // TODO types and arguments both must be passed to the box function
-  if (caller.typeArguments) {
-    const args = caller.typeArguments;
-  } else {
-    const args = caller.arguments;
-    const multiple = args.length > 1;
-    const start = args[0].start;
-    const end = args[args.length - 1].end;
+  const byArguments = macroBoxByArguments(caller, info, s);
+  const byTypeArguments = macroBoxByTypeArguments(caller, info, s);
 
-    const doStart = (method = "appendLeft") => {
-      s[method](toOffset, `;const ${boxedName}=${boxName}(`);
+  function box() {
+    // since we cannot move to the same offset, we need to adjust the type arguments offset
+    const typeOffset = caller.arguments.length > 0 ? end : toOffset;
+    byArguments.start(toOffset);
+    byTypeArguments.start(typeOffset);
 
-      s[method](
-        start!,
-        multiple
-          ? [1, 2].map((_, i) => `${boxedName}[${i}]`).join(",")
-          : boxedName
-      );
-    };
-    const doEnd = (method = "appendRight") => {
-      s.appendRight(toOffset, `);`);
-      // s.prependLeft(end, `);`);
-    };
+    byArguments.end(toOffset);
+    byTypeArguments.end(typeOffset);
 
-    // s.prependLeft(toOffset, `;const ${boxedName}=${boxName}(`);
-    // s.prependRight(toOffset, `);`);
-    // s.prependLeft(
-    //   start!,
-    //   multiple
-    //     ? [1, 2].map((_, i) => `${boxedName}[${i}]`).join(",")
-    //     : boxedName
-    // );
-
-    const doMove = () => {
-      if (split) {
-        s.move(start!, split.from, toOffset);
-        s.move(split.to, end!, toOffset);
-      } else {
-        s.move(start!, end!, toOffset);
-      }
-    };
-
-    const move = () => {
-      doStart();
-      doEnd();
-      doMove();
-    };
-    move.start = doStart;
-    move.end = doEnd;
-    move.move = doMove;
-    move.info = info;
-    // move.boxedName = boxedName;
-    // move.boxName = boxName;
-    // move.name = info.name;
-    // move.type = info.type;
-
-    return move;
+    byArguments.move(toOffset);
+    byTypeArguments.move(typeOffset);
   }
 
-  // const isType = caller.typeArguments !== undefined;
-  // const moveStart = isType
-  //   ? caller.typeArguments!.start
-  //   : caller.arguments[0].start;
-  // const moveEnd = isType
-  //   ? caller.typeArguments!.end
-  //   : caller.arguments[caller.arguments.length - 1].end;
+  return {
+    box,
+    info,
+  };
+}
 
-  // const multiple = isType
-  //   ? caller.typeArguments!.params.length > 1
-  //   : caller.arguments.length > 1;
+function macroBoxByTypeArguments(
+  caller: CallExpression,
+  info: ReturnType<typeof boxInfo>,
+  s: MagicString
+): {
+  start: (offset: number, method?: "appendLeft" | "prependLeft") => void;
+  move: (offset: number) => void;
+  end: (offset: number, method?: "appendRight" | "prependRight") => void;
+} {
+  function start(
+    offset: number,
+    method: "appendLeft" | "prependLeft" = "appendLeft"
+  ) {
+    const args = caller.typeArguments;
+    if (!args) return;
+    const start = args.params[0].start;
 
-  // s.appendLeft(
-  //   toOffset,
-  //   `;${isType ? "type" : "const"} ${boxedName}=${
-  //     multiple ? "[" : ""
-  //   }${boxName}(`
-  // );
-  // s.appendRight(toOffset, ");");
-  // s.appendLeft(
-  //   caller.start!,
-  //   [1, 2].map((_, i) => `${boxedName}[${i}]`).join(",")
-  // );
-  // s.move(caller.start!, caller.end!, toOffset);
+    s[method](offset, `;type ${info.type}=`);
+    s[method](start!, info.type);
+  }
+  function move(offset: number) {
+    const args = caller.typeArguments;
+    if (!args) return;
+    const start = args.params[0].start;
+    const end = args.params[args.params.length - 1].end;
+
+    s.move(start!, end!, offset);
+  }
+  function end(
+    offset: number,
+    method: "appendRight" | "prependRight" = "appendRight"
+  ) {
+    const args = caller.typeArguments;
+    if (!args) return;
+    s[method](offset, `;`);
+  }
+  return { start, move, end };
+}
+
+function macroBoxByArguments(
+  caller: CallExpression,
+  info: ReturnType<typeof boxInfo>,
+  s: MagicString
+): {
+  start: (offset: number, method?: "appendLeft" | "prependLeft") => void;
+  move: (offset: number) => void;
+  end: (offset: number, method?: "appendRight" | "prependRight") => void;
+} {
+  function start(
+    offset: number,
+    method: "appendLeft" | "prependLeft" = "appendLeft"
+  ) {
+    if (caller.arguments.length === 0) return;
+    const multiple = caller.arguments.length > 1;
+    const start = caller.arguments[0].start;
+    s[method](offset, `;const ${info.boxedName}=${info.boxName}(`);
+
+    s[method](
+      start!,
+      multiple
+        ? [1, 2].map((_, i) => `${info.boxedName}[${i}]`).join(",")
+        : info.boxedName
+    );
+  }
+  function move(offset: number) {
+    if (caller.arguments.length === 0) return;
+    const start = caller.arguments[0].start;
+    const end = caller.arguments[caller.arguments.length - 1].end;
+    s.move(start, end, offset);
+  }
+  function end(
+    offset: number,
+    method: "appendRight" | "prependRight" = "appendRight"
+  ) {
+    if (caller.arguments.length === 0) return;
+    s[method](offset, `);`);
+  }
+  return { start, move, end };
 }

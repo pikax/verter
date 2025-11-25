@@ -137,6 +137,27 @@ export type ProcessItemDefineModel = {
   varName: string;
 
   node: VerterASTNode;
+
+  /**
+   * Is the macro type only or is object.
+   * For example, `defineProps<Type>()` vs `defineProps({})`
+   * if has both then it's `type` eg: `defineProps<Type>({a: string})`
+   * will be isType = true
+   */
+  isType?: boolean;
+
+  /**
+   * variable name for type
+   */
+  typeName?: string;
+  /**
+   * variable name for value
+   */
+  valueName?: string;
+  /**
+   * variable name for object
+   */
+  objectName?: string;
 };
 
 export type ItemErrorString = "";
