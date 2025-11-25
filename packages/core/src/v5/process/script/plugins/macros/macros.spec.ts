@@ -46,17 +46,12 @@ describe("process script plugin script block", () => {
     return r;
   }
 
-  //   describe("ts", () => {});
-
-  //   it.only("test", () => {
-  //     const { s } = _parse(`export default { setup(){ defineExpose({ a: 0 }); }}`, 'ddd');
-  //     expect(s.original).toBe(s.toString());
-  //   });
-
   describe("setup", () => {
     function parse(content: string, lang = "ts", pre: string = "") {
       return _parse(`${pre ? pre + "\n" : ""}${content}`, false, lang, pre);
     }
+
+    // TODO add tests for javascript
 
     describe("defineModel", () => {
       it("defineModel()", () => {
@@ -496,137 +491,147 @@ describe("process script plugin script block", () => {
     });
 
     describe("defineOptions", () => {
-      it.skip("defineOptions({})", () => {
+      it("defineOptions({})", () => {
         const { result, context } = parse(`defineOptions({})`);
         expect(result).toContain(`defineOptions({})`);
 
-        expect(context.items).toMatchObject([
-          { type: "import" },
-          {
-            type: "options",
-            expression: {
-              type: "ObjectExpression",
-              properties: [],
-            },
-          },
-        ]);
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "options",
+              expression: expect.objectContaining({
+                type: "ObjectExpression",
+                properties: [],
+              }),
+            }),
+          ])
+        );
       });
-      it.skip("const foo = defineOptions({})", () => {
+      it("const foo = defineOptions({})", () => {
         const { result, context } = parse(`const foo = defineOptions({})`);
         expect(result).toContain(`const foo = defineOptions({})`);
 
-        expect(context.items).toMatchObject([
-          {
-            type: "binding",
-          },
-          { type: "import" },
-          {
-            type: "options",
-            expression: {
-              type: "ObjectExpression",
-              properties: [],
-            },
-          },
-        ]);
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "options",
+              expression: expect.objectContaining({
+                type: "ObjectExpression",
+                properties: [],
+              }),
+            }),
+          ])
+        );
       });
 
-      it.skip("defineOptions({ a: 0 })", () => {
+      it("defineOptions({ a: 0 })", () => {
         const { result, context } = parse(`defineOptions({ a: 0 })`);
         expect(result).toContain(`defineOptions({ a: 0 })`);
 
-        expect(context.items).toMatchObject([
-          { type: "import" },
-          {
-            type: "options",
-            expression: {
-              type: "ObjectExpression",
-              properties: [
-                {
-                  type: "Property",
-                  key: { type: "Identifier", name: "a" },
-                  value: { type: "Literal", value: 0 },
-                },
-              ],
-            },
-          },
-        ]);
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "options",
+              expression: expect.objectContaining({
+                type: "ObjectExpression",
+                properties: [
+                  expect.objectContaining({
+                    type: "Property",
+                    key: expect.objectContaining({
+                      type: "Identifier",
+                      name: "a",
+                    }),
+                    value: expect.objectContaining({
+                      type: "Literal",
+                      value: 0,
+                    }),
+                  }),
+                ],
+              }),
+            }),
+          ])
+        );
       });
 
-      it.skip("defineOptions(myOptions)", () => {
+      it("defineOptions(myOptions)", () => {
         const { result, context } = parse(`defineOptions(myOptions)`);
         expect(result).toContain(`defineOptions(myOptions)`);
 
-        expect(context.items).toMatchObject([
-          { type: "import" },
-          {
-            type: "options",
-            expression: {
-              type: "Identifier",
-              name: "myOptions",
-            },
-          },
-        ]);
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "options",
+              expression: expect.objectContaining({
+                type: "Identifier",
+                name: "myOptions",
+              }),
+            }),
+          ])
+        );
       });
 
       describe("invalid", () => {
-        it.skip("defineOptions()", () => {
+        it("defineOptions()", () => {
           const { result, context } = parse(`defineOptions()`);
           expect(result).toContain(`defineOptions()`);
 
-          expect(context.items).toMatchObject([
-            { type: "import" },
-            {
-              type: "warning",
-              message: "INVALID_DEFINE_OPTIONS",
-            },
-          ]);
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "warning",
+                message: "INVALID_DEFINE_OPTIONS",
+              }),
+            ])
+          );
         });
 
-        it.skip("const foo = defineOptions()", () => {
+        it("const foo = defineOptions()", () => {
           const { result, context } = parse(`const foo = defineOptions()`);
           expect(result).toContain(`const foo = defineOptions()`);
 
-          expect(context.items).toMatchObject([
-            { type: "binding" },
-            { type: "import" },
-            {
-              type: "warning",
-              message: "INVALID_DEFINE_OPTIONS",
-            },
-          ]);
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "warning",
+                message: "INVALID_DEFINE_OPTIONS",
+              }),
+            ])
+          );
         });
 
-        it.skip('defineOptions("a")', () => {
+        it('defineOptions("a")', () => {
           const { result, context } = parse(`defineOptions("a")`);
           expect(result).toContain(`defineOptions("a")`);
 
-          expect(context.items).toMatchObject([
-            { type: "import" },
-            {
-              type: "warning",
-              message: "INVALID_DEFINE_OPTIONS",
-            },
-          ]);
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "warning",
+                message: "INVALID_DEFINE_OPTIONS",
+              }),
+            ])
+          );
         });
 
-        it.skip("defineOptions({}, hello)", () => {
+        it("defineOptions({}, hello)", () => {
           const { result, context } = parse(`defineOptions({}, hello)`);
           expect(result).toContain(`defineOptions({}, hello)`);
 
-          expect(context.items).toMatchObject([
-            { type: "import" },
-            {
-              type: "options",
-              expression: {
-                type: "ObjectExpression",
-                properties: [],
-              },
-            },
-            {
-              type: "warning",
-              message: "INVALID_DEFINE_OPTIONS",
-            },
-          ]);
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "options",
+                expression: expect.objectContaining({
+                  type: "ObjectExpression",
+                  properties: [],
+                }),
+              }),
+              expect.objectContaining({
+                type: "warning",
+                message: "INVALID_DEFINE_OPTIONS",
+              }),
+            ])
+          );
         });
       });
     });

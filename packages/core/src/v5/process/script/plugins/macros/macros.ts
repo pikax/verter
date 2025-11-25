@@ -396,7 +396,7 @@ function processMacroCall(
 ) {
   const macroName =
     node.callee.type === "Identifier" ? node.callee.name : undefined;
-  if (!macroName || !Macros.has(macroName) || macroName === "defineOptions") {
+  if (!macroName || !Macros.has(macroName)) {
     return;
   }
   if (!ctx.isSetup) {
@@ -407,6 +407,10 @@ function processMacroCall(
       start: node.start,
       end: node.end,
     });
+    return;
+  }
+  if (macroName === "defineOptions") {
+    handleDefineOptions(node, ctx);
     return;
   }
 
