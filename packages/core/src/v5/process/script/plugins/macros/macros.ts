@@ -454,71 +454,75 @@ function processMacroCall(
     }
     case "withDefaults": {
       const defineProps = node.arguments[0];
-      if (defineProps.type === "CallExpression") {
-        if (defineProps.arguments.length > 0) {
-          // add a warning if there's arguments, since we are using withDefaults
+      if (defineProps) {
+        if (defineProps.type === "CallExpression") {
+          if (defineProps.arguments.length > 0) {
+            // add a warning if there's arguments, since we are using withDefaults
+            ctx.items.push({
+              type: ProcessItemType.Warning,
+              message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
+              node: defineProps,
+              start: defineProps.start,
+              end: defineProps.end,
+            });
+          }
+
+          let splitFromOffset = -1;
+          let splitToOffset = -1;
+
+          const propsBoxInfo = boxInfo("defineProps", null, ctx);
+
+          const isType = !!defineProps.typeArguments;
+
+          splitFromOffset = defineProps.typeArguments
+            ? defineProps.typeArguments.start
+            : defineProps.arguments[0].start;
+          splitToOffset = defineProps.typeArguments
+            ? defineProps.typeArguments.end
+            : defineProps.arguments[defineProps.arguments.length - 1].end;
+
+          if (isType) {
+            const paramsStart = defineProps.typeArguments?.params[0].start!;
+            const paramEnd =
+              defineProps.typeArguments?.params[
+                defineProps.typeArguments.params.length - 1
+              ].end!;
+
+            s.appendLeft(paramsStart, propsBoxInfo.type);
+            // create type and prettify it with "{}&" otherwise on hover it will
+            // show `defineProps_Type` only
+            s.appendRight(paramsStart, `;type ${propsBoxInfo.type}={}&`);
+
+            s.move(paramsStart, paramEnd, end);
+          } else {
+            s.appendLeft(start, `let ${propsBoxInfo.boxedName}`);
+            if (splitFromOffset !== -1 && splitToOffset !== -1) {
+              s.appendLeft(
+                splitFromOffset,
+                `${propsBoxInfo.boxedName}=${propsBoxInfo.boxName}(`
+              );
+              s.appendRight(splitToOffset, `)`);
+            }
+          }
+
+          ctx.items.push(createHelperImport([propsBoxInfo.name], ctx.prefix));
+
           ctx.items.push({
-            type: ProcessItemType.Warning,
-            message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
+            type: ProcessItemType.MacroBinding,
+            name: varName,
+            macro: "defineProps",
             node: defineProps,
-            start: defineProps.start,
-            end: defineProps.end,
+            isType,
+            valueName: varName,
+            typeName: isType ? propsBoxInfo.type : undefined,
+            objectName:
+              defineProps.arguments.length > 0
+                ? propsBoxInfo.boxedName
+                : undefined,
           });
         }
-
-        let splitFromOffset = -1;
-        let splitToOffset = -1;
-
-        const propsBoxInfo = boxInfo("defineProps", null, ctx);
-
-        const isType = !!defineProps.typeArguments;
-
-        splitFromOffset = defineProps.typeArguments
-          ? defineProps.typeArguments.start
-          : defineProps.arguments[0].start;
-        splitToOffset = defineProps.typeArguments
-          ? defineProps.typeArguments.end
-          : defineProps.arguments[defineProps.arguments.length - 1].end;
-
-        if (isType) {
-          const paramsStart = defineProps.typeArguments?.params[0].start!;
-          const paramEnd =
-            defineProps.typeArguments?.params[
-              defineProps.typeArguments.params.length - 1
-            ].end!;
-
-          s.appendLeft(paramsStart, propsBoxInfo.type);
-          // create type and prettify it with "{}&" otherwise on hover it will
-          // show `defineProps_Type` only
-          s.appendRight(paramsStart, `;type ${propsBoxInfo.type}={}&`);
-
-          s.move(paramsStart, paramEnd, end);
-        } else {
-          s.appendLeft(start, `let ${propsBoxInfo.boxedName}`);
-          if (splitFromOffset !== -1 && splitToOffset !== -1) {
-            s.appendLeft(
-              splitFromOffset,
-              `${propsBoxInfo.boxedName}=${propsBoxInfo.boxName}(`
-            );
-            s.appendRight(splitToOffset, `)`);
-          }
-        }
-
-        ctx.items.push(createHelperImport([propsBoxInfo.name], ctx.prefix));
-
-        ctx.items.push({
-          type: ProcessItemType.MacroBinding,
-          name: varName,
-          macro: "defineProps",
-          node: defineProps,
-          isType,
-          valueName: varName,
-          typeName: isType ? propsBoxInfo.type : undefined,
-          objectName:
-            defineProps.arguments.length > 0
-              ? propsBoxInfo.boxedName
-              : undefined,
-        });
+      } else {
+        // no props
       }
 
       box.box();

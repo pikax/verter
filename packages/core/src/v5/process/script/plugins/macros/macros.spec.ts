@@ -730,10 +730,181 @@ describe("process script plugin script block", () => {
           );
         });
       });
+
+      describe("types", () => {
+        it("defineProps<{ a?: string }>()", () => {
+          const { result, context } = parse(`defineProps<{ a?: string }>()`);
+
+          expect(result).toContain(
+            "type ___VERTER___defineProps_Type={ a?: string }"
+          );
+          expect(result).toContain(
+            `const ___VERTER___props=defineProps<___VERTER___defineProps_Type>();`
+          );
+
+          // TODO it should add a warning because this is an invalid usage of `defineProps`
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineProps",
+                isType: true,
+                name: "___VERTER___props",
+
+                objectName: undefined,
+                typeName: "___VERTER___defineProps_Type",
+                valueName: "___VERTER___props",
+              }),
+            ])
+          );
+        });
+
+        it("const props = defineProps<{ a?: string }>()", () => {
+          const { result, context } = parse(
+            `const props = defineProps<{ a?: string }>()`
+          );
+
+          expect(result).toContain(
+            "type ___VERTER___defineProps_Type={ a?: string }"
+          );
+          expect(result).toContain(
+            `const props = defineProps<___VERTER___defineProps_Type>();`
+          );
+          // TODO it should add a warning because this is an invalid usage of `defineProps`
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineProps",
+                isType: true,
+                name: "props",
+
+                objectName: undefined,
+                typeName: "___VERTER___defineProps_Type",
+                valueName: "props",
+              }),
+            ])
+          );
+        });
+
+        it("defineProps<{ a?: string }>({ a: String })", () => {
+          const { result, context } = parse(
+            `defineProps<{ a?: string }>({ a: String })`
+          );
+
+          expect(result).toContain(
+            "type ___VERTER___defineProps_Type={ a?: string }"
+          );
+
+          expect(result).toContain(
+            "const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })"
+          );
+          expect(result).toContain(
+            `const ___VERTER___props=defineProps<___VERTER___defineProps_Type>(___VERTER___defineProps_Boxed);`
+          );
+          // TODO it should add a warning because this is an invalid usage of `defineProps`
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineProps",
+                isType: true,
+                name: "___VERTER___props",
+
+                objectName: "___VERTER___defineProps_Boxed",
+                typeName: "___VERTER___defineProps_Type",
+                valueName: "___VERTER___props",
+              }),
+            ])
+          );
+        });
+
+        it("const props = defineProps<{ a?: string }>({ a: String })", () => {
+          const { result, context } = parse(
+            `const props = defineProps<{ a?: string }>({ a: String })`
+          );
+
+          expect(result).toContain(
+            "type ___VERTER___defineProps_Type={ a?: string }"
+          );
+
+          expect(result).toContain(
+            "const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })"
+          );
+          expect(result).toContain(
+            `const props = defineProps<___VERTER___defineProps_Type>(___VERTER___defineProps_Boxed);`
+          );
+
+          // TODO it should add a warning because this is an invalid usage of `defineProps`
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineProps",
+                isType: true,
+                name: "props",
+
+                objectName: "___VERTER___defineProps_Boxed",
+                typeName: "___VERTER___defineProps_Type",
+                valueName: "props",
+              }),
+            ])
+          );
+        });
+      });
     });
 
     describe("types", () => {
       describe("withDefaults", () => {
+        it("withDefaults()", () => {
+          const { result, context } = parse(`withDefaults()`);
+
+          expect(result).toContain(
+            `const ___VERTER___withDefaults=withDefaults()`
+          );
+
+          // TODO it should add a warning because this is an invalid usage of `withDefaults`
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "withDefaults",
+                isType: false,
+                name: "___VERTER___withDefaults",
+
+                objectName: undefined,
+                typeName: undefined,
+                valueName: "___VERTER___withDefaults",
+              }),
+            ])
+          );
+        });
+
+        it("const props = withDefaults()", () => {
+          const { result, context } = parse(`const props = withDefaults()`);
+
+          expect(result).toContain(`const props = withDefaults()`);
+
+          // TODO it should add a warning because this is an invalid usage of `withDefaults`
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "withDefaults",
+                isType: false,
+                name: "props",
+
+                objectName: undefined,
+                typeName: undefined,
+                valueName: "props",
+              }),
+            ])
+          );
+        });
+
         // it.skip("withDefaults(defineProps)", () => {
         //   const { result, context } = parse(
         //     `withDefaults(defineProps({ a: String }), {})`
