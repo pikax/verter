@@ -54,439 +54,437 @@ describe("process script plugin script block", () => {
     // TODO add tests for javascript
 
     describe("defineModel", () => {
-      it("defineModel()", () => {
-        const { result, context } = parse(`defineModel()`);
-        expect(result).toContain(
-          `const ___VERTER___models_modelValue=defineModel()`
-        );
+      describe("function & variable", () => {
+        it("defineModel()", () => {
+          const { result, context } = parse(`defineModel()`);
+          expect(result).toContain(
+            `const ___VERTER___models_modelValue=defineModel()`
+          );
 
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
 
-              name: "modelValue",
-              varName: "___VERTER___models_modelValue",
-              isType: false,
-              valueName: "___VERTER___models_modelValue",
-              typeName: undefined,
-              objectName: undefined,
-            }),
-          ])
-        );
+                name: "modelValue",
+                varName: "___VERTER___models_modelValue",
+                isType: false,
+                valueName: "___VERTER___models_modelValue",
+                typeName: undefined,
+                objectName: undefined,
+              }),
+            ])
+          );
+        });
+
+        it("defineModel({})", () => {
+          const { result, context } = parse(`defineModel({})`);
+
+          expect(result).toContain(
+            `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box({})`
+          );
+          expect(result).toContain(
+            `const ___VERTER___models_modelValue=defineModel(___VERTER___modelValue_defineModel_Boxed)`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
+
+                name: "modelValue",
+                varName: "___VERTER___models_modelValue",
+                isType: false,
+                valueName: "___VERTER___models_modelValue",
+                typeName: undefined,
+                objectName: "___VERTER___modelValue_defineModel_Boxed",
+              }),
+            ])
+          );
+        });
+
+        it('defineModel("model")', () => {
+          const { result, context } = parse(`defineModel("model")`);
+
+          expect(result).toContain(
+            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
+          );
+          expect(result).toContain(
+            `const ___VERTER___models_model=defineModel(___VERTER___model_defineModel_Boxed)`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
+                name: "model",
+                varName: "___VERTER___models_model",
+
+                isType: false,
+                valueName: "___VERTER___models_model",
+                typeName: undefined,
+                objectName: "___VERTER___model_defineModel_Boxed",
+              }),
+            ])
+          );
+        });
+
+        it('defineModel("model", {})', () => {
+          const { result, context } = parse(`defineModel("model", {})`);
+
+          expect(result).toContain(
+            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model", {})`
+          );
+
+          expect(result).toContain(
+            `const ___VERTER___models_model=defineModel(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
+                name: "model",
+                varName: "___VERTER___models_model",
+
+                isType: false,
+                valueName: "___VERTER___models_model",
+                typeName: undefined,
+                objectName: "___VERTER___model_defineModel_Boxed",
+              }),
+            ])
+          );
+        });
+        it("const model = defineModel()", () => {
+          const { result, context } = parse(`const model = defineModel()`);
+          expect(result).toContain(`const model = defineModel()`);
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
+
+                name: "modelValue",
+                varName: "model",
+                isType: false,
+                valueName: "model",
+                typeName: undefined,
+                objectName: undefined,
+              }),
+            ])
+          );
+        });
+
+        it("const model = defineModel({})", () => {
+          const { result, context } = parse(`const model = defineModel({})`);
+
+          expect(result).toContain(
+            `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box({})`
+          );
+          expect(result).toContain(
+            `const model = defineModel(___VERTER___modelValue_defineModel_Boxed)`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
+
+                name: "modelValue",
+                varName: "model",
+                isType: false,
+                valueName: "model",
+                typeName: undefined,
+                objectName: "___VERTER___modelValue_defineModel_Boxed",
+              }),
+            ])
+          );
+        });
+
+        it('const model = defineModel("model")', () => {
+          const { result, context } = parse(
+            `const model = defineModel("model")`
+          );
+
+          expect(result).toContain(
+            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
+          );
+
+          expect(result).toContain(
+            `const model = defineModel(___VERTER___model_defineModel_Boxed)`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
+                name: "model",
+                varName: "model",
+
+                isType: false,
+                valueName: "model",
+                typeName: undefined,
+                objectName: "___VERTER___model_defineModel_Boxed",
+              }),
+            ])
+          );
+        });
+
+        it('const model = defineModel("model", {})', () => {
+          const { result, context } = parse(
+            `const model = defineModel("model", {})`
+          );
+          expect(result).toContain(
+            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model", {})`
+          );
+          expect(result).toContain(
+            `const model = defineModel(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
+                name: "model",
+                varName: "model",
+
+                isType: false,
+                valueName: "model",
+                typeName: undefined,
+                objectName: "___VERTER___model_defineModel_Boxed",
+              }),
+            ])
+          );
+        });
       });
 
-      it("const model = defineModel()", () => {
-        const { result, context } = parse(`const model = defineModel()`);
-        expect(result).toContain(`const model = defineModel()`);
+      describe("types", () => {
+        it("defineModel<string>()", () => {
+          const { result, context } = parse(`defineModel<string>()`);
 
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
+          expect(result).toContain(
+            `type ___VERTER___modelValue_defineModel_Type=string`
+          );
+          expect(result).toContain(
+            `const ___VERTER___models_modelValue=defineModel<___VERTER___modelValue_defineModel_Type>()`
+          );
 
-              name: "modelValue",
-              varName: "model",
-              isType: false,
-              valueName: "model",
-              typeName: undefined,
-              objectName: undefined,
-            }),
-          ])
-        );
-      });
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
 
-      it("defineModel<string>()", () => {
-        const { result, context } = parse(`defineModel<string>()`);
+                name: "modelValue",
+                varName: "___VERTER___models_modelValue",
+                isType: true,
+                valueName: "___VERTER___models_modelValue",
+                typeName: "___VERTER___modelValue_defineModel_Type",
+                objectName: undefined,
+              }),
+            ])
+          );
+        });
+        it("const model = defineModel<string>()", () => {
+          const { result, context } = parse(
+            `const model = defineModel<string>()`
+          );
 
-        expect(result).toContain(
-          `type ___VERTER___modelValue_defineModel_Type=string`
-        );
-        expect(result).toContain(
-          `const ___VERTER___models_modelValue=defineModel<___VERTER___modelValue_defineModel_Type>()`
-        );
+          expect(result).toContain(
+            `type ___VERTER___modelValue_defineModel_Type=string`
+          );
+          expect(result).toContain(
+            `const model = defineModel<___VERTER___modelValue_defineModel_Type>()`
+          );
 
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
 
-              name: "modelValue",
-              varName: "___VERTER___models_modelValue",
-              isType: true,
-              valueName: "___VERTER___models_modelValue",
-              typeName: "___VERTER___modelValue_defineModel_Type",
-              objectName: undefined,
-            }),
-          ])
-        );
-      });
+                name: "modelValue",
+                varName: "model",
+                isType: true,
+                valueName: "model",
+                typeName: "___VERTER___modelValue_defineModel_Type",
+                objectName: undefined,
+              }),
+            ])
+          );
+        });
+        it("defineModel<string>({})", () => {
+          const { result, context } = parse(`defineModel<string>({})`);
 
-      it("const model = defineModel<string>()", () => {
-        const { result, context } = parse(
-          `const model = defineModel<string>()`
-        );
+          expect(result).toContain(
+            `type ___VERTER___modelValue_defineModel_Type=string`
+          );
+          expect(result).toContain(
+            `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box({})`
+          );
+          expect(result).toContain(
+            `const ___VERTER___models_modelValue=defineModel<___VERTER___modelValue_defineModel_Type>(___VERTER___modelValue_defineModel_Boxed)`
+          );
 
-        expect(result).toContain(
-          `type ___VERTER___modelValue_defineModel_Type=string`
-        );
-        expect(result).toContain(
-          `const model = defineModel<___VERTER___modelValue_defineModel_Type>()`
-        );
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
 
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
+                name: "modelValue",
+                varName: "___VERTER___models_modelValue",
+                isType: true,
+                valueName: "___VERTER___models_modelValue",
+                typeName: "___VERTER___modelValue_defineModel_Type",
+                objectName: "___VERTER___modelValue_defineModel_Boxed",
+              }),
+            ])
+          );
+        });
+        it("const model = defineModel<string>({})", () => {
+          const { result, context } = parse(
+            `const model = defineModel<string>({})`
+          );
+          expect(result).toContain(
+            `type ___VERTER___modelValue_defineModel_Type=string`
+          );
+          expect(result).toContain(
+            `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box({})`
+          );
+          expect(result).toContain(
+            `const model = defineModel<___VERTER___modelValue_defineModel_Type>(___VERTER___modelValue_defineModel_Boxed)`
+          );
 
-              name: "modelValue",
-              varName: "model",
-              isType: true,
-              valueName: "model",
-              typeName: "___VERTER___modelValue_defineModel_Type",
-              objectName: undefined,
-            }),
-          ])
-        );
-      });
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
 
-      it("defineModel({})", () => {
-        const { result, context } = parse(`defineModel({})`);
+                name: "modelValue",
+                varName: "model",
+                isType: true,
+                valueName: "model",
+                typeName: "___VERTER___modelValue_defineModel_Type",
+                objectName: "___VERTER___modelValue_defineModel_Boxed",
+              }),
+            ])
+          );
+        });
+        it('defineModel<string>("model")', () => {
+          const { result, context } = parse(`defineModel<string>("model")`);
 
-        expect(result).toContain(
-          `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box({})`
-        );
-        expect(result).toContain(
-          `const ___VERTER___models_modelValue=defineModel(___VERTER___modelValue_defineModel_Boxed)`
-        );
+          expect(result).toContain(
+            `type ___VERTER___model_defineModel_Type=string`
+          );
+          expect(result).toContain(
+            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
+          );
+          expect(result).toContain(
+            `const ___VERTER___models_model=defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed)`
+          );
 
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
+                name: "model",
+                varName: "___VERTER___models_model",
 
-              name: "modelValue",
-              varName: "___VERTER___models_modelValue",
-              isType: false,
-              valueName: "___VERTER___models_modelValue",
-              typeName: undefined,
-              objectName: "___VERTER___modelValue_defineModel_Boxed",
-            }),
-          ])
-        );
-      });
+                isType: true,
+                valueName: "___VERTER___models_model",
+                typeName: "___VERTER___model_defineModel_Type",
+                objectName: "___VERTER___model_defineModel_Boxed",
+              }),
+            ])
+          );
+        });
+        it('const model = defineModel<string>("model")', () => {
+          const { result, context } = parse(
+            `const model = defineModel<string>("model")`
+          );
 
-      it("const model = defineModel({})", () => {
-        const { result, context } = parse(`const model = defineModel({})`);
+          expect(result).toContain(
+            `type ___VERTER___model_defineModel_Type=string`
+          );
+          expect(result).toContain(
+            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
+          );
 
-        expect(result).toContain(
-          `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box({})`
-        );
-        expect(result).toContain(
-          `const model = defineModel(___VERTER___modelValue_defineModel_Boxed)`
-        );
+          expect(result).toContain(
+            `const model = defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed)`
+          );
 
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
+                name: "model",
+                varName: "model",
 
-              name: "modelValue",
-              varName: "model",
-              isType: false,
-              valueName: "model",
-              typeName: undefined,
-              objectName: "___VERTER___modelValue_defineModel_Boxed",
-            }),
-          ])
-        );
-      });
+                isType: true,
+                valueName: "model",
+                typeName: "___VERTER___model_defineModel_Type",
+                objectName: "___VERTER___model_defineModel_Boxed",
+              }),
+            ])
+          );
+        });
+        it('defineModel<string>("model", {})', () => {
+          const { result, context } = parse(`defineModel<string>("model", {})`);
 
-      it("defineModel<string>({})", () => {
-        const { result, context } = parse(`defineModel<string>({})`);
+          expect(result).toContain(
+            `type ___VERTER___model_defineModel_Type=string`
+          );
+          expect(result).toContain(
+            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model", {})`
+          );
 
-        expect(result).toContain(
-          `type ___VERTER___modelValue_defineModel_Type=string`
-        );
-        expect(result).toContain(
-          `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box({})`
-        );
-        expect(result).toContain(
-          `const ___VERTER___models_modelValue=defineModel<___VERTER___modelValue_defineModel_Type>(___VERTER___modelValue_defineModel_Boxed)`
-        );
+          expect(result).toContain(
+            `const ___VERTER___models_model=defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
+          );
 
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
+                name: "model",
+                varName: "___VERTER___models_model",
 
-              name: "modelValue",
-              varName: "___VERTER___models_modelValue",
-              isType: true,
-              valueName: "___VERTER___models_modelValue",
-              typeName: "___VERTER___modelValue_defineModel_Type",
-              objectName: "___VERTER___modelValue_defineModel_Boxed",
-            }),
-          ])
-        );
-      });
+                isType: true,
+                valueName: "___VERTER___models_model",
+                typeName: "___VERTER___model_defineModel_Type",
+                objectName: "___VERTER___model_defineModel_Boxed",
+              }),
+            ])
+          );
+        });
+        it('const model = defineModel<string>("model", {})', () => {
+          const { result, context } = parse(
+            `const model = defineModel<string>("model", {})`
+          );
+          expect(result).toContain(
+            `type ___VERTER___model_defineModel_Type=string`
+          );
+          expect(result).toContain(
+            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model", {})`
+          );
+          expect(result).toContain(
+            `const model = defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
+          );
 
-      it("const model = defineModel<string>({})", () => {
-        const { result, context } = parse(
-          `const model = defineModel<string>({})`
-        );
-        expect(result).toContain(
-          `type ___VERTER___modelValue_defineModel_Type=string`
-        );
-        expect(result).toContain(
-          `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box({})`
-        );
-        expect(result).toContain(
-          `const model = defineModel<___VERTER___modelValue_defineModel_Type>(___VERTER___modelValue_defineModel_Boxed)`
-        );
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "define-model",
+                name: "model",
+                varName: "model",
 
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
-
-              name: "modelValue",
-              varName: "model",
-              isType: true,
-              valueName: "model",
-              typeName: "___VERTER___modelValue_defineModel_Type",
-              objectName: "___VERTER___modelValue_defineModel_Boxed",
-            }),
-          ])
-        );
-      });
-
-      it('defineModel("model")', () => {
-        const { result, context } = parse(`defineModel("model")`);
-
-        expect(result).toContain(
-          `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
-        );
-        expect(result).toContain(
-          `const ___VERTER___models_model=defineModel(___VERTER___model_defineModel_Boxed)`
-        );
-
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
-              name: "model",
-              varName: "___VERTER___models_model",
-
-              isType: false,
-              valueName: "___VERTER___models_model",
-              typeName: undefined,
-              objectName: "___VERTER___model_defineModel_Boxed",
-            }),
-          ])
-        );
-      });
-
-      it('const model = defineModel("model")', () => {
-        const { result, context } = parse(`const model = defineModel("model")`);
-
-        expect(result).toContain(
-          `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
-        );
-
-        expect(result).toContain(
-          `const model = defineModel(___VERTER___model_defineModel_Boxed)`
-        );
-
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
-              name: "model",
-              varName: "model",
-
-              isType: false,
-              valueName: "model",
-              typeName: undefined,
-              objectName: "___VERTER___model_defineModel_Boxed",
-            }),
-          ])
-        );
-      });
-
-      it('defineModel<string>("model")', () => {
-        const { result, context } = parse(`defineModel<string>("model")`);
-
-        expect(result).toContain(
-          `type ___VERTER___model_defineModel_Type=string`
-        );
-        expect(result).toContain(
-          `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
-        );
-        expect(result).toContain(
-          `const ___VERTER___models_model=defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed)`
-        );
-
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
-              name: "model",
-              varName: "___VERTER___models_model",
-
-              isType: true,
-              valueName: "___VERTER___models_model",
-              typeName: "___VERTER___model_defineModel_Type",
-              objectName: "___VERTER___model_defineModel_Boxed",
-            }),
-          ])
-        );
-      });
-
-      it('const model = defineModel<string>("model")', () => {
-        const { result, context } = parse(
-          `const model = defineModel<string>("model")`
-        );
-
-        expect(result).toContain(
-          `type ___VERTER___model_defineModel_Type=string`
-        );
-        expect(result).toContain(
-          `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
-        );
-
-        expect(result).toContain(
-          `const model = defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed)`
-        );
-
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
-              name: "model",
-              varName: "model",
-
-              isType: true,
-              valueName: "model",
-              typeName: "___VERTER___model_defineModel_Type",
-              objectName: "___VERTER___model_defineModel_Boxed",
-            }),
-          ])
-        );
-      });
-
-      it('defineModel("model", {})', () => {
-        const { result, context } = parse(`defineModel("model", {})`);
-
-        expect(result).toContain(
-          `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model", {})`
-        );
-
-        expect(result).toContain(
-          `const ___VERTER___models_model=defineModel(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
-        );
-
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
-              name: "model",
-              varName: "___VERTER___models_model",
-
-              isType: false,
-              valueName: "___VERTER___models_model",
-              typeName: undefined,
-              objectName: "___VERTER___model_defineModel_Boxed",
-            }),
-          ])
-        );
-      });
-
-      it('const model = defineModel("model", {})', () => {
-        const { result, context } = parse(
-          `const model = defineModel("model", {})`
-        );
-        expect(result).toContain(
-          `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model", {})`
-        );
-        expect(result).toContain(
-          `const model = defineModel(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
-        );
-
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
-              name: "model",
-              varName: "model",
-
-              isType: false,
-              valueName: "model",
-              typeName: undefined,
-              objectName: "___VERTER___model_defineModel_Boxed",
-            }),
-          ])
-        );
-      });
-
-      it('defineModel<string>("model", {})', () => {
-        const { result, context } = parse(`defineModel<string>("model", {})`);
-
-        expect(result).toContain(
-          `type ___VERTER___model_defineModel_Type=string`
-        );
-        expect(result).toContain(
-          `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model", {})`
-        );
-
-        expect(result).toContain(
-          `const ___VERTER___models_model=defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
-        );
-
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
-              name: "model",
-              varName: "___VERTER___models_model",
-
-              isType: true,
-              valueName: "___VERTER___models_model",
-              typeName: "___VERTER___model_defineModel_Type",
-              objectName: "___VERTER___model_defineModel_Boxed",
-            }),
-          ])
-        );
-      });
-
-      it('const model = defineModel<string>("model", {})', () => {
-        const { result, context } = parse(
-          `const model = defineModel<string>("model", {})`
-        );
-        expect(result).toContain(
-          `type ___VERTER___model_defineModel_Type=string`
-        );
-        expect(result).toContain(
-          `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model", {})`
-        );
-        expect(result).toContain(
-          `const model = defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
-        );
-
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "define-model",
-              name: "model",
-              varName: "model",
-
-              isType: true,
-              valueName: "model",
-              typeName: "___VERTER___model_defineModel_Type",
-              objectName: "___VERTER___model_defineModel_Boxed",
-            }),
-          ])
-        );
+                isType: true,
+                valueName: "model",
+                typeName: "___VERTER___model_defineModel_Type",
+                objectName: "___VERTER___model_defineModel_Boxed",
+              }),
+            ])
+          );
+        });
       });
     });
 
@@ -637,177 +635,248 @@ describe("process script plugin script block", () => {
     });
 
     describe("defineProps", () => {
-      it.skip("const props = defineProps", () => {
-        const { result, context } = parse(
-          `const props = defineProps({ a: String })`
-        );
+      describe("function & variable", () => {
+        it("defineProps()", () => {
+          const { result, context } = parse(`defineProps()`);
 
-        // expect(result).toContain(`const props = defineProps({ a: String });`);
-        expect(result).toMatchInlineSnapshot(
-          `";function ___VERTER___TemplateBindingFN  (){;const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String });const props = defineProps(___VERTER___defineProps_Boxed);return{___VERTER___defineProps:props as typeof props,___VERTER___defineModel:{}}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>;"`
-        );
+          expect(result).toContain(`const ___VERTER___props=defineProps();`);
 
-        expect(context.items[0]).toMatchObject({
-          type: "macro-binding",
-          macro: "defineProps",
-          name: "props",
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineProps",
+                isType: false,
+                name: "___VERTER___props",
+
+                objectName: undefined,
+                typeName: undefined,
+                valueName: "___VERTER___props",
+              }),
+            ])
+          );
         });
-      });
+        it("const props = defineProps()", () => {
+          const { result, context } = parse(`const props = defineProps()`);
 
-      it.skip("defineProps", () => {
-        const { result, context } = parse(`defineProps({ a: String })`);
+          expect(result).toContain(`const props = defineProps();`);
 
-        expect(result).toContain(`___Props=defineProps({ a: String });`);
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineProps",
+                isType: false,
+                name: "props",
 
-        expect(context.items[0]).toMatchObject({
-          type: "macro-binding",
-          macro: "defineProps",
-          name: "___VERTER___Props",
-        });
-      });
-
-      // it.skip("withDefaults(defineProps)", () => {
-      //   const { result, context } = parse(
-      //     `withDefaults(defineProps({ a: String }), {})`
-      //   );
-
-      //   expect(result).toContain(
-      //     `const ___VERTER___Props=defineProps({ a: String });withDefaults(___VERTER___Props, {})`
-      //   );
-
-      //   expect(context.items).toMatchObject([
-      //     {
-      //       type: "macro-binding",
-      //       macro: "defineProps",
-      //       name: "___VERTER___Props",
-      //     },
-      //   ]);
-      // });
-      it("const props = withDefaults(defineProps({a: String}), {})", () => {
-        const { result, context, ...other } = parse(
-          `const props = withDefaults(defineProps({ a: String }), {})`
-        );
-
-        expect(result).toContain(
-          [
-            "let ___VERTER___defineProps_Boxed;",
-            "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
-            "defineProps(___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })), {});",
-          ].join("")
-        );
-        expect(result).toContain(
-          "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
-        );
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "macro-binding",
-              macro: "defineProps",
-              name: "props",
-              isType: false,
-
-              objectName: "___VERTER___defineProps_Boxed",
-              typeName: undefined,
-              valueName: "props",
-            }),
-            expect.objectContaining({
-              type: "macro-binding",
-              macro: "withDefaults",
-              name: "props",
-              isType: false,
-
-              objectName: "___VERTER___withDefaults_Boxed",
-              typeName: undefined,
-              valueName: "props",
-            }),
-            expect.objectContaining({
-              type: "warning",
-              message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
-              // this is bound to defineProps, but maybe it could be withDefaults, to be investigated and confirmed
-              start: 51,
-              end: 77,
-            }),
-          ])
-        );
-      });
-
-      it("withDefaults(defineProps<{ a?: string }>(), {})", () => {
-        const { result, context, ...other } = parse(
-          `withDefaults(defineProps<{ a?: string }>(), {})`,
-          "ts"
-        );
-
-        expect(result).toContain(
-          [
-            "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
-            "defineProps<___VERTER___defineProps_Type>(), {});",
-          ].join("")
-        );
-        expect(result).toContain(
-          "const ___VERTER___withDefaults=withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
-        );
-        expect(result).toContain(
-          ";type ___VERTER___defineProps_Type={}&{ a?: string };"
-        );
-
-        expect(context.items).toEqual(
-          expect.arrayContaining([
-            expect.objectContaining({
-              type: "macro-binding",
-              macro: "defineProps",
-              // NOTE THis maybe should be the name for withDefaults
-              name: "___VERTER___withDefaults",
-              isType: true,
-
-              objectName: undefined,
-              typeName: "___VERTER___defineProps_Type",
-              valueName: "___VERTER___withDefaults",
-            }),
-
-            expect.objectContaining({
-              type: "macro-binding",
-              macro: "withDefaults",
-              name: "___VERTER___withDefaults",
-              isType: false,
-
-              objectName: "___VERTER___withDefaults_Boxed",
-              typeName: undefined,
-              valueName: "___VERTER___withDefaults",
-            }),
-          ])
-        );
-      });
-      it.skip("const props = withDefaults(defineProps<{ a?: string }>(), {})", () => {
-        const { result, context, ...other } = parse(
-          `const props = withDefaults(defineProps<{ a?: string }>(), {})`,
-          "ts"
-        );
-
-        expect(result).toContain(
-          [
-            "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
-            "defineProps<___VERTER___defineProps_Type>(), {});",
-          ].join("")
-        );
-        expect(result).toContain(
-          "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
-        );
-        expect(result).toContain(
-          ";type ___VERTER___defineProps_Type={}&{ a?: string };"
-        );
-
-        expect(context.items[0]).toMatchObject({
-          type: "macro-binding",
-          macro: "defineProps",
-          name: "___VERTER___Props",
+                objectName: undefined,
+                typeName: undefined,
+                valueName: "props",
+              }),
+            ])
+          );
         });
 
-        expect(context.items[1]).toMatchObject({
-          type: "warning",
-          message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
-          // this is bound to defineProps, but maybe it could be withDefaults, to be investigated and confirmed
-          start: 51,
-          end: 77,
+        it("defineProps({ a: String })", () => {
+          const { result, context } = parse(`defineProps({ a: String })`);
+
+          expect(result).toContain(
+            `const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })`
+          );
+          expect(result).toContain(
+            `const ___VERTER___props=defineProps(___VERTER___defineProps_Boxed)`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineProps",
+                isType: false,
+                name: "___VERTER___props",
+
+                objectName: "___VERTER___defineProps_Boxed",
+                typeName: undefined,
+                valueName: "___VERTER___props",
+              }),
+            ])
+          );
+        });
+        it("const props = defineProps", () => {
+          const { result, context } = parse(
+            `const props = defineProps({ a: String })`
+          );
+
+          expect(result).toContain(
+            `const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })`
+          );
+          expect(result).toContain(
+            `const props = defineProps(___VERTER___defineProps_Boxed)`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineProps",
+                isType: false,
+                name: "props",
+
+                objectName: "___VERTER___defineProps_Boxed",
+                typeName: undefined,
+                valueName: "props",
+              }),
+            ])
+          );
+        });
+      });
+    });
+
+    describe("types", () => {
+      describe("withDefaults", () => {
+        // it.skip("withDefaults(defineProps)", () => {
+        //   const { result, context } = parse(
+        //     `withDefaults(defineProps({ a: String }), {})`
+        //   );
+
+        //   expect(result).toContain(
+        //     `const ___VERTER___Props=defineProps({ a: String });withDefaults(___VERTER___Props, {})`
+        //   );
+
+        //   expect(context.items).toMatchObject([
+        //     {
+        //       type: "macro-binding",
+        //       macro: "defineProps",
+        //       name: "___VERTER___Props",
+        //     },
+        //   ]);
+        // });
+        it.skip("const props = withDefaults(defineProps({a: String}), {})", () => {
+          const { result, context, ...other } = parse(
+            `const props = withDefaults(defineProps({ a: String }), {})`
+          );
+
+          expect(result).toContain(
+            [
+              "let ___VERTER___defineProps_Boxed;",
+              "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
+              "defineProps(___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })), {});",
+            ].join("")
+          );
+          expect(result).toContain(
+            "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
+          );
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineProps",
+                name: "props",
+                isType: false,
+
+                objectName: "___VERTER___defineProps_Boxed",
+                typeName: undefined,
+                valueName: "props",
+              }),
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "withDefaults",
+                name: "props",
+                isType: false,
+
+                objectName: "___VERTER___withDefaults_Boxed",
+                typeName: undefined,
+                valueName: "props",
+              }),
+              expect.objectContaining({
+                type: "warning",
+                message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
+                // this is bound to defineProps, but maybe it could be withDefaults, to be investigated and confirmed
+                start: 51,
+                end: 77,
+              }),
+            ])
+          );
+        });
+
+        it.skip("withDefaults(defineProps<{ a?: string }>(), {})", () => {
+          const { result, context, ...other } = parse(
+            `withDefaults(defineProps<{ a?: string }>(), {})`,
+            "ts"
+          );
+
+          expect(result).toContain(
+            [
+              "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
+              "defineProps<___VERTER___defineProps_Type>(), {});",
+            ].join("")
+          );
+          expect(result).toContain(
+            "const ___VERTER___withDefaults=withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
+          );
+          expect(result).toContain(
+            ";type ___VERTER___defineProps_Type={}&{ a?: string };"
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineProps",
+                // NOTE THis maybe should be the name for withDefaults
+                name: "___VERTER___withDefaults",
+                isType: true,
+
+                objectName: undefined,
+                typeName: "___VERTER___defineProps_Type",
+                valueName: "___VERTER___withDefaults",
+              }),
+
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "withDefaults",
+                name: "___VERTER___withDefaults",
+                isType: false,
+
+                objectName: "___VERTER___withDefaults_Boxed",
+                typeName: undefined,
+                valueName: "___VERTER___withDefaults",
+              }),
+            ])
+          );
+        });
+        it.skip("const props = withDefaults(defineProps<{ a?: string }>(), {})", () => {
+          const { result, context, ...other } = parse(
+            `const props = withDefaults(defineProps<{ a?: string }>(), {})`,
+            "ts"
+          );
+
+          expect(result).toContain(
+            [
+              "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
+              "defineProps<___VERTER___defineProps_Type>(), {});",
+            ].join("")
+          );
+          expect(result).toContain(
+            "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
+          );
+          expect(result).toContain(
+            ";type ___VERTER___defineProps_Type={}&{ a?: string };"
+          );
+
+          expect(context.items[0]).toMatchObject({
+            type: "macro-binding",
+            macro: "defineProps",
+            name: "___VERTER___Props",
+          });
+
+          expect(context.items[1]).toMatchObject({
+            type: "warning",
+            message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
+            // this is bound to defineProps, but maybe it could be withDefaults, to be investigated and confirmed
+            start: 51,
+            end: 77,
+          });
         });
       });
     });

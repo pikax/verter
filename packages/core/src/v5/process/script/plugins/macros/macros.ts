@@ -81,9 +81,7 @@ export const MacrosPlugin = definePlugin({
         ? `"object":{} as typeof ${info.objectName}`
         : ``;
 
-      const name = macro.startsWith("define")
-        ? macro[6].toLowerCase() + macro.slice(7)
-        : macro;
+      const name = normaliseDefineFromMacro(macro);
 
       return `${name}:{${[value, type, object]
         .filter((x) => x !== "")
@@ -423,7 +421,7 @@ function processMacroCall(
   addMacroDependencies(macroName as MacroNames, box.info.name, ctx);
 
   if (!varName) {
-    varName = ctx.prefix(macroName);
+    varName = box.info.varName;
   }
 
   switch (macroName) {
@@ -538,8 +536,36 @@ function processMacroCall(
         node: declarator ?? node,
         isType: isTypeModel,
         valueName: varName,
-        objectName: !isTypeModel ? box!.info.boxedName : undefined,
+        objectName: node.arguments.length > 0 ? box!.info.boxedName : undefined,
         typeName: isTypeModel ? box!.info.type : undefined,
+      });
+
+      break;
+    }
+
+    default: {
+      box.box();
+
+      // override `varName` since it should be based on defineModel
+      if (!declarator) {
+        if (varName === null) {
+          varName = box.info.varName;
+        }
+        s.appendRight(node.start, `const ${varName}=`);
+      }
+
+      const isType = !!node.typeArguments;
+
+      ctx.items.push({
+        type: ProcessItemType.MacroBinding,
+        name: varName ?? box.info.boxedName,
+        macro: macroName,
+        node: declarator ?? node,
+
+        isType: isType,
+        valueName: varName,
+        objectName: node.arguments.length > 0 ? box!.info.boxedName : undefined,
+        typeName: isType ? box!.info.type : undefined,
       });
 
       break;
@@ -631,7 +657,8 @@ function boxInfo(
   const name = `${macroName}_Box` as AvailableExports;
   const type = ctx.prefix(`${prepend}${macroName}_Type`);
   const boxName = ctx.prefix(`${name}`);
-  return { boxedName, boxName, name, type };
+  const varName = ctx.prefix(normaliseDefineFromMacro(macroName));
+  return { boxedName, boxName, name, type, varName };
 }
 
 function boxMacro(
@@ -757,4 +784,10 @@ function macroBoxByArguments(
     s[method](offset, `);`);
   }
   return { start, move, end };
+}
+
+function normaliseDefineFromMacro(name: string) {
+  return name.startsWith("define")
+    ? name[6].toLowerCase() + name.slice(7)
+    : name;
 }
