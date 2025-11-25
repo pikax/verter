@@ -29,6 +29,7 @@ const MacrosNames = [
 type MacroNames = (typeof MacrosNames)[number];
 
 const Macros = new Set<string>(MacrosNames);
+const NoReturnMacros = new Set<string>(["defineOptions", "defineExpose"]);
 
 export const MacrosPlugin = definePlugin({
   name: "VerterMacro",
@@ -551,7 +552,7 @@ function processMacroCall(
       box.box();
 
       // override `varName` since it should be based on defineModel
-      if (!declarator) {
+      if (!declarator && !NoReturnMacros.has(macroName)) {
         if (varName === null) {
           varName = box.info.varName;
         }

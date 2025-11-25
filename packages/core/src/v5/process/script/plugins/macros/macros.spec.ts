@@ -51,7 +51,219 @@ describe("process script plugin script block", () => {
       return _parse(`${pre ? pre + "\n" : ""}${content}`, false, lang, pre);
     }
 
-    // TODO add tests for javascript
+    describe("javascript", () => {
+      function parseJS(content: string, pre: string = "") {
+        return _parse(`${pre ? pre + "\n" : ""}${content}`, false, "js", pre);
+      }
+
+      it("defineProps()", () => {
+        const { result, context } = parseJS(`defineProps()`);
+
+        expect(result).toContain(`const ___VERTER___props=defineProps();`);
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineProps",
+              isType: false,
+              name: "___VERTER___props",
+            }),
+          ])
+        );
+      });
+
+      it("defineProps({ a: String })", () => {
+        const { result, context } = parseJS(`defineProps({ a: String })`);
+
+        expect(result).toContain(
+          `const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })`
+        );
+        expect(result).toContain(
+          `const ___VERTER___props=defineProps(___VERTER___defineProps_Boxed)`
+        );
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineProps",
+              isType: false,
+              name: "___VERTER___props",
+              objectName: "___VERTER___defineProps_Boxed",
+            }),
+          ])
+        );
+      });
+
+      it("const props = defineProps({ a: String })", () => {
+        const { result, context } = parseJS(
+          `const props = defineProps({ a: String })`
+        );
+
+        expect(result).toContain(
+          `const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })`
+        );
+        expect(result).toContain(
+          `const props = defineProps(___VERTER___defineProps_Boxed)`
+        );
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineProps",
+              isType: false,
+              name: "props",
+              objectName: "___VERTER___defineProps_Boxed",
+            }),
+          ])
+        );
+      });
+
+      it("defineEmits(['change', 'update'])", () => {
+        const { result, context } = parseJS(
+          `defineEmits(['change', 'update'])`
+        );
+
+        expect(result).toContain(
+          `const ___VERTER___defineEmits_Boxed=___VERTER___defineEmits_Box(['change', 'update'])`
+        );
+        expect(result).toContain(
+          `const ___VERTER___emits=defineEmits(___VERTER___defineEmits_Boxed)`
+        );
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineEmits",
+              isType: false,
+              name: "___VERTER___emits",
+              objectName: "___VERTER___defineEmits_Boxed",
+            }),
+          ])
+        );
+      });
+
+      it("const emit = defineEmits(['change'])", () => {
+        const { result, context } = parseJS(`const emit = defineEmits(['change'])`);
+
+        expect(result).toContain(
+          `const ___VERTER___defineEmits_Boxed=___VERTER___defineEmits_Box(['change'])`
+        );
+        expect(result).toContain(
+          `const emit = defineEmits(___VERTER___defineEmits_Boxed)`
+        );
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineEmits",
+              isType: false,
+              name: "emit",
+              objectName: "___VERTER___defineEmits_Boxed",
+            }),
+          ])
+        );
+      });
+
+      it("defineModel()", () => {
+        const { result, context } = parseJS(`defineModel()`);
+        expect(result).toContain(
+          `const ___VERTER___models_modelValue=defineModel()`
+        );
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "define-model",
+              name: "modelValue",
+              varName: "___VERTER___models_modelValue",
+              isType: false,
+            }),
+          ])
+        );
+      });
+
+      it('const model = defineModel("title")', () => {
+        const { result, context } = parseJS(`const model = defineModel("title")`);
+
+        expect(result).toContain(
+          `const ___VERTER___title_defineModel_Boxed=___VERTER___defineModel_Box("title")`
+        );
+        expect(result).toContain(
+          `const model = defineModel(___VERTER___title_defineModel_Boxed)`
+        );
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "define-model",
+              name: "title",
+              varName: "model",
+              isType: false,
+              objectName: "___VERTER___title_defineModel_Boxed",
+            }),
+          ])
+        );
+      });
+
+      it("defineExpose({ focus: () => {} })", () => {
+        const { result, context } = parseJS(`defineExpose({ focus: () => {} })`);
+
+        expect(result).toContain(
+          `const ___VERTER___defineExpose_Boxed=___VERTER___defineExpose_Box({ focus: () => {} })`
+        );
+        expect(result).toContain(`defineExpose(___VERTER___defineExpose_Boxed)`);
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineExpose",
+              isType: false,
+              name: "___VERTER___expose",
+              objectName: "___VERTER___defineExpose_Boxed",
+            }),
+          ])
+        );
+      });
+
+      it("defineSlots()", () => {
+        const { result, context } = parseJS(`defineSlots()`);
+
+        expect(result).toContain(`const ___VERTER___slots=defineSlots();`);
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineSlots",
+              isType: false,
+              name: "___VERTER___slots",
+            }),
+          ])
+        );
+      });
+
+      it("defineOptions({ inheritAttrs: false })", () => {
+        const { result, context } = parseJS(`defineOptions({ inheritAttrs: false })`);
+        expect(result).toContain(`defineOptions({ inheritAttrs: false })`);
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "options",
+              expression: expect.objectContaining({
+                type: "ObjectExpression",
+              }),
+            }),
+          ])
+        );
+      });
+    });
 
     describe("defineModel", () => {
       describe("function & variable", () => {
@@ -634,6 +846,7 @@ describe("process script plugin script block", () => {
       });
     });
 
+    
     describe("defineProps", () => {
       describe("function & variable", () => {
         it("defineProps()", () => {
@@ -857,200 +1070,664 @@ describe("process script plugin script block", () => {
       });
     });
 
-    describe("types", () => {
-      describe("withDefaults", () => {
-        it("withDefaults()", () => {
-          const { result, context } = parse(`withDefaults()`);
+    describe("defineEmits", () => {
+      describe("function & variable", () => {
+        it("defineEmits()", () => {
+          const { result, context } = parse(`defineEmits()`);
 
-          expect(result).toContain(
-            `const ___VERTER___withDefaults=withDefaults()`
-          );
+          expect(result).toContain(`const ___VERTER___emits=defineEmits();`);
 
-          // TODO it should add a warning because this is an invalid usage of `withDefaults`
           expect(context.items).toEqual(
             expect.arrayContaining([
               expect.objectContaining({
                 type: "macro-binding",
-                macro: "withDefaults",
+                macro: "defineEmits",
                 isType: false,
-                name: "___VERTER___withDefaults",
+                name: "___VERTER___emits",
 
                 objectName: undefined,
                 typeName: undefined,
-                valueName: "___VERTER___withDefaults",
+                valueName: "___VERTER___emits",
               }),
             ])
           );
         });
 
-        it("const props = withDefaults()", () => {
-          const { result, context } = parse(`const props = withDefaults()`);
+        it("const emit = defineEmits()", () => {
+          const { result, context } = parse(`const emit = defineEmits()`);
 
-          expect(result).toContain(`const props = withDefaults()`);
+          expect(result).toContain(`const emit = defineEmits();`);
 
-          // TODO it should add a warning because this is an invalid usage of `withDefaults`
           expect(context.items).toEqual(
             expect.arrayContaining([
               expect.objectContaining({
                 type: "macro-binding",
-                macro: "withDefaults",
+                macro: "defineEmits",
                 isType: false,
-                name: "props",
+                name: "emit",
 
                 objectName: undefined,
                 typeName: undefined,
-                valueName: "props",
+                valueName: "emit",
               }),
             ])
           );
         });
 
-        // it.skip("withDefaults(defineProps)", () => {
-        //   const { result, context } = parse(
-        //     `withDefaults(defineProps({ a: String }), {})`
-        //   );
-
-        //   expect(result).toContain(
-        //     `const ___VERTER___Props=defineProps({ a: String });withDefaults(___VERTER___Props, {})`
-        //   );
-
-        //   expect(context.items).toMatchObject([
-        //     {
-        //       type: "macro-binding",
-        //       macro: "defineProps",
-        //       name: "___VERTER___Props",
-        //     },
-        //   ]);
-        // });
-        it.skip("const props = withDefaults(defineProps({a: String}), {})", () => {
-          const { result, context, ...other } = parse(
-            `const props = withDefaults(defineProps({ a: String }), {})`
+        it("defineEmits(['change', 'update'])", () => {
+          const { result, context } = parse(
+            `defineEmits(['change', 'update'])`
           );
 
           expect(result).toContain(
-            [
-              "let ___VERTER___defineProps_Boxed;",
-              "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
-              "defineProps(___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })), {});",
-            ].join("")
+            `const ___VERTER___defineEmits_Boxed=___VERTER___defineEmits_Box(['change', 'update'])`
           );
           expect(result).toContain(
-            "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
-          );
-          expect(context.items).toEqual(
-            expect.arrayContaining([
-              expect.objectContaining({
-                type: "macro-binding",
-                macro: "defineProps",
-                name: "props",
-                isType: false,
-
-                objectName: "___VERTER___defineProps_Boxed",
-                typeName: undefined,
-                valueName: "props",
-              }),
-              expect.objectContaining({
-                type: "macro-binding",
-                macro: "withDefaults",
-                name: "props",
-                isType: false,
-
-                objectName: "___VERTER___withDefaults_Boxed",
-                typeName: undefined,
-                valueName: "props",
-              }),
-              expect.objectContaining({
-                type: "warning",
-                message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
-                // this is bound to defineProps, but maybe it could be withDefaults, to be investigated and confirmed
-                start: 51,
-                end: 77,
-              }),
-            ])
-          );
-        });
-
-        it.skip("withDefaults(defineProps<{ a?: string }>(), {})", () => {
-          const { result, context, ...other } = parse(
-            `withDefaults(defineProps<{ a?: string }>(), {})`,
-            "ts"
-          );
-
-          expect(result).toContain(
-            [
-              "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
-              "defineProps<___VERTER___defineProps_Type>(), {});",
-            ].join("")
-          );
-          expect(result).toContain(
-            "const ___VERTER___withDefaults=withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
-          );
-          expect(result).toContain(
-            ";type ___VERTER___defineProps_Type={}&{ a?: string };"
+            `const ___VERTER___emits=defineEmits(___VERTER___defineEmits_Boxed)`
           );
 
           expect(context.items).toEqual(
             expect.arrayContaining([
               expect.objectContaining({
                 type: "macro-binding",
-                macro: "defineProps",
-                // NOTE THis maybe should be the name for withDefaults
-                name: "___VERTER___withDefaults",
+                macro: "defineEmits",
+                isType: false,
+                name: "___VERTER___emits",
+
+                objectName: "___VERTER___defineEmits_Boxed",
+                typeName: undefined,
+                valueName: "___VERTER___emits",
+              }),
+            ])
+          );
+        });
+
+        it("const emit = defineEmits(['change', 'update'])", () => {
+          const { result, context } = parse(
+            `const emit = defineEmits(['change', 'update'])`
+          );
+
+          expect(result).toContain(
+            `const ___VERTER___defineEmits_Boxed=___VERTER___defineEmits_Box(['change', 'update'])`
+          );
+          expect(result).toContain(
+            `const emit = defineEmits(___VERTER___defineEmits_Boxed)`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineEmits",
+                isType: false,
+                name: "emit",
+
+                objectName: "___VERTER___defineEmits_Boxed",
+                typeName: undefined,
+                valueName: "emit",
+              }),
+            ])
+          );
+        });
+
+
+        it("defineEmits({ change: ()=> true, update: (arg: {foo:string})=> true})", () => {
+          const { result, context } = parse(
+            `defineEmits({ change: ()=> true, update: (arg: {foo:string})=> true})`
+          );
+
+          expect(result).toContain(
+            `const ___VERTER___defineEmits_Boxed=___VERTER___defineEmits_Box({ change: ()=> true, update: (arg: {foo:string})=> true})`
+          );
+          expect(result).toContain(
+            `const ___VERTER___emits=defineEmits(___VERTER___defineEmits_Boxed)`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineEmits",
+                isType: false,
+                name: "___VERTER___emits",
+
+                objectName: "___VERTER___defineEmits_Boxed",
+                typeName: undefined,
+                valueName: "___VERTER___emits",
+              }),
+            ])
+          );
+        });
+
+        it("const emit = defineEmits({ change: ()=> true, update: (arg: {foo:string})=> true})", () => {
+          const { result, context } = parse(
+            `const emit = defineEmits({ change: ()=> true, update: (arg: {foo:string})=> true})`
+          );
+
+          expect(result).toContain(
+            `const ___VERTER___defineEmits_Boxed=___VERTER___defineEmits_Box({ change: ()=> true, update: (arg: {foo:string})=> true})`
+          );
+          expect(result).toContain(
+            `const emit = defineEmits(___VERTER___defineEmits_Boxed)`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineEmits",
+                isType: false,
+                name: "emit",
+
+                objectName: "___VERTER___defineEmits_Boxed",
+                typeName: undefined,
+                valueName: "emit",
+              }),
+            ])
+          );
+        });
+      });
+
+      describe("types", () => {
+        it("defineEmits<{ change: [value: number] }>()", () => {
+          const { result, context } = parse(
+            `defineEmits<{ change: [value: number] }>()`
+          );
+
+          expect(result).toContain(
+            "type ___VERTER___defineEmits_Type={ change: [value: number] }"
+          );
+          expect(result).toContain(
+            `const ___VERTER___emits=defineEmits<___VERTER___defineEmits_Type>();`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineEmits",
                 isType: true,
+                name: "___VERTER___emits",
 
                 objectName: undefined,
-                typeName: "___VERTER___defineProps_Type",
-                valueName: "___VERTER___withDefaults",
-              }),
-
-              expect.objectContaining({
-                type: "macro-binding",
-                macro: "withDefaults",
-                name: "___VERTER___withDefaults",
-                isType: false,
-
-                objectName: "___VERTER___withDefaults_Boxed",
-                typeName: undefined,
-                valueName: "___VERTER___withDefaults",
+                typeName: "___VERTER___defineEmits_Type",
+                valueName: "___VERTER___emits",
               }),
             ])
           );
         });
-        it.skip("const props = withDefaults(defineProps<{ a?: string }>(), {})", () => {
-          const { result, context, ...other } = parse(
-            `const props = withDefaults(defineProps<{ a?: string }>(), {})`,
-            "ts"
+
+        it("const emit = defineEmits<{ change: [value: number] }>()", () => {
+          const { result, context } = parse(
+            `const emit = defineEmits<{ change: [value: number] }>()`
           );
 
           expect(result).toContain(
-            [
-              "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
-              "defineProps<___VERTER___defineProps_Type>(), {});",
-            ].join("")
+            "type ___VERTER___defineEmits_Type={ change: [value: number] }"
           );
           expect(result).toContain(
-            "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
-          );
-          expect(result).toContain(
-            ";type ___VERTER___defineProps_Type={}&{ a?: string };"
+            `const emit = defineEmits<___VERTER___defineEmits_Type>();`
           );
 
-          expect(context.items[0]).toMatchObject({
-            type: "macro-binding",
-            macro: "defineProps",
-            name: "___VERTER___Props",
-          });
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineEmits",
+                isType: true,
+                name: "emit",
 
-          expect(context.items[1]).toMatchObject({
-            type: "warning",
-            message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
-            // this is bound to defineProps, but maybe it could be withDefaults, to be investigated and confirmed
-            start: 51,
-            end: 77,
-          });
+                objectName: undefined,
+                typeName: "___VERTER___defineEmits_Type",
+                valueName: "emit",
+              }),
+            ])
+          );
         });
       });
     });
+
+    describe("defineSlots", () => {
+      describe("function & variable", () => {
+        it("defineSlots()", () => {
+          const { result, context } = parse(`defineSlots()`);
+
+          expect(result).toContain(`const ___VERTER___slots=defineSlots();`);
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineSlots",
+                isType: false,
+                name: "___VERTER___slots",
+
+                objectName: undefined,
+                typeName: undefined,
+                valueName: "___VERTER___slots",
+              }),
+            ])
+          );
+        });
+
+        it("const slots = defineSlots()", () => {
+          const { result, context } = parse(`const slots = defineSlots()`);
+
+          expect(result).toContain(`const slots = defineSlots();`);
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineSlots",
+                isType: false,
+                name: "slots",
+
+                objectName: undefined,
+                typeName: undefined,
+                valueName: "slots",
+              }),
+            ])
+          );
+        });
+      });
+
+      describe("types", () => {
+        it("defineSlots<{ default: (props: { msg: string }) => any }>()", () => {
+          const { result, context } = parse(
+            `defineSlots<{ default: (props: { msg: string }) => any }>()`
+          );
+
+          expect(result).toContain(
+            "type ___VERTER___defineSlots_Type={ default: (props: { msg: string }) => any }"
+          );
+          expect(result).toContain(
+            `const ___VERTER___slots=defineSlots<___VERTER___defineSlots_Type>();`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineSlots",
+                isType: true,
+                name: "___VERTER___slots",
+
+                objectName: undefined,
+                typeName: "___VERTER___defineSlots_Type",
+                valueName: "___VERTER___slots",
+              }),
+            ])
+          );
+        });
+
+        it("const slots = defineSlots<{ default: (props: { msg: string }) => any }>()", () => {
+          const { result, context } = parse(
+            `const slots = defineSlots<{ default: (props: { msg: string }) => any }>()`
+          );
+
+          expect(result).toContain(
+            "type ___VERTER___defineSlots_Type={ default: (props: { msg: string }) => any }"
+          );
+          expect(result).toContain(
+            `const slots = defineSlots<___VERTER___defineSlots_Type>();`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineSlots",
+                isType: true,
+                name: "slots",
+
+                objectName: undefined,
+                typeName: "___VERTER___defineSlots_Type",
+                valueName: "slots",
+              }),
+            ])
+          );
+        });
+      });
+    });
+
+    describe("defineExpose", () => {
+      it("defineExpose()", () => {
+        const { result, context } = parse(`defineExpose()`);
+
+        expect(result).toContain(`defineExpose()`);
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineExpose",
+              isType: false,
+              name: "___VERTER___expose",
+
+              objectName: undefined,
+              typeName: undefined,
+              valueName: "___VERTER___expose",
+            }),
+          ])
+        );
+      });
+
+      it("defineExpose({ focus: () => {} })", () => {
+        const { result, context } = parse(`defineExpose({ focus: () => {} })`);
+
+        expect(result).toContain(
+          `const ___VERTER___defineExpose_Boxed=___VERTER___defineExpose_Box({ focus: () => {} })`
+        );
+        expect(result).toContain(
+          `defineExpose(___VERTER___defineExpose_Boxed)`
+        );
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineExpose",
+              isType: false,
+              name: "___VERTER___expose",
+
+              objectName: "___VERTER___defineExpose_Boxed",
+              typeName: undefined,
+              valueName: "___VERTER___expose",
+            }),
+          ])
+        );
+      });
+
+      describe("types", () => {
+        it("defineExpose<{ focus: () => void }>()", () => {
+          const { result, context } = parse(
+            `defineExpose<{ focus: () => void }>()`
+          );
+
+          expect(result).toContain(
+            "type ___VERTER___defineExpose_Type={ focus: () => void }"
+          );
+          expect(result).toContain(
+            `defineExpose<___VERTER___defineExpose_Type>()`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineExpose",
+                isType: true,
+                name: "___VERTER___expose",
+
+                objectName: undefined,
+                typeName: "___VERTER___defineExpose_Type",
+                valueName: "___VERTER___expose",
+              }),
+            ])
+          );
+        });
+
+        it("defineExpose<{ focus: () => void }>({ focus: () => {} })", () => {
+          const { result, context } = parse(
+            `defineExpose<{ focus: () => void }>({ focus: () => {} })`
+          );
+
+          expect(result).toContain(
+            "type ___VERTER___defineExpose_Type={ focus: () => void }"
+          );
+          expect(result).toContain(
+            `const ___VERTER___defineExpose_Boxed=___VERTER___defineExpose_Box({ focus: () => {} })`
+          );
+          expect(result).toContain(
+            `defineExpose<___VERTER___defineExpose_Type>(___VERTER___defineExpose_Boxed)`
+          );
+
+          expect(context.items).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                type: "macro-binding",
+                macro: "defineExpose",
+                isType: true,
+                name: "___VERTER___expose",
+
+                objectName: "___VERTER___defineExpose_Boxed",
+                typeName: "___VERTER___defineExpose_Type",
+                valueName: "___VERTER___expose",
+              }),
+            ])
+          );
+        });
+      });
+    });
+
+    describe("withDefaults", () => {
+      it("withDefaults()", () => {
+        const { result, context } = parse(`withDefaults()`);
+
+        expect(result).toContain(
+          `const ___VERTER___withDefaults=withDefaults()`
+        );
+
+        // TODO it should add a warning because this is an invalid usage of `withDefaults`
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "withDefaults",
+              isType: false,
+              name: "___VERTER___withDefaults",
+
+              objectName: undefined,
+              typeName: undefined,
+              valueName: "___VERTER___withDefaults",
+            }),
+          ])
+        );
+      });
+
+      it("const props = withDefaults()", () => {
+        const { result, context } = parse(`const props = withDefaults()`);
+
+        expect(result).toContain(`const props = withDefaults()`);
+
+        // TODO it should add a warning because this is an invalid usage of `withDefaults`
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "withDefaults",
+              isType: false,
+              name: "props",
+
+              objectName: undefined,
+              typeName: undefined,
+              valueName: "props",
+            }),
+          ])
+        );
+      });
+
+      it("withDefaults(defineProps({ a: String }))", () => {
+        const { result, context } = parse(
+          `withDefaults(defineProps({ a: String }))`
+        );
+
+        expect(result).toContain(
+          "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(defineProps(___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })))"
+        );
+        expect(result).toContain("let ___VERTER___defineProps_Boxed;");
+        expect(result).toContain(
+          `const ___VERTER___withDefaults=withDefaults(___VERTER___withDefaults_Boxed)`
+        );
+
+        // TODO it should add a warning because this is an invalid usage of `withDefaults` with an object
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineProps",
+              isType: false,
+              name: "___VERTER___withDefaults",
+
+              objectName: "___VERTER___defineProps_Boxed",
+              typeName: undefined,
+              valueName: "___VERTER___withDefaults",
+            }),
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "withDefaults",
+              isType: false,
+              name: "___VERTER___withDefaults",
+
+              objectName: "___VERTER___withDefaults_Boxed",
+              typeName: undefined,
+              valueName: "___VERTER___withDefaults",
+            }),
+          ])
+        );
+      });
+      it("const props = withDefaults(defineProps({a: String}), {})", () => {
+        const { result, context, ...other } = parse(
+          `const props = withDefaults(defineProps({ a: String }), {})`
+        );
+
+        expect(result).toContain(
+          [
+            "let ___VERTER___defineProps_Boxed;",
+            "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
+            "defineProps(___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })), {});",
+          ].join("")
+        );
+        expect(result).toContain(
+          "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
+        );
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineProps",
+              name: "props",
+              isType: false,
+
+              objectName: "___VERTER___defineProps_Boxed",
+              typeName: undefined,
+              valueName: "props",
+            }),
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "withDefaults",
+              name: "props",
+              isType: false,
+
+              objectName: "___VERTER___withDefaults_Boxed",
+              typeName: undefined,
+              valueName: "props",
+            }),
+            expect.objectContaining({
+              type: "warning",
+              message: "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG",
+              // this is bound to defineProps, but maybe it could be withDefaults, to be investigated and confirmed
+              start: 51,
+              end: 77,
+            }),
+          ])
+        );
+      });
+
+      it("withDefaults(defineProps<{ a?: string }>(), {})", () => {
+        const { result, context, ...other } = parse(
+          `withDefaults(defineProps<{ a?: string }>(), {})`
+        );
+
+        expect(result).toContain(
+          [
+            "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
+            "defineProps<___VERTER___defineProps_Type>(), {});",
+          ].join("")
+        );
+        expect(result).toContain(
+          "const ___VERTER___withDefaults=withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
+        );
+        expect(result).toContain(
+          ";type ___VERTER___defineProps_Type={}&{ a?: string };"
+        );
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineProps",
+              // NOTE THis maybe should be the name for withDefaults
+              name: "___VERTER___withDefaults",
+              isType: true,
+
+              objectName: undefined,
+              typeName: "___VERTER___defineProps_Type",
+              valueName: "___VERTER___withDefaults",
+            }),
+
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "withDefaults",
+              name: "___VERTER___withDefaults",
+              isType: false,
+
+              objectName: "___VERTER___withDefaults_Boxed",
+              typeName: undefined,
+              valueName: "___VERTER___withDefaults",
+            }),
+          ])
+        );
+      });
+      it("const props = withDefaults(defineProps<{ a?: string }>(), {})", () => {
+        const { result, context, ...other } = parse(
+          `const props = withDefaults(defineProps<{ a?: string }>(), {})`,
+          "ts"
+        );
+
+        expect(result).toContain(
+          [
+            "const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(",
+            "defineProps<___VERTER___defineProps_Type>(), {});",
+          ].join("")
+        );
+        expect(result).toContain(
+          "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
+        );
+        expect(result).toContain(
+          ";type ___VERTER___defineProps_Type={}&{ a?: string };"
+        );
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineProps",
+              name: "props",
+              isType: true,
+
+              objectName: undefined,
+              typeName: "___VERTER___defineProps_Type",
+              valueName: "props",
+            }),
+
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "withDefaults",
+              name: "props",
+              isType: false,
+
+              objectName: "___VERTER___withDefaults_Boxed",
+              typeName: undefined,
+              valueName: "props",
+            }),
+          ])
+        );
+      });
+    });
+
+
   });
 
   describe.each(["js", "ts"])("lang %s", (lang) => {
@@ -1070,26 +1747,35 @@ describe("process script plugin script block", () => {
           expect(s.toString()).toContain(original);
         });
 
-        // this should return the binding for expose
-        it.todo("defineExpose", () => {
-          const { s, context, original } = parse(
+        // Options API macros inside setup() are not transformed by the macros plugin
+        // They remain as-is since the setup() function handles them at runtime
+        it("defineExpose in setup() is left untouched", () => {
+          const { result, context, original } = parse(
             `{ setup(){ defineExpose({ a: 0 }) }}`
           );
-          expect(s.toString()).toContain(original);
-          expect(context.items).toMatchObject([
-            { type: "import" },
-            {
-              type: "macro-binding",
-              macro: "defineExpose",
-              name: "exposed",
-              originalName: undefined,
-            },
-          ]);
+          // The code should remain unchanged for Options API
+          expect(result).toContain(`defineExpose({ a: 0 })`);
         });
 
-        it.skip("defineModel", () => {
-          const { s, original } = parse(`{ setup(){ defineModel() }}`);
-          expect(s.toString()).toContain(original);
+        it("defineModel in setup() is left untouched", () => {
+          const { result, original } = parse(`{ setup(){ defineModel() }}`);
+          // The code should remain unchanged for Options API
+          expect(result).toContain(`defineModel()`);
+        });
+
+        it("defineProps in setup() is left untouched", () => {
+          const { result } = parse(`{ setup(){ const props = defineProps(['foo']) }}`);
+          expect(result).toContain(`defineProps(['foo'])`);
+        });
+
+        it("defineEmits in setup() is left untouched", () => {
+          const { result } = parse(`{ setup(){ const emit = defineEmits(['change']) }}`);
+          expect(result).toContain(`defineEmits(['change'])`);
+        });
+
+        it("defineSlots in setup() is left untouched", () => {
+          const { result } = parse(`{ setup(){ const slots = defineSlots() }}`);
+          expect(result).toContain(`defineSlots()`);
         });
       }
     );
