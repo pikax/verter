@@ -8,6 +8,7 @@ import { TemplateBindingPlugin } from "../template-binding";
 import { ScriptBlockPlugin } from "../script-block";
 import { BindingPlugin } from "../binding";
 import { testSourceMaps } from "../../../../utils.test-utils";
+import { prefixWith } from "@verter/types/string";
 
 describe("process script plugin script block", () => {
   function _parse(
@@ -45,6 +46,10 @@ describe("process script plugin script block", () => {
 
     return r;
   }
+  it.only("fff", () => {
+    const r = prefixWith("___VERTER___");
+    expect(r).toBe("___VERTER___");
+  });
 
   describe("setup", () => {
     function parse(content: string, lang = "ts", pre: string = "") {
@@ -147,7 +152,9 @@ describe("process script plugin script block", () => {
       });
 
       it("const emit = defineEmits(['change'])", () => {
-        const { result, context } = parseJS(`const emit = defineEmits(['change'])`);
+        const { result, context } = parseJS(
+          `const emit = defineEmits(['change'])`
+        );
 
         expect(result).toContain(
           `const ___VERTER___defineEmits_Boxed=___VERTER___defineEmits_Box(['change'])`
@@ -188,7 +195,9 @@ describe("process script plugin script block", () => {
       });
 
       it('const model = defineModel("title")', () => {
-        const { result, context } = parseJS(`const model = defineModel("title")`);
+        const { result, context } = parseJS(
+          `const model = defineModel("title")`
+        );
 
         expect(result).toContain(
           `const ___VERTER___title_defineModel_Boxed=___VERTER___defineModel_Box("title")`
@@ -211,12 +220,16 @@ describe("process script plugin script block", () => {
       });
 
       it("defineExpose({ focus: () => {} })", () => {
-        const { result, context } = parseJS(`defineExpose({ focus: () => {} })`);
+        const { result, context } = parseJS(
+          `defineExpose({ focus: () => {} })`
+        );
 
         expect(result).toContain(
           `const ___VERTER___defineExpose_Boxed=___VERTER___defineExpose_Box({ focus: () => {} })`
         );
-        expect(result).toContain(`defineExpose(___VERTER___defineExpose_Boxed)`);
+        expect(result).toContain(
+          `defineExpose(___VERTER___defineExpose_Boxed)`
+        );
 
         expect(context.items).toEqual(
           expect.arrayContaining([
@@ -249,7 +262,9 @@ describe("process script plugin script block", () => {
       });
 
       it("defineOptions({ inheritAttrs: false })", () => {
-        const { result, context } = parseJS(`defineOptions({ inheritAttrs: false })`);
+        const { result, context } = parseJS(
+          `defineOptions({ inheritAttrs: false })`
+        );
         expect(result).toContain(`defineOptions({ inheritAttrs: false })`);
 
         expect(context.items).toEqual(
@@ -277,10 +292,18 @@ const props = defineProps<{ msg: string }>()
 const emit = defineEmits<{ change: [value: string] }>()
           `);
 
-          expect(result).toContain("type ___VERTER___defineProps_Type={ msg: string }");
-          expect(result).toContain("type ___VERTER___defineEmits_Type={ change: [value: string] }");
-          expect(result).toContain("const props = defineProps<___VERTER___defineProps_Type>()");
-          expect(result).toContain("const emit = defineEmits<___VERTER___defineEmits_Type>()");
+          expect(result).toContain(
+            "type ___VERTER___defineProps_Type={ msg: string }"
+          );
+          expect(result).toContain(
+            "type ___VERTER___defineEmits_Type={ change: [value: string] }"
+          );
+          expect(result).toContain(
+            "const props = defineProps<___VERTER___defineProps_Type>()"
+          );
+          expect(result).toContain(
+            "const emit = defineEmits<___VERTER___defineEmits_Type>()"
+          );
 
           expect(context.items).toEqual(
             expect.arrayContaining([
@@ -312,8 +335,12 @@ const firstName = defineModel<string>('firstName')
 const lastName = defineModel<string>('lastName')
           `);
 
-          expect(result).toContain("type ___VERTER___firstName_defineModel_Type=string");
-          expect(result).toContain("type ___VERTER___lastName_defineModel_Type=string");
+          expect(result).toContain(
+            "type ___VERTER___firstName_defineModel_Type=string"
+          );
+          expect(result).toContain(
+            "type ___VERTER___lastName_defineModel_Type=string"
+          );
           expect(result).toContain(
             "const ___VERTER___firstName_defineModel_Boxed=___VERTER___defineModel_Box('firstName')"
           );
@@ -359,9 +386,15 @@ const slots = defineSlots<{ default: () => any }>()
 defineExpose({ focus: () => {} })
           `);
 
-          expect(result).toContain("type ___VERTER___defineProps_Type={ msg: string }");
-          expect(result).toContain("type ___VERTER___defineEmits_Type={ change: [] }");
-          expect(result).toContain("type ___VERTER___defineSlots_Type={ default: () => any }");
+          expect(result).toContain(
+            "type ___VERTER___defineProps_Type={ msg: string }"
+          );
+          expect(result).toContain(
+            "type ___VERTER___defineEmits_Type={ change: [] }"
+          );
+          expect(result).toContain(
+            "type ___VERTER___defineSlots_Type={ default: () => any }"
+          );
           expect(result).toContain(
             "const ___VERTER___defineExpose_Boxed=___VERTER___defineExpose_Box({ focus: () => {} })"
           );
@@ -551,8 +584,12 @@ defineExpose({ focus: () => {} })
             `const { foo } = defineProps<{ foo: string }>()`
           );
 
-          expect(result).toContain("type ___VERTER___defineProps_Type={ foo: string }");
-          expect(result).toContain("defineProps<___VERTER___defineProps_Type>()");
+          expect(result).toContain(
+            "type ___VERTER___defineProps_Type={ foo: string }"
+          );
+          expect(result).toContain(
+            "defineProps<___VERTER___defineProps_Type>()"
+          );
 
           // The macro should still be processed
           expect(context.items).toEqual(
@@ -1529,7 +1566,6 @@ const emit = defineEmits(['change'])
       });
     });
 
-    
     describe("defineProps", () => {
       describe("function & variable", () => {
         it("defineProps()", () => {
@@ -1852,7 +1888,6 @@ const emit = defineEmits(['change'])
             ])
           );
         });
-
 
         it("defineEmits({ change: ()=> true, update: (arg: {foo:string})=> true})", () => {
           const { result, context } = parse(
@@ -2409,8 +2444,6 @@ const emit = defineEmits(['change'])
         );
       });
     });
-
-
   });
 
   describe.each(["js", "ts"])("lang %s", (lang) => {
@@ -2447,12 +2480,16 @@ const emit = defineEmits(['change'])
         });
 
         it("defineProps in setup() is left untouched", () => {
-          const { result } = parse(`{ setup(){ const props = defineProps(['foo']) }}`);
+          const { result } = parse(
+            `{ setup(){ const props = defineProps(['foo']) }}`
+          );
           expect(result).toContain(`defineProps(['foo'])`);
         });
 
         it("defineEmits in setup() is left untouched", () => {
-          const { result } = parse(`{ setup(){ const emit = defineEmits(['change']) }}`);
+          const { result } = parse(
+            `{ setup(){ const emit = defineEmits(['change']) }}`
+          );
           expect(result).toContain(`defineEmits(['change'])`);
         });
 

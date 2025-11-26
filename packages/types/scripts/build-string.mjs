@@ -93,6 +93,11 @@ function collectExportedNames(sourceFiles) {
   function visit(node) {
     if (ts.isTypeAliasDeclaration(node) && hasExport(node)) add(node.name);
     else if (ts.isInterfaceDeclaration(node) && hasExport(node)) add(node.name);
+    else if (ts.isClassDeclaration(node) && node.name && hasExport(node)) add(node.name);
+    else if (ts.isEnumDeclaration(node) && hasExport(node)) add(node.name);
+    else if (ts.isModuleDeclaration(node) && hasExport(node)) add(node.name);
+    else if (ts.isFunctionDeclaration(node) && node.name && hasExport(node)) add(node.name);
+    
     // Only type aliases and interfaces are included.
     // variables, functions, classes, enums are intentionally excluded
     return ts.forEachChild(node, visit);
@@ -135,9 +140,9 @@ function transformSourceFile(
             node,
             node.modifiers,
             name,
-            node.typeParameters,
-            node.heritageClauses,
-            node.members
+            node.typeParameters?.map((tp) => ts.visitNode(tp, visit)),
+            node.heritageClauses?.map((hc) => ts.visitNode(hc, visit)),
+            node.members.map((m) => ts.visitNode(m, visit))
           );
         }
 
@@ -147,9 +152,9 @@ function transformSourceFile(
             node,
             node.modifiers,
             name,
-            node.typeParameters,
-            node.heritageClauses,
-            node.members
+            node.typeParameters?.map((tp) => ts.visitNode(tp, visit)),
+            node.heritageClauses?.map((hc) => ts.visitNode(hc, visit)),
+            node.members.map((m) => ts.visitNode(m, visit))
           );
         }
 
@@ -170,10 +175,10 @@ function transformSourceFile(
             node.modifiers,
             node.asteriskToken,
             name,
-            node.typeParameters,
-            node.parameters,
-            node.type,
-            node.body
+            node.typeParameters?.map((tp) => ts.visitNode(tp, visit)),
+            node.parameters.map((p) => ts.visitNode(p, visit)),
+            node.type ? ts.visitNode(node.type, visit) : node.type,
+            node.body ? ts.visitNode(node.body, visit) : node.body
           );
         }
 
@@ -198,7 +203,7 @@ function transformSourceFile(
             node,
             node.modifiers,
             name,
-            node.typeParameters,
+            node.typeParameters?.map((tp) => ts.visitNode(tp, visit)),
             ts.visitNode(node.type, visit)
           );
         }
@@ -231,13 +236,12 @@ function transformSourceFile(
         // Prefix type references (only for our defined types)
         if (ts.isTypeReferenceNode(node)) {
           const newName = rewriteEntityName(node.typeName);
-          if (newName !== node.typeName) {
-            return ts.factory.updateTypeReferenceNode(
-              node,
-              newName,
-              node.typeArguments?.map((t) => ts.visitNode(t, visit))
-            );
-          }
+          const newTypeArgs = node.typeArguments?.map((t) => ts.visitNode(t, visit));
+          return ts.factory.updateTypeReferenceNode(
+            node,
+            newName,
+            newTypeArgs
+          );
         }
 
         // Prefix typeof references (TypeQueryNode)

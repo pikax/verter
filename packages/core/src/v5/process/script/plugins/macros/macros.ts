@@ -1,5 +1,8 @@
 import { definePlugin, ScriptContext } from "../../types";
-import type { CallExpression, VerterASTNode } from "../../../../parser/ast/types";
+import type {
+  CallExpression,
+  VerterASTNode,
+} from "../../../../parser/ast/types";
 import { ProcessContext, ProcessItemType } from "../../../types";
 import type { AvailableExports } from "@verter/types/string";
 import { createHelperImport } from "../../../utils";
@@ -319,7 +322,7 @@ function addMacroDependencies(
 ) {
   // if (!ctx.block.lang.startsWith("ts")) return;
 
-  createHelperImport([importBox], ctx.prefix);
+  ctx.items.push(createHelperImport([importBox], ctx.prefix));
 
   ctx.items.push({
     type: ProcessItemType.Import,

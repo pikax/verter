@@ -5,7 +5,9 @@ import { ExtractHidden, IntersectionFunctionToObject } from "../helpers";
  * For each event name `K`, it creates a prop named `onK` (capitalized)
  * that is a function accepting the same arguments as the event.
  */
-export type EmitsToProps<T> = IntersectionFunctionToObject<T> extends infer O
+export type EmitsToProps<T> = T extends () => any
+  ? {}
+  : IntersectionFunctionToObject<T> extends infer O
   ? ExtractHidden<O> extends infer E extends Record<PropertyKey, any>
     ? {
         [K in keyof E as `on${Capitalize<K & string>}`]?: (

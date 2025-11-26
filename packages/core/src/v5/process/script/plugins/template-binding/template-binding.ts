@@ -1,11 +1,17 @@
+import { AvailableExports } from "@verter/types/string";
 import { VerterASTNode } from "../../../../parser";
 import { ProcessItemType } from "../../../types";
+import { createHelperImport } from "../../../utils";
 import { definePlugin } from "../../types";
 import { generateTypeString } from "../utils";
 
 export const TemplateBindingPlugin = definePlugin({
   name: "VerterTemplateBinding",
   enforce: "post",
+
+  pre(s, ctx) {
+    ctx.items.push(createHelperImport(["createMacroReturn"], ctx.prefix));
+  },
 
   post(s, ctx) {
     const isTS = ctx.block.lang === "ts";
@@ -69,20 +75,24 @@ export const TemplateBindingPlugin = definePlugin({
       }
     }
 
-    const ModelAccessor = ctx.prefix("models");
-
     const unref = ctx.prefix("unref");
     const unwrapRef = ctx.prefix("UnwrapRef");
+    const createMacroReturn = ctx.prefix(
+      "createMacroReturn" as AvailableExports
+    );
 
-    const macroBindings = ctx.items
-      .filter((x) => x.type === ProcessItemType.MacroBinding)
-      .reduce((acc, x) => {
-        const n = ctx.prefix(
-          x.macro === "withDefaults" ? "defineProps" : x.macro
-        );
-        acc[x.macro] = x.name;
-        return acc;
-      }, {} as Record<string, string>);
+    // const macroBindings = ctx.items
+    //   .filter((x) => x.type === ProcessItemType.MacroBinding)
+    //   .reduce((acc, x) => {
+    //     const n = ctx.prefix(
+    //       x.macro === "withDefaults" ? "defineProps" : x.macro
+    //     );
+    //     acc[x.macro] = x.name;
+    //     return acc;
+    //   }, {} as Record<string, string>);
+    // const defineModels = ctx.items.filter(
+    //   (x) => x.type === ProcessItemType.DefineModel
+    // );
     const usedBindings = ctx.templateBindings
       .map((x) => {
         if (!x.name) return;
@@ -100,8 +110,8 @@ export const TemplateBindingPlugin = definePlugin({
 
     // .filter((x) => x.name && bindings.has(x.name));
 
-    const defineModels = ctx.items.filter(
-      (x) => x.type === ProcessItemType.DefineModel
+    const macroReturn = ctx.items.find(
+      (x) => x.type === ProcessItemType.MacroReturn
     );
 
     s.prependRight(
@@ -115,27 +125,29 @@ export const TemplateBindingPlugin = definePlugin({
                 : `${unref}(${x.name})`
             }`
         )
-        .concat(
-          Object.entries(macroBindings).map(
-            ([k, x]) => `${k}:${`${isTS ? `${x} as typeof ${x}` : ""}`}`
-          )
-          // Object.entries(macroBindings).map(([k, v]) =>
-          //   v.map((x) => `${k}:${k}`)
-          // )
-        )
-        .concat([
-          // defineModel regular props
-          `${ctx.prefix("defineModel")}:{${defineModels
-            .map(
-              (x) =>
-                // TODO this should be either pointing to the variable or to the function itself
-                `${x.name}/*${x.node.start},${x.node.end}*/: ${
-                  isTS ? `${x.varName} as typeof ${x.varName}` : x.varName
-                }`
-            )
-            .join(",")}}`,
-        ])
-        .join(",")}}`
+        // .concat(
+        //   Object.entries(macroBindings).map(
+        //     ([k, x]) => `${k}:${`${isTS ? `${x} as typeof ${x}` : ""}`}`
+        //   )
+        //   // Object.entries(macroBindings).map(([k, v]) =>
+        //   //   v.map((x) => `${k}:${k}`)
+        //   // )
+        // )
+        // .concat([
+        //   // defineModel regular props
+        //   `${ctx.prefix("defineModel")}:{${defineModels
+        //     .map(
+        //       (x) =>
+        //         // TODO this should be either pointing to the variable or to the function itself
+        //         `${x.name}/*${x.node.start},${x.node.end}*/: ${
+        //           isTS ? `${x.varName} as typeof ${x.varName}` : x.varName
+        //         }`
+        //     )
+        //     .join(",")}}`,
+        // ])
+        .join(",")}${usedBindings.length > 0 ? "," : ""}...${
+        macroReturn ? `${createMacroReturn}(${macroReturn.content})` : "{}"
+      }}`
     );
 
     if (!isTS) {

@@ -36,7 +36,10 @@ export type MacroReturnObject<V, T> = { value: V; object: T };
 /**
  * Helper to create macro return by type or object
  */
-export type MacroReturn<V, T> = MacroReturnType<V, T> | MacroReturnObject<V, T>;
+export type MacroReturn<V, T> =
+  | MacroReturnType<V, T>
+  | MacroReturnObject<V, T>
+  | { value: V };
 
 /**
  * Create macro return helper, to be used in setup return types

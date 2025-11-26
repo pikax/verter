@@ -532,6 +532,14 @@ describe('"emits" helper', () => {
         props.onChange?.("test");
       });
     });
+
+    it("empty", () => {
+      type Props = EmitsToProps<() => void>;
+      assertType<Props>({} as {});
+
+      // @ts-expect-error test for any type
+      assertType<{ a: 1 }>({} as Props);
+    });
   });
 
   describe("ComponentEmitsToProps", () => {

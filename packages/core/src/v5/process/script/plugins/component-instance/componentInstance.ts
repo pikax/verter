@@ -39,6 +39,7 @@ export const ComponentInstancePlugin = definePlugin({
       const allowDev = true;
 
       const componentName = ctx.prefix("Component");
+      const templateBinding = ctx.prefix("TemplateBinding");
       const defaultOptionsName = ctx.prefix("default");
 
       const genericDeclaration = ctx.generic
@@ -51,9 +52,9 @@ export const ComponentInstancePlugin = definePlugin({
       const instanceName = ctx.prefix("Instance");
 
       const declaration = [
-        `export type ${instanceName}${genericDeclaration} = ${macroToInstance}<typeof ${componentName}${sanitisedNames}, ${attributes}, ${element}, false>;`,
+        `export type ${instanceName}${genericDeclaration} = ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, false>;`,
         allowDev &&
-          `export type ${instanceName}_TEST${genericDeclaration} = ${macroToInstance}<typeof ${componentName}${sanitisedNames}, ${attributes}, ${element}, true>;`,
+          `export type ${instanceName}_TEST${genericDeclaration} = ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, true>;`,
         `export const ${componentName}: typeof ${defaultOptionsName} & { new${genericDeclaration}():${instanceName}${sanitisedNames} };`,
       ];
 
