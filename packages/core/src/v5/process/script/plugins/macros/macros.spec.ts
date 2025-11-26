@@ -288,10 +288,10 @@ const emit = defineEmits<{ change: [value: string] }>()
           `);
 
           expect(result).toContain(
-            "type ___VERTER___defineProps_Type={}&{ msg: string }"
+            "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ msg: string }>"
           );
           expect(result).toContain(
-            "type ___VERTER___defineEmits_Type={}&{ change: [value: string] }"
+            "type ___VERTER___defineEmits_Type=___VERTER___Prettify<{ change: [value: string] }>"
           );
           expect(result).toContain(
             "const props = defineProps<___VERTER___defineProps_Type>()"
@@ -331,10 +331,10 @@ const lastName = defineModel<string>('lastName')
           `);
 
           expect(result).toContain(
-            "type ___VERTER___firstName_defineModel_Type=string"
+            "type ___VERTER___firstName_defineModel_Type=___VERTER___Prettify<string>"
           );
           expect(result).toContain(
-            "type ___VERTER___lastName_defineModel_Type=string"
+            "type ___VERTER___lastName_defineModel_Type=___VERTER___Prettify<string>"
           );
           expect(result).toContain(
             "const ___VERTER___firstName_defineModel_Boxed=___VERTER___defineModel_Box('firstName')"
@@ -382,13 +382,13 @@ defineExpose({ focus: () => {} })
           `);
 
           expect(result).toContain(
-            "type ___VERTER___defineProps_Type={}&{ msg: string }"
+            "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ msg: string }>"
           );
           expect(result).toContain(
-            "type ___VERTER___defineEmits_Type={}&{ change: [] }"
+            "type ___VERTER___defineEmits_Type=___VERTER___Prettify<{ change: [] }>"
           );
           expect(result).toContain(
-            "type ___VERTER___defineSlots_Type={}&{ default: () => any }"
+            "type ___VERTER___defineSlots_Type=___VERTER___Prettify<{ default: () => any }>"
           );
           expect(result).toContain(
             "const ___VERTER___defineExpose_Boxed=___VERTER___defineExpose_Box({ focus: () => {} })"
@@ -440,7 +440,7 @@ defineExpose({ focus: () => {} })
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineProps_Type={}&{ value: string | number }"
+            "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ value: string | number }>"
           );
           expect(result).toContain(
             "const ___VERTER___props=defineProps<___VERTER___defineProps_Type>();"
@@ -467,7 +467,7 @@ defineExpose({ focus: () => {} })
             `import type { MyProps } from './types'`
           );
 
-          expect(result).toContain("type ___VERTER___defineProps_Type=MyProps");
+          expect(result).toContain("type ___VERTER___defineProps_Type=___VERTER___Prettify<MyProps>");
           expect(result).toContain(
             "const ___VERTER___props=defineProps<___VERTER___defineProps_Type>();"
           );
@@ -493,7 +493,7 @@ defineExpose({ focus: () => {} })
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineEmits_Type={}&{ (e: 'change', value: number): void; (e: 'update'): void }"
+            "type ___VERTER___defineEmits_Type=___VERTER___Prettify<{ (e: 'change', value: number): void; (e: 'update'): void }>"
           );
           expect(result).toContain(
             "const ___VERTER___emits=defineEmits<___VERTER___defineEmits_Type>();"
@@ -520,7 +520,7 @@ defineExpose({ focus: () => {} })
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineSlots_Type={}&{ default: (props: { item: { id: number; name: string }; index: number }) => any }"
+            "type ___VERTER___defineSlots_Type=___VERTER___Prettify<{ default: (props: { item: { id: number; name: string }; index: number }) => any }>"
           );
           expect(result).toContain(
             "const ___VERTER___slots=defineSlots<___VERTER___defineSlots_Type>();"
@@ -547,7 +547,7 @@ defineExpose({ focus: () => {} })
           );
 
           expect(result).toContain(
-            "type ___VERTER___value_defineModel_Type=string | undefined"
+            "type ___VERTER___value_defineModel_Type=___VERTER___Prettify<string | undefined>"
           );
           expect(result).toContain(
             "const ___VERTER___value_defineModel_Boxed=___VERTER___defineModel_Box('value', { required: false })"
@@ -580,7 +580,7 @@ defineExpose({ focus: () => {} })
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineProps_Type={}&{ foo: string }"
+            "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ foo: string }>"
           );
           expect(result).toContain(
             "defineProps<___VERTER___defineProps_Type>()"
@@ -1190,7 +1190,7 @@ const emit = defineEmits(['change'])
           const { result, context } = parse(`defineModel<string>()`);
 
           expect(result).toContain(
-            `type ___VERTER___modelValue_defineModel_Type=string`
+            `type ___VERTER___modelValue_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
             `const ___VERTER___models_modelValue=defineModel<___VERTER___modelValue_defineModel_Type>()`
@@ -1217,7 +1217,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            `type ___VERTER___modelValue_defineModel_Type=string`
+            `type ___VERTER___modelValue_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
             `const model = defineModel<___VERTER___modelValue_defineModel_Type>()`
@@ -1242,7 +1242,7 @@ const emit = defineEmits(['change'])
           const { result, context } = parse(`defineModel<string>({})`);
 
           expect(result).toContain(
-            `type ___VERTER___modelValue_defineModel_Type=string`
+            `type ___VERTER___modelValue_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
             `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box({})`
@@ -1271,7 +1271,7 @@ const emit = defineEmits(['change'])
             `const model = defineModel<string>({})`
           );
           expect(result).toContain(
-            `type ___VERTER___modelValue_defineModel_Type=string`
+            `type ___VERTER___modelValue_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
             `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box({})`
@@ -1299,7 +1299,7 @@ const emit = defineEmits(['change'])
           const { result, context } = parse(`defineModel<string>("model")`);
 
           expect(result).toContain(
-            `type ___VERTER___model_defineModel_Type=string`
+            `type ___VERTER___model_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
             `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
@@ -1329,7 +1329,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            `type ___VERTER___model_defineModel_Type=string`
+            `type ___VERTER___model_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
             `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
@@ -1358,7 +1358,7 @@ const emit = defineEmits(['change'])
           const { result, context } = parse(`defineModel<string>("model", {})`);
 
           expect(result).toContain(
-            `type ___VERTER___model_defineModel_Type=string`
+            `type ___VERTER___model_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
             `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model", {})`
@@ -1388,7 +1388,7 @@ const emit = defineEmits(['change'])
             `const model = defineModel<string>("model", {})`
           );
           expect(result).toContain(
-            `type ___VERTER___model_defineModel_Type=string`
+            `type ___VERTER___model_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
             `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model", {})`
@@ -1663,7 +1663,7 @@ const emit = defineEmits(['change'])
           const { result, context } = parse(`defineProps<{ a?: string }>()`);
 
           expect(result).toContain(
-            "type ___VERTER___defineProps_Type={}&{ a?: string }"
+            "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ a?: string }>"
           );
           expect(result).toContain(
             `const ___VERTER___props=defineProps<___VERTER___defineProps_Type>();`
@@ -1692,7 +1692,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineProps_Type={}&{ a?: string }"
+            "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ a?: string }>"
           );
           expect(result).toContain(
             `const props = defineProps<___VERTER___defineProps_Type>();`
@@ -1721,7 +1721,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineProps_Type={}&{ a?: string }"
+            "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ a?: string }>"
           );
 
           expect(result).toContain(
@@ -1754,7 +1754,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineProps_Type={}&{ a?: string }"
+            "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ a?: string }>"
           );
 
           expect(result).toContain(
@@ -1948,7 +1948,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineEmits_Type={}&{ change: [value: number] }"
+            "type ___VERTER___defineEmits_Type=___VERTER___Prettify<{ change: [value: number] }>"
           );
           expect(result).toContain(
             `const ___VERTER___emits=defineEmits<___VERTER___defineEmits_Type>();`
@@ -1976,7 +1976,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineEmits_Type={}&{ change: [value: number] }"
+            "type ___VERTER___defineEmits_Type=___VERTER___Prettify<{ change: [value: number] }>"
           );
           expect(result).toContain(
             `const emit = defineEmits<___VERTER___defineEmits_Type>();`
@@ -2052,7 +2052,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineSlots_Type={}&{ default: (props: { msg: string }) => any }"
+            "type ___VERTER___defineSlots_Type=___VERTER___Prettify<{ default: (props: { msg: string }) => any }>"
           );
           expect(result).toContain(
             `const ___VERTER___slots=defineSlots<___VERTER___defineSlots_Type>();`
@@ -2080,7 +2080,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineSlots_Type={}&{ default: (props: { msg: string }) => any }"
+            "type ___VERTER___defineSlots_Type=___VERTER___Prettify<{ default: (props: { msg: string }) => any }>"
           );
           expect(result).toContain(
             `const slots = defineSlots<___VERTER___defineSlots_Type>();`
@@ -2159,7 +2159,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineExpose_Type={}&{ focus: () => void }"
+            "type ___VERTER___defineExpose_Type=___VERTER___Prettify<{ focus: () => void }>"
           );
           expect(result).toContain(
             `defineExpose<___VERTER___defineExpose_Type>()`
@@ -2187,7 +2187,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            "type ___VERTER___defineExpose_Type={}&{ focus: () => void }"
+            "type ___VERTER___defineExpose_Type=___VERTER___Prettify<{ focus: () => void }>"
           );
           expect(result).toContain(
             `const ___VERTER___defineExpose_Boxed=___VERTER___defineExpose_Box({ focus: () => {} })`
@@ -2363,7 +2363,7 @@ const emit = defineEmits(['change'])
           "const ___VERTER___withDefaults=withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
         );
         expect(result).toContain(
-          ";type ___VERTER___defineProps_Type={}&{ a?: string };"
+          ";type ___VERTER___defineProps_Type=___VERTER___Prettify<{ a?: string }>;"
         );
 
         expect(context.items).toEqual(
@@ -2409,7 +2409,7 @@ const emit = defineEmits(['change'])
           "const props = withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])"
         );
         expect(result).toContain(
-          ";type ___VERTER___defineProps_Type={}&{ a?: string };"
+          ";type ___VERTER___defineProps_Type=___VERTER___Prettify<{ a?: string }>;"
         );
 
         expect(context.items).toEqual(

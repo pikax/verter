@@ -42,27 +42,10 @@ function shouldPrettifyType(
   isTypeDeclaration: boolean
 ) {
   if (!name) return true;
-
-  // const t =
-  //   name.type === "TSTypeReference"
-  //     ? name.typeName.type === "Identifier"
-  //       ? name.typeName.name
-  //       : name.type
-  //     : name.type;
-
   if (isTypeDeclaration) {
     return true;
-    // return (
-    //   name.type === "TSTypeReference" ||
-    //   name.type === "TSTupleType" ||
-    //   name.type === "TSTypeLiteral"
-    // );
-  }
-  if (name.type.startsWith("TS") && name.type.endsWith("Keyword")) {
-    return false;
   }
   return false;
-  return true;
 }
 
 type MacroInfo = {
@@ -271,28 +254,31 @@ function processMacroCall(
                 defineProps.typeArguments.params.length - 1
               ].end!;
 
+            // Replace the type argument with the type alias name
             s.appendLeft(
               paramsStart,
               shouldPrettifyType(firstParam, false)
                 ? `${ctx.prefix("Prettify")}<${propsBoxInfo.type}>`
                 : propsBoxInfo.type
             );
-            // create type and prettify it with "{}&" otherwise on hover it will
-            // show `defineProps_Type` only
-            s.appendRight(
-              paramsStart,
-              `;type ${propsBoxInfo.type}=${
-                shouldPrettifyType(firstParam, true)
-                  ? `${ctx.prefix("Prettify")}<`
-                  : ""
-              }`
-            );
-            s.appendRight(
-              paramEnd,
-              (shouldPrettifyType(firstParam, true) ? ">" : "") + ";"
-            );
 
-            s.move(paramsStart, paramEnd, end);
+            // Get the original type content to build the type declaration
+            const originalTypeContent = s.original.slice(paramsStart, paramEnd);
+            const prettifyPrefix = shouldPrettifyType(firstParam, true)
+              ? `${ctx.prefix("Prettify")}<`
+              : "";
+            const prettifySuffix = shouldPrettifyType(firstParam, true)
+              ? ">"
+              : "";
+
+            // Create the complete type declaration
+            const typeDeclaration = `;type ${propsBoxInfo.type}=${prettifyPrefix}${originalTypeContent}${prettifySuffix};`;
+
+            // Insert the type declaration at the end position
+            s.appendRight(end, typeDeclaration);
+
+            // Remove the original type argument content (replace with empty)
+            s.remove(paramsStart, paramEnd);
           } else {
             s.appendLeft(start, `let ${propsBoxInfo.boxedName}`);
             if (splitFromOffset !== -1 && splitToOffset !== -1) {
@@ -496,11 +482,12 @@ function boxMacro(
     byArguments.start(toOffset);
     byTypeArguments.start(typeOffset);
 
-    byArguments.end(toOffset);
-    byTypeArguments.end(typeOffset);
-
     byArguments.move(toOffset);
     byTypeArguments.move(typeOffset);
+
+    // Call end AFTER move so the closing > appears after the moved content
+    byArguments.end(toOffset);
+    byTypeArguments.end(typeOffset);
   }
 
   return {
@@ -526,17 +513,25 @@ function macroBoxByTypeArguments(
     const args = caller.typeArguments;
     if (!args) return;
     const arg = args.params[0];
-    const start = arg.start;
+    const argStart = arg.start!;
+    const argEnd = args.params[args.params.length - 1].end!;
 
+    // Get the original type content
+    const originalTypeContent = s.original.slice(argStart, argEnd);
+    const prettifyPrefix = shouldPrettifyType(arg, true)
+      ? `${ctx.prefix("Prettify")}<`
+      : "";
+    const prettifySuffix = shouldPrettifyType(arg, true) ? ">" : "";
+
+    // Create the complete type declaration
+    const typeDeclaration = `;type ${info.type}=${prettifyPrefix}${originalTypeContent}${prettifySuffix};`;
+
+    // Insert the type declaration at offset
+    s[method](offset, typeDeclaration);
+
+    // Replace the type argument with the type alias name
     s[method](
-      offset,
-      `;type ${info.type}=${
-        shouldPrettifyType(arg, true) ? `${ctx.prefix("Prettify")}<` : ""
-      }`
-    );
-    // s[method](offset, `;type ${info.type}=`);
-    s[method](
-      start!,
+      argStart,
       shouldPrettifyType(arg, false)
         ? `${ctx.prefix("Prettify")}<${info.type}>`
         : info.type
@@ -546,28 +541,18 @@ function macroBoxByTypeArguments(
     const args = caller.typeArguments;
     if (!args) return;
     const arg = args.params[0];
-    // if (arg.type === "TSTypeLiteral") {
-    //   // copy the type literal as is
-    //   s.prependLeft(
-    //     offset,
-    //     `;type ${info.type}=${s.original.slice(arg.start, arg.end)};`
-    //   );
-    //   return;
-    // }
     const start = arg.start;
     const end = args.params[args.params.length - 1].end;
 
-    s.move(start!, end!, offset);
+    // Remove the original type content since we already copied it in start()
+    s.remove(start!, end!);
   }
   function end(
     offset: number,
     method: "appendRight" | "prependRight" = "appendRight"
   ) {
-    const args = caller.typeArguments;
-    if (!args) return;
-    const param = args.params[0];
-    s[method](offset, `${shouldPrettifyType(param, true) ? ">" : ""};`);
-    // s[method](offset, `;`);
+    // No longer needed - the closing > is added in start() now
+    return;
   }
   return { start, move, end };
 }
