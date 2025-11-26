@@ -7,6 +7,7 @@ import { ProcessContext, ProcessItemType } from "../../../types";
 import type { AvailableExports } from "@verter/types/string";
 import { createHelperImport } from "../../../utils";
 import { MagicString } from "@vue/compiler-sfc";
+import type { TSType } from "@oxc-project/types";
 
 const MacrosNames = [
   "defineProps",
@@ -23,6 +24,46 @@ type MacroNames = (typeof MacrosNames)[number];
 
 const Macros = new Set<string>(MacrosNames);
 const NoReturnMacros = new Set<string>(["defineOptions", "defineExpose"]);
+
+// const PrettifyType = new Set<TSType["type"]>([
+//   "TSStringKeyword",
+//   "TSNumberKeyword",
+// ]);
+
+/**
+ * If it should prettify the Type types otherwise on hover it will show `___VERTER___*_Type` instead
+ * of the actual type
+ * @param name
+ * @param isTypeDeclaration
+ * @returns
+ */
+function shouldPrettifyType(
+  name: TSType | undefined,
+  isTypeDeclaration: boolean
+) {
+  if (!name) return true;
+
+  // const t =
+  //   name.type === "TSTypeReference"
+  //     ? name.typeName.type === "Identifier"
+  //       ? name.typeName.name
+  //       : name.type
+  //     : name.type;
+
+  if (isTypeDeclaration) {
+    return true;
+    // return (
+    //   name.type === "TSTypeReference" ||
+    //   name.type === "TSTupleType" ||
+    //   name.type === "TSTypeLiteral"
+    // );
+  }
+  if (name.type.startsWith("TS") && name.type.endsWith("Keyword")) {
+    return false;
+  }
+  return false;
+  return true;
+}
 
 type MacroInfo = {
   typeName?: string;
@@ -42,6 +83,9 @@ function generateMacroInfoString(info: MacroInfo): string {
 export const MacrosPlugin = definePlugin({
   name: "VerterMacro",
 
+  pre(s, ctx) {
+    ctx.items.push(createHelperImport(["Prettify"], ctx.prefix));
+  },
   post(s, ctx) {
     const modelReturn = {} as Record<string, MacroInfo>;
     const macroBindings = {} as Record<string, MacroInfo>;
@@ -220,16 +264,33 @@ function processMacroCall(
             : defineProps.arguments[defineProps.arguments.length - 1].end;
 
           if (isType) {
+            const firstParam = defineProps.typeArguments?.params[0];
             const paramsStart = defineProps.typeArguments?.params[0].start!;
             const paramEnd =
               defineProps.typeArguments?.params[
                 defineProps.typeArguments.params.length - 1
               ].end!;
 
-            s.appendLeft(paramsStart, propsBoxInfo.type);
+            s.appendLeft(
+              paramsStart,
+              shouldPrettifyType(firstParam, false)
+                ? `${ctx.prefix("Prettify")}<${propsBoxInfo.type}>`
+                : propsBoxInfo.type
+            );
             // create type and prettify it with "{}&" otherwise on hover it will
             // show `defineProps_Type` only
-            s.appendRight(paramsStart, `;type ${propsBoxInfo.type}={}&`);
+            s.appendRight(
+              paramsStart,
+              `;type ${propsBoxInfo.type}=${
+                shouldPrettifyType(firstParam, true)
+                  ? `${ctx.prefix("Prettify")}<`
+                  : ""
+              }`
+            );
+            s.appendRight(
+              paramEnd,
+              (shouldPrettifyType(firstParam, true) ? ">" : "") + ";"
+            );
 
             s.move(paramsStart, paramEnd, end);
           } else {
@@ -427,7 +488,7 @@ function boxMacro(
   );
 
   const byArguments = macroBoxByArguments(caller, info, s);
-  const byTypeArguments = macroBoxByTypeArguments(caller, info, s);
+  const byTypeArguments = macroBoxByTypeArguments(caller, info, s, ctx);
 
   function box() {
     // since we cannot move to the same offset, we need to adjust the type arguments offset
@@ -451,7 +512,8 @@ function boxMacro(
 function macroBoxByTypeArguments(
   caller: CallExpression,
   info: ReturnType<typeof boxInfo>,
-  s: MagicString
+  s: MagicString,
+  ctx: ScriptContext
 ): {
   start: (offset: number, method?: "appendLeft" | "prependLeft") => void;
   move: (offset: number) => void;
@@ -463,15 +525,36 @@ function macroBoxByTypeArguments(
   ) {
     const args = caller.typeArguments;
     if (!args) return;
-    const start = args.params[0].start;
+    const arg = args.params[0];
+    const start = arg.start;
 
-    s[method](offset, `;type ${info.type}=`);
-    s[method](start!, info.type);
+    s[method](
+      offset,
+      `;type ${info.type}=${
+        shouldPrettifyType(arg, true) ? `${ctx.prefix("Prettify")}<` : ""
+      }`
+    );
+    // s[method](offset, `;type ${info.type}=`);
+    s[method](
+      start!,
+      shouldPrettifyType(arg, false)
+        ? `${ctx.prefix("Prettify")}<${info.type}>`
+        : info.type
+    );
   }
   function move(offset: number) {
     const args = caller.typeArguments;
     if (!args) return;
-    const start = args.params[0].start;
+    const arg = args.params[0];
+    // if (arg.type === "TSTypeLiteral") {
+    //   // copy the type literal as is
+    //   s.prependLeft(
+    //     offset,
+    //     `;type ${info.type}=${s.original.slice(arg.start, arg.end)};`
+    //   );
+    //   return;
+    // }
+    const start = arg.start;
     const end = args.params[args.params.length - 1].end;
 
     s.move(start!, end!, offset);
@@ -482,7 +565,9 @@ function macroBoxByTypeArguments(
   ) {
     const args = caller.typeArguments;
     if (!args) return;
-    s[method](offset, `;`);
+    const param = args.params[0];
+    s[method](offset, `${shouldPrettifyType(param, true) ? ">" : ""};`);
+    // s[method](offset, `;`);
   }
   return { start, move, end };
 }

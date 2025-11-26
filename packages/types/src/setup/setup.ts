@@ -8,6 +8,11 @@ import {
 declare const MacroKey: unique symbol;
 
 /**
+ * Helper type to prettify types in TS playground and IDEs
+ */
+export type Prettify<T> = { [K in keyof T]: T[K] } & {};
+
+/**
  * Valid macros from vue setup
  */
 export type ReturnMacros =

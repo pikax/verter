@@ -22,5 +22,3 @@ export async function resolveAndDownloadBinding(toPath: string) {
 
   console.log("Verter: downloaded and extracted", binding);
 }
-
-resolveAndDownloadBinding("./");
