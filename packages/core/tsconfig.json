@@ -10,6 +10,8 @@
     "./src/**/*.ignore.tsx",
     "./src/**/*.ignore.ts",
     "./src/**/__bench__/**/*",
+    "./src/**/__generated__/**/*",
+    "./src/**/*.fixtures.ts",
     // "./src/**/*.spec.ts",
     "./src/bench/**/*"
   ],
