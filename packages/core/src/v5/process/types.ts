@@ -111,15 +111,15 @@ export type ProcessItemMacroBinding = {
   /**
    * variable name for type
    */
-  typeName?: string;
+  typeName?: string | null | undefined;
   /**
    * variable name for value
    */
-  valueName?: string;
+  valueName?: string | null | undefined;
   /**
    * variable name for object
    */
-  objectName?: string;
+  objectName?: string | null | undefined;
 
   node: VerterASTNode;
 };
@@ -134,7 +134,7 @@ export type ProcessItemDefineModel = {
   /**
    * variableName
    */
-  varName: string;
+  varName: string | null;
 
   node: VerterASTNode;
 
@@ -149,15 +149,15 @@ export type ProcessItemDefineModel = {
   /**
    * variable name for type
    */
-  typeName?: string;
+  typeName?: string | null | undefined;
   /**
    * variable name for value
    */
-  valueName?: string;
+  valueName?: string | null | undefined;
   /**
    * variable name for object
    */
-  objectName?: string;
+  objectName?: string | null | undefined;
 };
 
 export type ItemErrorString = "";

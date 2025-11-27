@@ -43,15 +43,25 @@ function shouldPrettifyType(
 ) {
   if (!name) return true;
   if (isTypeDeclaration) {
+    if (
+      name.type === "TSTypeReference" ||
+      (name.type === "TSUnionType" &&
+        name.types.every(
+          (x) => x.type === "TSTypeReference" || x.type === "TSLiteralType"
+        )) /*||
+      (name.type.startsWith("TS") && name.type.endsWith("Keyword"))*/
+    ) {
+      return false;
+    }
     return true;
   }
   return false;
 }
 
 type MacroInfo = {
-  typeName?: string;
-  valueName?: string;
-  objectName?: string;
+  typeName?: string | null | undefined;
+  valueName?: string | null | undefined;
+  objectName?: string | null | undefined;
 };
 
 function generateMacroInfoString(info: MacroInfo): string {
@@ -59,6 +69,10 @@ function generateMacroInfoString(info: MacroInfo): string {
     info.valueName && `"value":{} as typeof ${info.valueName}`,
     info.typeName && `"type":{} as ${info.typeName}`,
     info.objectName && `"object":{} as typeof ${info.objectName}`,
+    !info.typeName &&
+      !info.objectName &&
+      info.valueName &&
+      `"object":{} as typeof ${info.valueName}`,
   ].filter(Boolean);
   return parts.join(",");
 }
@@ -94,10 +108,17 @@ export const MacrosPlugin = definePlugin({
       }
     }
 
-    const content = Object.entries(macroBindings).map(([macro, info]) => {
-      const name = normaliseDefineFromMacro(macro);
-      return `${name}:{${generateMacroInfoString(info)}}`;
-    });
+    const content = Object.entries(macroBindings)
+      .map(([macro, info]) => {
+        const name = normaliseDefineFromMacro(macro);
+        const content = generateMacroInfoString(info);
+        if (!content) {
+          return "";
+        }
+
+        return `${name}:{${generateMacroInfoString(info)}}`;
+      })
+      .filter(Boolean);
 
     const modelEntries = Object.entries(modelReturn);
     if (modelEntries.length > 0) {
@@ -114,6 +135,20 @@ export const MacrosPlugin = definePlugin({
   },
 
   transformDeclaration(item, s, ctx) {
+    if (
+      ctx.items.some(
+        (x) =>
+          (x.type === ProcessItemType.MacroBinding ||
+            x.type === ProcessItemType.DefineModel) &&
+          // if this is a declarator might have been processed already
+          // @ts-expect-error TODO improve this, this shouldn't be necessary
+          x.node.start >= item.declarator.start &&
+          // @ts-expect-error TODO improve this, this shouldn't be necessary
+          x.node.end <= item.declarator.end
+      )
+    ) {
+      return;
+    }
     if (
       item.parent.type === "VariableDeclarator" &&
       item.parent.init?.type === "CallExpression"
@@ -185,7 +220,10 @@ function processMacroCall(
   const box = boxMacro(node, start, end, prependName, s, ctx);
   addMacroDependencies(macroName as MacroNames, box.info.name, ctx);
 
-  if (!varName) {
+  // For NoReturnMacros (defineExpose, defineOptions) without a declarator,
+  // we don't set varName since no variable is created
+  const isNoReturn = NoReturnMacros.has(macroName);
+  if (!varName && !(isNoReturn && !declarator)) {
     varName = box.info.varName;
   }
 
@@ -197,11 +235,22 @@ function processMacroCall(
       box.box();
 
       // override `varName` since it should be based on defineModel
-      if (!declarator) {
+      if (declarator) {
+        if (
+          declarator.type === "VariableDeclaration" &&
+          declarator.declarations.length > 0
+        ) {
+          const decl = declarator.declarations[0];
+          if (decl.id.type === "ArrayPattern") {
+            varName = `${accessor}_${name}`;
+            s.appendRight(start, `let ${varName};`);
+            s.appendRight(node.start, `${varName}=`);
+          }
+        }
+      } else {
         varName = `${accessor}_${name}`;
         s.appendRight(node.start, `const ${varName}=`);
       }
-
       const isType = !!node.typeArguments;
 
       ctx.items.push({
@@ -219,6 +268,7 @@ function processMacroCall(
     }
     case "withDefaults": {
       const defineProps = node.arguments[0];
+      let propsBox: ReturnType<typeof boxMacro> | null = null;
       if (defineProps) {
         if (defineProps.type === "CallExpression") {
           if (defineProps.arguments.length > 0) {
@@ -235,7 +285,7 @@ function processMacroCall(
           let splitFromOffset = -1;
           let splitToOffset = -1;
 
-          const propsBoxInfo = boxInfo("defineProps", null, ctx);
+          propsBox = boxMacro(defineProps, start, end, null, s, ctx);
 
           const isType = !!defineProps.typeArguments;
 
@@ -246,63 +296,38 @@ function processMacroCall(
             ? defineProps.typeArguments.end
             : defineProps.arguments[defineProps.arguments.length - 1].end;
 
-          if (isType) {
-            const firstParam = defineProps.typeArguments?.params[0];
-            const paramsStart = defineProps.typeArguments?.params[0].start!;
-            const paramEnd =
-              defineProps.typeArguments?.params[
-                defineProps.typeArguments.params.length - 1
-              ].end!;
-
-            // Replace the type argument with the type alias name
+          if (defineProps.arguments.length > 0) {
+            s.appendLeft(start, `;let ${propsBox.info.boxedName}`);
             s.appendLeft(
-              paramsStart,
-              shouldPrettifyType(firstParam, false)
-                ? `${ctx.prefix("Prettify")}<${propsBoxInfo.type}>`
-                : propsBoxInfo.type
+              defineProps.arguments[0].start,
+              `${propsBox.info.boxedName}=${propsBox.info.boxName}(`
             );
-
-            // Get the original type content to build the type declaration
-            const originalTypeContent = s.original.slice(paramsStart, paramEnd);
-            const prettifyPrefix = shouldPrettifyType(firstParam, true)
-              ? `${ctx.prefix("Prettify")}<`
-              : "";
-            const prettifySuffix = shouldPrettifyType(firstParam, true)
-              ? ">"
-              : "";
-
-            // Create the complete type declaration
-            const typeDeclaration = `;type ${propsBoxInfo.type}=${prettifyPrefix}${originalTypeContent}${prettifySuffix};`;
-
-            // Insert the type declaration at the end position
-            s.appendRight(end, typeDeclaration);
-
-            // Remove the original type argument content (replace with empty)
-            s.remove(paramsStart, paramEnd);
-          } else {
-            s.appendLeft(start, `let ${propsBoxInfo.boxedName}`);
-            if (splitFromOffset !== -1 && splitToOffset !== -1) {
-              s.appendLeft(
-                splitFromOffset,
-                `${propsBoxInfo.boxedName}=${propsBoxInfo.boxName}(`
-              );
-              s.appendRight(splitToOffset, `)`);
-            }
+            s.appendRight(
+              defineProps.arguments[defineProps.arguments.length - 1].end,
+              `)`
+            );
           }
 
-          ctx.items.push(createHelperImport([propsBoxInfo.name], ctx.prefix));
+          // propsBox.byArguments.start(start);
+          propsBox.byTypeArguments.start(end);
+          // propsBox.byArguments.move(start);
+          propsBox.byTypeArguments.move(end);
+          // propsBox.byArguments.end(start);
+          propsBox.byTypeArguments.end(end);
+
+          ctx.items.push(createHelperImport([propsBox.info.name], ctx.prefix));
 
           ctx.items.push({
             type: ProcessItemType.MacroBinding,
-            name: varName,
+            name: varName!,
             macro: "defineProps",
             node: defineProps,
             isType,
             valueName: varName,
-            typeName: isType ? propsBoxInfo.type : undefined,
+            typeName: isType ? propsBox.info.type : undefined,
             objectName:
               defineProps.arguments.length > 0
-                ? propsBoxInfo.boxedName
+                ? propsBox.info.boxedName
                 : undefined,
           });
         }
@@ -312,7 +337,26 @@ function processMacroCall(
 
       box.box();
 
-      if (!declarator) {
+      // if (!declarator) {
+      //   s.appendRight(node.start, `const ${varName}=`);
+      // }
+
+      // override `varName` since it should be based on defineModel
+      if (declarator) {
+        if (
+          declarator.type === "VariableDeclaration" &&
+          declarator.declarations.length > 0
+        ) {
+          const decl = declarator.declarations[0];
+          if (
+            decl.id.type === "ArrayPattern" ||
+            decl.id.type === "ObjectPattern"
+          ) {
+            s.appendRight(start, `let ${varName};`);
+            s.appendRight(node.start, `${varName}=`);
+          }
+        }
+      } else {
         s.appendRight(node.start, `const ${varName}=`);
       }
 
@@ -335,14 +379,27 @@ function processMacroCall(
     default: {
       box.box();
 
-      // override `varName` since it should be based on defineModel
-      if (!declarator && !NoReturnMacros.has(macroName)) {
-        if (varName === null) {
-          varName = box.info.varName;
+      // For macros that don't return a value (defineOptions, defineExpose),
+      // we don't create a variable assignment
+      const isNoReturn = NoReturnMacros.has(macroName);
+
+      if (declarator) {
+        if (
+          declarator.type === "VariableDeclaration" &&
+          declarator.declarations.length > 0
+        ) {
+          const decl = declarator.declarations[0];
+          if (
+            decl.id.type === "ArrayPattern" ||
+            decl.id.type === "ObjectPattern"
+          ) {
+            s.appendRight(start, `let ${varName};`);
+            s.appendRight(node.start, `${varName}=`);
+          }
         }
+      } else if (!isNoReturn) {
         s.appendRight(node.start, `const ${varName}=`);
       }
-
       const isType = !!node.typeArguments;
 
       ctx.items.push({
@@ -352,7 +409,9 @@ function processMacroCall(
         node: declarator ?? node,
 
         isType: isType,
-        valueName: varName,
+        // For NoReturnMacros without a declarator, valueName should be undefined
+        // since no variable is created
+        valueName: isNoReturn && !declarator ? undefined : varName,
         objectName: node.arguments.length > 0 ? box!.info.boxedName : undefined,
         typeName: isType ? box!.info.type : undefined,
       });
@@ -457,10 +516,7 @@ function boxMacro(
   prependName: string | null,
   s: any,
   ctx: ScriptContext
-): {
-  box(): void;
-  info: ReturnType<typeof boxInfo>;
-} {
+) {
   const name: AvailableExports | undefined =
     caller.callee.type === "Identifier"
       ? (caller.callee.name as AvailableExports)
@@ -478,7 +534,11 @@ function boxMacro(
 
   function box() {
     // since we cannot move to the same offset, we need to adjust the type arguments offset
-    const typeOffset = caller.arguments.length > 0 ? end : toOffset;
+    const typeOffset =
+      caller.arguments.length > 0 ||
+      (caller.typeArguments?.params?.length ?? 0) > 0
+        ? end
+        : toOffset;
     byArguments.start(toOffset);
     byTypeArguments.start(typeOffset);
 
@@ -493,6 +553,9 @@ function boxMacro(
   return {
     box,
     info,
+
+    byArguments,
+    byTypeArguments,
   };
 }
 
@@ -513,47 +576,68 @@ function macroBoxByTypeArguments(
     const args = caller.typeArguments;
     if (!args) return;
     const arg = args.params[0];
-    const argStart = arg.start!;
-    const argEnd = args.params[args.params.length - 1].end!;
-
-    // Get the original type content
-    const originalTypeContent = s.original.slice(argStart, argEnd);
-    const prettifyPrefix = shouldPrettifyType(arg, true)
-      ? `${ctx.prefix("Prettify")}<`
-      : "";
-    const prettifySuffix = shouldPrettifyType(arg, true) ? ">" : "";
-
-    // Create the complete type declaration
-    const typeDeclaration = `;type ${info.type}=${prettifyPrefix}${originalTypeContent}${prettifySuffix};`;
-
-    // Insert the type declaration at offset
-    s[method](offset, typeDeclaration);
-
-    // Replace the type argument with the type alias name
-    s[method](
-      argStart,
-      shouldPrettifyType(arg, false)
-        ? `${ctx.prefix("Prettify")}<${info.type}>`
-        : info.type
-    );
   }
   function move(offset: number) {
     const args = caller.typeArguments;
     if (!args) return;
-    const arg = args.params[0];
-    const start = arg.start;
-    const end = args.params[args.params.length - 1].end;
+    let prepend = args.params.length > 1 ? "_0" : "";
 
-    // Remove the original type content since we already copied it in start()
-    s.remove(start!, end!);
+    for (let i = 0; i < args.params.length; i++) {
+      const arg = args.params[i];
+      const argStart = arg.start!;
+      const argEnd = arg.end!;
+      // Additional logic for each type argument can be added here
+
+      // Get the original type content
+      // const originalTypeContent = s.original.slice(argStart, argEnd);
+      const prettifyPrefix = shouldPrettifyType(arg, true)
+        ? `${ctx.prefix("Prettify")}<`
+        : "";
+      const prettifySuffix = shouldPrettifyType(arg, true) ? ">" : "";
+
+      // Create the complete type declaration
+      const typeDeclaration = `;type ${info.type}${prepend}=${prettifyPrefix}`;
+
+      // Insert the type declaration at offset
+      s.appendRight(argStart, typeDeclaration);
+
+      // Replace the type argument with the type alias name
+      s.appendLeft(
+        argStart,
+        shouldPrettifyType(arg, false)
+          ? `${ctx.prefix("Prettify")}<${info.type}${prepend}`
+          : info.type + prepend
+      );
+
+      s.appendLeft(argEnd, `${prettifySuffix};`);
+
+      s.move(argStart, argEnd, offset);
+
+      prepend = `_${i + 1}`;
+    }
+
+    if (args.params.length > 1) {
+      info.type += "_0";
+    }
   }
   function end(
     offset: number,
     method: "appendRight" | "prependRight" = "appendRight"
   ) {
     // No longer needed - the closing > is added in start() now
+    // const args = caller.typeArguments;
+    // if (!args) return;
+    // for (let i = 0; i < args.params.length; i++) {
+    //   const arg = args.params[i];
+    //   const start = arg.start;
+    //   const end = arg.end;
+    //   const prettifySuffix = shouldPrettifyType(arg, true) ? ">" : "";
+    //   s[method](offset, `${prettifySuffix};`);
+    // }
+
     return;
   }
+
   return { start, move, end };
 }
 
@@ -570,14 +654,45 @@ function macroBoxByArguments(
     offset: number,
     method: "appendLeft" | "prependLeft" = "appendLeft"
   ) {
-    if (caller.arguments.length === 0) return;
-    const multiple = caller.arguments.length > 1;
+    if (caller.arguments.length === 0) {
+      // if (!caller.typeArguments) {
+      //   // empty, no need to box
+      //   s[method](offset, `let ${info.boxedName}=`);
+      // }
+      return;
+    }
+
+    // Check if this is a defineModel call with a name argument (first arg is a string literal)
+    // defineModel_Box('name') returns [string, options] tuple, so we need to spread it
+    const macroName =
+      caller.callee.type === "Identifier" ? caller.callee.name : undefined;
+    const firstArgIsStringLiteral =
+      caller.arguments[0]?.type === "Literal" &&
+      typeof caller.arguments[0].value === "string";
+    const isNamedDefineModel =
+      macroName === "defineModel" && firstArgIsStringLiteral;
+
+    // Use tuple spread if multiple arguments OR if it's a named defineModel (always returns tuple)
+    const useTupleSpread = caller.arguments.length > 1 || isNamedDefineModel;
     const start = caller.arguments[0].start;
-    s[method](offset, `;const ${info.boxedName}=${info.boxName}(`);
+
+    // Include original type arguments in the Box call to preserve type information
+    let typeArgsStr = "";
+    if (caller.typeArguments && caller.typeArguments.params.length > 0) {
+      const typeArgStart = caller.typeArguments.params[0].start;
+      const typeArgEnd =
+        caller.typeArguments.params[caller.typeArguments.params.length - 1].end;
+      typeArgsStr = `<${s.original.slice(typeArgStart, typeArgEnd)}>`;
+    }
+
+    s[method](
+      offset,
+      `;const ${info.boxedName}=${info.boxName}${typeArgsStr}(`
+    );
 
     s[method](
       start!,
-      multiple
+      useTupleSpread
         ? [1, 2].map((_, i) => `${info.boxedName}[${i}]`).join(",")
         : info.boxedName
     );

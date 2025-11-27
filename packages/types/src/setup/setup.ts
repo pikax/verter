@@ -10,7 +10,9 @@ declare const MacroKey: unique symbol;
 /**
  * Helper type to prettify types in TS playground and IDEs
  */
-export type Prettify<T> = { [K in keyof T]: T[K] } & {};
+export type Prettify<T> = T extends { (...args: any[]): any }
+  ? T & {}
+  : { [K in keyof T]: T[K] } & {};
 
 /**
  * Valid macros from vue setup
@@ -19,15 +21,15 @@ export type ReturnMacros =
   | "props"
   | "emits"
   | "slots"
-  | "options"
   | "model"
-  | "expose"
   | "withDefaults"
   | "templateRef";
+
+export type NonReturnMacros = "expose" | "options";
 /**
  * Normal macros, model holds special structure
  */
-export type RegularMacros = Exclude<ReturnMacros, "model">;
+export type RegularMacros = Exclude<ReturnMacros, "model" | NonReturnMacros>;
 /**
  * Helper to create macro return by type
  */
@@ -37,14 +39,12 @@ export type MacroReturnType<V, T> = { value: V; type: T };
  * Helper to create macro return by object
  */
 export type MacroReturnObject<V, T> = { value: V; object: T };
+export type MacroNonReturn<T> = { type: T } | { object: T };
 
 /**
  * Helper to create macro return by type or object
  */
-export type MacroReturn<V, T> =
-  | MacroReturnType<V, T>
-  | MacroReturnObject<V, T>
-  | { value: V };
+export type MacroReturn<V, T> = MacroReturnType<V, T> | MacroReturnObject<V, T>;
 
 /**
  * Create macro return helper, to be used in setup return types
@@ -55,7 +55,7 @@ export declare function createMacroReturn<
       model: Record<string, MacroReturn<any, any>>;
     } & {
       templateRef: Record<string, any>;
-    }
+    } & Record<NonReturnMacros, MacroNonReturn<any>>
   >
 >(o: T): CreateMacroReturn<T>;
 
@@ -94,7 +94,21 @@ export type ExtractMacroReturn<T> = T extends { [MacroKey]: infer R }
  * type Emits = ExtractMacro<Macros, "emits", () => void>; // Returns () => void (fallback)
  * ```
  */
-export type ExtractMacro<T, R extends ReturnMacros, F = never> = T extends {
+export type ExtractMacro<
+  T,
+  R extends ReturnMacros | NonReturnMacros,
+  F = never
+> = T extends {
+  [K in R]: infer M;
+}
+  ? M
+  : F;
+
+export type ExtractNonReturnMacro<
+  T,
+  R extends NonReturnMacros,
+  F = never
+> = T extends {
   [K in R]: infer M;
 }
   ? M
@@ -161,38 +175,6 @@ export type ExtractPropsFromMacro<T> = T extends {
     : PT
   : T;
 
-const macro = createMacroReturn({
-  props: { value: { foo: "" }, type: {} as { foo: string } },
-  withDefaults: { value: { foo: "default" }, type: {} as { foo: string } },
-});
-
-declare const MP: ExtractMacroProps<ExtractMacroReturn<typeof macro>>;
-declare const PX: ExtractPropsFromMacro<typeof MP>;
-PX.foo;
-
-const macroO = createMacroReturn({
-  props: {
-    value: { foo: "" },
-    object: {
-      foo: String,
-      bar: { type: Number, default: 0 },
-      baz: {
-        type: Boolean,
-      },
-      eee: {
-        type: String,
-        required: true,
-      },
-    },
-  },
-} as const);
-declare const MPO: ExtractMacroProps<ExtractMacroReturn<typeof macroO>>;
-declare const PXO: ExtractPropsFromMacro<typeof MPO>;
-PXO.foo;
-PXO.bar;
-PXO.baz;
-PXO.eee;
-
 /**
  * Extracts the emits macro from macro metadata.
  *
@@ -249,7 +231,7 @@ export type SlotsToSlotType<T> = T extends {
  * type Options = ExtractOptions<ExtractMacroReturn<ReturnType<typeof setup>>>;
  * ```
  */
-export type ExtractOptions<T> = ExtractMacro<T, "options", {}>;
+export type ExtractOptions<T> = ExtractNonReturnMacro<T, "options", {}>;
 
 export type MacroOptionsToOptions<T> = T extends {
   type: infer TT extends Record<string, any>;
@@ -307,7 +289,7 @@ export type MacroToModelRecord<T> = {
  * type Expose = ExtractExpose<ExtractMacroReturn<ReturnType<typeof setup>>>;
  * ```
  */
-export type ExtractExpose<T> = ExtractMacro<T, "expose", {}>;
+export type ExtractExpose<T> = ExtractNonReturnMacro<T, "expose", {}>;
 
 export type ExposeToVueExposeKey<T> = T extends {
   type: infer TT extends Record<string, any>;
@@ -367,39 +349,3 @@ export type NormalisedMacroReturn<T = {}, D = {}> = {
 
   $data: D;
 };
-
-// export type MacroToInternalInstance<T> = NormaliseMacroReturn<T> extends {
-//   props: infer P extends ExtractMacroProps<any>;
-//   emits: infer E extends ExtractEmits<any>;
-//   slots: infer S extends ExtractSlots<any>;
-//   options: infer O extends ExtractOptions<any>;
-//   model: infer M extends ExtractModel<any>;
-//   expose: infer X extends ExtractExpose<any>;
-// }
-//   ? import("vue").ComponentInternalInstance & {
-//       emit: Emit;
-//       // todo others
-//     }
-//   : import("vue").ComponentInternalInstance;
-
-// type T = MacroReturnToInstance<
-//   CreateMacroReturn<{
-//     props: { value: { foo: string }; type: { foo: string } };
-//     emits: (e: "update", val: number) => void;
-//     slots: { value: { default: () => string } };
-//     options: { value: { customOption: boolean } };
-//     model: { modelValue: { value: string; type: string } };
-//     expose: { value: { focus: () => void }; type: { focus: () => void } };
-//   }>
-// >;
-
-// const t = {} as T;
-// t.$props.foo;
-
-// declare const P: {
-//   props: { value: { foo: string }; type: { foo: string } };
-// };
-
-// declare const PP: MakePublicProps<typeof P>;
-
-// PP;

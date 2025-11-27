@@ -29,6 +29,40 @@ const HELPERS_TO_IMPORT = [];
 const NAME_APPEND = "_Box";
 const NAME_PREPEND = "";
 
+// Custom overrides for specific functions
+// These are used when Vue's original type signature doesn't work correctly for our use case
+// Each entry maps function name to a custom implementation that replaces the auto-generated one
+const CUSTOM_OVERRIDES = {
+  // withDefaults needs a custom override because Vue's original signature uses DefineProps<T, BKeys>
+  // which causes type errors when used with defineProps<{}>() (empty props object).
+  // By using a simpler [T, Defaults] tuple return type, we avoid this issue while still
+  // capturing the necessary type information for the transformer.
+  withDefaults: `/**
+ * Vue \`<script setup>\` compiler macro for providing props default values when
+ * using type-based \`defineProps\` declaration.
+ *
+ * Example usage:
+ * \`\`\`ts
+ * withDefaults(defineProps<{
+ *   size?: number
+ *   labels?: string[]
+ * }>(), {
+ *   size: 3,
+ *   labels: () => ['default label']
+ * })
+ * \`\`\`
+ *
+ * This is only usable inside \`<script setup>\`, is compiled away in the output
+ * and should **not** be actually called at runtime.
+ *
+ * @see {@link https://vuejs.org/guide/typescript/composition-api.html#typing-component-props}
+ */
+export declare function withDefaults_Box<
+  T,
+  Defaults extends InferDefaults<T>
+>(props: T, defaults: Defaults): [T, Defaults];`,
+};
+
 function resolveVueTypeFiles() {
   const files = [];
   const candidates = [
@@ -597,6 +631,13 @@ function generateOverrideFileFromDeclarations(
   for (const [name, decls] of declsMap.entries()) {
     if (!decls.length) continue;
     content += `// Overrides for ${name}\n`;
+    
+    // Check if this function has a custom override
+    if (CUSTOM_OVERRIDES[name]) {
+      content += CUSTOM_OVERRIDES[name] + "\n\n";
+      continue;
+    }
+    
     const seen = new Set();
     for (const d of decls) {
       const text = transformSignatureReturnToArgTypeAppendUniqueKey(

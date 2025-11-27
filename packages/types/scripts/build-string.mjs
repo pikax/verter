@@ -96,7 +96,7 @@ function collectExportedNames(sourceFiles) {
     else if (ts.isClassDeclaration(node) && node.name && hasExport(node)) add(node.name);
     else if (ts.isEnumDeclaration(node) && hasExport(node)) add(node.name);
     else if (ts.isModuleDeclaration(node) && hasExport(node)) add(node.name);
-    else if (ts.isFunctionDeclaration(node) && node.name && hasExport(node)) add(node.name);
+    // else if (ts.isFunctionDeclaration(node) && node.name && hasExport(node)) add(node.name);
     
     // Only type aliases and interfaces are included.
     // variables, functions, classes, enums are intentionally excluded

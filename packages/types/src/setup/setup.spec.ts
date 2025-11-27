@@ -15,6 +15,7 @@ import {
   ExtractModel,
   ExtractExpose,
   NormaliseMacroReturn,
+  NonReturnMacros,
 } from "./setup";
 import { PropType } from "vue";
 
@@ -95,16 +96,12 @@ describe("Setup helpers", () => {
       const props: ReturnMacros = "props";
       const emits: ReturnMacros = "emits";
       const slots: ReturnMacros = "slots";
-      const options: ReturnMacros = "options";
       const model: ReturnMacros = "model";
-      const expose: ReturnMacros = "expose";
 
       void props;
       void emits;
       void slots;
-      void options;
       void model;
-      void expose;
     });
 
     it("rejects invalid macro names", () => {
@@ -113,26 +110,40 @@ describe("Setup helpers", () => {
       void invalid;
     });
   });
+  describe("NonReturnMacros", () => {
+    it("includes all valid non-return macro names", () => {
+      const options: NonReturnMacros = "options";
+      const expose: NonReturnMacros = "expose";
+      void options;
+      void expose;
+    });
+  });
 
   describe("RegularMacros", () => {
     it("excludes model from regular macros", () => {
       const props: RegularMacros = "props";
       const emits: RegularMacros = "emits";
       const slots: RegularMacros = "slots";
-      const options: RegularMacros = "options";
-      const expose: RegularMacros = "expose";
 
       void props;
       void emits;
       void slots;
-      void options;
-      void expose;
     });
 
     it("rejects model as regular macro", () => {
       // @ts-expect-error model is not a regular macro
       const model: RegularMacros = "model";
       void model;
+    });
+    it("rejects options as regular macro", () => {
+      // @ts-expect-error options is not a regular macro
+      const options: RegularMacros = "options";
+      void options;
+    });
+    it("rejects expose as regular macro", () => {
+      // @ts-expect-error expose is not a regular macro
+      const expose: RegularMacros = "expose";
+      void expose;
     });
   });
 
@@ -681,7 +692,9 @@ describe("Setup helpers", () => {
 
       assertType<Normalized["props"]["props"]["value"]>({} as { id: number });
       assertType<Normalized["props"]["props"]["type"]>("Props");
-      assertType<Normalized["props"]["defaults"]>({} as { value: { id: number } });
+      assertType<Normalized["props"]["defaults"]>(
+        {} as { value: { id: number } }
+      );
       assertType<Normalized["emits"]["value"]>({} as () => void);
       assertType<Normalized["slots"]["value"]>({} as {});
       assertType<Normalized["options"]["value"]>({} as { name: string });

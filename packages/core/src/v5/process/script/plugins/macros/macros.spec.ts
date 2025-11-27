@@ -198,7 +198,7 @@ describe("process script plugin script block", () => {
           `const ___VERTER___title_defineModel_Boxed=___VERTER___defineModel_Box("title")`
         );
         expect(result).toContain(
-          `const model = defineModel(___VERTER___title_defineModel_Boxed)`
+          `const model = defineModel(___VERTER___title_defineModel_Boxed[0],___VERTER___title_defineModel_Boxed[1])`
         );
 
         expect(context.items).toEqual(
@@ -232,8 +232,10 @@ describe("process script plugin script block", () => {
               type: "macro-binding",
               macro: "defineExpose",
               isType: false,
-              name: "___VERTER___expose",
+              name: "___VERTER___defineExpose_Boxed",
               objectName: "___VERTER___defineExpose_Boxed",
+              // defineExpose without assignment doesn't create a variable
+              valueName: undefined,
             }),
           ])
         );
@@ -337,16 +339,16 @@ const lastName = defineModel<string>('lastName')
             "type ___VERTER___lastName_defineModel_Type=___VERTER___Prettify<string>"
           );
           expect(result).toContain(
-            "const ___VERTER___firstName_defineModel_Boxed=___VERTER___defineModel_Box('firstName')"
+            "const ___VERTER___firstName_defineModel_Boxed=___VERTER___defineModel_Box<string>('firstName')"
           );
           expect(result).toContain(
-            "const ___VERTER___lastName_defineModel_Boxed=___VERTER___defineModel_Box('lastName')"
+            "const ___VERTER___lastName_defineModel_Boxed=___VERTER___defineModel_Box<string>('lastName')"
           );
           expect(result).toContain(
-            "const firstName = defineModel<___VERTER___firstName_defineModel_Type>(___VERTER___firstName_defineModel_Boxed)"
+            "const firstName = defineModel<___VERTER___firstName_defineModel_Type>(___VERTER___firstName_defineModel_Boxed[0],___VERTER___firstName_defineModel_Boxed[1])"
           );
           expect(result).toContain(
-            "const lastName = defineModel<___VERTER___lastName_defineModel_Type>(___VERTER___lastName_defineModel_Boxed)"
+            "const lastName = defineModel<___VERTER___lastName_defineModel_Type>(___VERTER___lastName_defineModel_Boxed[0],___VERTER___lastName_defineModel_Boxed[1])"
           );
 
           expect(context.items).toEqual(
@@ -423,9 +425,10 @@ defineExpose({ focus: () => {} })
               expect.objectContaining({
                 type: "macro-binding",
                 macro: "defineExpose",
-                name: "___VERTER___expose",
+                name: "___VERTER___defineExpose_Boxed",
                 isType: false,
-                valueName: "___VERTER___expose",
+                // defineExpose without assignment doesn't create a variable
+                valueName: undefined,
                 objectName: "___VERTER___defineExpose_Boxed",
               }),
             ])
@@ -467,7 +470,8 @@ defineExpose({ focus: () => {} })
             `import type { MyProps } from './types'`
           );
 
-          expect(result).toContain("type ___VERTER___defineProps_Type=___VERTER___Prettify<MyProps>");
+          // Simple type references like MyProps are not wrapped in Prettify
+          expect(result).toContain("type ___VERTER___defineProps_Type=MyProps");
           expect(result).toContain(
             "const ___VERTER___props=defineProps<___VERTER___defineProps_Type>();"
           );
@@ -550,7 +554,7 @@ defineExpose({ focus: () => {} })
             "type ___VERTER___value_defineModel_Type=___VERTER___Prettify<string | undefined>"
           );
           expect(result).toContain(
-            "const ___VERTER___value_defineModel_Boxed=___VERTER___defineModel_Box('value', { required: false })"
+            "const ___VERTER___value_defineModel_Boxed=___VERTER___defineModel_Box<string | undefined>('value', { required: false })"
           );
           expect(result).toContain(
             "const model = defineModel<___VERTER___value_defineModel_Type>(___VERTER___value_defineModel_Boxed[0],___VERTER___value_defineModel_Boxed[1])"
@@ -1037,7 +1041,7 @@ const emit = defineEmits(['change'])
             `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
           );
           expect(result).toContain(
-            `const ___VERTER___models_model=defineModel(___VERTER___model_defineModel_Boxed)`
+            `const ___VERTER___models_model=defineModel(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
           );
 
           expect(context.items).toEqual(
@@ -1138,7 +1142,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            `const model = defineModel(___VERTER___model_defineModel_Boxed)`
+            `const model = defineModel(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
           );
 
           expect(context.items).toEqual(
@@ -1245,7 +1249,7 @@ const emit = defineEmits(['change'])
             `type ___VERTER___modelValue_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
-            `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box({})`
+            `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box<string>({})`
           );
           expect(result).toContain(
             `const ___VERTER___models_modelValue=defineModel<___VERTER___modelValue_defineModel_Type>(___VERTER___modelValue_defineModel_Boxed)`
@@ -1274,7 +1278,7 @@ const emit = defineEmits(['change'])
             `type ___VERTER___modelValue_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
-            `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box({})`
+            `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box<string>({})`
           );
           expect(result).toContain(
             `const model = defineModel<___VERTER___modelValue_defineModel_Type>(___VERTER___modelValue_defineModel_Boxed)`
@@ -1302,10 +1306,10 @@ const emit = defineEmits(['change'])
             `type ___VERTER___model_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
-            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
+            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box<string>("model")`
           );
           expect(result).toContain(
-            `const ___VERTER___models_model=defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed)`
+            `const ___VERTER___models_model=defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
           );
 
           expect(context.items).toEqual(
@@ -1332,11 +1336,11 @@ const emit = defineEmits(['change'])
             `type ___VERTER___model_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
-            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model")`
+            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box<string>("model")`
           );
 
           expect(result).toContain(
-            `const model = defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed)`
+            `const model = defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
           );
 
           expect(context.items).toEqual(
@@ -1361,7 +1365,7 @@ const emit = defineEmits(['change'])
             `type ___VERTER___model_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
-            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model", {})`
+            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box<string>("model", {})`
           );
 
           expect(result).toContain(
@@ -1391,7 +1395,7 @@ const emit = defineEmits(['change'])
             `type ___VERTER___model_defineModel_Type=___VERTER___Prettify<string>`
           );
           expect(result).toContain(
-            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box("model", {})`
+            `const ___VERTER___model_defineModel_Boxed=___VERTER___defineModel_Box<string>("model", {})`
           );
           expect(result).toContain(
             `const model = defineModel<___VERTER___model_defineModel_Type>(___VERTER___model_defineModel_Boxed[0],___VERTER___model_defineModel_Boxed[1])`
@@ -1725,7 +1729,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            "const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })"
+            "const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box<{ a?: string }>({ a: String })"
           );
           expect(result).toContain(
             `const ___VERTER___props=defineProps<___VERTER___defineProps_Type>(___VERTER___defineProps_Boxed);`
@@ -1758,7 +1762,7 @@ const emit = defineEmits(['change'])
           );
 
           expect(result).toContain(
-            "const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box({ a: String })"
+            "const ___VERTER___defineProps_Boxed=___VERTER___defineProps_Box<{ a?: string }>({ a: String })"
           );
           expect(result).toContain(
             `const props = defineProps<___VERTER___defineProps_Type>(___VERTER___defineProps_Boxed);`
@@ -2116,11 +2120,12 @@ const emit = defineEmits(['change'])
               type: "macro-binding",
               macro: "defineExpose",
               isType: false,
-              name: "___VERTER___expose",
+              name: "___VERTER___defineExpose_Boxed",
 
               objectName: undefined,
               typeName: undefined,
-              valueName: "___VERTER___expose",
+              // defineExpose without assignment doesn't create a variable
+              valueName: undefined,
             }),
           ])
         );
@@ -2142,11 +2147,12 @@ const emit = defineEmits(['change'])
               type: "macro-binding",
               macro: "defineExpose",
               isType: false,
-              name: "___VERTER___expose",
+              name: "___VERTER___defineExpose_Boxed",
 
               objectName: "___VERTER___defineExpose_Boxed",
               typeName: undefined,
-              valueName: "___VERTER___expose",
+              // defineExpose without assignment doesn't create a variable
+              valueName: undefined,
             }),
           ])
         );
@@ -2171,11 +2177,12 @@ const emit = defineEmits(['change'])
                 type: "macro-binding",
                 macro: "defineExpose",
                 isType: true,
-                name: "___VERTER___expose",
+                name: "___VERTER___defineExpose_Boxed",
 
                 objectName: undefined,
                 typeName: "___VERTER___defineExpose_Type",
-                valueName: "___VERTER___expose",
+                // defineExpose without assignment doesn't create a variable
+                valueName: undefined,
               }),
             ])
           );
@@ -2190,7 +2197,7 @@ const emit = defineEmits(['change'])
             "type ___VERTER___defineExpose_Type=___VERTER___Prettify<{ focus: () => void }>"
           );
           expect(result).toContain(
-            `const ___VERTER___defineExpose_Boxed=___VERTER___defineExpose_Box({ focus: () => {} })`
+            `const ___VERTER___defineExpose_Boxed=___VERTER___defineExpose_Box<{ focus: () => void }>({ focus: () => {} })`
           );
           expect(result).toContain(
             `defineExpose<___VERTER___defineExpose_Type>(___VERTER___defineExpose_Boxed)`
@@ -2202,11 +2209,12 @@ const emit = defineEmits(['change'])
                 type: "macro-binding",
                 macro: "defineExpose",
                 isType: true,
-                name: "___VERTER___expose",
+                name: "___VERTER___defineExpose_Boxed",
 
                 objectName: "___VERTER___defineExpose_Boxed",
                 typeName: "___VERTER___defineExpose_Type",
-                valueName: "___VERTER___expose",
+                // defineExpose without assignment doesn't create a variable
+                valueName: undefined,
               }),
             ])
           );
@@ -2494,15 +2502,586 @@ const emit = defineEmits(['change'])
         });
       }
     );
+  });
 
-    // describe.each([false, "defineComponent", "randomComponentDeclarator"])(
-    //   "wrapper %s",
-    //   (wrapper) => {
-    //     function parseWrapper(content: string) {
+  // ============================================================================
+  // Known failing fixtures - to be fixed
+  // These tests document known issues with macro transformations
+  // ============================================================================
+  describe("known failing fixtures", () => {
+    describe("destructured defineModel", () => {
+      it("defineModel destructured for modifiers - const [modelValue, modelModifiers] = defineModel()", () => {
+        const { result, context } = _parse(
+          `const [modelValue, modelModifiers] = defineModel();`,
+          false,
+          "ts"
+        );
 
-    //     }
+        expect(result).toContain("let ___VERTER___models_modelValue;");
+        // Should have proper handling for destructured defineModel
+        expect(result).toContain(
+          "const [modelValue, modelModifiers] = ___VERTER___models_modelValue=defineModel();"
+        );
+        // Should reference the correct variable (modelValue, not model)
+        expect(result).not.toContain("typeof modelValue");
+      });
 
-    //   }
-    // );
+      it("defineModel with modifiers type - const [modelValue, modifiers] = defineModel<string, 'trim' | 'uppercase'>()", () => {
+        // When defineModel has two type arguments, it should generate separate type aliases
+        // for each type parameter using the pattern: ${name}_Type_${i}
+        const { result, context } = _parse(
+          `const [modelValue, modifiers] = defineModel<string, 'trim' | 'uppercase'>();`,
+          false,
+          "ts"
+        );
+
+        // Should have two type aliases for the two type parameters
+        expect(result).toContain(
+          "type ___VERTER___modelValue_defineModel_Type_0=___VERTER___Prettify<string>"
+        );
+        expect(result).toContain(
+          "type ___VERTER___modelValue_defineModel_Type_1='trim' | 'uppercase'"
+        );
+
+        expect(result).toContain("let ___VERTER___models_modelValue;");
+
+        // The defineModel call should use the indexed type references
+        expect(result).toContain(
+          "const [modelValue, modifiers] = ___VERTER___models_modelValue=defineModel<___VERTER___modelValue_defineModel_Type_0, ___VERTER___modelValue_defineModel_Type_1>();"
+        );
+
+        // Should not have the old single type pattern
+        expect(result).not.toContain(
+          "type ___VERTER___modelValue_defineModel_Type=___VERTER___Prettify<string, 'trim' | 'uppercase'>"
+        );
+      });
+    });
+
+    describe("defineExpose edge cases", () => {
+      it("defineExpose empty - defineExpose()", () => {
+        const { result, context } = _parse(`defineExpose();`, false, "ts");
+
+        expect(result).toContain("defineExpose()");
+      });
+    });
+
+    describe("defineModel edge cases", () => {
+      it("defineModel with local option (3.4+) - defineModel<string>({ local: true })", () => {
+        const { result, context } = _parse(
+          `const model = defineModel<string>({ local: true });`,
+          false,
+          "ts"
+        );
+
+        expect(result).toContain(
+          `const ___VERTER___modelValue_defineModel_Boxed=___VERTER___defineModel_Box<string>({ local: true });`
+        );
+        expect(result).toContain(
+          `const model = defineModel<___VERTER___modelValue_defineModel_Type>(___VERTER___modelValue_defineModel_Boxed);`
+        );
+
+        expect(result).toContain(
+          "type ___VERTER___modelValue_defineModel_Type=___VERTER___Prettify<string>;"
+        );
+      });
+
+      it("defineModel without type (inferred) - const model = defineModel()", () => {
+        const { result, context } = _parse(
+          `const model = defineModel();`,
+          false,
+          "ts"
+        );
+
+        expect(result).toContain("const model = defineModel();");
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "define-model",
+              name: "modelValue",
+
+              isType: false,
+              typeName: undefined,
+
+              valueName: "model",
+              varName: "model",
+            }),
+          ])
+        );
+      });
+      it("defineModel without type or declaration (inferred) - defineModel()", () => {
+        const { result, context } = _parse(`defineModel();`, false, "ts");
+
+        expect(result).toContain(
+          "const ___VERTER___models_modelValue=defineModel();"
+        );
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "define-model",
+              name: "modelValue",
+
+              isType: false,
+              typeName: undefined,
+
+              valueName: "___VERTER___models_modelValue",
+              varName: "___VERTER___models_modelValue",
+            }),
+          ])
+        );
+      });
+    });
+
+    describe("defineSlots edge cases", () => {
+      it("defineSlots empty = defineSlots()", () => {
+        const { result, context } = _parse(`defineSlots();`, false, "ts");
+
+        expect(result).toContain("const ___VERTER___slots=defineSlots()");
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              name: "___VERTER___slots",
+
+              isType: false,
+              valueName: "___VERTER___slots",
+              typeName: undefined,
+              objectName: undefined,
+            }),
+          ])
+        );
+      });
+      it("defineSlots empty - const slots = defineSlots()", () => {
+        const { result, context } = _parse(
+          `const slots = defineSlots();`,
+          false,
+          "ts"
+        );
+
+        expect(result).toContain("const slots = defineSlots()");
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              name: "slots",
+
+              isType: false,
+              valueName: "slots",
+              typeName: undefined,
+              objectName: undefined,
+            }),
+          ])
+        );
+      });
+    });
+
+    describe("destructured defineProps", () => {
+      it("destructured defineProps - const { msg, count = 0 } = defineProps<...>()", () => {
+        const { result, context } = _parse(
+          `const { msg, count = 0 } = defineProps<{
+  msg: string;
+  count?: number;
+}>();`,
+          false,
+          "ts"
+        );
+
+        expect(result).toContain(`let ___VERTER___props;`);
+        expect(result).toContain(
+          `type ___VERTER___defineProps_Type=___VERTER___Prettify<{
+  msg: string;
+  count?: number;
+}>;`
+        );
+        expect(result).toContain(
+          `const { msg, count = 0 } = ___VERTER___props=defineProps<___VERTER___defineProps_Type>()`
+        );
+
+        // Should have a single type alias
+        expect(result.match(/type ___VERTER___defineProps_Type/g)?.length).toBe(
+          1
+        );
+        // Should not have concatenated type names
+        expect(result).not.toContain(
+          "defineProps<defineProps_TypedefineProps_Type>"
+        );
+      });
+      it("destructured withDefaults - const { msg, count = 0 } = withDefaults(defineProps<...>(), {})", () => {
+        const { result, context } = _parse(
+          `const { msg, count = 0 } = withDefaults(defineProps<{
+  msg: string;
+  count?: number;
+}>(), {});`,
+          false,
+          "ts"
+        );
+
+        expect(result).toContain(
+          `const ___VERTER___withDefaults_Boxed=___VERTER___withDefaults_Box(defineProps<___VERTER___defineProps_Type>(), {});`
+        );
+        expect(result).toContain(
+          `const { msg, count = 0 } = ___VERTER___withDefaults=withDefaults(___VERTER___withDefaults_Boxed[0],___VERTER___withDefaults_Boxed[1])`
+        );
+        expect(result).toContain(
+          `type ___VERTER___defineProps_Type=___VERTER___Prettify<{
+  msg: string;
+  count?: number;
+}>;`
+        );
+
+        // Should have a single type alias
+        expect(result.match(/type ___VERTER___defineProps_Type/g)?.length).toBe(
+          1
+        );
+        // Should not have concatenated type names
+        expect(result).not.toContain(
+          "defineProps<defineProps_TypedefineProps_Type>"
+        );
+      });
+    });
+
+    describe("empty macros", () => {
+      it("empty defineEmits - const emit = defineEmits()", () => {
+        const { result, context } = _parse(
+          `const emit = defineEmits()`,
+          false,
+          "ts"
+        );
+
+        expect(result).toContain("const emit = defineEmits()");
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineEmits",
+              name: "emit",
+              isType: false,
+              objectName: undefined,
+              typeName: undefined,
+              valueName: "emit",
+            }),
+          ])
+        );
+      });
+
+      it("empty defineProps - const props = defineProps()", () => {
+        const { result, context } = _parse(
+          `const props = defineProps()`,
+          false,
+          "ts"
+        );
+
+        expect(result).toContain("const props = defineProps(");
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineProps",
+              name: "props",
+              isType: false,
+              objectName: undefined,
+              typeName: undefined,
+              valueName: "props",
+            }),
+          ])
+        );
+      });
+    });
+
+    describe("model with union types", () => {
+      it("model with union type - ModelRef should not wrap union type in Prettify", () => {
+        const { result, context } = _parse(
+          `const selected = defineModel<'a' | 'b' | 'c'>('selected');`,
+          false,
+          "ts"
+        );
+
+        expect(result).toContain(
+          "const ___VERTER___selected_defineModel_Boxed=___VERTER___defineModel_Box<'a' | 'b' | 'c'>('selected')"
+        );
+        expect(result).toContain(
+          "const selected = defineModel<___VERTER___selected_defineModel_Type>(___VERTER___selected_defineModel_Boxed[0],___VERTER___selected_defineModel_Boxed[1]);"
+        );
+        expect(result).toContain(
+          "type ___VERTER___selected_defineModel_Type='a' | 'b' | 'c'"
+        );
+      });
+
+      it("multiple models with distinct types - similar Prettify issue with union types", () => {
+        const { result, context } = _parse(
+          `const firstName = defineModel<string>('firstName');
+const lastName = defineModel<string>('lastName');`,
+          false,
+          "ts"
+        );
+
+        expect(result).toContain(
+          "const ___VERTER___firstName_defineModel_Boxed=___VERTER___defineModel_Box<string>('firstName');"
+        );
+        expect(result).toContain(
+          "const ___VERTER___lastName_defineModel_Boxed=___VERTER___defineModel_Box<string>('lastName');"
+        );
+        expect(result).toContain(
+          `const firstName = defineModel<___VERTER___firstName_defineModel_Type>(___VERTER___firstName_defineModel_Boxed[0],___VERTER___firstName_defineModel_Boxed[1]);`
+        );
+        expect(result).toContain(
+          `const lastName = defineModel<___VERTER___lastName_defineModel_Type>(___VERTER___lastName_defineModel_Boxed[0],___VERTER___lastName_defineModel_Boxed[1]);`
+        );
+
+        expect(result).toContain(
+          `type ___VERTER___firstName_defineModel_Type=___VERTER___Prettify<string>;`
+        );
+
+        expect(result).toContain(
+          `type ___VERTER___lastName_defineModel_Type=___VERTER___Prettify<string>;`
+        );
+      });
+    });
+  });
+
+  // ============================================================================
+  // Generic component tests
+  // ============================================================================
+  describe("generic components", () => {
+    function parseGeneric(content: string, generic: string, lang = "ts") {
+      const prepend = `<script setup lang="${lang}" generic="${generic}">`;
+      const source = `${prepend}${content}</script>`;
+      const parsed = parser(source);
+
+      const s = new MagicString(source);
+
+      const scriptBlock = parsed.blocks.find(
+        (x) => x.type === "script"
+      ) as ParsedBlockScript;
+
+      return processScript(
+        scriptBlock.result.items,
+        [MacrosPlugin, TemplateBindingPlugin, ScriptBlockPlugin, BindingPlugin],
+        {
+          s,
+          filename: "test.vue",
+          blocks: parsed.blocks,
+          isSetup: true,
+          block: scriptBlock,
+          blockNameResolver: (name) => name,
+        }
+      );
+    }
+
+    describe("simple generic", () => {
+      it("defineProps with simple generic type parameter", () => {
+        const { result, context } = parseGeneric(
+          `const props = defineProps<{ item: T }>();`,
+          "T"
+        );
+
+        expect(result).toContain(
+          "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ item: T }>"
+        );
+        expect(result).toContain("defineProps<___VERTER___defineProps_Type>()");
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineProps",
+              name: "props",
+              isType: true,
+            }),
+          ])
+        );
+      });
+
+      it("defineEmits with simple generic type parameter", () => {
+        const { result, context } = parseGeneric(
+          `const emit = defineEmits<{ change: [value: T] }>();`,
+          "T"
+        );
+
+        expect(result).toContain(
+          "type ___VERTER___defineEmits_Type=___VERTER___Prettify<{ change: [value: T] }>"
+        );
+        expect(result).toContain("defineEmits<___VERTER___defineEmits_Type>()");
+      });
+
+      it("defineModel with simple generic type parameter", () => {
+        const { result, context } = parseGeneric(
+          `const model = defineModel<T>();`,
+          "T"
+        );
+
+        // Simple type references like T are not wrapped in Prettify
+        expect(result).toContain(
+          "type ___VERTER___modelValue_defineModel_Type=T"
+        );
+        expect(result).toContain(
+          "defineModel<___VERTER___modelValue_defineModel_Type>()"
+        );
+      });
+
+      it("defineSlots with simple generic type parameter", () => {
+        const { result, context } = parseGeneric(
+          `const slots = defineSlots<{ default: (props: { item: T }) => any }>();`,
+          "T"
+        );
+
+        expect(result).toContain(
+          "type ___VERTER___defineSlots_Type=___VERTER___Prettify<{ default: (props: { item: T }) => any }>"
+        );
+        expect(result).toContain("defineSlots<___VERTER___defineSlots_Type>()");
+      });
+    });
+
+    describe("generic with constraints", () => {
+      it("defineProps with constrained generic", () => {
+        const { result, context } = parseGeneric(
+          `const props = defineProps<{ item: T }>();`,
+          "T extends { id: number }"
+        );
+
+        expect(result).toContain(
+          "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ item: T }>"
+        );
+        expect(result).toContain("defineProps<___VERTER___defineProps_Type>()");
+      });
+
+      it("defineProps with multiple constrained generics", () => {
+        const { result, context } = parseGeneric(
+          `const props = defineProps<{ item: T; key: K }>();`,
+          "T extends object, K extends keyof T"
+        );
+
+        expect(result).toContain(
+          "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ item: T; key: K }>"
+        );
+        expect(result).toContain("defineProps<___VERTER___defineProps_Type>()");
+      });
+
+      it("defineEmits with constrained generic", () => {
+        const { result, context } = parseGeneric(
+          `const emit = defineEmits<{ select: [item: T] }>();`,
+          "T extends { id: number; name: string }"
+        );
+
+        expect(result).toContain(
+          "type ___VERTER___defineEmits_Type=___VERTER___Prettify<{ select: [item: T] }>"
+        );
+      });
+    });
+
+    describe("multiple generics", () => {
+      it("defineProps with multiple generic type parameters", () => {
+        const { result, context } = parseGeneric(
+          `const props = defineProps<{ items: T[]; selected: U | null }>();`,
+          "T, U"
+        );
+
+        expect(result).toContain(
+          "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ items: T[]; selected: U | null }>"
+        );
+      });
+
+      it("defineEmits with multiple generic type parameters", () => {
+        const { result, context } = parseGeneric(
+          `const emit = defineEmits<{ select: [item: T]; update: [key: K, value: V] }>();`,
+          "T, K extends string, V"
+        );
+
+        expect(result).toContain("type ___VERTER___defineEmits_Type");
+      });
+
+      it("multiple macros with generics", () => {
+        const { result, context } = parseGeneric(
+          `const props = defineProps<{ item: T }>();
+const emit = defineEmits<{ select: [item: T] }>();
+const model = defineModel<T | null>();
+const slots = defineSlots<{ default: (props: { item: T }) => any }>();`,
+          "T"
+        );
+
+        expect(result).toContain(
+          "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ item: T }>"
+        );
+        expect(result).toContain(
+          "type ___VERTER___defineEmits_Type=___VERTER___Prettify<{ select: [item: T] }>"
+        );
+        expect(result).toContain(
+          "type ___VERTER___modelValue_defineModel_Type=___VERTER___Prettify<T | null>"
+        );
+        expect(result).toContain(
+          "type ___VERTER___defineSlots_Type=___VERTER___Prettify<{ default: (props: { item: T }) => any }>"
+        );
+      });
+    });
+
+    describe("defineOptions cannot be used with generics", () => {
+      // defineOptions cannot use generic type parameters because defineOptions content
+      // is moved outside of the template function during transformation. Since the
+      // generic parameters are only available within the template function scope,
+      // defineOptions has no access to them. Additionally, defineOptions is used for
+      // component-level options (name, inheritAttrs, etc.) which don't need generics.
+      it("defineOptions is still valid in generic components (but cannot reference generic types)", () => {
+        const { result, context } = parseGeneric(
+          `defineOptions({ name: 'MyGenericComponent', inheritAttrs: false });
+const props = defineProps<{ item: T }>();`,
+          "T"
+        );
+
+        // defineOptions should work - it just can't reference T
+        expect(result).toContain(
+          "defineOptions({ name: 'MyGenericComponent', inheritAttrs: false })"
+        );
+        // props should still work with generics
+        expect(result).toContain(
+          "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ item: T }>"
+        );
+
+        expect(context.items).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: "options",
+            }),
+            expect.objectContaining({
+              type: "macro-binding",
+              macro: "defineProps",
+            }),
+          ])
+        );
+      });
+
+      // This test documents that using generic types in defineOptions would not work
+      // because defineOptions is hoisted out of the template function
+      it.skip("defineOptions with generic type reference would fail (not supported)", () => {
+        // This would fail because T is not in scope where defineOptions is placed
+        // const { result } = parseGeneric(
+        //   `defineOptions({ customOption: {} as T });`, // T not available here
+        //   "T"
+        // );
+      });
+    });
+
+    describe("generic with default types", () => {
+      it("defineProps with generic that has default type", () => {
+        const { result, context } = parseGeneric(
+          `const props = defineProps<{ item: T }>();`,
+          "T = string"
+        );
+
+        expect(result).toContain(
+          "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ item: T }>"
+        );
+      });
+
+      it("defineProps with constrained generic with default", () => {
+        const { result, context } = parseGeneric(
+          `const props = defineProps<{ items: T[] }>();`,
+          "T extends object = { id: number }"
+        );
+
+        expect(result).toContain(
+          "type ___VERTER___defineProps_Type=___VERTER___Prettify<{ items: T[] }>"
+        );
+      });
+    });
   });
 });

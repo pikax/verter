@@ -12,6 +12,7 @@
     "dev": "tsc -b --watch",
     "generate": "node ./scripts/generate.js",
     "generate:fixtures": "npx tsx scripts/fixtures.generator.ts",
+    "generate:fixtures:annotations": "npx tsx scripts/fixtures.generator.ts --annotations",
     "process": "node ./scripts/processDir.js",
     "lint": "TIMING=1 eslint src/**/*.ts* --fix",
     "test-generated": "tsc --noEmit --project tsconfig.generated.json",

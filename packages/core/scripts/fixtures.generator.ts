@@ -1,32 +1,34 @@
 /**
  * Fixtures Generator Script
- * 
+ *
  * This script finds all *.fixtures.ts files in the source directory
  * and generates corresponding type fixture files for IDE inspection.
- * 
+ *
  * Run with: pnpm generate:fixtures
- * 
+ *
  * Generated files are placed in __generated__ folders next to the fixture definitions.
  */
 
 import { globSync } from "glob";
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync, rmSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 const ROOT_DIR = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(ROOT_DIR, "src");
+const SHOULD_INCLUDE_ANNOTATIONS = process.argv.includes("--annotations");
 
 interface Fixture {
   name: string;
   code: string;
   lang?: string;
+  generic?: string;
   expectations?: any;
 }
 
 interface FixtureConfig {
   fixtures: Fixture[];
-  process: (code: string, lang?: string) => { result: string; context?: any };
+  process: (code: string, lang?: string, generic?: string) => { result: string; context?: any; sourcemap?: string };
   prefix?: string;
 }
 
@@ -35,8 +37,8 @@ interface FixtureConfig {
  */
 function formatForReadability(code: string): string {
   return code
-    .replace(/(}|>|\)|;)\s*;(const|let|type)/g, '$1;\n$2')
-    .replace(/\n\n+/g, '\n');
+    .replace(/(}|>|\)|;)\s*;(const|let|type)/g, "$1;\n$2")
+    .replace(/\n\n+/g, "\n");
 }
 
 /**
@@ -47,43 +49,43 @@ function addTwoslashAnnotations(code: string, prefix: string): string {
   const formatted = formatForReadability(code);
   const lines = formatted.split("\n");
   const result: string[] = [];
-  
-  // Macro function names to annotate
-  const macroFunctions = ['defineProps', 'defineEmits', 'defineModel', 'defineSlots', 'defineExpose', 'withDefaults'];
-  
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    
+
     // Check for variable declaration with macro call: const varName = defineMacro...
-    const varWithMacroMatch = line.match(/(const|let)\s+(\w+)\s*=\s*(defineProps|defineEmits|defineModel|defineSlots|defineExpose|withDefaults)/);
-    
+    const varWithMacroMatch = line.match(
+      /(const|let)\s+(\w+)\s*=\s*(defineProps|defineEmits|defineModel|defineSlots|defineExpose|withDefaults)/
+    );
+
     if (varWithMacroMatch) {
       const [, keyword, varName, macroName] = varWithMacroMatch;
-      
+
       // Only annotate user-facing variables (not prefixed internal ones)
       if (!prefix || !varName.startsWith(prefix)) {
         // Split the line to put ^? annotations on separate lines
         const keywordStart = line.indexOf(keyword);
         const varStart = line.indexOf(varName, keywordStart);
-        const macroStart = line.indexOf(macroName, varStart);
-        
+
         // Add annotation for the variable
         const varSpaces = " ".repeat(varStart);
         result.push(`${keyword} ${varName} =`);
         result.push(`${varSpaces}//^?`);
-        
-        // Add the rest of the line (the macro call)
-        const restOfLine = line.slice(line.indexOf('=') + 1).trim();
-        const macroSpaces = " ".repeat(macroStart - line.indexOf('=') - 1);
-        result.push(`${macroSpaces}${restOfLine}`);
-        result.push(`${macroSpaces}//^?`);
+
+        // Add the rest of the line (the macro call) with consistent indentation
+        const restOfLine = line.slice(line.indexOf("=") + 1).trim();
+        const indent = "  "; // Use standard indentation for the macro call
+        result.push(`${indent}${restOfLine}`);
+        result.push(`${indent}//^?`);
         continue;
       }
     }
-    
+
     // Check for standalone macro calls (like defineExpose without assignment)
-    const standaloneMacroMatch = line.match(/^\s*(defineProps|defineEmits|defineModel|defineSlots|defineExpose|withDefaults)\s*[<(]/);
-    if (standaloneMacroMatch && !line.includes('=')) {
+    const standaloneMacroMatch = line.match(
+      /^\s*(defineProps|defineEmits|defineModel|defineSlots|defineExpose|withDefaults)\s*[<(]/
+    );
+    if (standaloneMacroMatch && !line.includes("=")) {
       const macroName = standaloneMacroMatch[1];
       const macroStart = line.indexOf(macroName);
       const spaces = " ".repeat(macroStart);
@@ -91,10 +93,10 @@ function addTwoslashAnnotations(code: string, prefix: string): string {
       result.push(`${spaces}//^?`);
       continue;
     }
-    
+
     result.push(line);
   }
-  
+
   return result.join("\n");
 }
 
@@ -113,24 +115,6 @@ function generateHeader(): string {
  * 
  * Run: pnpm generate:fixtures
  */
-
-/* eslint-disable */
-
-import type { Ref, ComputedRef, ModelRef, WritableComputedRef } from 'vue';
-import { ref, computed, defineProps, defineEmits, defineModel, defineSlots, defineExpose, withDefaults } from 'vue';
-
-// Import from @verter/types and alias with ___VERTER___ prefix
-import {
-  Prettify as ___VERTER___Prettify,
-  createMacroReturn as ___VERTER___createMacroReturn,
-  defineProps_Box as ___VERTER___defineProps_Box,
-  defineEmits_Box as ___VERTER___defineEmits_Box,
-  defineModel_Box as ___VERTER___defineModel_Box,
-  defineExpose_Box as ___VERTER___defineExpose_Box,
-  defineSlots_Box as ___VERTER___defineSlots_Box,
-  withDefaults_Box as ___VERTER___withDefaults_Box,
-} from "@verter/types";
-
 `;
 }
 
@@ -140,10 +124,18 @@ import {
 function generateFixtureBlock(
   fixture: Fixture,
   output: string,
-  prefix: string
+  prefix: string,
+  sourcemap?: string,
+  includeAnnotations: boolean = true
 ): string {
-  const annotatedOutput = addTwoslashAnnotations(output, prefix);
-  const lang = fixture.lang || 'ts';
+  const annotatedOutput = includeAnnotations
+    ? addTwoslashAnnotations(output, prefix)
+    : formatForReadability(output);
+  const lang = fixture.lang || "ts";
+  const genericAttr = fixture.generic ? ` generic="${fixture.generic}"` : "";
+  const sourcemapComment = sourcemap
+    ? `\n//# sourceMappingURL=${sourcemap}`
+    : "";
 
   return `
 // ============================================================================
@@ -152,12 +144,12 @@ function generateFixtureBlock(
 /*
 Original:
 \`\`\`vue
-<script setup lang="${lang}">${fixture.code}</script>
+<script setup lang="${lang}"${genericAttr}>${fixture.code}</script>
 \`\`\`
 */
 
 // Transformed output:
-${annotatedOutput}
+${annotatedOutput}${sourcemapComment}
 `;
 }
 
@@ -166,42 +158,62 @@ ${annotatedOutput}
  */
 async function processFixtureFile(fixtureFilePath: string): Promise<void> {
   console.log(`\nProcessing: ${path.relative(ROOT_DIR, fixtureFilePath)}`);
-  
+
   try {
     // Import the fixture module
     const fileUrl = pathToFileURL(fixtureFilePath).href;
-    const fixtureModule = await import(fileUrl);
-    
+  const fixtureModule = await import(fileUrl);
+
     if (typeof fixtureModule.createFixtures !== "function") {
       console.log(`  Skipping: No createFixtures export found`);
       return;
     }
-    
+
     const config: FixtureConfig = fixtureModule.createFixtures();
     const prefix = config.prefix ?? "___VERTER___";
-    
-    // Create __generated__ directory
+
+    // Create __generated__ directory (clean it first if it exists)
     const fixtureDir = path.dirname(fixtureFilePath);
     const generatedDir = path.join(fixtureDir, "__generated__");
-    
-    if (!existsSync(generatedDir)) {
-      mkdirSync(generatedDir, { recursive: true });
+
+    if (existsSync(generatedDir)) {
+      rmSync(generatedDir, { recursive: true });
     }
-    
+    mkdirSync(generatedDir, { recursive: true });
+
+    // Write global.d.ts for $verter/types$ module resolution
+    const globalDtsFile = path.join(generatedDir, "global.d.ts");
+    const globalDtsContent = `declare module "$verter/types$" {
+  export * from "@verter/types";
+}
+`;
+    writeFileSync(globalDtsFile, globalDtsContent);
+    console.log(`  Generated: global.d.ts`);
+
     // Generate individual fixture files
     const sections: string[] = [generateHeader()];
-    
+
     for (const fixture of config.fixtures) {
       try {
-        const { result } = config.process(fixture.code, fixture.lang);
-        const block = generateFixtureBlock(fixture, result, prefix);
+        const { result, sourcemap } = config.process(
+          fixture.code,
+          fixture.lang,
+          fixture.generic
+        );
+        const block = generateFixtureBlock(
+          fixture,
+          result,
+          prefix,
+          sourcemap,
+          SHOULD_INCLUDE_ANNOTATIONS
+        );
         sections.push(block);
-        
+
         // Also create individual file for each fixture
         const safeName = fixture.name
           .toLowerCase()
-          .replace(/[^a-z0-9]+/g, '-')
-          .replace(/^-|-$/g, '');
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-|-$/g, "");
         const individualFile = path.join(generatedDir, `${safeName}.ts`);
         writeFileSync(individualFile, generateHeader() + block);
         console.log(`  Generated: ${safeName}.ts`);
@@ -215,32 +227,30 @@ async function processFixtureFile(fixtureFilePath: string): Promise<void> {
 `);
       }
     }
-    
-    // Write combined fixtures file
-    const combinedFile = path.join(generatedDir, "_all.ts");
-    writeFileSync(combinedFile, sections.join("\n"));
-    console.log(`  Generated: _all.ts (${config.fixtures.length} fixtures)`);
-    
+
     // Write tsconfig.json for the __generated__ folder so VS Code picks it up
     const tsconfigFile = path.join(generatedDir, "tsconfig.json");
-    const tsconfigContent = JSON.stringify({
-      compilerOptions: {
-        target: "ESNext",
-        module: "ESNext",
-        moduleResolution: "bundler",
-        strict: true,
-        skipLibCheck: true,
-        noEmit: true,
-        esModuleInterop: true,
-        allowSyntheticDefaultImports: true,
-        lib: ["ESNext", "DOM"],
-        types: []
+    const tsconfigContent = JSON.stringify(
+      {
+        compilerOptions: {
+          target: "ESNext",
+          module: "ESNext",
+          moduleResolution: "bundler",
+          strict: true,
+          skipLibCheck: true,
+          noEmit: true,
+          esModuleInterop: true,
+          allowSyntheticDefaultImports: true,
+          lib: ["ESNext", "DOM"],
+          types: [],
+        },
+        include: ["./*.ts"],
       },
-      include: ["./*.ts"]
-    }, null, 2);
+      null,
+      2
+    );
     writeFileSync(tsconfigFile, tsconfigContent);
     console.log(`  Generated: tsconfig.json`);
-    
   } catch (error) {
     console.error(`  Error loading fixture file:`, error);
   }
@@ -252,26 +262,26 @@ async function processFixtureFile(fixtureFilePath: string): Promise<void> {
 async function main(): Promise<void> {
   console.log("=== Fixtures Generator ===");
   console.log(`Source directory: ${SRC_DIR}`);
-  
+
   // Find all *.fixtures.ts files
   const fixtureFiles = globSync("**/*.fixtures.ts", {
     cwd: SRC_DIR,
     absolute: true,
     ignore: ["**/node_modules/**", "**/__generated__/**"],
   });
-  
+
   if (fixtureFiles.length === 0) {
     console.log("\nNo fixture files found.");
     return;
   }
-  
+
   console.log(`\nFound ${fixtureFiles.length} fixture file(s)`);
-  
+
   // Process each fixture file
   for (const fixtureFile of fixtureFiles) {
     await processFixtureFile(fixtureFile);
   }
-  
+
   console.log("\n=== Done ===");
 }
 

@@ -784,7 +784,7 @@ describe('"emits" helper', () => {
           const component = createGenericComponent(eventName, validator);
           type Component = typeof component;
           type Props = ComponentEmitsToProps<Component>;
-          return {} as Props;
+          return {} as any as Props;
         }
 
         const stringProps = testComponentProps(
