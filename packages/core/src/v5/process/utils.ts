@@ -100,6 +100,9 @@ export function generateImport(items: ImportModule[]) {
 
     const list = grouped[item.from];
 
+    if (!item.items) {
+      continue;
+    }
     if (item.asType) {
       // convert pure types to imports
       list.push(...item.items.map((i) => ({ ...i, type: true })));
@@ -112,6 +115,10 @@ export function generateImport(items: ImportModule[]) {
   for (const [key, value] of Object.entries(grouped)) {
     const added = new Set<string>();
     const toAdd: ImportItem[] = [];
+    if (value.length === 0) {
+      imports.push(`import "${key}";`);
+      continue;
+    }
     for (const item of value) {
       const name = item.alias ?? item.name;
       // ignore duplicates

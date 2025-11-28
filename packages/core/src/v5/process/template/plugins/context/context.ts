@@ -9,6 +9,7 @@ import { generateImport } from "../../../utils";
 import { TemplatePlugin } from "../../template";
 import { Slots } from "../../helpers/component";
 import { DEBUG } from "../../../../config";
+import { ProcessItemType } from "../../../types";
 
 export const ContextPlugin = {
   name: "VerterContext",
@@ -17,6 +18,11 @@ export const ContextPlugin = {
       ctx.blocks.find(
         (x) => x.type === "script" && x.block.tag.attributes.setup
       ) !== undefined;
+
+      ctx.items.push({
+        type: ProcessItemType.Import,
+        from: '$verter/tsx$',
+      })
 
     const options = ResolveOptionsFilename(ctx);
 

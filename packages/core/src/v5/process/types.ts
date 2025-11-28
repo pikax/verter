@@ -208,7 +208,7 @@ export type LocationProcessItem = {
 
 export type ImportModule = {
   from: string;
-  items: ImportItem[];
+  items?: ImportItem[];
   asType?: boolean;
   node?: VerterASTNode;
 };
