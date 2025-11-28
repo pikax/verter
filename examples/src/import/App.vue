@@ -1,6 +1,6 @@
-<script lang="ts">
+<script lang="ts" setup>
 import Comp from "./Comp.vue";
-import { defineComponent } from "vue";
+import { defineComponent, SlotsType } from "vue";
 
 const c = new Comp();
 
@@ -10,8 +10,16 @@ const Foo = defineComponent({
   data() {
     return {};
   },
+  slots: {} as SlotsType<{
+    foo: ()=> []
+}>
 });
 
 const f = new Foo();
 </script>
-<template></template>
+<template>
+  <Foo v-slot="e=> {
+    ___VERTER___slotInstance.$slots.foo
+    }"/>
+  <Comp />
+</template>

@@ -71,7 +71,7 @@ export function handleHelpers(source: string) {
         (i) =>
           ({
             ...i,
-            items: i.items.map((i) => ({
+            items: i.items?.map((i) => ({
               ...i,
               alias: i.alias ? i.alias.replaceAll("$V_", prefix) : undefined,
             })),

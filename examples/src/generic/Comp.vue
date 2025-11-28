@@ -8,7 +8,7 @@ defineProps<{
 // }>();
 
 defineSlots<
-  Record<T & string, (args: { name: T }) => any> & {
+  Record<T & string, (args: { test: T }) => any> & {
     header: (a: { foo: string }) => any;
   }
 >();
@@ -20,5 +20,7 @@ async () => {
 <template>
   <div>
     <slot name="header" foo=""> {{ name }}</slot>
+    <slot :name='name' :testx="'aaa'"></slot>
+    <slot name='testx' :te="aaa"></slot>
   </div>
 </template>
