@@ -23,6 +23,12 @@ import {
  * For visual type inspection, run: pnpm generate:fixtures
  * Then open __generated__/*.ts in VS Code
  *
+ * DEBUGGING TIPS:
+ * - To run a single fixture: pnpm vitest --run -t "defineModel basic"
+ * - To run syntax tests only: pnpm vitest --run -t "syntax validation"
+ * - To run semantic tests only: pnpm vitest --run -t "semantic validation"
+ * - Use .only on specific tests below for debugging
+ *
  * KNOWN ISSUES (tests expected to fail):
  * - destructured defineProps: Creates duplicate type aliases and malformed type references
  *   (e.g., `const { foo, bar } = defineProps<{ foo: string }>()`)
@@ -112,60 +118,127 @@ function hasSyntaxErrors(sourceFile: ts.SourceFile): ts.Diagnostic[] {
 
 /**
  * Assert that the generated code has no TypeScript errors.
- * This wraps the shared utility to pass the PREFIX.
+ * This wraps the shared utility.
  */
 function assertNoTypeErrors(code: string, testName?: string): void {
-  assertNoTypeErrorsShared(code, testName, PREFIX);
+  assertNoTypeErrorsShared(code, testName);
 }
 
+// ============================================================================
+// Get fixtures and prepare test data
+// ============================================================================
+
+const { fixtures } = createFixtures(PREFIX);
+
+// Create test data arrays for it.each
+// const fixtureNames = fixtures.map((f) => f.name);
+// const fixturesByName = new Map(fixtures.map((f) => [f.name, f]));
+
+// ============================================================================
+// Individual test functions (can be called directly for debugging)
+// ============================================================================
+
+/**
+ * Test a single fixture for syntax validity.
+ * Can be called directly in a debugger or from a .only test.
+ */
+export function testSyntaxValidity(
+  fixtureName: string,
+  sourceFile: ts.SourceFile
+): void {
+  const errors = hasSyntaxErrors(sourceFile);
+
+  if (errors.length > 0) {
+    console.log(`Fixture: ${fixtureName}`);
+    console.log(
+      "Syntax errors:",
+      errors.map((e) => e.messageText)
+    );
+    console.log("Generated code:", sourceFile.getFullText());
+  }
+
+  expect(errors).toHaveLength(0);
+}
+
+/**
+ * Test a single fixture for semantic validity.
+ * Can be called directly in a debugger or from a .only test.
+ */
+export function testSemanticValidity(
+  fixtureName: string,
+  content: string
+): void {
+  assertNoTypeErrors(content, fixtureName);
+}
+
+/**
+ * Test a single type test for a fixture.
+ * Can be called directly in a debugger or from a .only test.
+ */
+export function testTypeTest(
+  fixture: Fixture,
+  typeTestDescription: string,
+  content: string
+): void {
+  const typeTest = fixture.expectations?.typeTests?.find(
+    (t) => t.description === typeTestDescription
+  );
+  if (!typeTest) {
+    throw new Error(
+      `Type test not found: ${typeTestDescription} in fixture ${fixture.name}`
+    );
+  }
+
+  const testResult = runTypeTest(content, typeTest, PREFIX);
+  if (!testResult.success) {
+    throw new Error(testResult.error);
+  }
+}
+
+// ============================================================================
+// Test Suites
+// ============================================================================
+
 describe("macros fixtures validation", () => {
-  const { fixtures } = createFixtures(PREFIX);
+  const fixturesMap = new Map<
+    string,
+    { fixture: Fixture; code: string; sourceFile: ts.SourceFile }
+  >();
+  function getFixture(name: string) {
+    const entry = fixturesMap.get(name);
+    if (entry) return entry;
 
-  // Test all fixtures for syntax validity
+    const fixture = fixtures.find((f) => f.name === name);
+    if (!fixture) throw new Error(`Fixture not found: ${name}`);
+
+    const { result } = parseVueSFC(fixture.code, fixture.lang, fixture.generic);
+    const sourceFile = parseTypeScript(result);
+    const record = { fixture, code: result, sourceFile };
+    fixturesMap.set(name, record);
+    return record;
+  }
+  const fixtureNames = fixtures.map((f) => f.name);
+
+  // Test all fixtures for syntax validity using it.each
   describe("syntax validation", () => {
-    for (const fixture of fixtures) {
-      it(`should generate syntactically valid TypeScript for: ${fixture.name}`, () => {
-        const { result } = parseVueSFC(
-          fixture.code,
-          fixture.lang,
-          fixture.generic
-        );
-        const sourceFile = parseTypeScript(result);
-        const errors = hasSyntaxErrors(sourceFile);
-
-        if (errors.length > 0) {
-          console.log(`Fixture: ${fixture.name}`);
-          console.log(
-            "Syntax errors:",
-            errors.map((e) => e.messageText)
-          );
-          console.log("Generated code:", result);
-        }
-
-        expect(errors).toHaveLength(0);
-      });
-    }
+    it.each(fixtureNames)(
+      "should generate syntactically valid TypeScript for: %s",
+      (fixtureName) => {
+        const { sourceFile } = getFixture(fixtureName);
+        testSyntaxValidity(fixtureName, sourceFile);
+      }
+    );
   });
 
-  // Test all fixtures for TypeScript semantic validity
+  // Test all fixtures for TypeScript semantic validity using it.each
   describe("semantic validation", () => {
-    for (const fixture of fixtures) {
-      //   if (fixture.skipSemanticValidation) {
-      //     it.skip(`should generate semantically valid TypeScript for: ${fixture.name} (${fixture.skipSemanticValidation})`, () => {
-      //       const { result } = parseVueSFC(fixture.code, fixture.lang, fixture.generic);
-      //       assertNoTypeErrors(result, fixture.name);
-      //     });
-      //   } else {
-      it(`should generate semantically valid TypeScript for: ${fixture.name}`, () => {
-        const { result } = parseVueSFC(
-          fixture.code,
-          fixture.lang,
-          fixture.generic
-        );
-        assertNoTypeErrors(result, fixture.name);
-      });
-      //   }
-    }
+    it.each(fixtureNames)(
+      "should generate semantically valid TypeScript for: %s",
+      (fixtureName) => {
+        const { code } = getFixture(fixtureName);
+        testSemanticValidity(fixtureName, code);
+      }
+    );
   });
 
   // Test fixtures with expectations
@@ -174,65 +247,91 @@ describe("macros fixtures validation", () => {
       if (!fixture.expectations) continue;
 
       describe(fixture.name, () => {
-        const { result } = parseVueSFC(
-          fixture.code,
-          fixture.lang,
-          fixture.generic
-        );
-
+        const { code, sourceFile } = getFixture(fixture.name);
         if (fixture.expectations?.typeAliases) {
-          for (const typeAliasItem of fixture.expectations.typeAliases) {
-            const typeAlias = resolveExpectation(typeAliasItem);
-            it(`should create type alias: ${typeAlias}`, () => {
-              const sourceFile = parseTypeScript(result);
-              const typeAliases = findTypeAliases(sourceFile);
-              expect(typeAliases.has(typeAlias)).toBe(true);
-            });
-          }
+          const typeAliases = fixture.expectations.typeAliases.map((t) =>
+            resolveExpectation(t)
+          );
+          it.each(typeAliases)("should create type alias: %s", (typeAlias) => {
+            const aliases = findTypeAliases(sourceFile);
+            expect(aliases.has(typeAlias)).toBe(true);
+          });
         }
 
         if (fixture.expectations?.boxedVariables) {
-          for (const boxedVarItem of fixture.expectations.boxedVariables) {
-            const boxedVar = resolveExpectation(boxedVarItem);
-            it(`should create boxed variable: ${boxedVar}`, () => {
-              const sourceFile = parseTypeScript(result);
-              const declarations = findVariableDeclarations(sourceFile);
-              expect(declarations.has(boxedVar)).toBe(true);
-            });
-          }
+          const boxedVars = fixture.expectations.boxedVariables.map((b) =>
+            resolveExpectation(b)
+          );
+          it.each(boxedVars)("should create boxed variable: %s", (boxedVar) => {
+            const declarations = findVariableDeclarations(sourceFile);
+            expect(declarations.has(boxedVar)).toBe(true);
+          });
         }
 
         if (fixture.expectations?.patterns) {
-          for (const patternItem of fixture.expectations.patterns) {
-            const pattern = resolveExpectation(patternItem);
-            it(`should contain pattern: ${pattern.slice(0, 50)}...`, () => {
-              expect(result).toContain(pattern);
-            });
-          }
+          const patterns = fixture.expectations.patterns.map((p) =>
+            resolveExpectation(p)
+          );
+          it.each(patterns)("should contain pattern: %s", (pattern) => {
+            expect(code).toContain(pattern);
+          });
         }
 
         if (fixture.expectations?.antiPatterns) {
-          for (const antiPatternItem of fixture.expectations.antiPatterns) {
-            const antiPattern = resolveExpectation(antiPatternItem);
-            it(`should NOT contain: ${antiPattern.slice(0, 50)}...`, () => {
-              expect(result).not.toContain(antiPattern);
-            });
-          }
+          const antiPatterns = fixture.expectations.antiPatterns.map((a) =>
+            resolveExpectation(a)
+          );
+          it.each(antiPatterns)("should NOT contain: %s", (antiPattern) => {
+            expect(code).not.toContain(antiPattern);
+          });
         }
 
         // Type tests - verify hover types and catch any/unknown
         if (fixture.expectations?.typeTests) {
-          for (const typeTest of fixture.expectations.typeTests) {
-            const targetName = resolveWithPrefix(typeTest.target, PREFIX);
-            it(`type test: ${typeTest.description}`, () => {
-              const testResult = runTypeTest(result, typeTest, PREFIX);
+          const typeTests = fixture.expectations.typeTests;
+          it.each(typeTests.map((t) => [t.description, t] as const))(
+            "type test: %s",
+            (_description, typeTest) => {
+              const testResult = runTypeTest(code, typeTest, PREFIX);
               if (!testResult.success) {
                 throw new Error(testResult.error);
               }
-            });
-          }
+            }
+          );
         }
       });
     }
   });
 });
+
+// ============================================================================
+// Debug helpers - uncomment to debug a specific test
+// ============================================================================
+
+// Example: Debug a specific fixture's syntax
+// describe.only("debug", () => {
+//   it("debug syntax", () => {
+//     testSyntaxValidity("defineModel basic");
+//   });
+// });
+
+// Example: Debug a specific fixture's semantics
+// describe.only("debug", () => {
+//   it("debug semantics", () => {
+//     testSemanticValidity("defineModel basic");
+//   });
+// });
+
+// Example: Debug a specific type test
+// describe.only("debug", () => {
+//   it("debug type test", () => {
+//     testTypeTest("defineModel basic", "model variable should not be any");
+//   });
+// });
+
+// Example: Just print the generated code
+// describe.only("debug", () => {
+//   it("show generated code", () => {
+//     console.log(getGeneratedCode("defineModel basic"));
+//   });
+// });

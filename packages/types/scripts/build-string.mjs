@@ -50,22 +50,35 @@ function getSourceFilesFromIndex(indexPath) {
   return sourceFiles;
 }
 
-// Collect all declared names (types, interfaces, classes, enums, functions, variables, namespaces)
-function collectAllTypes(sourceFiles) {
+// Collect all declared names (for rewriting) and exported types/interfaces (for ExportedTypes set)
+function collectDeclarations(sourceFiles) {
   const allTypes = new Set();
+  const exportedTypesOrInterfaces = new Set();
 
-  function addName(name) {
+  const addName = (name) => {
     if (name && typeof name.text === "string") allTypes.add(name.text);
-  }
+  };
+
+  const hasExport = (node) =>
+    Array.isArray(node.modifiers) &&
+    node.modifiers.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
 
   function visit(node) {
-    if (ts.isTypeAliasDeclaration(node)) addName(node.name);
-    else if (ts.isInterfaceDeclaration(node)) addName(node.name);
-    else if (ts.isClassDeclaration(node) && node.name) addName(node.name);
-    else if (ts.isEnumDeclaration(node)) addName(node.name);
-    else if (ts.isFunctionDeclaration(node) && node.name) addName(node.name);
-    else if (ts.isModuleDeclaration(node)) addName(node.name);
-    else if (ts.isVariableStatement(node)) {
+    if (ts.isTypeAliasDeclaration(node)) {
+      addName(node.name);
+      if (hasExport(node)) exportedTypesOrInterfaces.add(node.name.text);
+    } else if (ts.isInterfaceDeclaration(node)) {
+      addName(node.name);
+      if (hasExport(node)) exportedTypesOrInterfaces.add(node.name.text);
+    } else if (ts.isClassDeclaration(node) && node.name) {
+      addName(node.name);
+    } else if (ts.isEnumDeclaration(node)) {
+      addName(node.name);
+    } else if (ts.isFunctionDeclaration(node) && node.name) {
+      addName(node.name);
+    } else if (ts.isModuleDeclaration(node)) {
+      addName(node.name);
+    } else if (ts.isVariableStatement(node)) {
       node.declarationList.declarations.forEach((decl) => {
         if (ts.isIdentifier(decl.name)) addName(decl.name);
       });
@@ -75,36 +88,7 @@ function collectAllTypes(sourceFiles) {
   }
 
   sourceFiles.forEach((sf) => visit(sf));
-  return allTypes;
-}
-
-// Collect exported type/interface names to build an automatic AvailableTypes union
-function collectExportedNames(sourceFiles) {
-  const names = new Set();
-
-  const add = (id) => {
-    if (id && typeof id.text === "string") names.add(id.text);
-  };
-
-  const hasExport = (node) =>
-    Array.isArray(node.modifiers) &&
-    node.modifiers.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
-
-  function visit(node) {
-    if (ts.isTypeAliasDeclaration(node) && hasExport(node)) add(node.name);
-    else if (ts.isInterfaceDeclaration(node) && hasExport(node)) add(node.name);
-    else if (ts.isClassDeclaration(node) && node.name && hasExport(node)) add(node.name);
-    else if (ts.isEnumDeclaration(node) && hasExport(node)) add(node.name);
-    else if (ts.isModuleDeclaration(node) && hasExport(node)) add(node.name);
-    // else if (ts.isFunctionDeclaration(node) && node.name && hasExport(node)) add(node.name);
-    
-    // Only type aliases and interfaces are included.
-    // variables, functions, classes, enums are intentionally excluded
-    return ts.forEachChild(node, visit);
-  }
-
-  sourceFiles.forEach((sf) => visit(sf));
-  return names;
+  return { allTypes, exportedTypesOrInterfaces };
 }
 
 function transformSourceFile(
@@ -303,9 +287,8 @@ function build() {
   // CLI flag: keep comments in the output string
   const keepComments = process.argv.includes("--keep-comments");
 
-  // Collect all declarations (exported and internal) and exported names list
-  const allTypes = collectAllTypes(sourceFiles);
-  const exportedNames = collectExportedNames(sourceFiles);
+  // Collect all declarations (for rewriting) and exported types/interfaces (for ExportedTypes)
+  const { allTypes, exportedTypesOrInterfaces } = collectDeclarations(sourceFiles);
 
   // Transform all files
   const transformedSources = sourceFiles.map((sourceFile, index) => {
@@ -330,8 +313,8 @@ function build() {
   // Combine all transformed sources
   let combined = transformedSources.join("\n\n");
 
-  // Append auto-generated AvailableTypes from exported names (unprefixed string literals)
-  const available = Array.from(exportedNames);
+  // Append auto-generated AvailableTypes from exported types/interfaces (unprefixed string literals)
+  const available = Array.from(allTypes);
   if (available.length) {
     combined +=
       "\n\nexport type AvailableTypes = " +
@@ -349,7 +332,7 @@ export function prefixWith(prefix) {
   return typeHelpersSource
     .replaceAll("$V_", prefix);
 }
-export const ExportedTypes = new Set([${available.map((n) => `"${n}"`).join(", ")}]);
+export const ExportedTypes = new Set([${Array.from(exportedTypesOrInterfaces).map((n) => `"${n}"`).join(", ")}]);
 `;
 
   // Ensure dist exists

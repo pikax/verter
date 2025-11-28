@@ -271,6 +271,11 @@ function processMacroCall(
       let propsBox: ReturnType<typeof boxMacro> | null = null;
       if (defineProps) {
         if (defineProps.type === "CallExpression") {
+          ctx.items.push({
+            type: ProcessItemType.Import,
+            from: "vue",
+            items: [{ name: "defineProps" }],
+          });
           if (defineProps.arguments.length > 0) {
             // add a warning if there's arguments, since we are using withDefaults
             ctx.items.push({

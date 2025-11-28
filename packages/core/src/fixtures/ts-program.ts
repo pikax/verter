@@ -20,100 +20,285 @@
  */
 
 import * as ts from "typescript";
+import * as path from "path";
 import type { TypeTest } from "./types";
 import { resolveWithPrefix } from "./types";
 
 // ============================================================================
-// Type Definitions for Semantic Validation
+// Path Constants
+// ============================================================================
+
+/** Path to the packages/core directory */
+const CORE_PACKAGE_DIR = path.resolve(__dirname, "../..");
+
+/** Path to tsconfig.test.json */
+const TSCONFIG_TEST_PATH = path.join(CORE_PACKAGE_DIR, "tsconfig.test.json");
+
+/** Path to global.d.ts for fixture testing */
+const GLOBAL_DTS_PATH = path.join(__dirname, "global.d.ts");
+
+/** Virtual test file path */
+const TEST_FILE_PATH = path.join(CORE_PACKAGE_DIR, "src", "__test__.ts");
+
+// Pre-normalize paths for fast comparison
+const NORMALIZED_TEST_FILE_PATH = path.normalize(TEST_FILE_PATH);
+const NORMALIZED_GLOBAL_DTS_PATH = path.normalize(GLOBAL_DTS_PATH);
+
+// ============================================================================
+// Cached TypeScript Configuration
+// ============================================================================
+
+let cachedCompilerOptions: ts.CompilerOptions | null = null;
+
+/**
+ * Load and parse the tsconfig.test.json configuration.
+ * Results are cached for performance.
+ */
+function loadTsConfig(): ts.CompilerOptions {
+  if (cachedCompilerOptions) {
+    return cachedCompilerOptions;
+  }
+
+  const configFile = ts.readConfigFile(TSCONFIG_TEST_PATH, ts.sys.readFile);
+  if (configFile.error) {
+    throw new Error(
+      `Failed to read tsconfig.test.json: ${ts.flattenDiagnosticMessageText(configFile.error.messageText, "\n")}`
+    );
+  }
+
+  const parsedConfig = ts.parseJsonConfigFileContent(
+    configFile.config,
+    ts.sys,
+    CORE_PACKAGE_DIR
+  );
+
+  if (parsedConfig.errors.length > 0) {
+    const errors = parsedConfig.errors
+      .map((e) => ts.flattenDiagnosticMessageText(e.messageText, "\n"))
+      .join("\n");
+    throw new Error(`Failed to parse tsconfig.test.json: ${errors}`);
+  }
+
+  // Override some options for fixture testing
+  cachedCompilerOptions = {
+    ...parsedConfig.options,
+    noEmit: true,
+    skipLibCheck: true,
+  };
+
+  return cachedCompilerOptions;
+}
+
+// ============================================================================
+// Cached Language Service for Performance
 // ============================================================================
 
 /**
- * Generate inline type definitions for semantic validation.
- *
- * These definitions simulate Vue macros and @verter/types helpers
- * to enable type checking without needing actual module resolution.
- *
- * @param prefix - The prefix used for helper types (e.g., "___VERTER___")
- * @returns Type definition string to prepend to code
+ * Cached language service instance for efficient repeated type checking.
+ * The language service caches parsed files and type information,
+ * so only the test file needs to be re-parsed on each check.
  */
-function generateTypeDefinitions(prefix: string): string {
-  return `
-// Standard library types (if not already defined)
-type PropertyKey = string | number | symbol;
-type Record<K extends keyof any, T> = { [P in K]: T };
-type ReturnType<T extends (...args: any) => any> = T extends (...args: any) => infer R ? R : any;
-type Readonly<T> = { readonly [K in keyof T]: T[K] };
-type Partial<T> = { [K in keyof T]?: T[K] };
-type Required<T> = { [K in keyof T]-?: T[K] };
-type Pick<T, K extends keyof T> = { [P in K]: T[P] };
-type Omit<T, K extends keyof any> = Pick<T, Exclude<keyof T, K>>;
-type Exclude<T, U> = T extends U ? never : T;
-type Extract<T, U> = T extends U ? T : never;
+let cachedLanguageService: ts.LanguageService | null = null;
+let cachedServiceHost: {
+  host: ts.LanguageServiceHost;
+  setTestFileContent: (content: string) => void;
+  getTestFileVersion: () => number;
+} | null = null;
 
-// DOM types (stubs for testing)
-interface Event {}
-interface MouseEvent extends Event {}
-interface KeyboardEvent extends Event {}
-interface FocusEvent extends Event {}
-interface InputEvent extends Event {}
+/** Cache for file contents read from disk (node_modules files don't change) */
+const fileContentCache = new Map<string, string | undefined>();
 
-// Standard library stubs
-interface Date {}
-interface Map<K, V> { get(key: K): V | undefined; set(key: K, value: V): this; }
-interface Set<T> { has(value: T): boolean; add(value: T): this; }
-interface Array<T> { length: number; [n: number]: T; }
+/** Cache for script snapshots (avoid recreating for unchanged files) */
+const scriptSnapshotCache = new Map<string, ts.IScriptSnapshot>();
 
-// Vue macros - these are global in Vue SFC context
-declare function defineProps<T>(): T;
-declare function defineProps<T>(props: T): T;
-declare function defineEmits<T>(): T;
-declare function defineEmits<T>(emits: T): T;
-declare function defineModel<T>(options?: any): ModelRef<T | undefined, string>;
-declare function defineModel<T>(name: string, options?: any): ModelRef<T | undefined, string>;
-declare function defineSlots<T>(): T;
-declare function defineExpose<T>(exposed?: T): void;
-declare function withDefaults<T, D>(props: T, defaults: D): T;
-declare function defineOptions<T>(options: T): void;
+/** Cache for module resolution results */
+const moduleResolutionCache = new Map<string, ts.ResolvedModule | undefined>();
 
-// Vue types
-interface ModelRef<T, M extends PropertyKey = string, G = T, S = T> {
-  value: T;
+/** Cache for fileExists calls */
+const fileExistsCache = new Map<string, boolean>();
+
+/** Cache for directoryExists calls */
+const directoryExistsCache = new Map<string, boolean>();
+
+/** Cached default lib file path */
+let cachedDefaultLibPath: string | null = null;
+
+/**
+ * Create or get the cached language service host.
+ * The host manages file content and versions for the language service.
+ */
+function getLanguageServiceHost(): typeof cachedServiceHost {
+  if (cachedServiceHost) {
+    return cachedServiceHost;
+  }
+
+  const compilerOptions = loadTsConfig();
+  const globalDtsContent = ts.sys.readFile(GLOBAL_DTS_PATH) ?? "";
+  
+  // Pre-create snapshot for global.d.ts (never changes)
+  const globalDtsSnapshot = ts.ScriptSnapshot.fromString(globalDtsContent);
+  
+  // Mutable state for the test file
+  let testFileContent = "";
+  let testFileVersion = 0;
+  let testFileSnapshot: ts.IScriptSnapshot = ts.ScriptSnapshot.fromString("");
+
+  const scriptFileNames = [TEST_FILE_PATH, GLOBAL_DTS_PATH];
+
+  // Fast path check function (avoid normalize on every call)
+  const isTestFile = (fileName: string) => 
+    fileName === TEST_FILE_PATH || path.normalize(fileName) === NORMALIZED_TEST_FILE_PATH;
+  const isGlobalDts = (fileName: string) => 
+    fileName === GLOBAL_DTS_PATH || path.normalize(fileName) === NORMALIZED_GLOBAL_DTS_PATH;
+
+  const host: ts.LanguageServiceHost = {
+    getScriptFileNames: () => scriptFileNames,
+    getScriptVersion: (fileName) => {
+      if (isTestFile(fileName)) {
+        return testFileVersion.toString();
+      }
+      // Other files don't change
+      return "1";
+    },
+    getScriptSnapshot: (fileName) => {
+      if (isTestFile(fileName)) {
+        return testFileSnapshot;
+      }
+      if (isGlobalDts(fileName)) {
+        return globalDtsSnapshot;
+      }
+      
+      // Check cache first for disk files
+      if (scriptSnapshotCache.has(fileName)) {
+        return scriptSnapshotCache.get(fileName);
+      }
+      
+      // Read from disk for other files (node_modules, etc.)
+      let content = fileContentCache.get(fileName);
+      if (content === undefined && !fileContentCache.has(fileName)) {
+        content = ts.sys.readFile(fileName);
+        fileContentCache.set(fileName, content);
+      }
+      
+      if (content !== undefined) {
+        const snapshot = ts.ScriptSnapshot.fromString(content);
+        scriptSnapshotCache.set(fileName, snapshot);
+        return snapshot;
+      }
+      return undefined;
+    },
+    getCurrentDirectory: () => CORE_PACKAGE_DIR,
+    getCompilationSettings: () => compilerOptions,
+    getDefaultLibFileName: () => {
+      if (!cachedDefaultLibPath) {
+        cachedDefaultLibPath = ts.getDefaultLibFilePath(compilerOptions);
+      }
+      return cachedDefaultLibPath;
+    },
+    fileExists: (fileName) => {
+      if (isTestFile(fileName) || isGlobalDts(fileName)) {
+        return true;
+      }
+      
+      // Check cache
+      if (fileExistsCache.has(fileName)) {
+        return fileExistsCache.get(fileName)!;
+      }
+      
+      const exists = ts.sys.fileExists(fileName);
+      fileExistsCache.set(fileName, exists);
+      return exists;
+    },
+    readFile: (fileName) => {
+      if (isTestFile(fileName)) {
+        return testFileContent;
+      }
+      if (isGlobalDts(fileName)) {
+        return globalDtsContent;
+      }
+      
+      // Check cache first
+      if (fileContentCache.has(fileName)) {
+        return fileContentCache.get(fileName);
+      }
+      
+      const content = ts.sys.readFile(fileName);
+      fileContentCache.set(fileName, content);
+      return content;
+    },
+    readDirectory: ts.sys.readDirectory,
+    directoryExists: (directoryName) => {
+      // Check cache
+      if (directoryExistsCache.has(directoryName)) {
+        return directoryExistsCache.get(directoryName)!;
+      }
+      
+      const exists = ts.sys.directoryExists(directoryName);
+      directoryExistsCache.set(directoryName, exists);
+      return exists;
+    },
+    getDirectories: ts.sys.getDirectories,
+    realpath: ts.sys.realpath,
+    resolveModuleNames: (moduleNames, containingFile, _reusedNames, _redirectedReference, options) => {
+      return moduleNames.map((moduleName) => {
+        // Create cache key
+        const cacheKey = `${containingFile}|${moduleName}`;
+        
+        if (moduleResolutionCache.has(cacheKey)) {
+          return moduleResolutionCache.get(cacheKey);
+        }
+        
+        // Redirect $verter/types$ to @verter/types
+        const actualModuleName = moduleName === "$verter/types$" ? "@verter/types" : moduleName;
+        
+        const result = ts.resolveModuleName(
+          actualModuleName,
+          containingFile,
+          options,
+          {
+            fileExists: host.fileExists!,
+            readFile: host.readFile!,
+            directoryExists: host.directoryExists!,
+            getDirectories: host.getDirectories!,
+            realpath: ts.sys.realpath,
+          }
+        );
+        
+        moduleResolutionCache.set(cacheKey, result.resolvedModule);
+        return result.resolvedModule;
+      });
+    },
+  };
+
+  cachedServiceHost = {
+    host,
+    setTestFileContent: (content: string) => {
+      testFileContent = content;
+      testFileVersion++;
+      // Create new snapshot only when content changes
+      testFileSnapshot = ts.ScriptSnapshot.fromString(content);
+    },
+    getTestFileVersion: () => testFileVersion,
+  };
+
+  return cachedServiceHost;
 }
-interface Ref<T> { value: T; }
-interface ComputedRef<T> { readonly value: T; }
-declare function ref<T>(value: T): Ref<T>;
-declare function computed<T>(getter: () => T): ComputedRef<T>;
 
-// @verter/types helpers - Prettify flattens intersection types for better display
-type Prettify<T> = T extends { (...args: any[]): any }
-  ? T & {}
-  : { [K in keyof T]: T[K] } & {};
+/**
+ * Get or create the cached language service.
+ */
+function getLanguageService(): ts.LanguageService {
+  if (cachedLanguageService) {
+    return cachedLanguageService;
+  }
 
-// Prefixed version for code that uses it
-type ${prefix}Prettify<T> = Prettify<T>;
+  const serviceHost = getLanguageServiceHost()!;
+  cachedLanguageService = ts.createLanguageService(
+    serviceHost.host,
+    ts.createDocumentRegistry()
+  );
 
-// Helper function stubs for runtime
-declare function ${prefix}createMacroReturn<T>(value: T): T;
-
-// Box functions for capturing macro values
-declare function ${prefix}defineProps_Box<T extends Record<string, any>>(props: T): T;
-declare function ${prefix}defineEmits_Box<T extends readonly string[]>(emits: T): T;
-declare function ${prefix}defineEmits_Box<T extends Record<string, any>>(emits: T): T;
-declare function ${prefix}defineModel_Box<T>(options?: any): any;
-declare function ${prefix}defineModel_Box<T>(name: string, options?: any): [string, any];
-declare function ${prefix}defineExpose_Box<T>(exposed?: T): T;
-declare function ${prefix}defineSlots_Box<T>(slots?: T): T;
-declare function ${prefix}withDefaults_Box<T, D>(props: T, defaults: D): [T, D];
-
-// PropType for object syntax props
-interface PropType<T> {}
-declare const String: PropType<string>;
-declare const Number: PropType<number>;
-declare const Boolean: PropType<boolean>;
-declare const Array: PropType<any[]>;
-declare const Object: PropType<object>;
-declare const Function: PropType<(...args: any[]) => any>;
-`;
+  return cachedLanguageService;
 }
 
 // ============================================================================
@@ -124,13 +309,6 @@ declare const Function: PropType<(...args: any[]) => any>;
  * Options for creating a TypeScript program for type testing.
  */
 export interface TypeProgramOptions {
-  /**
-   * Whether to strip import statements from the code.
-   * When true, imports are removed and type definitions are injected.
-   * @default true
-   */
-  stripImports?: boolean;
-
   /**
    * Additional type definitions to prepend to the code.
    * Use this for any additional declarations needed.
@@ -145,10 +323,11 @@ export interface TypeProgramOptions {
 }
 
 /**
- * Create a TypeScript program from code with injected type definitions.
+ * Create a TypeScript program from code with proper module resolution.
  *
- * This creates a full TypeScript program with inline type definitions
- * for Vue macros and @verter/types helpers.
+ * This uses a cached language service for efficient repeated type checking.
+ * The language service caches all resolved modules and type information,
+ * so only the test file content needs to be updated.
  *
  * @param code - The TypeScript code to compile
  * @param options - Configuration options
@@ -162,56 +341,29 @@ export function createTypeProgram(
   sourceFile: ts.SourceFile;
   checker: ts.TypeChecker;
 } {
-  const { stripImports = true, additionalDefinitions = "", prefix = "___VERTER___" } = options;
+  const { additionalDefinitions = "" } = options;
 
-  // Process the code
-  let processedCode = code;
+  // Prepend additional definitions if provided
+  const fullCode = additionalDefinitions ? additionalDefinitions + "\n" + code : code;
 
-  if (stripImports) {
-    // Strip import statements - we'll inject type definitions instead
-    processedCode = code
-      .replace(/import\s+[\s\S]*?\s+from\s+["'][^"']+["'];?\s*/g, "")
-      .replace(/import\s*["'][^"']+["'];?\s*/g, "");
+  // Update the test file content in the cached service host
+  const serviceHost = getLanguageServiceHost()!;
+  serviceHost.setTestFileContent(fullCode);
+
+  // Get the language service and program
+  const languageService = getLanguageService();
+  const program = languageService.getProgram();
+  
+  if (!program) {
+    throw new Error("Failed to get program from language service");
   }
 
-  // Generate and prepend type definitions
-  const typeDefinitions = generateTypeDefinitions(prefix);
-  const fullCode = typeDefinitions + additionalDefinitions + "\n" + processedCode;
-
-  const compilerOptions: ts.CompilerOptions = {
-    target: ts.ScriptTarget.ESNext,
-    module: ts.ModuleKind.ESNext,
-    moduleResolution: ts.ModuleResolutionKind.Bundler,
-    strict: true,
-    noEmit: true,
-    skipLibCheck: true,
-    lib: ["lib.esnext.d.ts"],
-    types: [],
-  };
-
-  const fileName = "test.ts";
-  const sourceFile = ts.createSourceFile(
-    fileName,
-    fullCode,
-    ts.ScriptTarget.ESNext,
-    true
-  );
-
-  // Create a minimal compiler host
-  const host: ts.CompilerHost = {
-    getSourceFile: (name) => (name === fileName ? sourceFile : undefined),
-    getDefaultLibFileName: () => "lib.d.ts",
-    writeFile: () => {},
-    getCurrentDirectory: () => "/",
-    getCanonicalFileName: (f) => f,
-    useCaseSensitiveFileNames: () => true,
-    getNewLine: () => "\n",
-    fileExists: (name) => name === fileName,
-    readFile: () => undefined,
-  };
-
-  const program = ts.createProgram([fileName], compilerOptions, host);
   const checker = program.getTypeChecker();
+  const sourceFile = program.getSourceFile(TEST_FILE_PATH);
+  
+  if (!sourceFile) {
+    throw new Error(`Failed to get test source file from program. Test file: ${TEST_FILE_PATH}`);
+  }
 
   return { program, sourceFile, checker };
 }
@@ -225,7 +377,6 @@ export function createTypeProgram(
  * @param code - The TypeScript code to analyze
  * @param symbolName - The name of the symbol to get the type for
  * @param kind - Whether to look for a "type" alias or "variable" declaration
- * @param prefix - The prefix used for helper types
  * @returns The type as a string, or null if not found
  *
  * @example
@@ -241,10 +392,9 @@ export function createTypeProgram(
 export function getTypeString(
   code: string,
   symbolName: string,
-  kind: "type" | "variable" = "type",
-  prefix: string = ""
+  kind: "type" | "variable" = "type"
 ): string | null {
-  const { sourceFile, checker } = createTypeProgram(code, { prefix });
+  const { sourceFile, checker } = createTypeProgram(code);
 
   let result: string | null = null;
 
@@ -364,7 +514,7 @@ export interface TypeTestResult {
  *
  * @param code - The generated code to test
  * @param test - The type test configuration
- * @param prefix - The prefix used for type names
+ * @param prefix - The prefix used for type names (for resolving prefixed targets)
  * @returns Test result with success status and error details
  *
  * @example
@@ -389,7 +539,7 @@ export function runTypeTest(
   const targetName = resolveWithPrefix(test.target, prefix);
   const kind = test.kind || "type";
 
-  const typeStr = getTypeString(code, targetName, kind, prefix);
+  const typeStr = getTypeString(code, targetName, kind);
 
   if (typeStr === null) {
     return {
@@ -470,14 +620,12 @@ export function runTypeTest(
  * syntax and semantic errors.
  *
  * @param code - The TypeScript code to check
- * @param prefix - The prefix used for helper types
  * @returns Array of TypeScript diagnostics
  */
 export function getSemanticErrors(
-  code: string,
-  prefix: string = ""
+  code: string
 ): ts.Diagnostic[] {
-  const { program, sourceFile } = createTypeProgram(code, { prefix });
+  const { program, sourceFile } = createTypeProgram(code);
 
   // Get all diagnostics (semantic + syntactic)
   const diagnostics = [
@@ -516,15 +664,13 @@ export function formatDiagnostics(diagnostics: ts.Diagnostic[]): string {
  *
  * @param code - The TypeScript code to check
  * @param testName - Optional test name for error context
- * @param prefix - The prefix used for helper types
  * @throws Error if TypeScript errors are found
  */
 export function assertNoTypeErrors(
   code: string,
-  testName?: string,
-  prefix: string = ""
+  testName?: string
 ): void {
-  const errors = getSemanticErrors(code, prefix);
+  const errors = getSemanticErrors(code);
 
   if (errors.length > 0) {
     const errorMessages = formatDiagnostics(errors);

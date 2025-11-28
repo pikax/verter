@@ -1,10 +1,14 @@
 import "vue/jsx";
-import '../tsx/tsx'
+import "../tsx/tsx";
 import { defineProps, defineEmits, useTemplateRef } from "vue";
 
-import { assertType, describe, it } from "vitest";
+import { assertType, describe, expect, it } from "vitest";
 import { CreateMacroReturn, createMacroReturn } from "../setup/setup";
-import { CreateExportedInstanceFromMacro, CreateExportedInstanceFromNormalisedMacro, PublicInstanceFromMacro } from "./instance";
+import {
+  CreateExportedInstanceFromMacro,
+  CreateExportedInstanceFromNormalisedMacro,
+  PublicInstanceFromMacro,
+} from "./instance";
 
 describe("Instance Types", () => {
   describe("PublicInstanceFromMacro", () => {
@@ -164,7 +168,7 @@ describe("Instance Types", () => {
           {},
           HTMLElement,
           false
-        >
+        >;
       };
       <>
         <Comp
@@ -173,11 +177,11 @@ describe("Instance Types", () => {
             // @ts-expect-error
             e === "a";
           }}
-          v-slot={e=> {
+          v-slot={(e) => {
             // @ts-expect-error wrong type
-            e.$props.value === 'a'
+            e.$props.value === "a";
 
-            return {}
+            return {};
           }}
         />
       </>;

@@ -59,6 +59,14 @@ type MakeInternalInstanceFromNormalisedMacro<
     : I
   : never;
 
+export type InternalInstanceFromMacro<
+  T,
+  Attrs = {},
+  DEV extends boolean = false
+> = NormaliseMacroReturn<T> extends infer NT extends NormalisedMacroReturn<any>
+  ? MakeInternalInstanceFromNormalisedMacro<NT, Attrs, DEV>
+  : {};
+
 export type ToInstanceProps<
   T,
   MakeDefaultsOptional extends boolean
@@ -91,7 +99,8 @@ export type CreateTypedPublicInstanceFromNormalisedMacro<
 
   $emit: MacroToEmitValue<T["emits"]> &
     ModelToEmits<MacroToModelRecord<T["model"]>>;
-};
+} & ToInstanceProps<T["props"], true> &
+  ModelToProps<MacroToModelRecord<T["model"]>>;
 
 export type PublicInstanceFromMacro<
   T,
@@ -120,25 +129,22 @@ export type PublicInstanceFromNormalisedMacro<
   MakeDefaultsOptional extends boolean,
   DEV extends boolean,
   InternalInstance = false
-> = Omit<
-  import("vue").ComponentPublicInstance<
-    {},
-    {},
-    {},
-    {},
-    {},
-    {},
-    {},
-    {},
-    MakeDefaultsOptional,
-    MacroOptionsToOptions<T["options"]>,
-    {},
-    SlotsToSlotType<T["slots"]>,
-    "",
-    {},
-    El
-  >,
-  keyof CreateTypedPublicInstanceFromNormalisedMacro<any>
+> = Omit<import("vue").ComponentPublicInstance<
+  {},
+  {},
+  {},
+  {},
+  {},
+  {},
+  {},
+  {},
+  MakeDefaultsOptional,
+  MacroOptionsToOptions<T["options"]>,
+  {},
+  SlotsToSlotType<T["slots"]>,
+  "",
+  {},
+  El>, '$props' | '$emit'
 > &
   CreateTypedPublicInstanceFromNormalisedMacro<
     T,
