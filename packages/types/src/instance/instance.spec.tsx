@@ -74,6 +74,8 @@ describe("Instance Types", () => {
       // @ts-expect-error
       TT.$.attrs.foo;
 
+      TT.foo
+
       assertType<number>(TT.$.uid);
 
       assertType<string>(TT.$.proxy.$.proxy!.$data.someData);

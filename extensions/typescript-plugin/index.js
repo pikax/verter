@@ -11052,7 +11052,7 @@ function requireScriptDefault$1() {
       const isSetup = ctx.isSetup;
       ctx.isAsync;
       ctx.block.block.tag;
-      const name = ctx.prefix("default");
+      const name = ctx.prefix("default_Component");
       const defineComponent = ctx.prefix("defineComponent");
       if (isSetup) {
         ctx.items.push({
@@ -12134,7 +12134,7 @@ function requireComponentInstance$1() {
       const prefix = ctx.prefix("");
       const bundler = bundler_1.BundlerHelper.withPrefix(prefix);
       const ProcessPropsName = ctx.prefix("ProcessProps");
-      const defaultOptionsName = ctx.prefix("default");
+      const defaultOptionsName = ctx.prefix("default_Component");
       const resolvePropsName = ctx.prefix("resolveProps");
       const resolveSlotsName = ctx.prefix("defineSlots");
       const componentName = ctx.prefix("Component");
@@ -12412,7 +12412,7 @@ function requireBundle$1() {
           const bundler = bundler_1.BundlerHelper.withPrefix(prefix);
           const ProcessPropsName = ctx.prefix("ProcessProps");
           const imports = [...bundler.imports];
-          const defaultOptionsName = ctx.prefix("default");
+          const defaultOptionsName = ctx.prefix("default_Component");
           const resolvePropsName = ctx.prefix("resolveProps");
           const resolveSlotsName = ctx.prefix("defineSlots");
           ctx.blockNameResolver;
@@ -14371,7 +14371,7 @@ function requireContext$1() {
       const options = (0, script_1.ResolveOptionsFilename)(ctx);
       const TemplateBindingName = ctx.prefix("TemplateBinding");
       const FullContextName = ctx.prefix("FullContext");
-      const DefaultName = ctx.prefix("default");
+      const DefaultName = ctx.prefix("default_Component");
       const ComponentInstanceName = ctx.prefix("ComponentInstance");
       const macros = isSetup ? [
         [ctx.prefix("resolveProps"), "$props"],

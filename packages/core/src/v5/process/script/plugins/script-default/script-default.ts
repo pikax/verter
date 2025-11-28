@@ -12,7 +12,7 @@ export const ScriptDefaultPlugin = definePlugin({
     const isSetup = ctx.isSetup;
     const isAsync = ctx.isAsync;
     const tag = ctx.block.block.tag;
-    const name = ctx.prefix("default");
+    const name = ctx.prefix("default_Component");
 
     const defineComponent = ctx.prefix("defineComponent");
 

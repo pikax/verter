@@ -129,22 +129,25 @@ export type PublicInstanceFromNormalisedMacro<
   MakeDefaultsOptional extends boolean,
   DEV extends boolean,
   InternalInstance = false
-> = Omit<import("vue").ComponentPublicInstance<
-  {},
-  {},
-  {},
-  {},
-  {},
-  {},
-  {},
-  {},
-  MakeDefaultsOptional,
-  MacroOptionsToOptions<T["options"]>,
-  {},
-  SlotsToSlotType<T["slots"]>,
-  "",
-  {},
-  El>, '$props' | '$emit'
+> = Omit<
+  import("vue").ComponentPublicInstance<
+    {},
+    {},
+    {},
+    {},
+    {},
+    {},
+    {},
+    {},
+    MakeDefaultsOptional,
+    MacroOptionsToOptions<T["options"]>,
+    {},
+    SlotsToSlotType<T["slots"]>,
+    "",
+    {},
+    El
+  >,
+  "$props" | "$emit" | "$data" | "$attrs" | "$refs" | "$"
 > &
   CreateTypedPublicInstanceFromNormalisedMacro<
     T,

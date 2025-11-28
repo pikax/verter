@@ -22,38 +22,42 @@ export const ContextPlugin = {
 
     const TemplateBindingName = ctx.prefix("TemplateBinding");
     const FullContextName = ctx.prefix("FullContext");
-    const DefaultName = ctx.prefix("Component");
+    const DefaultName = ctx.prefix("default_Component");
     const ComponentInstanceName = ctx.prefix("ComponentInstance");
-    const instance = ctx.prefix("Instance");
 
-    const macros = isSetup ? [] : [];
+    const macros = isSetup
+      ? [
+          [ctx.prefix("resolveProps"), "$props"],
+          [ctx.prefix("resolveEmits"), "$emit"],
+          // [ctx.prefix('resolveSlots'), "$slots"],
+          [ctx.prefix("defineSlots"), "$slots"],
+        ]
+      : [];
 
     const importStr = generateImport([
       {
         from: `./${options}`,
         items: [
-          {name: TemplateBindingName },
-          {name: FullContextName },
+          { name: TemplateBindingName },
+          { name: FullContextName },
           {
             name: DefaultName,
           },
-          {
-            name: instance
-          }
+          ...macros.map(([name]) => ({ name })),
         ],
       },
     ]);
 
     s.prepend(`${importStr}\n`);
 
-    const generic = ctx.generic ? `<${ctx.generic.names.join(",")}>` : "";
-    const instanceStr = `const ${ComponentInstanceName} = {} as ${instance}${generic};`;
+    const instanceStr = `const ${ComponentInstanceName} = new ${DefaultName}();`;
     const CTX = ctx.retrieveAccessor("ctx");
+    const generic = ctx.generic ? `<${ctx.generic.names.join(",")}>` : "";
 
     // todo add generic information
     const ctxItems = [
-      // isSetup ? ctx.prefix("resolveProps") : null,
-      // FullContextName,
+      isSetup ? ctx.prefix("resolveProps") : null,
+      FullContextName,
       TemplateBindingName,
     ]
       .filter(Boolean)
@@ -66,11 +70,11 @@ export const ContextPlugin = {
           ? `({} as Required<typeof ${DefaultName}.components> & {})`
           : `${DefaultName}.components`
       }`,
-      // // `...${macros.map(([name, prop]) => `${name}(${prop})`).join(",")}`,
-      // ...macros.map(
-      //   ([name, prop]) =>
-      //     `${prop}: ${ctx.isTS ? `{} as ${name}${generic} & {}` : name}`
-      // ),
+      // `...${macros.map(([name, prop]) => `${name}(${prop})`).join(",")}`,
+      ...macros.map(
+        ([name, prop]) =>
+          `${prop}: ${ctx.isTS ? `{} as ${name}${generic} & {}` : name}`
+      ),
       ...ctxItems,
     ].join(",")}};`;
 
@@ -79,14 +83,12 @@ export const ContextPlugin = {
     const debuggers = DEBUG
       ? [
           `const ___DEBUG_Verter = ${CTX};`,
-          `const ___DEBUG_ComponentInstance = ${ComponentInstanceName};`,
-          `const ___DEBUG_Instance = ({} as ${instance}${generic});`,
-          `const ___DEBUG_Default = ${DefaultName};`,
-          // `const ___DEBUG_Props = ({} as ___VERTER___resolveProps${generic});`,
+          "const ___DEBUG_Default = ___VERTER___default;",
+          `const ___DEBUG_Props = ({} as ___VERTER___resolveProps${generic});`,
           `const ___DEBUG_Components = ({} as Required<typeof ___VERTER___default.components> & {});`,
           `const ___DEBUG_FullContext = ({} as ___VERTER___FullContext${generic});`,
-          // `const ___DEBUG_Binding = ({} as ___VERTER___TemplateBinding${generic});`,
-          // `const ___DEBUG_Slots = ___VERTER___ctx['$slots'];`,
+          `const ___DEBUG_Binding = ({} as ___VERTER___TemplateBinding${generic});`,
+          `const ___DEBUG_Slots = ___VERTER___ctx['$slots'];`,
         ].join("\n")
       : "";
     s.prependLeft(
@@ -97,14 +99,14 @@ export const ContextPlugin = {
     // add slots Helper
     // s.append(Slots.withPrefix(ctx.prefix("")).content);
 
-//     s.append(`
-//       declare function ${ctx.prefix(
-//         "slotRender"
-//       )}<T extends (...args: any[]) => any>(slot: T): (cb: T)=>any;
-// export declare function ${ctx.prefix("StrictRenderSlot")}<
-//   T extends (...args: any[]) => any,
-//   Single extends boolean = ReturnType<T> extends Array<any> ? false : true
-// >(slot: T, children: Single extends true ? [ReturnType<T>] : ReturnType<T>): any;`);
+    s.append(`
+      declare function ${ctx.prefix(
+        "slotRender"
+      )}<T extends (...args: any[]) => any>(slot: T): (cb: T)=>any;
+export declare function ${ctx.prefix("StrictRenderSlot")}<
+  T extends (...args: any[]) => any,
+  Single extends boolean = ReturnType<T> extends Array<any> ? false : true
+>(slot: T, children: Single extends true ? [ReturnType<T>] : ReturnType<T>): any;`);
     // patch TSX
     if (false)
       s.prepend(`

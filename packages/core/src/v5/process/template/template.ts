@@ -41,6 +41,7 @@ export type TemplateAccessors =
   | "normalizeStyle"
   | "COMPONENT_CTX"
   | "ctx"
+  | "StrictRenderSlot"
   // aka $slots
   | "$slot"
   // slotToComponent, const slotComponent = ctx.$slots.default;
@@ -218,7 +219,7 @@ export function processTemplate(
 
   for (const item of items) {
     for (const plugin of pluginsByType[item.type]) {
-       plugin(item as any, s, context);
+      plugin(item as any, s, context);
     }
   }
 

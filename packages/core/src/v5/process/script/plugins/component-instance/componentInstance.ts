@@ -40,7 +40,7 @@ export const ComponentInstancePlugin = definePlugin({
 
       const componentName = ctx.prefix("Component");
       const templateBinding = ctx.prefix("TemplateBinding");
-      const defaultOptionsName = ctx.prefix("default");
+      const defaultOptionsName = ctx.prefix("default_Component");
 
       const genericDeclaration = ctx.generic
         ? `<${ctx.generic.declaration}>`
@@ -52,10 +52,10 @@ export const ComponentInstancePlugin = definePlugin({
       const instanceName = ctx.prefix("Instance");
 
       const declaration = [
-        `export type ${instanceName}${genericDeclaration} = ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, false>;`,
+        `export type ${instanceName}${genericDeclaration} = ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, false,false>;`,
         allowDev &&
-          `export type ${instanceName}_TEST${genericDeclaration} = ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, true>;`,
-        `export const ${componentName}: typeof ${defaultOptionsName} & { new${genericDeclaration}():${instanceName}${sanitisedNames} };`,
+          `export type ${instanceName}_TEST${genericDeclaration} = ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, true,true>;`,
+        `export const ${componentName}={} as typeof ${defaultOptionsName} & { new${genericDeclaration}(...args: any[]):${instanceName}${sanitisedNames} };`,
       ];
 
       s.append(declaration.filter(Boolean).join("\n"));
@@ -70,7 +70,7 @@ export const ComponentInstancePlugin = definePlugin({
 
     const ProcessPropsName = ctx.prefix("ProcessProps");
 
-    const defaultOptionsName = ctx.prefix("default");
+    const defaultOptionsName = ctx.prefix("default_Component");
     const resolvePropsName = ctx.prefix("resolveProps");
     const resolveSlotsName = ctx.prefix("defineSlots");
 

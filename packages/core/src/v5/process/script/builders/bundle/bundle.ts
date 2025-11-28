@@ -40,7 +40,7 @@ export function buildBundle(
 
           const imports = [...bundler.imports];
 
-          const defaultOptionsName = ctx.prefix("default");
+          const defaultOptionsName = ctx.prefix("default_Component");
           const resolvePropsName = ctx.prefix("resolveProps");
           const resolveSlotsName = ctx.prefix("defineSlots");
           ctx.blockNameResolver;
