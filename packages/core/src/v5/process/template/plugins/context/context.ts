@@ -5,11 +5,12 @@ import {
   TemplateTypes,
 } from "../../../../parser";
 import { ResolveOptionsFilename } from "../../../script";
-import { generateImport } from "../../../utils";
+import { createHelperImport, generateImport } from "../../../utils";
 import { TemplatePlugin } from "../../template";
 import { Slots } from "../../helpers/component";
 import { DEBUG } from "../../../../config";
 import { ProcessItemType } from "../../../types";
+import { AvailableExports } from "@verter/types/string";
 
 export const ContextPlugin = {
   name: "VerterContext",
@@ -19,10 +20,10 @@ export const ContextPlugin = {
         (x) => x.type === "script" && x.block.tag.attributes.setup
       ) !== undefined;
 
-      ctx.items.push({
-        type: ProcessItemType.Import,
-        from: '$verter/tsx$',
-      })
+    ctx.items.push({
+      type: ProcessItemType.Import,
+      from: "$verter/tsx$",
+    });
 
     const options = ResolveOptionsFilename(ctx);
 
@@ -31,6 +32,14 @@ export const ContextPlugin = {
     const DefaultName = ctx.prefix("Component");
     const ComponentInstanceName = ctx.prefix("ComponentInstance");
     const instance = ctx.prefix("Instance");
+    const SlotsToRender = ctx.prefix("SlotsToRender" as AvailableExports);
+    const ExtractComponents = ctx.prefix(
+      "extractComponents" as AvailableExports
+    );
+
+    ctx.items.push(
+      createHelperImport(["SlotsToRender", "extractComponents"], ctx.prefix)
+    );
 
     const macros = isSetup ? [] : [];
 
@@ -38,14 +47,14 @@ export const ContextPlugin = {
       {
         from: `./${options}`,
         items: [
-          {name: TemplateBindingName },
-          {name: FullContextName },
+          { name: TemplateBindingName },
+          { name: FullContextName },
           {
             name: DefaultName,
           },
           {
-            name: instance
-          }
+            name: instance,
+          },
         ],
       },
     ]);
@@ -67,11 +76,11 @@ export const ContextPlugin = {
       .map((x) => (ctx.isTS ? `...({} as ${x})` : `...${x}`));
     const ctxStr = `const ${CTX} = {${[
       `...${ComponentInstanceName}`,
-      `...${
-        ctx.isTS
-          ? `({} as Required<typeof ${DefaultName}.components> & {})`
-          : `${DefaultName}.components`
-      }`,
+      // `...${
+      //   ctx.isTS
+      //     ? `({} as Required<typeof ${DefaultName}.components> & {})`
+      //     : `${DefaultName}.components`
+      // }`,
       // // `...${macros.map(([name, prop]) => `${name}(${prop})`).join(",")}`,
       // ...macros.map(
       //   ([name, prop]) =>
@@ -79,6 +88,18 @@ export const ContextPlugin = {
       // ),
       ...ctxItems,
     ].join(",")}};`;
+
+    const components = ctx.prefix("components");
+    const componentsStr = `const ${components} = ${ExtractComponents}({
+  ${[
+    // `...${
+    //   ctx.isTS
+    //     ? `({} as Required<typeof ${DefaultName}.components> & {})`
+    //     : `${DefaultName}.components`
+    // }`,
+    `...${CTX}`,
+  ].join(",\n")}
+})`;
 
     const slotsCtx = `const ${ctx.prefix("$slot")} = ${CTX}['$slots'];`;
 
@@ -88,8 +109,9 @@ export const ContextPlugin = {
           `const ___DEBUG_ComponentInstance = ${ComponentInstanceName};`,
           `const ___DEBUG_Instance = ({} as ${instance}${generic});`,
           `const ___DEBUG_Default = ${DefaultName};`,
+          `const ___DEBUG_Components = ${components};`,
           // `const ___DEBUG_Props = ({} as ___VERTER___resolveProps${generic});`,
-          `const ___DEBUG_Components = ({} as Required<typeof ___VERTER___default.components> & {});`,
+          // `const ___DEBUG_Components = ({} as Required<typeof ___VERTER___default.components> & {});`,
           `const ___DEBUG_FullContext = ({} as ___VERTER___FullContext${generic});`,
           // `const ___DEBUG_Binding = ({} as ___VERTER___TemplateBinding${generic});`,
           // `const ___DEBUG_Slots = ___VERTER___ctx['$slots'];`,
@@ -97,20 +119,20 @@ export const ContextPlugin = {
       : "";
     s.prependLeft(
       ctx.block.block.block.loc.start.offset,
-      [instanceStr, ctxStr, slotsCtx, debuggers].join("\n")
+      [instanceStr, ctxStr, componentsStr, slotsCtx, debuggers].join("\n")
     );
 
     // add slots Helper
     // s.append(Slots.withPrefix(ctx.prefix("")).content);
 
-//     s.append(`
-//       declare function ${ctx.prefix(
-//         "slotRender"
-//       )}<T extends (...args: any[]) => any>(slot: T): (cb: T)=>any;
-// export declare function ${ctx.prefix("StrictRenderSlot")}<
-//   T extends (...args: any[]) => any,
-//   Single extends boolean = ReturnType<T> extends Array<any> ? false : true
-// >(slot: T, children: Single extends true ? [ReturnType<T>] : ReturnType<T>): any;`);
+    //     s.append(`
+    //       declare function ${ctx.prefix(
+    //         "slotRender"
+    //       )}<T extends (...args: any[]) => any>(slot: T): (cb: T)=>any;
+    // export declare function ${ctx.prefix("StrictRenderSlot")}<
+    //   T extends (...args: any[]) => any,
+    //   Single extends boolean = ReturnType<T> extends Array<any> ? false : true
+    // >(slot: T, children: Single extends true ? [ReturnType<T>] : ReturnType<T>): any;`);
     // patch TSX
     if (false)
       s.prepend(`

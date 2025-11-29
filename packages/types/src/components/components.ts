@@ -89,6 +89,10 @@ export type ExtractComponents<T, Default = {}> = Prettify<
     : O
   : never;
 
+export declare function extractComponents<T>(
+  obj: T
+): ExtractComponents<T, {}>;
+
 // Extracts only Vue components from an object, deeply removing non-component properties
 // export type ExtractComponents<T> = OmitNever<ExtractComponentsRaw<T>>;
 

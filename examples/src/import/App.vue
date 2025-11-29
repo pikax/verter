@@ -22,4 +22,6 @@ const f = new Foo();
     ___VERTER___slotInstance.$slots.foo
     }"/>
   <Comp />
+
+  {{ ___DEBUG_Components}}
 </template>
