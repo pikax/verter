@@ -24,30 +24,45 @@ describe("components helpers", () => {
       type R = GetVueComponent<typeof MyEl>;
       assertType<R>({} as MyEl);
       assertType<MyEl>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("function returning void -> Comment", () => {
       type R = GetVueComponent<() => void>;
       assertType<R>({} as typeof import("vue").Comment);
       assertType<typeof import("vue").Comment>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("function returning array -> Fragment", () => {
       type R = GetVueComponent<() => number[]>;
       assertType<R>({} as typeof import("vue").Fragment);
       assertType<typeof import("vue").Fragment>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("function returning other -> HTMLElement", () => {
       type R = GetVueComponent<() => string>;
       assertType<R>({} as HTMLElement);
       assertType<HTMLElement>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("direct HTMLElement type preserved", () => {
       type R = GetVueComponent<HTMLDivElement>;
       assertType<R>({} as HTMLDivElement);
       assertType<HTMLDivElement>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("works with defineComponent constructor", () => {
@@ -56,6 +71,9 @@ describe("components helpers", () => {
       type Expected = InstanceType<Comp>;
       assertType<R>({} as Expected);
       assertType<Expected>({} as R);
+
+      // Note: defineComponent without args has loose types, so R accepts any type
+      // This is expected Vue behavior - no @ts-expect-error here
     });
 
     it("Vue built-ins (KeepAlive)", () => {
@@ -63,6 +81,9 @@ describe("components helpers", () => {
       type Expected = InstanceType<typeof KeepAlive>;
       assertType<R>({} as Expected);
       assertType<Expected>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("Vue built-ins (Transition)", () => {
@@ -70,6 +91,9 @@ describe("components helpers", () => {
       type R = GetVueComponent<typeof Transition>;
       assertType<R>({} as typeof import("vue").Comment);
       assertType<typeof import("vue").Comment>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("Vue built-ins (TransitionGroup)", () => {
@@ -77,6 +101,9 @@ describe("components helpers", () => {
       type Expected = InstanceType<typeof TransitionGroup>;
       assertType<R>({} as Expected);
       assertType<Expected>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("Vue built-ins (Teleport)", () => {
@@ -84,6 +111,9 @@ describe("components helpers", () => {
       type Expected = InstanceType<typeof Teleport>;
       assertType<R>({} as Expected);
       assertType<Expected>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("Vue built-ins (Suspense)", () => {
@@ -91,6 +121,9 @@ describe("components helpers", () => {
       type Expected = InstanceType<typeof Suspense>;
       assertType<R>({} as Expected);
       assertType<Expected>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("function component returning VNode -> HTMLElement", () => {
@@ -98,6 +131,9 @@ describe("components helpers", () => {
       type R = GetVueComponent<FC>;
       assertType<R>({} as HTMLElement);
       assertType<HTMLElement>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("function component returning VNode[] -> Fragment", () => {
@@ -105,6 +141,9 @@ describe("components helpers", () => {
       type R = GetVueComponent<FC>;
       assertType<R>({} as typeof import("vue").Fragment);
       assertType<typeof import("vue").Fragment>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("function component returning void -> Comment", () => {
@@ -112,6 +151,9 @@ describe("components helpers", () => {
       type R = GetVueComponent<FC>;
       assertType<R>({} as typeof import("vue").Comment);
       assertType<typeof import("vue").Comment>({} as R);
+
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
 
     it("non-component types yield never", () => {
@@ -131,16 +173,25 @@ describe("components helpers", () => {
       it("preserves name type", () => {
         type Options = ReturnType<typeof DefineOptions<{ name: "MyComponent" }, "MyComponent", never>>;
         assertType<Options>({} as { name: "MyComponent" });
+
+        // @ts-expect-error - Options is not any/unknown, should not accept unrelated types
+        assertType<Options>({} as { unrelated: true });
       });
 
       it("preserves inheritAttrs type", () => {
         type Options = ReturnType<typeof DefineOptions<{ inheritAttrs: false }, never, false>>;
         assertType<Options>({} as { inheritAttrs: false });
+
+        // @ts-expect-error - Options is not any/unknown, should not accept unrelated types
+        assertType<Options>({} as { unrelated: true });
       });
 
       it("preserves both name and inheritAttrs", () => {
         type Options = ReturnType<typeof DefineOptions<{ name: "MyComponent"; inheritAttrs: false }, "MyComponent", false>>;
         assertType<Options>({} as { name: "MyComponent"; inheritAttrs: false });
+
+        // @ts-expect-error - Options is not any/unknown, should not accept unrelated types
+        assertType<Options>({} as { unrelated: true });
       });
 
       it("allows empty object", () => {

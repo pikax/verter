@@ -125,6 +125,26 @@ const { s, source, result } = processMacrosForSourcemap(code);
 const map = s.generateMap({ source: "test.vue" });
 ```
 
+**Type testing best practices** (packages/types/):
+- Always include **both** a positive assertion and a `@ts-expect-error` negative assertion
+- This prevents `any`/`unknown` types from silently passing tests
+- Use `{ unrelated: true }` as the test value for negative assertions
+
+```typescript
+it("type is correctly inferred", () => {
+  type Result = SomeTypeHelper<Input>;
+  
+  // Positive assertion - type matches expected
+  assertType<Result>({} as ExpectedType);
+  assertType<ExpectedType>({} as Result);
+  
+  // @ts-expect-error - Result is not any/unknown, should not accept unrelated types
+  assertType<Result>({} as { unrelated: true });
+});
+```
+
+**Important**: If the `@ts-expect-error` line does NOT produce an error, it means the type is `any` or too wide, and the type helper needs to be fixed.
+
 ## Development Workflow
 
 ```bash
