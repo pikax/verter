@@ -53,6 +53,14 @@ export type PartialUndefined<T> = {
   ? Omit<T, U> & Partial<Pick<T, U>>
   : T;
 
+/**
+ * A utility type that omits properties of type `never` from an object type `T`.
+ * Properties with type `never` are removed from the resulting type.
+ */
+export type OmitNever<T> = {
+  [K in keyof T as [T[K]] extends [never] ? never : K]: T[K];
+};
+
 //  --- External Sources ---
 
 // Source - https://stackoverflow.com/a

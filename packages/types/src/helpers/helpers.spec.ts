@@ -13,6 +13,7 @@ import {
   IntersectionFunctionToObject,
   UnionToIntersection,
   PartialUndefined,
+  OmitNever,
 } from "./helpers";
 
 describe("Helpers", () => {
@@ -582,6 +583,251 @@ describe("Helpers", () => {
         result.id;
         result.name;
       });
+    });
+  });
+
+  // @ai-generated - Tests OmitNever type helper with various scenarios
+  describe("OmitNever", () => {
+    it("removes properties with never type", () => {
+      type Original = {
+        a: string;
+        b: never;
+        c: number;
+      };
+
+      type Result = OmitNever<Original>;
+      type Expected = {
+        a: string;
+        c: number;
+      };
+
+      assertType<Result>({} as Expected);
+      assertType<Expected>({} as Result);
+
+      // @ts-expect-error - Result is not any/unknown, should not accept unrelated types
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("keeps all properties when none are never", () => {
+      type Original = {
+        a: string;
+        b: number;
+        c: boolean;
+      };
+
+      type Result = OmitNever<Original>;
+
+      assertType<Result>({} as Original);
+      assertType<Original>({} as Result);
+
+      // @ts-expect-error - Result is not any/unknown, should not accept unrelated types
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("returns empty object when all properties are never", () => {
+      type Original = {
+        a: never;
+        b: never;
+        c: never;
+      };
+
+      type Result = OmitNever<Original>;
+      type Expected = {};
+
+      assertType<Result>({} as Expected);
+      // Empty object accepts any object, so we test the other direction
+      assertType<Expected>({} as Result);
+    });
+
+    it("handles empty object", () => {
+      type Original = {};
+
+      type Result = OmitNever<Original>;
+
+      assertType<Result>({} as Original);
+      assertType<Original>({} as Result);
+    });
+
+    it("preserves optional properties that are not never", () => {
+      type Original = {
+        a: string;
+        b?: number;
+        c: never;
+        d?: never;
+      };
+
+      type Result = OmitNever<Original>;
+      type Expected = {
+        a: string;
+        b?: number;
+      };
+
+      assertType<Result>({} as Expected);
+      assertType<Expected>({} as Result);
+
+      // @ts-expect-error - Result is not any/unknown, should not accept unrelated types
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("handles union types that include never", () => {
+      type Original = {
+        a: string | never; // simplifies to string
+        b: never;
+        c: number;
+      };
+
+      type Result = OmitNever<Original>;
+      type Expected = {
+        a: string;
+        c: number;
+      };
+
+      assertType<Result>({} as Expected);
+      assertType<Expected>({} as Result);
+
+      // @ts-expect-error - Result is not any/unknown, should not accept unrelated types
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("handles readonly properties", () => {
+      type Original = {
+        readonly a: string;
+        readonly b: never;
+        c: number;
+      };
+
+      type Result = OmitNever<Original>;
+      type Expected = {
+        readonly a: string;
+        c: number;
+      };
+
+      assertType<Result>({} as Expected);
+      assertType<Expected>({} as Result);
+
+      // @ts-expect-error - Result is not any/unknown, should not accept unrelated types
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("does not remove properties with undefined or null", () => {
+      type Original = {
+        a: undefined;
+        b: null;
+        c: never;
+        d: string;
+      };
+
+      type Result = OmitNever<Original>;
+      type Expected = {
+        a: undefined;
+        b: null;
+        d: string;
+      };
+
+      assertType<Result>({} as Expected);
+      assertType<Expected>({} as Result);
+
+      // @ts-expect-error - Result is not any/unknown, should not accept unrelated types
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("handles nested objects (shallow - does not recurse)", () => {
+      type Original = {
+        a: string;
+        b: never;
+        nested: {
+          x: number;
+          y: never;
+        };
+      };
+
+      type Result = OmitNever<Original>;
+      type Expected = {
+        a: string;
+        nested: {
+          x: number;
+          y: never; // OmitNever is shallow, doesn't recurse
+        };
+      };
+
+      assertType<Result>({} as Expected);
+      assertType<Expected>({} as Result);
+
+      // @ts-expect-error - Result is not any/unknown, should not accept unrelated types
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("handles function properties", () => {
+      type Original = {
+        fn: () => void;
+        removed: never;
+        anotherFn: (x: number) => string;
+      };
+
+      type Result = OmitNever<Original>;
+      type Expected = {
+        fn: () => void;
+        anotherFn: (x: number) => string;
+      };
+
+      assertType<Result>({} as Expected);
+      assertType<Expected>({} as Result);
+
+      // @ts-expect-error - Result is not any/unknown, should not accept unrelated types
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("handles array properties", () => {
+      type Original = {
+        arr: string[];
+        removed: never;
+        tuple: [number, string];
+      };
+
+      type Result = OmitNever<Original>;
+      type Expected = {
+        arr: string[];
+        tuple: [number, string];
+      };
+
+      assertType<Result>({} as Expected);
+      assertType<Expected>({} as Result);
+
+      // @ts-expect-error - Result is not any/unknown, should not accept unrelated types
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("handles symbol and number keys", () => {
+      const sym = Symbol("test");
+      type Original = {
+        [sym]: string;
+        0: number;
+        removed: never;
+        normal: boolean;
+      };
+
+      type Result = OmitNever<Original>;
+      type Expected = {
+        [sym]: string;
+        0: number;
+        normal: boolean;
+      };
+
+      assertType<Result>({} as Expected);
+      assertType<Expected>({} as Result);
+    });
+
+    it("works with index signatures", () => {
+      type Original = {
+        [key: string]: string | never;
+        specific: never;
+      };
+
+      type Result = OmitNever<Original>;
+
+      // The index signature remains, only 'specific' is removed
+      const result: Result = { anyKey: "value" };
+      result.anyKey;
     });
   });
 });
