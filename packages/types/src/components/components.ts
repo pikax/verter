@@ -1,4 +1,6 @@
 import { defineComponent } from "vue";
+import { OmitNever } from "../helpers";
+import { Prettify } from "../setup";
 
 export type GetVueComponent<T> = T extends { new (): infer I }
   ? I
@@ -34,22 +36,61 @@ export declare function retrieveInstance<
   props: P
 ): Omit<InstanceType<C>, "$props"> & { $props: InstanceType<C>["$props"] & P };
 
-// Helper to omit keys where the value is never
-type OmitNever<T> = {
-  [K in keyof T as [T[K]] extends [never] ? never : K]: T[K];
-};
-
-// Internal helper that extracts components but leaves never for non-components
-type ExtractComponentsRaw<T> = {
-  [K in keyof T]: T[K] extends GetVueComponent<T[K]>
-    ? T[K]
-    : T[K] extends Record<string, any>
-      ? OmitNever<ExtractComponentsRaw<T[K]>>
-      : never;
-};
+/**
+ * Extracts only valid Vue component types from an object, deeply removing non-component properties.
+ *
+ * This utility type recursively traverses an object structure and:
+ * - Keeps properties that are valid Vue components (class constructors, functional components, HTMLElements)
+ * - Recursively processes nested objects to extract components at any depth
+ * - Removes properties that are not Vue components (primitives, non-component objects, etc.)
+ *
+ * Use case: Extract renderable components from a build context or module exports,
+ * filtering out non-component values like constants, utilities, or configuration objects.
+ *
+ * @example
+ * ```ts
+ * const context = {
+ *   MyButton: defineComponent({ ... }),
+ *   MyInput: defineComponent({ ... }),
+ *   config: { theme: 'dark' },
+ *   utils: {
+ *     helper: () => {},
+ *     NestedComp: defineComponent({ ... })
+ *   }
+ * };
+ *
+ * type Components = ExtractComponents<typeof context>;
+ * // Result: {
+ * //   MyButton: typeof MyButton;
+ * //   MyInput: typeof MyInput;
+ * //   utils: {
+ * //     NestedComp: typeof NestedComp;
+ * //   }
+ * // }
+ * ```
+ *
+ * @typeParam T - The object type to extract components from
+ */
+export type ExtractComponents<T, Default = {}> = Prettify<
+  OmitNever<{
+    [K in keyof T]: GetVueComponent<T[K]> extends never
+      ? T[K] extends Array<infer U>
+        ? U extends Record<string, any>
+          ? ExtractComponents<U, never>
+          : never
+        : T[K] extends Record<string, any>
+        ? ExtractComponents<T[K], never>
+        : never
+      : T[K];
+  }>
+> extends infer O
+  ? {} extends O
+    ? Default
+    : O
+  : never;
 
 // Extracts only Vue components from an object, deeply removing non-component properties
-export type ExtractComponents<T> = OmitNever<ExtractComponentsRaw<T>>;
+// export type ExtractComponents<T> = OmitNever<ExtractComponentsRaw<T>>;
 
 const foo = {
   Comp: defineComponent({}),
@@ -66,6 +107,9 @@ const foo = {
       Comp3: defineComponent({}),
     },
   },
+  config: {
+    theme: "dark",
+  },
 };
 
 const extracted = {} as ExtractComponents<typeof foo>;
@@ -73,8 +117,13 @@ const extracted = {} as ExtractComponents<typeof foo>;
 extracted.Comp;
 extracted.deep.Comp2;
 extracted.deeper.even.Comp3;
+extracted.deep;
+
+// @ts-expect-error
+extracted.config;
+
 // @ts-expect-error - b is not a component
-extracted.extracted.extracted.b;
+extracted.b;
 // @ts-expect-error - Teleport is not included because it's not a component constructor
 extracted.deep.not;
 // @ts-expect-error - Teleport is not included because it's not a component constructor
