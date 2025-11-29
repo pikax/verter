@@ -7,6 +7,8 @@
     "rootDir": "./src",
     "target": "ESNext",
     "module": "ESNext",
-    "moduleResolution": "Bundler"
+    "moduleResolution": "Bundler",
+    "jsx": "preserve",
+    "jsxImportSource": "vue"
   }
 }
