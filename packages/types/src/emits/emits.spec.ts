@@ -1,3 +1,10 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for emit type helpers including:
+ * - EmitsToProps: converts emit functions to prop event handlers
+ * - ComponentEmitsToProps: extracts emits from defineComponent and converts to props
+ * - Validates correct typing of event handlers (onEvent pattern)
+ */
 import { describe, it, assertType } from "vitest";
 import { EmitsToProps, ComponentEmitsToProps } from "./emits";
 import { UnionToIntersection } from "../helpers";

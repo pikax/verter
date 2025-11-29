@@ -1,3 +1,10 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for defineProps type helpers including:
+ * - PropsWithDefaults: tracks which props have defaults
+ * - MakePublicProps/MakeInternalProps: handles optional vs required props
+ * - Validates withDefaults integration and prop type inference
+ */
 import { describe, assertType, it } from "vitest";
 import type { DefineProps } from "vue";
 import type {

@@ -1,3 +1,11 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for Vue component instance type helpers including:
+ * - ToInstanceProps, CreateTypedPublicInstanceFromNormalisedMacro
+ * - InternalInstanceFromMacro, PublicInstanceFromNormalisedMacro
+ * - CreateExportedInstanceFromNormalisedMacro, CreateExportedInstanceFromMacro
+ * - Verifies props/models are accessible on instances and ComponentPublicInstance compatibility
+ */
 import { describe, it, assertType } from "vitest";
 import type {
   ModelRef,

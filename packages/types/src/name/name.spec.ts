@@ -1,3 +1,10 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for string case conversion type helpers including:
+ * - PascalToKebab, CamelToKebab: component name transformations
+ * - CanCapitalize: validates capitalizable strings
+ * - Used for Vue component name resolution
+ */
 import { describe, it, assertType } from "vitest";
 import type {
   CanCapitalize,

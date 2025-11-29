@@ -1,3 +1,8 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for infer-function plugin that handles function inference in SFC script.
+ * Validates correct transformation of inferred function types.
+ */
 import { MagicString } from "@vue/compiler-sfc";
 import { parser, TemplateTypes } from "../../../../parser";
 import {

@@ -1,3 +1,9 @@
+/**
+ * @ai-generated - Tests in this file were largely generated with AI assistance.
+ * Tests macro transformations for defineProps, defineEmits, defineModel,
+ * defineSlots, defineExpose, withDefaults - covering JS/TS variants,
+ * type-only vs runtime definitions, and sourcemap preservation.
+ */
 import { MagicString } from "@vue/compiler-sfc";
 import { parser } from "../../../../parser";
 import { ParsedBlockScript } from "../../../../parser/types";

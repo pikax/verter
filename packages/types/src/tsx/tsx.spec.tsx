@@ -1,3 +1,10 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for TSX/JSX type augmentations including:
+ * - v-slot directive typing on native elements
+ * - Component slot typing in JSX
+ * - Validates Vue JSX integration
+ */
 import { assertType, describe, expect, it } from "vitest";
 import { defineComponent, SlotsType, ref } from "vue";
 import "./tsx";

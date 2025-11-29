@@ -1,3 +1,9 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for Vue built-in component type augmentations including:
+ * - KeepAlive, Transition, TransitionGroup, Teleport, Suspense
+ * - Verifies slot typing and prop types for built-in components
+ */
 import { describe, it, assertType } from "vitest";
 import type { defineComponent, VNode } from "vue";
 import {

@@ -1,3 +1,10 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for core type utility helpers including:
+ * - PatchHidden/ExtractHidden: hidden type metadata pattern
+ * - FunctionToObject, UnionToIntersection, Prettify
+ * - IsAny, IsNever, IsUnknown type guards
+ */
 import { describe, it, assertType } from "vitest";
 import {
   ExtractHidden,

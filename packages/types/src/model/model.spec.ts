@@ -1,3 +1,10 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for defineModel type helpers including:
+ * - ModelToProps: extracts prop types from model definitions
+ * - ModelToEmits: generates update:modelValue emit types
+ * - Handles ModelRef, required/optional models, custom model names
+ */
 import { describe, it, assertType } from "vitest";
 import type { ModelRef } from "vue";
 import type { ModelToProps, ModelToEmits } from "./model";

@@ -1,3 +1,8 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Verifies all public types are properly exported from @verter/types package.
+ * Ensures type helpers, props, emits, slots, model, instance types are accessible.
+ */
 // This file verifies that all types are properly exported from the package
 import { describe, it, assertType } from "vitest";
 

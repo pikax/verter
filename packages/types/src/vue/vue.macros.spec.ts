@@ -1,3 +1,10 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for Vue macro type augmentations (_Box types) including:
+ * - defineProps_Box, withDefaults_Box, defineEmits_Box
+ * - defineModel_Box, defineSlots_Box, defineExpose_Box
+ * - Validates hidden metadata extraction from macro returns
+ */
 import { describe, it, assertType } from "vitest";
 import type { ExtractHidden } from "../helpers";
 import {

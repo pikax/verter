@@ -1,3 +1,9 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for slot type helpers including:
+ * - StrictRenderSlot: type-safe slot rendering with required props
+ * - Validates slot prop typing and VNode return types
+ */
 import "vue/jsx";
 import { assertType, describe, it } from "vitest";
 import { defineComponent, SlotsType } from "vue";

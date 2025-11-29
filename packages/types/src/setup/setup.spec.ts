@@ -1,3 +1,10 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for macro return type system including:
+ * - MacroReturn, NormalisedMacroReturn: setup() return type metadata
+ * - createMacroReturn: helper for building typed macro returns
+ * - NormaliseMacroReturn: normalizes various macro formats
+ */
 import { describe, it, assertType, expect } from "vitest";
 import {
   ReturnMacros,

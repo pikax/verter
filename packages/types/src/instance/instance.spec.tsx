@@ -1,3 +1,10 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * TSX integration tests for instance types including:
+ * - PublicInstanceFromMacro with generic components
+ * - CreateExportedInstanceFromMacro JSX usage
+ * - Validates ref typing and component instance access in TSX
+ */
 import "vue/jsx";
 import "../tsx/tsx";
 import { defineProps, defineEmits, useTemplateRef } from "vue";

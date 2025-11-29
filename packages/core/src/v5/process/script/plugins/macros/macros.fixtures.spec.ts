@@ -1,3 +1,8 @@
+/**
+ * @ai-generated - This test file was generated with AI assistance.
+ * Tests for macro fixture generation utilities.
+ * Validates createFixtures helper for generating test cases for macro transformations.
+ */
 import * as ts from "typescript";
 import { createFixtures } from "./macros.fixtures";
 import type {
