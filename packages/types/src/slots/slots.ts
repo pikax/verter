@@ -52,10 +52,49 @@ export declare function StrictRenderSlot<T extends (...args: any[]) => any, U>(
     : ReturnType<T>
 ): any;
 
+/**
+ * Converts Vue slot types into JSX-compatible component types for rendering slots as components.
+ *
+ * This utility type transforms a slots object (typically from `$slots` or `SlotsType`) into an object
+ * where each slot becomes a component constructor that can be used in JSX/TSX templates.
+ *
+ * The transformation:
+ * - Slot functions with props `(props: P) => any` become `{ new(): { $props: P } }`
+ * - Slot functions without props `() => any` become `{ new(): { $props: {} } }`
+ * - Non-function slots fallback to `{ new(): { $props: {} } }`
+ *
+ * Use case: Render typed slots as JSX components while preserving prop type safety.
+ *
+ * @example
+ * ```ts
+ * const Component = defineComponent({
+ *   slots: {} as SlotsType<{
+ *     default: (props: { msg: string }) => any;
+ *     header: (props: { title: string }) => any;
+ *     footer: () => any;
+ *   }>
+ * });
+ *
+ * type Slots = SlotsToRender<typeof Component.$slots>;
+ * // Result: {
+ * //   default: { new(): { $props: { msg: string } } };
+ * //   header: { new(): { $props: { title: string } } };
+ * //   footer: { new(): { $props: {} } };
+ * // }
+ *
+ * // Usage in JSX:
+ * const RenderSlots = {} as Slots;
+ * <RenderSlots.default msg="hello" />
+ * <RenderSlots.header title="Page Title" />
+ * <RenderSlots.footer />
+ * ```
+ *
+ * @typeParam T - The slots type object, typically from `$slots` or defined via `SlotsType`
+ */
 export type SlotsToRender<T> = {
   [K in keyof T]: T[K] extends (props: infer P) => any
     ? { new (): { $props: P & {} } }
     : T[K] extends () => any
-      ? { new (): { $props: {} } }
-      : { new (): { $props: {} } };
+    ? { new (): { $props: {} } }
+    : { new (): { $props: {} } };
 };

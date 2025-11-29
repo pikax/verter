@@ -127,8 +127,10 @@ const map = s.generateMap({ source: "test.vue" });
 
 **Type testing best practices** (packages/types/):
 - Always include **both** a positive assertion and a `@ts-expect-error` negative assertion
-- This prevents `any`/`unknown` types from silently passing tests
-- Use `{ unrelated: true }` as the test value for negative assertions
+- This prevents `any`/`unknown`/`never` types from silently passing tests
+- Use `assertType<{ unrelated: true }>({} as Result)` - this single check catches both:
+  - `any`/`unknown` (type is too wide, assignable to anything)
+  - `never` (type is too narrow, assignable to anything)
 
 ```typescript
 it("type is correctly inferred", () => {
@@ -138,12 +140,12 @@ it("type is correctly inferred", () => {
   assertType<Result>({} as ExpectedType);
   assertType<ExpectedType>({} as Result);
   
-  // @ts-expect-error - Result is not any/unknown, should not accept unrelated types
-  assertType<Result>({} as { unrelated: true });
+  // @ts-expect-error - Result is not any/unknown/never, should not be assignable to unrelated types
+  assertType<{ unrelated: true }>({} as Result);
 });
 ```
 
-**Important**: If the `@ts-expect-error` line does NOT produce an error, it means the type is `any` or too wide, and the type helper needs to be fixed.
+**Important**: If the `@ts-expect-error` does NOT produce an error, the type is `any`, `unknown`, or `never`.
 
 ## Development Workflow
 

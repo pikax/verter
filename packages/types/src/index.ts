@@ -4,6 +4,7 @@ export * from "./helpers";
 export * from "./instance";
 export * from "./model";
 export * from "./name";
+export * from "./render";
 export * from "./props";
 export * from "./setup";
 export * from "./slots";
