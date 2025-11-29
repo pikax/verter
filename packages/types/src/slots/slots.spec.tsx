@@ -10,7 +10,7 @@
 import "../tsx/tsx";
 import { assertType, describe, it } from "vitest";
 import { defineComponent, SlotsType } from "vue";
-import { SlotsToRender, StrictRenderSlot } from "./slots";
+import { SlotsToRender } from "./slots";
 
 describe("SlotsToRender", () => {
   describe("basic slot props", () => {
@@ -343,7 +343,9 @@ describe("SlotsToRender", () => {
     describe("literal types", () => {
       const Component = new (defineComponent({
         slots: {} as SlotsType<{
-          default: (props: { status: "active" | "inactive" | "pending" }) => any;
+          default: (props: {
+            status: "active" | "inactive" | "pending";
+          }) => any;
         }>,
       }))();
 
@@ -464,7 +466,10 @@ describe("SlotsToRender", () => {
     describe("generic-like patterns", () => {
       const Component = new (defineComponent({
         slots: {} as SlotsType<{
-          default: (props: { data: unknown; render: (item: unknown) => any }) => any;
+          default: (props: {
+            data: unknown;
+            render: (item: unknown) => any;
+          }) => any;
         }>,
       }))();
 
@@ -474,7 +479,10 @@ describe("SlotsToRender", () => {
         <>
           <RenderSlots.default data="string" render={(item) => item} />
           <RenderSlots.default data={123} render={(item) => item} />
-          <RenderSlots.default data={{ complex: true }} render={(item) => item} />
+          <RenderSlots.default
+            data={{ complex: true }}
+            render={(item) => item}
+          />
         </>;
       });
     });
@@ -769,7 +777,9 @@ describe("SlotsToRender", () => {
       type Slots = SlotsToRender<typeof Component.$slots>;
 
       // Assert the structure of the resulting type
-      assertType<Slots["default"]>({} as { new (): { $props: { msg: string } } });
+      assertType<Slots["default"]>(
+        {} as { new (): { $props: { msg: string } } }
+      );
     });
 
     it("preserves optional props in $props", () => {

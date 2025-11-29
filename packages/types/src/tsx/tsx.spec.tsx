@@ -1,3 +1,4 @@
+/// <reference types="vue/jsx" />
 /**
  * @ai-generated - This test file was generated with AI assistance.
  * Tests for TSX/JSX type augmentations including:
