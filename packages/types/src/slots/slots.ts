@@ -54,6 +54,8 @@ export declare function StrictRenderSlot<T extends (...args: any[]) => any, U>(
 
 export type SlotsToRender<T> = {
   [K in keyof T]: T[K] extends (props: infer P) => any
-    ? { new (): { $props: P } }
-    : {};
+    ? { new (): { $props: P & {} } }
+    : T[K] extends () => any
+      ? { new (): { $props: {} } }
+      : { new (): { $props: {} } };
 };

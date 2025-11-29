@@ -1,3 +1,4 @@
+/// <reference types="vue/jsx" />
 /**
  * @ai-generated - This test file was generated with AI assistance.
  * Tests for SlotsToRender type helper including:
@@ -257,7 +258,7 @@ describe("SlotsToRender", () => {
         default: (props: { msg: string }) => any;
         header: (props: { title: string }) => any;
         footer: (props: { year: number }) => any;
-        empty: (props: Record<string, never>) => any;
+        empty: () => any;
       }>,
     }))();
 
@@ -297,8 +298,8 @@ describe("SlotsToRender", () => {
     const Component = new (defineComponent({
       slots: {} as SlotsType<{
         // Slots without props should use empty object type for proper JSX compatibility
-        default: (props: Record<string, never>) => any;
-        header: (props: Record<string, never>) => any;
+        default: () => any;
+        header: () => any;
       }>,
     }))();
 
@@ -493,7 +494,7 @@ describe("SlotsToRender", () => {
       slots: {} as SlotsType<{
         default: (props: { msg: string }) => any;
         header?: (props: { title: string }) => any;
-        footer?: (props: Record<string, never>) => any;
+        footer?: () => any;
       }>,
     }))();
 
@@ -524,7 +525,7 @@ describe("SlotsToRender", () => {
     describe("empty props object", () => {
       const Component = new (defineComponent({
         slots: {} as SlotsType<{
-          default: (props: Record<string, never>) => any;
+          default: () => any;
         }>,
       }))();
 
@@ -651,7 +652,7 @@ describe("SlotsToRender", () => {
             column: Column<TableItem>;
           }) => any;
           header: (props: { columns: Column<TableItem>[] }) => any;
-          empty: (props: Record<string, never>) => any;
+          empty: () => any;
           loading: (props: { progress: number }) => any;
         }>,
       }))();
@@ -716,7 +717,7 @@ describe("SlotsToRender", () => {
           }) => any;
           label: (props: { required: boolean }) => any;
           error: (props: { message: string }) => any;
-          hint: (props: Record<string, never>) => any;
+          hint: () => any;
         }>,
       }))();
 
@@ -807,7 +808,7 @@ describe("SlotsToRender", () => {
 
       // For slots without props (no parameter), the inferred P is `unknown`
       // This results in { new(): { $props: unknown } }
-      assertType<Slots["default"]>({} as { new (): { $props: unknown } });
+      assertType<Slots["default"]>({} as { new (): { $props: {} } });
     });
 
     it("non-function slot produces fallback type", () => {
@@ -818,11 +819,9 @@ describe("SlotsToRender", () => {
 
       type Result = SlotsToRender<NonFunctionSlots>;
 
-      // Non-function slots don't match the conditional, so they become () => any
-      const defaultSlot: Result["default"] = () => "anything";
-      const headerSlot: Result["header"] = () => 123;
-      assertType<() => any>(defaultSlot);
-      assertType<() => any>(headerSlot);
+      // Non-function slots produce { new(): { $props: {} } } - a JSX component with empty props
+      assertType<{ new (): { $props: {} } }>({} as Result["default"]);
+      assertType<{ new (): { $props: {} } }>({} as Result["header"]);
     });
   });
 });
