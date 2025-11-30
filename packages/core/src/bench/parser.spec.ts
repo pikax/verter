@@ -7,18 +7,18 @@ describe("bench parser sanity tests", () => {
 </template>
 <script lang="ts">
 </script>`;
-    it("old", () => {
+    it.skip("old", () => {
       const { render } = parseOld(content);
 
       expect(render.content).toMatchSnapshot();
     });
-    it("new", () => {
+    it.skip("new", () => {
       const { render } = parse(content);
       expect(render.result).toMatchSnapshot();
     });
   });
 
-  describe.only("test file", () => {
+  describe("test file", () => {
     // console.log(Object.keys(ValidFiles));
     const content = ValidFiles["ContactInformation.vue"];
 
