@@ -28,3 +28,18 @@ export type ComponentEmitsToProps<T> = T extends new (
     ? EmitsToProps<EmitFn>
     : {}
   : {};
+
+export declare function eventCallbacks<
+  TArgs extends Array<any>,
+  R extends ($event: TArgs[0]) => any
+>(event: TArgs, cb: R): R;
+
+// function onFoo(e: number, b: string): void {}
+
+// declare function makeCallbacks<T extends (...args: any[]) => void>(
+//   o: T
+// ): undefined | ((cb: T) => void);
+
+// makeCallbacks(onFoo)((...args) => {
+//   eventCallbacks(args, (e) => {});
+// });

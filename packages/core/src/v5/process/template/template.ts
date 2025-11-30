@@ -52,7 +52,7 @@ export type TemplateAccessors =
   // slotRender, slotRender(ctx.$slots.default, (slotProps)=> [...])
   | "slotRender"
   // callback for events
-  | "eventCb"
+  | "eventCallbacks"
   // (...eventArgs) in the event callback
   | "eventArgs"
   // to retrieve the instance on a component or element Template

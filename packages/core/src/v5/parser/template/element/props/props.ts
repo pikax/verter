@@ -201,6 +201,11 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
         });
     }
 
+    const event = prop.name === "on";
+    if (event) {
+      context.ignoredIdentifiers.push("$event");
+    }
+
     return [
       {
         type: TemplateTypes.Prop,

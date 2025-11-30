@@ -7,14 +7,22 @@ const c = new Comp();
 // const Foo;
 const Foo = defineComponent({
   props: {
-    a: String
+    a: String,
   },
+  emits: {
+    foo: (a: { rr: 1 }) => true,
+  },
+
   data() {
     return {};
   },
   slots: {} as SlotsType<{
     foo: (args: { a: 1 }) => [];
   }>,
+
+  mounted() {
+    this.$emit("");
+  },
 });
 
 const f = new Foo();
@@ -28,7 +36,9 @@ const aa = {
 };
 </script>
 <template>
-  <Foo  >
+  <div></div>
+
+  <Foo>
     <template #foo="args">
       {{ ___VERTER___slotInstance.$slots.foo }}
       {{ ___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo) }}
@@ -36,6 +46,9 @@ const aa = {
     </template>
   </Foo>
   <Comp />
+  <Foo @foo="onFoo($event)"> </Foo>
+  <Foo @foo="$event"> </Foo>
+  <Foo :onFoo="(...args) => {}"> </Foo>
 
   <div></div>
 
