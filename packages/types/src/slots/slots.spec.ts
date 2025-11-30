@@ -7,7 +7,7 @@
 import "vue/jsx";
 import { assertType, describe, it } from "vitest";
 import { defineComponent, SlotsType } from "vue";
-import { StrictRenderSlot } from "./slots";
+import { strictRenderSlot } from "./slots";
 
 describe("StrictRenderSlot", () => {
   const TabItem = defineComponent({
@@ -46,113 +46,113 @@ describe("StrictRenderSlot", () => {
   const c = new Tab();
 
   it("accepts array children for array-returning slot", () => {
-    StrictRenderSlot(c.$slots.default, [TabItem, TabItem]);
-    StrictRenderSlot(c.$slots.default, []);
-    StrictRenderSlot(c.$slots.default, [TabItem]);
+    strictRenderSlot(c.$slots.default, [TabItem, TabItem]);
+    strictRenderSlot(c.$slots.default, []);
+    strictRenderSlot(c.$slots.default, [TabItem]);
     // @ts-expect-error wrong child type
-    StrictRenderSlot(c.$slots.default, [UnpatchedTabItems]);
+    strictRenderSlot(c.$slots.default, [UnpatchedTabItems]);
     // additional sanity: mixing non-matching type still errors
     // @ts-expect-error wrong child type in array
-    StrictRenderSlot(c.$slots.default, [TabItem, UnpatchedTabItems]);
+    strictRenderSlot(c.$slots.default, [TabItem, UnpatchedTabItems]);
   });
 
   it("requires single-element tuple for single-returning slot", () => {
-    StrictRenderSlot(c.$slots.single, [TabItem]);
+    strictRenderSlot(c.$slots.single, [TabItem]);
     // @ts-expect-error multiple children not allowed for single slot
-    StrictRenderSlot(c.$slots.single, [TabItem, TabItem]);
+    strictRenderSlot(c.$slots.single, [TabItem, TabItem]);
     // @ts-expect-error wrong child type
-    StrictRenderSlot(c.$slots.single, [UnpatchedTabItems]);
+    strictRenderSlot(c.$slots.single, [UnpatchedTabItems]);
   });
 
   it("requires non-empty array for notEmpty-returning slot", () => {
-    StrictRenderSlot(c.$slots.notEmpty, [TabItem]);
-    StrictRenderSlot(c.$slots.notEmpty, [TabItem, TabItem]);
+    strictRenderSlot(c.$slots.notEmpty, [TabItem]);
+    strictRenderSlot(c.$slots.notEmpty, [TabItem, TabItem]);
     // @ts-expect-error empty array not allowed
-    StrictRenderSlot(c.$slots.notEmpty, []);
+    strictRenderSlot(c.$slots.notEmpty, []);
     // @ts-expect-error wrong child type
-    StrictRenderSlot(c.$slots.notEmpty, [UnpatchedTabItems]);
+    strictRenderSlot(c.$slots.notEmpty, [UnpatchedTabItems]);
   });
 
   it("supports tuple-returning slot", () => {
-    StrictRenderSlot(c.$slots.tuple, [TabItem, TabItem]);
+    strictRenderSlot(c.$slots.tuple, [TabItem, TabItem]);
     // @ts-expect-error wrong number of children
-    StrictRenderSlot(c.$slots.tuple, [TabItem]);
+    strictRenderSlot(c.$slots.tuple, [TabItem]);
     // @ts-expect-error wrong child type
-    StrictRenderSlot(c.$slots.tuple, [TabItem, UnpatchedTabItems]);
+    strictRenderSlot(c.$slots.tuple, [TabItem, UnpatchedTabItems]);
   });
 
   it("support for string", () => {
-    StrictRenderSlot(c.$slots.string, ["just a string"]);
+    strictRenderSlot(c.$slots.string, ["just a string"]);
     // @ts-expect-error multiple strings allowed
-    StrictRenderSlot(c.$slots.string, ["one", "two"]);
+    strictRenderSlot(c.$slots.string, ["one", "two"]);
     // @ts-expect-error wrong type
-    StrictRenderSlot(c.$slots.string, [TabItem]);
+    strictRenderSlot(c.$slots.string, [TabItem]);
   });
   it("support for string | TabItem", () => {
-    StrictRenderSlot(c.$slots.stringMixed, ["just a string"]);
-    StrictRenderSlot(c.$slots.stringMixed, [TabItem]);
+    strictRenderSlot(c.$slots.stringMixed, ["just a string"]);
+    strictRenderSlot(c.$slots.stringMixed, [TabItem]);
     // @ts-expect-error wrong type
-    StrictRenderSlot(c.$slots.stringMixed, [UnpatchedTabItems]);
+    strictRenderSlot(c.$slots.stringMixed, [UnpatchedTabItems]);
   });
   it("support for named slot returning literal", () => {
-    StrictRenderSlot(c.$slots.literal, ["foo"]);
+    strictRenderSlot(c.$slots.literal, ["foo"]);
     // @ts-expect-error wrong literal
-    StrictRenderSlot(c.$slots.literal, ["bar"]);
+    strictRenderSlot(c.$slots.literal, ["bar"]);
     // @ts-expect-error wrong type
-    StrictRenderSlot(c.$slots.literal, [TabItem]);
+    strictRenderSlot(c.$slots.literal, [TabItem]);
     // @ts-expect-error wrong number of literals
-    StrictRenderSlot(c.$slots.literal, ["foo", "foo"]);
+    strictRenderSlot(c.$slots.literal, ["foo", "foo"]);
   });
 
   it("support for named slot returning literal union", () => {
-    StrictRenderSlot(c.$slots.literalMixed, ["foo"]);
-    StrictRenderSlot(c.$slots.literalMixed, ["bar"]);
+    strictRenderSlot(c.$slots.literalMixed, ["foo"]);
+    strictRenderSlot(c.$slots.literalMixed, ["bar"]);
 
     // @ts-expect-error wrong literal
-    StrictRenderSlot(c.$slots.literalMixed, ["baz"]);
+    strictRenderSlot(c.$slots.literalMixed, ["baz"]);
 
     // @ts-expect-error wrong type
-    StrictRenderSlot(c.$slots.literalMixed, [TabItem]);
+    strictRenderSlot(c.$slots.literalMixed, [TabItem]);
   });
 
   it("support for named slot returning literal union array", () => {
-    StrictRenderSlot(c.$slots.literalMultiple, ["foo", "bar", "foo"]);
-    StrictRenderSlot(c.$slots.literalMultiple, []);
-    StrictRenderSlot(c.$slots.literalMultiple, ["bar"]);
+    strictRenderSlot(c.$slots.literalMultiple, ["foo", "bar", "foo"]);
+    strictRenderSlot(c.$slots.literalMultiple, []);
+    strictRenderSlot(c.$slots.literalMultiple, ["bar"]);
     // Note: ["baz"] cannot be rejected because TypeScript widens it to string[]
     // To get strict literal checking, users must use `as const`: ["baz"] as const
     // @ts-expect-error wrong type
-    StrictRenderSlot(c.$slots.literalMultiple, ["baz" as const]);
+    strictRenderSlot(c.$slots.literalMultiple, ["baz" as const]);
     // @ts-expect-error wrong type
-    StrictRenderSlot(c.$slots.literalMultiple, [TabItem]);
+    strictRenderSlot(c.$slots.literalMultiple, [TabItem]);
   });
 
   it("support for named slot returning tuple of literal and component", () => {
-    StrictRenderSlot(c.$slots.literalTuple, ["foo", TabItem]);
+    strictRenderSlot(c.$slots.literalTuple, ["foo", TabItem]);
     // @ts-expect-error wrong literal
-    StrictRenderSlot(c.$slots.literalTuple, ["bar", TabItem]);
+    strictRenderSlot(c.$slots.literalTuple, ["bar", TabItem]);
     // @ts-expect-error wrong type
-    StrictRenderSlot(c.$slots.literalTuple, ["foo", UnpatchedTabItems]);
+    strictRenderSlot(c.$slots.literalTuple, ["foo", UnpatchedTabItems]);
   });
 
   it("support for named slot returning HTMLSpanElement", () => {
-    StrictRenderSlot(c.$slots.spanElement, [
+    strictRenderSlot(c.$slots.spanElement, [
       document.createElement("span") as HTMLSpanElement,
     ]);
 
     // @ts-expect-error wrong type
-    StrictRenderSlot(c.$slots.spanElement, [
+    strictRenderSlot(c.$slots.spanElement, [
       document.createElement("div") as HTMLDivElement,
     ]);
   });
 
   it("support for named slot returning HTMLSpanElement[]", () => {
-    StrictRenderSlot(c.$slots.spanElements, [
+    strictRenderSlot(c.$slots.spanElements, [
       document.createElement("span") as HTMLSpanElement,
     ]);
 
     // @ts-expect-error wrong type
-    StrictRenderSlot(c.$slots.spanElements, [
+    strictRenderSlot(c.$slots.spanElements, [
       document.createElement("div") as HTMLDivElement,
     ]);
   });
