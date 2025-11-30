@@ -41,7 +41,7 @@ export type TemplateAccessors =
   | "normalizeStyle"
   | "COMPONENT_CTX"
   | "ctx"
-  | "StrictRenderSlot"
+  | "renderSlotJSX"
   // aka $slots
   | "$slot"
   // slotToComponent, const slotComponent = ctx.$slots.default;

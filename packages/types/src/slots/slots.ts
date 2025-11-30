@@ -9,7 +9,7 @@ type IsExactlyEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <
  * @param slot render function
  * @param children
  */
-export declare function StrictRenderSlot<T extends (...args: any[]) => any, U>(
+export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(
   slot: T,
   child: ReturnType<T> extends infer R
     ? R extends Array<any>
@@ -22,7 +22,7 @@ export declare function StrictRenderSlot<T extends (...args: any[]) => any, U>(
     : ReturnType<T>
 ): any;
 
-export declare function StrictRenderSlot<T extends (...args: any[]) => any, U>(
+export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(
   slot: T,
   children: ReturnType<T> extends infer R
     ? R extends readonly [any, ...any[]]
@@ -51,6 +51,10 @@ export declare function StrictRenderSlot<T extends (...args: any[]) => any, U>(
       : never
     : ReturnType<T>
 ): any;
+
+export declare function renderSlotJSX<T>(
+  slot: T
+): T extends (...args: infer A) => any ? (cb: (...a: A) => any) => any : never;
 
 /**
  * Converts Vue slot types into JSX-compatible component types for rendering slots as components.
