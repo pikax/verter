@@ -11,9 +11,12 @@
     "./src/**/*.ignore.ts",
     "./src/**/__bench__/**/*",
     "./src/**/__generated__/**/*",
-    // "./src/**/*.fixtures.ts",
-    // "./src/**/*.spec.ts",
-    "./src/bench/**/*"
+    "./src/**/*.fixtures.ts",
+    "./src/fixtures/**/*",
+    "./src/**/*.spec.ts",
+    "./src/**/*.bench.ts",
+    "./src/bench/**/*",
+    "./src/**/*.test-utils.ts"
   ],
   "compilerOptions": {
     "outDir": "./dist",

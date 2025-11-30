@@ -5,5 +5,6 @@ export default defineConfig({
     // ...
     globals: true,
     benchmark: {},
+    exclude: ["**/node_modules/**", "**/dist/**"],
   },
 });

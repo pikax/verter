@@ -20,7 +20,7 @@
  */
 
 import * as ts from "typescript";
-import * as path from "path";
+import * as path from "node:path";
 import type { TypeTest } from "./types";
 import { resolveWithPrefix } from "./types";
 

@@ -1,7 +1,7 @@
 import { Position } from "source-map-js";
 import { SourceMapConsumer } from "source-map-js/lib/source-map-consumer";
 import { MagicString } from "vue/compiler-sfc";
-import fs from "fs";
+import fs from "node:fs";
 
 export function getSourceMap({ s }: { s: MagicString }) {
   return new SourceMapConsumer(
