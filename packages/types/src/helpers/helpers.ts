@@ -63,7 +63,7 @@ export type OmitNever<T> = {
 
 //  --- External Sources ---
 
-// Source - https://stackoverflow.com/a
+// Source - https://stackoverflow.com/a/50375286
 // Posted by jcalz, modified by community. See post 'Timeline' for change history
 // Retrieved 2025-11-14, License - CC BY-SA 4.0
 
