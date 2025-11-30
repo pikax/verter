@@ -46,8 +46,8 @@ export declare function toComponentRender<
 ): T extends keyof C
   ? C[T]
   : T extends keyof import("vue").NativeElements
-    ? (props: import("vue").NativeElements[T])=> JSX.Element
-    : never;
+  ? (props: import("vue").NativeElements[T]) => JSX.Element
+  : never;
 
 /**
  * @see {@link toComponentRender} for full documentation

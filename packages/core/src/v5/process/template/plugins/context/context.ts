@@ -32,13 +32,17 @@ export const ContextPlugin = {
     const DefaultName = ctx.prefix("Component");
     const ComponentInstanceName = ctx.prefix("ComponentInstance");
     const instance = ctx.prefix("Instance");
-    const SlotsToRender = ctx.prefix("SlotsToRender" as AvailableExports);
+    const components = ctx.prefix("components");
+    // const SlotsToRender = ctx.prefix("SlotsToRender" as AvailableExports);
     const ExtractComponents = ctx.prefix(
       "extractComponents" as AvailableExports
     );
 
     ctx.items.push(
-      createHelperImport(["SlotsToRender", "extractComponents"], ctx.prefix)
+      createHelperImport(
+        ["SlotsToRender", "extractComponents", "OmitNever"],
+        ctx.prefix
+      )
     );
 
     const macros = isSetup ? [] : [];
@@ -89,7 +93,6 @@ export const ContextPlugin = {
       ...ctxItems,
     ].join(",")}};`;
 
-    const components = ctx.prefix("components");
     const componentsStr = `const ${components} = ${ExtractComponents}({
   ${[
     // `...${
@@ -97,7 +100,8 @@ export const ContextPlugin = {
     //     ? `({} as Required<typeof ${DefaultName}.components> & {})`
     //     : `${DefaultName}.components`
     // }`,
-    `...${CTX}`,
+    // `...${CTX}`,
+    ...ctxItems,
   ].join(",\n")}
 })`;
 

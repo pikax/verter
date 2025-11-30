@@ -1,5 +1,3 @@
-import { defineComponent } from "vue";
-import { OmitNever } from "../helpers";
 import { Prettify } from "../setup";
 
 export type GetVueComponent<T> = T extends { new (): infer I }
@@ -71,64 +69,33 @@ export declare function retrieveInstance<
  *
  * @typeParam T - The object type to extract components from
  */
-export type ExtractComponents<T, Default = {}> = Prettify<
-  OmitNever<{
-    [K in keyof T]: GetVueComponent<T[K]> extends never
-      ? T[K] extends Array<infer U>
-        ? U extends Record<string, any>
-          ? ExtractComponents<U, never>
-          : never
-        : T[K] extends Record<string, any>
-        ? ExtractComponents<T[K], never>
-        : never
-      : T[K];
-  }>
-> extends infer O
-  ? {} extends O
+// export type ExtractComponents<T, Default = {}> = Prettify<
+//   OmitNever<{
+//     [K in keyof T]: ExtractComponent<T[K]>;
+//   }>
+// > extends infer O
+//   ? [{}] extends [O]
+//     ? Default
+//     : O
+//   : never;
+export type ExtractComponents<T, Default = {}> = {
+  [K in keyof T as ExtractComponent<T[K]> extends never
+    ? never
+    : K]: ExtractComponent<T[K]>;
+} extends infer O
+  ? [{}] extends [O]
     ? Default
     : O
   : never;
 
-export declare function extractComponents<T>(
-  obj: T
-): ExtractComponents<T, {}>;
+export type ExtractComponent<T> = GetVueComponent<T> extends never
+  ? T extends Array<infer U>
+    ? U extends Record<string, any>
+      ? ExtractComponents<U, never>
+      : never
+    : T extends Record<string, any>
+    ? ExtractComponents<T, never>
+    : never
+  : T;
 
-// Extracts only Vue components from an object, deeply removing non-component properties
-// export type ExtractComponents<T> = OmitNever<ExtractComponentsRaw<T>>;
-
-const foo = {
-  Comp: defineComponent({}),
-  b: 1,
-  Teleport: {} as typeof import("vue").Teleport,
-
-  deep: {
-    Comp2: defineComponent({}),
-    not: "a component",
-  },
-  deeper: {
-    even: {
-      not: "a component",
-      Comp3: defineComponent({}),
-    },
-  },
-  config: {
-    theme: "dark",
-  },
-};
-
-const extracted = {} as ExtractComponents<typeof foo>;
-
-extracted.Comp;
-extracted.deep.Comp2;
-extracted.deeper.even.Comp3;
-extracted.deep;
-
-// @ts-expect-error
-extracted.config;
-
-// @ts-expect-error - b is not a component
-extracted.b;
-// @ts-expect-error - Teleport is not included because it's not a component constructor
-extracted.deep.not;
-// @ts-expect-error - Teleport is not included because it's not a component constructor
-extracted.deeper.even.not;
+export declare function extractComponents<T>(t: T): ExtractComponents<T>
