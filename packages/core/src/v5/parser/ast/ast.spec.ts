@@ -38,20 +38,14 @@ describe("parse AST", () => {
     it("should contain errors", () => {
       const source = `const a = 'a`;
       const ast = parse(source);
-      expect(ast.errors).toMatchInlineSnapshot(`
-        [
-          {
-            "labels": [
-              {
-                "end": 12,
-                "start": 10,
-              },
-            ],
-            "message": "Unterminated string",
-            "severity": "Error",
-          },
-        ]
-      `);
+      expect(ast.errors).toHaveLength(1);
+      expect(ast.errors[0].message).toBe("Unterminated string");
+      expect(ast.errors[0].severity).toBe("Error");
+      expect(ast.errors[0].labels).toHaveLength(1);
+      expect(ast.errors[0].labels[0]).toEqual({
+        end: 12,
+        start: 10,
+      });
     });
 
     describe("non-ascii", () => {

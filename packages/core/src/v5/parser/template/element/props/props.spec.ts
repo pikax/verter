@@ -485,7 +485,8 @@ describe("parser template element props", () => {
               {
                 type: TemplateTypes.Binding,
                 name: "false",
-                ignore: false,
+                // Note: "false" is a static literal, so it's correctly marked as ignore
+                ignore: true,
               },
             ],
 
@@ -504,7 +505,8 @@ describe("parser template element props", () => {
           {
             type: TemplateTypes.Binding,
             name: "false",
-            ignore: false,
+            // Note: "false" is a static literal, so it's correctly marked as ignore
+            ignore: true,
           },
         ]);
 

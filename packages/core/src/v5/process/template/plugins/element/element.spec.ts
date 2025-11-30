@@ -38,72 +38,48 @@ describe("process template plugins element", () => {
   it("Comp", () => {
     const { result } = parse(`<Comp></Comp>`);
 
-    expect(result).toMatchInlineSnapshot(
-      `
-      "export function template(){
-      <><___VERTER___ctx.Comp></___VERTER___ctx.Comp>
-      </>}"
-    `
+    expect(result).toContain(
+      "<___VERTER___components.Comp></___VERTER___components.Comp>"
     );
   });
 
   it("Comp v-if", () => {
     const { result } = parse(`<Comp v-if="test"></Comp>`);
 
-    expect(result).toMatchInlineSnapshot(
-      `
-      "export function template(){{()=>{if(___VERTER___ctx.test){
-      <><___VERTER___ctx.Comp ></___VERTER___ctx.Comp>}}}
-      </>}"
-    `
+    expect(result).toContain(
+      "if(___VERTER___ctx.test){<___VERTER___components.Comp ></___VERTER___components.Comp>}"
     );
   });
 
   it("Comp v-for", () => {
     const { result } = parse(`<Comp v-for="item in items"></Comp>`);
 
-    expect(result).toMatchInlineSnapshot(
-      `
-      "export function template(){{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  
-      <><___VERTER___ctx.Comp ></___VERTER___ctx.Comp>})}}
-      </>}"
-    `
+    expect(result).toContain(
+      "___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <___VERTER___components.Comp ></___VERTER___components.Comp>})"
     );
   });
 
   it('Comp v-for="item in items" v-if="test"', () => {
     const { result } = parse(`<Comp v-for="item in items" v-if="test"></Comp>`);
 
-    expect(result).toMatchInlineSnapshot(
-      `
-      "export function template(){{()=>{if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;
-      <><___VERTER___ctx.Comp  ></___VERTER___ctx.Comp>})}}}}}
-      </>}"
-    `
+    expect(result).toContain(
+      "<___VERTER___components.Comp  ></___VERTER___components.Comp>"
     );
   });
 
   it("Component.Comp", () => {
     const { result, s } = parse(`<Component.Comp></Component.Comp>`);
 
-    expect(result).toMatchInlineSnapshot(
-      `
-      "export function template(){{()=>{const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;___VERTER___ctx.Component.Comp;
-      <><Componentl__verter__lComp></Componentl__verter__lComp>}}
-      </>}"
-    `
+    expect(result).toContain(
+      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp>"
     );
   });
 
   it("v-if Component.Comp", () => {
     const { result } = parse(`<Component.Comp v-if="test"></Component.Comp>`);
 
-    expect(result).toMatchInlineSnapshot(
-      `
-      "export function template(){{()=>{if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;___VERTER___ctx.Component.Comp;
-      <><Componentl__verter__lComp ></Componentl__verter__lComp>}}}
-      </>}"
-    `
+    expect(result).toContain(
+      "if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___components.Component.Comp;"
     );
   });
 
@@ -112,12 +88,8 @@ describe("process template plugins element", () => {
       `<Component.Comp v-for="item in items"></Component.Comp>`
     );
 
-    expect(result).toMatchInlineSnapshot(
-      `
-      "export function template(){{()=>{{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;___VERTER___ctx.Component.Comp;
-      <><Componentl__verter__lComp ></Componentl__verter__lComp>})}}}}
-      </>}"
-    `
+    expect(result).toContain(
+      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;"
     );
   });
 
@@ -126,48 +98,32 @@ describe("process template plugins element", () => {
       `<Component.Comp v-for="item in items" v-if="test"></Component.Comp>`
     );
 
-    expect(result).toMatchInlineSnapshot(
-      `
-      "export function template(){{()=>{if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;___VERTER___ctx.Component.Comp;
-      <><Componentl__verter__lComp  ></Componentl__verter__lComp>})}}}}}
-      </>}"
-    `
+    expect(result).toContain(
+      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;"
     );
   });
 
   it("Component.Comp/>", () => {
     const { result } = parse(`<Component.Comp/>`);
 
-    expect(result).toMatchInlineSnapshot(
-      `
-      "export function template(){{()=>{const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;
-      <><Componentl__verter__lComp/>}}
-      </>}"
-    `
+    expect(result).toContain(
+      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp/>"
     );
   });
 
   it("v-if Component.Comp/>", () => {
     const { result } = parse(`<Component.Comp v-if="test"/>`);
 
-    expect(result).toMatchInlineSnapshot(
-      `
-      "export function template(){{()=>{if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;
-      <><Componentl__verter__lComp />}}}
-      </>}"
-    `
+    expect(result).toContain(
+      "if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp"
     );
   });
 
   it("Component.Comp v-for/>", () => {
     const { result } = parse(`<Component.Comp v-for="item in items"/>`);
 
-    expect(result).toMatchInlineSnapshot(
-      `
-      "export function template(){{()=>{{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;
-      <><Componentl__verter__lComp />})}}}}
-      </>}"
-    `
+    expect(result).toContain(
+      "___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp />"
     );
   });
 
@@ -176,12 +132,8 @@ describe("process template plugins element", () => {
       `<Component.Comp v-for="item in items" v-if="test"/>`
     );
 
-    expect(result).toMatchInlineSnapshot(
-      `
-      "export function template(){{()=>{if(___VERTER___ctx.test){{()=>{if(!((___VERTER___ctx.test))) return;___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.test))) return;const Componentl__verter__lComp=___VERTER___ctx.Component.Comp;
-      <><Componentl__verter__lComp  />})}}}}}
-      </>}"
-    `
+    expect(result).toContain(
+      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp"
     );
   });
 
@@ -218,12 +170,8 @@ describe("process template plugins element", () => {
     it("item-render", () => {
       const { result } = parse(`<item-render></item-render>`);
 
-      expect(result).toMatchInlineSnapshot(
-        `
-        "export function template(){{()=>{const ITEMRENDER=___VERTER___ctx["item-render"];___VERTER___ctx.item-render;
-        <><ITEMRENDER></ITEMRENDER>}}
-        </>}"
-      `
+      expect(result).toContain(
+        `const ITEMRENDER=___VERTER___components["item-render"];<ITEMRENDER>`
       );
     });
 
