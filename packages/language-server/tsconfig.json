@@ -13,10 +13,11 @@
     "rootDir": "./src",
 
     "target": "ES6",
-    "module": "CommonJS",
+    "module": "nodenext",
     "types": ["vitest/importMeta", "vitest/globals"],
     "preserveConstEnums": true,
     "jsx": "preserve",
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    "moduleResolution": "nodenext"
   }
 }

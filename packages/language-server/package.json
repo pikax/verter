@@ -19,6 +19,7 @@
   "dependencies": {
     "@verter/core": "workspace:^",
     "@verter/language-shared": "workspace:^",
+    "@verter/types": "workspace:^",
     "@vue/compiler-core": "^3.5.17",
     "acorn-loose": "^8.5.2",
     "glob": "^11.0.3",

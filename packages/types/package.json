@@ -1,0 +1,56 @@
+{
+  "name": "@verter/types",
+  "version": "1.0.0",
+  "description": "Type helpers for Verter",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./string": {
+      "types": "./dist/string-export.d.ts",
+      "import": "./dist/string-export.js",
+      "default": "./dist/string-export.js"
+    },
+    "./tsx": {
+      "types": "./dist/tsx-export.d.ts",
+      "import": "./dist/tsx-export.js",
+      "default": "./dist/tsx-export.js"
+    },
+    "./tsx-string": {
+      "types": "./dist/tsx-string-export.d.ts",
+      "import": "./dist/tsx-string-export.js",
+      "default": "./dist/tsx-string-export.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b --force && node scripts/build-string.mjs && node scripts/build-tsx.mjs",
+    "build:tsx": "node scripts/build-tsx.mjs",
+    "build:string": "node scripts/build-string.mjs",
+    "generate:vue": "node scripts/generate-vue-overrides.mjs",
+    "dev": "tsc -b --watch",
+    "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
+    "test": "vitest --typecheck --run",
+    "bench": "node scripts/bench-types.mjs",
+    "bench:trace": "node scripts/bench-types.mjs --trace"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "readme.md",
+    "LICENSE"
+  ],
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.9",
+    "vue": "^3.5.24"
+  }
+}

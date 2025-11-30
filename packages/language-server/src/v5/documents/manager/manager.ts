@@ -26,6 +26,8 @@ import {
   uriToPath,
 } from "../utils.js";
 import { FileNotificationChange } from "@verter/language-shared";
+import { prefixWith } from "@verter/types/string";
+import verterTsx from "@verter/types/tsx-string";
 
 export type VersionScriptSnapshot = IScriptSnapshot & { version: number };
 
@@ -118,6 +120,11 @@ export class DocumentManager implements Disposable {
       filepath = toVueParentDocument(filepath);
     }
 
+    // Virtual verter modules always exist
+    if (filepath.indexOf("$verter/types$") >= 0 || filepath.indexOf("$verter/tsx$") >= 0) {
+      return true;
+    }
+
     if (this._files.has(filepath)) {
       return true;
     }
@@ -140,11 +147,32 @@ export class DocumentManager implements Disposable {
   readFile(filepath: string, encoding: BufferEncoding = "utf-8") {
     // if (isVerterVirtual(filepath)) {
     // normalise path
-    filepath = uriToPath(filepath);
+    filepath =
+      filepath.indexOf("$verter/types$") >= 0
+        ? "$verter/types$"
+        : filepath.indexOf("$verter/tsx$") >= 0
+          ? "$verter/tsx$"
+          : uriToPath(filepath);
 
     // }
     let d = this._files.get(filepath);
     if (!d) {
+      if (filepath === "$verter/types$") {
+        const content = prefixWith("");
+        const doc = TypescriptDocument.create(filepath, "ts", 0, content);
+        this._files.set(filepath, doc);
+        this._files.set(pathToUri(filepath), doc);
+        return content;
+      }
+
+      if (filepath === "$verter/tsx$") {
+        const content = verterTsx;
+        const doc = TypescriptDocument.create(filepath, "tsx", 0, content);
+        this._files.set(filepath, doc);
+        this._files.set(pathToUri(filepath), doc);
+        return content;
+      }
+
       console.log("reading file sync", filepath);
       const c = readFileSync(filepath, { encoding });
       const uri = pathToUri(filepath);
@@ -169,6 +197,26 @@ export class DocumentManager implements Disposable {
   }
 
   getDocument(filename: string) {
+    if (filename.indexOf("$verter/types$") >= 0) {
+      filename = "$verter/types$";
+      let d = this._files.get(filename);
+      if (!d) {
+        this.readFile(filename);
+        d = this._files.get(filename);
+      }
+
+      return d;
+    }
+    if (filename.indexOf("$verter/tsx$") >= 0) {
+      filename = "$verter/tsx$";
+      let d = this._files.get(filename);
+      if (!d) {
+        this.readFile(filename);
+        d = this._files.get(filename);
+      }
+
+      return d;
+    }
     if (isVueSubDocument(filename)) {
       filename = toVueParentDocument(filename);
     }

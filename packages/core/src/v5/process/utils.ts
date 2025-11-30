@@ -1,9 +1,38 @@
-import type { ImportItem, ImportModule } from "./types";
+import {
+  ProcessItemImport,
+  ProcessItemType,
+  type ImportItem,
+  type ImportModule,
+} from "./types";
+import { ExportedTypes } from "@verter/types/string";
+import type { AvailableExports } from "@verter/types/string";
 
-export function defaultPrefix(str: string) {
+export function defaultPrefix<T>(str: string) {
   return "___VERTER___" + str;
 }
 
+export const VERTER_HELPERS_IMPORT = "$verter/types$";
+
+export function createHelperImport(
+  items: Array<AvailableExports>,
+  prefix: (str: string) => string
+): ProcessItemImport {
+  return {
+    type: ProcessItemType.Import,
+    from: VERTER_HELPERS_IMPORT,
+    items: items.map((name) => ({
+      name: name,
+      type: ExportedTypes.has(name),
+      alias: prefix(name),
+    })),
+  };
+}
+
+/**
+ * @deprecated
+ * @param source
+ * @returns
+ */
 function retriveImportFromHelpers(source: string): ImportModule[] {
   const VERTER_IMPORTS_KEY = "__VERTER_IMPORTS__";
 
@@ -21,6 +50,11 @@ function retriveImportFromHelpers(source: string): ImportModule[] {
   return items as ImportModule[];
 }
 
+/**
+ * @deprecated
+ * @param source
+ * @returns
+ */
 export function handleHelpers(source: string) {
   const VERTER_START = "__VERTER__START__";
 
@@ -32,12 +66,12 @@ export function handleHelpers(source: string) {
 
   function withPrefix(prefix: string) {
     return {
-      content: content.replaceAll("$V_", prefix).replaceAll('\nexport ', '\n'),
+      content: content.replaceAll("$V_", prefix).replaceAll("\nexport ", "\n"),
       imports: imports.map(
         (i) =>
           ({
             ...i,
-            items: i.items.map((i) => ({
+            items: i.items?.map((i) => ({
               ...i,
               alias: i.alias ? i.alias.replaceAll("$V_", prefix) : undefined,
             })),
@@ -66,6 +100,9 @@ export function generateImport(items: ImportModule[]) {
 
     const list = grouped[item.from];
 
+    if (!item.items) {
+      continue;
+    }
     if (item.asType) {
       // convert pure types to imports
       list.push(...item.items.map((i) => ({ ...i, type: true })));
@@ -78,6 +115,10 @@ export function generateImport(items: ImportModule[]) {
   for (const [key, value] of Object.entries(grouped)) {
     const added = new Set<string>();
     const toAdd: ImportItem[] = [];
+    if (value.length === 0) {
+      imports.push(`import "${key}";`);
+      continue;
+    }
     for (const item of value) {
       const name = item.alias ?? item.name;
       // ignore duplicates
@@ -91,9 +132,7 @@ export function generateImport(items: ImportModule[]) {
       `import { ${toAdd
         .map(
           (i) =>
-            (i.type ? `type ` : "") +
-            i.name +
-            (i.alias ? ` as ${i.alias}` : "")
+            (i.type ? `type ` : "") + i.name + (i.alias ? ` as ${i.alias}` : "")
         )
         .join(", ")} } from "${key}";`
     );

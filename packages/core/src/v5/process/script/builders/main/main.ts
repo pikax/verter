@@ -20,9 +20,9 @@ import {
   ScriptResolversPlugin,
   ComponentInstancePlugin,
   DefineOptionsPlugin,
+  InferFunctionPlugin,
 } from "../../plugins/";
 
-import { relative } from "node:path/posix";
 import { TemplateTypes } from "../../../../parser/template/types";
 
 export function ResolveOptionsFilename(
@@ -54,9 +54,9 @@ export function buildOptions(
       TemplateBindingPlugin,
       ScriptDefaultPlugin,
       SFCCleanerPlugin,
-      ScriptResolversPlugin,
       ComponentInstancePlugin,
       DefineOptionsPlugin,
+      InferFunctionPlugin
     ],
     {
       ...context,

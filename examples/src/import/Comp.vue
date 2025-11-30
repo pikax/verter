@@ -1,1 +1,5 @@
-<script></script>
+<script setup lang="ts">
+defineProps<{
+    foo:string
+}>()
+</script>

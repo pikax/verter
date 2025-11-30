@@ -205,7 +205,7 @@ describe("ast bench", () => {
       // bench("async oxc", async () => {
       //   await Promise.all(
       //     sources.map(async (source) => {
-      //       const parsed = await parse("test.ts", source);
+      //       const parsed = await parseAsync("test.ts", source);
       //       makeChanges(parsed.magicString as any, parsed.program);
       //     })
       //   );
@@ -224,10 +224,7 @@ describe("ast bench", () => {
       bench("async sanitised oxc + magicstring", async () => {
         await Promise.all(
           sources.map(async (source) => {
-            const parsed = await parse(
-              "test.ts",
-              sanitisePosition(source)
-            );
+            const parsed = await parse("test.ts", sanitisePosition(source));
             const s = new MagicString(source);
             makeChanges(s, parsed.program);
           })

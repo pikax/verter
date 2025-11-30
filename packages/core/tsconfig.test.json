@@ -1,6 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["./src", "**/*.spec.ts"],
+  "include": ["./src", "**/*.spec.ts", "**/*.fixtures.ts"],
   "exclude": [
     "dist",
     "node_modules",
@@ -10,6 +10,7 @@
     "./src/**/*.ignore.tsx",
     "./src/**/*.ignore.ts",
     "./src/**/__bench__/**/*",
+    "./src/**/__generated__/**/*",
     // "./src/**/*.spec.ts",
     "./src/bench/**/*"
   ],

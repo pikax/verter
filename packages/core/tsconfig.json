@@ -10,6 +10,8 @@
     "./src/**/*.ignore.tsx",
     "./src/**/*.ignore.ts",
     "./src/**/__bench__/**/*",
+    "./src/**/__generated__/**/*",
+    // "./src/**/*.fixtures.ts",
     // "./src/**/*.spec.ts",
     "./src/bench/**/*"
   ],
@@ -17,7 +19,8 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "target": "ESNext",
-    "module": "CommonJS",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
     "types": ["vitest/importMeta", "vitest/globals", "vite/client"],
     "jsx": "preserve",
     "preserveConstEnums": true

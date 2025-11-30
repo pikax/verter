@@ -7,7 +7,7 @@
     "rootDir": "./src",
 
     "target": "ES6",
-    "module": "CommonJS",
+    "module": "nodenext",
     "jsx": "preserve"
   }
 }

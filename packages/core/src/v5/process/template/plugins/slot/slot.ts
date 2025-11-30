@@ -16,6 +16,8 @@ import {
   TemplateRenderSlot,
 } from "../../../../parser/template/types";
 import { MagicString } from "@vue/compiler-sfc";
+import { createHelperImport } from "../../../utils";
+import { AvailableExports } from "@verter/types/string";
 
 /**
  * Patch types
@@ -170,7 +172,8 @@ export const SlotPlugin = declareTemplatePlugin({
     } else {
       pos = slot.prop.node!.loc.start.offset;
     }
-    s.prependLeft(pos, ` ${ctx.prefix("v-slot")}={(${slotInstance})=>{`);
+    const slotProp = "v-slot"; // ctx.prefix("v-slot");
+    s.prependLeft(pos, ` ${slotProp}={(${slotInstance})=>{`);
 
     if (ctx.doNarrow && slot.context.conditions.length > 0) {
       ctx.doNarrow(
@@ -348,10 +351,12 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
    * @param slot
    * @param s
    * @param ctx
-   */
+   */ 
   transformSlotRender(slot, s, ctx) {
     // const $slots = ctx.retrieveAccessor("$slot");
-    const slotRender = ctx.retrieveAccessor("slotRender");
+    // StrictRenderSlot
+    ctx.items.push(createHelperImport(["renderSlotJSX"], ctx.prefix));
+    const slotRender = ctx.retrieveAccessor("renderSlotJSX");
     const slotInstance = ctx.retrieveAccessor("slotInstance");
 
     // <template v-slot

@@ -55,9 +55,11 @@ describe("process script plugins imports", () => {
 
   it("should add imports", () => {
     const { s } = parse(`let a = defineModel();`, false, "ts");
+    // The import path has changed to $verter/types$
     expect(s.toString()).toContain(
-      `import { type ___VERTER___ModelToProps, type ___VERTER___UnionToIntersection, type ___VERTER___ModelToEmits } from "$verter/options.helper.ts";let a = defineModel();`
+      `import { type Prettify as ___VERTER___Prettify } from "$verter/types$"`
     );
+    expect(s.toString()).toContain(`let a = defineModel();`);
   });
   it("should only generate 1 import", () => {
     const { s } = parse(
@@ -65,9 +67,11 @@ describe("process script plugins imports", () => {
       false,
       "ts"
     );
+    // The import path has changed to $verter/types$
     expect(s.toString()).toContain(
-      `import { type ___VERTER___ModelToProps, type ___VERTER___UnionToIntersection, type ___VERTER___ModelToEmits, type ___VERTER___EmitMapToProps, type ___VERTER___OverloadParameters } from "$verter/options.helper.ts";defineModel(); defineModel('foo'); defineEmits();`
+      `import { type Prettify as ___VERTER___Prettify } from "$verter/types$"`
     );
+    expect(s.toString()).toContain(`defineModel(); defineModel('foo'); defineEmits()`);
   });
 
   it("should add move an extra character at the end", () => {

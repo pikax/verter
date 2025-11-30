@@ -58,15 +58,18 @@ export const enum ProcessItemType {
    */
   MacroBinding = "macro-binding",
   /**
+   * Contains Macro return information
+   */
+  MacroReturn = "macro-return",
+  /**
    * Contains the component options, for example `defineOptions`
    */
   Options = "options",
 
-
   /**
    * Used to describe the defineModel variables
    */
-  DefineModel = 'define-model'
+  DefineModel = "define-model",
 }
 
 export type ProcessItemImport = {
@@ -85,17 +88,44 @@ export type ProcessItemWarning = {
   message: ItemWarningString;
 } & LocationProcessItem;
 
+export type ProcessItemMacroReturn = {
+  type: ProcessItemType.MacroReturn;
+
+  content: string;
+};
+
 export type ProcessItemMacroBinding = {
   type: ProcessItemType.MacroBinding;
   name: string;
   macro: string;
   // originalName?: string;
 
+  /**
+   * Is the macro type only or is object.
+   * For example, `defineProps<Type>()` vs `defineProps({})`
+   * if has both then it's `type` eg: `defineProps<Type>({a: string})`
+   * will be isType = true
+   */
+  isType?: boolean;
+
+  /**
+   * variable name for type
+   */
+  typeName?: string | null | undefined;
+  /**
+   * variable name for value
+   */
+  valueName?: string | null | undefined;
+  /**
+   * variable name for object
+   */
+  objectName?: string | null | undefined;
+
   node: VerterASTNode;
 };
 
 export type ProcessItemDefineModel = {
-  type: ProcessItemType.DefineModel,
+  type: ProcessItemType.DefineModel;
   /**
    * model name
    */
@@ -104,16 +134,38 @@ export type ProcessItemDefineModel = {
   /**
    * variableName
    */
-  varName: string
+  varName: string | null;
 
   node: VerterASTNode;
-}
+
+  /**
+   * Is the macro type only or is object.
+   * For example, `defineProps<Type>()` vs `defineProps({})`
+   * if has both then it's `type` eg: `defineProps<Type>({a: string})`
+   * will be isType = true
+   */
+  isType?: boolean;
+
+  /**
+   * variable name for type
+   */
+  typeName?: string | null | undefined;
+  /**
+   * variable name for value
+   */
+  valueName?: string | null | undefined;
+  /**
+   * variable name for object
+   */
+  objectName?: string | null | undefined;
+};
 
 export type ItemErrorString = "";
 export type ItemWarningString =
   | "NO_EXPRESSION_VMODEL"
   | "MACRO_NOT_IN_SETUP"
-  | "INVALID_DEFINE_OPTIONS";
+  | "INVALID_DEFINE_OPTIONS"
+  | "INVALID_WITH_DEFAULTS_DEFINE_PROPS_WITH_OBJECT_ARG";
 
 export type ProcessItemBinding = {
   type: ProcessItemType.Binding;
@@ -144,7 +196,8 @@ export type ProcessItem =
   | ProcessItemBinding
   | ProcessItemOptions
   | ProcessItemMacroBinding
-  | ProcessItemDefineModel;
+  | ProcessItemDefineModel
+  | ProcessItemMacroReturn;
 
 export type LocationProcessItem = {
   start: number;
@@ -155,7 +208,7 @@ export type LocationProcessItem = {
 
 export type ImportModule = {
   from: string;
-  items: ImportItem[];
+  items?: ImportItem[];
   asType?: boolean;
   node?: VerterASTNode;
 };
