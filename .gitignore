@@ -10,6 +10,7 @@ TODOs.md
 .eslintcache
 dts-build/packages
 *.tsbuildinfo
+package-lock.json
 
 # Generated type fixtures
 **/__generated__/
