@@ -100,11 +100,11 @@ describe("process script builders bundle", () => {
       });
 
       it("handles empty filename edge case", () => {
-        // When filename is empty, the component name ends up empty too
-        // This is an edge case that shouldn't normally occur
+        // When filename is empty, the component name falls back to "Component"
         const { result } = parse(`const foo = 1`, false, "ts", "");
         expect(result).toContain(`import { ___VERTER___Component }`);
-        expect(result).toContain(`declare const : typeof ___VERTER___Component`);
+        expect(result).toContain(`declare const Component: typeof ___VERTER___Component`);
+        expect(result).toContain(`export default Component;`);
       });
     });
 

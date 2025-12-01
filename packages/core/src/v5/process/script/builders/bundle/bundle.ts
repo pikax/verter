@@ -42,7 +42,7 @@ export function buildBundle(
           const importsStr = generateImport(imports);
           const compName = capitalize(
             camelize(
-              ctx.filename.split("/").pop()?.split(".").shift() ?? "Comp"
+              ctx.filename.split("/").pop()?.split(".").shift() || "Component"
             )
           );
 
