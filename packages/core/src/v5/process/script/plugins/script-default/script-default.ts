@@ -1,6 +1,7 @@
 import { ScriptTypes, VerterASTNode } from "../../../../parser";
 import { ProcessItemType } from "../../../types";
 import { definePlugin } from "../../types";
+import { boxInfo } from "../macros";
 import { generateTypeString } from "../utils";
 
 export const ScriptDefaultPlugin = definePlugin({
@@ -34,11 +35,7 @@ export const ScriptDefaultPlugin = definePlugin({
 
       let options = "{}";
       if (optionsMacro) {
-        // TODO this should be referenced directly to the optionsMacro
-        const start = optionsMacro.expression.start;
-        const end = optionsMacro.expression.end;
-
-        options = s.slice(start, end);
+        options = boxInfo("defineOptions", null, ctx).boxedName;
       }
 
       s.append(`\n;export const ${name}=${defineComponent}(${options});`);

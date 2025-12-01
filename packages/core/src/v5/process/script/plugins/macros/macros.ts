@@ -500,7 +500,7 @@ function getModelName(node: CallExpression) {
   return modelName;
 }
 
-function boxInfo(
+export function boxInfo(
   macroName: string,
   prependName: string | null,
   ctx: ScriptContext

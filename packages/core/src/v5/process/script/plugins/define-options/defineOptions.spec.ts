@@ -1,7 +1,15 @@
+/**
+ * @ai-generated - This test file was updated with AI assistance.
+ * Tests defineOptions macro transformation:
+ * - Boxing of defineOptions arguments
+ * - Moving defineOptions to start of script
+ * - Handling both standalone calls and variable declarations
+ */
 import { MagicString } from "@vue/compiler-sfc";
 import { parser } from "../../../../parser";
 import { ParsedBlockScript } from "../../../../parser/types";
 import { processScript } from "../../script";
+import { ProcessItemType } from "../../../types";
 
 import { DefineOptionsPlugin } from "./index.js";
 import { TemplateBindingPlugin } from "../template-binding";
@@ -50,29 +58,99 @@ describe("process defineOptions", () => {
     return r;
   }
 
-  //   describe("ts", () => {});
-
-  //   it.only("test", () => {
-  //     const { s } = _parse(`export default { setup(){ defineExpose({ a: 0 }); }}`, 'ddd');
-  //     expect(s.original).toBe(s.toString());
-  //   });
-
   describe("setup", () => {
     function parse(content: string, lang = "ts", pre: string = "") {
       return _parse(`${pre ? pre + "\n" : ""}${content}`, false, lang, pre);
     }
-    it("should move", () => {
+
+    it("should move and box defineOptions", () => {
       const { result, context } = parse(`defineOptions(myOptions)`);
-      expect(result).toContain(
-        `defineOptions(myOptions);function ___VERTER___Template`
+      
+      // Should declare the boxed variable
+      expect(result).toContain(`let ___VERTER___defineOptions_Boxed;`);
+      
+      // Should box the options argument
+      expect(result).toContain(`___VERTER___defineOptions_Boxed=___VERTER___defineOptions_Box(myOptions)`);
+      
+      // Should move to beginning (before template binding function)
+      expect(result).toContain(`defineOptions(`);
+      expect(result).toContain(`function ___VERTER___TemplateBindingFN`);
+      
+      // Should add helper import
+      expect(context.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: ProcessItemType.Import,
+            from: "$verter/types$",
+            items: expect.arrayContaining([
+              expect.objectContaining({ name: "defineOptions_Box" }),
+            ]),
+          }),
+        ])
       );
     });
 
-    it("should move with declaration", () => {
+    it("should move and box defineOptions with declaration", () => {
       const { result, context } = parse(`const foo = defineOptions(myOptions)`);
-      expect(result).toContain(
-        `const foo = defineOptions(myOptions);function ___VERTER___Template`
+      
+      // Should declare the boxed variable
+      expect(result).toContain(`let ___VERTER___defineOptions_Boxed;`);
+      
+      // Should box the options argument
+      expect(result).toContain(`___VERTER___defineOptions_Boxed=___VERTER___defineOptions_Box(myOptions)`);
+      
+      // Should keep original variable declaration structure
+      expect(result).toContain(`const foo = defineOptions(`);
+      
+      // Should move to beginning (before template binding function)
+      expect(result).toContain(`function ___VERTER___TemplateBindingFN`);
+      
+      // Should add helper import
+      expect(context.items).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: ProcessItemType.Import,
+            from: "$verter/types$",
+            items: expect.arrayContaining([
+              expect.objectContaining({ name: "defineOptions_Box" }),
+            ]),
+          }),
+        ])
       );
+    });
+
+    it("should handle object literal options", () => {
+      const { result, context } = parse(`defineOptions({ inheritAttrs: false })`);
+      
+      // Should box the object literal
+      expect(result).toContain(`___VERTER___defineOptions_Box({ inheritAttrs: false })`);
+    });
+
+    it("should handle complex options object", () => {
+      const { result, context } = parse(`defineOptions({ 
+        inheritAttrs: false,
+        name: 'MyComponent',
+        customOptions: { foo: 'bar' }
+      })`);
+      
+      // Should contain the boxed declaration
+      expect(result).toContain(`let ___VERTER___defineOptions_Boxed;`);
+      expect(result).toContain(`___VERTER___defineOptions_Box(`);
+    });
+  });
+
+  describe("options (non-setup)", () => {
+    function parse(content: string, lang = "ts") {
+      return _parse(content, "", lang);
+    }
+
+    it("should not process defineOptions in non-setup script (no-op)", () => {
+      // defineOptions is only valid in <script setup>
+      // In options API, it's not a recognized macro and should be left as-is
+      const { result } = parse(`defineOptions({ inheritAttrs: false })`);
+      
+      // The call should remain in the output unchanged
+      expect(result).toContain(`defineOptions({ inheritAttrs: false })`);
     });
   });
 });

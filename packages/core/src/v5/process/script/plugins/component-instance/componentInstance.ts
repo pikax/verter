@@ -52,9 +52,9 @@ export const ComponentInstancePlugin = definePlugin({
       const instanceName = ctx.prefix("Instance");
 
       const declaration = [
-        `export type ${instanceName}${genericDeclaration} = ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, false,false>;`,
+        `export type ${instanceName}${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, false,false>;`,
         allowDev &&
-          `export type ${instanceName}_TEST${genericDeclaration} = ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, true,true>;`,
+          `export type ${instanceName}_TEST${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, true,true>;`,
         `export const ${componentName}={} as typeof ${defaultOptionsName} & { new${genericDeclaration}(...args: any[]):${instanceName}${sanitisedNames} };`,
       ];
 
