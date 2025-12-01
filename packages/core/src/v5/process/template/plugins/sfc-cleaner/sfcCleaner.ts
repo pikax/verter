@@ -6,9 +6,16 @@ export const SFCCleanerPlugin = declareTemplatePlugin({
 
   post(s, ctx) {
     ctx.blocks.forEach((block) => {
-      if (block === ctx.block || !block.block.block.content) {
+      if (block === ctx.block) {
         return;
       }
+      
+      // Skip blocks that are outside the original source bounds
+      // (e.g., empty script blocks added by parser)
+      if (block.block.tag.pos.open.start >= s.original.length) {
+        return;
+      }
+      
       // comment out every line
       const content = s.original.slice(
         block.block.tag.pos.open.start,
