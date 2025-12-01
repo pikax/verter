@@ -13,10 +13,12 @@ import { ProcessItemType } from "../../../types";
 
 import { ComponentInstancePlugin } from "./index.js";
 import { ScriptBlockPlugin } from "../script-block";
+import { ScriptDefaultPlugin } from "../script-default";
 import { BindingPlugin } from "../binding";
 import { TemplateBindingPlugin } from "../template-binding";
 import { MacrosPlugin } from "../macros";
 import { AttributesPlugin } from "../attributes";
+import { DefineOptionsPlugin } from "../define-options";
 
 describe("process ComponentInstancePlugin", () => {
   function _parse(
@@ -47,6 +49,8 @@ describe("process ComponentInstancePlugin", () => {
         ScriptBlockPlugin,
         BindingPlugin,
         AttributesPlugin,
+        ScriptDefaultPlugin,
+        DefineOptionsPlugin,
         ComponentInstancePlugin,
       ],
       {
@@ -69,7 +73,7 @@ describe("process ComponentInstancePlugin", () => {
     }
 
     it("generates instance type export", () => {
-      const { result, context } = parse(`const foo = 1`);
+      const { result } = parse(`const foo = 1`);
 
       // Should export Instance type
       expect(result).toContain(`export type ___VERTER___Instance =`);
@@ -129,6 +133,19 @@ describe("process ComponentInstancePlugin", () => {
       const { result } = parse(`const foo = 1`);
 
       expect(result).toContain(`___VERTER___attributes`);
+    });
+
+    it("merges defineOptions with instance type", () => {
+      const { result } = parse(`defineOptions({ name: 'TestComp' }); const foo = 1`);
+      
+      // Should include InstanceType from the defineComponent export
+      expect(result).toContain(`InstanceType<typeof ___VERTER___default_Component>`);
+      
+      // Should include PublicInstanceFromMacro helper  
+      expect(result).toContain(`___VERTER___PublicInstanceFromMacro<`);
+      
+      // Instance type should be an intersection of InstanceType and PublicInstanceFromMacro
+      expect(result).toMatch(/InstanceType<[^>]+>\s*&\s*___VERTER___PublicInstanceFromMacro/);
     });
   });
 

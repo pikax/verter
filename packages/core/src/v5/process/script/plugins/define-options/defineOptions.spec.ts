@@ -120,14 +120,14 @@ describe("process defineOptions", () => {
     });
 
     it("should handle object literal options", () => {
-      const { result, context } = parse(`defineOptions({ inheritAttrs: false })`);
+      const { result } = parse(`defineOptions({ inheritAttrs: false })`);
       
       // Should box the object literal
       expect(result).toContain(`___VERTER___defineOptions_Box({ inheritAttrs: false })`);
     });
 
     it("should handle complex options object", () => {
-      const { result, context } = parse(`defineOptions({ 
+      const { result } = parse(`defineOptions({ 
         inheritAttrs: false,
         name: 'MyComponent',
         customOptions: { foo: 'bar' }
@@ -136,6 +136,18 @@ describe("process defineOptions", () => {
       // Should contain the boxed declaration
       expect(result).toContain(`let ___VERTER___defineOptions_Boxed;`);
       expect(result).toContain(`___VERTER___defineOptions_Box(`);
+    });
+
+    it("should handle defineOptions with no arguments", () => {
+      const { result, context } = parse(`defineOptions()`);
+      
+      // Should not transform or box when no arguments are provided
+      // MacrosPlugin will handle validation
+      expect(result).not.toContain(`___VERTER___defineOptions_Boxed`);
+      expect(result).not.toContain(`___VERTER___defineOptions_Box`);
+      
+      // Original call should remain
+      expect(result).toContain(`defineOptions()`);
     });
   });
 
@@ -146,7 +158,7 @@ describe("process defineOptions", () => {
 
     it("should not process defineOptions in non-setup script (no-op)", () => {
       // defineOptions is only valid in <script setup>
-      // In options API, it's not a recognized macro and should be left as-is
+      // In options API, it produces a warning and is left untransformed
       const { result } = parse(`defineOptions({ inheritAttrs: false })`);
       
       // The call should remain in the output unchanged
