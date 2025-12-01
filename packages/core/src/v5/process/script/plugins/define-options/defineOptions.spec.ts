@@ -139,7 +139,7 @@ describe("process defineOptions", () => {
     });
 
     it("should handle defineOptions with no arguments", () => {
-      const { result, context } = parse(`defineOptions()`);
+      const { result } = parse(`defineOptions()`);
       
       // Should not transform or box when no arguments are provided
       // MacrosPlugin will handle validation
