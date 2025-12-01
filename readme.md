@@ -11,6 +11,37 @@ Verter is a Vue Language Server Protocol (LSP) implementation that provides enha
 - **Options API Support**: While Script Setup receives more attention, Options API is fully supported
 - **Strict Type Safety**: Built with a "strict first" approach to type safety
 - **JSX/TSX Interoperability**: SFCs can be seamlessly used in JSX/TSX projects
+- **Improved Generic Component Handling**: Full support for generic Vue components with proper constructor typing
+
+### Generic Components
+
+Verter provides improved handling for generic Vue components, respecting Vue constructors with proper type inference. This allows you to get correctly typed instances of generic components:
+
+```vue
+<!-- Comp.vue -->
+<script setup lang="ts" generic="T extends string">
+defineProps<{
+  name: T;
+}>();
+
+defineSlots<
+  Record<T & string, (args: { test: T }) => any> & {
+    header: (a: { foo: string }) => any;
+  }
+>();
+</script>
+```
+
+```typescript
+// Using the generic component with type parameters
+import Comp from "./Comp.vue";
+
+// Get a typed instance with specific generic parameter
+const foo = {} as InstanceType<typeof Comp<'myName'>>;
+foo.$props.name; // Type: 'myName'
+```
+
+This enables full type safety when working with generic components, including proper inference for props, slots, and component instances.
 
 ## Why Verter?
 

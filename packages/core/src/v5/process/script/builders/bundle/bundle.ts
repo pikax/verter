@@ -31,89 +31,26 @@ export function buildBundle(
           // remove everything, we dont need it
           s.remove(0, s.original.length);
 
-          const prefix = ctx.prefix("");
-          // s.prepend(`${prefix}export default `);
-          const bundler = BundlerHelper.withPrefix(prefix);
-
-          // bundler names
-          const ProcessPropsName = ctx.prefix("ProcessProps");
-
-          const imports = [...bundler.imports];
-
-          const defaultOptionsName = ctx.prefix("default_Component");
-          const resolvePropsName = ctx.prefix("resolveProps");
-          const resolveSlotsName = ctx.prefix("defineSlots");
-          ctx.blockNameResolver;
+          const imports = [];
+          const defaultOptionsName = ctx.prefix("Component");
           imports.push({
             from: `./${ResolveOptionsFilename(ctx).split("/").pop() ?? ""}`,
-            items: [
-              { name: defaultOptionsName },
-              { name: resolvePropsName },
-              { name: resolveSlotsName },
-            ],
+            items: [{ name: defaultOptionsName }],
           });
 
           const importsStr = generateImport(imports);
           const compName = capitalize(
             camelize(
-              ctx.filename.split("/").pop()?.split(".").shift() ?? "Comp"
+              ctx.filename.split("/").pop()?.split(".").shift() || "Component"
             )
           );
 
-          const genericDeclaration = ctx.generic
-            ? `<${ctx.generic.declaration}>`
-            : "";
-
-          const sanitisedNames = ctx.generic
-            ? `<${ctx.generic.sanitisedNames.join(",")}>`
-            : "";
-
-          // const vSlotProp = `'v-slot': (cb: (i: InstanceType<typeof ${compName}${sanitisedNames}>) => any) => any`;
-          // const vSlotProp = [
-          //   `'v-slot': (cb: (instance: ${resolveSlotsName}${sanitisedNames}`,
-          //   ` extends ${ctx.isAsync ? "Promise<" : ""}infer P${
-          //     ctx.isAsync ? ">" : ""
-          //   }`,
-          //   `? P extends P & 1 ? {} : P & {} : never) => void | any | any[])=>void | any;`,
-          // ].join("");
-
-          const vSlotProp = `'${ctx.prefix(
-            "v-slot"
-          )}'?: (i: InstanceType<typeof ${compName}${sanitisedNames}>)  => any`;
-
-          const props = [
-            `$props: (${ProcessPropsName}<${resolvePropsName}${sanitisedNames}`,
-            `${ctx.isAsync ? " extends Promise<infer P> ? P : {}" : ""}>)`,
-            // ` & { supa?: (i: InstanceType<typeof ${compName}${sanitisedNames}>)  => any}`,
-            // ` & { ___verter___slot?: (i: InstanceType<typeof ${compName}${sanitisedNames}>)  => any}`,
-            ` & {${vSlotProp}};`,
-          ];
-
-          const slots = [
-            `$slots: ${resolveSlotsName}${sanitisedNames}`,
-            ` extends ${ctx.isAsync ? "Promise<" : ""}infer P${
-              ctx.isAsync ? ">" : ""
-            }`,
-            `? P extends P & 1 ? {} : P & {} : never;`,
-          ];
-
           const declaration = [
-            ...(ctx.isSetup
-              ? [
-                  `declare const ${compName}: typeof ${defaultOptionsName} & {new${genericDeclaration}():{`,
-                  ...props,
-                  ...slots,
-                  `}};`,
-                ]
-              : [`declare const ${compName}: typeof ${defaultOptionsName};`]),
-            // `declare const ${compName}: { a: string}`,
+            `declare const ${compName}: typeof ${defaultOptionsName};`,
             `export default ${compName};`,
           ];
-          // const declaration = `declare const ${compName}: typeof ${defaultOptionsName};`;
 
-          s.prepend(
-            [importsStr, bundler.content, declaration.join("")].join("\n")
-          );
+          s.prepend([importsStr, declaration.join("\n")].join("\n"));
         },
       },
     ],

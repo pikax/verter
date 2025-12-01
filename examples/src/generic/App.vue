@@ -16,7 +16,7 @@ const c = new Comp<"foo">().$props["___VERTER___v-slot"];
 
 <template>
   <Comp name="foo">
-    <template #foo="{ name }"> {{ ___VERTER___slotInstance.$props }}</template>
+    <template #foo="{ test }"> {{ ___VERTER___slotInstance.$slots.header }}</template>
     <template #header></template>
   </Comp>
 
