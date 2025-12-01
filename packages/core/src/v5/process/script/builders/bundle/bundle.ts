@@ -33,7 +33,6 @@ export function buildBundle(
 
           const imports = [];
           const defaultOptionsName = ctx.prefix("Component");
-          ctx.blockNameResolver;
           imports.push({
             from: `./${ResolveOptionsFilename(ctx).split("/").pop() ?? ""}`,
             items: [{ name: defaultOptionsName }],
