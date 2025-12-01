@@ -13,11 +13,11 @@
   },
   "dependencies": {
     "@verter/core": "workspace:^",
-    "vue": "^3.5.17"
+    "vue": "^3.5.25"
   },
   "devDependencies": {
-    "@types/node": "^24.0.12",
-    "typescript": "^5.8.3",
-    "vite": "^7.0.2"
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.4"
   }
 }
