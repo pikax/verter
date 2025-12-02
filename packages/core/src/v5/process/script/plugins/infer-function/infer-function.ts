@@ -67,7 +67,7 @@ export const InferFunctionPlugin = definePlugin({
           }${ctx.generic ? `<${ctx.generic.declaration}>` : ""}>`;
           let property: string | undefined;
 
-          if ("event" in directive && directive.event && directive.arg) {
+          if ("event" in directive && directive.event && directive.arg && directive.arg.length > 0) {
             const argName = directive.arg[0].name;
             if (!argName) {
               throw new Error("Unable to infer event name");
