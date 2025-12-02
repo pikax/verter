@@ -26,7 +26,7 @@
     "@vue/compiler-sfc": "^3.5.17",
     "@vue/shared": "^3.5.17",
     "vue": "^3.5.17",
-    "oxc-parser": "^0.75.1"
+    "oxc-parser": "^0.98.0"
   },
   "files": [
     "dist",

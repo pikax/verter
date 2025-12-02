@@ -90,11 +90,11 @@ const Comp = defineComponent({
 declare const Foo: { new (): { $props: { bar: string } } };
 
 <Comp
-  v-slot={(x) => {
-    x.bar;
+  v-slot={(x: unknown) => {
+    console.log(x);
   }}
 />;
 
-<Foo bar="" v-slot={(x) => {}} />;
+<Foo bar="" v-slot={(x: unknown) => console.log(x)} />;
 
-<select v-slot={} />;
+// <select v-slot={} />; // Invalid - v-slot requires expression

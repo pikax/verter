@@ -65,7 +65,7 @@ export function handleSetupNode(
 
         case "TSDeclareFunction":
         case "FunctionDeclaration": {
-          console.log("processing TSF fgoo");
+          // console.log("processing TSF fgoo");
           items.push({
             type: ScriptTypes.Declaration,
             node: node,
@@ -256,7 +256,7 @@ export function createSetupContext(opts: {
 
       case "TSDeclareFunction":
       case "FunctionDeclaration": {
-        console.log("processing TSF fgoo");
+        // console.log("processing TSF fgoo");
         context.skip();
         return {
           type: ScriptTypes.Declaration,

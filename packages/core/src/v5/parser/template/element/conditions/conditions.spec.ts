@@ -72,7 +72,8 @@ describe("parser template conditions", () => {
               content: "true",
             },
             name: "true",
-            ignore: false,
+            // Note: "true" is a static literal, so it's correctly marked as ignore
+            ignore: true,
           },
         ],
 

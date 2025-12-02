@@ -1,8 +1,5 @@
-import { camelize, capitalize } from "vue";
-import { ScriptItem, ScriptTypes } from "../../../../parser/script/types";
-import { BundlerHelper } from "../../../template/helpers/bundler";
+import { ScriptItem } from "../../../../parser/script/types";
 import { ProcessContext } from "../../../types";
-import { generateImport } from "../../../utils";
 import { processScript } from "../../script";
 import { ScriptContext } from "../../types";
 
@@ -17,13 +14,13 @@ import {
   TemplateBindingPlugin,
   SFCCleanerPlugin,
   ScriptDefaultPlugin,
-  ScriptResolversPlugin,
   ComponentInstancePlugin,
   DefineOptionsPlugin,
   InferFunctionPlugin,
 } from "../../plugins/";
 
 import { TemplateTypes } from "../../../../parser/template/types";
+import { ComponentTypePlugin } from "../../plugins/component-type";
 
 export function ResolveOptionsFilename(
   ctx: Required<Pick<ProcessContext, "blockNameResolver">>
@@ -57,7 +54,8 @@ export function buildOptions(
       ScriptResolversPlugin,
       ComponentInstancePlugin,
       DefineOptionsPlugin,
-      InferFunctionPlugin
+      ComponentTypePlugin,
+      InferFunctionPlugin,
     ],
     {
       ...context,

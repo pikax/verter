@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["src/**/*.spec.ts", "src/**/*.spec.tsx", "src/test-utils.d.ts", "src/tsx/tsx.tsx"],
+  "exclude": [],
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "preserve",
+    "jsxImportSource": "vue"
+  }
+}

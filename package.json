@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "build": "pnpm --filter @verter/language-shared --filter @verter/language-server --filter @verter/core --filter verter-vscode --filter @verter/typescript-plugin  build",
+    "build": "pnpm --filter @verter/types --filter @verter/language-shared --filter @verter/language-server --filter @verter/core --filter @verter/oxc-bindings --filter verter-vscode --filter @verter/typescript-plugin  build",
     "watch": "pnpm --filter @verter/core --filter @verter/language-shared --filter @verter/language-server --filter verter-vscode --filter @verter/typescript-plugin watch",
     "dev-extension": "pnpm --filter @verter/language-server --filter verter-vscode watch",
     "update-all": "pnpm up -r -i -L",
@@ -19,16 +19,16 @@
   "license": "ISC",
   "devDependencies": {
     "@hyrious/esbuild-plugin-commonjs": "^0.2.6",
-    "@rollup/plugin-commonjs": "^28.0.6",
-    "@rollup/plugin-node-resolve": "^16.0.1",
-    "@vscode/vsce": "^3.6.0",
-    "esbuild": "^0.25.6",
+    "@rollup/plugin-commonjs": "^29.0.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@vscode/vsce": "^3.7.1",
+    "esbuild": "^0.27.0",
     "esbuild-plugin-alias": "^0.2.1",
     "esbuild-plugin-alias-path": "^2.0.2",
-    "glob": "^11.0.3",
-    "rollup": "^4.44.2",
+    "glob": "^13.0.0",
+    "rollup": "^4.53.3",
     "rollup-plugin-esbuild": "^6.2.1",
-    "vitest": "^3.2.4"
+    "vitest": "^4.0.14"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
@@ -37,5 +37,6 @@
       "esbuild",
       "keytar"
     ]
-  }
+  },
+  "packageManager": "pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c"
 }

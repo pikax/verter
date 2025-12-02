@@ -8,7 +8,7 @@ import {
   parseAcorn,
   parseBabel,
 } from "./ast.js";
-import { parseAsync } from "oxc-parser";
+import { parse } from "oxc-parser";
 import { MagicString, walk } from "@vue/compiler-sfc";
 import { isFunctionType } from "@vue/compiler-core";
 
@@ -32,7 +32,7 @@ describe("ast bench", () => {
   describe.each(Object.keys(validFiles))("single %s", (x) => {
     const file = validFiles[x];
     bench("oxc async", async () => {
-      await parseAsync("index.ts", file);
+      await parse("index.ts", file);
     });
     bench("oxc", () => {
       parseOXC(file);
@@ -58,7 +58,7 @@ describe("ast bench", () => {
   describe("multi", () => {
     bench("oxc async", async () => {
       await Promise.all(
-        Object.values(validFiles).map((x) => parseAsync("index.ts", x))
+        Object.values(validFiles).map((x) => parse("index.ts", x))
       );
     });
 
@@ -214,7 +214,7 @@ describe("ast bench", () => {
       bench("async oxc + magicstring", async () => {
         await Promise.all(
           sources.map(async (source) => {
-            const parsed = await parseAsync("test.ts", source);
+            const parsed = await parse("test.ts", source);
             const s = new MagicString(source);
             makeChanges(s, parsed.program);
           })
@@ -224,10 +224,7 @@ describe("ast bench", () => {
       bench("async sanitised oxc + magicstring", async () => {
         await Promise.all(
           sources.map(async (source) => {
-            const parsed = await parseAsync(
-              "test.ts",
-              sanitisePosition(source)
-            );
+            const parsed = await parse("test.ts", sanitisePosition(source));
             const s = new MagicString(source);
             makeChanges(s, parsed.program);
           })

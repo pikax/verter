@@ -94,7 +94,7 @@ export const ElementPlugin = declareTemplatePlugin({
 
       return;
     }
-    const componentAccessor = ctx.retrieveAccessor("ctx");
+    const componentAccessor = ctx.retrieveAccessor("components");
     s.prependRight(
       node.loc.start.offset + 1,
       `${componentAccessor}${shouldWrap ? '["' : "."}`

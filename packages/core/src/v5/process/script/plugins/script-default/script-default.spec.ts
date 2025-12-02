@@ -75,7 +75,7 @@ describe("process script plugin script-default", () => {
 
       // needs to export the default
       expect(result).toContain(
-        `;export const ___VERTER___default=___VERTER___defineComponent({});`
+        `;export const ___VERTER___default_Component=___VERTER___defineComponent({});`
       );
 
       expect(result).not.toContain("export default");
@@ -89,7 +89,7 @@ describe("process script plugin script-default", () => {
 
       // needs to export the default
       expect(result).toContain(
-        `;export const ___VERTER___default=___VERTER___defineComponent({ props: { foo: String } })`
+        `;export const ___VERTER___default_Component=___VERTER___defineComponent({ props: { foo: String } })`
       );
       expect(result).not.toContain("export default");
     });
@@ -105,7 +105,7 @@ describe("process script plugin script-default", () => {
 
       // needs to export the default
       expect(result).toContain(
-        `export const ___VERTER___default=defineComponent({ props: { foo: String } })`
+        `export const ___VERTER___default_Component=defineComponent({ props: { foo: String } })`
       );
       expect(result).not.toContain("export default");
     });
@@ -121,7 +121,7 @@ describe("process script plugin script-default", () => {
 
       // needs to export the default
       expect(result).toContain(
-        `export const ___VERTER___default=customDefineComponent({ setup() {} })`
+        `export const ___VERTER___default_Component=customDefineComponent({ setup() {} })`
       );
     });
 
@@ -137,7 +137,7 @@ export default Comp`,
 
       // needs to export the default
       expect(result).toContain("const Comp = { props: { foo: String } };");
-      expect(result).toContain("export const ___VERTER___default=Comp");
+      expect(result).toContain("export const ___VERTER___default_Component=Comp");
     });
   });
 
@@ -160,7 +160,7 @@ export default Comp`,
 
         // needs to export the default
         expect(result).toContain(
-          `;export const ___VERTER___default=___VERTER___defineComponent({});`
+          `;export const ___VERTER___default_Component=___VERTER___defineComponent({});`
         );
       });
 
@@ -177,7 +177,7 @@ export default Comp`,
 
         // needs to export the default
         expect(result).toContain(
-          `;export const ___VERTER___default=___VERTER___defineComponent({});`
+          `;export const ___VERTER___default_Component=___VERTER___defineComponent({});`
         );
       });
       it("defineOptions({ inheritAttrs: false })", () => {
@@ -196,9 +196,9 @@ export default Comp`,
           `function script  (){defineOptions({ inheritAttrs: false })}`
         );
 
-        // needs to export the default
+        // needs to export the default using the boxed options variable
         expect(result).toContain(
-          `export const ___VERTER___default=___VERTER___defineComponent({ inheritAttrs: false });`
+          `export const ___VERTER___default_Component=___VERTER___defineComponent(___VERTER___defineOptions_Boxed);`
         );
       });
 
@@ -218,9 +218,9 @@ export default Comp`,
           `function script  (){let a = defineOptions({ inheritAttrs: false })}`
         );
 
-        // needs to export the default
+        // needs to export the default using the boxed options variable
         expect(result).toContain(
-          `;export const ___VERTER___default=___VERTER___defineComponent({ inheritAttrs: false });`
+          `;export const ___VERTER___default_Component=___VERTER___defineComponent(___VERTER___defineOptions_Boxed);`
         );
       });
     });
@@ -236,7 +236,7 @@ export default Comp`,
 
         // needs to export the default
         expect(result).toContain(
-          `;export const ___VERTER___default=___VERTER___defineComponent({});`
+          `;export const ___VERTER___default_Component=___VERTER___defineComponent({});`
         );
 
         expect(result).not.toContain("export default");
@@ -250,7 +250,7 @@ export default Comp`,
 
         // needs to export the default
         expect(result).toContain(
-          `;export const ___VERTER___default=___VERTER___defineComponent({ props: { foo: String } })`
+          `;export const ___VERTER___default_Component=___VERTER___defineComponent({ props: { foo: String } })`
         );
         expect(result).not.toContain("export default");
       });
@@ -266,7 +266,7 @@ export default Comp`,
 
         // needs to export the default
         expect(result).toContain(
-          `export const ___VERTER___default=defineComponent({ props: { foo: String } })`
+          `export const ___VERTER___default_Component=defineComponent({ props: { foo: String } })`
         );
         expect(result).not.toContain("export default");
       });
@@ -282,7 +282,7 @@ export default Comp`,
 
         // needs to export the default
         expect(result).toContain(
-          `export const ___VERTER___default=customDefineComponent({ setup() {} })`
+          `export const ___VERTER___default_Component=customDefineComponent({ setup() {} })`
         );
       });
 
@@ -298,7 +298,7 @@ export default Comp`,
 
         // needs to export the default
         expect(result).toContain("const Comp = { props: { foo: String } };");
-        expect(result).toContain("export const ___VERTER___default=Comp");
+        expect(result).toContain("export const ___VERTER___default_Component=Comp");
       });
 
       it("export const CompB = defineComponent({ setup() {} })", () => {
@@ -313,7 +313,7 @@ export default { components: { CompB }}`,
         );
 
         expect(result).toContain(
-          `export const ___VERTER___default=___VERTER___defineComponent({ components: { CompB }});`
+          `export const ___VERTER___default_Component=___VERTER___defineComponent({ components: { CompB }});`
         );
       });
     });

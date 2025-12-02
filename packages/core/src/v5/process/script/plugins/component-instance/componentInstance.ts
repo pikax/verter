@@ -1,27 +1,71 @@
 import { definePlugin } from "../../types";
 import { BundlerHelper } from "../../../template/helpers/bundler";
-import { generateImport } from "../../../utils";
+import { createHelperImport } from "../../../utils";
+import { type AvailableExports } from "@verter/types/string";
 
 export const ComponentInstancePlugin = definePlugin({
   name: "VerterComponentInstance",
   enforce: "post",
 
   pre(s, ctx) {
-    const prefix = ctx.prefix("");
-    const bundler = BundlerHelper.withPrefix(prefix);
-    const imports = [...bundler.imports];
+    // const prefix = ctx.prefix("");
+    // const bundler = BundlerHelper.withPrefix(prefix);
+    // const imports = [...bundler.imports];
+    // const str = generateImport(imports);
+    // s.prepend(`${str}\n`);
 
-    const str = generateImport(imports);
-    s.prepend(`${str}\n`);
+    if (ctx.isSetup) {
+      ctx.items.push(
+        createHelperImport(["PublicInstanceFromMacro"], ctx.prefix)
+      );
+    }
   },
 
   post(s, ctx) {
+    if (ctx.isSetup) {
+      const macroToInstance = ctx.prefix(
+        "PublicInstanceFromMacro" as AvailableExports
+      );
+      const attributes = ctx.prefix("attributes");
+      // TODO resolve the first element in template and use its type
+      // NOTE that if inheritedAttrs is false, then it should be {}
+      const element = "Element";
+      // if allowDev is true it will export a type to be imported in test components
+      const allowDev = true;
+
+      const componentName = ctx.prefix("Component");
+      const templateBinding = ctx.prefix("TemplateBinding");
+      const defaultOptionsName = ctx.prefix("default_Component");
+
+      const genericDeclaration = ctx.generic
+        ? `<${ctx.generic.declaration}>`
+        : "";
+      const sanitisedNames = ctx.generic
+        ? `<${ctx.generic.sanitisedNames.join(",")}>`
+        : "";
+
+      const instanceName = ctx.prefix("Instance");
+
+      const declaration = [
+        `export type ${instanceName}${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, false,false>;`,
+        allowDev &&
+          `export type ${instanceName}_TEST${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, true,true>;`,
+        `export const ${componentName}={} as typeof ${defaultOptionsName} & { new${genericDeclaration}(...args: any[]):${instanceName}${sanitisedNames} };`,
+      ];
+
+      s.append(declaration.filter(Boolean).join("\n"));
+    } else {
+      console.warn("Setup is not supported yet for ComponentInstancePlugin");
+    }
+  },
+
+  postOld(s: any, ctx: any) {
     const prefix = ctx.prefix("");
     const bundler = BundlerHelper.withPrefix(prefix);
 
     const ProcessPropsName = ctx.prefix("ProcessProps");
 
-    const defaultOptionsName = ctx.prefix("default");
+    const defaultOptionsName = ctx.prefix("default_Component");
     const resolvePropsName = ctx.prefix("resolveProps");
     const resolveSlotsName = ctx.prefix("defineSlots");
 

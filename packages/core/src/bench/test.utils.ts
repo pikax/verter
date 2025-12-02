@@ -2,8 +2,6 @@ import { MagicString } from "@vue/compiler-sfc";
 // import { createContext } from "../parser";
 import { parser } from "../v5/parser";
 // import { processRender } from "./__old__";
-import { ParsedBlockTemplate } from "../v5/parser/types";
-import { DefaultPlugins, processTemplate } from "../v5/process/template";
 import { basename } from "node:path";
 
 export function parseOld(content: string) {

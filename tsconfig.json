@@ -6,6 +6,7 @@
   //   "include": ["packages/*/tests"],
   "references": [
     { "path": "./packages/core/tsconfig.json" },
-    { "path": "./packages/core/tsconfig.generated.json" }
+    { "path": "./packages/core/tsconfig.generated.json" },
+    { "path": "./packages/types/tsconfig.json" }
   ]
 }

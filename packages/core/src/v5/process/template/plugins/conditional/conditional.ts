@@ -257,42 +257,123 @@ function generateTernaryCondition(
   return `!(${text})? undefined :`;
 }
 
-// TODO test this, specially when is in a Function
-function generateConditionText(
+/**
+ * Generates a TypeScript condition expression for type narrowing in Vue templates.
+ *
+ * For v-if/v-else-if/v-else chains, this generates the combined condition that would be
+ * true at that point in the chain. For example:
+ * - v-if="A" → "A"
+ * - v-else-if="B" (after v-if="A") → "!(A) && B"
+ * - v-else-if="C" (after v-if="A" and v-else-if="B") → "!(A) && !(B) && C"
+ * - v-else → "!(A) && !(B) && !(C)"
+ *
+ * The function processes siblings (prior conditions in the chain) by deduplicating them
+ * to avoid the bug where nested sibling references would cause conditions to be repeated.
+ *
+ * @param conditions - The current condition(s) being processed (may include nested conditions)
+ * @param s - MagicString containing the source code for extracting condition text
+ * @returns A TypeScript expression that represents when this branch would be taken
+ */
+export function generateConditionText(
   conditions: TemplateCondition[],
   s: MagicString
 ): string {
-  const siblings = conditions
+  // Collect all unique siblings from all conditions (direct siblings only, no recursion)
+  // Each condition's siblings are all prior conditions in the v-if/v-else-if chain
+  const allSiblings = conditions
     .map((x) => x.siblings)
     .flat()
     .filter((x) => x);
 
-  let negations = "";
-  if (siblings.length > 0) {
-    const st = generateConditionText(siblings, s);
-    if (st) {
-      negations = `!(${st})`;
+  // Deduplicate siblings by node reference to avoid processing the same condition multiple times.
+  // This fixes a bug where v-else-if chains would duplicate conditions because each sibling
+  // also contains references to its own siblings (e.g., condition C has siblings [A, B],
+  // and B has siblings [A], which would cause A to appear twice without deduplication).
+  const uniqueSiblings = new Map<object, TemplateCondition>();
+  for (const sibling of allSiblings) {
+    if (!uniqueSiblings.has(sibling.node)) {
+      uniqueSiblings.set(sibling.node, sibling);
     }
   }
+
+  // Generate negation text for each sibling (without recursive sibling processing)
+  const negationParts: string[] = [];
+  for (const sibling of uniqueSiblings.values()) {
+    const condText = s
+      .slice(sibling.node.loc.start.offset, sibling.node.loc.end.offset)
+      .toString();
+    if (condText) {
+      const parsed = parseConditionText(condText);
+      if (parsed) {
+        // Wrap compound conditions in parentheses before negating
+        negationParts.push(`!(${wrapIfNeeded(parsed)})`);
+      }
+    }
+  }
+
+  const negations = negationParts.join(" && ");
 
   const positive = conditions
     .map((x) =>
       s.slice(x.node.loc.start.offset, x.node.loc.end.offset).toString()
     )
     .filter((x) => x)
-    .map((x) => {
-      const ending = x.endsWith("{") ? -1 : x.length;
-
-      if (x.startsWith("if")) {
-        x = x.slice(2, ending);
-      } else if (x.startsWith("else if")) {
-        x = x.slice(7, ending);
-      } else if (x.startsWith("else")) {
-        x = x.slice(4, ending);
-      }
-      return x;
-    })
+    .map((x) => parseConditionText(x))
+    .filter((x) => x)
+    .map((x) => wrapIfNeeded(x))
     .join(" && ");
 
   return [negations, positive].filter((x) => x).join(" && ");
+}
+
+/**
+ * Wraps a condition expression in parentheses if it contains operators that could
+ * cause precedence issues when combined with && or !.
+ *
+ * @param expr - The condition expression
+ * @returns The expression, wrapped in parentheses if needed
+ */
+function wrapIfNeeded(expr: string): string {
+  // If already wrapped in parentheses, return as-is
+  if (expr.startsWith("(") && expr.endsWith(")")) {
+    // Check if the parentheses are balanced and wrap the entire expression
+    let depth = 0;
+    for (let i = 0; i < expr.length - 1; i++) {
+      if (expr[i] === "(") depth++;
+      else if (expr[i] === ")") depth--;
+      if (depth === 0) {
+        // The opening paren closes before the end, so it doesn't wrap everything
+        return `(${expr})`;
+      }
+    }
+    return expr;
+  }
+
+  // If contains && or || operators, wrap in parentheses
+  // This ensures proper precedence when combined with outer && and !
+  if (expr.includes("&&") || expr.includes("||")) {
+    return `(${expr})`;
+  }
+
+  return expr;
+}
+
+/**
+ * Parses a raw condition text from the source, removing prefixes like "if", "else if", "else"
+ * and trailing braces.
+ *
+ * @param text - Raw condition text from the source (e.g., "if(isVisible){" or "else if(isNumber){")
+ * @returns The extracted condition expression (e.g., "(isVisible)" or "(isNumber)")
+ */
+function parseConditionText(text: string): string {
+  const ending = text.endsWith("{") ? -1 : text.length;
+
+  if (text.startsWith("if")) {
+    return text.slice(2, ending);
+  } else if (text.startsWith("else if")) {
+    return text.slice(7, ending);
+  } else if (text.startsWith("else")) {
+    return text.slice(4, ending);
+  }
+  return text.slice(0, ending);
 }

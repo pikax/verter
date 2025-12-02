@@ -3,8 +3,13 @@ import { ProcessItemType } from "../../../types";
 import { definePlugin } from "../../types";
 import { generateTypeDeclaration } from "../utils";
 
+// TODO this has been deprecated in favor of macro plugin and typescript in @verter/types
+
 // provides the resolvers for the script block
 // eg: resolveProps, resolveEmits, ...
+/**
+ * @deprecated use macro plugins and typescript in @verter/types
+ */
 export const ScriptResolversPlugin = definePlugin({
   name: "VerterResolvers",
 
@@ -18,10 +23,12 @@ export const ScriptResolversPlugin = definePlugin({
       (x) => x.type === ProcessItemType.DefineModel
     );
 
-    const hasEmit = true || ctx.items.some(
-      (x) =>
-        x.type === ProcessItemType.MacroBinding && x.macro === "defineEmits"
-    );
+    const hasEmit =
+      true ||
+      ctx.items.some(
+        (x) =>
+          x.type === ProcessItemType.MacroBinding && x.macro === "defineEmits"
+      );
 
     const definePropsName = ctx.prefix("defineProps");
     const defineEmitsName = ctx.prefix("defineEmits");
@@ -41,7 +48,6 @@ export const ScriptResolversPlugin = definePlugin({
                 : never) => any
 } : {})`;
 
-
     const resolveProps = [
       hasModel
         ? `Omit<${definePropsName}${genericNames}, keyof ${modelToProp}>`
@@ -51,7 +57,10 @@ export const ScriptResolversPlugin = definePlugin({
     ]
       .filter(Boolean)
       .join(" & ");
-    const resolveEmits = [`${defineEmitsName}${genericNames}`, hasModel && modelToEmits]
+    const resolveEmits = [
+      `${defineEmitsName}${genericNames}`,
+      hasModel && modelToEmits,
+    ]
       .filter(Boolean)
       .join(" & ");
 

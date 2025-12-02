@@ -6,10 +6,13 @@ const props = withDefaults(defineProps<MyProps>(), {});
 
 <template>
   <div>{{ $props }}</div>
+  <div>{{ $ }}</div>
   <div>{{ bar }}</div>
+  <div>{{props}}</div>
 
   <span> {{ ___DEBUG_Verter }} </span>
-  <span> {{ ___DEBUG_Default }} </span>
+  <span> {{ ___DEBUG_ComponentInstance }} </span>
+  <span> {{ ___DEBUG_Instance }} </span>
   <span> {{ ___DEBUG_Props }} </span>
   <span> {{ ___DEBUG_Components }} </span>
   <span> {{ ___DEBUG_FullContext }} </span>

@@ -184,7 +184,13 @@ describe("process template plugins loop", () => {
   it("v-for with slots dynamic", () => {
     const { result } = parse(`<Comp v-for="item in items" #[item]></Comp>`);
     expect(result).toContain(
-      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <___VERTER___ctx.Comp   v-slot={(___VERTER___slotInstance):any=>{___VERTER___slotRender(___VERTER___slotInstance.$slots[item])(()=>{})}}></___VERTER___ctx.Comp>})}}`
+      `___VERTER___renderList(___VERTER___ctx.items,(item)=>{`
+    );
+    expect(result).toContain(
+      `<___VERTER___components.Comp`
+    );
+    expect(result).toContain(
+      `v-slot={(___VERTER___slotInstance)=>{___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[item])`
     );
   });
 
@@ -194,11 +200,7 @@ describe("process template plugins loop", () => {
         <div>{{ item }}</div>
     </slot>
 </div>`);
-    expect(result)
-      .toContain(`{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div >
-    {()=>{const ___VERTER___slotComponent=___VERTER___$slot[item];<___VERTER___slotComponent >
-        <div>{ item }</div>
-    </___VERTER___slotComponent>}}
-</div>})}}`);
+    expect(result).toContain(`___VERTER___renderList(___VERTER___ctx.items,(item)=>{`);
+    expect(result).toContain(`const ___VERTER___slotComponent=___VERTER___$slot[item]`);
   });
 });

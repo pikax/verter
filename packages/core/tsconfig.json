@@ -10,14 +10,20 @@
     "./src/**/*.ignore.tsx",
     "./src/**/*.ignore.ts",
     "./src/**/__bench__/**/*",
-    // "./src/**/*.spec.ts",
-    "./src/bench/**/*"
+    "./src/**/__generated__/**/*",
+    "./src/**/*.fixtures.ts",
+    "./src/fixtures/**/*",
+    "./src/**/*.spec.ts",
+    "./src/**/*.bench.ts",
+    "./src/bench/**/*",
+    "./src/**/*.test-utils.ts"
   ],
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
     "target": "ESNext",
-    "module": "CommonJS",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
     "types": ["vitest/importMeta", "vitest/globals", "vite/client"],
     "jsx": "preserve",
     "preserveConstEnums": true
