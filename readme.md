@@ -2,7 +2,8 @@
 
 Verter is a Vue Language Server Protocol (LSP) implementation that provides enhanced TypeScript support for Vue Single File Components (SFCs). Verter converts Vue SFCs to **typed TSX representations** that TypeScript can analyze for type-checking, completions, and error reporting.
 
-> **Important**: The generated TSX is syntactically valid TypeScript/TSX used for **type analysis only** — it's not meant to be executed or compiled as actual JSX/TSX code.
+> [!IMPORTANT]
+> The generated TSX is syntactically valid TypeScript/TSX used for **type analysis only** — it's not meant to be executed or compiled as actual JSX/TSX code.
 
 ## Features
 
@@ -67,7 +68,8 @@ The generated TSX is syntactically valid TypeScript that represents the Vue comp
 | Focus | Best TypeScript integration | Feature-rich IDE support |
 | Use case | When you need strict type safety | General Vue development |
 
-> **Note**: If you haven't encountered specific issues with Volar, there's no reason to switch. Verter is for developers who need enhanced TypeScript support.
+> [!NOTE]
+> If you haven't encountered specific issues with Volar, there's no reason to switch. Verter is for developers who need enhanced TypeScript support.
 
 ## Architecture
 
