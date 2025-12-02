@@ -113,7 +113,7 @@ describe("process template plugins conditional", () => {
 
                 else if(typeof test === 'number'){<div  :test="()=>!(!((typeof test === 'string')) && (typeof test === 'number'))? undefined :test" />}
 
-                else{<div  :test="()=>!(!(!((typeof test === 'string')) && (typeof test === 'string') && (typeof test === 'number')))? undefined :test" />}}}"
+                else{<div  :test="()=>!(!((typeof test === 'string')) && !((typeof test === 'number')))? undefined :test" />}}}"
       `);
     });
   });
@@ -131,7 +131,7 @@ describe("process template plugins conditional", () => {
                 {()=>{if(!((typeof test === 'string'))) return;if(test === 'app'){<div  :test="()=> !((typeof test === 'string') && (test === 'app'))? undefined :test">app</div>}}}
               </div>}
               else if(typeof test === 'number'){<div />}
-              else{<div  :test="()=>!(!(!((typeof test === 'string')) && (typeof test === 'string') && (typeof test === 'number')))? undefined :test" />}}}"
+              else{<div  :test="()=>!(!((typeof test === 'string')) && !((typeof test === 'number')))? undefined :test" />}}}"
     `);
   });
 });

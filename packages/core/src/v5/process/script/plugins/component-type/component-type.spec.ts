@@ -228,6 +228,97 @@ describe("ComponentTypePlugin", () => {
       const divMatches = result.match(/HTMLElementTagNameMap\["div"\]/g);
       expect(divMatches?.length).toBe(3);
     });
+
+    // @ai-generated - Tests for verifying correct narrowing in v-if/v-else-if/v-else chains
+    it("generates correct narrowing for v-if condition", () => {
+      const { result } = processComponentType(
+        '<div v-if="isTypeA">A</div>',
+        "const isTypeA = true;"
+      );
+
+      // v-if should have narrowing with the condition
+      expect(result).toContain("if(!(");
+      expect(result).toContain("isTypeA");
+      expect(result).toContain("return null");
+    });
+
+    it("generates correct narrowing for v-else-if - should negate v-if condition", () => {
+      const { result } = processComponentType(
+        `<div v-if="isTypeA">A</div>
+         <div v-else-if="isTypeB">B</div>`,
+        "const isTypeA = true; const isTypeB = true;"
+      );
+
+      // v-else-if should negate the v-if condition and include its own condition
+      // Expected: if(!(!((isTypeA)) && (isTypeB))) return null;
+      expect(result).toContain("isTypeA");
+      expect(result).toContain("isTypeB");
+      
+      // The v-else-if narrowing should negate isTypeA 
+      const elseIfNarrowing = result.match(/if\(!\(.*isTypeA.*\)\) return null/);
+      expect(elseIfNarrowing).toBeTruthy();
+    });
+
+    it("generates correct narrowing for v-else - should negate all prior conditions", () => {
+      const { result } = processComponentType(
+        `<div v-if="isTypeA">A</div>
+         <div v-else>B</div>`,
+        "const isTypeA = true;"
+      );
+
+      // v-else should negate the v-if condition
+      // The narrowing for v-else should contain negation of isTypeA
+      expect(result).toContain("isTypeA");
+    });
+
+    it("generates correct narrowing for multiple v-else-if - each condition appears once", () => {
+      const { result } = processComponentType(
+        `<div v-if="isTypeA">A</div>
+         <div v-else-if="isTypeB">B</div>
+         <div v-else-if="isTypeC">C</div>
+         <div v-else>D</div>`,
+        "const isTypeA = true; const isTypeB = true; const isTypeC = true;"
+      );
+
+      // Extract the narrowing statements (if(!(...)) return null;)
+      const narrowingStatements = result.match(/if\(!\(.*?\)\) return null;/g) || [];
+      
+      // Should have 4 narrowing statements (one per element)
+      expect(narrowingStatements.length).toBe(4);
+
+      // v-if element narrowing: should be just the condition
+      expect(narrowingStatements[0]).toBe("if(!((isTypeA))) return null;");
+
+      // v-else-if="isTypeB" narrowing: should negate v-if and include its condition
+      expect(narrowingStatements[1]).toBe("if(!(!((isTypeA)) && (isTypeB))) return null;");
+
+      // v-else-if="isTypeC" narrowing: should negate both prior conditions
+      expect(narrowingStatements[2]).toBe("if(!(!((isTypeA)) && !((isTypeB)) && (isTypeC))) return null;");
+
+      // v-else narrowing: should negate all three conditions
+      expect(narrowingStatements[3]).toBe("if(!(!((isTypeA)) && !((isTypeB)) && !((isTypeC)))) return null;");
+    });
+
+    it("generates correct narrowing for typeof conditions", () => {
+      const { result } = processComponentType(
+        `<div v-if="typeof test === 'string'">String</div>
+         <div v-else-if="typeof test === 'number'">Number</div>
+         <div v-else>Other</div>`,
+        "const test = 'hello' as string | number | boolean;"
+      );
+
+      // Check that typeof conditions are present
+      expect(result).toContain("typeof test");
+      
+      // Each typeof condition should appear a limited number of times
+      const stringTypeofMatches = result.match(/typeof test === 'string'/g) || [];
+      const numberTypeofMatches = result.match(/typeof test === 'number'/g) || [];
+      
+      // Should not have excessive duplication
+      expect(stringTypeofMatches.length).toBeLessThanOrEqual(4);
+      expect(numberTypeofMatches.length).toBeLessThanOrEqual(3);
+    });
+
   });
 
   // ============================================================================

@@ -409,7 +409,7 @@ const conditionalFixtures: Fixture[] = [
   },
   {
     name: "v-if with compound conditions",
-    code: "const isLoggedIn = true; const hasPermission = true;",
+    code: "import { ref } from 'vue';\nconst isLoggedIn = ref(true); const hasPermission = ref(true);",
     template: `
       <div v-if="isLoggedIn && hasPermission">Full Access</div>
       <div v-else-if="isLoggedIn && !hasPermission">Limited Access</div>

@@ -24,6 +24,7 @@ import {
 } from "../../plugins/";
 
 import { TemplateTypes } from "../../../../parser/template/types";
+import { ComponentTypePlugin } from "../../plugins/component-type";
 
 export function ResolveOptionsFilename(
   ctx: Required<Pick<ProcessContext, "blockNameResolver">>
@@ -56,7 +57,8 @@ export function buildOptions(
       SFCCleanerPlugin,
       ComponentInstancePlugin,
       DefineOptionsPlugin,
-      InferFunctionPlugin
+      ComponentTypePlugin,
+      InferFunctionPlugin,
     ],
     {
       ...context,
