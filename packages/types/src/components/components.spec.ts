@@ -656,33 +656,35 @@ describe("components helpers", () => {
     });
 
     describe("non-constructor types", () => {
-      it("returns empty object for non-constructor types", () => {
+      it("merges additional props for non-constructor types", () => {
+        // For non-constructor types (like string), the function returns T & P
+        // This is the fallback behavior for primitive types used with type assertions
         type Result = ReturnType<
           typeof enhanceElementWithProps<string, AdditionalProps>
         >;
 
-        assertType<Result>({} as {});
-        assertType<{}>({} as Result);
+        assertType<Result>({} as string & AdditionalProps);
+        assertType<string & AdditionalProps>({} as Result);
       });
 
-      it("returns empty object for plain object type", () => {
+      it("merges additional props with plain object type", () => {
         type PlainObject = { foo: string };
         type Result = ReturnType<
           typeof enhanceElementWithProps<PlainObject, AdditionalProps>
         >;
 
-        assertType<Result>({} as {});
-        assertType<{}>({} as Result);
+        assertType<Result>({} as PlainObject & AdditionalProps);
+        assertType<PlainObject & AdditionalProps>({} as Result);
       });
 
-      it("returns empty object for function type (non-constructor)", () => {
+      it("merges additional props with function type (non-constructor)", () => {
         type FnType = () => void;
         type Result = ReturnType<
           typeof enhanceElementWithProps<FnType, AdditionalProps>
         >;
 
-        assertType<Result>({} as {});
-        assertType<{}>({} as Result);
+        assertType<Result>({} as FnType & AdditionalProps);
+        assertType<FnType & AdditionalProps>({} as Result);
       });
     });
 

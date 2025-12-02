@@ -1,3 +1,33 @@
+/**
+ * @fileoverview Component Type Plugin for Vue SFC to TSX transformation.
+ *
+ * This plugin generates typed component type functions from Vue templates,
+ * enabling full TypeScript type inference for template elements, including:
+ * - HTML elements with their proper element types (e.g., HTMLDivElement)
+ * - Vue components with their props and slots
+ * - Loop variables from v-for directives
+ * - Scoped slot props from parent components
+ * - Conditional narrowing from v-if/v-else-if/v-else
+ *
+ * @example Generated output for a simple template:
+ * ```vue
+ * <template>
+ *   <div id="app">{{ message }}</div>
+ * </template>
+ * ```
+ * Generates:
+ * ```typescript
+ * function ___VERTER___Comp0() {
+ *   const { message } = {} as ___VERTER___FullContext;
+ *   return enhanceElementWithProps({} as HTMLElementTagNameMap["div"], { "id": "app" });
+ * }
+ * ```
+ *
+ * @see {@link file://packages/types/src/components/components.ts} - Type helpers used by generated code
+ * @see {@link file://packages/types/src/loops/loops.ts} - Loop extraction helpers
+ * @see {@link file://packages/types/src/slots/slots.ts} - Slot argument extraction helpers
+ */
+
 import { definePlugin, ScriptContext } from "../../types";
 import { BundlerHelper } from "../../../template/helpers/bundler";
 import {
@@ -28,6 +58,45 @@ import {
   generateConditionText,
 } from "../../../template/plugins";
 
+/**
+ * Plugin that generates typed component type functions from Vue templates.
+ *
+ * This plugin runs in the "pre" phase to set up conditional narrowing,
+ * then in the "post" phase to generate the actual component type functions.
+ *
+ * ## How it works:
+ *
+ * 1. **Pre-phase**: Processes v-if/v-else-if/v-else conditions to enable
+ *    type narrowing in the generated code.
+ *
+ * 2. **Post-phase**: For each element in the template, generates a function
+ *    that returns the properly typed instance:
+ *    - HTML elements use `enhanceElementWithProps` with `HTMLElementTagNameMap`
+ *    - Vue components use `new ComponentName(props)` syntax
+ *    - Loops use `extractLoops` to type `v-for` variables
+ *    - Slots use `extractArgumentsFromRenderSlot` to type scoped slot props
+ *
+ * ## Generated helpers used:
+ *
+ * - `enhanceElementWithProps<T, P>`: Merges element type with additional props
+ * - `extractLoops<T>`: Extracts key/value types from array or object iterations
+ * - `extractArgumentsFromRenderSlot<T, N>`: Extracts slot props from parent component
+ *
+ * @example Component with v-for loop:
+ * ```vue
+ * <template>
+ *   <li v-for="(item, index) in items" :key="index">{{ item.name }}</li>
+ * </template>
+ * ```
+ * Generates:
+ * ```typescript
+ * function ___VERTER___Comp0() {
+ *   const { items } = {} as ___VERTER___FullContext;
+ *   const { key: index, value: item } = extractLoops(items);
+ *   return enhanceElementWithProps({} as HTMLElementTagNameMap["li"], { "key": index });
+ * }
+ * ```
+ */
 export const ComponentTypePlugin = definePlugin({
   name: "VerterComponentType",
   enforce: "pre",
@@ -128,11 +197,29 @@ export const ComponentTypePlugin = definePlugin({
   },
 });
 
+/**
+ * Generates a unique component function name based on the element's source offset.
+ *
+ * @param node - The element node from the template AST
+ * @param ctx - The script context containing the prefix function
+ * @returns A prefixed function name like `___VERTER___Comp123`
+ */
 function resolveComponentNameByNode(node: ElementNode, ctx: ScriptContext) {
   const start = node.loc.start;
   return ctx.prefix(`Comp${start.offset}`);
 }
 
+/**
+ * Determines whether a template element represents a Vue component or a plain HTML element.
+ *
+ * An element is considered a component if:
+ * - It has a tagType of COMPONENT (e.g., PascalCase or registered component)
+ * - It's an element whose tag matches a binding in the script context
+ *
+ * @param element - The template element to check
+ * @param ctx - The script context containing bindings
+ * @returns true if the element is a Vue component, false if it's a plain HTML element
+ */
 function isComponent(element: TemplateElement, ctx: ScriptContext) {
   const node = element.node;
   const name = node.tag;
@@ -146,6 +233,25 @@ function isComponent(element: TemplateElement, ctx: ScriptContext) {
   );
 }
 
+/**
+ * Converts a prop (attribute or directive) to a TypeScript object property string.
+ *
+ * @example Static attribute:
+ * ```html
+ * <div id="app">
+ * ```
+ * Returns: `"id": "app"`
+ *
+ * @example Dynamic binding:
+ * ```html
+ * <div :class="myClass">
+ * ```
+ * Returns: `"class": myClass`
+ *
+ * @param prop - The attribute or directive node
+ * @param ctx - The script context
+ * @returns A string like `"propName": value` or empty string if not applicable
+ */
 function propToString(
   prop: AttributeNode | DirectiveNode,
   ctx: ScriptContext
@@ -171,6 +277,13 @@ function propToString(
   return "";
 }
 
+/**
+ * Collects all props from an element and formats them as a TypeScript object literal.
+ *
+ * @param element - The template element
+ * @param ctx - The script context
+ * @returns A string like `{ "id": "app", "class": myClass }`
+ */
 function resolveComponentProps(element: TemplateElement, ctx: ScriptContext) {
   const node = element.node;
 
@@ -182,6 +295,31 @@ function resolveComponentProps(element: TemplateElement, ctx: ScriptContext) {
   return `{${props}}`;
 }
 
+/**
+ * Generates a complete component type function for a template element.
+ *
+ * For Vue components, generates:
+ * ```typescript
+ * function ___VERTER___Comp0() {
+ *   // context setup (bindings, loops, conditionals)
+ *   return new MyComponent({ "prop": value });
+ * }
+ * ```
+ *
+ * For HTML elements, generates:
+ * ```typescript
+ * function ___VERTER___Comp0() {
+ *   // context setup
+ *   return enhanceElementWithProps({} as HTMLElementTagNameMap["div"], { "id": "app" });
+ * }
+ * ```
+ *
+ * @param element - The template element to process
+ * @param templateBindings - Set of binding names available in the template
+ * @param extraContext - Shared context for tracking narrowing and loop bindings
+ * @param ctx - The script context
+ * @returns The generated function as a string
+ */
 function resolveComponent(
   element: TemplateElement,
   templateBindings: Set<string>,
@@ -207,11 +345,43 @@ ${pre}
 }`;
 }
 
+/**
+ * Converts an HTML tag name to a TypeScript type assertion expression.
+ *
+ * @param tag - The HTML tag name (e.g., "div", "span", "input")
+ * @returns A type assertion string like `{} as HTMLElementTagNameMap["div"]`
+ */
 function tagToHTMLElement(tag: string): string {
   // {} as ${tagToHTMLElement(tag)}
   return `{} as HTMLElementTagNameMap["${tag}"]`;
 }
 
+/**
+ * Generates the context setup code for a component type function.
+ *
+ * This includes:
+ * - Extracting bindings from FullContext for template variables
+ * - Adding v-for loop variable extractions (key/value from extractLoops)
+ * - Adding scoped slot prop extractions (from extractArgumentsFromRenderSlot)
+ * - Adding conditional narrowing statements (if conditions)
+ *
+ * @example Generated context for v-for:
+ * ```typescript
+ * const { items } = {} as ___VERTER___FullContext;
+ * const { key: index, value: item } = extractLoops(items);
+ * ```
+ *
+ * @example Generated context for scoped slot:
+ * ```typescript
+ * const { msg } = extractArgumentsFromRenderSlot(Comp0(), "default");
+ * ```
+ *
+ * @param element - The template element being processed
+ * @param templateBindings - Set of binding names used in the template
+ * @param extraContext - Shared context for accumulating narrowing/loop bindings
+ * @param ctx - The script context
+ * @returns Generated setup code as a string
+ */
 function availableContext(
   element: TemplateElement,
   templateBindings: Set<string>,
@@ -295,15 +465,17 @@ function availableContext(
 
   const matchedLoops = extraContext.narrowBindings
     .filter(
-      (x) =>
+      (x: { start: number; end: number; content: string }) =>
         x.start <= element.node.loc.start.offset &&
         x.end >= element.node.loc.end.offset
     )
-    .map((x) => x.content);
+    .map((x: { content: string }) => x.content);
 
   return [bStr, ...matchedLoops].filter(Boolean).join("\n");
 }
 
+/**
+ * Generates conditional narrowing code for v-if/v-else-if/v-else elements.\n *\n * When an element has conditions (from v-if/v-else-if), this generates\n * early return statements that help TypeScript narrow types.\n *\n * @example For `<div v-if=\"user\">...</div>`:\n * ```typescript\n * if(!(user)) return null;\n * ```\n *\n * @param element - The template element with conditional rendering\n * @param extraContext - Shared context for accumulating narrowing bindings\n * @param ctx - The script context\n * @returns Generated narrowing code or undefined if no condition\n */
 function resolveNarrow(
   element: TemplateElement,
   extraContext: any,
