@@ -107,6 +107,21 @@ export interface Fixture {
   generic?: string;
 
   /**
+   * Vue SFC template content (without `<template>` tags).
+   * Used for testing template transformations.
+   *
+   * @example
+   * ```typescript
+   * template: `
+   * <div>
+   *   <span>{{ msg }}</span>
+   * </div>
+   * `
+   * ```
+   */
+  template?: string;
+
+  /**
    * Expected patterns and type structures to verify in the output.
    * See {@link FixtureExpectations} for available validation options.
    */
@@ -435,20 +450,21 @@ export interface FixtureConfig {
   /**
    * Process function to transform Vue SFC content.
    *
-   * This function should:
-   * 1. Parse the input code
-   * 2. Apply the plugin transformation
-   * 3. Return the transformed result
+   * This function receives the full fixture object, giving implementations
+   * full control over how to handle all fixture properties (code, template,
+   * lang, generic, etc.).
    *
-   * @param code - The Vue SFC script content (without `<script>` tags)
-   * @param lang - The script language ("ts", "js", "tsx", "jsx")
-   * @param generic - Optional generic type parameters for the script setup block
+   * @param fixture - The fixture object containing all test data
    * @returns The processed result with transformed code
    *
    * @example
    * ```typescript
-   * process: (code, lang, generic) => {
-   *   const result = myPlugin.transform(code, { lang, generic });
+   * process: (fixture) => {
+   *   const result = myPlugin.transform(fixture.code, {
+   *     lang: fixture.lang,
+   *     generic: fixture.generic,
+   *     template: fixture.template,
+   *   });
    *   return {
    *     result: result.code,
    *     context: result.context,
@@ -457,7 +473,7 @@ export interface FixtureConfig {
    * }
    * ```
    */
-  process: (code: string, lang?: string, generic?: string) => ProcessResult;
+  process: (fixture: Fixture) => ProcessResult;
 
   /**
    * Prefix for helper types and internal variables.

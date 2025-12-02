@@ -2,6 +2,7 @@ export * from "./components";
 export * from "./emits";
 export * from "./helpers";
 export * from "./instance";
+export * from "./loops";
 export * from "./model";
 export * from "./name";
 export * from "./render";

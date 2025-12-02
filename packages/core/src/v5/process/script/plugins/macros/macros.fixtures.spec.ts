@@ -56,10 +56,16 @@ function resolveExpectation(value: WithPrefixString): string {
 // Parse Vue SFC and get transformed result
 function parseVueSFC(
   content: string,
-  lang = "ts",
+  lang: "ts" | "js" | "tsx" | "jsx" = "ts",
   generic?: string
 ): { result: string; context: any } {
-  const result = processMacros(content, lang, generic);
+  // processMacros expects a Fixture object, not separate arguments
+  const result = processMacros({
+    name: "test",
+    code: content,
+    lang,
+    generic,
+  });
   return {
     result: result.result,
     context: result.context,

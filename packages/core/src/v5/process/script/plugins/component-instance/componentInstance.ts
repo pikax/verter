@@ -1,12 +1,7 @@
 import { definePlugin } from "../../types";
 import { BundlerHelper } from "../../../template/helpers/bundler";
-import {
-  createHelperImport,
-  generateImport,
-  VERTER_HELPERS_IMPORT,
-} from "../../../utils";
+import { createHelperImport } from "../../../utils";
 import { type AvailableExports } from "@verter/types/string";
-import { ProcessItemType } from "../../../types";
 
 export const ComponentInstancePlugin = definePlugin({
   name: "VerterComponentInstance",

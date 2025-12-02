@@ -26,7 +26,7 @@ import type { ModelToEmits, ModelToProps, ModelToModelInfo } from "./index";
 import type { GetVueComponent, DefineOptions } from "./index";
 
 // Slots
-import type { strictRenderSlot } from "./index";
+import type { strictRenderSlot, extractArgumentsFromRenderSlot, SlotsToRender } from "./index";
 
 // Props
 import type {
@@ -67,6 +67,9 @@ import type {
 } from "./index";
 
 import { createMacroReturn } from "./index";
+
+// Loops
+import type { extractLoops, ExtractLoopsResult } from "./index";
 
 // Name
 import type {
@@ -126,6 +129,10 @@ describe("Package exports", () => {
     type TestMakeBooleanOptional = MakeBooleanOptional<any>;
     type TestExtractBooleanKeys = ExtractBooleanKeys<any>;
     type TestMakeInternalProps = MakeInternalProps<TestPropsWithDefaults>;
+
+    // Loops types
+    type TestExtractLoops = ReturnType<typeof extractLoops<string[]>>;
+    type TestExtractLoopsResult = ExtractLoopsResult<string[]>;
 
     // Setup types
     type TestReturnMacros = ReturnMacros;

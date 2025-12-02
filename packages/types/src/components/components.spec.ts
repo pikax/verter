@@ -17,6 +17,7 @@ import type {
   GetVueComponent,
   DefineOptions,
   ExtractComponents,
+  enhanceElementWithProps,
 } from "./components";
 
 describe("components helpers", () => {
@@ -571,6 +572,211 @@ describe("components helpers", () => {
         assertType<Instance["$props"]>(
           {} as { required: string; optional?: number }
         );
+      });
+    });
+  });
+
+  // @ai-generated - Tests enhanceElementWithProps for merging constructor instances with additional props
+  describe("enhanceElementWithProps", () => {
+    // Mock types for testing
+    type MockInstance = { foo: string; bar: number };
+    type MockConstructor = { new (): MockInstance };
+    type AdditionalProps = { extra: boolean; added: string };
+
+    describe("basic enhancement", () => {
+      it("enhances constructor instance with additional props", () => {
+        type Result = ReturnType<
+          typeof enhanceElementWithProps<MockConstructor, AdditionalProps>
+        >;
+        type Expected = MockInstance & AdditionalProps;
+
+        assertType<Result>({} as Expected);
+        assertType<Expected>({} as Result);
+
+        // @ts-expect-error - Result is not any/unknown/never
+        assertType<Result>({} as { unrelated: true });
+      });
+
+      it("preserves original instance properties", () => {
+        type Result = ReturnType<
+          typeof enhanceElementWithProps<MockConstructor, AdditionalProps>
+        >;
+
+        // Verify original props are accessible
+        const result = {} as Result;
+        assertType<string>(result.foo);
+        assertType<number>(result.bar);
+      });
+
+      it("adds new props to instance", () => {
+        type Result = ReturnType<
+          typeof enhanceElementWithProps<MockConstructor, AdditionalProps>
+        >;
+
+        // Verify additional props are accessible
+        const result = {} as Result;
+        assertType<boolean>(result.extra);
+        assertType<string>(result.added);
+      });
+    });
+
+    describe("instance extends props scenario", () => {
+      it("returns instance when it already extends props", () => {
+        type InstanceWithProps = { foo: string; extra: boolean };
+        type ConstructorWithProps = { new (): InstanceWithProps };
+        type Props = { extra: boolean };
+
+        type Result = ReturnType<
+          typeof enhanceElementWithProps<ConstructorWithProps, Props>
+        >;
+
+        // When instance already extends P, it should return I directly
+        assertType<Result>({} as InstanceWithProps);
+        assertType<InstanceWithProps>({} as Result);
+
+        // @ts-expect-error - Result is not any/unknown/never
+        assertType<Result>({} as { unrelated: true });
+      });
+
+      it("returns instance when props are subset of instance", () => {
+        type FullInstance = { a: string; b: number; c: boolean };
+        type FullConstructor = { new (): FullInstance };
+        type SubsetProps = { a: string; b: number };
+
+        type Result = ReturnType<
+          typeof enhanceElementWithProps<FullConstructor, SubsetProps>
+        >;
+
+        assertType<Result>({} as FullInstance);
+        assertType<FullInstance>({} as Result);
+
+        // @ts-expect-error - Result is not any/unknown/never
+        assertType<Result>({} as { unrelated: true });
+      });
+    });
+
+    describe("non-constructor types", () => {
+      it("merges additional props for non-constructor types", () => {
+        // For non-constructor types (like string), the function returns T & P
+        // This is the fallback behavior for primitive types used with type assertions
+        type Result = ReturnType<
+          typeof enhanceElementWithProps<string, AdditionalProps>
+        >;
+
+        assertType<Result>({} as string & AdditionalProps);
+        assertType<string & AdditionalProps>({} as Result);
+      });
+
+      it("merges additional props with plain object type", () => {
+        type PlainObject = { foo: string };
+        type Result = ReturnType<
+          typeof enhanceElementWithProps<PlainObject, AdditionalProps>
+        >;
+
+        assertType<Result>({} as PlainObject & AdditionalProps);
+        assertType<PlainObject & AdditionalProps>({} as Result);
+      });
+
+      it("merges additional props with function type (non-constructor)", () => {
+        type FnType = () => void;
+        type Result = ReturnType<
+          typeof enhanceElementWithProps<FnType, AdditionalProps>
+        >;
+
+        assertType<Result>({} as FnType & AdditionalProps);
+        assertType<FnType & AdditionalProps>({} as Result);
+      });
+    });
+
+    describe("Vue component scenarios", () => {
+      it("enhances Vue component constructor with additional props", () => {
+        type VueInstance = {
+          $props: { msg: string };
+          $emit: (e: "click") => void;
+        };
+        type VueConstructor = { new (): VueInstance };
+        type ExtraProps = { customProp: number };
+
+        type Result = ReturnType<
+          typeof enhanceElementWithProps<VueConstructor, ExtraProps>
+        >;
+        type Expected = VueInstance & ExtraProps;
+
+        assertType<Result>({} as Expected);
+        assertType<Expected>({} as Result);
+
+        // Verify Vue-specific properties are preserved
+        const result = {} as Result;
+        assertType<{ msg: string }>(result.$props);
+
+        // @ts-expect-error - Result is not any/unknown/never
+        assertType<Result>({} as { unrelated: true });
+      });
+
+      it("handles component with complex instance type", () => {
+        type ComplexInstance = {
+          $props: { required: string; optional?: number };
+          $emit: (e: "update", value: string) => void;
+          $slots: { default: () => void };
+          publicMethod: () => void;
+        };
+        type ComplexConstructor = { new (): ComplexInstance };
+        type MergeProps = { injectedProp: boolean };
+
+        type Result = ReturnType<
+          typeof enhanceElementWithProps<ComplexConstructor, MergeProps>
+        >;
+
+        // Verify all original properties are accessible
+        const result = {} as Result;
+        assertType<{ required: string; optional?: number }>(result.$props);
+        assertType<(e: "update", value: string) => void>(result.$emit);
+        assertType<{ default: () => void }>(result.$slots);
+        assertType<() => void>(result.publicMethod);
+        assertType<boolean>(result.injectedProp);
+
+        // @ts-expect-error - Result is not any/unknown/never
+        assertType<Result>({} as { unrelated: true });
+      });
+    });
+
+    describe("edge cases", () => {
+      it("handles empty props", () => {
+        type Result = ReturnType<
+          typeof enhanceElementWithProps<MockConstructor, {}>
+        >;
+
+        // With empty props, instance is already compatible, returns I directly
+        assertType<Result>({} as MockInstance);
+        assertType<MockInstance>({} as Result);
+
+        // @ts-expect-error - Result is not any/unknown/never
+        assertType<Result>({} as { unrelated: true });
+      });
+
+      it("handles overlapping property types", () => {
+        type InstanceWithFoo = { foo: string; other: number };
+        type ConstructorWithFoo = { new (): InstanceWithFoo };
+        type OverlappingProps = { foo: string; newProp: boolean };
+
+        type Result = ReturnType<
+          typeof enhanceElementWithProps<ConstructorWithFoo, OverlappingProps>
+        >;
+
+        // foo exists in both, should be merged via intersection
+        const result = {} as Result;
+        assertType<string>(result.foo);
+        assertType<number>(result.other);
+        assertType<boolean>(result.newProp);
+
+        // @ts-expect-error - Result is not any/unknown/never
+        assertType<Result>({} as { unrelated: true });
+      });
+
+      it("handles never type", () => {
+        type Result = ReturnType<typeof enhanceElementWithProps<never, {}>>;
+
+        assertType<Result>({} as {});
       });
     });
   });
