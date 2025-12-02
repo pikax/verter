@@ -109,14 +109,8 @@ export const InferFunctionPlugin = definePlugin({
               );
             }
           }
-
-          console.log("directive", directive, type);
         }
       }
-    }
-
-    if (item.name === "foo") {
-      return;
     }
   },
 });
