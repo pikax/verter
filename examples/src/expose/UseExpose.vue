@@ -8,8 +8,8 @@ const inputRef = ref<HTMLInputElement | null>(null);
 const buttonRef = ref<HTMLButtonElement>();
 
 // Vue 3.5+ useTemplateRef
-const divRef = useTemplateRef<HTMLDivElement>("myDiv");
-const canvasRef = useTemplateRef<HTMLCanvasElement>("canvas");
+const divRef = useTemplateRef("myDiv");
+const canvasRef = useTemplateRef("canvas");
 
 // Template ref to component with exposed methods
 const exposeRef = ref<InstanceType<typeof DefineExpose> | null>(null);

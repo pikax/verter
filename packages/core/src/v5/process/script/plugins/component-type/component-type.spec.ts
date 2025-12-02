@@ -99,7 +99,9 @@ describe("ComponentTypePlugin", () => {
     it("generates component type function for simple div element", () => {
       const { result } = processComponentType("<div></div>");
 
-      expect(result).toContain("enhanceElementWithProps");
+      // Must include the prefix at the CALL site - just checking the name could match the import alias
+      // Using regex to verify it's called with the prefix: ___VERTER___enhanceElementWithProps(
+      expect(result).toMatch(/___VERTER___enhanceElementWithProps\(/);
       expect(result).toContain('HTMLElementTagNameMap["div"]');
       expect(result).toMatch(/function ___VERTER___Comp\d+/);
     });
@@ -107,7 +109,7 @@ describe("ComponentTypePlugin", () => {
     it("generates component type function for div with static text", () => {
       const { result } = processComponentType("<div>Hello World</div>");
 
-      expect(result).toContain("enhanceElementWithProps");
+      expect(result).toMatch(/___VERTER___enhanceElementWithProps\(/);
       expect(result).toContain('HTMLElementTagNameMap["div"]');
     });
 
@@ -332,7 +334,8 @@ describe("ComponentTypePlugin", () => {
         "const items = ['a', 'b', 'c'];"
       );
 
-      expect(result).toContain("extractLoops");
+      // Must include the prefix - bare "extractLoops" without prefix would be a bug
+      expect(result).toContain("___VERTER___extractLoops");
       expect(result).toContain('HTMLElementTagNameMap["li"]');
     });
 
@@ -342,7 +345,7 @@ describe("ComponentTypePlugin", () => {
         "const items = ['a', 'b', 'c'];"
       );
 
-      expect(result).toContain("extractLoops");
+      expect(result).toContain("___VERTER___extractLoops");
       expect(result).toMatch(/key:\s*index/);
       expect(result).toMatch(/value:\s*item/);
     });
@@ -355,8 +358,8 @@ describe("ComponentTypePlugin", () => {
         "const matrix = [[1, 2], [3, 4]];"
       );
 
-      // Should have extractLoops calls for both loops
-      const loopMatches = result.match(/extractLoops/g);
+      // Should have prefixed extractLoops calls for both loops
+      const loopMatches = result.match(/___VERTER___extractLoops/g);
       expect(loopMatches?.length).toBeGreaterThanOrEqual(2);
     });
 
@@ -366,7 +369,7 @@ describe("ComponentTypePlugin", () => {
         "const users = [{ id: 1, name: 'John' }];"
       );
 
-      expect(result).toContain("extractLoops");
+      expect(result).toContain("___VERTER___extractLoops");
     });
   });
 
@@ -397,8 +400,8 @@ describe("ComponentTypePlugin", () => {
         "import MyList from './MyList.vue';"
       );
 
-      // Should use extractArgumentsFromRenderSlot for scoped slot props
-      expect(result).toContain("extractArgumentsFromRenderSlot");
+      // Must include the prefix - bare function name without prefix would be a bug
+      expect(result).toContain("___VERTER___extractArgumentsFromRenderSlot");
     });
 
     it("handles multiple named slots", () => {
@@ -446,7 +449,7 @@ describe("ComponentTypePlugin", () => {
       );
 
       expect(result).toContain("new UserCard");
-      expect(result).toContain("extractLoops");
+      expect(result).toContain("___VERTER___extractLoops");
     });
   });
 
@@ -624,11 +627,11 @@ describe("ComponentTypePlugin", () => {
          const items = [{ id: 1 }];`
       );
 
-      // Should have all the necessary pieces
+      // Should have all the necessary pieces with proper prefixes
       expect(result).toContain('HTMLElementTagNameMap["div"]');
       expect(result).toContain("new MyComponent");
-      expect(result).toContain("extractLoops");
-      expect(result).toContain("extractArgumentsFromRenderSlot");
+      expect(result).toContain("___VERTER___extractLoops");
+      expect(result).toContain("___VERTER___extractArgumentsFromRenderSlot");
     });
 
     it("handles form with v-model bindings", () => {
@@ -650,7 +653,7 @@ describe("ComponentTypePlugin", () => {
       expect(result).toContain('HTMLElementTagNameMap["input"]');
       expect(result).toContain('HTMLElementTagNameMap["select"]');
       expect(result).toContain('HTMLElementTagNameMap["option"]');
-      expect(result).toContain("extractLoops");
+      expect(result).toContain("___VERTER___extractLoops");
     });
   });
 });
