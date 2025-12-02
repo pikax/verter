@@ -16,7 +16,7 @@ import { createHelperImport } from "../../../utils";
 import { boxInfo } from "../macros";
 
 export const DefineOptionsPlugin = definePlugin({
-  name: "VerterComponentInstance",
+  name: "DefineOptions",
   enforce: "post",
 
   handled: false,
@@ -33,6 +33,9 @@ export const DefineOptionsPlugin = definePlugin({
         if (item.parent.init.callee.name !== "defineOptions") return;
 
         if (ctx.isSetup) {
+          if (!item.parent.init.arguments || item.parent.init.arguments.length === 0) {
+            return; // MacrosPlugin will handle validation
+          }
           ctx.items.push(createHelperImport(["defineOptions_Box"], ctx.prefix));
 
           const info = boxInfo("defineOptions", null, ctx);
@@ -65,6 +68,9 @@ export const DefineOptionsPlugin = definePlugin({
     }
 
     if (ctx.isSetup) {
+      if (!item.node.arguments || item.node.arguments.length === 0) {
+        return; // MacrosPlugin will handle validation
+      }
       ctx.items.push(createHelperImport(["defineOptions_Box"], ctx.prefix));
 
       const info = boxInfo("defineOptions", null, ctx);
