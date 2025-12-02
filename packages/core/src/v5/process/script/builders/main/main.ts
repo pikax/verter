@@ -1,8 +1,5 @@
-import { camelize, capitalize } from "vue";
-import { ScriptItem, ScriptTypes } from "../../../../parser/script/types";
-import { BundlerHelper } from "../../../template/helpers/bundler";
+import { ScriptItem } from "../../../../parser/script/types";
 import { ProcessContext } from "../../../types";
-import { generateImport } from "../../../utils";
 import { processScript } from "../../script";
 import { ScriptContext } from "../../types";
 
@@ -17,7 +14,6 @@ import {
   TemplateBindingPlugin,
   SFCCleanerPlugin,
   ScriptDefaultPlugin,
-  ScriptResolversPlugin,
   ComponentInstancePlugin,
   DefineOptionsPlugin,
   InferFunctionPlugin,

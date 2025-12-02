@@ -20,12 +20,8 @@
  * Run `pnpm generate:fixtures` to regenerate the fixture files.
  */
 
-import { MagicString } from "@vue/compiler-sfc";
 import { parser } from "../../../../parser";
-import {
-  ParsedBlockScript,
-  ParsedBlockTemplate,
-} from "../../../../parser/types";
+import { ParsedBlockScript } from "../../../../parser/types";
 import { processScript } from "../../script";
 import { MacrosPlugin } from "../macros";
 import { TemplateBindingPlugin } from "../template-binding";

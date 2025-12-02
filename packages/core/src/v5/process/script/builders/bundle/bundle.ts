@@ -1,7 +1,5 @@
 import { camelize, capitalize } from "vue";
-import { VerterAST } from "../../../../parser/ast";
 import { ScriptItem } from "../../../../parser/script/types";
-import { BundlerHelper } from "../../../template/helpers/bundler";
 import { ProcessContext } from "../../../types";
 import { generateImport } from "../../../utils";
 import { processScript } from "../../script";

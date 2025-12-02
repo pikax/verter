@@ -29,23 +29,13 @@
  */
 
 import { definePlugin, ScriptContext } from "../../types";
-import { BundlerHelper } from "../../../template/helpers/bundler";
-import {
-  createHelperImport,
-  generateImport,
-  VERTER_HELPERS_IMPORT,
-} from "../../../utils";
+import { createHelperImport } from "../../../utils";
 import { type AvailableExports } from "@verter/types/string";
 import {
   TemplateTypes,
   type TemplateElement,
 } from "../../../../parser/template/types";
-import {
-  ParsedBlockTemplate,
-  ProcessItemType,
-  ScriptTypes,
-  VerterASTNode,
-} from "../../../..";
+import { ParsedBlockTemplate, ProcessItemType, ScriptTypes } from "../../../..";
 import {
   AttributeNode,
   DirectiveNode,
