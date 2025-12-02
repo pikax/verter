@@ -196,9 +196,9 @@ export default Comp`,
           `function script  (){defineOptions({ inheritAttrs: false })}`
         );
 
-        // needs to export the default
+        // needs to export the default using the boxed options variable
         expect(result).toContain(
-          `export const ___VERTER___default_Component=___VERTER___defineComponent({ inheritAttrs: false });`
+          `export const ___VERTER___default_Component=___VERTER___defineComponent(___VERTER___defineOptions_Boxed);`
         );
       });
 
@@ -218,9 +218,9 @@ export default Comp`,
           `function script  (){let a = defineOptions({ inheritAttrs: false })}`
         );
 
-        // needs to export the default
+        // needs to export the default using the boxed options variable
         expect(result).toContain(
-          `;export const ___VERTER___default_Component=___VERTER___defineComponent({ inheritAttrs: false });`
+          `;export const ___VERTER___default_Component=___VERTER___defineComponent(___VERTER___defineOptions_Boxed);`
         );
       });
     });
