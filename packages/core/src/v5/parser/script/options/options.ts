@@ -148,7 +148,6 @@ export function createOptionsContext(opts: {
       }
       case "Identifier": {
         if (
-          !setupFunction &&
           node.name === "setup" &&
           parent?.type === "Property" &&
           (parent.value.type === "FunctionExpression" ||
@@ -156,6 +155,7 @@ export function createOptionsContext(opts: {
         ) {
           setupFunction = parent.value.body;
         }
+        return;
       }
     }
   }

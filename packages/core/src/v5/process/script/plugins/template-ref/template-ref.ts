@@ -86,9 +86,11 @@ function handleExpression(
     possibleNames.push(rawRefName);
     const refName = rawRefName.startsWith("typeof ")
       ? rawRefName.slice(7)
-      : rawRefName;
+      : rawRefName.startsWith('"') && rawRefName.endsWith('"')
+        ? rawRefName.slice(1, -1)
+        : rawRefName;
 
-    if (!name || name === refName || name === (ref as any).value) {
+    if (!name || name === refName) {
       const tag = resolveTagNameType(item, ctx);
       if (Array.isArray(tag)) {
         possibleTypes.push(...tag);
@@ -183,8 +185,6 @@ function resolveTagNameType(
   return `ReturnType<typeof ${ctx.prefix("Comp")}${item.node.loc.start.offset}${
     ctx.generic ? `<${ctx.generic.names.join(",")}>` : ""
   }>`;
-
-  return resolveTagNameForTag(item.tag, ctx);
 }
 
 function resolveTagNameForTag(tag: string, ctx: ScriptContext) {
