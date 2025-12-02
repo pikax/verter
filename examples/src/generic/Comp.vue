@@ -3,6 +3,10 @@ defineProps<{
   name: T;
 }>();
 
+defineEmits<{
+  change: [name: T];
+}>();
+
 // const slots = defineSlots<{
 //   foo: (a: { name: T }) => any;
 // }>();
@@ -20,7 +24,7 @@ async () => {
 <template>
   <div>
     <slot name="header" foo=""> {{ name }}</slot>
-    <slot :name='name' :testx="'aaa'"></slot>
-    <slot name='testx' :te="aaa"></slot>
+    <slot :name="name" :testx="'aaa'"></slot>
+    <slot name="testx" :te="aaa"></slot>
   </div>
 </template>

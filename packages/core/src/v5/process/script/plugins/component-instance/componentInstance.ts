@@ -50,7 +50,7 @@ export const ComponentInstancePlugin = definePlugin({
         `export type ${instanceName}${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, false,false>;`,
         allowDev &&
           `export type ${instanceName}_TEST${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, true,true>;`,
-        `export const ${componentName}={} as typeof ${defaultOptionsName} & { new${genericDeclaration}(...args: any[]):${instanceName}${sanitisedNames} };`,
+        `export const ${componentName}={} as typeof ${defaultOptionsName} & { new${genericDeclaration}(props?: ${instanceName}${sanitisedNames}['$props']):${instanceName}${sanitisedNames} };`,
       ];
 
       s.append(declaration.filter(Boolean).join("\n"));

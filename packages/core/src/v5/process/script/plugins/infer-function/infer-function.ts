@@ -1,18 +1,11 @@
 import { ElementTypes } from "@vue/compiler-core";
 import {
   ParsedBlockTemplate,
-  TemplateDirective,
   TemplateProp,
-  TemplatePropDirective,
   TemplateTypes,
 } from "../../../../parser";
-import { ScriptTypes } from "../../../../parser/script";
-import { BlockPlugin } from "../../../template/plugins";
-import { ProcessItemBinding, ProcessItemType } from "../../../types";
 import { definePlugin } from "../../types";
-import { generateTypeString } from "../utils";
 import { capitalize } from "vue";
-
 
 /**
  * TODO rename this to be infer vars and others, not only functions
@@ -46,69 +39,71 @@ export const InferFunctionPlugin = definePlugin({
             (x) => x.type === "template"
           ) as ParsedBlockTemplate;
 
+          // Limitation: This plugin does not currently support functions used in multiple event handlers.
+          // When a function is used in multiple @event bindings, only the first binding is considered.
+          // Only search for TemplateProp since @event handlers (v-on) are always parsed as props.
+          // TemplateDirective would be for other directive types which are not event handlers.
           const directive = template.result.items.find(
             (x) =>
-              (x.type === TemplateTypes.Directive ||
-                x.type === TemplateTypes.Prop) &&
+              x.type === TemplateTypes.Prop &&
               x.name === "on" &&
               x.node &&
-              x.node.loc.start >= templateBinding.node.loc.start &&
-              x.node.loc.end <= templateBinding.node.loc.end
-          ) as TemplateDirective | TemplateProp | undefined;
+              x.node.loc.start.offset <=
+                templateBinding.node.loc.start.offset &&
+              x.node.loc.end.offset >= templateBinding.node.loc.end.offset
+          ) as TemplateProp | undefined;
           if (!directive) {
             // directive not found
             return;
           }
 
-          const element =
-            directive.type === TemplateTypes.Prop
-              ? directive.element
-              : null; /*TODO handle directives on elements*/
-
+          const element = directive.element;
           if (!element) {
             return;
           }
 
-          let type = "";
-          let property: string | undefined = "";
+          let type = `ReturnType<typeof ${ctx.prefix("Comp")}${
+            element.loc.start.offset
+          }${ctx.generic ? `<${ctx.generic.declaration}>` : ""}>`;
+          let property: string | undefined;
 
-          if (element.tagType === ElementTypes.ELEMENT) {
-            type = `HTML${capitalize(element.tag)}Element`;
-          }
-
-          if ("event" in directive && directive.event && directive.arg) {
-            property = directive.arg[0].name;
-            if (!property) {
+          if ("event" in directive && directive.event && directive.arg && directive.arg.length > 0) {
+            const argName = directive.arg[0].name;
+            if (!argName) {
               throw new Error("Unable to infer event name");
             }
+            property =
+              element.tagType === ElementTypes.COMPONENT
+                ? "on" + capitalize(argName)
+                : argName;
           }
-
-          type A = HTMLElementEventMap["click"];
+          if (element.tagType === ElementTypes.COMPONENT) {
+            type = `Required<${type}['$props']>`;
+          }
 
           if (type && property) {
             const start = item.params[0].start;
             const end = item.params[item.params.length - 1].end;
-            
+
             s.appendRight(start, "...[");
+
             if (element.tagType === ElementTypes.ELEMENT) {
-              // todo handle custom elements]
-              // s.appendLeft(end + 1, `]: [HTMLElementEventMap["${property}"]]`);
-              // s.appendRight(end + 1, `]: [HTMLElementEventMap["${property}"]]`);
-              // s.prependLeft(end + 1, `]: [HTMLElementEventMap["${property}"]]`);
-              // s.prependRight(end + 1, `]: [HTMLElementEventMap["${property}"]]`);
-              s.overwrite(end, end + 1, `]: [HTMLElementEventMap["${property}"]]${s.original[end]}`);
+              s.overwrite(
+                end,
+                end + 1,
+                `]: [HTMLElementEventMap["${property}"]]${s.original[end]}`
+              );
             } else {
-              // s.appendLeft(end, `]: ${type}EventMap["${property}"]`)
+              const text = `]: Parameters<${type}["${property}"]>`;
+              s.overwrite(
+                end,
+                end + 1,
+                text + s.original[end]
+              );
             }
           }
-
-          console.log("directive", directive, type);
         }
       }
-    }
-
-    if (item.name === "foo") {
-      return;
     }
   },
 });

@@ -2,6 +2,9 @@
 
 Verter is a Vue Language Server Protocol (LSP) implementation that provides enhanced TypeScript support for Vue Single File Components (SFCs). Verter converts Vue SFCs to **typed TSX representations** that TypeScript can analyze for type-checking, completions, and error reporting.
 
+> [!WARNING]
+> **This project is in active development.** Not everything is working perfectly yet. APIs may change, and you may encounter bugs or incomplete features. Use at your own risk and please report any issues you find.
+
 > [!IMPORTANT]
 > The generated TSX is syntactically valid TypeScript/TSX used for **type analysis only** — it's not meant to be executed or compiled as actual JSX/TSX code.
 
@@ -13,6 +16,7 @@ Verter is a Vue Language Server Protocol (LSP) implementation that provides enha
 - **Strict Type Safety**: Built with a "strict first" approach to type safety
 - **JSX/TSX Interoperability**: SFCs can be seamlessly used in JSX/TSX projects
 - **Improved Generic Component Handling**: Full support for generic Vue components with proper constructor typing
+- **Automatic Event Handler Type Inference**: Infers parameter types for functions used as template event handlers
 
 ### Generic Components
 
@@ -43,6 +47,35 @@ foo.$props.name; // Type: 'myName'
 ```
 
 This enables full type safety when working with generic components, including proper inference for props, slots, and component instances.
+
+### Automatic Event Handler Type Inference
+
+Verter automatically infers types for function parameters used as event handlers in templates. This eliminates the need to manually annotate event types:
+
+```vue
+<script setup lang="ts">
+// No type annotation needed - Verter infers the type automatically!
+function handleClick(e) {
+  // e is inferred as MouseEvent from HTMLElementEventMap["click"]
+  console.log(e.clientX, e.clientY)
+}
+
+function handleInput(event) {
+  // event is inferred as Event from HTMLElementEventMap["input"]
+  console.log(event.target)
+}
+</script>
+
+<template>
+  <button @click="handleClick">Click me</button>
+  <input @input="handleInput" />
+</template>
+```
+
+This works for:
+- **Native HTML elements**: Infers types from `HTMLElementEventMap` (e.g., `click` → `MouseEvent`, `input` → `Event`)
+- **Vue components**: Infers types from the component's emits/props definitions
+- **Multiple parameters**: When a function has multiple parameters, the plugin wraps all parameters using rest/spread syntax with the first parameter typed as the event and additional parameters typed as `undefined`
 
 ## Why Verter?
 
