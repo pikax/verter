@@ -167,12 +167,14 @@ export const ComponentTypePlugin = definePlugin({
     ) as TemplateElement[];
 
     s.append(
-      `function getRootComponent${ctx.generic ? ctx.generic.source : ""}() {`
+      `function ${ctx.prefix("getRootComponent")}${
+        ctx.generic ? ctx.generic.source : ""
+      }(){`
     );
 
     if (rootComponent.length === 1) {
       s.append(
-        `return Comp${rootComponent[0].node.loc.start.offset}${
+        `return ${ctx.prefix("Comp")}${rootComponent[0].node.loc.start.offset}${
           ctx.generic ? ctx.generic.source : ""
         }()`
       );

@@ -458,15 +458,15 @@ describe("ComponentTypePlugin", () => {
     it("generates getRootComponent function", () => {
       const { result } = processComponentType("<div>Root</div>");
 
-      expect(result).toContain("function getRootComponent");
+      expect(result).toContain("function ___VERTER___getRootComponent");
     });
 
     it("returns single root component when template has one root", () => {
       const { result } = processComponentType("<div>Single root</div>");
 
-      expect(result).toMatch(/function getRootComponent.*\(\)/);
-      // Note: getRootComponent returns Comp{offset}() without prefix
-      expect(result).toMatch(/return Comp\d+\(\)/);
+      expect(result).toMatch(/function ___VERTER___getRootComponent.*\(\)/);
+      // getRootComponent returns prefixed Comp{offset}()
+      expect(result).toMatch(/return ___VERTER___Comp\d+\(\)/);
     });
 
     it("returns empty object for multiple roots (fragment)", () => {
@@ -501,8 +501,8 @@ describe("ComponentTypePlugin", () => {
       );
 
       // Note: The current implementation appends generic source directly
-      // which results in `getRootComponentT extends string()` format
-      expect(result).toContain("function getRootComponent");
+      // which results in `getRootComponent<T extends string>()` format
+      expect(result).toContain("function ___VERTER___getRootComponent");
       expect(result).toContain("T extends string");
     });
   });
@@ -552,8 +552,8 @@ describe("ComponentTypePlugin", () => {
       // Empty template with just whitespace
       const { result } = processComponentType("   ");
 
-      // Should still generate getRootComponent
-      expect(result).toContain("function getRootComponent");
+      // Should still generate getRootComponent (prefixed)
+      expect(result).toContain("function ___VERTER___getRootComponent");
     });
 
     it("handles deeply nested elements", () => {

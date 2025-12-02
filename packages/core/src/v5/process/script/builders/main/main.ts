@@ -51,7 +51,6 @@ export function buildOptions(
       TemplateBindingPlugin,
       ScriptDefaultPlugin,
       SFCCleanerPlugin,
-      ScriptResolversPlugin,
       ComponentInstancePlugin,
       DefineOptionsPlugin,
       ComponentTypePlugin,

@@ -11,14 +11,22 @@ defineOptions({
   },
 });
 
-const c = new Comp<"foo">().$props["___VERTER___v-slot"];
+function onChange(e) {
+  e;
+}
+function onClick(e) {
+  e;
+}
 </script>
 
 <template>
-  <Comp name="foo">
-    <template #foo="{ test }"> {{ ___VERTER___slotInstance.$slots.header }}</template>
-    <template #header></template>
+  <Comp name="foo" @change="onChange">
+    <!-- <template #foo="{ test }">
+      {{ ___VERTER___slotInstance.$slots.header }}</template
+    >
+    <template #header></template> -->
   </Comp>
+  <div @click="onClick"></div>
 
-  <span>{{ $data.bar + b }}</span>
+  <!-- <span>{{ $data.bar + b }}</span> -->
 </template>
