@@ -310,6 +310,65 @@ const fixtures: Fixture[] = [
       ],
     },
   },
+
+  // ============================================================================
+  // Vue Component Events
+  // ============================================================================
+  {
+    name: "component event with change handler",
+    code: `import MyComp from './MyComp.vue'\nfunction handleChange(e) { return e }`,
+    template: `<MyComp @change="handleChange" />`,
+    expectations: {
+      patterns: [
+        "Parameters<",
+        '["onChange"]',
+        "$props",
+        "...[e]:",
+      ],
+      antiPatterns: [
+        "HTMLElementEventMap",
+      ],
+    },
+  },
+  {
+    name: "component event with click handler",
+    code: `import MyButton from './MyButton.vue'\nfunction onClick(e) { return e }`,
+    template: `<MyButton @click="onClick" />`,
+    expectations: {
+      patterns: [
+        "Parameters<",
+        '["onClick"]',
+        "$props",
+      ],
+      antiPatterns: [
+        "HTMLElementEventMap",
+      ],
+    },
+  },
+  {
+    name: "component event with custom event",
+    code: `import CustomSelect from './CustomSelect.vue'\nfunction onSelect(item) { console.log(item) }`,
+    template: `<CustomSelect @select="onSelect" />`,
+    expectations: {
+      patterns: [
+        "Parameters<",
+        '["onSelect"]',
+        "$props",
+      ],
+    },
+  },
+  {
+    name: "component event with update event",
+    code: `import DataTable from './DataTable.vue'\nfunction handleUpdate(data) { console.log(data) }`,
+    template: `<DataTable @update="handleUpdate" />`,
+    expectations: {
+      patterns: [
+        "Parameters<",
+        '["onUpdate"]',
+        "$props",
+      ],
+    },
+  },
 ];
 
 /**

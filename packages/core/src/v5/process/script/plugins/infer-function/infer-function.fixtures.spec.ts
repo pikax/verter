@@ -13,7 +13,6 @@
  */
 import { createFixtures, fixtures } from "./infer-function.fixtures";
 import type { Fixture } from "../../../../../fixtures/types";
-import { resolveWithPrefix } from "../../../../../fixtures/types";
 
 const PREFIX = "___VERTER___";
 

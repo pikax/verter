@@ -75,7 +75,7 @@ function handleInput(event) {
 This works for:
 - **Native HTML elements**: Infers types from `HTMLElementEventMap` (e.g., `click` → `MouseEvent`, `input` → `Event`)
 - **Vue components**: Infers types from the component's emits/props definitions
-- **Multiple parameters**: All parameters in the function signature are wrapped correctly
+- **Multiple parameters**: When a function has multiple parameters, the plugin wraps all parameters using rest/spread syntax with the first parameter typed as the event and additional parameters typed as `undefined`
 
 ## Why Verter?
 

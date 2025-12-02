@@ -148,6 +148,12 @@ describe("process InferFunctionPlugin", () => {
     });
 
     describe("multiple parameters", () => {
+      // NOTE: When a function has multiple parameters like `handler(a, b, c)` used in `@click="handler"`,
+      // the plugin transforms it to `handler(...[a, b, c]: [HTMLElementEventMap["click"]])`.
+      // TypeScript will destructure a single-element tuple into three parameters, where:
+      // - `a` is typed as the event (e.g., MouseEvent)
+      // - `b` and `c` are typed as `undefined` (since there are no additional tuple elements)
+      // This is the expected behavior for the current MVP implementation.
       it("handles function with multiple parameters", () => {
         const { result } = _parse(
           "function handler(a, b, c) { return [a, b, c] }",
@@ -237,6 +243,49 @@ describe("process InferFunctionPlugin", () => {
       );
       // Non-setup scripts should still work with template bindings
       expect(result).toBeDefined();
+    });
+  });
+
+  // @ai-generated - Tests for Vue component events to verify type inference from component props
+  describe("Vue component events", () => {
+    it("infers event type from Vue component props", () => {
+      const { result } = _parse(
+        `import MyComp from './MyComp.vue'\nfunction handleChange(e) { return e }`,
+        false,
+        "ts",
+        "",
+        '<template><MyComp @change="handleChange" /></template>'
+      );
+      // Should infer from component's props type (using Parameters<>)
+      expect(result).toContain("Parameters<");
+      expect(result).toContain('["onChange"]');
+      expect(result).toContain("$props");
+    });
+
+    it("infers event type with capitalized event name for components", () => {
+      const { result } = _parse(
+        `import MyButton from './MyButton.vue'\nfunction onClick(e) { return e }`,
+        false,
+        "ts",
+        "",
+        '<template><MyButton @click="onClick" /></template>'
+      );
+      // Component events should be capitalized (onClick, not click)
+      expect(result).toContain("Parameters<");
+      expect(result).toContain('["onClick"]');
+    });
+
+    it("infers event type from locally registered component", () => {
+      const { result } = _parse(
+        `import CustomSelect from './CustomSelect.vue'\nfunction onSelect(item) { console.log(item) }`,
+        false,
+        "ts",
+        "",
+        '<template><CustomSelect @select="onSelect" /></template>'
+      );
+      // Should work with locally registered components
+      expect(result).toContain("Parameters<");
+      expect(result).toContain('["onSelect"]');
     });
   });
 });
