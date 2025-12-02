@@ -1,5 +1,7 @@
+import { Expression } from "oxc-parser";
 import { MacrosPlugin } from "../../../process/script/plugins/macros";
 import {
+  FunctionBody,
   FunctionDeclaration,
   ObjectExpression,
   VerterASTNode,
@@ -103,7 +105,7 @@ export function createOptionsContext(opts: {
   let track = false;
   let objectExpression: ObjectExpression | null = null;
 
-  let setupFunction: null | FunctionDeclaration = null;
+  let setupFunction: null | FunctionBody | Expression = null;
 
   function visit(
     node: VerterASTNode,
@@ -140,9 +142,20 @@ export function createOptionsContext(opts: {
       }
       case "FunctionExpression": {
         if (!setupFunction && key === "setup") {
-          setupFunction = node;
+          setupFunction = node.body;
         }
         return;
+      }
+      case "Identifier": {
+        if (
+          !setupFunction &&
+          node.name === "setup" &&
+          parent?.type === "Property" &&
+          (parent.value.type === "FunctionExpression" ||
+            parent.value.type === "ArrowFunctionExpression")
+        ) {
+          setupFunction = parent.value.body;
+        }
       }
     }
   }

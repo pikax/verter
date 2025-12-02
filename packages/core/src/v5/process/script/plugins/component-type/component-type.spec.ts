@@ -99,8 +99,9 @@ describe("ComponentTypePlugin", () => {
     it("generates component type function for simple div element", () => {
       const { result } = processComponentType("<div></div>");
 
-      // Must include the prefix - bare "enhanceElementWithProps" without prefix would be a bug
-      expect(result).toContain("___VERTER___enhanceElementWithProps");
+      // Must include the prefix at the CALL site - just checking the name could match the import alias
+      // Using regex to verify it's called with the prefix: ___VERTER___enhanceElementWithProps(
+      expect(result).toMatch(/___VERTER___enhanceElementWithProps\(/);
       expect(result).toContain('HTMLElementTagNameMap["div"]');
       expect(result).toMatch(/function ___VERTER___Comp\d+/);
     });
@@ -108,7 +109,7 @@ describe("ComponentTypePlugin", () => {
     it("generates component type function for div with static text", () => {
       const { result } = processComponentType("<div>Hello World</div>");
 
-      expect(result).toContain("___VERTER___enhanceElementWithProps");
+      expect(result).toMatch(/___VERTER___enhanceElementWithProps\(/);
       expect(result).toContain('HTMLElementTagNameMap["div"]');
     });
 

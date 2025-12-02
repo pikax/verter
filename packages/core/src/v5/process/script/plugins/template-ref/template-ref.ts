@@ -21,20 +21,20 @@ const NormalisedComponentsAccessor = "NormalisedComponents";
 export const TemplateRefPlugin = definePlugin({
   name: "VerterTemplateRef",
 
-  // transformDeclaration(item, s, ctx) {
-  //   if (
-  //     item.parent.type === "VariableDeclarator" &&
-  //     item.parent.init?.type === "CallExpression"
-  //   ) {
-  //     if (item.parent.init.callee.type === "Identifier") {
-  //       const macroName = item.parent.init.callee.name;
-  //       if (macroName !== "useTemplateRef") {
-  //         return;
-  //       }
-  //       handleExpression(item.parent.init, s, ctx);
-  //     }
-  //   }
-  // },
+  transformDeclaration(item, s, ctx) {
+    if (
+      item.parent.type === "VariableDeclarator" &&
+      item.parent.init?.type === "CallExpression"
+    ) {
+      if (item.parent.init.callee.type === "Identifier") {
+        const macroName = item.parent.init.callee.name;
+        if (macroName !== "useTemplateRef") {
+          return;
+        }
+        handleExpression(item.parent.init, s, ctx);
+      }
+    }
+  },
 
   transformFunctionCall(item, s, ctx) {
     if (item.name !== "useTemplateRef") return;
