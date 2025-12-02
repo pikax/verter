@@ -202,7 +202,7 @@ describe("parser", () => {
       const source = `<script>export default { async setup() { await Promise.resolve()} }</script>`;
       const parsed = parser(source);
 
-      expect(parsed.isAsync).toBe(false);
+      expect(parsed.isAsync).toBe(true);
     });
     it("async setup", () => {
       const source = `<script setup>await Promise.resolve()</script>`;

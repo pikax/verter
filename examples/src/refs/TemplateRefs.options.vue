@@ -3,7 +3,7 @@ import { defineComponent, useTemplateRef } from "vue";
 
 export default defineComponent({
   setup() {
-    const myRef = useTemplateRef("");
+    const myRef = useTemplateRef("myRef");
     return {};
   },
 });

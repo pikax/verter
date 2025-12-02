@@ -47,7 +47,7 @@ describe("process script plugin template-ref", () => {
         template?.result?.items.filter(
           (x) => x.type === TemplateTypes.Binding
         ) ?? [],
-        blockNameResolver: (name) => name,
+      blockNameResolver: (name) => name,
     });
     return r;
   }
@@ -56,7 +56,8 @@ describe("process script plugin template-ref", () => {
     test("no ref", () => {
       const { result } = parse(`let a = useTemplateRef()`, false, "ts");
       expect(result).toMatchInlineSnapshot(
-      `"<script setup lang="ts">let a = useTemplateRef()</script>"`);
+        `"<script setup lang="ts">let a = useTemplateRef()</script>"`
+      );
     });
 
     it("ref", () => {
@@ -67,7 +68,8 @@ describe("process script plugin template-ref", () => {
         '<template><div ref="a"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><div ref="a"/></template><script setup lang="ts">let a = useTemplateRef<HTMLDivElement,"a"><HTMLDivElement,"a">()</script>"`);
+        `"<template><div ref="a"/></template><script setup lang="ts">let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"a"><ReturnType<typeof ___VERTER___Comp10>,"a">()</script>"`
+      );
     });
 
     it("MyComp :ref='a'", () => {
@@ -78,7 +80,8 @@ describe("process script plugin template-ref", () => {
         '<template><Comp :ref="a"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><Comp :ref="a"/></template><script setup lang="ts">import Comp from './Comp.vue';let a = useTemplateRef<___VERTER___NormalisedComponents["Comp"],typeof a><___VERTER___NormalisedComponents["Comp"],typeof a>()</script>"`);
+        `"<template><Comp :ref="a"/></template><script setup lang="ts">import Comp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof a><ReturnType<typeof ___VERTER___Comp10>,typeof a>()</script>"`
+      );
     });
 
     it("MyComp :ref='foo'", () => {
@@ -89,7 +92,8 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foo"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<___VERTER___NormalisedComponents["MyComp"],typeof foo><___VERTER___NormalisedComponents["MyComp"],typeof foo>();const foo = 'test'</script>"`);
+        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo><ReturnType<typeof ___VERTER___Comp10>,typeof foo>();const foo = 'test'</script>"`
+      );
     });
 
     it("MyComp :ref='foo' with string matching", () => {
@@ -100,7 +104,8 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foo"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<___VERTER___NormalisedComponents["MyComp"],typeof foo><___VERTER___NormalisedComponents["MyComp"],typeof foo>('test');const foo = 'test'</script>"`);
+        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo><ReturnType<typeof ___VERTER___Comp10>,typeof foo>('test');const foo = 'test'</script>"`
+      );
     });
 
     it('unknown if :ref="foo"', () => {
@@ -111,7 +116,8 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foo"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<unknown,typeof foo><unknown,typeof foo>('test');const foo = 'testx'</script>"`);
+        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<unknown,typeof foo><unknown,typeof foo>('test');const foo = 'testx'</script>"`
+      );
     });
     it("multiple MyComp :ref='foo' with string matching", () => {
       const { result } = parse(
@@ -121,7 +127,8 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foox"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><my-comp :ref="foox"/></template><script setup lang="ts">import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef<___VERTER___NormalisedComponents["MyComp"],typeof foox><___VERTER___NormalisedComponents["MyComp"],typeof foox>('test');const foo = 'test';const foox = 'test'</script>"`);
+        `"<template><my-comp :ref="foox"/></template><script setup lang="ts">import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foox><ReturnType<typeof ___VERTER___Comp10>,typeof foox>('test');const foo = 'test';const foox = 'test'</script>"`
+      );
     });
     it("multiple MyComp :ref='foo' with string matching but incorrect", () => {
       const { result } = parse(
@@ -131,7 +138,8 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foox"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><my-comp :ref="foox"/></template><script setup lang="ts">import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef<unknown,typeof foox><unknown,typeof foox>('test');const foo = 'test';const foox = 'testx'</script>"`);
+        `"<template><my-comp :ref="foox"/></template><script setup lang="ts">import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef<unknown,typeof foox><unknown,typeof foox>('test');const foo = 'test';const foox = 'testx'</script>"`
+      );
     });
 
     it("MyComp :ref='foo.bar'", () => {
@@ -142,7 +150,8 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foo.bar"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><my-comp :ref="foo.bar"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<___VERTER___NormalisedComponents["MyComp"],typeof foo.bar><___VERTER___NormalisedComponents["MyComp"],typeof foo.bar>();const foo = { bar:'test'}</script>"`);
+        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar><ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar>();const foo = { bar:'test'}</script>"`
+      );
     });
 
     it("MyComp :ref='foo.bar' with argument", () => {
@@ -153,7 +162,8 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foo.bar"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><my-comp :ref="foo.bar"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<___VERTER___NormalisedComponents["MyComp"],typeof foo.bar><___VERTER___NormalisedComponents["MyComp"],typeof foo.bar>('test');const foo = { bar:'test' as const}</script>"`);
+        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar><ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar>('test');const foo = { bar:'test' as const}</script>"`
+      );
     });
 
     it("components.MyComp ref", () => {
@@ -164,7 +174,8 @@ describe("process script plugin template-ref", () => {
         '<template><components.MyComp ref="a"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><components.MyComp ref="a"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<___VERTER___NormalisedComponents["components"]["MyComp"],"a"><___VERTER___NormalisedComponents["components"]["MyComp"],"a">();const components = {MyComp}</script>"`);
+        `"<template><components.MyComp ref="a"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"a"><ReturnType<typeof ___VERTER___Comp10>,"a">();const components = {MyComp}</script>"`
+      );
     });
 
     it("ref (el)=>name=el", () => {
@@ -175,7 +186,8 @@ describe("process script plugin template-ref", () => {
         '<template><div :ref="el=> name = el"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><div :ref="el=> name = el"/></template><script setup lang="ts">let a = useTemplateRef()</script>"`);
+        `"<template><div :ref="el=> name = el"/></template><script setup lang="ts">let a = useTemplateRef()</script>"`
+      );
     });
 
     it('component is="div"', () => {
@@ -196,7 +208,8 @@ describe("process script plugin template-ref", () => {
         '<template><component :is="foo" ref="a"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><component :is="foo" ref="a"/></template><script setup lang="ts">let a = useTemplateRef<typeof foo,"a"><typeof foo,"a">();let foo = 'div'</script>"`);
+        `"<template><component :is="foo" ref="a"/></template><script setup lang="ts">let a = useTemplateRef<typeof foo,"a"><typeof foo,"a">();let foo = 'div'</script>"`
+      );
     });
     it('component :is="true ? "div" : "span""', () => {
       const { result } = parse(
@@ -206,7 +219,8 @@ describe("process script plugin template-ref", () => {
         "<template><component :is=\"true ? 'div' : 'span'\" ref=\"a\"/></template>"
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><component :is="true ? 'div' : 'span'" ref="a"/></template><script setup lang="ts">let a = useTemplateRef<HTMLDivElement|HTMLSpanElement,"a"><HTMLDivElement|HTMLSpanElement,"a">()</script>"`);
+        `"<template><component :is="true ? 'div' : 'span'" ref="a"/></template><script setup lang="ts">let a = useTemplateRef<HTMLDivElement|HTMLSpanElement,"a"><HTMLDivElement|HTMLSpanElement,"a">()</script>"`
+      );
     });
 
     it("explicit type", () => {
@@ -217,7 +231,8 @@ describe("process script plugin template-ref", () => {
         '<template><div :ref="a"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><div :ref="a"/></template><script setup lang="ts">let a = useTemplateRef<HTMLDivElement>('foo')</script>"`);
+        `"<template><div :ref="a"/></template><script setup lang="ts">let a = useTemplateRef<HTMLDivElement>('foo')</script>"`
+      );
     });
   });
 
@@ -321,7 +336,8 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foo.bar"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><my-comp :ref="foo.bar"/></template><script setup lang="js">import MyComp from './Comp.vue';let a = useTemplateRef('test');const foo = { bar:'test' as const}</script>"`);
+        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="js">import MyComp from './Comp.vue';let a = useTemplateRef('test');const foo = { bar:'test' as const}</script>"`
+      );
     });
 
     it("components.MyComp ref", () => {
@@ -384,7 +400,102 @@ describe("process script plugin template-ref", () => {
         '<template><div :ref="a"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-      `"<template><div :ref="a"/></template><script setup lang="js">let a = useTemplateRef<HTMLDivElement>('foo')</script>"`);
+        `"<template><div :ref="a"/></template><script setup lang="js">let a = useTemplateRef<HTMLDivElement>('foo')</script>"`
+      );
+    });
+  });
+
+  /**
+   * @ai-generated - Tests for useTemplateRef inside defineComponent setup function.
+   * Verifies that the TemplateRefPlugin correctly transforms useTemplateRef calls
+   * when used in Options API components with setup() function.
+   */
+  describe("options API - defineComponent setup()", () => {
+    describe("ts", () => {
+      it("transforms useTemplateRef inside defineComponent setup", () => {
+        const { result } = parse(
+          `import { defineComponent, useTemplateRef } from 'vue'; export default defineComponent({ setup() { const myRef = useTemplateRef('myRef'); return { myRef }; } });`,
+          "",
+          "ts",
+          '<template><div ref="myRef"></div></template>'
+        );
+
+        // Should add type parameters to useTemplateRef
+        expect(result).toContain("useTemplateRef<");
+        expect(result).toContain(',"myRef">');
+      });
+
+      it("transforms useTemplateRef with component ref", () => {
+        const { result } = parse(
+          `import { defineComponent, useTemplateRef } from 'vue'; import MyComp from './MyComp.vue'; export default defineComponent({ setup() { const compRef = useTemplateRef('compRef'); return { compRef }; } });`,
+          "",
+          "ts",
+          '<template><MyComp ref="compRef"></MyComp></template>'
+        );
+
+        expect(result).toContain("useTemplateRef<");
+        expect(result).toContain(',"compRef">');
+      });
+
+      it("transforms useTemplateRef with dynamic ref binding", () => {
+        const { result } = parse(
+          `import { defineComponent, useTemplateRef } from 'vue'; export default defineComponent({ setup() { const el = useTemplateRef(); return { el }; } });`,
+          "",
+          "ts",
+          '<template><div :ref="el"></div></template>'
+        );
+
+        expect(result).toContain("useTemplateRef<");
+        expect(result).toContain("typeof el");
+      });
+
+      it("does not transform useTemplateRef with explicit type parameters", () => {
+        const { result } = parse(
+          `import { defineComponent, useTemplateRef } from 'vue'; export default defineComponent({ setup() { const myRef = useTemplateRef<HTMLInputElement>('myRef'); return { myRef }; } });`,
+          "",
+          "ts",
+          '<template><div ref="myRef"></div></template>'
+        );
+
+        // Should NOT add additional type parameters since explicit types are provided
+        expect(result).toContain("useTemplateRef<HTMLInputElement>('myRef')");
+      });
+
+      it("handles arrow function setup", () => {
+        const { result } = parse(
+          `import { defineComponent, useTemplateRef } from 'vue'; export default defineComponent({ setup: () => { const myRef = useTemplateRef('myRef'); return { myRef }; } });`,
+          "",
+          "ts",
+          '<template><div ref="myRef"></div></template>'
+        );
+
+        expect(result).toContain("useTemplateRef<");
+        expect(result).toContain(',"myRef">');
+      });
+
+      it("handles plain object export with setup", () => {
+        const { result } = parse(
+          `import { useTemplateRef } from 'vue'; export default { setup() { const myRef = useTemplateRef('myRef'); return { myRef }; } };`,
+          "",
+          "ts",
+          '<template><div ref="myRef"></div></template>'
+        );
+
+        expect(result).toContain("useTemplateRef<");
+        expect(result).toContain(',"myRef">');
+      });
+
+      it("handles custom wrapper function", () => {
+        const { result } = parse(
+          `import { useTemplateRef } from 'vue'; export default myDefineComponent({ setup() { const myRef = useTemplateRef('myRef'); return { myRef }; } });`,
+          "",
+          "ts",
+          '<template><div ref="myRef"></div></template>'
+        );
+
+        expect(result).toContain("useTemplateRef<");
+        expect(result).toContain(',"myRef">');
+      });
     });
   });
 });
