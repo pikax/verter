@@ -113,7 +113,7 @@ const now = new Date();
     <p>{{ count >= 1 && count <= 10 }}</p>
 
     <!-- Bitwise (rarely used but valid) -->
-    <p>{{ count | 0 }}</p>
+    <p>{{ (count | 0) }}</p>
     <p>{{ count & 1 }}</p>
     <p>{{ count << 1 }}</p>
 
