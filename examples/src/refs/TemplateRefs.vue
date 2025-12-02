@@ -1,7 +1,12 @@
 <script setup lang="ts">
 // Template ref patterns for parser testing
 
-import { ref, useTemplateRef, onMounted, type ComponentPublicInstance } from "vue";
+import {
+  ref,
+  useTemplateRef,
+  onMounted,
+  type ComponentPublicInstance,
+} from "vue";
 
 // DOM element refs
 const inputRef = ref<HTMLInputElement | null>(null);
@@ -9,8 +14,8 @@ const divRef = ref<HTMLDivElement>();
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 
 // Vue 3.5+ useTemplateRef
-const buttonRef = useTemplateRef<HTMLButtonElement>("myButton");
-const formRef = useTemplateRef<HTMLFormElement>("myForm");
+const buttonRef = useTemplateRef("myButton");
+const formRef = useTemplateRef("myForm");
 
 // Multiple refs (v-for)
 const itemRefs = ref<HTMLLIElement[]>([]);
@@ -42,25 +47,25 @@ onMounted(() => {
   // DOM access
   inputRef.value?.focus();
   inputRef.value?.select();
-  
+
   divRef.value?.scrollIntoView();
   divRef.value?.classList.add("mounted");
-  
+
   const ctx = canvasRef.value?.getContext("2d");
   ctx?.fillRect(0, 0, 100, 100);
-  
+
   // useTemplateRef access
   buttonRef.value?.click();
   formRef.value?.reset();
-  
+
   // Array refs
   itemRefs.value.forEach((el, idx) => {
     el.dataset.index = String(idx);
   });
-  
+
   // Component ref access
   childRef.value?.someMethod();
-  
+
   // Exposed methods access
   exposedRef.value?.focus();
   const value = exposedRef.value?.getValue();

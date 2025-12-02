@@ -17,6 +17,7 @@ import {
   ComponentInstancePlugin,
   DefineOptionsPlugin,
   InferFunctionPlugin,
+  TemplateRefPlugin,
 } from "../../plugins/";
 
 import { TemplateTypes } from "../../../../parser/template/types";
@@ -54,6 +55,7 @@ export function buildOptions(
       ComponentInstancePlugin,
       DefineOptionsPlugin,
       ComponentTypePlugin,
+      TemplateRefPlugin,
       InferFunctionPlugin,
     ],
     {

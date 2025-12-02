@@ -330,9 +330,9 @@ ${pre}
   return ${
     isComp
       ? `new ${tag}(${props})`
-      : `${"enhanceElementWithProps" as AvailableExports}(${tagToHTMLElement(
-          tag
-        )},${props})`
+      : `${ctx.prefix(
+          "enhanceElementWithProps" as AvailableExports
+        )}(${tagToHTMLElement(tag)},${props})`
   }  
 }`;
 }
