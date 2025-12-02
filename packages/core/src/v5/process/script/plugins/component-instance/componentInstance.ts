@@ -29,13 +29,13 @@ export const ComponentInstancePlugin = definePlugin({
       const attributes = ctx.prefix("attributes");
       // TODO resolve the first element in template and use its type
       // NOTE that if inheritedAttrs is false, then it should be {}
-      const element = "Element";
       // if allowDev is true it will export a type to be imported in test components
       const allowDev = true;
 
       const componentName = ctx.prefix("Component");
       const templateBinding = ctx.prefix("TemplateBinding");
       const defaultOptionsName = ctx.prefix("default_Component");
+      const getRootComponentName = ctx.prefix("getRootComponent");
 
       const genericDeclaration = ctx.generic
         ? `<${ctx.generic.declaration}>`
@@ -46,10 +46,13 @@ export const ComponentInstancePlugin = definePlugin({
 
       const instanceName = ctx.prefix("Instance");
 
+      const element = `ReturnType<typeof ${getRootComponentName}${sanitisedNames}>`
+      const rootElementStr = `(${element} extends infer R ? R extends {$props:infer P} ? P : R : {})`;
+
       const declaration = [
-        `export type ${instanceName}${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, false,false>;`,
+        `export type ${instanceName}${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}&${rootElementStr}, ${element}, false,false>;`,
         allowDev &&
-          `export type ${instanceName}_TEST${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, true,true>;`,
+          `export type ${instanceName}_TEST${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}&${rootElementStr}, ${element}, true,true>;`,
         `export const ${componentName}={} as typeof ${defaultOptionsName} & { new${genericDeclaration}(props?: ${instanceName}${sanitisedNames}['$props']):${instanceName}${sanitisedNames} };`,
       ];
 
