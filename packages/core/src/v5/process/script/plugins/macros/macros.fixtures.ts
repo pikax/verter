@@ -1386,8 +1386,8 @@ const props = defineProps<{
 export function createFixtures(prefix: string = ""): FixtureConfig {
   return {
     fixtures: [...fixtures, ...typeInspectionFixtures],
-    process: (code, lang, generic) =>
-      processMacros(code, prefix, lang, generic),
+    process: (fixture) =>
+      processMacros(fixture.code, prefix, fixture.lang, fixture.generic),
     // Use empty prefix for cleaner output
     prefix,
   };

@@ -2,12 +2,13 @@
  * @ai-generated - This test file was generated with AI assistance.
  * Tests for slot type helpers including:
  * - StrictRenderSlot: type-safe slot rendering with required props
+ * - extractArgumentsFromRenderSlot: extracts slot props from component instances
  * - Validates slot prop typing and VNode return types
  */
 import "vue/jsx";
 import { assertType, describe, it } from "vitest";
 import { defineComponent, SlotsType } from "vue";
-import { strictRenderSlot } from "./slots";
+import { strictRenderSlot, extractArgumentsFromRenderSlot } from "./slots";
 
 describe("StrictRenderSlot", () => {
   const TabItem = defineComponent({
@@ -155,5 +156,144 @@ describe("StrictRenderSlot", () => {
     strictRenderSlot(c.$slots.spanElements, [
       document.createElement("div") as HTMLDivElement,
     ]);
+  });
+});
+
+// @ai-generated - Tests for extractArgumentsFromRenderSlot helper
+describe("extractArgumentsFromRenderSlot", () => {
+  const MyCompSlots = defineComponent({
+    slots: {} as SlotsType<{
+      default: (props: { msg: string }) => any;
+      header: (props: { title: string; subtitle?: string }) => any;
+      footer: () => any;
+      complex: (props: { items: { id: number; name: string }[] }) => any;
+    }>,
+  });
+
+  // Simulate how component-type plugin creates component instances
+  function Comp1() {
+    return new MyCompSlots();
+  }
+
+  it("extracts props from slot with single prop", () => {
+    const result = extractArgumentsFromRenderSlot(Comp1(), "default");
+    type Result = typeof result;
+    type Expected = { msg: string };
+
+    assertType<Result>({} as Expected);
+    assertType<Expected>({} as Result);
+
+    // @ts-expect-error - Result is not any/unknown/never
+    assertType<{ unrelated: true }>({} as Result);
+
+    // Verify prop access
+    result.msg satisfies string;
+  });
+
+  it("extracts props from slot with multiple props", () => {
+    const result = extractArgumentsFromRenderSlot(Comp1(), "header");
+    type Result = typeof result;
+    type Expected = { title: string; subtitle?: string };
+
+    assertType<Result>({} as Expected);
+    assertType<Expected>({} as Result);
+
+    // @ts-expect-error - Result is not any/unknown/never
+    assertType<{ unrelated: true }>({} as Result);
+
+    // Verify prop access
+    result.title satisfies string;
+    result.subtitle satisfies string | undefined;
+  });
+
+  it("handles slot without props (returns undefined)", () => {
+    const result = extractArgumentsFromRenderSlot(Comp1(), "footer");
+    type Result = typeof result;
+
+    // Footer slot has no props, so Parameters<() => any>[0] is undefined
+    // The result type should be undefined when there are no slot props
+    result satisfies undefined;
+  });
+
+  it("extracts complex nested props from slot", () => {
+    const result = extractArgumentsFromRenderSlot(Comp1(), "complex");
+    type Result = typeof result;
+    type Expected = { items: { id: number; name: string }[] };
+
+    assertType<Result>({} as Expected);
+    assertType<Expected>({} as Result);
+
+    // @ts-expect-error - Result is not any/unknown/never
+    assertType<{ unrelated: true }>({} as Result);
+
+    // Verify nested access
+    result.items[0].id satisfies number;
+    result.items[0].name satisfies string;
+  });
+
+  it("works with component instance directly", () => {
+    const instance = new MyCompSlots();
+    const result = extractArgumentsFromRenderSlot(instance, "default");
+
+    result.msg satisfies string;
+
+    // @ts-expect-error - wrong prop name
+    result.wrongProp;
+  });
+
+  it("provides type safety for slot names", () => {
+    // Valid slot names compile
+    extractArgumentsFromRenderSlot(Comp1(), "default");
+    extractArgumentsFromRenderSlot(Comp1(), "header");
+    extractArgumentsFromRenderSlot(Comp1(), "footer");
+    extractArgumentsFromRenderSlot(Comp1(), "complex");
+
+    // @ts-expect-error - invalid slot name
+    extractArgumentsFromRenderSlot(Comp1(), "nonexistent");
+  });
+
+  // Test with generic component types
+  describe("with generic components", () => {
+    const GenericComp = defineComponent({
+      slots: {} as SlotsType<{
+        item: (props: { value: number; index: number }) => any;
+      }>,
+    });
+
+    function GenericCompFn() {
+      return new GenericComp();
+    }
+
+    it("extracts props from generic component slots", () => {
+      const result = extractArgumentsFromRenderSlot(GenericCompFn(), "item");
+
+      result.value satisfies number;
+      result.index satisfies number;
+
+      // @ts-expect-error - wrong prop type
+      result.value satisfies string;
+    });
+  });
+
+  // Test with union props
+  describe("with union type props", () => {
+    const UnionComp = defineComponent({
+      slots: {} as SlotsType<{
+        status: (props: { state: "loading" | "success" | "error" }) => any;
+      }>,
+    });
+
+    function UnionCompFn() {
+      return new UnionComp();
+    }
+
+    it("extracts union type props correctly", () => {
+      const result = extractArgumentsFromRenderSlot(UnionCompFn(), "status");
+
+      result.state satisfies "loading" | "success" | "error";
+
+      // @ts-expect-error - wrong union value
+      result.state satisfies "pending";
+    });
   });
 });

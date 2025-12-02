@@ -28,7 +28,11 @@ interface Fixture {
 
 interface FixtureConfig {
   fixtures: Fixture[];
-  process: (code: string, lang?: string, generic?: string) => { result: string; context?: any; sourcemap?: string };
+  process: (fixture: Fixture) => {
+    result: string;
+    context?: any;
+    sourcemap?: string;
+  };
   prefix?: string;
 }
 
@@ -162,7 +166,7 @@ async function processFixtureFile(fixtureFilePath: string): Promise<void> {
   try {
     // Import the fixture module
     const fileUrl = pathToFileURL(fixtureFilePath).href;
-  const fixtureModule = await import(fileUrl);
+    const fixtureModule = await import(fileUrl);
 
     if (typeof fixtureModule.createFixtures !== "function") {
       console.log(`  Skipping: No createFixtures export found`);
@@ -195,11 +199,7 @@ async function processFixtureFile(fixtureFilePath: string): Promise<void> {
 
     for (const fixture of config.fixtures) {
       try {
-        const { result, sourcemap } = config.process(
-          fixture.code,
-          fixture.lang,
-          fixture.generic
-        );
+        const { result, sourcemap } = config.process(fixture);
         const block = generateFixtureBlock(
           fixture,
           result,

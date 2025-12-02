@@ -258,7 +258,7 @@ function generateTernaryCondition(
 }
 
 // TODO test this, specially when is in a Function
-function generateConditionText(
+export function generateConditionText(
   conditions: TemplateCondition[],
   s: MagicString
 ): string {

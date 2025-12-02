@@ -24,7 +24,7 @@ export const ScriptBlockPlugin = definePlugin({
       s.update(tag.pos.close.start, tag.pos.close.end, "");
       s.prependRight(tag.pos.close.start, "}");
     } else {
-      // NOTE we might need to move the generic elsewhere
+      // NOTE we might need to move t he generic elsewhere
       s.overwrite(tag.pos.open.start, tag.pos.open.end, "");
       s.overwrite(tag.pos.close.start, tag.pos.close.end, "");
     }

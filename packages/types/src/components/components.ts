@@ -98,4 +98,15 @@ export type ExtractComponent<T> = GetVueComponent<T> extends never
     : never
   : T;
 
-export declare function extractComponents<T>(t: T): ExtractComponents<T>
+export declare function extractComponents<T>(t: T): ExtractComponents<T>;
+
+export declare function enhanceElementWithProps<T, P>(
+  t: T,
+  p: P
+): T extends { new (): infer I extends P }
+  ? I
+  : T extends { new (): infer I }
+  ? I & P
+  : T extends { new (): any }
+  ? InstanceType<T> & P
+  : T & P;
