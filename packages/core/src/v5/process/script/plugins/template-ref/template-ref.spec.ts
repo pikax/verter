@@ -68,7 +68,7 @@ describe("process script plugin template-ref", () => {
         '<template><div ref="a"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><div ref="a"/></template><script setup lang="ts">let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"a"><ReturnType<typeof ___VERTER___Comp10>,"a">()</script>"`
+        `"<template><div ref="a"/></template><script setup lang="ts">let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"a">()</script>"`
       );
     });
 
@@ -80,7 +80,7 @@ describe("process script plugin template-ref", () => {
         '<template><Comp :ref="a"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><Comp :ref="a"/></template><script setup lang="ts">import Comp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof a><ReturnType<typeof ___VERTER___Comp10>,typeof a>()</script>"`
+        `"<template><Comp :ref="a"/></template><script setup lang="ts">import Comp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof a>()</script>"`
       );
     });
 
@@ -92,7 +92,7 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foo"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo><ReturnType<typeof ___VERTER___Comp10>,typeof foo>();const foo = 'test'</script>"`
+        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo>();const foo = 'test'</script>"`
       );
     });
 
@@ -104,7 +104,7 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foo"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo><ReturnType<typeof ___VERTER___Comp10>,typeof foo>('test');const foo = 'test'</script>"`
+        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo>('test');const foo = 'test'</script>"`
       );
     });
 
@@ -116,7 +116,7 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foo"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<unknown,typeof foo><unknown,typeof foo>('test');const foo = 'testx'</script>"`
+        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<unknown,typeof foo>('test');const foo = 'testx'</script>"`
       );
     });
     it("multiple MyComp :ref='foo' with string matching", () => {
@@ -127,7 +127,7 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foox"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foox"/></template><script setup lang="ts">import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foox><ReturnType<typeof ___VERTER___Comp10>,typeof foox>('test');const foo = 'test';const foox = 'test'</script>"`
+        `"<template><my-comp :ref="foox"/></template><script setup lang="ts">import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foox>('test');const foo = 'test';const foox = 'test'</script>"`
       );
     });
     it("multiple MyComp :ref='foo' with string matching but incorrect", () => {
@@ -138,7 +138,7 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foox"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foox"/></template><script setup lang="ts">import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef<unknown,typeof foox><unknown,typeof foox>('test');const foo = 'test';const foox = 'testx'</script>"`
+        `"<template><my-comp :ref="foox"/></template><script setup lang="ts">import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef<unknown,typeof foox>('test');const foo = 'test';const foox = 'testx'</script>"`
       );
     });
 
@@ -150,7 +150,7 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foo.bar"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar><ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar>();const foo = { bar:'test'}</script>"`
+        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar>();const foo = { bar:'test'}</script>"`
       );
     });
 
@@ -162,7 +162,7 @@ describe("process script plugin template-ref", () => {
         '<template><my-comp :ref="foo.bar"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar><ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar>('test');const foo = { bar:'test' as const}</script>"`
+        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar>('test');const foo = { bar:'test' as const}</script>"`
       );
     });
 
@@ -174,7 +174,7 @@ describe("process script plugin template-ref", () => {
         '<template><components.MyComp ref="a"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><components.MyComp ref="a"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"a"><ReturnType<typeof ___VERTER___Comp10>,"a">();const components = {MyComp}</script>"`
+        `"<template><components.MyComp ref="a"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"a">();const components = {MyComp}</script>"`
       );
     });
 
@@ -208,7 +208,7 @@ describe("process script plugin template-ref", () => {
         '<template><component :is="foo" ref="a"/></template>'
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><component :is="foo" ref="a"/></template><script setup lang="ts">let a = useTemplateRef<typeof foo,"a"><typeof foo,"a">();let foo = 'div'</script>"`
+        `"<template><component :is="foo" ref="a"/></template><script setup lang="ts">let a = useTemplateRef<typeof foo,"a">();let foo = 'div'</script>"`
       );
     });
     it('component :is="true ? "div" : "span""', () => {
@@ -219,7 +219,7 @@ describe("process script plugin template-ref", () => {
         "<template><component :is=\"true ? 'div' : 'span'\" ref=\"a\"/></template>"
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><component :is="true ? 'div' : 'span'" ref="a"/></template><script setup lang="ts">let a = useTemplateRef<HTMLDivElement|HTMLSpanElement,"a"><HTMLDivElement|HTMLSpanElement,"a">()</script>"`
+        `"<template><component :is="true ? 'div' : 'span'" ref="a"/></template><script setup lang="ts">let a = useTemplateRef<HTMLDivElement|HTMLSpanElement,"a">()</script>"`
       );
     });
 

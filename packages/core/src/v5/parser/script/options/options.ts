@@ -156,6 +156,7 @@ export function createOptionsContext(opts: {
         ) {
           setupFunction = parent.value.body;
         }
+        return
       }
     }
   }

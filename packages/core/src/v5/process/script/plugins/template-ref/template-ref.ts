@@ -21,20 +21,20 @@ const NormalisedComponentsAccessor = "NormalisedComponents";
 export const TemplateRefPlugin = definePlugin({
   name: "VerterTemplateRef",
 
-  transformDeclaration(item, s, ctx) {
-    if (
-      item.parent.type === "VariableDeclarator" &&
-      item.parent.init?.type === "CallExpression"
-    ) {
-      if (item.parent.init.callee.type === "Identifier") {
-        const macroName = item.parent.init.callee.name;
-        if (macroName !== "useTemplateRef") {
-          return;
-        }
-        handleExpression(item.parent.init, s, ctx);
-      }
-    }
-  },
+  // transformDeclaration(item, s, ctx) {
+  //   if (
+  //     item.parent.type === "VariableDeclarator" &&
+  //     item.parent.init?.type === "CallExpression"
+  //   ) {
+  //     if (item.parent.init.callee.type === "Identifier") {
+  //       const macroName = item.parent.init.callee.name;
+  //       if (macroName !== "useTemplateRef") {
+  //         return;
+  //       }
+  //       handleExpression(item.parent.init, s, ctx);
+  //     }
+  //   }
+  // },
 
   transformFunctionCall(item, s, ctx) {
     if (item.name !== "useTemplateRef") return;
@@ -88,7 +88,7 @@ function handleExpression(
       ? rawRefName.slice(7)
       : rawRefName;
 
-    if (!name || name === refName || name === (ref as any).value) {
+    if (!name || name === refName || ('value' in ref && name ===  ref.value)) {
       const tag = resolveTagNameType(item, ctx);
       if (Array.isArray(tag)) {
         possibleTypes.push(...tag);
@@ -183,8 +183,6 @@ function resolveTagNameType(
   return `ReturnType<typeof ${ctx.prefix("Comp")}${item.node.loc.start.offset}${
     ctx.generic ? `<${ctx.generic.names.join(",")}>` : ""
   }>`;
-
-  return resolveTagNameForTag(item.tag, ctx);
 }
 
 function resolveTagNameForTag(tag: string, ctx: ScriptContext) {
