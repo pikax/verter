@@ -191,6 +191,8 @@ function range(start: number, end: number): number[] {
 </template>
 
 <script setup lang="ts">
+import { defineComponent } from "vue";
+
 // Placeholder component definition for iteration
 const UserCard = defineComponent({
   props: {
@@ -198,6 +200,4 @@ const UserCard = defineComponent({
   },
   template: `<div>{{ user.name }}</div>`,
 });
-
-import { defineComponent } from "vue";
 </script>
