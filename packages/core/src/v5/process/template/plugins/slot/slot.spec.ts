@@ -118,7 +118,7 @@ describe("process template plugins slot", () => {
       
       // Extract the offset numbers from both slot variables
       const slotComponentPattern = /___VERTER___slotComponent(\d+)/;
-      const matches = result.match(/___VERTER___slotComponent(\d+)/g);
+      const matches = result.match(new RegExp(slotComponentPattern.source, 'g'));
       expect(matches).toHaveLength(4); // 2 slots × 2 occurrences (declaration + usage)
       
       const offsets = Array.from(new Set(matches.map(m => {
