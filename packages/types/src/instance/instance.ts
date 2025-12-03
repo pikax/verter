@@ -76,8 +76,8 @@ export type ToInstanceProps<
       : {}
     : PP extends Record<string, any>
     ? MakeDefaultsOptional extends true
-      ? MakePublicProps<PP> & { xx: PP }
-      : MakeInternalProps<PP> & { xy: PP }
+      ? MakePublicProps<PP>
+      : MakeInternalProps<PP>
     : T extends Record<string, any>
     ? MakeInternalProps<T>
     : {}
