@@ -121,8 +121,9 @@ describe("process template plugins slot", () => {
       expect(matches).toHaveLength(4); // 2 slots × 2 occurrences (declaration + usage)
       
       const offsets = Array.from(new Set(matches.map(m => {
-        const match = m.match(/\d+/);
-        return match ? match[0] : '';
+        const match = m.match(/___VERTER___slotComponent(\d+)/);
+        if (!match) throw new Error(`Unexpected match format: ${m}`);
+        return match[1];
       })));
       expect(offsets).toHaveLength(2); // Ensure two different offset values
     });
