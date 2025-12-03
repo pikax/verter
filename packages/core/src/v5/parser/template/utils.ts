@@ -6,6 +6,7 @@ import {
   type ExpressionNode,
 } from "@vue/compiler-core";
 import {
+  TemplateBrokenExpression,
   TemplateComment,
   TemplateCondition,
   TemplateDirective,
@@ -48,9 +49,18 @@ export function retrieveBindings(
     ignoredIdentifiers: string[];
   },
   directive: null | DirectiveNode = null
-): Array<TemplateBinding | TemplateFunction | TemplateLiteral> {
-  const bindings: Array<TemplateBinding | TemplateFunction | TemplateLiteral> =
-    [];
+): Array<
+  | TemplateBinding
+  | TemplateFunction
+  | TemplateLiteral
+  | TemplateBrokenExpression
+> {
+  const bindings: Array<
+    | TemplateBinding
+    | TemplateFunction
+    | TemplateLiteral
+    | TemplateBrokenExpression
+  > = [];
 
   if (exp.type !== NodeTypes.SIMPLE_EXPRESSION) {
     return bindings;
@@ -72,23 +82,28 @@ export function retrieveBindings(
   } else if (exp.ast) {
     bindings.push(...getASTBindings(exp.ast, context, exp));
   } else {
-    const ast = parseAcornLoose(exp.content);
-    if (ast) {
-      bindings.push(...getASTBindings(ast, context, exp));
-    } else {
-      bindings.push({
-        type: TemplateTypes.Binding,
-        node: exp,
-        context,
+    bindings.push({
+      type: TemplateTypes.BrokenExpression,
+      node: exp,
+      directive,
+    });
+    // const ast = parseAcornLoose(exp.content);
+    // if (ast) {
+    //   bindings.push(...getASTBindings(ast, context,  exp));
+    // } else {
+    //   bindings.push({
+    //     type: TemplateTypes.Binding,
+    //     node: exp,
+    //     context,
 
-        value: exp.content,
-        invalid: true,
-        ignore: false,
-        name: undefined,
-        parent: null,
-        exp,
-      });
-    }
+    //     value: exp.content,
+    //     invalid: true,
+    //     ignore: false,
+    //     name: undefined,
+    //     parent: null,
+    //     exp,
+    //   });
+    // }
   }
 
   return bindings;
@@ -104,10 +119,6 @@ export function getASTBindings(
   >;
 
   const isAcorn = "type" in ast && ast.type === "Program";
-
-  // this is to handle Acorn Typescript parsed ASTs,
-  // since we don't have full TS support, we need to track manually
-  let inTypescript = false;
 
   walk(ast, {
     enter(
@@ -191,7 +202,8 @@ export function getASTBindings(
           if (
             parent &&
             (("property" in parent && parent.property === n) ||
-              ("key" in parent && parent.key === n))
+              ("key" in parent && parent.key === n)) &&
+            (!("extra" in parent) || parent.extra?.parenthesized !== true)
           ) {
             this.skip();
             return;
@@ -322,6 +334,7 @@ export function createTemplateTypeMap() {
     [TemplateTypes.Interpolation]: [] as Array<TemplateInterpolation>,
     [TemplateTypes.Function]: [] as Array<TemplateFunction>,
     [TemplateTypes.Literal]: [] as Array<TemplateLiteral>,
+    [TemplateTypes.BrokenExpression]: [] as Array<TemplateBrokenExpression>,
   } satisfies {
     [K in TemplateTypes]: Array<TemplateItemByType[K]>;
   };

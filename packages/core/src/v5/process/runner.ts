@@ -24,6 +24,7 @@ export function runPlugins<T, C extends ProcessContext>(
     [TemplateTypes.Interpolation]: [],
     [TemplateTypes.Function]: [],
     [TemplateTypes.Literal]: [],
+    [TemplateTypes.BrokenExpression]: [],
   } as {
     [K in TemplateTypes]: Array<
       (item: TemplateItemByType[K], context: ProcessContext) => void

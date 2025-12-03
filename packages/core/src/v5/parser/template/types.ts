@@ -32,7 +32,14 @@ export const enum TemplateTypes {
 
   Literal = "Literal",
 
+  BrokenExpression = "BrokenExpression",
 }
+
+export type TemplateBrokenExpression = {
+  type: TemplateTypes.BrokenExpression;
+  node: SimpleExpressionNode;
+  directive: DirectiveNode | null;
+};
 
 export type TemplateComment = {
   type: TemplateTypes.Comment;
@@ -306,6 +313,7 @@ export type TemplateItemByType = {
   [TemplateTypes.Loop]: TemplateLoop;
   [TemplateTypes.Function]: TemplateFunction;
   [TemplateTypes.Literal]: TemplateLiteral;
+  [TemplateTypes.BrokenExpression]: TemplateBrokenExpression;
 };
 
 export type TemplateItem =
@@ -321,4 +329,5 @@ export type TemplateItem =
   | TemplateInterpolation
   | TemplateElement
   | TemplateFunction
-  | TemplateLiteral;
+  | TemplateLiteral
+  | TemplateBrokenExpression;

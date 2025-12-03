@@ -13,6 +13,7 @@ export function parseAcornLoose(
   const ast = acornLooseParse(source, {
     ecmaVersion: "latest",
     allowAwaitOutsideFunction: true,
+    // locations: true,
     sourceType: "module",
   });
   return ast;

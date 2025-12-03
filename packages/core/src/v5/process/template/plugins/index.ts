@@ -15,3 +15,4 @@ export * from "./template-tag/index.js";
 export * from "./sfc-cleaner/index.js";
 export * from "./context/index.js";
 export * from "./imports/index.js";
+export * from "./broken-expression/index.js";
