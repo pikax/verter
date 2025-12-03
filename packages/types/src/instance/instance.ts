@@ -31,8 +31,8 @@ export type CreateTypedInternalInstanceFromNormalisedMacro<
   //   // TODO add more properties, it needs name etc.
   //   options: MacroOptionsToOptions<T["options"]>;
 
-  // exposed: {}
-  // exposedProxy: {}
+  exposed: T["expose"];
+  exposedProxy: T["expose"];
 };
 
 type MakeInternalInstanceFromNormalisedMacro<
@@ -99,8 +99,12 @@ export type CreateTypedPublicInstanceFromNormalisedMacro<
   $emit: MacroToEmitValue<T["emits"]> &
     ModelToEmits<MacroToModelRecord<T["model"]>>;
 } & ToInstanceProps<T["props"], true> &
-  ModelToProps<MacroToModelRecord<T["model"]>>;
-
+  ModelToProps<MacroToModelRecord<T["model"]>> &
+  (T["expose"] extends { value: infer V }
+    ? V
+    : T["expose"] extends { object: infer V }
+    ? V
+    : {});
 export type PublicInstanceFromMacro<
   T,
   Attrs,
