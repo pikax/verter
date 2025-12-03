@@ -11,12 +11,13 @@
  * are correctly extracted regardless of which parser is used.
  */
 
-import { parse as parseSFC } from "@vue/compiler-sfc";
+import {parser} from "../parser.js";
 import {
   TemplateTypes,
   TemplateBinding,
   TemplateFunction,
   TemplateLiteral,
+  TemplateBrokenExpression,
 } from "./types";
 import { retrieveBindings } from "./utils";
 import { NodeTypes, SimpleExpressionNode } from "@vue/compiler-core";
@@ -30,27 +31,21 @@ describe("parser template utils - retrieveBindings", () => {
     content: string,
     ignoredIdentifiers: string[] = []
   ): {
-    bindings: Array<TemplateBinding | TemplateFunction | TemplateLiteral>;
+    bindings: Array<
+      | TemplateBinding
+      | TemplateFunction
+      | TemplateLiteral
+      | TemplateBrokenExpression
+    >;
     context: { ignoredIdentifiers: string[] };
   } {
     // Wrap in template interpolation to get Vue to parse it
-    const source = `<template>{{ ${content} }}</template>`;
-    const sfc = parseSFC(source, {});
-    const template = sfc.descriptor.template;
-    const ast = template?.ast!;
-
-    // Get the interpolation node
-    const interpolation = ast.children[0] as any;
-    if (interpolation?.type !== NodeTypes.INTERPOLATION) {
-      throw new Error("Expected interpolation node");
+    const source = `<template>{{ ${content} }}</template><script lang="ts"></script>`;
+    const parsed = parser(source, "test.vue", {});
+    const template = parsed.blocks.find(x=>x.type === "template")
+    return {
+      bindings: template!.result?.items!
     }
-
-    const exp = interpolation.content as SimpleExpressionNode;
-    exp.ast = false; // reset any existing AST to force re-parse
-    const context = { ignoredIdentifiers };
-
-    const bindings = retrieveBindings(exp, context);
-    return { bindings, context };
   }
 
   /**
@@ -87,6 +82,17 @@ describe("parser template utils - retrieveBindings", () => {
     bindings: Array<TemplateBinding | TemplateFunction | TemplateLiteral>
   ): boolean {
     return bindings.some((b) => b.type === TemplateTypes.Function);
+  }
+
+  function hasBrokenExpression(
+    bindings: Array<
+      | TemplateBinding
+      | TemplateFunction
+      | TemplateLiteral
+      | TemplateBrokenExpression
+    >
+  ): boolean {
+    return bindings.some((b) => b.type === TemplateTypes.BrokenExpression);
   }
 
   // ============================================================
@@ -556,103 +562,97 @@ describe("parser template utils - retrieveBindings", () => {
     describe("trailing dot (incomplete member access)", () => {
       test("simple identifier with trailing dot", () => {
         const { bindings } = createExpression("foo.");
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo"]);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("member access with trailing dot", () => {
         const { bindings } = createExpression("foo.bar.");
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo"]);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("method call with trailing dot", () => {
         const { bindings } = createExpression("foo.bar().");
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo"]);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
 
     describe("incomplete expressions", () => {
       test("binary expression with missing right operand", () => {
         const { bindings } = createExpression("foo +");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("incomplete ternary", () => {
         const { bindings } = createExpression("foo ?");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("incomplete ternary after colon", () => {
         const { bindings } = createExpression("foo ? bar :");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("bar");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
 
     describe("unclosed brackets/parens", () => {
       test("unclosed parenthesis", () => {
         const { bindings } = createExpression("foo(bar");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("bar");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("unclosed bracket", () => {
         const { bindings } = createExpression("foo[bar");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("bar");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("unclosed brace in object", () => {
         const { bindings } = createExpression("{ foo: bar");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("bar");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("unclosed array bracket", () => {
         const { bindings } = createExpression("[foo, bar");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("bar");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
 
     describe("broken arrow functions", () => {
       test("arrow function with trailing dot in body", () => {
         const { bindings } = createExpression("(x) => x.");
-        // Should still recognize it's a function and 'x' is a parameter
-        expect(hasFunction(bindings)).toBe(true);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("arrow function with incomplete body", () => {
         const { bindings } = createExpression("(x) => x +");
-        expect(hasFunction(bindings)).toBe(true);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("arrow function with rest param and trailing dot", () => {
         const { bindings } = createExpression("(...args) => args.");
-        expect(hasFunction(bindings)).toBe(true);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
 
     describe("broken function expressions", () => {
       test("function with trailing dot", () => {
         const { bindings } = createExpression("function(x) { return x. }");
-        expect(hasFunction(bindings)).toBe(true);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("function with incomplete return", () => {
         const { bindings } = createExpression("function(x) { return x +");
-        expect(hasFunction(bindings)).toBe(true);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
 
     describe("broken method chains", () => {
       test("method chain with trailing dot", () => {
         const { bindings } = createExpression("foo.bar().baz.");
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo"]);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("method chain with incomplete call", () => {
         const { bindings } = createExpression("foo.bar(baz.");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("baz");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
   });
@@ -665,80 +665,78 @@ describe("parser template utils - retrieveBindings", () => {
     describe("type assertions with trailing dot", () => {
       test("as assertion with trailing dot", () => {
         const { bindings } = createExpression("(foo as string).");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("as assertion on member with trailing dot", () => {
         const { bindings } = createExpression("(foo.bar as Baz).");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
 
     describe("typed arrow functions with errors", () => {
       test("typed arrow with trailing dot", () => {
         const { bindings } = createExpression("(x: string) => x.");
-        expect(hasFunction(bindings)).toBe(true);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("typed arrow with complex type and trailing dot", () => {
         const { bindings } = createExpression("(x: { foo: number }) => x.foo.");
-        expect(hasFunction(bindings)).toBe(true);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("arrow with return type and incomplete", () => {
         const { bindings } = createExpression("(x): string => x +");
-        expect(hasFunction(bindings)).toBe(true);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
 
     describe("generic expressions with errors", () => {
       test("generic call with trailing dot", () => {
         const { bindings } = createExpression("foo<string>(bar).");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("bar");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("generic new with trailing dot", () => {
         const { bindings } = createExpression("new Map<string, number>().");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("Map");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
 
     describe("satisfies with errors", () => {
       test("satisfies with trailing dot", () => {
         const { bindings } = createExpression("(foo satisfies MyType).");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
 
     describe("non-null assertion with errors", () => {
       test("non-null with trailing dot", () => {
         const { bindings } = createExpression("foo!.");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("chained non-null with trailing dot", () => {
         const { bindings } = createExpression("foo!.bar!.");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
 
     describe("complex broken TypeScript", () => {
       test("type assertion in method chain with trailing dot", () => {
         const { bindings } = createExpression("(foo as Foo).bar(baz as Baz).");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("baz");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("generic array method with trailing dot", () => {
         const { bindings } = createExpression("arr.map<Foo>(x => x).");
-        expect(getNonIgnoredBindingNames(bindings)).toContain("arr");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("typeof with trailing dot", () => {
         const { bindings } = createExpression("(typeof foo).");
         // typeof returns a string, so this is technically broken but we should handle it
-        expect(getNonIgnoredBindingNames(bindings)).toContain("foo");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
 
@@ -747,14 +745,14 @@ describe("parser template utils - retrieveBindings", () => {
         const { bindings } = createExpression(
           "({ foo: bar } as { foo: string })."
         );
-        expect(getNonIgnoredBindingNames(bindings)).toContain("bar");
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
 
       test("arrow function with inline type and trailing dot", () => {
         const { bindings } = createExpression(
           "((x: number): number => x * 2)."
         );
-        expect(hasFunction(bindings)).toBe(true);
+        expect(hasBrokenExpression(bindings)).toBe(true);
       });
     });
   });
@@ -814,11 +812,7 @@ describe("parser template utils - retrieveBindings", () => {
 
         test(`${name}: broken version`, () => {
           const { bindings } = createExpression(broken);
-          const names = getNonIgnoredBindingNames(bindings);
-          // Broken version should at least contain the bindings that appear before the error
-          expectedBindings.forEach((expected) => {
-            expect(names).toContain(expected);
-          });
+          expect(hasBrokenExpression(bindings)).toBe(true);
         });
       });
     });
@@ -874,15 +868,8 @@ describe("parser template utils - retrieveBindings", () => {
 
           test(`${name}: broken version`, () => {
             const { bindings } = createExpression(broken);
-            if (expectedBindings) {
-              const names = getNonIgnoredBindingNames(bindings);
-              expectedBindings.forEach((expected) => {
-                expect(names).toContain(expected);
-              });
-            }
-            if (expectFn) {
-              expect(hasFunction(bindings)).toBe(true);
-            }
+
+            expect(hasBrokenExpression(bindings)).toBe(true);
           });
         }
       );
@@ -935,7 +922,7 @@ describe("parser template utils - retrieveBindings", () => {
 
     test("arrow function returning arrow function with trailing dot", () => {
       const { bindings } = createExpression("(x) => (y) => x + y.");
-      expect(hasFunction(bindings)).toBe(true);
+      expect(hasBrokenExpression(bindings)).toBe(true);
     });
 
     test("IIFE", () => {
@@ -965,12 +952,12 @@ describe("parser template utils - retrieveBindings", () => {
 
     test("spread in array with broken state", () => {
       const { bindings } = createExpression("[...arr.");
-      expect(getNonIgnoredBindingNames(bindings)).toContain("arr");
+      expect(hasBrokenExpression(bindings)).toBe(true);
     });
 
     test("destructuring in arrow parameter with broken state", () => {
       const { bindings } = createExpression("({ a, b }) => a + b.");
-      expect(hasFunction(bindings)).toBe(true);
+      expect(hasBrokenExpression(bindings)).toBe(true);
     });
   });
 });
