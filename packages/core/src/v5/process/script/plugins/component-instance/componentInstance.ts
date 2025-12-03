@@ -2,6 +2,7 @@ import { definePlugin } from "../../types";
 import { BundlerHelper } from "../../../template/helpers/bundler";
 import { createHelperImport } from "../../../utils";
 import { type AvailableExports } from "@verter/types/string";
+import { ProcessItemType } from "../../../types";
 
 export const ComponentInstancePlugin = definePlugin({
   name: "VerterComponentInstance",
@@ -16,7 +17,10 @@ export const ComponentInstancePlugin = definePlugin({
 
     if (ctx.isSetup) {
       ctx.items.push(
-        createHelperImport(["PublicInstanceFromMacro"], ctx.prefix)
+        createHelperImport(
+          ["PublicInstanceFromMacro", "ExtractComponentProps"],
+          ctx.prefix
+        )
       );
     }
   },
@@ -29,13 +33,20 @@ export const ComponentInstancePlugin = definePlugin({
       const attributes = ctx.prefix("attributes");
       // TODO resolve the first element in template and use its type
       // NOTE that if inheritedAttrs is false, then it should be {}
-      const element = "Element";
       // if allowDev is true it will export a type to be imported in test components
       const allowDev = true;
 
+      const noInheritAttrs =
+        ctx.items.find((i) => i.type === ProcessItemType.InheritAttrs)
+          ?.value === false;
+      const inheritAttrs = noInheritAttrs ? "false" : "true";
+
       const componentName = ctx.prefix("Component");
       const templateBinding = ctx.prefix("TemplateBinding");
+      const RootElement = ctx.prefix("RootElement");
       const defaultOptionsName = ctx.prefix("default_Component");
+      const getRootComponentName = ctx.prefix("getRootComponent");
+      const ExtractComponentProps = ctx.prefix("ExtractComponentProps");
 
       const genericDeclaration = ctx.generic
         ? `<${ctx.generic.declaration}>`
@@ -46,10 +57,44 @@ export const ComponentInstancePlugin = definePlugin({
 
       const instanceName = ctx.prefix("Instance");
 
+      // const element = `ReturnType<typeof ${getRootComponentName}${sanitisedNames}>`;
+      // const rootElementStr = `(${element} extends infer R ? R extends {$props:infer P} ? P : R : {})`;
+      const rootElementStr = `type ${RootElement}${
+        ctx.generic ? `<${ctx.generic.source}>` : ""
+      }=ReturnType<typeof ${getRootComponentName}${
+        ctx.generic ? `<${ctx.generic.names.join(",")}>` : ""
+      }>`;
+      const RootElementProps = `${RootElement}Props`;
+      const RootElementPropsStr = `type ${RootElementProps}${
+        ctx.generic ? `<${ctx.generic.source}>` : ""
+      }=${ExtractComponentProps}<${RootElement}${
+        ctx.generic ? `<${ctx.generic.names.join(",")}>` : ""
+      }>`;
+
+      const PatchedInstanceKeys = [
+        "$",
+        "$data",
+        "$props",
+        "$attrs",
+        "$refs",
+        "$options",
+        "$emit",
+        "$el",
+        "$slots",
+      ]
+        .map((x) => `"${x}"`)
+        .join("|");
+
       const declaration = [
-        `export type ${instanceName}${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, false,false>;`,
+        rootElementStr,
+        RootElementPropsStr,
+        `export type ${instanceName}${genericDeclaration} = Omit<InstanceType<typeof ${defaultOptionsName}>,${PatchedInstanceKeys}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}${
+          noInheritAttrs ? "" : "&" + RootElementProps
+        },${RootElement}, false,false>;`,
         allowDev &&
-          `export type ${instanceName}_TEST${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}, ${element}, true,true>;`,
+          `export type ${instanceName}_TEST${genericDeclaration} = Omit<InstanceType<typeof ${defaultOptionsName}>,${PatchedInstanceKeys}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}${
+            noInheritAttrs ? "" : "&" + RootElementProps
+          },${RootElement}, true,true>;`,
         `export const ${componentName}={} as typeof ${defaultOptionsName} & { new${genericDeclaration}(props?: ${instanceName}${sanitisedNames}['$props']):${instanceName}${sanitisedNames} };`,
       ];
 

@@ -50,6 +50,91 @@ function getSourceFilesFromIndex(indexPath) {
   return sourceFiles;
 }
 
+// Resolve a relative import path to an absolute file path
+function resolveImportPath(importPath, fromFile) {
+  const fromDir = path.dirname(fromFile);
+  const resolved = path.resolve(fromDir, importPath);
+  
+  // Try with .ts extension first, then as-is if it's a file, then index.ts
+  const possiblePaths = [
+    resolved + ".ts",
+    path.join(resolved, "index.ts"),
+  ];
+  
+  // Only add resolved if it exists and is a file (not directory)
+  if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+    possiblePaths.unshift(resolved);
+  }
+  
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p) && fs.statSync(p).isFile()) {
+      return p;
+    }
+  }
+  return null;
+}
+
+// Collect local imports from a source file
+function collectLocalImports(sourceFile, filePath) {
+  const imports = [];
+  
+  ts.forEachChild(sourceFile, (node) => {
+    if (ts.isImportDeclaration(node) && node.moduleSpecifier) {
+      if (ts.isStringLiteral(node.moduleSpecifier)) {
+        const modulePath = node.moduleSpecifier.text;
+        // Only handle relative imports (local files)
+        if (modulePath.startsWith(".")) {
+          const resolvedPath = resolveImportPath(modulePath, filePath);
+          if (resolvedPath) {
+            imports.push({
+              modulePath,
+              resolvedPath,
+              importClause: node.importClause,
+            });
+          }
+        }
+      }
+    }
+  });
+  
+  return imports;
+}
+
+// Recursively collect all source files including local imports
+function collectAllSourceFiles(initialFiles) {
+  const allFiles = new Set();
+  const fileOrder = []; // Maintain order: dependencies first
+  const pending = [...initialFiles];
+  
+  while (pending.length > 0) {
+    const filePath = pending.shift();
+    if (allFiles.has(filePath)) continue;
+    
+    const source = fs.readFileSync(filePath, "utf-8");
+    const sourceFile = ts.createSourceFile(
+      path.basename(filePath),
+      source,
+      ts.ScriptTarget.Latest,
+      true
+    );
+    
+    // Collect local imports from this file
+    const imports = collectLocalImports(sourceFile, filePath);
+    
+    // Add imported files to pending (they should be processed before this file)
+    for (const imp of imports) {
+      if (!allFiles.has(imp.resolvedPath)) {
+        pending.unshift(imp.resolvedPath); // Add to front to process dependencies first
+      }
+    }
+    
+    allFiles.add(filePath);
+    fileOrder.push(filePath);
+  }
+  
+  return fileOrder;
+}
+
 // Collect all declared names (for rewriting) and exported types/interfaces (for ExportedTypes set)
 function collectDeclarations(sourceFiles) {
   const allTypes = new Set();
@@ -261,12 +346,15 @@ function transformSourceFile(
 function build() {
   // Discover source files from index.ts
   const indexPath = path.join(srcDir, "index.ts");
-  const sourceFilePaths = getSourceFilesFromIndex(indexPath);
+  const initialSourceFiles = getSourceFilesFromIndex(indexPath);
 
-  if (sourceFilePaths.length === 0) {
+  if (initialSourceFiles.length === 0) {
     console.error("No source files found in index.ts exports");
     process.exit(1);
   }
+
+  // Collect all source files including local imports (dependencies first)
+  const sourceFilePaths = collectAllSourceFiles(initialSourceFiles);
 
   console.log(
     "Found source files:",
@@ -299,13 +387,23 @@ function build() {
       keepComments
     );
 
-    // Remove imports from all files except the first one (to avoid duplicate imports)
-    if (index > 0) {
-      transformed = transformed.replace(
-        /import\s*{[^}]+}\s*from\s*["'][^"']+["'];?\s*/g,
-        ""
-      );
-    }
+    // Remove all local relative imports (they are inlined)
+    transformed = transformed.replace(
+      /import\s+(?:type\s+)?{[^}]+}\s*from\s*["']\.\.?\/[^"']+["'];?\s*/g,
+      ""
+    );
+
+    // Remove all export * from statements (content is inlined)
+    transformed = transformed.replace(
+      /export\s+\*\s+from\s*["'][^"']+["'];?\s*/g,
+      ""
+    );
+
+    // Remove all export { } from statements (content is inlined)
+    transformed = transformed.replace(
+      /export\s+(?:type\s+)?{[^}]+}\s*from\s*["'][^"']+["'];?\s*/g,
+      ""
+    );
 
     return transformed;
   });

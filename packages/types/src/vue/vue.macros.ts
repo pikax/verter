@@ -127,17 +127,34 @@ export declare function defineEmits_Box<T extends import("vue").ComponentTypeEmi
  *
  * @see {@link https://vuejs.org/api/sfc-script-setup.html#defineoptions}
  */
-export declare function defineOptions_Box<RawBindings = {}, D = {}, C extends import("vue").ComputedOptions = {}, M extends import("vue").MethodOptions = {}, Mixin extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin, Extends extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin>(options?: import("vue").ComponentOptionsBase<{}, RawBindings, D, C, M, Mixin, Extends, {}> & {
-    props?: never;
-    emits?: never;
-    expose?: never;
-    slots?: never;
-}): import("vue").ComponentOptionsBase<{}, RawBindings, D, C, M, Mixin, Extends, {}> & {
-    props?: never;
-    emits?: never;
-    expose?: never;
-    slots?: never;
-};
+export declare function defineOptions_Box<
+  RawBindings = {},
+  D = {},
+  C extends import("vue").ComputedOptions = {},
+  M extends import("vue").MethodOptions = {},
+  Mixin extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin,
+  Extends extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin,
+  InheritAttrs extends true | false = true,
+  T = Record<string, any>
+>(
+  options?: T &
+    import("vue").ComponentOptionsBase<
+      {},
+      RawBindings,
+      D,
+      C,
+      M,
+      Mixin,
+      Extends,
+      {}
+    > & {
+      props?: never;
+      emits?: never;
+      expose?: never;
+      slots?: never;
+      inheritAttrs?: InheritAttrs;
+    }
+): T;
 
 // Overrides for defineModel
 /**
