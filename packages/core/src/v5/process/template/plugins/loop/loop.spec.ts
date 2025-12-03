@@ -201,6 +201,6 @@ describe("process template plugins loop", () => {
     </slot>
 </div>`);
     expect(result).toContain(`___VERTER___renderList(___VERTER___ctx.items,(item)=>{`);
-    expect(result).toContain(`const ___VERTER___slotComponent=___VERTER___$slot[item]`);
+    expect(result).toMatch(/const ___VERTER___slotComponent\d+=___VERTER___\$slot\[item\]/);
   });
 });

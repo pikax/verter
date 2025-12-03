@@ -46,29 +46,29 @@ describe("process template plugins slot", () => {
   describe("declaration", () => {
     it("<slot/>", () => {
       const { result } = parse(`<slot/>`);
-      expect(result).toContain(
-        "const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent/>"
+      expect(result).toMatch(
+        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\.default;<___VERTER___slotComponent\d+\/>/
       );
     });
     it('<slot name="test" />', () => {
       const { result } = parse(`<slot name="test"/>`);
-      expect(result).toContain(
-        'const ___VERTER___slotComponent=___VERTER___$slot["test"];<___VERTER___slotComponent />'
+      expect(result).toMatch(
+        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\["test"\];<___VERTER___slotComponent\d+\s\/>/
       );
     });
 
     it(`<slot :name="test"/>`, () => {
       const { result } = parse(`<slot :name="test"/>`);
-      expect(result).toContain(
-        "const ___VERTER___slotComponent=___VERTER___$slot[___VERTER___ctx.test];<___VERTER___slotComponent />"
+      expect(result).toMatch(
+        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\[___VERTER___ctx\.test\];<___VERTER___slotComponent\d+\s\/>/
       );
     });
 
     it(`<slot :[msg]="test"/>`, () => {
       const { result } = parse(`<slot :[msg]="test"/>`);
 
-      expect(result).toContain(
-        "const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent {...{[___VERTER___ctx.msg]:___VERTER___ctx.test}}/>"
+      expect(result).toMatch(
+        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\.default;<___VERTER___slotComponent\d+ \{\.\.\.\{\[___VERTER___ctx\.msg\]:___VERTER___ctx\.test\}\}\/\>/
       );
     });
 
@@ -76,40 +76,50 @@ describe("process template plugins slot", () => {
       const { result } = parse(
         `<slot :[msg]="test" :name="name" v-bind:onTest="()=> callMe()" @bind="bind"/>`
       );
-      expect(result).toContain(
-        "const ___VERTER___slotComponent=___VERTER___$slot[___VERTER___ctx.name];<___VERTER___slotComponent {...{[___VERTER___ctx.msg]:___VERTER___ctx.test}}  onTest={()=> ___VERTER___ctx.callMe()} onBind={___VERTER___ctx.bind}/>"
+      expect(result).toMatch(
+        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\[___VERTER___ctx\.name\];<___VERTER___slotComponent\d+ \{\.\.\.\{\[___VERTER___ctx\.msg\]:___VERTER___ctx\.test\}\}  onTest=\{\(\)=> ___VERTER___ctx\.callMe\(\)\}\s+onBind=\{___VERTER___ctx\.bind\}\/>/
       );
     });
 
     it("<slot v-if=\"test === 'app'\"/>", () => {
       const { result } = parse(`<slot v-if="test === 'app'"/>`);
 
-      expect(result).toContain(
-        "const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent />"
+      expect(result).toMatch(
+        /if\(___VERTER___ctx\.test === 'app'\)\{const ___VERTER___slotComponent\d+=___VERTER___\$slot\.default;<___VERTER___slotComponent\d+ \/>\}/
       );
     });
 
     it("with parent v-if", () => {
       const { result } = parse(`<div v-if="test === 'app'"> <slot /> </div>`);
 
-      expect(result).toContain(
-        "<div > {()=>{const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent />}} </div>"
+      expect(result).toMatch(
+        /<div > \{\(\)=>\{const ___VERTER___slotComponent\d+=___VERTER___\$slot\.default;<___VERTER___slotComponent\d+ \/>\}\} <\/div>/
       );
     });
 
     it("<slot> <span>1</span> </slot>", () => {
       const { result } = parse(`<slot> <span>1</span> </slot>`);
 
-      expect(result).toContain(
-        "const ___VERTER___slotComponent=___VERTER___$slot.default;<___VERTER___slotComponent> <span>1</span> </___VERTER___slotComponent>"
+      expect(result).toMatch(
+        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\.default;<___VERTER___slotComponent\d+> <span>1<\/span> <\/___VERTER___slotComponent\d+>/
       );
     });
 
     it('<slot v-for="name in names" :name="name"/>', () => {
       const { result } = parse(`<slot v-for="name in names" :name="name"/>`);
 
-      expect(result).toContain(
-        `{()=>{___VERTER___renderList(___VERTER___ctx.names,(name)=>{  const ___VERTER___slotComponent=___VERTER___$slot[name];<___VERTER___slotComponent  />})}}`
+      expect(result).toMatch(
+        /___VERTER___renderList\(___VERTER___ctx\.names,\(name\)=>\{\s+const ___VERTER___slotComponent\d+=___VERTER___\$slot\[name\];<___VERTER___slotComponent\d+\s*\/\>\}\)/
+      );
+    });
+
+    it('multiple slots <slot name="foo"/><slot name="bar"/>', () => {
+      const { result } = parse(`<slot name="foo"/><slot name="bar"/>`);
+      expect(result).toMatch(
+        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\["foo"\];<___VERTER___slotComponent\d+ \/>/
+      );
+      expect(result).toMatch(
+        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\["bar"\];<___VERTER___slotComponent\d+ \/>/
       );
     });
   });
