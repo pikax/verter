@@ -29,8 +29,7 @@
     }
   },
   "scripts": {
-    "prebuild": "npm run generate:vue && npm run generate:attributes",
-    "build": "node scripts/build-string.mjs && node scripts/build-tsx.mjs && node scripts/generate-tsx-attributes.cjs && tsc -b --force",
+    "build": "node scripts/build-string.mjs && node scripts/build-tsx.mjs && npm run generate:vue && npm run generate:attributes && tsc -b --force",
     "build:tsx": "node scripts/build-tsx.mjs",
     "build:string": "node scripts/build-string.mjs",
     "generate:vue": "node scripts/generate-vue-overrides.mjs",
