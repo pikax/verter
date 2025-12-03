@@ -69,12 +69,18 @@ export type InternalInstanceFromMacro<
 export type ToInstanceProps<
   T,
   MakeDefaultsOptional extends boolean
-> = ExtractPropsFromMacro<T> extends infer PP extends Record<string, any>
-  ? MakeDefaultsOptional extends true
-    ? MakePublicProps<PP>
-    : MakeInternalProps<PP>
-  : T extends Record<string, any>
-  ? MakeInternalProps<T>
+> = ExtractPropsFromMacro<T> extends infer PP
+  ? {} extends PP
+    ? T extends Record<string, any>
+      ? MakeInternalProps<T>
+      : {}
+    : PP extends Record<string, any>
+    ? MakeDefaultsOptional extends true
+      ? MakePublicProps<PP> & { xx: PP }
+      : MakeInternalProps<PP> & { xy: PP }
+    : T extends Record<string, any>
+    ? MakeInternalProps<T>
+    : {}
   : {};
 
 export type CreateTypedPublicInstanceFromNormalisedMacro<
@@ -100,10 +106,11 @@ export type CreateTypedPublicInstanceFromNormalisedMacro<
 
   $emit: MacroToEmitValue<T["emits"]> &
     ModelToEmits<MacroToModelRecord<T["model"]>>;
-} & (T["expose"] extends { value: infer V }
-  ? V
-  : T["expose"] extends { object: infer V }
-  ? V
+} & (T["expose"] extends { object: infer V }
+  ? unknown extends V
+    ? ToInstanceProps<T["props"], true> &
+        ModelToProps<MacroToModelRecord<T["model"]>>
+    : V
   : ToInstanceProps<T["props"], true> &
       ModelToProps<MacroToModelRecord<T["model"]>>);
 export type PublicInstanceFromMacro<
@@ -147,10 +154,10 @@ export type PublicInstanceFromNormalisedMacro<
     MacroOptionsToOptions<T["options"]>,
     {},
     SlotsToSlotType<T["slots"]>,
-    T["expose"] extends { value: infer V }
-      ? keyof V
-      : T["expose"] extends { object: infer V }
-      ? keyof V
+    T["expose"] extends { object: infer V }
+      ? unknown extends V
+        ? ""
+        : keyof V
       : "",
     {},
     El
@@ -163,9 +170,7 @@ export type PublicInstanceFromNormalisedMacro<
     MakeDefaultsOptional,
     DEV,
     InternalInstance
-  > & {
-    // $el: El;
-  };
+  >;
 
 export type CreateExportedInstanceFromNormalisedMacro<
   T extends NormalisedMacroReturn<any>,

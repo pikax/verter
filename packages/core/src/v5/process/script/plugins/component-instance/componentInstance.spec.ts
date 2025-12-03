@@ -114,7 +114,7 @@ describe("process ComponentInstancePlugin", () => {
 
       // Should also include InstanceType<typeof default_Component> in TEST type
       expect(result).toContain(
-        `export type ___VERTER___Instance_TEST = InstanceType<typeof ___VERTER___default_Component>`
+        `export type ___VERTER___Instance_TEST = Omit<InstanceType<typeof ___VERTER___default_Component>,"$"|"$data"|"$props"|"$attrs"|"$refs"|"$options"|"$emit"|"$el"|"$slots">`
       );
     });
 
@@ -155,8 +155,8 @@ describe("process ComponentInstancePlugin", () => {
       // Should include PublicInstanceFromMacro helper  
       expect(result).toContain(`___VERTER___PublicInstanceFromMacro<`);
       
-      // Instance type should be an intersection of InstanceType and PublicInstanceFromMacro
-      expect(result).toMatch(/InstanceType<[^>]+>\s*&\s*___VERTER___PublicInstanceFromMacro/);
+      // Instance type should be an intersection of Omit<InstanceType<...>> and PublicInstanceFromMacro
+      expect(result).toMatch(/Omit<InstanceType<[^>]+>[^>]+>\s*&\s*___VERTER___PublicInstanceFromMacro/);
     });
   });
 
@@ -227,7 +227,7 @@ describe("process ComponentInstancePlugin", () => {
 
       // TEST type should also include InstanceType<typeof default_Component>
       expect(result).toContain(
-        `export type ___VERTER___Instance_TEST<__VERTER__TS__T = any> = InstanceType<typeof ___VERTER___default_Component>`
+        `export type ___VERTER___Instance_TEST<__VERTER__TS__T = any> = Omit<InstanceType<typeof ___VERTER___default_Component>,"$"|"$data"|"$props"|"$attrs"|"$refs"|"$options"|"$emit"|"$el"|"$slots">`
       );
     });
   });
