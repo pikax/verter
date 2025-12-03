@@ -8,8 +8,8 @@ import {
   type ComponentPublicInstance,
 } from "vue";
 
-// DOM element refs
-const inputRef = ref<HTMLInputElement | null>(null);
+// DOM element refs 
+const inputRef = ref(null);
 const divRef = ref<HTMLDivElement>();
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 
@@ -19,6 +19,7 @@ const formRef = useTemplateRef("myForm");
 
 // Multiple refs (v-for)
 const itemRefs = ref<HTMLLIElement[]>([]);
+const iii = useTemplateRef("itemRefs");
 
 // Function ref
 const setItemRef = (el: HTMLLIElement | null, index: number) => {
@@ -33,6 +34,7 @@ const childRef = ref<InstanceType<typeof ChildComponent> | null>(null);
 
 // Generic component ref
 const genericRef = ref<ComponentPublicInstance | null>(null);
+const genRef = useTemplateRef('genericRef')
 
 // Ref with exposed methods
 interface ExposedMethods {
@@ -95,11 +97,7 @@ const items = ["a", "b", "c"];
 
     <!-- Array refs with v-for -->
     <ul>
-      <li
-        v-for="(item, index) in items"
-        :key="item"
-        :ref="(el) => setItemRef(el as HTMLLIElement, index)"
-      >
+      <li v-for="(item, index) in items" :key="item" ref="itemRefs">
         {{ item }}
       </li>
     </ul>

@@ -21,30 +21,34 @@ const NormalisedComponentsAccessor = "NormalisedComponents";
 export const TemplateRefPlugin = definePlugin({
   name: "VerterTemplateRef",
 
-  // transformDeclaration(item, s, ctx) {
-  //   if (
-  //     item.parent.type === "VariableDeclarator" &&
-  //     item.parent.init?.type === "CallExpression"
-  //   ) {
-  //     if (item.parent.init.callee.type === "Identifier") {
-  //       const macroName = item.parent.init.callee.name;
-  //       if (macroName !== "useTemplateRef") {
-  //         return;
-  //       }
-  //       handleExpression(item.parent.init, s, ctx);
-  //     }
-  //   }
-  // },
+  transformDeclaration(item, s, ctx) {
+    if (
+      item.parent.type === "VariableDeclarator" &&
+      item.parent.init?.type === "CallExpression" &&
+      item.parent.init.typeArguments === null
+    ) {
+      if (item.parent.init.callee.type === "Identifier") {
+        const macroName = item.parent.init.callee.name;
+        if (macroName !== "ref" || !item.name) {
+          return;
+        }
+        const varName = item.name;
+
+        handleExpression(item.parent.init, s, varName, ctx);
+      }
+    }
+  },
 
   transformFunctionCall(item, s, ctx) {
     if (item.name !== "useTemplateRef") return;
-    handleExpression(item.node, s, ctx);
+    handleExpression(item.node, s, undefined, ctx);
   },
 });
 
 function handleExpression(
   node: CallExpression,
   s: MagicString,
+  _name: string | undefined,
   ctx: ScriptContext
 ) {
   // don't handle if there's explicit type parameters
@@ -59,11 +63,13 @@ function handleExpression(
 
   const nameArg = node.arguments?.[0];
 
-  const name = nameArg
-    ? nameArg.type === "Literal"
-      ? s.original.slice(nameArg.start + 1, nameArg.end - 1)
-      : s.original.slice(nameArg.start, nameArg.end)
-    : "";
+  const name =
+    _name ??
+    (nameArg
+      ? nameArg.type === "Literal"
+        ? s.original.slice(nameArg.start + 1, nameArg.end - 1)
+        : s.original.slice(nameArg.start, nameArg.end)
+      : "");
 
   const possibleTypes = [] as string[];
   const possibleNames = [] as string[];
@@ -88,7 +94,7 @@ function handleExpression(
       ? rawRefName.slice(7)
       : rawRefName;
 
-    if (!name || name === refName || ('value' in ref && name ===  ref.value)) {
+    if (!name || name === refName || ("value" in ref && name === ref.value)) {
       const tag = resolveTagNameType(item, ctx);
       if (Array.isArray(tag)) {
         possibleTypes.push(...tag);
@@ -136,14 +142,26 @@ function handleExpression(
   const isTS = ctx.block.lang.startsWith("ts");
 
   if (isTS) {
-    s.prependLeft(node.callee.end, `<${types || "unknown"},${names}>`);
+    if (_name) {
+      if (!types) return;
+      s.prependLeft(node.callee.end, `<${types}|null>`);
+    } else {
+      s.prependLeft(node.callee.end, `<${types || "unknown"},${names}>`);
+    }
   } else {
-    s.prependLeft(
-      node.callee.start,
-      `/**@type{typeof import('vue').useTemplateRef<${
-        types || "unknown"
-      },${names}>}*/(`
-    );
+    if (_name) {
+      s.prependLeft(
+        node.callee.start,
+        `/**@type{typeof import('vue').ref<${types}|null>}*/(`
+      );
+    } else {
+      s.prependLeft(
+        node.callee.start,
+        `/**@type{typeof import('vue').useTemplateRef<${
+          types || "unknown"
+        },${names}>}*/(`
+      );
+    }
     s.prependLeft(node.callee.end, ")");
   }
 }
@@ -182,7 +200,7 @@ function resolveTagNameType(
 
   return `ReturnType<typeof ${ctx.prefix("Comp")}${item.node.loc.start.offset}${
     ctx.generic ? `<${ctx.generic.names.join(",")}>` : ""
-  }>`;
+  }>${item.context.inFor ? "[]" : ""}`;
 }
 
 function resolveTagNameForTag(tag: string, ctx: ScriptContext) {
