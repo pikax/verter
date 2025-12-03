@@ -754,69 +754,14 @@ function main() {
     );
   }
 
-  // Collect helper types: types that are exported but not from vue and are actually used in generated signatures
-  // Also scan internal type definitions for helper types they use
+  // Helper types are types that are defined locally in the generated file
+  // and should NOT be qualified with import("vue").
+  // We don't need to scan for types to keep unqualified - all Vue types
+  // should be qualified with import("vue") since Vue re-exports everything
+  // from @vue/runtime-core and @vue/runtime-dom.
+  // The only types that should stay unqualified are those we define locally
+  // (internal types like PropOptions, DefineModelOptions, etc.)
   const helperTypes = new Set();
-
-  const collectTypesFromNode = (typeNode) => {
-    if (!typeNode) return;
-    if (
-      ts.isTypeReferenceNode(typeNode) &&
-      ts.isIdentifier(typeNode.typeName)
-    ) {
-      const name = typeNode.typeName.text;
-      if (
-        exportedTypes.has(name) &&
-        !exportedInVue.has(name) &&
-        !internalTypes.has(name)
-      ) {
-        helperTypes.add(name);
-      }
-    }
-    typeNode.forEachChild(collectTypesFromNode);
-  };
-
-  // Scan function signatures
-  for (const [funcName, declList] of decls.entries()) {
-    for (const { node } of declList) {
-      if (node.parameters) {
-        for (const param of node.parameters) {
-          collectTypesFromNode(param.type);
-        }
-      }
-      collectTypesFromNode(node.type);
-      if (node.typeParameters) {
-        for (const tp of node.typeParameters) {
-          collectTypesFromNode(tp.constraint);
-          collectTypesFromNode(tp.default);
-        }
-      }
-    }
-  }
-
-  // Also scan internal type definitions for helper types they reference
-  for (const [typeName, typeText] of typeDefinitions.entries()) {
-    // Parse the type definition text to scan for type references
-    const tempSf = ts.createSourceFile(
-      "temp.ts",
-      typeText,
-      ts.ScriptTarget.Latest,
-      true
-    );
-    const visitNode = (node) => {
-      collectTypesFromNode(node);
-      ts.forEachChild(node, visitNode);
-    };
-    visitNode(tempSf);
-  }
-
-  if (helperTypes.size) {
-    console.log(
-      `🎯 Detected helper types to keep unqualified: ${Array.from(
-        helperTypes
-      ).join(", ")}`
-    );
-  }
 
   // Check if UnionToIntersection or IfAny are used anywhere
   let usesUnionToIntersection = false;
