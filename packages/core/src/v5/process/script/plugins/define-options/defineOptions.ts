@@ -9,7 +9,10 @@
 //       );
 //     }
 import { definePlugin } from "../../types";
-import type { VerterASTNode } from "../../../../parser/ast/types";
+import type {
+  CallExpression,
+  VerterASTNode,
+} from "../../../../parser/ast/types";
 import { ProcessContext, ProcessItemType } from "../../../types";
 import { MagicString } from "@vue/compiler-sfc";
 import { createHelperImport } from "../../../utils";
@@ -33,9 +36,13 @@ export const DefineOptionsPlugin = definePlugin({
         if (item.parent.init.callee.name !== "defineOptions") return;
 
         if (ctx.isSetup) {
-          if (!item.parent.init.arguments || item.parent.init.arguments.length === 0) {
+          if (
+            !item.parent.init.arguments ||
+            item.parent.init.arguments.length === 0
+          ) {
             return; // MacrosPlugin will handle validation
           }
+          checkInheritAttrs(item.parent.init, ctx);
           ctx.items.push(createHelperImport(["defineOptions_Box"], ctx.prefix));
 
           const info = boxInfo("defineOptions", null, ctx);
@@ -72,10 +79,14 @@ export const DefineOptionsPlugin = definePlugin({
         return; // MacrosPlugin will handle validation
       }
       ctx.items.push(createHelperImport(["defineOptions_Box"], ctx.prefix));
+      checkInheritAttrs(item.node, ctx);
 
       const info = boxInfo("defineOptions", null, ctx);
       s.prependRight(item.node.start, `let ${info.boxedName};`);
-      s.prependLeft(item.node.arguments[0].start!, `${info.boxedName}=${info.boxName}(`);
+      s.prependLeft(
+        item.node.arguments[0].start!,
+        `${info.boxedName}=${info.boxName}(`
+      );
       s.prependRight(item.node.arguments[0].end!, `)`);
       s.move(item.node.start, item.node.end, 0);
     } else {
@@ -89,3 +100,31 @@ export const DefineOptionsPlugin = definePlugin({
     }
   },
 });
+
+function checkInheritAttrs(node: CallExpression, ctx: ProcessContext) {
+  const arg = node.arguments[0];
+  if (!arg || arg.type !== "ObjectExpression") {
+    return;
+  }
+  const inheritAttrsProp = arg.properties.find((x) => {
+    return (
+      x.type === "Property" &&
+      x.key.type === "Identifier" &&
+      x.key.name === "inheritAttrs"
+    );
+  });
+  if (!inheritAttrsProp) {
+    return;
+  }
+  if (inheritAttrsProp.type === "Property") {
+    if (inheritAttrsProp.value.type === "Literal") {
+      if (inheritAttrsProp.value.value === false) {
+        ctx.items.push({
+          type: ProcessItemType.InheritAttrs,
+          node: inheritAttrsProp.value,
+          value: false,
+        });
+      }
+    }
+  }
+}

@@ -70,7 +70,14 @@ export const enum ProcessItemType {
    * Used to describe the defineModel variables
    */
   DefineModel = "define-model",
+
+  InheritAttrs = "inherit-attrs",
 }
+export type ProcessItemInheritAttrs = {
+  type: ProcessItemType.InheritAttrs;
+  value: boolean;
+  node: VerterASTNode;
+};
 
 export type ProcessItemImport = {
   type: ProcessItemType.Import;
@@ -197,7 +204,8 @@ export type ProcessItem =
   | ProcessItemOptions
   | ProcessItemMacroBinding
   | ProcessItemDefineModel
-  | ProcessItemMacroReturn;
+  | ProcessItemMacroReturn
+  | ProcessItemInheritAttrs;
 
 export type LocationProcessItem = {
   start: number;

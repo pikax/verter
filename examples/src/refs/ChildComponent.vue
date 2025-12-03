@@ -1,10 +1,14 @@
 <script setup lang="ts">
 // Child component with exposed methods
 
-import { ref } from "vue";
+import { ref, defineOptions } from "vue";
 
 const internalValue = ref("");
 const inputRef = ref<HTMLInputElement | null>(null);
+
+defineOptions({
+  inheritAttrs: false,
+});
 
 function focus() {
   inputRef.value?.focus();
@@ -21,6 +25,13 @@ function getValue(): string {
 function someMethod() {
   console.log("someMethod called");
 }
+
+const a = {} as ___VERTER___RootElement;
+const b = {} as ___VERTER___Instance;
+b.$el;
+// ___VERTER___defineOptions_Boxed = ___VERTER___defineOptions_Box({
+//   inheritAttrs: false
+// })
 
 defineExpose({
   focus,

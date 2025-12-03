@@ -173,7 +173,7 @@ export type ExtractPropsFromMacro<T> = T extends {
   ? keyof DT extends keyof PT
     ? PropsWithDefaults<PT, keyof DT>
     : PT
-  : T;
+  : {};
 
 /**
  * Extracts the emits macro from macro metadata.

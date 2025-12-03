@@ -61,6 +61,43 @@ export declare function withDefaults_Box<
   T,
   Defaults extends InferDefaults<T>
 >(props: T, defaults: Defaults): [T, Defaults];`,
+
+  // defineOptions custom override to ensure stable type signature
+  defineOptions: `/**
+ * Vue \`<script setup>\` compiler macro for declaring a component's additional
+ * options. This should be used only for options that cannot be expressed via
+ * Composition API - e.g. \`inheritAttrs\`.
+ *
+ * @see {@link https://vuejs.org/api/sfc-script-setup.html#defineoptions}
+ */
+export declare function defineOptions_Box<
+  RawBindings = {},
+  D = {},
+  C extends import("vue").ComputedOptions = {},
+  M extends import("vue").MethodOptions = {},
+  Mixin extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin,
+  Extends extends import("vue").ComponentOptionsMixin = import("vue").ComponentOptionsMixin,
+  InheritAttrs extends true | false = true,
+  T = Record<string, any>
+>(
+  options?: T &
+    import("vue").ComponentOptionsBase<
+      {},
+      RawBindings,
+      D,
+      C,
+      M,
+      Mixin,
+      Extends,
+      {}
+    > & {
+      props?: never;
+      emits?: never;
+      expose?: never;
+      slots?: never;
+      inheritAttrs?: InheritAttrs;
+    }
+): T;`,
 };
 
 function resolveVueTypeFiles() {

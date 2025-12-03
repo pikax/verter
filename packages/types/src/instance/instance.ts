@@ -91,26 +91,27 @@ export type CreateTypedPublicInstanceFromNormalisedMacro<
   $data: DEV extends true ? T["$data"] : {};
   $props: ToInstanceProps<T["props"], MakeDefaultsOptional> &
     ModelToProps<MacroToModelRecord<T["model"]>> &
-    EmitsToProps<MacroToEmitValue<T["emits"]>>;
+    EmitsToProps<MacroToEmitValue<T["emits"]>> &
+    Attrs;
 
   $attrs: Attrs;
   $refs: T["templateRef"];
+  $options: MacroOptionsToOptions<T["options"]>;
 
   $emit: MacroToEmitValue<T["emits"]> &
     ModelToEmits<MacroToModelRecord<T["model"]>>;
-} & ToInstanceProps<T["props"], true> &
-  ModelToProps<MacroToModelRecord<T["model"]>> &
-  (T["expose"] extends { value: infer V }
-    ? V
-    : T["expose"] extends { object: infer V }
-    ? V
-    : {});
+} & (T["expose"] extends { value: infer V }
+  ? V
+  : T["expose"] extends { object: infer V }
+  ? V
+  : ToInstanceProps<T["props"], true> &
+      ModelToProps<MacroToModelRecord<T["model"]>>);
 export type PublicInstanceFromMacro<
   T,
   Attrs,
   El extends Element,
   MakeDefaultsOptional extends boolean,
-  DEV extends boolean,
+  DEV extends boolean = false,
   InternalInstance extends
     | false
     | MakeInternalInstanceFromNormalisedMacro<any, any> = false
@@ -130,7 +131,7 @@ export type PublicInstanceFromNormalisedMacro<
   Attrs,
   El extends Element,
   MakeDefaultsOptional extends boolean,
-  DEV extends boolean,
+  DEV extends boolean = false,
   InternalInstance = false
 > = Omit<
   import("vue").ComponentPublicInstance<
@@ -146,7 +147,11 @@ export type PublicInstanceFromNormalisedMacro<
     MacroOptionsToOptions<T["options"]>,
     {},
     SlotsToSlotType<T["slots"]>,
-    "",
+    T["expose"] extends { value: infer V }
+      ? keyof V
+      : T["expose"] extends { object: infer V }
+      ? keyof V
+      : "",
     {},
     El
   >,
@@ -158,7 +163,9 @@ export type PublicInstanceFromNormalisedMacro<
     MakeDefaultsOptional,
     DEV,
     InternalInstance
-  >;
+  > & {
+    // $el: El;
+  };
 
 export type CreateExportedInstanceFromNormalisedMacro<
   T extends NormalisedMacroReturn<any>,

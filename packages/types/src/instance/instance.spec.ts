@@ -6,7 +6,7 @@
  * - CreateExportedInstanceFromNormalisedMacro, CreateExportedInstanceFromMacro
  * - Verifies props/models are accessible on instances and ComponentPublicInstance compatibility
  */
-import { describe, it, assertType } from "vitest";
+import { describe, it, assertType, expect } from "vitest";
 import type {
   ModelRef,
   ComponentPublicInstance,
@@ -24,6 +24,7 @@ import {
 } from "./instance";
 import { createMacroReturn } from "../setup";
 import type { PropsWithDefaults } from "../props";
+import { UniqueKey } from "../helpers";
 
 describe("instance helpers", () => {
   describe("ToInstanceProps", () => {
@@ -577,6 +578,7 @@ describe("instance helpers", () => {
       type Instance = CreateExportedInstanceFromNormalisedMacro<
         TestNormalized,
         {},
+        true,
         HTMLElement
       >;
 
@@ -639,6 +641,7 @@ describe("instance helpers", () => {
       type Instance = CreateExportedInstanceFromNormalisedMacro<
         TestNormalized,
         {},
+        true,
         HTMLDivElement
       >;
 
@@ -713,7 +716,7 @@ describe("instance helpers", () => {
       // a macro return structure through NormaliseMacroReturn
       // Using type directly instead of createMacroReturn (which is a type-only helper)
       type MacroReturnType = {
-        [k: symbol]: {
+        [UniqueKey]: {
           props: { value: { count: number }; type: { count: number } };
         };
       };
@@ -796,6 +799,7 @@ describe("instance helpers", () => {
       type Instance = CreateExportedInstanceFromNormalisedMacro<
         TestNormalized,
         {},
+        true,
         HTMLInputElement
       >;
 
@@ -890,7 +894,7 @@ describe("instance helpers", () => {
 
     it("CreateExportedInstanceFromMacro with expose", () => {
       type MacroReturnType = {
-        [k: symbol]: {
+        [UniqueKey]: {
           props: { value: { id: number }; type: { id: number } };
           expose: {
             value: {
@@ -943,6 +947,263 @@ describe("instance helpers", () => {
       // Generic exposed methods
       assertType<<T>(items: T[]) => void>(instance.setItems);
       assertType<<T>(index: number) => T | undefined>(instance.getItem);
+    });
+  });
+
+  /**
+   * @ai-generated - Tests for InheritAttrs generic parameter
+   * When InheritAttrs is true (default), attrs should be included in $props
+   * When InheritAttrs is false, attrs should NOT be included in $props
+   */
+  describe("InheritAttrs generic parameter", () => {
+    type TestAttrs = { class: string; style: object; "data-testid": string };
+
+    it("PublicInstanceFromNormalisedMacro includes attrs in $props when InheritAttrs is true", () => {
+      type TestNormalized = {
+        props: { props: { type: { id: number } }; defaults: { value: {} } };
+        emits: { value: () => void };
+        slots: {};
+        options: {};
+        model: {};
+        expose: {};
+        templateRef: {};
+        $data: {};
+      };
+
+      type Instance = PublicInstanceFromNormalisedMacro<
+        TestNormalized,
+        TestAttrs,
+        HTMLElement,
+        false,
+        true, // InheritAttrs = true
+        false
+      >;
+
+      // $props should include attrs (as Partial)
+      type PropsIncludeClass = Instance["$props"] extends { class?: string }
+        ? true
+        : false;
+      assertType<PropsIncludeClass>({} as true);
+
+      type PropsIncludeStyle = Instance["$props"] extends { style?: object }
+        ? true
+        : false;
+      assertType<PropsIncludeStyle>({} as true);
+
+      type PropsIncludeDataTestId = Instance["$props"] extends {
+        "data-testid"?: string;
+      }
+        ? true
+        : false;
+      assertType<PropsIncludeDataTestId>({} as true);
+
+      // Props should still be accessible
+      type PropsIncludeId = Instance["$props"] extends { id: number }
+        ? true
+        : false;
+      assertType<PropsIncludeId>({} as true);
+    });
+
+    it("PublicInstanceFromNormalisedMacro excludes attrs from $props when InheritAttrs is false", () => {
+      type TestNormalized = {
+        props: { props: { type: { id: number } }; defaults: { value: {} } };
+        emits: { value: () => void };
+        slots: {};
+        options: {};
+        model: {};
+        expose: {};
+        templateRef: {};
+        $data: {};
+      };
+
+      type Instance = PublicInstanceFromNormalisedMacro<
+        TestNormalized,
+        TestAttrs,
+        HTMLElement,
+        false,
+        false, // InheritAttrs = false
+        false
+      >;
+
+      // $props should NOT include attrs
+      type PropsExcludeClass = Instance["$props"] extends { class?: string }
+        ? false
+        : true;
+      assertType<PropsExcludeClass>({} as true);
+
+      type PropsExcludeStyle = Instance["$props"] extends { style?: object }
+        ? false
+        : true;
+      assertType<PropsExcludeStyle>({} as true);
+
+      // Props should still be accessible
+      type PropsIncludeId = Instance["$props"] extends { id: number }
+        ? true
+        : false;
+      assertType<PropsIncludeId>({} as true);
+
+      // $attrs should still have the attrs
+      type AttrsHaveClass = Instance["$attrs"] extends { class: string }
+        ? true
+        : false;
+      assertType<AttrsHaveClass>({} as true);
+    });
+
+    it("CreateExportedInstanceFromNormalisedMacro with InheritAttrs true includes attrs in $props", () => {
+      type TestNormalized = {
+        props: { props: { type: { name: string } }; defaults: { value: {} } };
+        emits: { value: () => void };
+        slots: {};
+        options: {};
+        model: {};
+        expose: {};
+        templateRef: {};
+        $data: {};
+      };
+
+      type Instance = CreateExportedInstanceFromNormalisedMacro<
+        TestNormalized,
+        TestAttrs,
+        true, // InheritAttrs = true
+        HTMLDivElement
+      >;
+
+      // $props should include attrs as optional
+      type PropsIncludeClass = Instance["$props"] extends { class?: string }
+        ? true
+        : false;
+      assertType<PropsIncludeClass>({} as true);
+    });
+
+    it("CreateExportedInstanceFromNormalisedMacro with InheritAttrs false excludes attrs from $props", () => {
+      type TestNormalized = {
+        props: { props: { type: { name: string } }; defaults: { value: {} } };
+        emits: { value: () => void };
+        slots: {};
+        options: {};
+        model: {};
+        expose: {};
+        templateRef: {};
+        $data: {};
+      };
+
+      type Instance = CreateExportedInstanceFromNormalisedMacro<
+        TestNormalized,
+        TestAttrs,
+        false, // InheritAttrs = false
+        HTMLDivElement
+      >;
+
+      // $props should NOT include attrs
+      type PropsExcludeClass = Instance["$props"] extends { class?: string }
+        ? false
+        : true;
+      assertType<PropsExcludeClass>({} as true);
+    });
+
+    it("CreateExportedInstanceFromMacro with InheritAttrs parameter", () => {
+      type MacroReturnType = {
+        [UniqueKey]: {
+          props: { value: { count: number }; type: { count: number } };
+        };
+      };
+
+      // With InheritAttrs = true (default)
+      type InstanceWithAttrs = CreateExportedInstanceFromMacro<
+        MacroReturnType,
+        TestAttrs,
+        true
+      >;
+
+      type WithAttrsHasClass = InstanceWithAttrs["$props"] extends {
+        class?: string;
+      }
+        ? true
+        : false;
+      assertType<WithAttrsHasClass>({} as true);
+
+      // With InheritAttrs = false
+      type InstanceWithoutAttrs = CreateExportedInstanceFromMacro<
+        MacroReturnType,
+        TestAttrs,
+        false
+      >;
+
+      // @ts-expect-error
+      assertType<InstanceWithoutAttrs>({} as never);
+
+      type WithoutAttrsHasClass = InstanceWithoutAttrs["$props"] extends {
+        class?: string;
+      }
+        ? false
+        : true;
+      assertType<WithoutAttrsHasClass>({} as true);
+    });
+
+    it("InternalInstanceFromMacro with InheritAttrs parameter", () => {
+      type TestNormalized = {
+        props: { props: { type: { id: number } }; defaults: { value: {} } };
+        emits: { value: () => void };
+        slots: {};
+        options: {};
+        model: {};
+        expose: {};
+        templateRef: {};
+        $data: {};
+      };
+
+      // InheritAttrs parameter is passed through to internal instance
+      type InternalTrue = InternalInstanceFromMacro<
+        TestNormalized,
+        TestAttrs,
+        true
+      >;
+      type InternalFalse = InternalInstanceFromMacro<
+        TestNormalized,
+        TestAttrs,
+        false
+      >;
+
+      // Both should have attrs property
+      type TrueHasAttrs = InternalTrue["attrs"] extends TestAttrs
+        ? true
+        : false;
+      assertType<TrueHasAttrs>({} as true);
+
+      type FalseHasAttrs = InternalFalse["attrs"] extends TestAttrs
+        ? true
+        : false;
+      assertType<FalseHasAttrs>({} as true);
+    });
+
+    it("default InheritAttrs is true", () => {
+      type TestNormalized = {
+        props: { props: { type: { id: number } }; defaults: { value: {} } };
+        emits: { value: () => void };
+        slots: {};
+        options: {};
+        model: {};
+        expose: {};
+        templateRef: {};
+        $data: {};
+      };
+
+      // Without specifying InheritAttrs (should default to true)
+      type InstanceDefault = PublicInstanceFromNormalisedMacro<
+        TestNormalized,
+        TestAttrs,
+        HTMLElement,
+        false
+        // InheritAttrs not specified - should default to true
+      >;
+
+      // Should include attrs in $props by default
+      type DefaultIncludesClass = InstanceDefault["$props"] extends {
+        class?: string;
+      }
+        ? true
+        : false;
+      assertType<DefaultIncludesClass>({} as true);
     });
   });
 });

@@ -8,7 +8,7 @@ import {
   type ComponentPublicInstance,
 } from "vue";
 
-// DOM element refs 
+// DOM element refs
 const inputRef = ref(null);
 const divRef = ref<HTMLDivElement>();
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -34,7 +34,7 @@ const childRef = ref(null);
 
 // Generic component ref
 const genericRef = ref<ComponentPublicInstance | null>(null);
-const genRef = useTemplateRef('genericRef')
+const genRef = useTemplateRef("genericRef");
 
 // Ref with exposed methods
 interface ExposedMethods {
