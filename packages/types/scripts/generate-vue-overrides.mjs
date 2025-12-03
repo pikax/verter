@@ -285,9 +285,8 @@ function collectUsedInternalTypes(
                 if (internalTypes.has(name)) {
                   usedInternal.add(name);
                 }
-                if (exportedTypes.has(name) && !exportedInVue.has(name)) {
-                  neededLocalExternal.add(name);
-                }
+                // Don't add to neededLocalExternal - all Vue types should be
+                // qualified with import("vue") since Vue re-exports them
               }
               ts.forEachChild(node, visit);
             };
@@ -309,9 +308,8 @@ function collectUsedInternalTypes(
                 if (internalTypes.has(name)) {
                   usedInternal.add(name);
                 }
-                if (exportedTypes.has(name) && !exportedInVue.has(name)) {
-                  neededLocalExternal.add(name);
-                }
+                // Don't add to neededLocalExternal - all Vue types should be
+                // qualified with import("vue") since Vue re-exports them
               }
               ts.forEachChild(node, visit);
             };
@@ -321,6 +319,7 @@ function collectUsedInternalTypes(
       }
 
       // Check return types as well (to include e.g. PropsWithDefaults)
+      // Note: This block is disabled (false condition) but kept for potential future use
       if (node.type && false) {
         const visit = (node) => {
           if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName)) {
@@ -328,9 +327,8 @@ function collectUsedInternalTypes(
             if (internalTypes.has(name)) {
               usedInternal.add(name);
             }
-            if (exportedTypes.has(name) && !exportedInVue.has(name)) {
-              neededLocalExternal.add(name);
-            }
+            // Don't add to neededLocalExternal - all Vue types should be
+            // qualified with import("vue") since Vue re-exports them
           }
           ts.forEachChild(node, visit);
         };
@@ -378,16 +376,16 @@ function collectUsedInternalTypes(
 
     typeDefinitions.set(typeName, typeInfo.text);
 
-    // Find internal and external (non-vue) type dependencies
+    // Find internal type dependencies (transitive closure)
+    // Don't collect external types - they will be qualified with import("vue")
     const visit = (node) => {
       if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName)) {
         const name = node.typeName.text;
         if (internalTypes.has(name) && !processed.has(name)) {
           toProcess.push(name);
         }
-        if (exportedTypes.has(name) && !exportedInVue.has(name)) {
-          neededLocalExternal.add(name);
-        }
+        // Don't add to neededLocalExternal - all Vue types should be
+        // qualified with import("vue") since Vue re-exports them
       }
       ts.forEachChild(node, visit);
     };
