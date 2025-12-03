@@ -35,7 +35,7 @@ function mergeTsx() {
   const tsxWithoutImport = stripAttributesImport(tsx).trimStart();
 
   // Place attributes first, then components tsx types, then main tsx
-  const merged = `${attributes.trim()}\nn${tsxWithoutImport.trim()}\n`;
+  const merged = `${attributes.trim()}\n\n${tsxWithoutImport.trim()}\n`;
   return merged;
 }
 
