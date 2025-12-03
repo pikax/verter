@@ -105,6 +105,10 @@ export function getASTBindings(
 
   const isAcorn = "type" in ast && ast.type === "Program";
 
+  // this is to handle Acorn Typescript parsed ASTs,
+  // since we don't have full TS support, we need to track manually
+  let inTypescript = false;
+
   walk(ast, {
     enter(
       n: babel_types.Node | VerterASTNode,
@@ -129,7 +133,7 @@ export function getASTBindings(
             // Collect all parameter identifiers including rest parameters
             collectDeclaredIds(param as VerterASTNode, ignoredIdentifiers);
           });
-          
+
           const pN = exp ? patchBabelNodeLoc(n as babel_types.Node, exp) : n;
           const bN = exp
             ? patchBabelNodeLoc(n.body as babel_types.Node, exp)
@@ -218,6 +222,17 @@ export function getASTBindings(
             exp: exp as SimpleExpressionNode | null,
           });
           break;
+        }
+        case "ExpressionStatement": {
+          if (
+            n.expression?.type === "Identifier" &&
+            n.expression?.name === "as"
+          ) {
+            // skip 'as' operator
+            this.skip();
+
+            break;
+          }
         }
         default: {
           if (n.type.endsWith("Literal")) {

@@ -15,14 +15,18 @@ describe("process template", () => {
       (x) => x.type === "template"
     ) as ParsedBlockTemplate;
 
-    const r = processTemplate(templateBlock.result.items, [...DefaultPlugins.filter(x=>x.name !== 'VerterContext')], {
-      ...options,
-      s,
-      filename: "test.vue",
-      blocks: parsed.blocks,
-      block: templateBlock,
-      blockNameResolver: (name) => name,
-    });
+    const r = processTemplate(
+      templateBlock.result.items,
+      [...DefaultPlugins.filter((x) => x.name !== "VerterContext")],
+      {
+        ...options,
+        s,
+        filename: "test.vue",
+        blocks: parsed.blocks,
+        block: templateBlock,
+        blockNameResolver: (name) => name,
+      }
+    );
 
     return r;
   }
@@ -66,7 +70,9 @@ describe("process template", () => {
       );
       expect(result).toContain(`if(___VERTER___ctx.test === 'app'){<div >`);
       expect(result).toContain(`/* @ts-expect-error no overlap */`);
-      expect(result).toContain(`if(___VERTER___ctx.test === 'foo'){<div > Error </div>}`);
+      expect(result).toContain(
+        `if(___VERTER___ctx.test === 'foo'){<div > Error </div>}`
+      );
     });
   });
 
@@ -144,6 +150,20 @@ describe("process template", () => {
               foo: 1;
             };
             a;
+          }
+        }}`);
+        // 'as' should NOT be prefixed with ___VERTER___ctx
+        // object properties in type annotation should NOT be prefixed
+        expect(result).not.toContain("___VERTER___ctx.as");
+        expect(result).not.toContain("___VERTER___ctx.foo");
+      });
+      test.only("TypeScript 'as' and then usage keyword should not be prefixed", () => {
+        const { result } = parse(`{{
+          () => {
+            let a = {} as {
+              foo: 1;
+            };
+            a.
           }
         }}`);
         // 'as' should NOT be prefixed with ___VERTER___ctx
