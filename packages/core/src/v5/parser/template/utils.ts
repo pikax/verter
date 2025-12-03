@@ -123,13 +123,32 @@ export function getASTBindings(
           if (n.id) {
             ignoredIdentifiers.push(n.id.name);
           }
+          // Collect function parameters
+          const params = n.params;
+          params.forEach((param) => {
+            // Collect all parameter identifiers including rest parameters
+            collectDeclaredIds(param as VerterASTNode, ignoredIdentifiers);
+          });
+          
+          const pN = exp ? patchBabelNodeLoc(n as babel_types.Node, exp) : n;
+          const bN = exp
+            ? patchBabelNodeLoc(n.body as babel_types.Node, exp)
+            : n;
+          bindings.push({
+            type: TemplateTypes.Function,
+            // @ts-expect-error not correct type
+            node: pN,
+            // @ts-expect-error not correct type
+            body: bN,
+            context,
+          });
+          break;
         }
         case "ArrowFunctionExpression": {
           const params = n.params;
           params.forEach((param) => {
-            if (param.type === "Identifier") {
-              ignoredIdentifiers.push(param.name);
-            }
+            // Collect all parameter identifiers including rest parameters
+            collectDeclaredIds(param as VerterASTNode, ignoredIdentifiers);
           });
 
           const pN = exp ? patchBabelNodeLoc(n as babel_types.Node, exp) : n;
