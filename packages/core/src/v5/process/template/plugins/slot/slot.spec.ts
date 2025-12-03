@@ -120,7 +120,10 @@ describe("process template plugins slot", () => {
       const matches = result.match(/___VERTER___slotComponent(\d+)/g);
       expect(matches).toHaveLength(4); // 2 slots × 2 occurrences (declaration + usage)
       
-      const offsets = Array.from(new Set(matches.map(m => m.match(/\d+/)![0])));
+      const offsets = Array.from(new Set(matches.map(m => {
+        const match = m.match(/\d+/);
+        return match ? match[0] : '';
+      })));
       expect(offsets).toHaveLength(2); // Ensure two different offset values
     });
   });
