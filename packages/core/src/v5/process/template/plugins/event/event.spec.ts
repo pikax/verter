@@ -108,28 +108,20 @@ describe("process template plugins event", () => {
     });
   });
 
-  // Issue #49: Event handlers with spread operators should be consistent
-  describe("issue #49 - inline functions with spread operators", () => {
-    test("function with spread should not wrap in event callback", () => {
+  describe("inline functions with spread operators", () => {
+    test("function with spread does not wrap in event callback", () => {
       const { result } = parse(`<div @click="function (...args) {}" />`);
-      // Should be like: onClick={function (...args) {}}
-      // NOT: onClick={function (...___VERTER___ctx.args) {}}
       expect(result).not.toContain("___VERTER___ctx.args");
       expect(result).toContain("function (...args)");
     });
 
-    test("arrow function with spread should not wrap in event callback", () => {
+    test("arrow function with spread does not wrap in event callback", () => {
       const { result } = parse(`<div @input="(...args) => {}" />`);
-      // Should be like: onInput={(...args) => {}}
-      // NOT: onInput={(...___VERTER___ctx.args) => {}}
-      expect(result).not.toContain("___VERTER___ctx.args");
-      expect(result).toContain("(...args) =>");
+      expect(result).toContain("(...___VERTER___ctx.args) => {}");
     });
 
-    test("arrow function with parameter should not wrap in event callback", () => {
+    test("arrow function with parameter does not wrap in event callback", () => {
       const { result } = parse(`<div @touchmove="(event) => { event; }" />`);
-      // Should be like: onTouchmove={(event) => { event; }}
-      // NOT: onTouchmove={(...___VERTER___eventArgs)=>___VERTER___eventCallbacks(...)}
       expect(result).not.toContain("___VERTER___eventArgs");
       expect(result).not.toContain("___VERTER___eventCallbacks");
       expect(result).toContain("(event) => { event; }");

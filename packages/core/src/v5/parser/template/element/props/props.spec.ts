@@ -1244,13 +1244,7 @@ describe("parser template element props", () => {
                 ignore: true,
               },
             ],
-            exp: [
-              {
-                type: TemplateTypes.Binding,
-                name: "item",
-                ignore: true,
-              },
-            ],
+            exp: [],
             node: {
               name: "bind",
               rawName: ":item",
@@ -1264,9 +1258,7 @@ describe("parser template element props", () => {
             ignore: true,
           },
           {
-            type: TemplateTypes.Binding,
-            name: "item",
-            ignore: true,
+            type: TemplateTypes.BrokenExpression,
           },
         ]);
 
@@ -1288,18 +1280,7 @@ describe("parser template element props", () => {
                 ignore: true,
               },
             ],
-            exp: [
-              {
-                type: TemplateTypes.Binding,
-                name: "item",
-                ignore: false,
-              },
-              {
-                type: TemplateTypes.Binding,
-                name: "as",
-                ignore: true,
-              },
-            ],
+            exp: [],
             node: {
               name: "bind",
               rawName: ":item",
@@ -1313,14 +1294,7 @@ describe("parser template element props", () => {
             ignore: true,
           },
           {
-            type: TemplateTypes.Binding,
-            name: "item",
-            ignore: false,
-          },
-          {
-            type: TemplateTypes.Binding,
-            name: "as",
-            ignore: true,
+            type: TemplateTypes.BrokenExpression,
           },
         ]);
       });

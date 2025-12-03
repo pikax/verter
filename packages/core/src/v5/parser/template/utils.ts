@@ -162,21 +162,9 @@ export function getASTBindings(
         case "ArrowFunctionExpression": {
           const params = n.params;
           params.forEach((param) => {
-            // Collect all parameter identifiers including rest parameters
-            collectDeclaredIds(param as VerterASTNode, ignoredIdentifiers);
-          });
-
-          const pN = exp ? patchBabelNodeLoc(n as babel_types.Node, exp) : n;
-          const bN = exp
-            ? patchBabelNodeLoc(n.body as babel_types.Node, exp)
-            : n;
-          bindings.push({
-            type: TemplateTypes.Function,
-            // @ts-expect-error not correct type
-            node: pN,
-            // @ts-expect-error not correct type
-            body: bN,
-            context,
+            if (param.type === "Identifier") {
+              ignoredIdentifiers.push(param.name);
+            }
           });
           break;
         }
@@ -202,8 +190,7 @@ export function getASTBindings(
           if (
             parent &&
             (("property" in parent && parent.property === n) ||
-              ("key" in parent && parent.key === n)) &&
-            (!("extra" in parent) || parent.extra?.parenthesized !== true)
+              ("key" in parent && parent.key === n))
           ) {
             this.skip();
             return;
@@ -234,17 +221,6 @@ export function getASTBindings(
             exp: exp as SimpleExpressionNode | null,
           });
           break;
-        }
-        case "ExpressionStatement": {
-          if (
-            n.expression?.type === "Identifier" &&
-            n.expression?.name === "as"
-          ) {
-            // skip 'as' operator
-            this.skip();
-
-            break;
-          }
         }
         default: {
           if (n.type.endsWith("Literal")) {
