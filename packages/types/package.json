@@ -29,6 +29,7 @@
     }
   },
   "scripts": {
+    "prebuild": "npm run generate:vue && npm run generate:attributes",
     "build": "node scripts/build-string.mjs && node scripts/build-tsx.mjs && node scripts/generate-tsx-attributes.cjs && tsc -b --force",
     "build:tsx": "node scripts/build-tsx.mjs",
     "build:string": "node scripts/build-string.mjs",
@@ -38,8 +39,7 @@
     "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
     "test": "vitest --typecheck --run",
     "bench": "node scripts/bench-types.mjs",
-    "bench:trace": "node scripts/bench-types.mjs --trace",
-    "postinstall": "npm run generate:vue && npm run generate:attributes"
+    "bench:trace": "node scripts/bench-types.mjs --trace"
   },
   "keywords": [],
   "author": "",
