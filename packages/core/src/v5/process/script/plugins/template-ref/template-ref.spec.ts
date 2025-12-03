@@ -1094,6 +1094,157 @@ describe("process script plugin template-ref", () => {
   });
 
   /**
+   * @ai-generated - Tests to verify ref() is NOT modified when called with
+   * non-null arguments. Only ref() or ref(null) should be processed.
+   */
+  describe("ref() with non-null arguments should not be modified", () => {
+    describe("ts", () => {
+      it("ref() with string argument should not be modified", () => {
+        const { result } = parse(
+          `const myDiv = ref('initial')`,
+          false,
+          "ts",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("const myDiv = ref('initial')");
+        expect(result).not.toContain("ref<");
+      });
+
+      it("ref() with number argument should not be modified", () => {
+        const { result } = parse(
+          `const myDiv = ref(0)`,
+          false,
+          "ts",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("const myDiv = ref(0)");
+        expect(result).not.toContain("ref<");
+      });
+
+      it("ref() with boolean argument should not be modified", () => {
+        const { result } = parse(
+          `const myDiv = ref(false)`,
+          false,
+          "ts",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("const myDiv = ref(false)");
+        expect(result).not.toContain("ref<");
+      });
+
+      it("ref() with object argument should not be modified", () => {
+        const { result } = parse(
+          `const myDiv = ref({})`,
+          false,
+          "ts",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("const myDiv = ref({})");
+        expect(result).not.toContain("ref<");
+      });
+
+      it("ref() with array argument should not be modified", () => {
+        const { result } = parse(
+          `const myDiv = ref([])`,
+          false,
+          "ts",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("const myDiv = ref([])");
+        expect(result).not.toContain("ref<");
+      });
+
+      it("ref() with undefined argument should not be modified", () => {
+        const { result } = parse(
+          `const myDiv = ref(undefined)`,
+          false,
+          "ts",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("const myDiv = ref(undefined)");
+        expect(result).not.toContain("ref<");
+      });
+
+      it("ref() with variable argument should not be modified", () => {
+        const { result } = parse(
+          `const initial = null; const myDiv = ref(initial)`,
+          false,
+          "ts",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("const myDiv = ref(initial)");
+        expect(result).not.toContain("ref<");
+      });
+
+      it("ref() with function call argument should not be modified", () => {
+        const { result } = parse(
+          `const myDiv = ref(getInitialValue())`,
+          false,
+          "ts",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("const myDiv = ref(getInitialValue())");
+        expect(result).not.toContain("ref<");
+      });
+
+      it("ref() with multiple arguments should not be modified", () => {
+        const { result } = parse(
+          `const myDiv = ref(null, {})`,
+          false,
+          "ts",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("const myDiv = ref(null, {})");
+        expect(result).not.toContain("ref<");
+      });
+
+      it("ref() with null argument SHOULD be modified", () => {
+        const { result } = parse(
+          `const myDiv = ref(null)`,
+          false,
+          "ts",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("ref<ReturnType<typeof ___VERTER___Comp10>|null>(null)");
+      });
+
+      it("ref() with no arguments SHOULD be modified", () => {
+        const { result } = parse(
+          `const myDiv = ref()`,
+          false,
+          "ts",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("ref<ReturnType<typeof ___VERTER___Comp10>|null>()");
+      });
+    });
+
+    describe("js", () => {
+      it("ref() with string argument should not be modified", () => {
+        const { result } = parse(
+          `const myDiv = ref('initial')`,
+          false,
+          "js",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("const myDiv = ref('initial')");
+        expect(result).not.toContain("@type");
+      });
+
+      it("ref() with object argument should not be modified", () => {
+        const { result } = parse(
+          `const myDiv = ref({})`,
+          false,
+          "js",
+          '<template><div ref="myDiv"/></template>'
+        );
+        expect(result).toContain("const myDiv = ref({})");
+        expect(result).not.toContain("@type");
+      });
+    });
+  });
+
+  /**
    * @ai-generated - Tests to verify ref() ONLY modifies when assigned to a variable
    * with the EXACT name matching the template ref.
    */

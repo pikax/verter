@@ -29,15 +29,17 @@
     }
   },
   "scripts": {
-    "build": "tsc -b --force && node scripts/build-string.mjs && node scripts/build-tsx.mjs",
+    "build": "node scripts/build-string.mjs && node scripts/build-tsx.mjs && node scripts/generate-tsx-attributes.cjs && tsc -b --force",
     "build:tsx": "node scripts/build-tsx.mjs",
     "build:string": "node scripts/build-string.mjs",
     "generate:vue": "node scripts/generate-vue-overrides.mjs",
+    "generate:attributes": "node scripts/generate-tsx-attributes.cjs",
     "dev": "tsc -b --watch",
     "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
     "test": "vitest --typecheck --run",
     "bench": "node scripts/bench-types.mjs",
-    "bench:trace": "node scripts/bench-types.mjs --trace"
+    "bench:trace": "node scripts/bench-types.mjs --trace",
+    "postinstall": "npm run generate:vue && npm run generate:attributes"
   },
   "keywords": [],
   "author": "",

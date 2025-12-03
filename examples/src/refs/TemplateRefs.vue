@@ -30,7 +30,7 @@ const setItemRef = (el: HTMLLIElement | null, index: number) => {
 
 // Component ref
 import ChildComponent from "./ChildComponent.vue";
-const childRef = ref<InstanceType<typeof ChildComponent> | null>(null);
+const childRef = ref(null);
 
 // Generic component ref
 const genericRef = ref<ComponentPublicInstance | null>(null);

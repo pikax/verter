@@ -10,7 +10,6 @@ const distDir = path.join(__dirname, "../dist");
 
 const TSX_FILE = path.join(srcDir, "tsx.tsx");
 const ATTR_FILE = path.join(srcDir, "tsx.attributes.ts");
-const COMPONENTS_TSX_FILE = path.join(srcDir, "components-tsx.ts");
 
 function ensureDist() {
   if (!fs.existsSync(distDir)) fs.mkdirSync(distDir, { recursive: true });
@@ -32,17 +31,11 @@ function stripAttributesImport(code) {
 function mergeTsx() {
   const attributes = readFile(ATTR_FILE);
   const tsx = readFile(TSX_FILE);
-  const componentsTsx = readFile(COMPONENTS_TSX_FILE);
 
   const tsxWithoutImport = stripAttributesImport(tsx).trimStart();
-  
-  // Strip auto-generated comment from components file (already in attributes)
-  const componentsTsxClean = componentsTsx
-    .replace(/^\/\*.*?\*\/\s*/s, "")
-    .trim();
 
   // Place attributes first, then components tsx types, then main tsx
-  const merged = `${attributes.trim()}\n\n${componentsTsxClean}\n\n${tsxWithoutImport.trim()}\n`;
+  const merged = `${attributes.trim()}\nn${tsxWithoutImport.trim()}\n`;
   return merged;
 }
 
@@ -54,7 +47,10 @@ function writeDistFiles(merged) {
   fs.writeFileSync(tsOut, merged, "utf-8");
 
   // Write string export JS + d.ts
-  const escaped = merged.replace(/`/g, "\\`").replace(/\\/g, "\\\\").replace(/\$\{/g, "\\${");
+  const escaped = merged
+    .replace(/`/g, "\\`")
+    .replace(/\\/g, "\\\\")
+    .replace(/\$\{/g, "\\${");
   const jsOut = path.join(distDir, "tsx-string-export.js");
   const dtsOut = path.join(distDir, "tsx-string-export.d.ts");
 
@@ -68,7 +64,9 @@ function writeDistFiles(merged) {
 function main() {
   const merged = mergeTsx();
   writeDistFiles(merged);
-  console.log("✓ Built tsx merged outputs: dist/tsx.ts and dist/tsx-string-export.js");
+  console.log(
+    "✓ Built tsx merged outputs: dist/tsx.ts and dist/tsx-string-export.js"
+  );
 }
 
 main();

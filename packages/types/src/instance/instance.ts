@@ -12,7 +12,6 @@ import {
 import { MakePublicProps, MakeInternalProps } from "../props";
 import { ModelToEmits, ModelToProps } from "../model";
 import { EmitsToProps } from "../emits";
-import { defineComponent } from "vue";
 
 export type CreateTypedInternalInstanceFromNormalisedMacro<
   T extends NormalisedMacroReturn<any>,

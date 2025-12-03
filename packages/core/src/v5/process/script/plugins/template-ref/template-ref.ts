@@ -32,8 +32,21 @@ export const TemplateRefPlugin = definePlugin({
         if (macroName !== "ref" || !item.name) {
           return;
         }
-        const varName = item.name;
 
+        const args = item.parent.init.arguments;
+        // Only process if no arguments, or single argument that is `null`
+        if (args.length > 1) {
+          return;
+        }
+        if (args.length === 1) {
+          const arg = args[0];
+          // Only allow `null` literal as the single argument
+          if (arg.type !== "Literal" || arg.value !== null) {
+            return;
+          }
+        }
+
+        const varName = item.name;
         handleExpression(item.parent.init, s, varName, ctx);
       }
     }
