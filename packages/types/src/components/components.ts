@@ -1,14 +1,5 @@
-/**
- * Vue Component Type Utilities
- *
- * This module provides type utilities for working with Vue components in TypeScript.
- * These helpers enable type-safe component extraction, instance retrieval, and
- * prop enhancement for use in the Verter Vue Language Server.
- *
- * @module components
- */
-
-import { Prettify } from "../setup";
+// Import for local use
+import type { ExtractFromHTMLElement } from "../tsx/components-tsx";
 
 /**
  * Extracts the instance type from a Vue component definition.
@@ -277,3 +268,63 @@ export declare function enhanceElementWithProps<T, P>(
   : T extends { new (): any }
   ? InstanceType<T> & P
   : T & P;
+
+/**
+ * Extracts the props type from a Vue component or HTML element.
+ *
+ * This utility type handles different input patterns:
+ * - **Class-based components (constructors)**: Recursively extracts from the instance type
+ * - **Component instances with `$props`**: Returns the `$props` type directly
+ * - **HTML elements**: Returns element-specific attributes (e.g., `AudioHTMLAttributes` for `HTMLAudioElement`)
+ * - **Functional components**: Extracts the props parameter type
+ * - **Fallback**: Returns empty object `{}` if no specific type can be determined
+ *
+ * This is useful for getting the props interface of a component or element
+ * for type-safe prop spreading or validation.
+ *
+ * @example Class-based component
+ * ```ts
+ * const MyButton = defineComponent({
+ *   props: { label: String, disabled: Boolean }
+ * });
+ * type Props = ExtractComponentProps<typeof MyButton>;
+ * // Props includes { label?: string; disabled?: boolean; ... }
+ * ```
+ *
+ * @example Component instance
+ * ```ts
+ * type Instance = InstanceType<typeof MyButton>;
+ * type Props = ExtractComponentProps<Instance>;
+ * // Same as above - extracts from $props
+ * ```
+ *
+ * @example HTML audio element
+ * ```ts
+ * type AudioProps = ExtractComponentProps<HTMLAudioElement>;
+ * // Returns AudioHTMLAttributes (includes src, controls, autoplay, etc.)
+ * ```
+ *
+ * @example HTML input element
+ * ```ts
+ * type InputProps = ExtractComponentProps<HTMLInputElement>;
+ * // Returns InputHTMLAttributes (includes type, value, placeholder, etc.)
+ * ```
+ *
+ * @example Functional component
+ * ```ts
+ * const FnComp = (props: { foo: string }) => h('div');
+ * type Props = ExtractComponentProps<typeof FnComp>;
+ * // Props is { foo: string }
+ * ```
+ *
+ * @typeParam T - The component constructor, instance, or HTML element type
+ */
+export type ExtractComponentProps<T> = T extends { new (): infer I }
+  ? ExtractComponentProps<I>
+  : T extends { $props: infer P }
+  ? P
+  : T extends HTMLElement
+  ? ExtractFromHTMLElement<T>
+  : T extends (p: infer P) => any
+  ? P
+  : {};

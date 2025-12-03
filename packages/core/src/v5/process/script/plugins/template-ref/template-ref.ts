@@ -150,6 +150,7 @@ function handleExpression(
     }
   } else {
     if (_name) {
+      if (!types) return;
       s.prependLeft(
         node.callee.start,
         `/**@type{typeof import('vue').ref<${types}|null>}*/(`

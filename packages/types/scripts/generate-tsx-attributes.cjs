@@ -164,15 +164,6 @@ function generate(packageRoot, workspaceRoot) {
     seen.add("HTMLAttributes");
   }
 
-  const vueLifecycleHooks = [
-    "before-mount",
-    "mounted",
-    "before-update",
-    "updated",
-    "before-unmount",
-    "unmounted",
-  ];
-
   // Build augmentations
   const lines = [];
   lines.push(
@@ -185,10 +176,6 @@ function generate(packageRoot, workspaceRoot) {
     if (!elType) return; // skip SVG
     lines.push(`  interface ${iface} {`);
     lines.push(`    "v-slot"?: (instance: ${elType}) => any;`);
-    // Vue lifecycle hooks
-    vueLifecycleHooks.forEach((hook) => {
-      lines.push(`    "onVue:${hook}"?: (vnode: VNode<${elType}>) => any;`);
-    });
     lines.push("  }");
   });
   lines.push("}");

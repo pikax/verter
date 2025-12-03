@@ -10,6 +10,7 @@ const distDir = path.join(__dirname, "../dist");
 
 const TSX_FILE = path.join(srcDir, "tsx.tsx");
 const ATTR_FILE = path.join(srcDir, "tsx.attributes.ts");
+const COMPONENTS_TSX_FILE = path.join(srcDir, "components-tsx.ts");
 
 function ensureDist() {
   if (!fs.existsSync(distDir)) fs.mkdirSync(distDir, { recursive: true });
@@ -31,11 +32,17 @@ function stripAttributesImport(code) {
 function mergeTsx() {
   const attributes = readFile(ATTR_FILE);
   const tsx = readFile(TSX_FILE);
+  const componentsTsx = readFile(COMPONENTS_TSX_FILE);
 
   const tsxWithoutImport = stripAttributesImport(tsx).trimStart();
+  
+  // Strip auto-generated comment from components file (already in attributes)
+  const componentsTsxClean = componentsTsx
+    .replace(/^\/\*.*?\*\/\s*/s, "")
+    .trim();
 
-  // Place attributes first so augmentations are available before global JSX block
-  const merged = `${attributes.trim()}\n\n${tsxWithoutImport.trim()}\n`;
+  // Place attributes first, then components tsx types, then main tsx
+  const merged = `${attributes.trim()}\n\n${componentsTsxClean}\n\n${tsxWithoutImport.trim()}\n`;
   return merged;
 }
 

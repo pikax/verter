@@ -34,6 +34,7 @@ export const ComponentInstancePlugin = definePlugin({
 
       const componentName = ctx.prefix("Component");
       const templateBinding = ctx.prefix("TemplateBinding");
+      const RootElement = ctx.prefix("RootElement");
       const defaultOptionsName = ctx.prefix("default_Component");
       const getRootComponentName = ctx.prefix("getRootComponent");
 
@@ -46,8 +47,10 @@ export const ComponentInstancePlugin = definePlugin({
 
       const instanceName = ctx.prefix("Instance");
 
-      const element = `ReturnType<typeof ${getRootComponentName}${sanitisedNames}>`
+      const element = `ReturnType<typeof ${getRootComponentName}${sanitisedNames}>`;
       const rootElementStr = `(${element} extends infer R ? R extends {$props:infer P} ? P : R : {})`;
+      const rootElement = `type ${RootElement}=$ReturnType<typeof ${getRootComponentName}${sanitisedNames}>`;
+      const rootElementProps = `type ${RootElement}Props=(${element} extends infer R ? R extends {$props:infer P} ? P : R : {})`;
 
       const declaration = [
         `export type ${instanceName}${genericDeclaration} = InstanceType<typeof ${defaultOptionsName}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}&${rootElementStr}, ${element}, false,false>;`,
