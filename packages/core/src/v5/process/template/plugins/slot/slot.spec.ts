@@ -117,11 +117,12 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot name="foo"/><slot name="bar"/>`);
       
       // Extract the offset numbers from both slot variables
-      const matches = result.match(/___VERTER___slotComponent(\d+)/g);
+      const slotComponentPattern = /___VERTER___slotComponent(\d+)/;
+      const matches = result.match(new RegExp(slotComponentPattern.source, 'g'));
       expect(matches).toHaveLength(4); // 2 slots × 2 occurrences (declaration + usage)
       
       const offsets = Array.from(new Set(matches.map(m => {
-        const match = m.match(/___VERTER___slotComponent(\d+)/);
+        const match = m.match(slotComponentPattern);
         if (!match) throw new Error(`Unexpected match format: ${m}`);
         return match[1];
       })));
