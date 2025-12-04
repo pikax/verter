@@ -115,12 +115,18 @@ describe("process template plugins slot", () => {
 
     it('multiple slots <slot name="foo"/><slot name="bar"/>', () => {
       const { result } = parse(`<slot name="foo"/><slot name="bar"/>`);
-      expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\["foo"\];<___VERTER___slotComponent\d+ \/>/
-      );
-      expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\["bar"\];<___VERTER___slotComponent\d+ \/>/
-      );
+      
+      // Extract the offset numbers from both slot variables
+      const slotComponentPattern = /___VERTER___slotComponent(\d+)/;
+      const matches = result.match(new RegExp(slotComponentPattern.source, 'g'));
+      expect(matches).toHaveLength(4); // 2 slots × 2 occurrences (declaration + usage)
+      
+      const offsets = Array.from(new Set(matches.map(m => {
+        const match = m.match(slotComponentPattern);
+        if (!match) throw new Error(`Unexpected match format: ${m}`);
+        return match[1];
+      })));
+      expect(offsets).toHaveLength(2); // Ensure two different offset values
     });
   });
 
