@@ -234,6 +234,7 @@ const $slots = PatchSlots(c.$slots);
   transformSlotDeclaration(item, s, ctx) {
     const $slots = ctx.retrieveAccessor("$slot");
     const renderSlot = ctx.retrieveAccessor("slotComponent");
+    const slotVarName = `${renderSlot}${item.node.loc.start.offset}`;
 
     const node = item.node;
 
@@ -244,7 +245,7 @@ const $slots = PatchSlots(c.$slots);
       s.overwrite(
         node.loc.start.offset + 1,
         node.loc.start.offset + 5,
-        renderSlot
+        slotVarName
       );
       // rename end tag
       if (!node.isSelfClosing) {
@@ -252,7 +253,7 @@ const $slots = PatchSlots(c.$slots);
           node.loc.source.indexOf("slot", node.loc.source.lastIndexOf("</")) +
           node.loc.start.offset;
 
-        s.overwrite(nameIndex, nameIndex + 4, renderSlot);
+        s.overwrite(nameIndex, nameIndex + 4, slotVarName);
       }
 
       s.prependRight(node.loc.start.offset + 1, `<`);
@@ -325,7 +326,7 @@ const $slots = PatchSlots(c.$slots);
         s.prependLeft(insertIndex, `.default`);
       }
 
-      s.prependLeft(insertIndex, `const ${renderSlot}=${$slots}`);
+      s.prependLeft(insertIndex, `const ${slotVarName}=${$slots}`);
 
       // s.prependRight(insertIndex, "<");
 
