@@ -6,7 +6,7 @@
  * - CreateExportedInstanceFromNormalisedMacro, CreateExportedInstanceFromMacro
  * - Verifies props/models are accessible on instances and ComponentPublicInstance compatibility
  */
-import { describe, it, assertType } from "vitest";
+import { describe, it, assertType, expect } from "vitest";
 import type {
   ModelRef,
   ComponentPublicInstance,
@@ -24,6 +24,7 @@ import {
 } from "./instance";
 import { createMacroReturn } from "../setup";
 import type { PropsWithDefaults } from "../props";
+import { UniqueKey } from "../helpers";
 
 describe("instance helpers", () => {
   describe("ToInstanceProps", () => {
@@ -713,7 +714,7 @@ describe("instance helpers", () => {
       // a macro return structure through NormaliseMacroReturn
       // Using type directly instead of createMacroReturn (which is a type-only helper)
       type MacroReturnType = {
-        [k: symbol]: {
+        [UniqueKey]: {
           props: { value: { count: number }; type: { count: number } };
         };
       };
@@ -733,6 +734,216 @@ describe("instance helpers", () => {
         ? true
         : false;
       assertType<HasPropsCount>({} as true);
+    });
+  });
+
+  /**
+   * @ai-generated - Tests for instances with exposed macro values
+   */
+  describe("Instance with expose macro", () => {
+    it("public instance exposes methods from defineExpose", () => {
+      type TestNormalized = {
+        props: { props: { type: { id: number } }; defaults: { value: {} } };
+        emits: { value: () => void };
+        slots: {};
+        options: {};
+        model: {};
+        expose: {
+          object: {
+            focus: () => void;
+            reset: (value: string) => void;
+            getValue: () => string;
+          };
+        };
+        templateRef: {};
+        $data: {};
+      };
+
+      type Instance = PublicInstanceFromNormalisedMacro<
+        TestNormalized,
+        {},
+        HTMLElement,
+        false,
+        false
+      >;
+
+      const instance = {} as Instance;
+
+      // Exposed methods should be accessible on the instance
+      assertType<() => void>(instance.focus);
+      assertType<(value: string) => void>(instance.reset);
+      assertType<() => string>(instance.getValue);
+      // Props should still be accessible
+      assertType<number>(instance.$props.id);
+    });
+
+    it("exported instance exposes methods from defineExpose", () => {
+      type TestNormalized = {
+        props: { props: { type: { name: string } }; defaults: { value: {} } };
+        emits: { value: (e: "change", val: string) => void };
+        slots: {};
+        options: {};
+        model: {};
+        expose: {
+          object: {
+            validate: () => boolean;
+            clear: () => void;
+          };
+        };
+        templateRef: {};
+        $data: {};
+      };
+
+      type Instance = CreateExportedInstanceFromNormalisedMacro<
+        TestNormalized,
+        {},
+        HTMLInputElement
+      >;
+
+      const instance = {} as Instance;
+
+      // Exposed methods accessible
+      assertType<() => boolean>(instance.validate);
+      assertType<() => void>(instance.clear);
+
+      // Props accessible (with MakeDefaultsOptional=true for exported)
+      assertType<string | undefined>(instance.$props.name);
+
+      // Standard Vue properties
+      assertType<HTMLInputElement | null>(instance.$el);
+    });
+
+    it("internal instance has exposed property with correct type", () => {
+      type TestNormalized = {
+        props: { props: { type: { count: number } }; defaults: { value: {} } };
+        emits: { value: () => void };
+        slots: {};
+        options: {};
+        model: {};
+        expose: {
+          object: {
+            increment: () => void;
+            decrement: () => void;
+            getCount: () => number;
+          };
+        };
+        templateRef: {};
+        $data: {};
+      };
+
+      type Internal = InternalInstanceFromMacro<TestNormalized>;
+
+      const internal = {} as Internal;
+
+      // Check exposed property exists on internal instance
+      // Note: Vue's ComponentInternalInstance has `exposed` property
+      assertType<object | null>(internal.exposed);
+    });
+
+    it("instance with both props, models and expose", () => {
+      type TestNormalized = {
+        props: {
+          props: { type: { label: string; disabled: boolean } };
+          defaults: { value: {} };
+        };
+        emits: { value: (e: "submit", data: object) => void };
+        slots: {};
+        options: {};
+        model: {
+          modelValue: { value: ModelRef<string, "modelValue"> };
+        };
+        expose: {
+          object: {
+            submit: () => void;
+            reset: () => void;
+            isValid: () => boolean;
+          };
+        };
+        templateRef: {};
+        $data: {};
+      };
+
+      type Instance = PublicInstanceFromNormalisedMacro<
+        TestNormalized,
+        {},
+        HTMLFormElement,
+        false,
+        false
+      >;
+
+      const instance = {} as Instance;
+
+      // Props accessible
+      assertType<string>(instance.$props.label);
+      assertType<boolean>(instance.$props.disabled);
+
+      // Model accessible
+      assertType<string>(instance.$props.modelValue);
+
+      // Exposed methods accessible
+      assertType<() => void>(instance.submit);
+      assertType<() => void>(instance.reset);
+      assertType<() => boolean>(instance.isValid);
+
+      // $el is the element type
+      assertType<HTMLFormElement | null>(instance.$el);
+    });
+
+    it("CreateExportedInstanceFromMacro with expose", () => {
+      type MacroReturnType = {
+        [UniqueKey]: {
+          props: { value: { id: number }; type: { id: number } };
+          expose: {
+            object: {
+              refresh: () => Promise<void>;
+              getData: () => object;
+            };
+          };
+        };
+      };
+
+      type Instance = CreateExportedInstanceFromMacro<MacroReturnType>;
+
+      // Props accessible
+      type HasId = Instance extends { id: number | undefined } ? true : false;
+      assertType<HasId>({} as true);
+
+      // Exposed methods accessible
+      type HasRefresh = Instance extends { refresh: () => Promise<void> }
+        ? true
+        : false;
+      assertType<HasRefresh>({} as true);
+
+      type HasGetData = Instance extends { getData: () => object }
+        ? true
+        : false;
+      assertType<HasGetData>({} as true);
+    });
+
+    it("expose with generic types", () => {
+      type TestNormalized = {
+        props: { props: { type: {} }; defaults: { value: {} } };
+        emits: { value: () => void };
+        slots: {};
+        options: {};
+        model: {};
+        expose: {
+          object: {
+            setItems: <T>(items: T[]) => void;
+            getItem: <T>(index: number) => T | undefined;
+          };
+        };
+        templateRef: {};
+        $data: {};
+      };
+
+      type Instance = CreateExportedInstanceFromNormalisedMacro<TestNormalized>;
+
+      const instance = {} as Instance;
+
+      // Generic exposed methods
+      assertType<<T>(items: T[]) => void>(instance.setItems);
+      assertType<<T>(index: number) => T | undefined>(instance.getItem);
     });
   });
 });

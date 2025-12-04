@@ -156,6 +156,16 @@ pnpm dev-extension  # Watch language-server + vscode extension
 pnpm clean          # Remove build artifacts
 ```
 
+## Testing Requirements
+
+**IMPORTANT**: When making any code changes, always add corresponding tests whenever possible. This includes:
+- New features: Add tests covering the new functionality
+- Bug fixes: Add tests that would have caught the bug
+- Refactoring: Ensure existing tests pass and add tests for edge cases discovered
+- Behavioral changes: Add tests verifying the new behavior
+
+Tests serve as documentation of expected behavior and prevent regressions.
+
 ## Code Patterns
 
 **Defining script plugins:**

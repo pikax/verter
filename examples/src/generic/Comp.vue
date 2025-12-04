@@ -20,6 +20,8 @@ defineSlots<
 async () => {
   await Promise.resolve();
 };
+
+// const a = {} as ReturnType<typeof ___VERTER___getRootComponent<T>> 
 </script>
 <template>
   <div>

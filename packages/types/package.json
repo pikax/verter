@@ -29,10 +29,11 @@
     }
   },
   "scripts": {
-    "build": "tsc -b --force && node scripts/build-string.mjs && node scripts/build-tsx.mjs",
+    "build": "node scripts/build-string.mjs && node scripts/build-tsx.mjs && npm run generate:vue && npm run generate:attributes && tsc -b --force",
     "build:tsx": "node scripts/build-tsx.mjs",
     "build:string": "node scripts/build-string.mjs",
     "generate:vue": "node scripts/generate-vue-overrides.mjs",
+    "generate:attributes": "node scripts/generate-tsx-attributes.cjs",
     "dev": "tsc -b --watch",
     "clean": "npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
     "test": "vitest --typecheck --run",

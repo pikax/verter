@@ -12,7 +12,6 @@ import {
 import { MakePublicProps, MakeInternalProps } from "../props";
 import { ModelToEmits, ModelToProps } from "../model";
 import { EmitsToProps } from "../emits";
-import { defineComponent } from "vue";
 
 export type CreateTypedInternalInstanceFromNormalisedMacro<
   T extends NormalisedMacroReturn<any>,
@@ -32,8 +31,8 @@ export type CreateTypedInternalInstanceFromNormalisedMacro<
   //   // TODO add more properties, it needs name etc.
   //   options: MacroOptionsToOptions<T["options"]>;
 
-  // exposed: {}
-  // exposedProxy: {}
+  exposed: T["expose"];
+  exposedProxy: T["expose"];
 };
 
 type MakeInternalInstanceFromNormalisedMacro<
@@ -70,12 +69,18 @@ export type InternalInstanceFromMacro<
 export type ToInstanceProps<
   T,
   MakeDefaultsOptional extends boolean
-> = ExtractPropsFromMacro<T> extends infer PP extends Record<string, any>
-  ? MakeDefaultsOptional extends true
-    ? MakePublicProps<PP>
-    : MakeInternalProps<PP>
-  : T extends Record<string, any>
-  ? MakeInternalProps<T>
+> = ExtractPropsFromMacro<T> extends infer PP
+  ? {} extends PP
+    ? T extends Record<string, any>
+      ? MakeInternalProps<T>
+      : {}
+    : PP extends Record<string, any>
+    ? MakeDefaultsOptional extends true
+      ? MakePublicProps<PP>
+      : MakeInternalProps<PP>
+    : T extends Record<string, any>
+    ? MakeInternalProps<T>
+    : {}
   : {};
 
 export type CreateTypedPublicInstanceFromNormalisedMacro<
@@ -92,22 +97,28 @@ export type CreateTypedPublicInstanceFromNormalisedMacro<
   $data: DEV extends true ? T["$data"] : {};
   $props: ToInstanceProps<T["props"], MakeDefaultsOptional> &
     ModelToProps<MacroToModelRecord<T["model"]>> &
-    EmitsToProps<MacroToEmitValue<T["emits"]>>;
+    EmitsToProps<MacroToEmitValue<T["emits"]>> &
+    Attrs;
 
   $attrs: Attrs;
   $refs: T["templateRef"];
+  $options: MacroOptionsToOptions<T["options"]>;
 
   $emit: MacroToEmitValue<T["emits"]> &
     ModelToEmits<MacroToModelRecord<T["model"]>>;
-} & ToInstanceProps<T["props"], true> &
-  ModelToProps<MacroToModelRecord<T["model"]>>;
-
+} & (T["expose"] extends { object: infer V }
+  ? unknown extends V
+    ? ToInstanceProps<T["props"], true> &
+        ModelToProps<MacroToModelRecord<T["model"]>>
+    : V
+  : ToInstanceProps<T["props"], true> &
+      ModelToProps<MacroToModelRecord<T["model"]>>);
 export type PublicInstanceFromMacro<
   T,
   Attrs,
   El extends Element,
   MakeDefaultsOptional extends boolean,
-  DEV extends boolean,
+  DEV extends boolean = false,
   InternalInstance extends
     | false
     | MakeInternalInstanceFromNormalisedMacro<any, any> = false
@@ -127,7 +138,7 @@ export type PublicInstanceFromNormalisedMacro<
   Attrs,
   El extends Element,
   MakeDefaultsOptional extends boolean,
-  DEV extends boolean,
+  DEV extends boolean = false,
   InternalInstance = false
 > = Omit<
   import("vue").ComponentPublicInstance<
@@ -143,7 +154,11 @@ export type PublicInstanceFromNormalisedMacro<
     MacroOptionsToOptions<T["options"]>,
     {},
     SlotsToSlotType<T["slots"]>,
-    "",
+    T["expose"] extends { object: infer V }
+      ? unknown extends V
+        ? ""
+        : keyof V
+      : "",
     {},
     El
   >,

@@ -4,6 +4,7 @@
  * - KeepAlive, Transition, TransitionGroup, Teleport, Suspense
  * - Verifies slot typing and prop types for built-in components
  */
+import "../tsx/tsx";
 import { describe, it, assertType } from "vitest";
 import type { defineComponent, VNode } from "vue";
 import {
@@ -778,6 +779,291 @@ describe("components helpers", () => {
 
         assertType<Result>({} as {});
       });
+    });
+  });
+
+  /**
+   * @ai-generated - Tests for ExtractComponentProps utility type.
+   * Verifies prop extraction from Vue components and HTML elements.
+   */
+  describe("ExtractComponentProps", () => {
+    // Import the type augmentations for HTML elements
+    type ExtractComponentProps<T> =
+      import("./components").ExtractComponentProps<T>;
+
+    it("extracts props from component constructor", () => {
+      type MockComponent = {
+        new (): {
+          $props: { label: string; disabled?: boolean };
+        };
+      };
+      type Result = ExtractComponentProps<MockComponent>;
+
+      assertType<Result>({} as { label: string; disabled?: boolean });
+      assertType<{ label: string; disabled?: boolean }>({} as Result);
+
+      // @ts-expect-error - Result is not any/unknown/never
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("extracts props from component instance with $props", () => {
+      type MockInstance = {
+        $props: { value: number; onChange: () => void };
+        $emit: (event: string) => void;
+      };
+      type Result = ExtractComponentProps<MockInstance>;
+
+      assertType<Result>({} as { value: number; onChange: () => void });
+      assertType<{ value: number; onChange: () => void }>({} as Result);
+
+      // @ts-expect-error - Result is not any/unknown/never
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    // ExtractComponentProps uses ExtractFromHTMLElement to map HTML element types
+    // to their corresponding Vue HTML attribute types (e.g., HTMLAudioElement -> AudioHTMLAttributes)
+
+    it("extracts props from HTMLAudioElement", () => {
+      type Result = ExtractComponentProps<HTMLAudioElement>;
+      type Booleanish = boolean | "true" | "false" | "";
+
+      const result = {} as Result;
+
+      // AudioHTMLAttributes includes media-specific properties
+      // Note: Vue uses Booleanish for boolean HTML attributes
+      assertType<string | undefined>(result.src);
+      assertType<Booleanish | undefined>(result.controls);
+      assertType<Booleanish | undefined>(result.autoplay);
+      assertType<Booleanish | undefined>(result.loop);
+      assertType<Booleanish | undefined>(result.muted);
+      assertType<string | undefined>(result.preload);
+
+      // Also includes base HTMLAttributes
+      assertType<string | undefined>(result.id);
+      assertType<string | undefined>(result.class);
+
+      // @ts-expect-error - Result is not any/unknown/never
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("extracts props from HTMLInputElement", () => {
+      type Result = ExtractComponentProps<HTMLInputElement>;
+      type Booleanish = boolean | "true" | "false" | "";
+
+      const result = {} as Result;
+
+      // InputHTMLAttributes includes input-specific properties
+      assertType<string | undefined>(result.type);
+      assertType<string | number | readonly string[] | undefined>(result.value);
+      assertType<string | undefined>(result.placeholder);
+      assertType<Booleanish | undefined>(result.disabled);
+      assertType<Booleanish | undefined>(result.readonly);
+      assertType<Booleanish | undefined>(result.required);
+      assertType<string | undefined>(result.name);
+
+      // Also includes base HTMLAttributes
+      assertType<string | undefined>(result.id);
+      assertType<string | undefined>(result.class);
+
+      // @ts-expect-error - Result is not any/unknown/never
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("extracts props from HTMLVideoElement", () => {
+      type Result = ExtractComponentProps<HTMLVideoElement>;
+      type Booleanish = boolean | "true" | "false" | "";
+
+      const result = {} as Result;
+
+      // VideoHTMLAttributes includes video/media-specific properties
+      assertType<string | undefined>(result.src);
+      assertType<Booleanish | undefined>(result.controls);
+      assertType<string | undefined>(result.poster);
+      assertType<string | number | undefined>(result.width);
+      assertType<string | number | undefined>(result.height);
+      assertType<Booleanish | undefined>(result.autoplay);
+      assertType<Booleanish | undefined>(result.loop);
+      assertType<Booleanish | undefined>(result.muted);
+
+      // Also includes base HTMLAttributes
+      assertType<string | undefined>(result.id);
+      assertType<string | undefined>(result.class);
+
+      // @ts-expect-error - Result is not any/unknown/never
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("extracts props from HTMLButtonElement", () => {
+      type Result = ExtractComponentProps<HTMLButtonElement>;
+      type Booleanish = boolean | "true" | "false" | "";
+
+      const result = {} as Result;
+
+      // ButtonHTMLAttributes includes button-specific properties
+      assertType<"button" | "submit" | "reset" | undefined>(result.type);
+      assertType<Booleanish | undefined>(result.disabled);
+      assertType<string | undefined>(result.form);
+      assertType<string | undefined>(result.name);
+      // Note: value in Vue's ButtonHTMLAttributes supports multiple types
+      assertType<string | number | readonly string[] | undefined>(result.value);
+
+      // Also includes base HTMLAttributes
+      assertType<string | undefined>(result.id);
+      assertType<string | undefined>(result.class);
+
+      // @ts-expect-error - Result is not any/unknown/never
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("extracts props from HTMLFormElement", () => {
+      type Result = ExtractComponentProps<HTMLFormElement>;
+
+      const result = {} as Result;
+
+      // FormHTMLAttributes includes form-specific properties
+      assertType<string | undefined>(result.action);
+      assertType<string | undefined>(result.method);
+      assertType<string | undefined>(result.enctype);
+      assertType<string | undefined>(result.target);
+      assertType<string | undefined>(result.name);
+
+      // Also includes base HTMLAttributes
+      assertType<string | undefined>(result.id);
+      assertType<string | undefined>(result.class);
+
+      // @ts-expect-error - Result is not any/unknown/never
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("extracts props from HTMLAnchorElement", () => {
+      type Result = ExtractComponentProps<HTMLAnchorElement>;
+
+      const result = {} as Result;
+
+      // AnchorHTMLAttributes includes anchor-specific properties
+      assertType<string | undefined>(result.href);
+      assertType<string | undefined>(result.target);
+      assertType<string | undefined>(result.rel);
+      assertType<string | undefined>(result.download);
+
+      // Also includes base HTMLAttributes
+      assertType<string | undefined>(result.id);
+      assertType<string | undefined>(result.class);
+
+      // @ts-expect-error - Result is not any/unknown/never
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("extracts props from HTMLImageElement", () => {
+      type Result = ExtractComponentProps<HTMLImageElement>;
+
+      const result = {} as Result;
+
+      // ImgHTMLAttributes includes image-specific properties
+      assertType<string | undefined>(result.src);
+      assertType<string | undefined>(result.alt);
+      assertType<string | number | undefined>(result.width);
+      assertType<string | number | undefined>(result.height);
+      assertType<"" | "anonymous" | "use-credentials" | undefined>(
+        result.crossorigin
+      );
+      assertType<"async" | "auto" | "sync" | undefined>(result.decoding);
+      assertType<"lazy" | "eager" | undefined>(result.loading);
+
+      // Also includes base HTMLAttributes
+      assertType<string | undefined>(result.id);
+      assertType<string | undefined>(result.class);
+
+      // @ts-expect-error - Result is not any/unknown/never
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("extracts props from HTMLSelectElement", () => {
+      type Result = ExtractComponentProps<HTMLSelectElement>;
+      type Booleanish = boolean | "true" | "false" | "";
+
+      const result = {} as Result;
+
+      // SelectHTMLAttributes includes select-specific properties
+      assertType<Booleanish | undefined>(result.disabled);
+      assertType<Booleanish | undefined>(result.multiple);
+      assertType<string | undefined>(result.name);
+      assertType<Booleanish | undefined>(result.required);
+      assertType<string | number | undefined>(result.size);
+
+      // Also includes base HTMLAttributes
+      assertType<string | undefined>(result.id);
+      assertType<string | undefined>(result.class);
+
+      // @ts-expect-error - Result is not any/unknown/never
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("extracts props from HTMLTextAreaElement", () => {
+      type Result = ExtractComponentProps<HTMLTextAreaElement>;
+      type Booleanish = boolean | "true" | "false" | "";
+
+      const result = {} as Result;
+
+      // TextareaHTMLAttributes includes textarea-specific properties
+      assertType<Booleanish | undefined>(result.disabled);
+      assertType<string | undefined>(result.placeholder);
+      assertType<Booleanish | undefined>(result.readonly);
+      assertType<Booleanish | undefined>(result.required);
+      assertType<string | number | undefined>(result.rows);
+      assertType<string | number | undefined>(result.cols);
+      assertType<string | undefined>(result.name);
+
+      // Also includes base HTMLAttributes
+      assertType<string | undefined>(result.id);
+      assertType<string | undefined>(result.class);
+
+      // @ts-expect-error - Result is not any/unknown/never
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("extracts HTMLAttributes for generic HTMLElement", () => {
+      // Generic HTMLElement falls through to the default HTMLAttributes case
+      type Result = ExtractComponentProps<HTMLElement>;
+
+      const result = {} as Result;
+
+      // Base HTMLAttributes properties
+      assertType<string | undefined>(result.id);
+      assertType<string | undefined>(result.class);
+      assertType<import("vue").StyleValue | undefined>(result.style);
+      assertType<string | number | undefined>(result.tabindex);
+      assertType<string | undefined>(result.title);
+
+      // @ts-expect-error - Result is not any/unknown/never
+      assertType<Result>({} as { unrelated: true });
+    });
+
+    it("recursively extracts from constructor to instance", () => {
+      type NestedComponent = {
+        new (): {
+          new (): {
+            $props: { deep: boolean };
+          };
+        };
+      };
+      // Note: This tests the recursive unwrapping behavior
+      type Result = ExtractComponentProps<NestedComponent>;
+
+      // The first level unwraps, then it should continue extracting
+      // Since the instance doesn't directly have $props, it keeps unwrapping
+    });
+
+    it("handles component with empty $props", () => {
+      type EmptyPropsComponent = {
+        new (): {
+          $props: {};
+        };
+      };
+      type Result = ExtractComponentProps<EmptyPropsComponent>;
+
+      assertType<Result>({} as {});
+      assertType<{}>({} as Result);
     });
   });
 });

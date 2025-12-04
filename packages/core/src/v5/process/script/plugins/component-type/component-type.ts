@@ -168,14 +168,14 @@ export const ComponentTypePlugin = definePlugin({
 
     s.append(
       `function ${ctx.prefix("getRootComponent")}${
-        ctx.generic ? ctx.generic.source : ""
+        ctx.generic ? `<${ctx.generic.source}>` : ""
       }(){`
     );
 
     if (rootComponent.length === 1) {
       s.append(
         `return ${ctx.prefix("Comp")}${rootComponent[0].node.loc.start.offset}${
-          ctx.generic ? ctx.generic.source : ""
+          ctx.generic ? `<${ctx.generic.source}>` : ""
         }()`
       );
     } else {
@@ -325,7 +325,7 @@ function resolveComponent(
   const props = resolveComponentProps(element, ctx);
   const pre = availableContext(element, templateBindings, extraContext, ctx);
 
-  return `function ${name}${ctx.generic ? ctx.generic.source : ""}() {
+  return `function ${name}${ctx.generic ? `<${ctx.generic.source}>` : ""}() {
 ${pre}
   return ${
     isComp

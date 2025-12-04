@@ -3,6 +3,8 @@ import Comp from "./Comp.vue";
 
 const foo = {} as InstanceType<typeof Comp>;
 
+foo?.$props.
+
 defineOptions({
   data() {
     return {
@@ -20,7 +22,7 @@ function onClick(e) {
 </script>
 
 <template>
-  <Comp name="foo" @change="onChange">
+  <Comp name="foo" @change="onChange" >
     <!-- <template #foo="{ test }">
       {{ ___VERTER___slotInstance.$slots.header }}</template
     >
