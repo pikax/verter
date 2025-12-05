@@ -62,7 +62,7 @@ const model = defineModel({
       ]
     `);
   });
-  it.only("should get the correct imports", () => {
+  it("should get the correct imports", () => {
     const parsed = parse(`
     <script setup lang="ts">
     const model = defineModel<{ foo: string }>();

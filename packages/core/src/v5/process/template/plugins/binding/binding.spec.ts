@@ -179,9 +179,8 @@ describe("process template plugins binding", () => {
     });
   });
 
-  // Issue #52: Template context applied incorrectly to 'as' keyword
-  describe("issue #52 - TypeScript 'as' keyword", () => {
-    test.skip("should not prefix 'as' keyword in type assertion", () => {
+  describe("type assertions", () => {
+    test("does not prefix inside type assertions", () => {
       const { result } = parse(`{{
         () => {
           let a = {} as {
@@ -197,9 +196,8 @@ describe("process template plugins binding", () => {
     });
   });
 
-  // Issue #47: Arrow function parameters incorrectly prefixed
-  describe("issue #47 - arrow function parameters", () => {
-    test.skip("should not prefix arrow function parameters", () => {
+  describe("arrow function parameters", () => {
+    test("does not prefix arrow function parameters", () => {
       const { result } = parse(`{{
         (foo:string)=> {
           foo.toLowerCase();
@@ -214,7 +212,7 @@ describe("process template plugins binding", () => {
       }
     });
 
-    test.skip("arrow function parameters should be ignored in bindings", () => {
+    test("ignores arrow function parameters when binding", () => {
       const { result } = parse(`{{ (event) => { event.target } }}`);
       // 'event' parameter should not be prefixed with ___VERTER___ctx
       expect(result).not.toContain("___VERTER___ctx.event");

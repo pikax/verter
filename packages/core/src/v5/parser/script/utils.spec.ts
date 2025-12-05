@@ -1,1 +1,3 @@
-describe.skip("parser script utils", () => {});
+describe("parser script utils", () => {
+	it.todo("add coverage for script utility helpers");
+});

@@ -87,14 +87,7 @@ describe("process template plugins directive", () => {
         expect(result).toContain(`<input value={} onInput={($event)=>(=$event.target.value)} />`);
       });
 
-      // TODO: Fix this test
-      it.skip("v-model=", () => {
-        const { result } = parse(`<input v-model=/>`);
-        expect(result).toContain(``);
-        expect(result).toMatchInlineSnapshot(
-          `"<input value={___VERTER___ctx.} onInput={($event)=>(=$event.target.value)} />"`
-        );
-      });
+      it.todo("v-model= (invalid syntax) should surface parse error");
     });
     describe.todo("checkbox", () => { });
     describe.todo("dynamic", () => { });

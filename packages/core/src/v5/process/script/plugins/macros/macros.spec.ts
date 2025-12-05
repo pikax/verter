@@ -2467,7 +2467,7 @@ const emit = defineEmits(['change'])
           return { ..._parse(original, wrapper, lang, pre), original };
         }
 
-        it.skip("leave the script untouched", () => {
+        it("leave the script untouched", () => {
           const { s, original } = parse("{ data(){ return { a: 0 } } }");
           expect(s.toString()).toContain(original);
         });
@@ -3057,13 +3057,9 @@ const props = defineProps<{ item: T }>();`,
 
       // This test documents that using generic types in defineOptions would not work
       // because defineOptions is hoisted out of the template function
-      it.skip("defineOptions with generic type reference would fail (not supported)", () => {
-        // This would fail because T is not in scope where defineOptions is placed
-        // const { result } = parseGeneric(
-        //   `defineOptions({ customOption: {} as T });`, // T not available here
-        //   "T"
-        // );
-      });
+      test.todo(
+        "defineOptions with generic type reference fails (hoisting loses generic scope)"
+      );
     });
 
     describe("generic with default types", () => {

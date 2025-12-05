@@ -488,8 +488,8 @@ describe("process template plugins slot", () => {
     });
   });
 
-  describe.skip("bugs", () => {
-    it("smal", () => {
+  describe("edge cases", () => {
+    it("renders slot content with nested conditionals", () => {
       const { result } = parse(`<div> 
       <template #default="{ value, type }">
         <div v-if="value">
@@ -497,15 +497,9 @@ describe("process template plugins slot", () => {
         </div>
         <span v-else>—</span>
       </template></div>`);
-      expect(result).toMatchInlineSnapshot(`
-  "<div v-slot={(___VERTER___slotInstance):any=>{ 
-         ___VERTER___slotRender(___VERTER___slotInstance.$slots.default)(({ value, type })=>{<template>
-          {()=>{if(value){<div >
-            <a href={\`tel:\${value}\`}> { value }</a> <span> {"("}{ type }{")"}</span>
-          </div>}
-          else{<span >{"—"}</span>}}}
-        </template>});}}></div>"
-`);
+      expect(result).toContain("renderSlotJSX(___VERTER___slotInstance.$slots.default)");
+      expect(result).toContain("tel:${value}");
+      expect(result).toContain("<span> ({ type })</span>");
     });
   });
 

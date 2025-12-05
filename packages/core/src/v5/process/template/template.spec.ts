@@ -77,65 +77,46 @@ describe("process template", () => {
   });
 
   describe("slot", () => {
-    it.skip("slot with v-if", () => {
+    it("slot with v-if", () => {
       const { result } = parse(`<slot v-if="false"/>`);
       expect(result).toMatchInlineSnapshot(`
-      "{ (): any => {if(false){const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
-      return <RENDER_SLOT />}}}"
+      "export function template(){
+      <>{()=>{if(false){const ___VERTER___slotComponent10=___VERTER___$slot.default;<___VERTER___slotComponent10 />}}}</>}"
     `);
     });
 
-    it.skip("slot with parent v-if", () => {
+    it("slot with parent v-if", () => {
       const { result } = parse(`<div v-if="false"> <slot /> </div>`);
       expect(result).toMatchInlineSnapshot(`
-      "{ (): any => {if(false){<div > {()=>{
-      if(!(false)) { return; } 
-      const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
-      return <RENDER_SLOT />}} </div>}}}"
+      "export function template(){
+      <>{()=>{if(false){<div > {()=>{const ___VERTER___slotComponent29=___VERTER___$slot.default;<___VERTER___slotComponent29 />}} </div>}}}</>}"
     `);
     });
 
-    it.skip("slot with parent v-else", () => {
+    it("slot with parent v-else", () => {
       const { result } = parse(
         `<div v-if="false"> <slot /> </div><div v-else> <slot/> </div>`
       );
       expect(result).toMatchInlineSnapshot(`
-      "{ (): any => {if(false){<div > {()=>{
-      if(!(false)) { return; } 
-      const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
-      return <RENDER_SLOT />}} </div>}else{
-      <div > {()=>{
-      if(!((!false))) { return; } 
-      const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
-      return <RENDER_SLOT/>}} </div>
-      }}}"
+      "export function template(){
+      <>{()=>{if(false){<div > {()=>{const ___VERTER___slotComponent29=___VERTER___$slot.default;<___VERTER___slotComponent29 />}} </div>}else{<div > {()=>{const ___VERTER___slotComponent57=___VERTER___$slot.default;<___VERTER___slotComponent57/>}} </div>}}}</>}"
     `);
     });
-    it.skip("slot with parent v-else-if", () => {
+    it("slot with parent v-else-if", () => {
       const { result } = parse(
         `<div v-if="disableDrag"> <slot /> </div><div v-else-if="!disableDrag"> <slot/> </div><div v-else> <slot/> </div>`
       );
       expect(result).toMatchInlineSnapshot(`
-      "{ (): any => {if(___VERTER___ctx.disableDrag){<div > {()=>{
-      if(!(___VERTER___ctx.disableDrag)) { return; } 
-      const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
-      return <RENDER_SLOT />}} </div>}else if(!___VERTER___ctx.disableDrag){<div > {()=>{
-      if(!((!___VERTER___ctx.disableDrag))) { return; } 
-      const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
-      return <RENDER_SLOT/>}} </div>}else{
-      <div > {()=>{
-      if(!((!(!___VERTER___ctx.disableDrag)))) { return; } 
-      const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots.default);
-      return <RENDER_SLOT/>}} </div>
-      }}}"
+      "export function template(){
+      <>{()=>{if(___VERTER___ctx.disableDrag){<div > {()=>{const ___VERTER___slotComponent35=___VERTER___$slot.default;<___VERTER___slotComponent35 />}} </div>}else if(!___VERTER___ctx.disableDrag){<div > {()=>{const ___VERTER___slotComponent81=___VERTER___$slot.default;<___VERTER___slotComponent81/>}} </div>}else{<div > {()=>{const ___VERTER___slotComponent108=___VERTER___$slot.default;<___VERTER___slotComponent108/>}} </div>}}}</>}"
     `);
     });
 
-    it.skip("slot with v-for", () => {
+    it("slot with v-for", () => {
       const { result } = parse(`<slot v-for="name in $slots" :name="name"/>`);
       expect(result).toMatchInlineSnapshot(`
-      "{___VERTER___renderList(___VERTER___ctx.$slots,name   =>{ const RENDER_SLOT = ___VERTER___SLOT_TO_COMPONENT(___VERTER___ctx.$slots[name]);
-      return <RENDER_SLOT  />})}"
+      "import { renderList as ___VERTER___renderList } from \"vue\";export function template(){
+      <>{()=>{___VERTER___renderList(___VERTER___ctx.$slots,(name)=>{  const ___VERTER___slotComponent10=___VERTER___$slot[name];<___VERTER___slotComponent10  />})}}</>}"
     `);
     });
   });
@@ -157,7 +138,7 @@ describe("process template", () => {
         expect(result).not.toContain("___VERTER___ctx.as");
         expect(result).not.toContain("___VERTER___ctx.foo");
       });
-      test.only("TypeScript 'as' and then usage keyword should not be prefixed", () => {
+      test("TypeScript 'as' and then usage keyword should not be prefixed", () => {
         const { result } = parse(`{{
           () => {
             let a = {} as {

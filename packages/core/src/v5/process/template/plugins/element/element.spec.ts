@@ -175,7 +175,7 @@ describe("process template plugins element", () => {
       );
     });
 
-    it.skip(";test", () => {
+    it("handles mixed-case component names", () => {
       const { result } = parse(`
   <HelloMoto />
   <hello-moto />
@@ -184,12 +184,13 @@ describe("process template plugins element", () => {
   <Hello-Moto />`);
 
       expect(result).toMatchInlineSnapshot(`
-        "
-          <___VERTER___COMPONENT_CTX.HelloMoto />
-          {()=>{const HELLOMOTO=___VERTER___COMPONENT_CTX["hello-moto"];<HELLOMOTO />}}
+        "export function template(){
+        <>
+          <___VERTER___components.HelloMoto />
+          {()=>{const HELLOMOTO=___VERTER___components[\"hello-moto\"];<HELLOMOTO />}}
 
-          <___VERTER___COMPONENT_CTX.helloMoto />
-          {()=>{const HELLOMOTO=___VERTER___COMPONENT_CTX["Hello-Moto"];<HELLOMOTO />}}"
+          <___VERTER___components.helloMoto />
+          {()=>{const HELLOMOTO=___VERTER___components[\"Hello-Moto\"];<HELLOMOTO />}}</>}"
       `);
     });
   });

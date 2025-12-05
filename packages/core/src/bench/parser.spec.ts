@@ -7,15 +7,8 @@ describe("bench parser sanity tests", () => {
 </template>
 <script lang="ts">
 </script>`;
-    it.skip("old", () => {
-      const { render } = parseOld(content);
-
-      expect(render.content).toMatchSnapshot();
-    });
-    it.skip("new", () => {
-      const { render } = parse(content);
-      expect(render.result).toMatchSnapshot();
-    });
+    it.todo("old parser snapshot for simple inline content");
+    it.todo("new parser snapshot for simple inline content");
   });
 
   describe("test file", () => {
