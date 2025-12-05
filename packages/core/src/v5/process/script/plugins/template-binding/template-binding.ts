@@ -143,12 +143,12 @@ export const TemplateBindingPlugin = definePlugin({
       )
       .join(",");
 
+//       ${propsReturn}${propsReturn ? "," : ""}
+// ${modelReturns}${modelReturns ? "," : ""}
+
     s.prependRight(
       tag.pos.close.start,
-      `;return{
-${propsReturn}${propsReturn ? "," : ""}
-${modelReturns}${modelReturns ? "," : ""}
-${usedBindings
+      `;return{${usedBindings
   .map(
     (x) =>
       `${x.name}/*${x.start},${x.end}*/: ${

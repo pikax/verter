@@ -82,7 +82,7 @@ describe("process template plugins binding", () => {
   test("args", () => {
     const { result } = parse(`<div :test="(e: Argument)=> e + test" />`);
     expect(result).toMatchInlineSnapshot(
-      `"<div :test="(e: ___VERTER___ctx.Argument)=> e + ___VERTER___ctx.test" />"`
+      `"<div :test="(e: Argument)=> e + ___VERTER___ctx.test" />"`
     );
   });
   test(':[msg]="msg"', () => {

@@ -594,7 +594,6 @@ describe("parser template interpolation", () => {
         name: "foo",
         ignore: true,
       },
-
       {
         name: "foo",
         ignore: true,

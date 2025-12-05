@@ -161,7 +161,17 @@ export function getASTBindings(
 
       if (parent) {
         if (
+          (parent.type === "ClassMethod" && key === "key") ||
           (parent.type === "ObjectProperty" && key === "key") ||
+          (parent.type === "MemberExpression" &&
+            key === "property" &&
+            (!exp ||
+              ("content" in exp &&
+                typeof exp.content === "string" &&
+                exp.content[
+                  n.start! -
+                    2 /* the AST always starts at 1 and we want the previous */
+                ]) !== "[")) ||
           (parent.type === "TSTypeReference" && key === "typeName")
         ) {
           this.skip();
@@ -240,10 +250,9 @@ export function getASTBindings(
           const name = n.name;
           if (
             parent &&
-            parent.type === "ObjectProperty" &&
-            (parent as babel_types.ObjectProperty).key === n &&
-            // ignore non-shorthand keys; shorthand uses the value as the binding
-            !(parent as babel_types.ObjectProperty).shorthand
+            (parent.type === "ObjectProperty" || parent.type === "Property") &&
+            (parent as babel_types.ObjectProperty | babel_types.ObjectMethod)
+              .key === n
           ) {
             this.skip();
             return;
@@ -257,8 +266,8 @@ export function getASTBindings(
           ) {
             const content =
               exp?.type === NodeTypes.SIMPLE_EXPRESSION
-              // @ts-expect-error TODO Fix
-                ? exp.content.slice(
+                ? // @ts-expect-error TODO Fix
+                  exp.content.slice(
                     parent.start! - ast.start!,
                     parent.end! - ast.start!
                   )
@@ -324,6 +333,24 @@ export function getASTBindings(
           }
           break;
         }
+        // case "ClassExpression": {
+        //   if (n.id && n.id.type === "Identifier") {
+        //     bindings.push({
+        //       type: TemplateTypes.Binding,
+        //       // @ts-expect-error not correct type
+        //       node: exp ? patchBabelNodeLoc(n.id, exp) : n.id,
+        //       name: n.id.name,
+        //       parent: null,
+        //       ignore: true,
+        //       directive: null,
+        //       exp: exp as SimpleExpressionNode | null,
+        //     });
+
+        //     ignoredIdentifiers.push(n.id.name);
+        //   }
+        //   // this.skip();
+        //   break;
+        // }
         default: {
           if (n.type.endsWith("Literal") && !n.type.startsWith("TS")) {
             // @ts-expect-error not correct type
@@ -404,7 +431,7 @@ function collectDeclaredIds(node: VerterASTNode, ignoredIdentifiers: string[]) {
     }
     // @ts-expect-error TODO fix
     case "ObjectProperty": {
-    // @ts-expect-error TODO fix
+      // @ts-expect-error TODO fix
       collectDeclaredIds(node.value, ignoredIdentifiers);
       break;
     }

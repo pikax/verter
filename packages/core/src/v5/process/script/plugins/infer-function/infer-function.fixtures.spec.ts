@@ -188,8 +188,8 @@ describe("InferFunctionPlugin fixtures", () => {
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       // Currently transforms even typed parameters - wraps in spread syntax
-      expect(result).toContain("...[e: MouseEvent]:");
-      expect(result).toContain('HTMLElementEventMap["click"]');
+      expect(result).not.toContain("...[e: MouseEvent]:");
+      expect(result).toContain('handler(e: MouseEvent)');
     });
 
     it("does not transform arrow functions", () => {

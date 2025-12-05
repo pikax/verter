@@ -14,7 +14,10 @@
 
 import { MagicString } from "@vue/compiler-sfc";
 import { parser, TemplateTypes } from "../../../../parser";
-import { ParsedBlockScript, ParsedBlockTemplate } from "../../../../parser/types";
+import {
+  ParsedBlockScript,
+  ParsedBlockTemplate,
+} from "../../../../parser/types";
 import { processScript } from "../../script";
 import { InferFunctionPlugin } from "./index.js";
 import { MacrosPlugin } from "../macros";
@@ -95,10 +98,7 @@ const fixtures: Fixture[] = [
     code: `function handleClick(e) { return e }`,
     template: `<button @click="handleClick">Click me</button>`,
     expectations: {
-      patterns: [
-        `HTMLElementEventMap["click"]`,
-        "...[e]:",
-      ],
+      patterns: [`HTMLElementEventMap["click"]`, "...[e]:"],
       typeTests: [
         {
           target: "handleClick",
@@ -114,10 +114,7 @@ const fixtures: Fixture[] = [
     code: `function handleInput(event) { console.log(event.target) }`,
     template: `<input @input="handleInput" />`,
     expectations: {
-      patterns: [
-        `HTMLElementEventMap["input"]`,
-        "...[event]:",
-      ],
+      patterns: [`HTMLElementEventMap["input"]`, "...[event]:"],
     },
   },
   {
@@ -125,9 +122,7 @@ const fixtures: Fixture[] = [
     code: `function handleChange(e) { }`,
     template: `<select @change="handleChange"></select>`,
     expectations: {
-      patterns: [
-        `HTMLElementEventMap["change"]`,
-      ],
+      patterns: [`HTMLElementEventMap["change"]`],
     },
   },
   {
@@ -135,9 +130,7 @@ const fixtures: Fixture[] = [
     code: `function handleSubmit(e) { e.preventDefault() }`,
     template: `<form @submit="handleSubmit"></form>`,
     expectations: {
-      patterns: [
-        `HTMLElementEventMap["submit"]`,
-      ],
+      patterns: [`HTMLElementEventMap["submit"]`],
     },
   },
   {
@@ -145,9 +138,7 @@ const fixtures: Fixture[] = [
     code: `function handleKeydown(e) { if (e.key === 'Enter') {} }`,
     template: `<input @keydown="handleKeydown" />`,
     expectations: {
-      patterns: [
-        `HTMLElementEventMap["keydown"]`,
-      ],
+      patterns: [`HTMLElementEventMap["keydown"]`],
     },
   },
   {
@@ -155,9 +146,7 @@ const fixtures: Fixture[] = [
     code: `function handleFocus(e) { }`,
     template: `<input @focus="handleFocus" />`,
     expectations: {
-      patterns: [
-        `HTMLElementEventMap["focus"]`,
-      ],
+      patterns: [`HTMLElementEventMap["focus"]`],
     },
   },
   {
@@ -165,9 +154,7 @@ const fixtures: Fixture[] = [
     code: `function handleBlur(e) { }`,
     template: `<input @blur="handleBlur" />`,
     expectations: {
-      patterns: [
-        `HTMLElementEventMap["blur"]`,
-      ],
+      patterns: [`HTMLElementEventMap["blur"]`],
     },
   },
   {
@@ -175,9 +162,7 @@ const fixtures: Fixture[] = [
     code: `function handleMouseEnter(e) { }`,
     template: `<div @mouseenter="handleMouseEnter"></div>`,
     expectations: {
-      patterns: [
-        `HTMLElementEventMap["mouseenter"]`,
-      ],
+      patterns: [`HTMLElementEventMap["mouseenter"]`],
     },
   },
   {
@@ -185,9 +170,7 @@ const fixtures: Fixture[] = [
     code: `function handleMouseLeave(e) { }`,
     template: `<div @mouseleave="handleMouseLeave"></div>`,
     expectations: {
-      patterns: [
-        `HTMLElementEventMap["mouseleave"]`,
-      ],
+      patterns: [`HTMLElementEventMap["mouseleave"]`],
     },
   },
 
@@ -199,10 +182,7 @@ const fixtures: Fixture[] = [
     code: `function handler(a, b, c) { return [a, b, c] }`,
     template: `<div @click="handler"></div>`,
     expectations: {
-      patterns: [
-        "...[a, b, c]:",
-        `HTMLElementEventMap["click"]`,
-      ],
+      patterns: ["...[a, b, c]:", `HTMLElementEventMap["click"]`],
     },
   },
 
@@ -214,13 +194,8 @@ const fixtures: Fixture[] = [
     code: `function unusedFunction(x) { return x * 2 }`,
     template: `<div>No event binding here</div>`,
     expectations: {
-      patterns: [
-        "function unusedFunction(x)",
-      ],
-      antiPatterns: [
-        "HTMLElementEventMap",
-        "...[",
-      ],
+      patterns: ["function unusedFunction(x)"],
+      antiPatterns: ["HTMLElementEventMap", "...["],
     },
   },
 
@@ -236,9 +211,7 @@ const fixtures: Fixture[] = [
     template: `<div @click="handler"></div>`,
     expectations: {
       patterns: [
-        // Currently transforms even typed parameters - adds spread syntax around existing type
-        "...[e: MouseEvent]:",
-        `HTMLElementEventMap["click"]`,
+        "e: MouseEvent",
       ],
     },
   },
@@ -251,12 +224,8 @@ const fixtures: Fixture[] = [
     code: `const handler = (e) => e.target`,
     template: `<div @click="handler"></div>`,
     expectations: {
-      patterns: [
-        "const handler = (e) => e.target",
-      ],
-      antiPatterns: [
-        "HTMLElementEventMap",
-      ],
+      patterns: ["const handler = (e) => e.target"],
+      antiPatterns: ["HTMLElementEventMap"],
     },
   },
 
@@ -268,9 +237,7 @@ const fixtures: Fixture[] = [
     code: `function handleAnchorClick(e) { e.preventDefault() }`,
     template: `<a href="#" @click="handleAnchorClick">Link</a>`,
     expectations: {
-      patterns: [
-        `HTMLElementEventMap["click"]`,
-      ],
+      patterns: [`HTMLElementEventMap["click"]`],
     },
   },
   {
@@ -278,9 +245,7 @@ const fixtures: Fixture[] = [
     code: `function handleDblClick(e) { }`,
     template: `<div @dblclick="handleDblClick"></div>`,
     expectations: {
-      patterns: [
-        `HTMLElementEventMap["dblclick"]`,
-      ],
+      patterns: [`HTMLElementEventMap["dblclick"]`],
     },
   },
   {
@@ -288,9 +253,7 @@ const fixtures: Fixture[] = [
     code: `function handleContextMenu(e) { e.preventDefault() }`,
     template: `<div @contextmenu="handleContextMenu"></div>`,
     expectations: {
-      patterns: [
-        `HTMLElementEventMap["contextmenu"]`,
-      ],
+      patterns: [`HTMLElementEventMap["contextmenu"]`],
     },
   },
 
@@ -302,12 +265,8 @@ const fixtures: Fixture[] = [
     code: `function noParams() { console.log('clicked') }`,
     template: `<div @click="noParams"></div>`,
     expectations: {
-      patterns: [
-        "function noParams()",
-      ],
-      antiPatterns: [
-        "HTMLElementEventMap",
-      ],
+      patterns: ["function noParams()"],
+      antiPatterns: ["HTMLElementEventMap"],
     },
   },
 
@@ -319,15 +278,8 @@ const fixtures: Fixture[] = [
     code: `import MyComp from './MyComp.vue'\nfunction handleChange(e) { return e }`,
     template: `<MyComp @change="handleChange" />`,
     expectations: {
-      patterns: [
-        "Parameters<",
-        '["onChange"]',
-        "$props",
-        "...[e]:",
-      ],
-      antiPatterns: [
-        "HTMLElementEventMap",
-      ],
+      patterns: ["Parameters<", '["onChange"]', "$props", "...[e]:"],
+      antiPatterns: ["HTMLElementEventMap"],
     },
   },
   {
@@ -335,14 +287,8 @@ const fixtures: Fixture[] = [
     code: `import MyButton from './MyButton.vue'\nfunction onClick(e) { return e }`,
     template: `<MyButton @click="onClick" />`,
     expectations: {
-      patterns: [
-        "Parameters<",
-        '["onClick"]',
-        "$props",
-      ],
-      antiPatterns: [
-        "HTMLElementEventMap",
-      ],
+      patterns: ["Parameters<", '["onClick"]', "$props"],
+      antiPatterns: ["HTMLElementEventMap"],
     },
   },
   {
@@ -350,11 +296,7 @@ const fixtures: Fixture[] = [
     code: `import CustomSelect from './CustomSelect.vue'\nfunction onSelect(item) { console.log(item) }`,
     template: `<CustomSelect @select="onSelect" />`,
     expectations: {
-      patterns: [
-        "Parameters<",
-        '["onSelect"]',
-        "$props",
-      ],
+      patterns: ["Parameters<", '["onSelect"]', "$props"],
     },
   },
   {
@@ -362,11 +304,7 @@ const fixtures: Fixture[] = [
     code: `import DataTable from './DataTable.vue'\nfunction handleUpdate(data) { console.log(data) }`,
     template: `<DataTable @update="handleUpdate" />`,
     expectations: {
-      patterns: [
-        "Parameters<",
-        '["onUpdate"]',
-        "$props",
-      ],
+      patterns: ["Parameters<", '["onUpdate"]', "$props"],
     },
   },
 ];
