@@ -9,10 +9,10 @@ import {
   type AsyncComponentLoader,
 } from "vue";
 
+import Basic from "./AsyncChild.vue";
+
 // Basic async component (without generic - env.d.ts limitation)
-const AsyncBasic = defineAsyncComponent(() =>
-  import("./AsyncChild.vue")
-);
+const AsyncBasic = defineAsyncComponent(() => import("./AsyncChild.vue"));
 
 // Async component with loading state
 const AsyncWithLoading = defineAsyncComponent({
@@ -73,7 +73,10 @@ const AsyncDynamic = computed(() =>
 );
 
 // Lazy loaded components map
-const lazyComponents: Record<string, ReturnType<typeof defineAsyncComponent>> = {
+const lazyComponents: Record<
+  string,
+  ReturnType<typeof defineAsyncComponent>
+> = {
   dashboard: defineAsyncComponent(() => import("./Dashboard.vue")),
   settings: defineAsyncComponent(() => import("./Settings.vue")),
   profile: defineAsyncComponent(() => import("./Profile.vue")),
@@ -88,8 +91,8 @@ interface UserProfileProps {
 }
 
 // Props type is for documentation - actual component uses its own props
-const AsyncUserProfile = defineAsyncComponent(() =>
-  import("./UserProfile.vue")
+const AsyncUserProfile = defineAsyncComponent(
+  () => import("./UserProfile.vue")
 );
 
 // Preload component manually
@@ -137,7 +140,8 @@ function toggleDynamic() {
 }
 
 function switchComponent() {
-  componentName.value = componentName.value === "ComponentA" ? "ComponentB" : "ComponentA";
+  componentName.value =
+    componentName.value === "ComponentA" ? "ComponentB" : "ComponentA";
 }
 
 function setRoute(route: "dashboard" | "settings" | "profile") {
@@ -152,6 +156,7 @@ function setRoute(route: "dashboard" | "settings" | "profile") {
       <h3>Basic Async Component</h3>
       <button @click="toggleAsync">Toggle Async</button>
       <AsyncBasic v-if="showAsync" message="Hello from async!" />
+      <Basic v-if="showAsync" message="Hello from async!" />
     </section>
 
     <!-- Async with loading -->
@@ -196,9 +201,7 @@ function setRoute(route: "dashboard" | "settings" | "profile") {
     <!-- Typed async component -->
     <section>
       <h3>Typed Async Component</h3>
-      <label>
-        User ID: <input type="number" v-model.number="userId" />
-      </label>
+      <label> User ID: <input type="number" v-model.number="userId" /> </label>
       <AsyncUserProfile :user-id="userId" :show-avatar="true" />
     </section>
 

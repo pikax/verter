@@ -115,6 +115,7 @@ export function handleSetupNode(
                   !x.parent?.type.startsWith("TS")
               )
               .map((b) => {
+                // @ts-expect-error
                 const key = `${(b as TemplateBinding).name}:${b.node.start}`;
                 if (seen.has(key)) {
                   return null;

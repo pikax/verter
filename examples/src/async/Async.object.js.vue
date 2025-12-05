@@ -6,9 +6,7 @@ import {
   markRaw,
 } from "vue";
 
-const AsyncBasic = defineAsyncComponent(() =>
-  import("./AsyncChild.vue")
-);
+const AsyncBasic = defineAsyncComponent(() => import("./AsyncChild.vue"));
 
 const AsyncWithLoading = defineAsyncComponent({
   loader: () => import("./AsyncChild.vue"),
@@ -99,7 +97,8 @@ export default defineComponent({
       this.showDynamic = !this.showDynamic;
     },
     switchComponent() {
-      this.componentName = this.componentName === "ComponentA" ? "ComponentB" : "ComponentA";
+      this.componentName =
+        this.componentName === "ComponentA" ? "ComponentB" : "ComponentA";
     },
     setRoute(route) {
       this.currentRoute = route;
@@ -122,6 +121,7 @@ export default defineComponent({
 
     <section>
       <h3>Async with Loading State</h3>
+
       <Suspense>
         <template #default>
           <AsyncWithLoading v-if="showAsync" />

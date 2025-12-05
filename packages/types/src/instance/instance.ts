@@ -7,6 +7,7 @@ import {
   MacroToModelRecord,
   NormalisedMacroReturn,
   NormaliseMacroReturn,
+  Prettify,
   SlotsToSlotType,
 } from "../setup";
 import { MakePublicProps, MakeInternalProps } from "../props";
@@ -95,9 +96,11 @@ export type CreateTypedPublicInstanceFromNormalisedMacro<
     : InternalInstance;
 
   $data: DEV extends true ? T["$data"] : {};
-  $props: ToInstanceProps<T["props"], MakeDefaultsOptional> &
-    ModelToProps<MacroToModelRecord<T["model"]>> &
-    EmitsToProps<MacroToEmitValue<T["emits"]>> &
+  $props: Prettify<
+    ToInstanceProps<T["props"], MakeDefaultsOptional> &
+      ModelToProps<MacroToModelRecord<T["model"]>> &
+      EmitsToProps<MacroToEmitValue<T["emits"]>>
+  > &
     Attrs;
 
   $attrs: Attrs;

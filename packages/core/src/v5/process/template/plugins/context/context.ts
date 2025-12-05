@@ -96,12 +96,13 @@ export const ContextPlugin = {
 
     const componentsStr = `const ${components} = ${ExtractComponents}({
   ${[
-    // `...${
-    //   ctx.isTS
-    //     ? `({} as Required<typeof ${DefaultName}.components> & {})`
-    //     : `${DefaultName}.components`
-    // }`,
-    // `...${CTX}`,
+    `...{} as import('vue').GlobalComponents`,
+    `...${
+      ctx.isTS
+        ? `({} as Required<typeof ${DefaultName}.components> & {})`
+        : `${DefaultName}.components`
+    }`,
+    `...${CTX}`,
     ...ctxItems,
   ].join(",\n")}
 })`;

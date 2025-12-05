@@ -136,50 +136,37 @@ export const TemplateBindingPlugin = definePlugin({
       .map((x) => `...({} as typeof ${x})`)
       .join(",");
 
-    const modelReturns = Array.from(modelBindings.values())
-      .map(
-        (x) =>
-          `${x.name}/*${x.node.start},${x.node.end}*/: {} as typeof ${x.valueName} extends import('vue').ModelRef<infer V> ? V : ${unwrapRef}<typeof ${x.valueName}>`
-      )
-      .join(",");
+    const modelReturns = Array.from(modelBindings.values()).map(
+      (x) =>
+        `${x.name}/*${x.node.start},${x.node.end}*/: {} as typeof ${x.valueName} extends import('vue').ModelRef<infer V> ? V : ${unwrapRef}<typeof ${x.valueName}>`
+    );
 
-//       ${propsReturn}${propsReturn ? "," : ""}
-// ${modelReturns}${modelReturns ? "," : ""}
+    const returnBindings = usedBindings.map(
+      (x) =>
+        `${x.name}/*${x.start},${x.end}*/: ${
+          isTS
+            ? `${x.name} as unknown as ${unwrapRef}<typeof ${x.name}>`
+            : `${unref}(${x.name})`
+        }`
+    );
+
+    // ..${
+    //     macroReturn ? `${createMacroReturn}(${macroReturn.content})` : "{}"
+    //   }}
+    const macroReturnStr = macroReturn
+      ? `...${createMacroReturn}(${macroReturn.content})`
+      : "";
 
     s.prependRight(
       tag.pos.close.start,
-      `;return{${usedBindings
-  .map(
-    (x) =>
-      `${x.name}/*${x.start},${x.end}*/: ${
-        isTS
-          ? `${x.name} as unknown as ${unwrapRef}<typeof ${x.name}>`
-          : `${unref}(${x.name})`
-      }`
-  )
-  // .concat(
-  //   Object.entries(macroBindings).map(
-  //     ([k, x]) => `${k}:${`${isTS ? `${x} as typeof ${x}` : ""}`}`
-  //   )
-  //   // Object.entries(macroBindings).map(([k, v]) =>
-  //   //   v.map((x) => `${k}:${k}`)
-  //   // )
-  // )
-  // .concat([
-  //   // defineModel regular props
-  //   `${ctx.prefix("defineModel")}:{${defineModels
-  //     .map(
-  //       (x) =>
-  //         // TODO this should be either pointing to the variable or to the function itself
-  //         `${x.name}/*${x.node.start},${x.node.end}*/: ${
-  //           isTS ? `${x.varName} as typeof ${x.varName}` : x.varName
-  //         }`
-  //     )
-  //     .join(",")}}`,
-  // ])
-  .join(",")}${usedBindings.length > 0 ? "," : ""}...${
-        macroReturn ? `${createMacroReturn}(${macroReturn.content})` : "{}"
-      }}`
+      `;return{${[
+        propsReturn,
+        ...modelReturns,
+        ...returnBindings,
+        macroReturnStr,
+      ]
+        .filter((x) => x.length > 0)
+        .join(",\n")}}`
     );
 
     if (!isTS) {
