@@ -28,7 +28,7 @@ import { walk } from "@vue/compiler-sfc";
 import * as babel_types from "@babel/types";
 import { patchAcornNodeLoc, patchBabelNodeLoc } from "../../utils/node/node.js";
 import { BindingPattern, VerterASTNode } from "../ast/types.js";
-import { parseAcornLoose } from "../ast/ast.js";
+import { parseAcornLoose, parseOXC } from "../ast/ast.js";
 import type AcornTypes from "acorn";
 
 const Keywords =
@@ -80,13 +80,20 @@ export function retrieveBindings(
       exp,
     });
   } else if (exp.ast) {
+    patchBabelNodeLoc(exp.ast as babel_types.Node, exp);
     bindings.push(...getASTBindings(exp.ast, context, exp));
-  } else {
-    bindings.push({
-      type: TemplateTypes.BrokenExpression,
-      node: exp,
-      directive,
-    });
+  } else if (exp.content.trim() !== "") {
+    const ast = parseOXC(exp.content)?.program?.body[0];
+    if (ast) {
+      bindings.push(...getASTBindings(ast, context, exp));
+    } else {
+      bindings.push({
+        type: TemplateTypes.BrokenExpression,
+        node: exp,
+        directive,
+      });
+    }
+
     // const ast = parseAcornLoose(exp.content);
     // if (ast) {
     //   bindings.push(...getASTBindings(ast, context,  exp));
@@ -123,7 +130,8 @@ export function getASTBindings(
   walk(ast, {
     enter(
       n: babel_types.Node | VerterASTNode,
-      parent: babel_types.Node | VerterASTNode
+      parent: babel_types.Node | VerterASTNode,
+      key: string | number | null
     ) {
       const ignoredIdentifiers: string[] =
         // @ts-expect-error
@@ -132,17 +140,44 @@ export function getASTBindings(
           ...(parent?._ignoredIdentifiers || context.ignoredIdentifiers),
         ]);
 
+      if (parent) {
+        if (
+          (parent.type === "ObjectProperty" && key === "key") ||
+          (parent.type === "TSTypeReference" && key === "typeName")
+        ) {
+          this.skip();
+          return;
+        }
+      }
+
       switch (n.type) {
         case "FunctionDeclaration":
         case "FunctionExpression": {
           if (n.id) {
             ignoredIdentifiers.push(n.id.name);
           }
-          // Collect function parameters
+        }
+        case "ArrowFunctionExpression": {
           const params = n.params;
           params.forEach((param) => {
-            // Collect all parameter identifiers including rest parameters
-            collectDeclaredIds(param as VerterASTNode, ignoredIdentifiers);
+            if (param.type === "Identifier") {
+              ignoredIdentifiers.push(param.name);
+            } else if (
+              param.type === "RestElement" &&
+              param.argument.type === "Identifier"
+            ) {
+              ignoredIdentifiers.push(param.argument.name);
+            } else if (param.type === "AssignmentPattern") {
+              const left = param.left;
+              if (left.type === "Identifier") {
+                ignoredIdentifiers.push(left.name);
+              }
+            } else if (
+              param.type === "ObjectPattern" ||
+              param.type === "ArrayPattern"
+            ) {
+              collectDeclaredIds(param as BindingPattern, ignoredIdentifiers);
+            }
           });
 
           const pN = exp ? patchBabelNodeLoc(n as babel_types.Node, exp) : n;
@@ -156,15 +191,6 @@ export function getASTBindings(
             // @ts-expect-error not correct type
             body: bN,
             context,
-          });
-          break;
-        }
-        case "ArrowFunctionExpression": {
-          const params = n.params;
-          params.forEach((param) => {
-            if (param.type === "Identifier") {
-              ignoredIdentifiers.push(param.name);
-            }
           });
           break;
         }
@@ -187,14 +213,43 @@ export function getASTBindings(
 
         case "Identifier": {
           const name = n.name;
+          // console.log("Identifier:", name, ast);
           if (
+            exp &&
             parent &&
             (("property" in parent && parent.property === n) ||
               ("key" in parent && parent.key === n))
           ) {
-            this.skip();
-            return;
+            const content =
+              exp?.type === NodeTypes.SIMPLE_EXPRESSION
+              // @ts-expect-error TODO Fix
+                ? exp.content.slice(
+                    parent.start! - ast.start!,
+                    parent.end! - ast.start!
+                  )
+                : (parent as any).loc.source;
+
+            const accessor = content[n.start! - parent.start! - 1];
+
+            if (accessor === ".") {
+              this.skip();
+              return;
+            }
           }
+
+          // if (
+          //   parent &&
+          //   (("property" in parent &&
+          //     parent.property === n &&
+          //     !(
+          //       (parent as any).extra?.parenthesized === true &&
+          //       parent.loc.source[(parent as any).extra.parenStart] === "["
+          //     )) ||
+          //     ("key" in parent && parent.key === n))
+          // ) {
+          //   this.skip();
+          //   return;
+          // }
           // this is the node where acorn fails
           if (isAcorn && name === "✖") {
             this.skip();
@@ -222,8 +277,27 @@ export function getASTBindings(
           });
           break;
         }
+        // case "ObjectProperty": {
+        //   if (n.key.type === "Identifier") {
+        //     ignoredIdentifiers.push(n.key.name);
+        //   }
+        //   break;
+        // }
+        case "ObjectExpression": {
+          n.properties.forEach((prop) =>
+            // @ts-expect-error TODO fix
+            collectDeclaredIds(prop, ignoredIdentifiers)
+          );
+          break;
+        }
+        case "TSPropertySignature": {
+          if (n.key.type === "Identifier") {
+            ignoredIdentifiers.push(n.key.name);
+          }
+          break;
+        }
         default: {
-          if (n.type.endsWith("Literal")) {
+          if (n.type.endsWith("Literal") && !n.type.startsWith("TS")) {
             // @ts-expect-error not correct type
             const pNode = exp && !isAcorn ? patchBabelNodeLoc(n, exp) : n;
             let content = "";
@@ -238,7 +312,7 @@ export function getASTBindings(
               type: TemplateTypes.Literal,
               content,
               value,
-              // @ts-expect-error
+              // @ts-expect-error not correct type
               node: pNode,
             });
           }
@@ -283,14 +357,31 @@ function collectDeclaredIds(node: VerterASTNode, ignoredIdentifiers: string[]) {
       break;
     case "ObjectPattern":
       for (const prop of node.properties) {
-        if (prop.type === "Property") {
-          // { key: value } or shorthand
-          collectDeclaredIds(prop.value, ignoredIdentifiers);
-        } else if (prop.type === "RestElement") {
-          collectDeclaredIds(prop.argument, ignoredIdentifiers);
-        }
+        collectDeclaredIds(prop, ignoredIdentifiers);
+        // if (prop.type === "Property") {
+        //   // { key: value } or shorthand
+        //   collectDeclaredIds(prop.value, ignoredIdentifiers);
+        // } else if (prop.type === "RestElement") {
+        //   collectDeclaredIds(prop.argument, ignoredIdentifiers);
+        // } else if (prop.type === "ObjectProperty") {
+        //   collectDeclaredIds(prop.value, ignoredIdentifiers);
+        // }
       }
       break;
+    case "RestElement": {
+      collectDeclaredIds(node.argument, ignoredIdentifiers);
+      break;
+    }
+    case "Property": {
+      collectDeclaredIds(node.value, ignoredIdentifiers);
+      break;
+    }
+    // @ts-expect-error TODO fix
+    case "ObjectProperty": {
+    // @ts-expect-error TODO fix
+      collectDeclaredIds(node.value, ignoredIdentifiers);
+      break;
+    }
     // add more cases if you need to handle TS-specific patterns, etc.
   }
 }

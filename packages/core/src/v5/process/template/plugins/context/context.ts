@@ -79,6 +79,7 @@ export const ContextPlugin = {
       .map((x) => (ctx.isTS ? `${x}${generic}` : x))
       .map((x) => (ctx.isTS ? `...({} as ${x})` : `...${x}`));
     const ctxStr = `const ${CTX} = {${[
+      `...({} as Window & typeof globalThis)`,
       `...${ComponentInstanceName}`,
       // `...${
       //   ctx.isTS

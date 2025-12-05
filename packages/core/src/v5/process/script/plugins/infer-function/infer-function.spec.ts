@@ -197,8 +197,8 @@ describe("process InferFunctionPlugin", () => {
           '<template><div @click="handler"></div></template>'
         );
         // Currently the plugin still transforms typed parameters
-        expect(result).toContain("...[e: MouseEvent]:");
-        expect(result).toContain('HTMLElementEventMap["click"]');
+        expect(result).not.toContain("...[e: MouseEvent]:");
+        expect(result).toContain('e: MouseEvent');
       });
     });
 

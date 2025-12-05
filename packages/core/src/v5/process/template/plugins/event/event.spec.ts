@@ -117,7 +117,7 @@ describe("process template plugins event", () => {
 
     test("arrow function with spread does not wrap in event callback", () => {
       const { result } = parse(`<div @input="(...args) => {}" />`);
-      expect(result).toContain("(...___VERTER___ctx.args) => {}");
+      expect(result).toContain("(...args) => {}");
     });
 
     test("arrow function with parameter does not wrap in event callback", () => {

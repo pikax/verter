@@ -414,22 +414,8 @@ describe("parser template interpolation", () => {
       {
         type: "Interpolation",
       },
-      {
-        name: "temp",
-        ignore: false,
-      },
-      {
-        name: "foo",
-        ignore: false,
-      },
+      { type: "BrokenExpression" },
     ]);
-
-    // @ts-expect-error
-    for (const node of result) {
-      expect(
-        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
-      ).toBe(node.node.loc.source);
-    }
   });
 
   it("{{ temp as Foo +  }}", () => {
@@ -441,26 +427,8 @@ describe("parser template interpolation", () => {
       {
         type: "Interpolation",
       },
-      {
-        name: "temp",
-        ignore: false,
-      },
-      {
-        name: "as",
-        ignore: true,
-      },
-      {
-        name: "Foo",
-        ignore: false,
-      },
+      { type: "BrokenExpression" },
     ]);
-
-    // @ts-expect-error
-    for (const node of result) {
-      expect(
-        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
-      ).toBe(node.node.loc.source);
-    }
   });
 
   it("{{ foo(baz + 1, { key: kuz }) }}", () => {

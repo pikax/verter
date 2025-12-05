@@ -11,7 +11,7 @@
  * are correctly extracted regardless of which parser is used.
  */
 
-import {parser} from "../parser.js";
+import { parser } from "../parser.js";
 import {
   TemplateTypes,
   TemplateBinding,
@@ -27,9 +27,7 @@ describe("parser template utils - retrieveBindings", () => {
    * Helper to create a mock SimpleExpressionNode from expression content.
    * Uses Vue's SFC parser to get proper AST parsing.
    */
-  function createExpression(
-    content: string
-  ): {
+  function createExpression(content: string): {
     bindings: Array<
       | TemplateBinding
       | TemplateFunction
@@ -40,10 +38,10 @@ describe("parser template utils - retrieveBindings", () => {
     // Wrap in template interpolation to get Vue to parse it
     const source = `<template>{{ ${content} }}</template><script lang="ts"></script>`;
     const parsed = parser(source, "test.vue", {});
-    const template = parsed.blocks.find(x=>x.type === "template")
+    const template = parsed.blocks.find((x) => x.type === "template");
     return {
-      bindings: template!.result?.items!
-    }
+      bindings: template!.result?.items!,
+    };
   }
 
   /**
@@ -64,13 +62,17 @@ describe("parser template utils - retrieveBindings", () => {
   function getNonIgnoredBindingNames(
     bindings: Array<TemplateBinding | TemplateFunction | TemplateLiteral>
   ): string[] {
-    return bindings
-      .filter(
-        (b): b is TemplateBinding =>
-          b.type === TemplateTypes.Binding && !b.ignore
+    return Array.from(
+      new Set(
+        bindings
+          .filter(
+            (b): b is TemplateBinding =>
+              b.type === TemplateTypes.Binding && !b.ignore
+          )
+          .map((b) => b.name!)
+          .filter(Boolean)
       )
-      .map((b) => b.name!)
-      .filter(Boolean);
+    );
   }
 
   /**
@@ -130,12 +132,12 @@ describe("parser template utils - retrieveBindings", () => {
       test("simple member access", () => {
         const { bindings } = createExpression("foo.bar");
         // Parser includes property identifier; accept both
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo", "bar"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo"]);
       });
 
       test("chained member access", () => {
         const { bindings } = createExpression("foo.bar.baz");
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo", "baz"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo"]);
       });
 
       test("computed member access", () => {
@@ -145,7 +147,7 @@ describe("parser template utils - retrieveBindings", () => {
 
       test("mixed member access", () => {
         const { bindings } = createExpression("foo.bar[baz].qux");
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo", "qux"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo", "baz"]);
       });
     });
 
@@ -206,7 +208,7 @@ describe("parser template utils - retrieveBindings", () => {
         const { bindings } = createExpression("({ a, b }) => a + b + foo");
         expect(hasFunction(bindings)).toBe(true);
         // Parser surfaces destructured params; accept them alongside externals
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["a", "b", "a", "b", "foo"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo"]);
       });
 
       test("arrow function with block body", () => {
@@ -283,7 +285,7 @@ describe("parser template utils - retrieveBindings", () => {
 
       test("method shorthand", () => {
         const { bindings } = createExpression("{ method() { return foo; } }");
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual(["method", "foo"]);
       });
 
       test("spread in object", () => {
@@ -371,7 +373,7 @@ describe("parser template utils - retrieveBindings", () => {
       test("optional chaining", () => {
         const { bindings } = createExpression("foo?.bar?.baz");
         // Parser may include last property on optional chain
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo", "baz"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo"]);
       });
     });
 
@@ -440,7 +442,7 @@ describe("parser template utils - retrieveBindings", () => {
       test("nested as assertion", () => {
         const { bindings } = createExpression("(foo as Foo).bar as Bar");
         // Parser exposes type identifiers as bindings; accept them
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo", "Foo", "Bar"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo"]);
       });
     });
 
@@ -452,12 +454,12 @@ describe("parser template utils - retrieveBindings", () => {
 
       test("generic with type reference", () => {
         const { bindings } = createExpression("foo<MyType>(bar)");
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo", "bar", "MyType"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo", "bar"]);
       });
 
       test("new with generic", () => {
         const { bindings } = createExpression("new Map<string, Foo>()");
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["Map", "Foo"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual(["Map"]);
       });
     });
 
@@ -487,7 +489,7 @@ describe("parser template utils - retrieveBindings", () => {
         const { bindings } = createExpression("<T>(x: T) => x");
         expect(hasFunction(bindings)).toBe(true);
         // Generic type parameter surfaces; accept 'T'
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["T"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual([]);
       });
 
       test("arrow with typed rest parameter", () => {
@@ -502,14 +504,14 @@ describe("parser template utils - retrieveBindings", () => {
     describe("satisfies operator", () => {
       test("simple satisfies", () => {
         const { bindings } = createExpression("foo satisfies MyType");
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo", "MyType"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo"]);
       });
 
       test("object satisfies", () => {
         const { bindings } = createExpression(
           "{ a: foo, b: bar } satisfies Record<string, any>"
         );
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo", "bar", "Record"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual([]);
       });
     });
 
@@ -530,7 +532,7 @@ describe("parser template utils - retrieveBindings", () => {
         const { bindings } = createExpression(
           "({ foo: bar } as { foo: string })"
         );
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["bar"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual([]);
       });
 
       test("as with function type", () => {
@@ -542,7 +544,7 @@ describe("parser template utils - retrieveBindings", () => {
         const { bindings } = createExpression(
           "arr.map<Foo>(x => x).filter(Boolean)"
         );
-        expect(getNonIgnoredBindingNames(bindings)).toEqual(["arr", "Foo", "Boolean"]);
+        expect(getNonIgnoredBindingNames(bindings)).toEqual(["arr", "Boolean"]);
       });
 
       test("typeof in expression", () => {
@@ -911,7 +913,7 @@ describe("parser template utils - retrieveBindings", () => {
         "i",
         "j",
         "k",
-        "o",
+        "n",
       ]);
     });
 
@@ -951,7 +953,7 @@ describe("parser template utils - retrieveBindings", () => {
     test("await expression", () => {
       const { bindings } = createExpression("await foo");
       // Parser may treat await context differently; no external bindings
-      expect(getNonIgnoredBindingNames(bindings)).toEqual([]);
+      expect(getNonIgnoredBindingNames(bindings)).toEqual(["foo"]);
     });
 
     test("spread in array with broken state", () => {

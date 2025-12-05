@@ -9,37 +9,15 @@ const IgnoredASTTypes = new Set([
   "FunctionExpression",
 ]);
 
-
-/**
- * Determines if an event handler expression should skip the event callback wrapping.
- * 
- * This function handles two cases:
- * 1. Direct function expressions: @click="()=>test", @click="function(){}"
- * 2. Block-bodied functions: @click="(event) => { event; }"
- * 
- * The second case is parsed as a Program node by the Vue compiler, so we need to
- * check if the Program contains a single ExpressionStatement with a function.
- * 
- * @param ast - The AST node of the event handler expression
- * @returns true if the event wrapping should be skipped
- */
-function shouldSkipEventWrapping(ast: any): boolean {
-  if (IgnoredASTTypes.has(ast.type)) {
-    return true;
-  }
-  
-  // Check if it's a Program with a single statement that is a function
-  // This handles cases like: @click="(event) => { event; }"
-  if (ast.type === "Program" && ast.body && ast.body.length === 1) {
-    const statement = ast.body[0];
-    // Check if it's an ExpressionStatement containing a function
-    if (statement.type === "ExpressionStatement" && statement.expression) {
-      const exprType = statement.expression.type;
-      return exprType === "ArrowFunctionExpression" || exprType === "FunctionExpression";
+function extractASTType(node: import("@babel/types").Node): string {
+  if (node.type === "Program") {
+    const body = node.body[0];
+    if (!body) return node.type;
+    if (body.type === "ExpressionStatement") {
+      return extractASTType(body.expression);
     }
   }
-  
-  return false;
+  return node.type;
 }
 
 export const EventPlugin = declareTemplatePlugin({
@@ -70,7 +48,7 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
       return;
     }
 
-    if (shouldSkipEventWrapping(exp.ast)) {
+    if (IgnoredASTTypes.has(extractASTType(exp.ast))) {
       return;
     }
     ctx.items.push(createHelperImport(["eventCallbacks"], ctx.prefix));
