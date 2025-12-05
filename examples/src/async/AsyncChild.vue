@@ -3,10 +3,16 @@
 defineProps<{
   message?: string;
 }>();
+
+defineModel<string>("foo", {
+  required: false,
+  default: "",
+});
 </script>
 
 <template>
   <div class="async-child">
     <p>{{ message ?? "Async Child Component" }}</p>
+    <p>{{ foo }}</p>
   </div>
 </template>

@@ -133,6 +133,25 @@ export function getASTBindings(
       parent: babel_types.Node | VerterASTNode,
       key: string | number | null
     ) {
+      const inheritedIgnoreBindings =
+        // @ts-expect-error internal flag used at runtime
+        parent?._ignoreBindings === true;
+
+      // @ts-expect-error internal flag used at runtime
+      n._ignoreBindings = inheritedIgnoreBindings;
+
+      if (
+        !inheritedIgnoreBindings &&
+        n.type === "ObjectExpression" &&
+        parent &&
+        (parent.type === "TSAsExpression" ||
+          parent.type === "TSSatisfiesExpression")
+      ) {
+        // Object literals used purely in type assertions/satisfies should not contribute bindings
+        // @ts-expect-error internal flag used at runtime
+        n._ignoreBindings = true;
+      }
+
       const ignoredIdentifiers: string[] =
         // @ts-expect-error
         (n._ignoredIdentifiers = [
@@ -212,7 +231,23 @@ export function getASTBindings(
         }
 
         case "Identifier": {
+          // @ts-expect-error internal flag used at runtime
+          if (n._ignoreBindings === true) {
+            this.skip();
+            return;
+          }
+
           const name = n.name;
+          if (
+            parent &&
+            parent.type === "ObjectProperty" &&
+            (parent as babel_types.ObjectProperty).key === n &&
+            // ignore non-shorthand keys; shorthand uses the value as the binding
+            !(parent as babel_types.ObjectProperty).shorthand
+          ) {
+            this.skip();
+            return;
+          }
           // console.log("Identifier:", name, ast);
           if (
             exp &&
@@ -283,13 +318,6 @@ export function getASTBindings(
         //   }
         //   break;
         // }
-        case "ObjectExpression": {
-          n.properties.forEach((prop) =>
-            // @ts-expect-error TODO fix
-            collectDeclaredIds(prop, ignoredIdentifiers)
-          );
-          break;
-        }
         case "TSPropertySignature": {
           if (n.key.type === "Identifier") {
             ignoredIdentifiers.push(n.key.name);
@@ -328,6 +356,8 @@ export function getASTBindings(
     leave(n: babel_types.Node) {
       // @ts-expect-error
       delete n._ignoredIdentifiers;
+      // @ts-expect-error
+      delete n._ignoreBindings;
     },
   });
 
@@ -368,10 +398,6 @@ function collectDeclaredIds(node: VerterASTNode, ignoredIdentifiers: string[]) {
         // }
       }
       break;
-    case "RestElement": {
-      collectDeclaredIds(node.argument, ignoredIdentifiers);
-      break;
-    }
     case "Property": {
       collectDeclaredIds(node.value, ignoredIdentifiers);
       break;
