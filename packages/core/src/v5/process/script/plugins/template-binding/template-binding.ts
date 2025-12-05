@@ -92,7 +92,8 @@ export const TemplateBindingPlugin = definePlugin({
     }
 
     const unref = ctx.prefix("unref");
-    const unwrapRef = ctx.prefix("UnwrapRef");
+    // const unwrapRef = ctx.prefix("UnwrapRef");
+    const unwrapRef = `import('vue').UnwrapRef`;
     const createMacroReturn = ctx.prefix(
       "createMacroReturn" as AvailableExports
     );
