@@ -4,6 +4,7 @@ import { declareTemplatePlugin, TemplateContext } from "../../template";
 import { BlockPlugin } from "../block";
 import { TemplateElement } from "../../../../parser/template/types";
 import { MagicString } from "@vue/compiler-sfc";
+import { createHelperImport } from "../../../utils";
 
 export const ElementPlugin = declareTemplatePlugin({
   name: "VeterElement",
@@ -60,6 +61,8 @@ export const ElementPlugin = declareTemplatePlugin({
       }
 
       const name = ctx.prefix("component_render");
+      ctx.items.push(createHelperImport(["extractRenderComponent"], ctx.prefix));
+      const extractComponent = ctx.prefix("extractRenderComponent");
 
       s.move(
         isProp.exp!.loc.start.offset,
@@ -74,10 +77,10 @@ export const ElementPlugin = declareTemplatePlugin({
       s.update(
         node.loc.start.offset,
         node.loc.start.offset + 1,
-        `const ${name}=`
+        `const ${name}=${extractComponent}(`
       );
 
-      s.appendRight(node.loc.start.offset + 1, ";\n<");
+      s.appendRight(node.loc.start.offset + 1, ");\n<");
       // s.appendLeft(node.loc.end.offset, "}}");
       s.update(tagNameStart, tagNameEnd, name);
 

@@ -23,6 +23,7 @@ import {
   ExtractExpose,
   NormaliseMacroReturn,
   NonReturnMacros,
+  ExtractPropsFromMacro,
 } from "./setup";
 import { PropType } from "vue";
 
@@ -2594,6 +2595,66 @@ describe("Setup helpers", () => {
 
       // @ts-expect-error incorrect type
       assertType<Props["props"]["value"]>({ id: "wrong type" });
+    });
+  });
+
+  // @ai-generated - Tests for optional-only props in defineProps
+  describe("ExtractPropsFromMacro with optional props", () => {
+    it("should extract required props", () => {
+      type MacroRaw = ReturnType<
+        typeof createMacroReturn<{
+          props: { value: { message: string }; type: { message: string } };
+        }>
+      >;
+      // Must unwrap MacroKey first
+      type Macro = ExtractMacroReturn<MacroRaw>;
+      type Props = ExtractPropsFromMacro<ExtractMacroProps<Macro>>;
+      
+      assertType<Props>({ message: "hello" });
+      // Verify Props has the message key
+      assertType<string>({} as Props["message"]);
+      // @ts-expect-error - Props should have message, not be any/unknown/never
+      assertType<{ unrelated: true }>({} as Props);
+    });
+
+    it("should extract optional props", () => {
+      type MacroRaw = ReturnType<
+        typeof createMacroReturn<{
+          props: { value: { message?: string }; type: { message?: string } };
+        }>
+      >;
+      // Must unwrap MacroKey first
+      type Macro = ExtractMacroReturn<MacroRaw>;
+      type Props = ExtractPropsFromMacro<ExtractMacroProps<Macro>>;
+      
+      // Optional props should still be extractable
+      assertType<Props>({ message: "hello" });
+      assertType<Props>({});
+      // Verify Props has the message key (optional)
+      assertType<string | undefined>({} as Props["message"]);
+      // @ts-expect-error - Props should have message key, not be any/unknown/never
+      assertType<{ unrelated: true }>({} as Props);
+    });
+
+    it("should extract mixed required and optional props", () => {
+      type MacroRaw = ReturnType<
+        typeof createMacroReturn<{
+          props: {
+            value: { required: string; optional?: number };
+            type: { required: string; optional?: number };
+          };
+        }>
+      >;
+      // Must unwrap MacroKey first
+      type Macro = ExtractMacroReturn<MacroRaw>;
+      type Props = ExtractPropsFromMacro<ExtractMacroProps<Macro>>;
+      
+      assertType<Props>({ required: "hello" });
+      assertType<Props>({ required: "hello", optional: 42 });
+      // Verify required is present
+      assertType<string>({} as Props["required"]);
+      // @ts-expect-error - Props should not be any/unknown/never
+      assertType<{ unrelated: true }>({} as Props);
     });
   });
 });
