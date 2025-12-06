@@ -73,10 +73,7 @@ const AsyncDynamic = computed(() =>
 );
 
 // Lazy loaded components map
-const lazyComponents: Record<
-  string,
-  ReturnType<typeof defineAsyncComponent>
-> = {
+const lazyComponents = {
   dashboard: defineAsyncComponent(() => import("./Dashboard.vue")),
   settings: defineAsyncComponent(() => import("./Settings.vue")),
   profile: defineAsyncComponent(() => import("./Profile.vue")),
@@ -157,6 +154,7 @@ function setRoute(route: "dashboard" | "settings" | "profile") {
       <button @click="toggleAsync">Toggle Async</button>
       <AsyncBasic v-if="showAsync" message="Hello from async!" />
       <Basic v-if="showAsync" message="Hello from async!" />
+      <Basic v-if="showAsync" />
     </section>
 
     <!-- Async with loading -->

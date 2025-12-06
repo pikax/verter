@@ -39,6 +39,7 @@ export type CreateTypedInternalInstanceFromNormalisedMacro<
 type MakeInternalInstanceFromNormalisedMacro<
   T extends NormalisedMacroReturn<any>,
   Attrs = {},
+  AttrsProps extends boolean = false,
   DEV extends boolean = false
 > = CreateTypedInternalInstanceFromNormalisedMacro<
   T,
@@ -52,8 +53,9 @@ type MakeInternalInstanceFromNormalisedMacro<
           Attrs,
           Element,
           false,
+          AttrsProps,
           DEV,
-          MakeInternalInstanceFromNormalisedMacro<T, Attrs, DEV>
+          MakeInternalInstanceFromNormalisedMacro<T, Attrs, AttrsProps, DEV>
         >;
       }
     : I
@@ -71,22 +73,21 @@ export type ToInstanceProps<
   T,
   MakeDefaultsOptional extends boolean
 > = ExtractPropsFromMacro<T> extends infer PP
-  ? {} extends PP
-    ? T extends Record<string, any>
-      ? MakeInternalProps<T>
-      : {}
+  ? // Check if PP has no keys (truly empty) rather than {} extends PP
+    // which would be true for all-optional props like { message?: string }
+    keyof PP extends never
+    ? {}
     : PP extends Record<string, any>
     ? MakeDefaultsOptional extends true
       ? MakePublicProps<PP>
       : MakeInternalProps<PP>
-    : T extends Record<string, any>
-    ? MakeInternalProps<T>
     : {}
   : {};
 
 export type CreateTypedPublicInstanceFromNormalisedMacro<
   T extends NormalisedMacroReturn<any>,
   Attrs = {},
+  AttrsProps extends boolean = false,
   MakeDefaultsOptional extends boolean = false,
   DEV extends boolean = false,
   InternalInstance = false
@@ -101,7 +102,7 @@ export type CreateTypedPublicInstanceFromNormalisedMacro<
       ModelToProps<MacroToModelRecord<T["model"]>> &
       EmitsToProps<MacroToEmitValue<T["emits"]>>
   > &
-    Attrs;
+    (AttrsProps extends true ? Attrs : {});
 
   $attrs: Attrs;
   $refs: T["templateRef"];
@@ -121,6 +122,7 @@ export type PublicInstanceFromMacro<
   Attrs,
   El extends Element,
   MakeDefaultsOptional extends boolean,
+  AttrsProps extends boolean = false,
   DEV extends boolean = false,
   InternalInstance extends
     | false
@@ -131,6 +133,7 @@ export type PublicInstanceFromMacro<
       Attrs,
       El,
       MakeDefaultsOptional,
+      AttrsProps,
       DEV,
       InternalInstance
     >
@@ -141,6 +144,7 @@ export type PublicInstanceFromNormalisedMacro<
   Attrs,
   El extends Element,
   MakeDefaultsOptional extends boolean,
+  AttrsProps extends boolean = false,
   DEV extends boolean = false,
   InternalInstance = false
 > = Omit<
@@ -170,6 +174,7 @@ export type PublicInstanceFromNormalisedMacro<
   CreateTypedPublicInstanceFromNormalisedMacro<
     T,
     Attrs,
+    AttrsProps,
     MakeDefaultsOptional,
     DEV,
     InternalInstance
@@ -192,3 +197,97 @@ export type CreateExportedInstanceFromMacro<
 > = NormaliseMacroReturn<T> extends infer NT extends NormalisedMacroReturn<any>
   ? CreateExportedInstanceFromNormalisedMacro<NT, Attrs, El, DEV>
   : {};
+
+/**
+ * Creates a public instance type for use within the component's SFC template.
+ *
+ * This type is used internally when generating template bindings. It differs from
+ * the external public instance because:
+ * - `MakeDefaultsOptional` is `false`: Props with defaults are required (always defined internally)
+ * - `AttrsProps` is `false`: Attrs are NOT included in `$props` (attrs accessed separately via `$attrs`)
+ *
+ * Use this type when you need the instance type as seen from inside the component template,
+ * where all props (including those with defaults) are guaranteed to be present.
+ *
+ * @template T - The macro return type from `createMacroReturn`
+ * @template Attrs - The component's attrs type (fallthrough attributes)
+ * @template El - The root element type (defaults to Element)
+ *
+ * @example
+ * ```ts
+ * const setup = () => createMacroReturn({
+ *   props: { value: { count: number }, type: { count: number } }
+ * });
+ * type Instance = SFCPublicInstanceFromMacro<ReturnType<typeof setup>, {}, HTMLDivElement>;
+ * // Instance.$props.count is number (not optional)
+ * // Instance.$attrs does NOT appear in Instance.$props
+ * ```
+ */
+export type SFCPublicInstanceFromMacro<
+  T,
+  Attrs,
+  El extends Element
+> = PublicInstanceFromMacro<T, Attrs, El, false, false>;
+
+/**
+ * Creates a public instance type for external/consumer usage of the component.
+ *
+ * This type is used when consuming a component from outside (e.g., in parent templates
+ * or when using `ref` on a component). It differs from the internal SFC instance because:
+ * - `MakeDefaultsOptional` is `true`: Props with defaults are optional (can be omitted by consumer)
+ * - `AttrsProps` is `false`: Attrs are NOT included in `$props`
+ *
+ * Use this type when you need the instance type as seen by component consumers,
+ * where props with defaults can be omitted.
+ *
+ * @template T - The macro return type from `createMacroReturn`
+ * @template Attrs - The component's attrs type (fallthrough attributes)
+ * @template El - The root element type (defaults to Element)
+ *
+ * @example
+ * ```ts
+ * const setup = () => createMacroReturn({
+ *   props: { value: { title: string }, type: { title: string } },
+ *   withDefaults: { value: { title: 'Default' }, type: { title: string } }
+ * });
+ * type Instance = ExternalPublicInstanceFromMacro<ReturnType<typeof setup>, {}, HTMLDivElement>;
+ * // Instance.$props.title is string | undefined (optional for consumers)
+ * ```
+ */
+export type ExternalPublicInstanceFromMacro<
+  T,
+  Attrs,
+  El extends Element
+> = PublicInstanceFromMacro<T, Attrs, El, true, false>;
+
+/**
+ * Creates a public instance type for testing purposes with attrs included in props.
+ *
+ * This type is specifically designed for use in Vitest tests where you need to verify
+ * that attrs are properly merged into `$props`. It includes:
+ * - `MakeDefaultsOptional` is `true`: Props with defaults are optional
+ * - `AttrsProps` is `true`: Attrs ARE included in `$props` (for testing attr merging)
+ *
+ * **Note:** This type should only be used in test files. For production code, use
+ * `SFCPublicInstanceFromMacro` or `ExternalPublicInstanceFromMacro` instead.
+ *
+ * @template T - The macro return type from `createMacroReturn`
+ * @template Attrs - The component's attrs type (fallthrough attributes)
+ * @template El - The root element type (defaults to Element)
+ *
+ * @example
+ * ```ts
+ * // In a test file:
+ * type CustomAttrs = { class?: string; 'data-testid'?: string };
+ * const setup = () => createMacroReturn({
+ *   props: { value: { id: number }, type: { id: number } }
+ * });
+ * type Instance = TestExternalPublicInstanceFromMacro<ReturnType<typeof setup>, CustomAttrs, HTMLDivElement>;
+ * // Instance.$props includes both { id?: number } AND { class?: string; 'data-testid'?: string }
+ * ```
+ */
+export type TestExternalPublicInstanceFromMacro<
+  T,
+  Attrs,
+  El extends Element
+> = PublicInstanceFromMacro<T, Attrs, El, true, true>;

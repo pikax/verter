@@ -161,7 +161,7 @@ describe("process template plugins element", () => {
       const { result } = parse(`<component :is="as || 'div'"></component>`);
 
       expect(result).toContain(
-        "const ___VERTER___component_render=___VERTER___ctx.as || 'div';\n<___VERTER___component_render ></___VERTER___component_render>"
+        "const ___VERTER___component_render=___VERTER___extractRenderComponent(___VERTER___ctx.as || 'div');\n<___VERTER___component_render ></___VERTER___component_render>"
       );
     });
   });

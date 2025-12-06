@@ -6,13 +6,14 @@
  */
 import "../tsx/tsx";
 import { describe, it, assertType } from "vitest";
-import type { defineComponent, VNode } from "vue";
+import { defineComponent, VNode } from "vue";
 import {
   KeepAlive,
   Transition,
   TransitionGroup,
   Teleport,
   Suspense,
+  defineAsyncComponent,
 } from "vue";
 import type {
   GetVueComponent,
@@ -213,6 +214,25 @@ describe("components helpers", () => {
     it("allows empty object", () => {
       type Options = ReturnType<typeof DefineOptions<{}, never, never>>;
       assertType<Options>({} as {});
+    });
+
+    it("from defineAsyncComponent", () => {
+      const component = defineAsyncComponent(() =>
+        Promise.resolve(
+          defineComponent({
+            props: {
+              message: String,
+            },
+          })
+        )
+      );
+
+      type R = GetVueComponent<typeof component>;
+      type Expected = InstanceType<typeof component>;
+      assertType<R>({} as Expected);
+      assertType<Expected>({} as R);
+      // @ts-expect-error - R is not any/unknown, should not accept unrelated types
+      assertType<R>({} as { unrelated: true });
     });
   });
 

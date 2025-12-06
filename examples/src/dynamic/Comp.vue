@@ -12,4 +12,5 @@ defineSlots<{
   <component :is="as || 'div'">
     <slot />
   </component>
+  <component is="div"> </component>
 </template>

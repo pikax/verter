@@ -5,8 +5,8 @@ import type { ExtractFromHTMLElement } from "../tsx/components-tsx";
  * Extracts the instance type from a Vue component definition.
  *
  * This utility type handles different component definition patterns:
- * - Class-based components (constructors): Returns the instance type
- * - Functional components: Determines return type (Comment, Fragment, or HTMLElement)
+ * - Class-based components (constructnal components: Determines reors): Returns the instance type
+ * - Functioturn type (Comment, Fragment, or HTMLElement)
  * - HTMLElement: Returns the element type directly
  * - Non-component types: Returns `never`
  *
@@ -33,7 +33,9 @@ import type { ExtractFromHTMLElement } from "../tsx/components-tsx";
  *
  * @typeParam T - The component definition or element type to extract from
  */
-export type GetVueComponent<T> = T extends { new (): infer I }
+export type GetVueComponent<T> = T extends {
+  new (): infer I extends { $props: any };
+}
   ? I
   : T extends (...args: any) => infer R
   ? void extends R
@@ -43,8 +45,14 @@ export type GetVueComponent<T> = T extends { new (): infer I }
     : HTMLElement
   : T extends HTMLElement
   ? T
+  : T extends { $props: any }
+  ? T
+  : T extends { new (): infer I; prototype: HTMLElement }
+  ? I
   : never;
 
+// prototype: HTMLElement;
+// new(): HTMLElement;
 /**
  * Helper function to maintain literal types for `name` and `inheritAttrs` options.
  *
@@ -202,6 +210,33 @@ export type ExtractComponent<T> = GetVueComponent<T> extends never
     ? ExtractComponents<T, never>
     : never
   : T;
+
+export type ExtractRenderComponent<T> = T extends {
+  new (): infer I;
+}
+  ? I extends { $props: any }
+    ? T
+    : I extends HTMLElement
+    ? (props: ExtractFromHTMLElement<I>) => I
+    : I
+  : T extends (...args: any) => infer R
+  ? void extends R
+    ? typeof import("vue").Comment
+    : R extends Array<any>
+    ? typeof import("vue").Fragment
+    : HTMLElement
+  : T extends HTMLElement
+  ? (props: ExtractFromHTMLElement<T>) => T
+  : T extends keyof import("vue").NativeElements
+  ? (props: import("vue").NativeElements[T]) => JSX.Element
+  : (props: {}) => JSX.Element;
+
+export declare function extractRenderComponent<T extends string>(
+  t: T
+): ExtractRenderComponent<T>;
+export declare function extractRenderComponent<T>(
+  t: T
+): ExtractRenderComponent<T>;
 
 /**
  * Runtime helper function for extracting components from an object.
