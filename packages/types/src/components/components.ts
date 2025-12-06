@@ -227,9 +227,16 @@ export type ExtractRenderComponent<T> = T extends {
     : HTMLElement
   : T extends HTMLElement
   ? (props: ExtractFromHTMLElement<T>) => T
-  : never;
+  : T extends keyof import("vue").NativeElements
+  ? (props: import("vue").NativeElements[T]) => JSX.Element
+  : (props: {}) => JSX.Element;
 
-export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
+export declare function extractRenderComponent<T extends string>(
+  t: T
+): ExtractRenderComponent<T>;
+export declare function extractRenderComponent<T>(
+  t: T
+): ExtractRenderComponent<T>;
 
 /**
  * Runtime helper function for extracting components from an object.
