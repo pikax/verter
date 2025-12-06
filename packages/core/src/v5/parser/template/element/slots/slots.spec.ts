@@ -511,7 +511,7 @@ describe("parser template slots", () => {
       expect(result).toMatchObject({
         slot: {
           type: TemplateTypes.SlotRender,
-          parent: {},
+          parent: null,
           name: null,
           prop: {
             type: TemplateTypes.Directive,
@@ -521,7 +521,7 @@ describe("parser template slots", () => {
               {
                 type: TemplateTypes.Binding,
                 name: "foo",
-                ignore: false,
+                ignore: true,
               },
             ],
             node: {
@@ -546,7 +546,7 @@ describe("parser template slots", () => {
       expect(result).toMatchObject({
         slot: {
           type: TemplateTypes.SlotRender,
-          parent: {},
+          parent: null,
           name: [
             {
               type: TemplateTypes.Binding,
@@ -568,7 +568,7 @@ describe("parser template slots", () => {
               {
                 type: TemplateTypes.Binding,
                 name: "foo",
-                ignore: false,
+                ignore: true,
               },
             ],
             node: {
@@ -592,7 +592,7 @@ describe("parser template slots", () => {
       expect(result).toMatchObject({
         slot: {
           type: TemplateTypes.SlotRender,
-          parent: {},
+          parent: null,
           name: [
             {
               type: TemplateTypes.Binding,
@@ -614,7 +614,7 @@ describe("parser template slots", () => {
               {
                 type: TemplateTypes.Binding,
                 name: "foo",
-                ignore: false,
+                ignore: true,
               },
             ],
             node: {
@@ -644,7 +644,7 @@ describe("parser template slots", () => {
       expect(result).toMatchObject({
         slot: {
           type: TemplateTypes.SlotRender,
-          parent: {},
+          parent: null,
           name: null,
           prop: {
             type: TemplateTypes.Directive,
@@ -654,7 +654,7 @@ describe("parser template slots", () => {
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
-                ignore: false,
+                ignore: true,
               },
             ],
             node: {
@@ -679,7 +679,7 @@ describe("parser template slots", () => {
       expect(result).toMatchObject({
         slot: {
           type: TemplateTypes.SlotRender,
-          parent: {},
+          parent: null,
           name: [
             {
               type: TemplateTypes.Binding,
@@ -701,7 +701,7 @@ describe("parser template slots", () => {
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
-                ignore: false,
+                ignore: true,
               },
             ],
             node: {
@@ -726,7 +726,7 @@ describe("parser template slots", () => {
       expect(result).toMatchObject({
         slot: {
           type: TemplateTypes.SlotRender,
-          parent: {},
+          parent: null,
           name: [
             {
               type: TemplateTypes.Binding,
@@ -748,7 +748,7 @@ describe("parser template slots", () => {
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
-                ignore: false,
+                ignore: true,
               },
             ],
             node: {
@@ -780,7 +780,7 @@ describe("parser template slots", () => {
       expect(result).toMatchObject({
         slot: {
           type: TemplateTypes.SlotRender,
-          parent: {},
+          parent: null,
           name: [
             {
               type: TemplateTypes.Binding,
@@ -802,7 +802,7 @@ describe("parser template slots", () => {
               {
                 type: TemplateTypes.Binding,
                 name: "bar",
-                ignore: false,
+                ignore: true,
               },
             ],
             node: {
@@ -920,7 +920,7 @@ describe("parser template slots", () => {
         expect(result).toMatchObject({
           slot: {
             type: TemplateTypes.SlotRender,
-            parent: {},
+            parent: null,
             name: null,
             prop: {
               type: TemplateTypes.Directive,
@@ -930,7 +930,7 @@ describe("parser template slots", () => {
                 {
                   type: TemplateTypes.Binding,
                   name: "foo",
-                  ignore: false,
+                  ignore: true,
                 },
               ],
               node: {
@@ -955,7 +955,7 @@ describe("parser template slots", () => {
         expect(result).toMatchObject({
           slot: {
             type: TemplateTypes.SlotRender,
-            parent: {},
+            parent: null,
             name: [
               {
                 type: TemplateTypes.Binding,
@@ -977,7 +977,7 @@ describe("parser template slots", () => {
                 {
                   type: TemplateTypes.Binding,
                   name: "foo",
-                  ignore: false,
+                  ignore: true,
                 },
               ],
               node: {
@@ -1001,7 +1001,7 @@ describe("parser template slots", () => {
         expect(result).toMatchObject({
           slot: {
             type: TemplateTypes.SlotRender,
-            parent: {},
+            parent: null,
             name: [
               {
                 type: TemplateTypes.Binding,
@@ -1023,7 +1023,7 @@ describe("parser template slots", () => {
                 {
                   type: TemplateTypes.Binding,
                   name: "foo",
-                  ignore: false,
+                  ignore: true,
                 },
               ],
               node: {
@@ -1053,7 +1053,7 @@ describe("parser template slots", () => {
         expect(result).toMatchObject({
           slot: {
             type: TemplateTypes.SlotRender,
-            parent: {},
+            parent: null,
             name: null,
             prop: {
               type: TemplateTypes.Directive,
@@ -1063,7 +1063,7 @@ describe("parser template slots", () => {
                 {
                   type: TemplateTypes.Binding,
                   name: "bar",
-                  ignore: false,
+                  ignore: true,
                 },
               ],
               node: {
@@ -1088,7 +1088,7 @@ describe("parser template slots", () => {
         expect(result).toMatchObject({
           slot: {
             type: TemplateTypes.SlotRender,
-            parent: {},
+            parent:null,
             name: [
               {
                 type: TemplateTypes.Binding,
@@ -1110,7 +1110,7 @@ describe("parser template slots", () => {
                 {
                   type: TemplateTypes.Binding,
                   name: "bar",
-                  ignore: false,
+                  ignore: true,
                 },
               ],
               node: {
@@ -1135,7 +1135,7 @@ describe("parser template slots", () => {
         expect(result).toMatchObject({
           slot: {
             type: TemplateTypes.SlotRender,
-            parent: {},
+            parent: null,
             name: [
               {
                 type: TemplateTypes.Binding,
@@ -1157,7 +1157,7 @@ describe("parser template slots", () => {
                 {
                   type: TemplateTypes.Binding,
                   name: "bar",
-                  ignore: false,
+                  ignore: true,
                 },
               ],
               node: {
@@ -1189,7 +1189,7 @@ describe("parser template slots", () => {
         expect(result).toMatchObject({
           slot: {
             type: TemplateTypes.SlotRender,
-            parent: {},
+            parent: null,
             name: [
               {
                 type: TemplateTypes.Binding,
@@ -1211,7 +1211,7 @@ describe("parser template slots", () => {
                 {
                   type: TemplateTypes.Binding,
                   name: "bar",
-                  ignore: false,
+                  ignore: true,
                 },
               ],
               node: {

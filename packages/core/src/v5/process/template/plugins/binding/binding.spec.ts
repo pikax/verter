@@ -82,7 +82,7 @@ describe("process template plugins binding", () => {
   test("args", () => {
     const { result } = parse(`<div :test="(e: Argument)=> e + test" />`);
     expect(result).toMatchInlineSnapshot(
-      `"<div :test="(e: ___VERTER___ctx.Argument)=> e + ___VERTER___ctx.test" />"`
+      `"<div :test="(e: Argument)=> e + ___VERTER___ctx.test" />"`
     );
   });
   test(':[msg]="msg"', () => {
@@ -176,6 +176,46 @@ describe("process template plugins binding", () => {
       expect(result).toMatchInlineSnapshot(
         `"{{ [___VERTER___ctx.test, { test: ___VERTER___ctx.test }, [___VERTER___ctx.test]] }}"`
       );
+    });
+  });
+
+  describe("type assertions", () => {
+    test("does not prefix inside type assertions", () => {
+      const { result } = parse(`{{
+        () => {
+          let a = {} as {
+            foo: 1;
+          };
+          a;
+        }
+      }}`);
+      // 'as' should NOT be prefixed with ___VERTER___ctx
+      // object properties in type annotation should NOT be prefixed
+      expect(result).not.toContain("___VERTER___ctx.as");
+      expect(result).not.toContain("___VERTER___ctx.foo");
+    });
+  });
+
+  describe("arrow function parameters", () => {
+    test("does not prefix arrow function parameters", () => {
+      const { result } = parse(`{{
+        (foo:string)=> {
+          foo.toLowerCase();
+        }
+      }}`);
+      // 'foo' inside the arrow function body should NOT be prefixed
+      // Only the first 'foo' (the parameter) might appear in output, but not prefixed
+      const lines = result.split('\n');
+      const bodyLine = lines.find(line => line.includes('toLowerCase'));
+      if (bodyLine) {
+        expect(bodyLine).not.toContain("___VERTER___ctx.foo");
+      }
+    });
+
+    test("ignores arrow function parameters when binding", () => {
+      const { result } = parse(`{{ (event) => { event.target } }}`);
+      // 'event' parameter should not be prefixed with ___VERTER___ctx
+      expect(result).not.toContain("___VERTER___ctx.event");
     });
   });
 });

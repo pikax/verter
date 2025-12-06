@@ -122,7 +122,8 @@ export function handleSetupNode(
                   rest: false,
                   declare: node.declare,
                 } as ScriptDeclaration;
-              });
+              })
+              .filter(Boolean) as ScriptDeclaration[];
           });
 
           this.skip();

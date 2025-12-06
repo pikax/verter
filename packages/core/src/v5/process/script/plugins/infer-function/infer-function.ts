@@ -32,7 +32,9 @@ export const InferFunctionPlugin = definePlugin({
     // check if has types
     if (ctx.block.lang === "ts") {
       if (item.params && item.params.length > 0) {
-        if (item.params.every((p) => p.type === "Identifier")) {
+        if (
+          item.params.every((p) => p.type === "Identifier" && !p.typeAnnotation)
+        ) {
           // we can patch
 
           const template = ctx.blocks.find(
@@ -67,7 +69,12 @@ export const InferFunctionPlugin = definePlugin({
           }${ctx.generic ? `<${ctx.generic.declaration}>` : ""}>`;
           let property: string | undefined;
 
-          if ("event" in directive && directive.event && directive.arg && directive.arg.length > 0) {
+          if (
+            "event" in directive &&
+            directive.event &&
+            directive.arg &&
+            directive.arg.length > 0
+          ) {
             const argName = directive.arg[0].name;
             if (!argName) {
               throw new Error("Unable to infer event name");
@@ -95,11 +102,7 @@ export const InferFunctionPlugin = definePlugin({
               );
             } else {
               const text = `]: Parameters<${type}["${property}"]>`;
-              s.overwrite(
-                end,
-                end + 1,
-                text + s.original[end]
-              );
+              s.overwrite(end, end + 1, text + s.original[end]);
             }
           }
         }

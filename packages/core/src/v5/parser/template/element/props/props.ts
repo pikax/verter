@@ -7,6 +7,7 @@ import type {
 import { VerterNode } from "../../../walk";
 import {
   TemplateBinding,
+  TemplateBrokenExpression,
   TemplateDirective,
   TemplateFunction,
   TemplateLiteral,
@@ -171,7 +172,12 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
   context: PropsContext
 ): [
   TemplateProp | TemplateDirective,
-  ...Array<TemplateBinding | TemplateFunction | TemplateLiteral>
+  ...Array<
+    | TemplateBinding
+    | TemplateFunction
+    | TemplateLiteral
+    | TemplateBrokenExpression
+  >
 ] {
   if (prop.type === NodeTypes.ATTRIBUTE) {
     return [

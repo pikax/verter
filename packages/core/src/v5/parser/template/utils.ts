@@ -6,6 +6,7 @@ import {
   type ExpressionNode,
 } from "@vue/compiler-core";
 import {
+  TemplateBrokenExpression,
   TemplateComment,
   TemplateCondition,
   TemplateDirective,
@@ -27,7 +28,7 @@ import { walk } from "@vue/compiler-sfc";
 import * as babel_types from "@babel/types";
 import { patchAcornNodeLoc, patchBabelNodeLoc } from "../../utils/node/node.js";
 import { BindingPattern, VerterASTNode } from "../ast/types.js";
-import { parseAcornLoose } from "../ast/ast.js";
+import { parseAcornLoose, parseOXC } from "../ast/ast.js";
 import type AcornTypes from "acorn";
 
 const Keywords =
@@ -48,9 +49,18 @@ export function retrieveBindings(
     ignoredIdentifiers: string[];
   },
   directive: null | DirectiveNode = null
-): Array<TemplateBinding | TemplateFunction | TemplateLiteral> {
-  const bindings: Array<TemplateBinding | TemplateFunction | TemplateLiteral> =
-    [];
+): Array<
+  | TemplateBinding
+  | TemplateFunction
+  | TemplateLiteral
+  | TemplateBrokenExpression
+> {
+  const bindings: Array<
+    | TemplateBinding
+    | TemplateFunction
+    | TemplateLiteral
+    | TemplateBrokenExpression
+  > = [];
 
   if (exp.type !== NodeTypes.SIMPLE_EXPRESSION) {
     return bindings;
@@ -70,25 +80,37 @@ export function retrieveBindings(
       exp,
     });
   } else if (exp.ast) {
+    patchBabelNodeLoc(exp.ast as babel_types.Node, exp);
     bindings.push(...getASTBindings(exp.ast, context, exp));
-  } else {
-    const ast = parseAcornLoose(exp.content);
+  } else if (exp.content.trim() !== "") {
+    const ast = parseOXC(exp.content)?.program?.body[0];
     if (ast) {
       bindings.push(...getASTBindings(ast, context, exp));
     } else {
       bindings.push({
-        type: TemplateTypes.Binding,
+        type: TemplateTypes.BrokenExpression,
         node: exp,
-        context,
-
-        value: exp.content,
-        invalid: true,
-        ignore: false,
-        name: undefined,
-        parent: null,
-        exp,
+        directive,
       });
     }
+
+    // const ast = parseAcornLoose(exp.content);
+    // if (ast) {
+    //   bindings.push(...getASTBindings(ast, context,  exp));
+    // } else {
+    //   bindings.push({
+    //     type: TemplateTypes.Binding,
+    //     node: exp,
+    //     context,
+
+    //     value: exp.content,
+    //     invalid: true,
+    //     ignore: false,
+    //     name: undefined,
+    //     parent: null,
+    //     exp,
+    //   });
+    // }
   }
 
   return bindings;
@@ -108,14 +130,54 @@ export function getASTBindings(
   walk(ast, {
     enter(
       n: babel_types.Node | VerterASTNode,
-      parent: babel_types.Node | VerterASTNode
+      parent: babel_types.Node | VerterASTNode,
+      key: string | number | null
     ) {
+      const inheritedIgnoreBindings =
+        // @ts-expect-error internal flag used at runtime
+        parent?._ignoreBindings === true;
+
+      // @ts-expect-error internal flag used at runtime
+      n._ignoreBindings = inheritedIgnoreBindings;
+
+      if (
+        !inheritedIgnoreBindings &&
+        n.type === "ObjectExpression" &&
+        parent &&
+        (parent.type === "TSAsExpression" ||
+          parent.type === "TSSatisfiesExpression")
+      ) {
+        // Object literals used purely in type assertions/satisfies should not contribute bindings
+        // @ts-expect-error internal flag used at runtime
+        n._ignoreBindings = true;
+      }
+
       const ignoredIdentifiers: string[] =
         // @ts-expect-error
         (n._ignoredIdentifiers = [
           // @ts-expect-error
           ...(parent?._ignoredIdentifiers || context.ignoredIdentifiers),
         ]);
+
+      if (parent) {
+        if (
+          (parent.type === "ClassMethod" && key === "key") ||
+          (parent.type === "ObjectProperty" && key === "key") ||
+          (parent.type === "MemberExpression" &&
+            key === "property" &&
+            (!exp ||
+              ("content" in exp &&
+                typeof exp.content === "string" &&
+                exp.content[
+                  n.start! -
+                    2 /* the AST always starts at 1 and we want the previous */
+                ]) !== "[")) ||
+          (parent.type === "TSTypeReference" && key === "typeName")
+        ) {
+          this.skip();
+          return;
+        }
+      }
 
       switch (n.type) {
         case "FunctionDeclaration":
@@ -129,6 +191,21 @@ export function getASTBindings(
           params.forEach((param) => {
             if (param.type === "Identifier") {
               ignoredIdentifiers.push(param.name);
+            } else if (
+              param.type === "RestElement" &&
+              param.argument.type === "Identifier"
+            ) {
+              ignoredIdentifiers.push(param.argument.name);
+            } else if (param.type === "AssignmentPattern") {
+              const left = param.left;
+              if (left.type === "Identifier") {
+                ignoredIdentifiers.push(left.name);
+              }
+            } else if (
+              param.type === "ObjectPattern" ||
+              param.type === "ArrayPattern"
+            ) {
+              collectDeclaredIds(param as BindingPattern, ignoredIdentifiers);
             }
           });
 
@@ -164,15 +241,59 @@ export function getASTBindings(
         }
 
         case "Identifier": {
+          // @ts-expect-error internal flag used at runtime
+          if (n._ignoreBindings === true) {
+            this.skip();
+            return;
+          }
+
           const name = n.name;
           if (
             parent &&
-            (("property" in parent && parent.property === n) ||
-              ("key" in parent && parent.key === n))
+            (parent.type === "ObjectProperty" || parent.type === "Property") &&
+            (parent as babel_types.ObjectProperty | babel_types.ObjectMethod)
+              .key === n
           ) {
             this.skip();
             return;
           }
+          // console.log("Identifier:", name, ast);
+          if (
+            exp &&
+            parent &&
+            (("property" in parent && parent.property === n) ||
+              ("key" in parent && parent.key === n))
+          ) {
+            const content =
+              exp?.type === NodeTypes.SIMPLE_EXPRESSION
+                ? // @ts-expect-error TODO Fix
+                  exp.content.slice(
+                    parent.start! - ast.start!,
+                    parent.end! - ast.start!
+                  )
+                : (parent as any).loc.source;
+
+            const accessor = content[n.start! - parent.start! - 1];
+
+            if (accessor === ".") {
+              this.skip();
+              return;
+            }
+          }
+
+          // if (
+          //   parent &&
+          //   (("property" in parent &&
+          //     parent.property === n &&
+          //     !(
+          //       (parent as any).extra?.parenthesized === true &&
+          //       parent.loc.source[(parent as any).extra.parenStart] === "["
+          //     )) ||
+          //     ("key" in parent && parent.key === n))
+          // ) {
+          //   this.skip();
+          //   return;
+          // }
           // this is the node where acorn fails
           if (isAcorn && name === "✖") {
             this.skip();
@@ -200,8 +321,38 @@ export function getASTBindings(
           });
           break;
         }
+        // case "ObjectProperty": {
+        //   if (n.key.type === "Identifier") {
+        //     ignoredIdentifiers.push(n.key.name);
+        //   }
+        //   break;
+        // }
+        case "TSPropertySignature": {
+          if (n.key.type === "Identifier") {
+            ignoredIdentifiers.push(n.key.name);
+          }
+          break;
+        }
+        // case "ClassExpression": {
+        //   if (n.id && n.id.type === "Identifier") {
+        //     bindings.push({
+        //       type: TemplateTypes.Binding,
+        //       // @ts-expect-error not correct type
+        //       node: exp ? patchBabelNodeLoc(n.id, exp) : n.id,
+        //       name: n.id.name,
+        //       parent: null,
+        //       ignore: true,
+        //       directive: null,
+        //       exp: exp as SimpleExpressionNode | null,
+        //     });
+
+        //     ignoredIdentifiers.push(n.id.name);
+        //   }
+        //   // this.skip();
+        //   break;
+        // }
         default: {
-          if (n.type.endsWith("Literal")) {
+          if (n.type.endsWith("Literal") && !n.type.startsWith("TS")) {
             // @ts-expect-error not correct type
             const pNode = exp && !isAcorn ? patchBabelNodeLoc(n, exp) : n;
             let content = "";
@@ -216,7 +367,7 @@ export function getASTBindings(
               type: TemplateTypes.Literal,
               content,
               value,
-              // @ts-expect-error
+              // @ts-expect-error not correct type
               node: pNode,
             });
           }
@@ -232,6 +383,8 @@ export function getASTBindings(
     leave(n: babel_types.Node) {
       // @ts-expect-error
       delete n._ignoredIdentifiers;
+      // @ts-expect-error
+      delete n._ignoreBindings;
     },
   });
 
@@ -261,14 +414,27 @@ function collectDeclaredIds(node: VerterASTNode, ignoredIdentifiers: string[]) {
       break;
     case "ObjectPattern":
       for (const prop of node.properties) {
-        if (prop.type === "Property") {
-          // { key: value } or shorthand
-          collectDeclaredIds(prop.value, ignoredIdentifiers);
-        } else if (prop.type === "RestElement") {
-          collectDeclaredIds(prop.argument, ignoredIdentifiers);
-        }
+        collectDeclaredIds(prop, ignoredIdentifiers);
+        // if (prop.type === "Property") {
+        //   // { key: value } or shorthand
+        //   collectDeclaredIds(prop.value, ignoredIdentifiers);
+        // } else if (prop.type === "RestElement") {
+        //   collectDeclaredIds(prop.argument, ignoredIdentifiers);
+        // } else if (prop.type === "ObjectProperty") {
+        //   collectDeclaredIds(prop.value, ignoredIdentifiers);
+        // }
       }
       break;
+    case "Property": {
+      collectDeclaredIds(node.value, ignoredIdentifiers);
+      break;
+    }
+    // @ts-expect-error TODO fix
+    case "ObjectProperty": {
+      // @ts-expect-error TODO fix
+      collectDeclaredIds(node.value, ignoredIdentifiers);
+      break;
+    }
     // add more cases if you need to handle TS-specific patterns, etc.
   }
 }
@@ -288,6 +454,7 @@ export function createTemplateTypeMap() {
     [TemplateTypes.Interpolation]: [] as Array<TemplateInterpolation>,
     [TemplateTypes.Function]: [] as Array<TemplateFunction>,
     [TemplateTypes.Literal]: [] as Array<TemplateLiteral>,
+    [TemplateTypes.BrokenExpression]: [] as Array<TemplateBrokenExpression>,
   } satisfies {
     [K in TemplateTypes]: Array<TemplateItemByType[K]>;
   };

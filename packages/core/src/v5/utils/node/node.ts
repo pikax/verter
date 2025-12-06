@@ -18,11 +18,54 @@ export function patchBabelNodeLoc<T extends babel_types.Node>(
         node.loc.start.index - 1,
         node.loc.end.index - 1
       );
+  } else {
+    return patchOXCNodeLoc(node as any, templateNode) as babel_types.Node & {
+      loc: Node["loc"] & babel_types.Node["loc"];
+    };
   }
 
   return node as babel_types.Node & {
     loc: Node["loc"] & babel_types.Node["loc"];
   };
+}
+
+export function patchOXCNodeLoc<T extends import("oxc-parser").Node>(
+  node: T,
+  templateNode: Node
+) {
+  const source = templateNode.loc.source;
+  const lineOffsets: number[] = [];
+  let currentOffset = 0;
+  for (let i = 0; i < source.length; i++) {
+    if (source[i] === "\n") {
+      lineOffsets.push(currentOffset);
+    }
+    currentOffset++;
+  }
+
+  const startLine = lineOffsets.findIndex((offset) => offset >= node.start);
+  const endLine = lineOffsets.findIndex((offset) => offset >= node.end);
+
+  const loc = {
+    start: {
+      line: templateNode.loc.start.line + startLine + 1,
+      column: lineOffsets[startLine - 1]
+        ? node.start - lineOffsets[startLine - 1]
+        : templateNode.loc.start.column + node.start,
+    },
+    end: {
+      line: templateNode.loc.start.line + endLine + 1,
+      column: lineOffsets[endLine - 1]
+        ? node.end - lineOffsets[endLine - 1]
+        : templateNode.loc.start.column + node.end,
+    },
+    source: source.slice(node.start, node.end),
+  };
+
+  // @ts-expect-error
+  node.loc = loc;
+
+  return node;
 }
 
 export function patchBabelPosition(
@@ -32,7 +75,7 @@ export function patchBabelPosition(
   pos.line = offsetPos.line + pos.line - 1;
   pos.column = offsetPos.column + pos.column - 1;
   // @ts-expect-error not part of pos
-  pos.offset = offsetPos.offset + pos.index - 1;
+  pos.offset = offsetPos.offset + (pos.index ?? pos.start) - 1;
 
   return pos as babel_types.SourceLocation["start"] & Position;
 }

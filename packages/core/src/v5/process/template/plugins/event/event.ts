@@ -9,6 +9,17 @@ const IgnoredASTTypes = new Set([
   "FunctionExpression",
 ]);
 
+function extractASTType(node: import("@babel/types").Node): string {
+  if (node.type === "Program") {
+    const body = node.body[0];
+    if (!body) return node.type;
+    if (body.type === "ExpressionStatement") {
+      return extractASTType(body.expression);
+    }
+  }
+  return node.type;
+}
+
 export const EventPlugin = declareTemplatePlugin({
   name: "VerterPropEvent",
 
@@ -37,7 +48,7 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
       return;
     }
 
-    if (IgnoredASTTypes.has(exp.ast.type)) {
+    if (IgnoredASTTypes.has(extractASTType(exp.ast))) {
       return;
     }
     ctx.items.push(createHelperImport(["eventCallbacks"], ctx.prefix));

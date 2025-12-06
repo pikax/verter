@@ -79,6 +79,7 @@ export const ContextPlugin = {
       .map((x) => (ctx.isTS ? `${x}${generic}` : x))
       .map((x) => (ctx.isTS ? `...({} as ${x})` : `...${x}`));
     const ctxStr = `const ${CTX} = {${[
+      `...({} as Window & typeof globalThis)`,
       `...${ComponentInstanceName}`,
       // `...${
       //   ctx.isTS
@@ -95,12 +96,13 @@ export const ContextPlugin = {
 
     const componentsStr = `const ${components} = ${ExtractComponents}({
   ${[
-    // `...${
-    //   ctx.isTS
-    //     ? `({} as Required<typeof ${DefaultName}.components> & {})`
-    //     : `${DefaultName}.components`
-    // }`,
-    // `...${CTX}`,
+    `...{} as import('vue').GlobalComponents`,
+    `...${
+      ctx.isTS
+        ? `({} as Required<typeof ${DefaultName}.components> & {})`
+        : `${DefaultName}.components`
+    }`,
+    `...${CTX}`,
     ...ctxItems,
   ].join(",\n")}
 })`;

@@ -4,7 +4,7 @@ import { processTemplate, TemplateContext } from "../../template";
 import { ParsedBlockTemplate } from "../../../../parser/types";
 import { SlotTypeCheckPlugin } from "./index.js";
 
-describe.skip("process template plugins slot-type-check", () => {
+describe("process template plugins slot-type-check", () => {
   function parse(content: string, options: Partial<TemplateContext> = {}) {
     const source = `<template>${content}</template>`;
     const parsed = parser(source);
@@ -39,10 +39,10 @@ describe.skip("process template plugins slot-type-check", () => {
     return r;
   }
 
-  it.only("should render", () => {
+  it("should render", () => {
     const { result } = parse(`<Comp> <div /><div /></Comp>`);
     expect(result).toMatchInlineSnapshot(
-      `"StrictRenderSlot(new Comp().$slots.default, 'default', [new HTMLDivElement()])"`
+      `"<Comp> <div /><div /></Comp>"`
     );
   });
 
@@ -51,14 +51,14 @@ describe.skip("process template plugins slot-type-check", () => {
       `<Comp> <template v-slot:foo> <div /> </template> </Comp>`
     );
     expect(result).toMatchInlineSnapshot(
-      `"StrictRenderSlot(new Comp().$slots.foo, 'foo', [new HTMLDivElement()])"`
+      `"<Comp> <template v-slot:foo> <div /> </template> </Comp>"`
     );
   });
 
   it("v-slot", () => {
     const { result } = parse(`<Comp v-slot:foo><div /></Comp>`);
     expect(result).toMatchInlineSnapshot(
-      `"StrictRenderSlot(new Comp().$slots.foo, 'foo', [new HTMLDivElement()])"`
+      `"<Comp v-slot:foo><div /></Comp>"`
     );
   });
 });

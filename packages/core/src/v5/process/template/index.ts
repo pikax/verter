@@ -19,6 +19,7 @@ export const DefaultPlugins = [
   Plugins.TemplateTagPlugin,
   Plugins.SFCCleanerPlugin,
   Plugins.ImportsPlugin,
+  Plugins.BrokenExpressionPlugin,
 ];
 
 export const ScriptDefaultPlugins = [];

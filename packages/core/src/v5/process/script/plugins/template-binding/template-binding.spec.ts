@@ -60,7 +60,7 @@ describe("process script plugin template-binding", () => {
     const { result } = parse(`let a = 0`, false, "js");
     expect(result).toMatchInlineSnapshot(
       `
-      "/** @returns {{}} */;function ___VERTER___TemplateBindingFN  (){let a = 0;return{...{}}}
+      "/** @returns {{}} */;function ___VERTER___TemplateBindingFN  (){let a = 0;return{}}
       /** @typedef {ReturnType<typeof ___VERTER___TemplateBindingFN>} ___VERTER___TemplateBinding */
       /** @type {___VERTER___TemplateBinding} */
       export const ___VERTER___TemplateBinding = null;
@@ -78,7 +78,7 @@ describe("process script plugin template-binding", () => {
       ""
     );
     expect(result).toMatchInlineSnapshot(`
-      "<template><div>{{ a }}</div></template>/** @returns {{a:___VERTER___UnwrapRef<typeof a>}} */;function ___VERTER___TemplateBindingFN  (){let a = 0;return{a/*67,68*/: ___VERTER___unref(a),...{}}}
+      "<template><div>{{ a }}</div></template>/** @returns {{a:import('vue').UnwrapRef<typeof a>}} */;function ___VERTER___TemplateBindingFN  (){let a = 0;return{a/*67,68*/: ___VERTER___unref(a)}}
       /** @typedef {ReturnType<typeof ___VERTER___TemplateBindingFN>} ___VERTER___TemplateBinding */
       /** @type {___VERTER___TemplateBinding} */
       export const ___VERTER___TemplateBinding = null;
@@ -95,9 +95,7 @@ describe("process script plugin template-binding", () => {
       ""
     );
 
-    expect(result).toMatchInlineSnapshot(
-      `"<template><div>{{ a }}</div></template>;function ___VERTER___TemplateBindingFN  (){let a = 0;return{a/*67,68*/: a as unknown as ___VERTER___UnwrapRef<typeof a>,...{}}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>;"`
-    );
+    expect(result).toMatchInlineSnapshot(`"<template><div>{{ a }}</div></template>;function ___VERTER___TemplateBindingFN  (){let a = 0;return{a/*67,68*/: a as unknown as import('vue').UnwrapRef<typeof a>}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN>;"`)
   });
 
   it("async", () => {
@@ -108,9 +106,7 @@ describe("process script plugin template-binding", () => {
       "<template><div>{{ a }}</div></template>",
       ""
     );
-    expect(result).toMatchInlineSnapshot(
-      `"<template><div>{{ a }}</div></template>;async function ___VERTER___TemplateBindingFN  (){let a = await Promise.resolve(0);return{a/*67,68*/: a as unknown as ___VERTER___UnwrapRef<typeof a>,...{}}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN> extends Promise<infer R>?R:never;"`
-    );
+    expect(result).toMatchInlineSnapshot(`"<template><div>{{ a }}</div></template>;async function ___VERTER___TemplateBindingFN  (){let a = await Promise.resolve(0);return{a/*67,68*/: a as unknown as import('vue').UnwrapRef<typeof a>}};export type ___VERTER___TemplateBinding=ReturnType<typeof ___VERTER___TemplateBindingFN> extends Promise<infer R>?R:never;"`)
   });
 
   it("Component", () => {
@@ -122,7 +118,8 @@ describe("process script plugin template-binding", () => {
       ""
     );
     expect(result).toMatchInlineSnapshot(`
-      "<template><Comp>{{ a }}</Comp></template>/** @returns {{Comp:___VERTER___UnwrapRef<typeof Comp>,a:___VERTER___UnwrapRef<typeof a>}} */;function ___VERTER___TemplateBindingFN  (){import Comp from './Comp.vue'; let a = 0;return{Comp/*72,76*/: ___VERTER___unref(Comp),a/*100,101*/: ___VERTER___unref(a),...{}}}
+      "<template><Comp>{{ a }}</Comp></template>/** @returns {{Comp:import('vue').UnwrapRef<typeof Comp>,a:import('vue').UnwrapRef<typeof a>}} */;function ___VERTER___TemplateBindingFN  (){import Comp from './Comp.vue'; let a = 0;return{Comp/*72,76*/: ___VERTER___unref(Comp),
+      a/*100,101*/: ___VERTER___unref(a)}}
       /** @typedef {ReturnType<typeof ___VERTER___TemplateBindingFN>} ___VERTER___TemplateBinding */
       /** @type {___VERTER___TemplateBinding} */
       export const ___VERTER___TemplateBinding = null;

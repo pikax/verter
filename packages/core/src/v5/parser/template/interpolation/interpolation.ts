@@ -1,6 +1,7 @@
 import { type InterpolationNode, NodeTypes } from "@vue/compiler-core";
 import {
   TemplateBinding,
+  TemplateBrokenExpression,
   TemplateFunction,
   TemplateInterpolation,
   TemplateLiteral,
@@ -21,7 +22,7 @@ export function handleInterpolation<
 ):
   | [
       TemplateInterpolation,
-      ...Array<TemplateBinding | TemplateFunction | TemplateLiteral>
+      ...Array<TemplateBinding | TemplateFunction | TemplateLiteral | TemplateBrokenExpression>
     ]
   | null {
   if (node.type !== NodeTypes.INTERPOLATION) {

@@ -60,15 +60,19 @@ function handleClick(event: MouseEvent) {
   emit("click", event);
 }
 
-function handleFocus(event: FocusEvent) {
+function handleFocus(event) {
   emit("focus", event);
 }
 
 // Access specific attrs with typing
 const tabindex = computed(() => {
   const value = attrs.tabindex;
-  return typeof value === "number" ? value : typeof value === "string" ? parseInt(value, 10) : 0;
-});
+  return typeof value === "number"
+    ? value
+    : typeof value === "string"
+    ? parseInt(value, 10)
+    : 0; 
+}); 
 
 const placeholder = computed(() => attrs.placeholder as string | undefined);
 const title = computed(() => attrs.title as string | undefined);
@@ -86,20 +90,20 @@ export default {
   <div class="attrs-wrapper">
     <!-- Manually apply attrs to inner element -->
     <label :for="getAttrId()">{{ label }}</label>
-    <input
+    <input 
       v-bind="attrs"
       :disabled="disabled"
       @click="handleClick"
       @focus="handleFocus"
     />
-    
+
     <!-- Or selectively apply attrs -->
     <div class="custom-element">
       <span :class="getAttrClass()" :style="getAttrStyle()">
         Custom styled element
       </span>
     </div>
-    
+
     <!-- Show attrs info -->
     <div class="attrs-info">
       <p>ID: {{ getAttrId() }}</p>

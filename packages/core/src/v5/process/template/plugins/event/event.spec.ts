@@ -107,4 +107,24 @@ describe("process template plugins event", () => {
       expect(result).toContain(`<div onClick={{test: ___VERTER___ctx.test}} />`);
     });
   });
+
+  describe("inline functions with spread operators", () => {
+    test("function with spread does not wrap in event callback", () => {
+      const { result } = parse(`<div @click="function (...args) {}" />`);
+      expect(result).not.toContain("___VERTER___ctx.args");
+      expect(result).toContain("function (...args)");
+    });
+
+    test("arrow function with spread does not wrap in event callback", () => {
+      const { result } = parse(`<div @input="(...args) => {}" />`);
+      expect(result).toContain("(...args) => {}");
+    });
+
+    test("arrow function with parameter does not wrap in event callback", () => {
+      const { result } = parse(`<div @touchmove="(event) => { event; }" />`);
+      expect(result).not.toContain("___VERTER___eventArgs");
+      expect(result).not.toContain("___VERTER___eventCallbacks");
+      expect(result).toContain("(event) => { event; }");
+    });
+  });
 });

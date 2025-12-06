@@ -145,6 +145,7 @@ export function processTemplate(
     [TemplateTypes.Function]: [],
     [TemplateTypes.Condition]: [],
     [TemplateTypes.Literal]: [],
+    [TemplateTypes.BrokenExpression]: [],
   } as {
     [K in TemplateTypes]: Array<
       (

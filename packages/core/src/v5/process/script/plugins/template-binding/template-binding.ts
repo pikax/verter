@@ -1,6 +1,10 @@
 import { AvailableExports } from "@verter/types/string";
 import { VerterASTNode } from "../../../../parser";
-import { ProcessItemType } from "../../../types";
+import {
+  ProcessItemDefineModel,
+  ProcessItemMacroBinding,
+  ProcessItemType,
+} from "../../../types";
 import { createHelperImport } from "../../../utils";
 import { definePlugin } from "../../types";
 import { generateTypeString } from "../utils";
@@ -60,10 +64,22 @@ export const TemplateBindingPlugin = definePlugin({
     // );
 
     const bindings = new Map<string, VerterASTNode>();
+    const propsBindings = [] as ProcessItemMacroBinding[];
+    const modelBindings = new Map<string, ProcessItemDefineModel>();
     for (const item of ctx.items) {
       switch (item.type) {
         case ProcessItemType.Binding: {
           bindings.set(item.name, item.node);
+          break;
+        }
+        case ProcessItemType.DefineModel: {
+          modelBindings.set(item.name, item);
+          break;
+        }
+        case ProcessItemType.MacroBinding: {
+          if (item.macro === "defineProps") {
+            propsBindings.push(item);
+          }
           break;
         }
         // case ProcessItemType.Import: {
@@ -76,7 +92,8 @@ export const TemplateBindingPlugin = definePlugin({
     }
 
     const unref = ctx.prefix("unref");
-    const unwrapRef = ctx.prefix("UnwrapRef");
+    // const unwrapRef = ctx.prefix("UnwrapRef");
+    const unwrapRef = `import('vue').UnwrapRef`;
     const createMacroReturn = ctx.prefix(
       "createMacroReturn" as AvailableExports
     );
@@ -114,40 +131,43 @@ export const TemplateBindingPlugin = definePlugin({
       (x) => x.type === ProcessItemType.MacroReturn
     );
 
+    const propsReturn = propsBindings
+      .map((x) => x.valueName)
+      .filter((x) => !!x)
+      .map((x) => `...({} as typeof ${x})`)
+      .join(",");
+
+    const modelReturns = Array.from(modelBindings.values()).map(
+      (x) =>
+        `${x.name}/*${x.node.start},${x.node.end}*/: {} as typeof ${x.valueName} extends import('vue').ModelRef<infer V> ? V : ${unwrapRef}<typeof ${x.valueName}>`
+    );
+
+    const returnBindings = usedBindings.map(
+      (x) =>
+        `${x.name}/*${x.start},${x.end}*/: ${
+          isTS
+            ? `${x.name} as unknown as ${unwrapRef}<typeof ${x.name}>`
+            : `${unref}(${x.name})`
+        }`
+    );
+
+    // ..${
+    //     macroReturn ? `${createMacroReturn}(${macroReturn.content})` : "{}"
+    //   }}
+    const macroReturnStr = macroReturn
+      ? `...${createMacroReturn}(${macroReturn.content})`
+      : "";
+
     s.prependRight(
       tag.pos.close.start,
-      `;return{${usedBindings
-        .map(
-          (x) =>
-            `${x.name}/*${x.start},${x.end}*/: ${
-              isTS
-                ? `${x.name} as unknown as ${unwrapRef}<typeof ${x.name}>`
-                : `${unref}(${x.name})`
-            }`
-        )
-        // .concat(
-        //   Object.entries(macroBindings).map(
-        //     ([k, x]) => `${k}:${`${isTS ? `${x} as typeof ${x}` : ""}`}`
-        //   )
-        //   // Object.entries(macroBindings).map(([k, v]) =>
-        //   //   v.map((x) => `${k}:${k}`)
-        //   // )
-        // )
-        // .concat([
-        //   // defineModel regular props
-        //   `${ctx.prefix("defineModel")}:{${defineModels
-        //     .map(
-        //       (x) =>
-        //         // TODO this should be either pointing to the variable or to the function itself
-        //         `${x.name}/*${x.node.start},${x.node.end}*/: ${
-        //           isTS ? `${x.varName} as typeof ${x.varName}` : x.varName
-        //         }`
-        //     )
-        //     .join(",")}}`,
-        // ])
-        .join(",")}${usedBindings.length > 0 ? "," : ""}...${
-        macroReturn ? `${createMacroReturn}(${macroReturn.content})` : "{}"
-      }}`
+      `;return{${[
+        propsReturn,
+        ...modelReturns,
+        ...returnBindings,
+        macroReturnStr,
+      ]
+        .filter((x) => x.length > 0)
+        .join(",\n")}}`
     );
 
     if (!isTS) {
