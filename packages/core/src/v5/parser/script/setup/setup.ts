@@ -97,8 +97,6 @@ export function handleSetupNode(
               ignoredIdentifiers: [],
             });
 
-            const seen = new Set<string>();
-
             if (x.init?.type === "AwaitExpression") {
               isAsync = true;
               items.push({
@@ -115,13 +113,6 @@ export function handleSetupNode(
                   !x.parent?.type.startsWith("TS")
               )
               .map((b) => {
-                // @ts-expect-error
-                const key = `${(b as TemplateBinding).name}:${b.node.start}`;
-                if (seen.has(key)) {
-                  return null;
-                }
-                seen.add(key);
-
                 return {
                   type: ScriptTypes.Declaration,
                   node: b.node as VerterASTNode,
