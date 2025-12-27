@@ -193,6 +193,11 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
       },
     ];
   } else if (BuiltInDirectivesAsProps.has(prop.name)) {
+    const event = prop.name === "on";
+    if (event) {
+      context.ignoredIdentifiers.push("$event");
+    }
+
     const nameBinding = prop.arg
       ? retrieveBindings(prop.arg, context, prop)
       : [];
@@ -205,11 +210,6 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
           x.ignore = false;
           x.skip = true;
         });
-    }
-
-    const event = prop.name === "on";
-    if (event) {
-      context.ignoredIdentifiers.push("$event");
     }
 
     return [
