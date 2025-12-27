@@ -1865,6 +1865,46 @@ describe("instance helpers", () => {
         assertType<string | number | null>(instance.$props.modelValue);
         assertType<string | number | null>(instance.modelValue);
       });
+
+      it("handles default model", () => {
+        const macroReturn = createMacroReturn({
+          model: {
+            modelValue: {
+              value: {} as ModelRef<string, "modelValue">,
+              type: {} as string,
+
+              object: [] as unknown as [
+                string,
+                {
+                  default: "";
+                }
+              ],
+            },
+
+            bool: {
+              value: {} as ModelRef<boolean | undefined, "bool">,
+              type: {} as boolean,
+            },
+          },
+        });
+
+        type Instance = PublicInstanceFromMacro<
+          typeof macroReturn,
+          {},
+          HTMLElement,
+          true
+        >;
+
+        const instance = {} as Instance;
+
+        assertType<string | undefined>(instance.$props.modelValue);
+        assertType<string>(instance.modelValue);
+        assertType<boolean>(instance.$props.bool);
+
+        assertType<typeof instance.$props.modelValue>(undefined);
+        // @ts-expect-error - modelValue should not be undefined
+        assertType<typeof instance.modelValue>(undefined);
+      });
     });
 
     describe("DEV mode parameter", () => {

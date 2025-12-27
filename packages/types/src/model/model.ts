@@ -1,4 +1,4 @@
-import { UnionToIntersection } from "../helpers";
+import { OmitNever, UnionToIntersection } from "../helpers";
 
 /**
  * Extracts model information from a ModelRef type.
@@ -27,6 +27,18 @@ type ExtractModelInfo<T, D extends string> = T extends import("vue").ModelRef<
 export type ModelToModelInfo<T> = {
   [K in keyof T]: ExtractModelInfo<T[K], K & string>;
 };
+
+const foo = defineModel<string>("value");
+const bar = defineModel<string>("count", {
+  default: "hello",
+});
+const baz = defineModel<string>("count", {
+  required: true,
+});
+
+type FOO = ExtractModelInfo<typeof foo, "value">;
+type BAR = ExtractModelInfo<typeof bar, "count">;
+type BAZ = ExtractModelInfo<typeof baz, "count">;
 
 /**
  * Converts model definitions into emit function types.
@@ -61,12 +73,38 @@ export type ModelToEmits<T> = {} extends T
  * The prop name is the custom name if provided, otherwise the property key.
  * Properties with model info of never are excluded.
  */
-export type ModelToProps<T> = ModelToModelInfo<T> extends infer O
+export type ModelToPropsOld<T> = ModelToModelInfo<T> extends infer O
   ? {
       [K in keyof O as O[K] extends never
         ? never
         : O[K] extends { name: infer N extends string }
         ? N
         : K & string]: O[K] extends { type: infer C } ? C : never;
+    } & {
+      [K in keyof O as O[K] extends never
+        ? never
+        : O[K] extends { name: infer N extends string }
+        ? `onUpdate:${N}`
+        : `onUpdate:${K & string}`]?: O[K] extends { type: infer C }
+        ? (v: C) => any
+        : never;
     }
   : never;
+
+export type ModelToProps<T> = OmitNever<{
+  [K in keyof T]: T[K] extends import("vue").ModelRef<boolean | undefined>
+    ? // make boolean default
+      boolean
+    : T[K] extends import("vue").ModelRef<infer TT>
+    ? TT
+    : T[K] extends undefined | import("vue").ModelRef<infer TT>
+    ? TT | undefined
+    : never;
+}>;
+
+export type MacroToPropEvents<T> = {
+  [K in keyof T as `onUpdate:${K &
+    string}`]?: T[K] extends import("vue").ModelRef<infer TT>
+    ? (v: TT) => any
+    : never;
+};

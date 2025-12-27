@@ -110,19 +110,34 @@ export const TemplateBindingPlugin = definePlugin({
     // const defineModels = ctx.items.filter(
     //   (x) => x.type === ProcessItemType.DefineModel
     // );
-    const usedBindings = ctx.templateBindings
+    // const usedBindings = ctx.templateBindings
+    //   .map((x) => {
+    //     if (!x.name) return;
+    //     const b = bindings.get(x.name);
+    //     if (!b) return;
+    //     // rebind path
+    //     return {
+    //       name: x.name,
+    //       start: b.start,
+    //       end: b.end,
+    //     };
+    //   })
+    //   // .map((x) => (x.name ? bindings.get(x.name) : undefined))
+    //   .filter((x) => !!x);
+    const usedBindings = Array.from(
+      new Set(ctx.templateBindings.map((x) => x.name)).values()
+    )
       .map((x) => {
-        if (!x.name) return;
-        const b = bindings.get(x.name);
+        if (!x) return;
+        const b = bindings.get(x);
         if (!b) return;
         // rebind path
         return {
-          name: x.name,
+          name: x,
           start: b.start,
           end: b.end,
         };
       })
-      // .map((x) => (x.name ? bindings.get(x.name) : undefined))
       .filter((x) => !!x);
 
     // .filter((x) => x.name && bindings.has(x.name));
@@ -139,7 +154,7 @@ export const TemplateBindingPlugin = definePlugin({
 
     const modelReturns = Array.from(modelBindings.values()).map(
       (x) =>
-        `${x.name}/*${x.node.start},${x.node.end}*/: {} as typeof ${x.valueName} extends import('vue').ModelRef<infer V> ? V : ${unwrapRef}<typeof ${x.valueName}>`
+        `${x.name}/*${x.node.start},${x.node.end}*/: {} as typeof ${x.valueName} extends import('vue').ModelRef<infer V> ? V extends boolean|undefined ? boolean : V & {b: 1} : ${unwrapRef}<typeof ${x.valueName}> & {a: 1}`
     );
 
     const returnBindings = usedBindings.map(
@@ -162,8 +177,8 @@ export const TemplateBindingPlugin = definePlugin({
       tag.pos.close.start,
       `;return{${[
         propsReturn,
-        ...modelReturns,
         ...returnBindings,
+        ...modelReturns,
         macroReturnStr,
       ]
         .filter((x) => x.length > 0)

@@ -44,6 +44,7 @@ function shouldPrettifyType(
   if (!name) return true;
   if (isTypeDeclaration) {
     if (
+      name.type === "TSBooleanKeyword" ||
       name.type === "TSTypeReference" ||
       (name.type === "TSUnionType" &&
         name.types.every(

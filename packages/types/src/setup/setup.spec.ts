@@ -25,7 +25,7 @@ import {
   NonReturnMacros,
   ExtractPropsFromMacro,
 } from "./setup";
-import { PropType } from "vue";
+import { ModelRef, PropType } from "vue";
 
 describe("Setup helpers", () => {
   // String
@@ -606,6 +606,43 @@ describe("Setup helpers", () => {
       type Model = ExtractModel<Macros>;
 
       assertType<Model["value"]["value"]>("test");
+
+      // @ts-expect-error nonexistent nested property
+      assertType<Model["value"]["foo"]>("");
+
+      // @ts-expect-error nonExistent property
+      assertType<Model["nonExistent"]>("");
+      // @ts-expect-error incorrect type
+      assertType<Model["value"]>(1);
+    });
+
+    it("extracts options", () => {
+      const show = defineModel<boolean>("show", { default: true });
+      const value = defineModel<string>("value", { required: true });
+
+      const macros = {
+        model: {
+          show: {
+            value: show,
+            type: {} as boolean,
+            object: [] as unknown as ["show", { default: true }],
+          },
+          value: {
+            value: value,
+            type: {} as string,
+            object: [] as unknown as ["value", { required: true }],
+          },
+        },
+      };
+      type Model = ExtractModel<typeof macros>;
+      assertType<Model["value"]["value"]>({} as ModelRef<string>);
+      assertType<Model["show"]["value"]>({} as ModelRef<boolean>);
+
+      assertType<Model["value"]["type"]>("" as string);
+      assertType<Model["show"]["type"]>(false as boolean);
+
+      assertType<Model["value"]["object"]>({} as ["value", { required: true }]);
+      assertType<Model["show"]["object"]>({} as ["show", { default: true }]);
 
       // @ts-expect-error nonexistent nested property
       assertType<Model["value"]["foo"]>("");
@@ -2609,7 +2646,7 @@ describe("Setup helpers", () => {
       // Must unwrap MacroKey first
       type Macro = ExtractMacroReturn<MacroRaw>;
       type Props = ExtractPropsFromMacro<ExtractMacroProps<Macro>>;
-      
+
       assertType<Props>({ message: "hello" });
       // Verify Props has the message key
       assertType<string>({} as Props["message"]);
@@ -2626,7 +2663,7 @@ describe("Setup helpers", () => {
       // Must unwrap MacroKey first
       type Macro = ExtractMacroReturn<MacroRaw>;
       type Props = ExtractPropsFromMacro<ExtractMacroProps<Macro>>;
-      
+
       // Optional props should still be extractable
       assertType<Props>({ message: "hello" });
       assertType<Props>({});
@@ -2648,7 +2685,7 @@ describe("Setup helpers", () => {
       // Must unwrap MacroKey first
       type Macro = ExtractMacroReturn<MacroRaw>;
       type Props = ExtractPropsFromMacro<ExtractMacroProps<Macro>>;
-      
+
       assertType<Props>({ required: "hello" });
       assertType<Props>({ required: "hello", optional: 42 });
       // Verify required is present

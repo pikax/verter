@@ -262,15 +262,17 @@ export type MacroOptionsToOptions<T> = T extends {
  */
 export type ExtractModel<T> = ExtractMacro<T, "model", {}>;
 
+export type ExtractOptionalModel<T> = {
+  [K in keyof T]: T[K] extends { object: [any, { default: any }] } ? K : never;
+}[keyof T];
+
 export type MacroToModelType<T> = T extends {
   type: infer TT extends Record<string, any>;
 }
   ? TT
   : T extends { value: infer TV extends Record<string, any> }
   ? TV
-  : {
-      a: T;
-    };
+  : {};
 export type MacroToModelRecord<T> = {
   [K in keyof T]: MacroToModelType<T[K]>;
 };

@@ -1,6 +1,7 @@
 import {
   createMacroReturn,
   CreateMacroReturn,
+  ExtractOptionalModel,
   ExtractPropsFromMacro,
   MacroOptionsToOptions,
   MacroToEmitValue,
@@ -11,7 +12,7 @@ import {
   SlotsToSlotType,
 } from "../setup";
 import { MakePublicProps, MakeInternalProps } from "../props";
-import { ModelToEmits, ModelToProps } from "../model";
+import { MacroToPropEvents, ModelToEmits, ModelToProps } from "../model";
 import { EmitsToProps } from "../emits";
 
 export type CreateTypedInternalInstanceFromNormalisedMacro<
@@ -99,7 +100,23 @@ export type CreateTypedPublicInstanceFromNormalisedMacro<
   $data: DEV extends true ? T["$data"] : {};
   $props: Prettify<
     ToInstanceProps<T["props"], MakeDefaultsOptional> &
-      ModelToProps<MacroToModelRecord<T["model"]>> &
+      // (ModelToProps<MacroToModelRecord<T["model"]>> extends infer M
+      //   ? ExtractOptionalModel<T["model"]> extends infer O extends keyof M
+      //     ? Omit<M, O> & Partial<Pick<M, O>>
+      //     : M
+      //   : {}) & MacroToPropEvents<T['model']>
+      (MacroToModelRecord<T["model"]> extends infer M
+        ? (ModelToProps<M> extends infer MP
+            ? MakeDefaultsOptional extends true
+              ? ExtractOptionalModel<
+                  T["model"]
+                > extends infer O extends keyof MP
+                ? Omit<MP, O> & Partial<Pick<MP, O>>
+                : MP
+              : MP
+            : {}) &
+            MacroToPropEvents<M>
+        : {}) &
       EmitsToProps<MacroToEmitValue<T["emits"]>>
   > &
     (AttrsProps extends true ? Attrs : {});
