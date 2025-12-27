@@ -5,7 +5,7 @@ import {
   TemplateTypes,
 } from "../../../../parser/template/types";
 import { declareTemplatePlugin, TemplateContext } from "../../template";
-import { Node, NodeTypes } from "@vue/compiler-core";
+import { ElementNode, Node, NodeTypes } from "@vue/compiler-core";
 
 export const BlockPlugin = declareTemplatePlugin({
   name: "VerterBlock",
@@ -44,7 +44,13 @@ export const BlockPlugin = declareTemplatePlugin({
       );
 
       // TODO this is not 100% correct, since the child might have a v-if
-      if (ctx.doNarrow && conditions?.conditions.length) {
+      const isSlotElement =
+        parent &&
+        typeof (parent as any).type === "number" &&
+        (parent as ElementNode).type === NodeTypes.ELEMENT &&
+        (parent as ElementNode).tag === "slot";
+
+      if (ctx.doNarrow && !isSlotElement && conditions?.conditions.length) {
         ctx.doNarrow(
           {
             index: first.loc.end.offset,
