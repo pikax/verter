@@ -13,6 +13,7 @@ import type {
   ComponentPublicInstance,
   WatchStopHandle,
   ComponentInternalInstance,
+  Ref,
 } from "vue";
 import {
   CreateTypedInternalInstanceFromNormalisedMacro,
@@ -767,6 +768,12 @@ describe("instance helpers", () => {
             focus: () => void;
             reset: (value: string) => void;
             getValue: () => string;
+
+            shallowObject: Ref<{ foo: 1 }>;
+
+            deepObject: {
+              test: Ref<{ foo: 1 }>;
+            };
           };
         };
         templateRef: {};
@@ -787,6 +794,8 @@ describe("instance helpers", () => {
       assertType<() => void>(instance.focus);
       assertType<(value: string) => void>(instance.reset);
       assertType<() => string>(instance.getValue);
+      assertType<{ foo: 1 }>(instance.shallowObject);
+      assertType<{ test: Ref<{ foo: 1 }> }>(instance.deepObject);
       // Props should still be accessible
       assertType<number>(instance.$props.id);
     });
@@ -2053,7 +2062,9 @@ describe("instance helpers", () => {
 
         // Attrs should be in $attrs, not $props
         type AttrsType = Instance["$attrs"];
-        type AttrsHasClass = AttrsType extends { class?: string } ? true : false;
+        type AttrsHasClass = AttrsType extends { class?: string }
+          ? true
+          : false;
         assertType<AttrsHasClass>({} as true);
       });
 
@@ -2276,7 +2287,9 @@ describe("instance helpers", () => {
         assertType<boolean | undefined>(instance.$props.disabled);
 
         // Fallthrough attrs merged in for testing
-        type HasStyle = PropsWithAttrs extends { style?: object } ? true : false;
+        type HasStyle = PropsWithAttrs extends { style?: object }
+          ? true
+          : false;
         assertType<HasStyle>({} as true);
 
         // Element type is correct

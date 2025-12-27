@@ -114,7 +114,7 @@ export type CreateTypedPublicInstanceFromNormalisedMacro<
   ? unknown extends V
     ? ToInstanceProps<T["props"], true> &
         ModelToProps<MacroToModelRecord<T["model"]>>
-    : V
+    : import("vue").ShallowUnwrapRef<V>
   : ToInstanceProps<T["props"], true> &
       ModelToProps<MacroToModelRecord<T["model"]>>);
 export type PublicInstanceFromMacro<
