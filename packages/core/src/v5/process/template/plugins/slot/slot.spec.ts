@@ -47,20 +47,20 @@ describe("process template plugins slot", () => {
     it("<slot/>", () => {
       const { result } = parse(`<slot/>`);
       expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\.default;<___VERTER___slotComponent\d+\/>/
+        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+\/>/
       );
     });
     it('<slot name="test" />', () => {
       const { result } = parse(`<slot name="test"/>`);
       expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\["test"\];<___VERTER___slotComponent\d+\s\/>/
+        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\["test"\]\);<___VERTER___slotComponent\d+\s\/>/
       );
     });
 
     it(`<slot :name="test"/>`, () => {
       const { result } = parse(`<slot :name="test"/>`);
       expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\[___VERTER___ctx\.test\];<___VERTER___slotComponent\d+\s\/>/
+        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\[___VERTER___ctx\.test\]\);<___VERTER___slotComponent\d+\s\/>/
       );
     });
 
@@ -68,7 +68,7 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot :[msg]="test"/>`);
 
       expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\.default;<___VERTER___slotComponent\d+ \{\.\.\.\{\[___VERTER___ctx\.msg\]:___VERTER___ctx\.test\}\}\/\>/
+        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+ \{\.\.\.\{\[___VERTER___ctx\.msg\]:___VERTER___ctx\.test\}\}\/\>/
       );
     });
 
@@ -77,7 +77,7 @@ describe("process template plugins slot", () => {
         `<slot :[msg]="test" :name="name" v-bind:onTest="()=> callMe()" @bind="bind"/>`
       );
       expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\[___VERTER___ctx\.name\];<___VERTER___slotComponent\d+ \{\.\.\.\{\[___VERTER___ctx\.msg\]:___VERTER___ctx\.test\}\}  onTest=\{\(\)=> ___VERTER___ctx\.callMe\(\)\}\s+onBind=\{___VERTER___ctx\.bind\}\/>/
+        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\[___VERTER___ctx\.name\]\);<___VERTER___slotComponent\d+ \{\.\.\.\{\[___VERTER___ctx\.msg\]:___VERTER___ctx\.test\}\}  onTest=\{\(\)=> ___VERTER___ctx\.callMe\(\)\}\s+onBind=\{___VERTER___ctx\.bind\}\/>/
       );
     });
 
@@ -85,7 +85,7 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot v-if="test === 'app'"/>`);
 
       expect(result).toMatch(
-        /if\(___VERTER___ctx\.test === 'app'\)\{const ___VERTER___slotComponent\d+=___VERTER___\$slot\.default;<___VERTER___slotComponent\d+ \/>\}/
+        /if\(___VERTER___ctx\.test === 'app'\)\{const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+ \/>\}/
       );
     });
 
@@ -93,7 +93,7 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<div v-if="test === 'app'"> <slot /> </div>`);
 
       expect(result).toMatch(
-        /<div > \{\(\)=>\{const ___VERTER___slotComponent\d+=___VERTER___\$slot\.default;<___VERTER___slotComponent\d+ \/>\}\} <\/div>/
+        /<div > \{\(\)=>\{const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+ \/>\}\} <\/div>/
       );
     });
 
@@ -101,7 +101,7 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot> <span>1</span> </slot>`);
 
       expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___\$slot\.default;<___VERTER___slotComponent\d+> <span>1<\/span> <\/___VERTER___slotComponent\d+>/
+        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+> <span>1<\/span> <\/___VERTER___slotComponent\d+>/
       );
     });
 
@@ -109,7 +109,7 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot v-for="name in names" :name="name"/>`);
 
       expect(result).toMatch(
-        /___VERTER___renderList\(___VERTER___ctx\.names,\(name\)=>\{\s+const ___VERTER___slotComponent\d+=___VERTER___\$slot\[name\];<___VERTER___slotComponent\d+\s*\/\>\}\)/
+        /___VERTER___renderList\(___VERTER___ctx\.names,\(name\)=>\{\s+const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\[name\]\);<___VERTER___slotComponent\d+\s*\/\>\}\)/
       );
     });
 

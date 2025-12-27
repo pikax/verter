@@ -232,6 +232,8 @@ const $slots = PatchSlots(c.$slots);
      */
 
   transformSlotDeclaration(item, s, ctx) {
+    ctx.items.push(createHelperImport(["slotToRender"], ctx.prefix));
+    const slotToRender = ctx.retrieveAccessor("slotToRender");
     const $slots = ctx.retrieveAccessor("$slot");
     const renderSlot = ctx.retrieveAccessor("slotComponent");
     const slotVarName = `${renderSlot}${item.node.loc.start.offset}`;
@@ -288,8 +290,10 @@ const $slots = PatchSlots(c.$slots);
               s.overwrite(
                 prop.value.loc.end.offset - 1,
                 prop.value.loc.end.offset,
-                '"]'
+                '"])'
               );
+            } else {
+              s.prependLeft(prop.nameLoc.end.offset, ')');
             }
           } else if ("directive" in item.name && item.name.directive) {
             const directive = item.name.directive;
@@ -316,17 +320,20 @@ const $slots = PatchSlots(c.$slots);
               s.overwrite(
                 directive.exp.loc.end.offset,
                 directive.exp.loc.end.offset + 1,
-                "]"
+                "])"
               );
             }
           }
         }
       } else {
         // default slot
-        s.prependLeft(insertIndex, `.default`);
+        s.prependLeft(insertIndex, `.default)`);
       }
 
-      s.prependLeft(insertIndex, `const ${slotVarName}=${$slots}`);
+      s.prependLeft(
+        insertIndex,
+        `const ${slotVarName}=${slotToRender}(${$slots}`
+      );
 
       // s.prependRight(insertIndex, "<");
 
@@ -352,7 +359,7 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
    * @param slot
    * @param s
    * @param ctx
-   */ 
+   */
   transformSlotRender(slot, s, ctx) {
     // const $slots = ctx.retrieveAccessor("$slot");
     // StrictRenderSlot

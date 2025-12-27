@@ -80,17 +80,17 @@ describe("process template", () => {
     it("slot with v-if", () => {
       const { result } = parse(`<slot v-if="false"/>`);
       expect(result).toMatchInlineSnapshot(`
-      "export function template(){
-      <>{()=>{if(false){const ___VERTER___slotComponent10=___VERTER___$slot.default;<___VERTER___slotComponent10 />}}}</>}"
-    `);
+        "import { slotToRender as ___VERTER___slotToRender } from "$verter/types$";export function template(){
+        <>{()=>{if(false){const ___VERTER___slotComponent10=___VERTER___slotToRender(___VERTER___$slot.default);<___VERTER___slotComponent10 />}}}</>}"
+      `);
     });
 
     it("slot with parent v-if", () => {
       const { result } = parse(`<div v-if="false"> <slot /> </div>`);
       expect(result).toMatchInlineSnapshot(`
-      "export function template(){
-      <>{()=>{if(false){<div > {()=>{const ___VERTER___slotComponent29=___VERTER___$slot.default;<___VERTER___slotComponent29 />}} </div>}}}</>}"
-    `);
+        "import { slotToRender as ___VERTER___slotToRender } from "$verter/types$";export function template(){
+        <>{()=>{if(false){<div > {()=>{const ___VERTER___slotComponent29=___VERTER___slotToRender(___VERTER___$slot.default);<___VERTER___slotComponent29 />}} </div>}}}</>}"
+      `);
     });
 
     it("slot with parent v-else", () => {
@@ -98,26 +98,27 @@ describe("process template", () => {
         `<div v-if="false"> <slot /> </div><div v-else> <slot/> </div>`
       );
       expect(result).toMatchInlineSnapshot(`
-      "export function template(){
-      <>{()=>{if(false){<div > {()=>{const ___VERTER___slotComponent29=___VERTER___$slot.default;<___VERTER___slotComponent29 />}} </div>}else{<div > {()=>{const ___VERTER___slotComponent57=___VERTER___$slot.default;<___VERTER___slotComponent57/>}} </div>}}}</>}"
-    `);
+        "import { slotToRender as ___VERTER___slotToRender } from "$verter/types$";export function template(){
+        <>{()=>{if(false){<div > {()=>{const ___VERTER___slotComponent29=___VERTER___slotToRender(___VERTER___$slot.default);<___VERTER___slotComponent29 />}} </div>}else{<div > {()=>{const ___VERTER___slotComponent57=___VERTER___slotToRender(___VERTER___$slot.default);<___VERTER___slotComponent57/>}} </div>}}}</>}"
+      `);
     });
     it("slot with parent v-else-if", () => {
       const { result } = parse(
         `<div v-if="disableDrag"> <slot /> </div><div v-else-if="!disableDrag"> <slot/> </div><div v-else> <slot/> </div>`
       );
       expect(result).toMatchInlineSnapshot(`
-      "export function template(){
-      <>{()=>{if(___VERTER___ctx.disableDrag){<div > {()=>{const ___VERTER___slotComponent35=___VERTER___$slot.default;<___VERTER___slotComponent35 />}} </div>}else if(!___VERTER___ctx.disableDrag){<div > {()=>{const ___VERTER___slotComponent81=___VERTER___$slot.default;<___VERTER___slotComponent81/>}} </div>}else{<div > {()=>{const ___VERTER___slotComponent108=___VERTER___$slot.default;<___VERTER___slotComponent108/>}} </div>}}}</>}"
-    `);
+        "import { slotToRender as ___VERTER___slotToRender } from "$verter/types$";export function template(){
+        <>{()=>{if(___VERTER___ctx.disableDrag){<div > {()=>{const ___VERTER___slotComponent35=___VERTER___slotToRender(___VERTER___$slot.default);<___VERTER___slotComponent35 />}} </div>}else if(!___VERTER___ctx.disableDrag){<div > {()=>{const ___VERTER___slotComponent81=___VERTER___slotToRender(___VERTER___$slot.default);<___VERTER___slotComponent81/>}} </div>}else{<div > {()=>{const ___VERTER___slotComponent108=___VERTER___slotToRender(___VERTER___$slot.default);<___VERTER___slotComponent108/>}} </div>}}}</>}"
+      `);
     });
 
     it("slot with v-for", () => {
       const { result } = parse(`<slot v-for="name in $slots" :name="name"/>`);
       expect(result).toMatchInlineSnapshot(`
-      "import { renderList as ___VERTER___renderList } from \"vue\";export function template(){
-      <>{()=>{___VERTER___renderList(___VERTER___ctx.$slots,(name)=>{  const ___VERTER___slotComponent10=___VERTER___$slot[name];<___VERTER___slotComponent10  />})}}</>}"
-    `);
+        "import { renderList as ___VERTER___renderList } from "vue";
+        import { slotToRender as ___VERTER___slotToRender } from "$verter/types$";export function template(){
+        <>{()=>{___VERTER___renderList(___VERTER___ctx.$slots,(name)=>{  const ___VERTER___slotComponent10=___VERTER___slotToRender(___VERTER___$slot[name]);<___VERTER___slotComponent10  />})}}</>}"
+      `);
     });
   });
 

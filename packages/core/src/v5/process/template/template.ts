@@ -42,6 +42,7 @@ export type TemplateAccessors =
   | "COMPONENT_CTX"
   | "ctx"
   | "renderSlotJSX"
+  | "slotToRender"
   | "components"
   // aka $slots
   | "$slot"

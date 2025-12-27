@@ -54,7 +54,9 @@ export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(
 
 export declare function renderSlotJSX<T>(
   slot: T
-): T extends (...args: infer A) => any ? (cb: (...a: A) => any) => any : never;
+): T extends (...args: infer A) => any
+  ? (cb: (...a: A) => any) => JSX.Element
+  : never;
 
 /**
  * Converts Vue slot types into JSX-compatible component types for rendering slots as components.
@@ -96,12 +98,16 @@ export declare function renderSlotJSX<T>(
  * @typeParam T - The slots type object, typically from `$slots` or defined via `SlotsType`
  */
 export type SlotsToRender<T> = {
-  [K in keyof T]: T[K] extends (props: infer P) => any
-    ? { new (): { $props: P & {} } }
-    : T[K] extends () => any
-    ? { new (): { $props: {} } }
-    : { new (): { $props: {} } };
+  [K in keyof T]: SlotToRender<T[K]>;
 };
+
+export type SlotToRender<T> = T extends (props: infer P) => any
+  ? { new (): { $props: P & {} } }
+  : T extends () => any
+  ? { new (): { $props: {} } }
+  : { new (): { $props: {} } };
+
+export declare function slotToRender<T>(slot: T): SlotToRender<T>;
 
 /**
  * Extracts the slot props (arguments) from a component instance for a given slot name.
@@ -161,4 +167,3 @@ export declare function extractArgumentsFromRenderSlot<
   T extends { $slots: { [K in N]: any } },
   N extends string
 >(component: T, slotName: N): Parameters<T["$slots"][N]>[0];
-

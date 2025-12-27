@@ -418,42 +418,45 @@ export function startServer(options: LsConnectionOption = {}) {
   function sendDiagnostics(document: VueDocument) {
     if (!isVueDocument(document)) return;
 
-    console.time("sendDiagnostics");
-    const tsService = verterManager.getTsService(document.uri);
-    if (!tsService) {
-      return;
-    }
-
-    function getDiagnostics(doc: VueSubDocument) {
-      if (doc instanceof VueStyleDocument) {
-        return doc.languageService.doValidation(doc, doc.stylesheet, {
-          validate: true,
-        });
+    setTimeout(() => {
+      console.time("sendDiagnostics" + document.uri);
+      const tsService = verterManager.getTsService(document.uri);
+      if (!tsService) {
+        return;
       }
 
-      const diagnostics = [
-        ...tsService.getSemanticDiagnostics(doc.uri),
-        ...tsService.getSyntacticDiagnostics(doc.uri),
-        ...tsService.getSuggestionDiagnostics(doc.uri),
-      ];
-      return diagnostics.map((x) => mapDiagnostic(x, doc));
-    }
+      function getDiagnostics(doc: VueSubDocument) {
+        if (doc instanceof VueStyleDocument) {
+          return doc.languageService.doValidation(doc, doc.stylesheet, {
+            validate: true,
+          });
+        }
 
-    const diagnostics = document.docs
-      .filter(
-        (x) =>
-          (x.languageId === "ts" || x.languageId === "tsx") &&
-          !(x instanceof VueBundleDocument)
-      )
-      .flatMap((x) => {
-        return getDiagnostics(x);
-      })
-      .filter((x) => !!x);
+        const diagnostics = [
+          ...tsService.getSemanticDiagnostics(doc.uri),
+          ...tsService.getSyntacticDiagnostics(doc.uri),
+          ...tsService.getSuggestionDiagnostics(doc.uri),
+        ];
+        return diagnostics.map((x) => mapDiagnostic(x, doc));
+      }
 
-    connection.sendDiagnostics({
-      uri: document.uri,
-      diagnostics,
-      version: document.version,
+      const diagnostics = document.docs
+        .filter(
+          (x) =>
+            (x.languageId === "ts" || x.languageId === "tsx") &&
+            !(x instanceof VueBundleDocument)
+        )
+        .flatMap((x) => {
+          return getDiagnostics(x);
+        })
+        .filter((x) => !!x);
+
+      connection.sendDiagnostics({
+        uri: document.uri,
+        diagnostics,
+        version: document.version,
+      });
+      console.timeEnd("sendDiagnostics" + document.uri);
     });
   }
 
@@ -468,7 +471,7 @@ export function startServer(options: LsConnectionOption = {}) {
 
     const ts = verterManager.getTsService(doc.uri);
 
-  // @ts-expect-error TODO fix this with proper types
+    // @ts-expect-error TODO fix this with proper types
     const h = ts._host;
 
     let s = "";
