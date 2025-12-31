@@ -72,14 +72,13 @@ export const ContextPlugin = {
     // todo add generic information
     const ctxItems = [
       // isSetup ? ctx.prefix("resolveProps") : null,
-      // FullContextName,
+      FullContextName,
       TemplateBindingName,
     ]
       .filter(Boolean)
       .map((x) => (ctx.isTS ? `${x}${generic}` : x))
       .map((x) => (ctx.isTS ? `...({} as ${x})` : `...${x}`));
     const ctxStr = `const ${CTX} = {${[
-      `...({} as Window & typeof globalThis)`,
       `...${ComponentInstanceName}`,
       // `...${
       //   ctx.isTS
@@ -102,7 +101,7 @@ export const ContextPlugin = {
         ? `({} as Required<typeof ${DefaultName}.components> & {})`
         : `${DefaultName}.components`
     }`,
-    `...${CTX}`,
+    // `...${CTX}`,
     ...ctxItems,
   ].join(",\n")}
 })`;

@@ -47,6 +47,7 @@ import {
   ConditionalPlugin,
   generateConditionText,
 } from "../../../template/plugins";
+import { camelize, capitalize } from "vue";
 
 /**
  * Plugin that generates typed component type functions from Vue templates.
@@ -134,7 +135,10 @@ export const ComponentTypePlugin = definePlugin({
     );
 
     const components = template.result.items.filter(
-      (x) => x.type === TemplateTypes.Element
+      (x) =>
+        x.type === TemplateTypes.Element &&
+        x.node.tagType !== ElementTypes.SLOT &&
+        x.node.tagType !== ElementTypes.TEMPLATE
     ) as TemplateElement[];
 
     const imports = new Set(
@@ -175,7 +179,7 @@ export const ComponentTypePlugin = definePlugin({
     if (rootComponent.length === 1) {
       s.append(
         `return ${ctx.prefix("Comp")}${rootComponent[0].node.loc.start.offset}${
-          ctx.generic ? `<${ctx.generic.source}>` : ""
+          ctx.generic ? `<${ctx.generic.names.join(",")}>` : ""
         }()`
       );
     } else {
@@ -259,8 +263,17 @@ function propToString(
     ) {
       const argContent = prop.arg.content;
       if (prop.exp && prop.exp.type === 4 /* SIMPLE_EXPRESSION */) {
+        const isEvent =
+          prop.name === "on" &&
+          (prop.rawName?.startsWith("@") || prop.rawName?.startsWith("v-on:"));
+
         const expContent = prop.exp.content;
-        return `"${argContent}": ${expContent}`;
+        let name = argContent;
+        if (isEvent) {
+          name = `on${capitalize(camelize(name))}`;
+        }
+
+        return `"${name}": ${expContent}`;
       } else {
         return `"${argContent}": true`;
       }

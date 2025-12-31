@@ -147,9 +147,13 @@ export const TemplateBindingPlugin = definePlugin({
     );
 
     const propsReturn = propsBindings
-      .map((x) => x.valueName)
-      .filter((x) => !!x)
-      .map((x) => `...({} as typeof ${x})`)
+      .filter((x) => !!x.valueName)
+      .map(
+        (x) =>
+          `...({} as Pick<typeof ${x.valueName}, keyof ${
+            x.typeName ?? x.valueName ?? x.valueName
+          }>)`
+      )
       .join(",");
 
     const modelReturns = Array.from(modelBindings.values()).map(

@@ -57,8 +57,8 @@ export const ComponentInstancePlugin = definePlugin({
 
       const instanceName = ctx.prefix("Instance");
 
-      // const element = `ReturnType<typeof ${getRootComponentName}${sanitisedNames}>`;
-      // const rootElementStr = `(${element} extends infer R ? R extends {$props:infer P} ? P : R : {})`;
+      const publicConstructor = `new${genericDeclaration}(props?: ${instanceName}${sanitisedNames}['$props']): ${instanceName}${sanitisedNames}`;
+
       const rootElementStr = `type ${RootElement}${
         ctx.generic ? `<${ctx.generic.source}>` : ""
       }=ReturnType<typeof ${getRootComponentName}${
@@ -89,13 +89,17 @@ export const ComponentInstancePlugin = definePlugin({
         rootElementStr,
         RootElementPropsStr,
         `export type ${instanceName}${genericDeclaration} = Omit<InstanceType<typeof ${defaultOptionsName}>,${PatchedInstanceKeys}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}${
-          noInheritAttrs ? "" : "&" + RootElementProps
+          noInheritAttrs
+            ? ""
+            : "&" +
+              RootElementProps +
+              (ctx.generic ? `<${ctx.generic.sanitisedNames.join(",")}>` : "")
         },${RootElement}, false,true>;`,
         allowDev &&
           `export type ${instanceName}_TEST${genericDeclaration} = Omit<InstanceType<typeof ${defaultOptionsName}>,${PatchedInstanceKeys}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}${
             noInheritAttrs ? "" : "&" + RootElementProps
           },${RootElement}, true,true>;`,
-        `export const ${componentName}={} as typeof ${defaultOptionsName} & { new${genericDeclaration}(props?: ${instanceName}${sanitisedNames}['$props']):${instanceName}${sanitisedNames} };`,
+        `export const ${componentName}={} as typeof ${defaultOptionsName} & {${publicConstructor}};`,
       ];
 
       s.append(declaration.filter(Boolean).join("\n"));

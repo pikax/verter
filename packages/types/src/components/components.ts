@@ -49,6 +49,8 @@ export type GetVueComponent<T> = T extends {
   ? T
   : T extends { new (): infer I; prototype: HTMLElement }
   ? I
+  : T extends { new (): any }
+  ? T
   : never;
 
 // prototype: HTMLElement;

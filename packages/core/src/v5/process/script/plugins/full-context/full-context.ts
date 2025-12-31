@@ -1,6 +1,7 @@
 import { ScriptTypes } from "../../../../parser/script";
 import { BlockPlugin } from "../../../template/plugins";
 import { ProcessItemBinding, ProcessItemType } from "../../../types";
+import { createHelperImport } from "../../../utils";
 import { definePlugin } from "../../types";
 import { generateTypeString } from "../utils";
 
@@ -17,6 +18,8 @@ export const FullContextPlugin = definePlugin({
       asType: ctx.isTS,
       items: [importItem],
     });
+
+    ctx.items.push(createHelperImport(["Prettify"], ctx.prefix));
   },
   post(s, ctx) {
     const isTS = ctx.block.lang === "ts";
@@ -25,6 +28,8 @@ export const FullContextPlugin = definePlugin({
 
     const unref = ctx.prefix("unref");
     const unwrapRef = ctx.prefix("UnwrapRef");
+
+    const prettify = ctx.prefix("Prettify");
 
     const bindings = ctx.items.filter(
       (x) => x.type === ProcessItemType.Binding && x.item.node
@@ -50,6 +55,17 @@ export const FullContextPlugin = definePlugin({
       }
     }
 
+    const importBindings =
+      ctx.block.result?.items
+        .filter((x) => x.type === ScriptTypes.Import)
+        .flatMap((x) => x.bindings) ?? [];
+
+    for (const b of importBindings) {
+      if (b.name) {
+        names.add(b.name);
+      }
+    }
+
     const typeStr = generateTypeString(
       fullContext,
       {
@@ -65,7 +81,10 @@ export const FullContextPlugin = definePlugin({
       .map(
         (x) =>
           `${x}${
-            isTS ? `: {} as ${unwrapRef}<typeof ${x}>` : `: ${unref}(${x})"`
+            isTS
+              ? // ? `: {} as ${prettify}<${unwrapRef}<typeof ${x}>>`
+                `: {} as typeof ${x}`
+              : `: ${unref}(${x})"`
           }`
       )
       .join(",")}}};${typeStr}`;
