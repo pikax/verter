@@ -10,6 +10,8 @@ import { VueSubDocument } from "./documents/verter/vue/sub/sub";
 import {
   VueStyleDocument,
   VueTypescriptDocument,
+  VueRenderDocument,
+  VueBundleDocument,
 } from "./documents/verter/vue/sub";
 import { mapDiagnostic } from "./helpers";
 
@@ -29,7 +31,7 @@ type DiagnosticProcessingResult = DiagnosticResult & {
   token: CancellationToken;
 };
 
-const BATCH_DELAY = 10; // ms
+const BATCH_DELAY = 250; // ms
 
 function debounce<T extends (...args: any[]) => void>(
   fn: T,
@@ -110,6 +112,17 @@ export class DiagnosticsManager {
       const token = request.tokenSource.token;
       // process request
 
+      if (token.isCancellationRequested) {
+        this.requests.delete(request.doc.uri);
+        continue;
+      }
+
+      if (request.version !== request.doc.version) {
+        // document has changed, skip
+        this.requests.delete(request.doc.uri);
+        continue;
+      }
+
       // if (request.version !== request.doc.version) {
       //   console.warn(
       //     `[diagnostics] Skipping diagnostics for ${request.doc.uri} - document version has changed (requested: ${request.version}, current: ${request.doc.version})`
@@ -145,6 +158,51 @@ export class DiagnosticsManager {
     }
   }
 
+  private retrieveDiagnosticsSingle(
+    doc: VerterDocument,
+    token: CancellationToken
+  ): DiagnosticProcessingResult | null {
+    const docs = doc instanceof VueDocument ? doc.docs : null;
+    if (!docs) {
+      return null;
+    }
+
+    if (token.isCancellationRequested) {
+      return null;
+    }
+
+    const tsDocs = docs.filter(
+      (d): d is VueTypescriptDocument => d instanceof VueTypescriptDocument
+    );
+    const styleDocs = docs.filter(
+      (d): d is VueStyleDocument => d instanceof VueStyleDocument
+    );
+
+    const primaryTsDoc =
+      tsDocs.find((d) => d instanceof VueRenderDocument) ||
+      tsDocs.find((d) => d instanceof VueBundleDocument) ||
+      tsDocs[0];
+
+    const docsToProcess = [primaryTsDoc, ...styleDocs].filter((d) => !!d);
+
+    if (!docsToProcess.length) {
+      return null;
+    }
+
+    const diagnostics = docsToProcess.flatMap(
+      (d) => this.getDocDiagnostics(d, token) ?? []
+    );
+    if (token.isCancellationRequested) {
+      return null;
+    }
+    return {
+      uri: doc.uri,
+      diagnostics: diagnostics,
+      version: doc.version,
+      token,
+    } as DiagnosticProcessingResult;
+  }
+
   private retrieveDiagnostics(
     doc: VerterDocument,
     token: CancellationToken
@@ -154,9 +212,31 @@ export class DiagnosticsManager {
       return null;
     }
 
-    const diagnostics = docs.flatMap(
-      (d) => this.getDocDiagnostics(d, token) ?? []
-    );
+    const sorted = [...docs].sort((x) => (x.uri.endsWith("tsx") ? 9 : 0));
+
+    const diagnostics: Diagnostic[] = [];
+
+    for (let i = 0; i < sorted.length; i++) {
+      const d = sorted[i];
+      if (token.isCancellationRequested) {
+        return null;
+      }
+
+      // tsx file takes quite a bit to get diagnostics so we can just send new ones
+      if (d.uri.endsWith("tsx")) {
+        this.connection.sendDiagnostics({
+          uri: doc.uri,
+          diagnostics,
+          version: doc.version,
+        });
+      }
+
+      diagnostics.push(...(this.getDocDiagnostics(d, token) ?? []));
+    }
+
+    // const diagnostics = docs.flatMap(
+    //   (d) => this.getDocDiagnostics(d, token) ?? []
+    // );
     if (token.isCancellationRequested) {
       return null;
     }
@@ -188,7 +268,7 @@ export class DiagnosticsManager {
         return null;
       }
 
-      console.time("diag");
+      console.time("diag" + doc.uri);
       const r = [
         tsService.getSemanticDiagnostics,
         tsService.getSyntacticDiagnostics,
@@ -205,7 +285,7 @@ export class DiagnosticsManager {
       if (token.isCancellationRequested) {
         return null;
       }
-      console.timeEnd("diag");
+      console.timeEnd("diag" + doc.uri);
 
       return r;
     } else if (doc instanceof VueStyleDocument) {
