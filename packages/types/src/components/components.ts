@@ -166,7 +166,9 @@ export declare function retrieveInstance<
 export type ExtractComponents<T, Default = {}> = {
   [K in keyof T as ExtractComponent<T[K]> extends never
     ? never
-    : K]: ExtractComponent<T[K]>;
+    : K extends `${Capitalize<K & string>}`
+    ? K
+    : never]: ExtractComponent<T[K]>;
 } extends infer O
   ? [{}] extends [O]
     ? Default
@@ -259,6 +261,18 @@ export declare function extractRenderComponent<T>(
  * @returns An object containing only the valid Vue component properties
  */
 export declare function extractComponents<T>(t: T): ExtractComponents<T>;
+
+function fooA(p: {}) {}
+
+function FooB(p: { a: string }) {}
+
+const ctx = { fooA, FooB };
+
+const c = extractComponents(ctx);
+
+// @ts-expect-error
+c.fooA;
+c.FooB;
 
 /**
  * Enhances an element or component type with additional props.

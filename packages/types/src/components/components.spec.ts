@@ -307,10 +307,10 @@ describe("components helpers", () => {
     });
 
     describe("deep extraction", () => {
-      it("extracts components from nested objects", () => {
+      it("extracts components from nested objects with capitalized keys", () => {
         type Input = {
           Comp: MockComponent;
-          nested: {
+          Nested: {
             NestedComp: MockComponent2;
             notComponent: string;
           };
@@ -319,7 +319,7 @@ describe("components helpers", () => {
         type Result = ExtractComponents<Input>;
         type Expected = {
           Comp: MockComponent;
-          nested: {
+          Nested: {
             NestedComp: MockComponent2;
           };
         };
@@ -331,11 +331,11 @@ describe("components helpers", () => {
         assertType<Result>({} as { unrelated: true });
       });
 
-      it("extracts from deeply nested structures", () => {
+      it("extracts from deeply nested capitalized structures", () => {
         type Input = {
-          level1: {
-            level2: {
-              level3: {
+          Level1: {
+            Level2: {
+              Level3: {
                 DeepComp: MockComponent;
                 value: number;
               };
@@ -348,9 +348,9 @@ describe("components helpers", () => {
 
         type Result = ExtractComponents<Input>;
         type Expected = {
-          level1: {
-            level2: {
-              level3: {
+          Level1: {
+            Level2: {
+              Level3: {
                 DeepComp: MockComponent;
               };
             };
@@ -366,10 +366,10 @@ describe("components helpers", () => {
         assertType<Result>({} as { unrelated: true });
       });
 
-      it("removes empty nested objects", () => {
+      it("removes empty nested objects even when capitalized", () => {
         type Input = {
           Comp: MockComponent;
-          empty: {
+          Empty: {
             noComponents: string;
             justValues: number;
           };
@@ -382,6 +382,50 @@ describe("components helpers", () => {
 
         assertType<Result>({} as Expected);
         assertType<Expected>({} as Result);
+      });
+    });
+
+    describe("capitalization filter", () => {
+      it("removes lowercase component keys", () => {
+        type Input = {
+          fooA: MockComponent;
+          FooB: MockComponent2;
+        };
+
+        type Result = ExtractComponents<Input>;
+        type Expected = {
+          FooB: MockComponent2;
+        };
+
+        assertType<Result>({} as Expected);
+        assertType<Expected>({} as Result);
+
+        // @ts-expect-error - lowercase keys should not be present
+        ({} as Result).fooA;
+      });
+
+      it("removes lowercase containers even when they hold components", () => {
+        type Input = {
+          container: {
+            FooC: MockComponent;
+          };
+          Container: {
+            FooD: MockComponent2;
+          };
+        };
+
+        type Result = ExtractComponents<Input>;
+        type Expected = {
+          Container: {
+            FooD: MockComponent2;
+          };
+        };
+
+        assertType<Result>({} as Expected);
+        assertType<Expected>({} as Result);
+
+        // @ts-expect-error - lowercase container should be removed entirely
+        ({} as Result).container;
       });
     });
 
@@ -441,21 +485,21 @@ describe("components helpers", () => {
     });
 
     describe("real-world patterns", () => {
-      it("extracts from module-like structure", () => {
+      it("extracts from module-like structure with capitalized keys", () => {
         type ModuleExports = {
           Button: MockComponent;
           Input: MockComponent2;
           Form: MockComponent3;
           // Functional-components
-          utils: {
+          Utils: {
             formatDate: (d: Date) => string;
             validateEmail: (s: string) => boolean;
           };
-          constants: {
+          Constants: {
             MAX_LENGTH: number;
             DEFAULT_THEME: string;
           };
-          types: {
+          Types: {
             // Nested component
             Dialog: MockComponent;
           };
@@ -466,13 +510,8 @@ describe("components helpers", () => {
           Button: MockComponent;
           Input: MockComponent2;
           Form: MockComponent3;
-          types: {
+          Types: {
             Dialog: MockComponent;
-          };
-          // Functional-components
-          utils: {
-            formatDate: (d: Date) => string;
-            validateEmail: (s: string) => boolean;
           };
         };
 
@@ -481,9 +520,15 @@ describe("components helpers", () => {
 
         // @ts-expect-error - Result is not any/unknown
         assertType<Result>({} as { unrelated: true });
+
+        // @ts-expect-error - Utils is dropped because nested keys are not capitalized
+        ({} as Result).Utils;
+
+        // @ts-expect-error - Constants is dropped because it contains no components
+        ({} as Result).Constants;
       });
 
-      it("extracts from component library structure", () => {
+      it("extracts from component library structure honoring capitalization", () => {
         type ComponentLibrary = {
           // Direct components
           Button: MockComponent;
@@ -492,8 +537,8 @@ describe("components helpers", () => {
             Input: MockComponent;
             Select: MockComponent2;
             Checkbox: MockComponent3;
-            validators: {
-              required: (v: unknown) => boolean;
+            Validators: {
+              Required: (v: unknown) => boolean;
             };
           };
           Layout: {
@@ -502,8 +547,8 @@ describe("components helpers", () => {
             Col: MockComponent;
           };
           // Non-component exports
-          version: string;
-          install: (app: unknown) => void;
+          Version: string;
+          Install: (app: unknown) => void;
         };
 
         type Result = ExtractComponents<ComponentLibrary>;
@@ -513,8 +558,8 @@ describe("components helpers", () => {
             Input: MockComponent;
             Select: MockComponent2;
             Checkbox: MockComponent3;
-            validators: {
-              required: (v: unknown) => boolean;
+            Validators: {
+              Required: (v: unknown) => boolean;
             };
           };
           Layout: {
@@ -522,7 +567,7 @@ describe("components helpers", () => {
             Row: MockComponent;
             Col: MockComponent;
           };
-          install: (app: unknown) => void;
+          Install: (app: unknown) => void;
         };
 
         assertType<Result>({} as Expected);
@@ -534,17 +579,17 @@ describe("components helpers", () => {
     });
 
     describe("edge cases", () => {
-      it("handles HTMLElement types", () => {
+      it("handles HTMLElement types with capitalized keys", () => {
         type Input = {
-          div: HTMLDivElement;
-          span: HTMLSpanElement;
+          Div: HTMLDivElement;
+          Span: HTMLSpanElement;
           notElement: string;
         };
 
         type Result = ExtractComponents<Input>;
         type Expected = {
-          div: HTMLDivElement;
-          span: HTMLSpanElement;
+          Div: HTMLDivElement;
+          Span: HTMLSpanElement;
         };
 
         assertType<Result>({} as Expected);
