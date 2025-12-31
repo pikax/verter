@@ -1,1 +1,1 @@
-export * from "./vue.js";
+export { VueDocument } from "./vue.js";

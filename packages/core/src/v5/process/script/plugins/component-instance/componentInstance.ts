@@ -90,7 +90,7 @@ export const ComponentInstancePlugin = definePlugin({
         RootElementPropsStr,
         `export type ${instanceName}${genericDeclaration} = Omit<InstanceType<typeof ${defaultOptionsName}>,${PatchedInstanceKeys}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}${
           noInheritAttrs ? "" : "&" + RootElementProps
-        },${RootElement}, false,false>;`,
+        },${RootElement}, false,true>;`,
         allowDev &&
           `export type ${instanceName}_TEST${genericDeclaration} = Omit<InstanceType<typeof ${defaultOptionsName}>,${PatchedInstanceKeys}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}${
             noInheritAttrs ? "" : "&" + RootElementProps

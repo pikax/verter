@@ -35,6 +35,7 @@ import {
   VueBundleDocument,
   VueStyleDocument,
 } from "./v5/documents/verter/vue/sub";
+import { DiagnosticsManager } from "./v5/DiagnosticsManager";
 
 export interface LsConnectionOption {
   /**
@@ -69,6 +70,11 @@ export function startServer(options: LsConnectionOption = {}) {
 
   const documentManager = new DocumentManager();
   const verterManager = new VerterManager(documentManager);
+  const diagnosticsManager = new DiagnosticsManager(
+    connection,
+    verterManager,
+    documentManager
+  );
 
   // @ts-expect-error TODO fix this with proper types
   connection.onInitialize((params) => {
@@ -398,21 +404,24 @@ export function startServer(options: LsConnectionOption = {}) {
   });
 
   connection.onRequest("textDocument/diagnostic", async (params) => {
-    const document = documentManager.getDocument(params.textDocument.uri);
-    if (!document || !isVueDocument(document)) {
-      return;
-    }
-    sendDiagnostics(document);
+    // const document = documentManager.getDocument(params.textDocument.uri);
+    // if (!document || !isVueDocument(document)) {
+    //   return;
+    // }
+    diagnosticsManager.requestDiagnostics(params.textDocument.uri)
+    // sendDiagnostics(document);
   });
 
   connection.onDidOpenTextDocument((params) => {
-    const doc = documentManager.getDocument(params.textDocument.uri);
-    if (!doc) {
-      return;
-    }
-    if (isVueDocument(doc)) {
-      sendDiagnostics(doc);
-    }
+    diagnosticsManager.requestDiagnostics(params.textDocument.uri)
+
+    // const doc = documentManager.getDocument(params.textDocument.uri);
+    // if (!doc) {
+    //   return;
+    // }
+    // if (isVueDocument(doc)) {
+    //   sendDiagnostics(doc);
+    // }
   });
 
   function sendDiagnostics(document: VueDocument) {
