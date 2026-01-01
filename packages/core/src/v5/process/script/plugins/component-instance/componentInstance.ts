@@ -62,8 +62,6 @@ export const ComponentInstancePlugin = definePlugin({
 
       const publicConstructor = `new${genericDeclaration}(props?: ${instanceName}${sanitisedNames}['$props']): ${instanceName}${sanitisedNames}`;
 
-      const rootElementPassedProps = {};
-
       const rootElementStr = `type ${RootElement}${
         ctx.generic ? `<${ctx.generic.source}>` : ""
       }=ReturnType<typeof ${getRootComponentName}${

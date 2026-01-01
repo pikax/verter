@@ -55,19 +55,19 @@ describe("process script plugin full context", () => {
       }
       it("work", () => {
         const { result } = parse("let a = 0");
-        expect(result).toContain("function ___VERTER___FullContextFN() {let a = 0;return{a: {} as ___VERTER___UnwrapRef<typeof a>}}");
+        expect(result).toContain("function ___VERTER___FullContextFN() {let a = 0;return{a: {} as typeof a}}");
         expect(result).toContain("export type ___VERTER___FullContext=ReturnType<typeof ___VERTER___FullContextFN>");
       });
 
       it("async", () => {
         const { result } = parse("let a = await Promise.resolve(0);");
-        expect(result).toContain("async function ___VERTER___FullContextFN() {let a = await Promise.resolve(0);;return{a: {} as ___VERTER___UnwrapRef<typeof a>}}");
+        expect(result).toContain("async function ___VERTER___FullContextFN() {let a = await Promise.resolve(0);;return{a: {} as typeof a}}");
         expect(result).toContain("export type ___VERTER___FullContext=ReturnType<typeof ___VERTER___FullContextFN> extends Promise<infer R>?R:never;");
       });
 
       it("generic", () => {
         const { result } = parse("let a = {} as unknown as T", 'generic="T"');
-        expect(result).toContain("function ___VERTER___FullContextFN<T>() {let a = {} as unknown as T;return{a: {} as ___VERTER___UnwrapRef<typeof a>}}");
+        expect(result).toContain("function ___VERTER___FullContextFN<T>() {let a = {} as unknown as T;return{a: {} as typeof a}}");
         expect(result).toContain("export type ___VERTER___FullContext<T>=ReturnType<typeof ___VERTER___FullContextFN<T>>");
       });
 
@@ -76,7 +76,7 @@ describe("process script plugin full context", () => {
           "let a = await Promise.resolve({} as unknown as T)",
           'generic="T"'
         );
-        expect(result).toContain("async function ___VERTER___FullContextFN<T>() {let a = await Promise.resolve({} as unknown as T);return{a: {} as ___VERTER___UnwrapRef<typeof a>}}");
+        expect(result).toContain("async function ___VERTER___FullContextFN<T>() {let a = await Promise.resolve({} as unknown as T);return{a: {} as typeof a}}");
         expect(result).toContain("export type ___VERTER___FullContext<T>=ReturnType<typeof ___VERTER___FullContextFN<T>> extends Promise<infer R>?R:never;");
       });
     });

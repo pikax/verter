@@ -92,7 +92,7 @@ describe("process ComponentInstancePlugin", () => {
       expect(result).toContain(`export const ___VERTER___Component=`);
 
       // Should have constructor type with optional props parameter that references Instance['$props']
-      expect(result).toContain(`{ new(props?: ___VERTER___Instance['$props']):___VERTER___Instance }`);
+      expect(result).toMatch(/\{\s*new\(props\?:\s*___VERTER___Instance\['\$props'\]\):\s*___VERTER___Instance\s*\}/);
     });
 
     // @ai-generated - Tests the constructor accepts props for proper type inference
@@ -103,7 +103,7 @@ describe("process ComponentInstancePlugin", () => {
       expect(result).toMatch(/new\(props\?: ___VERTER___Instance\['\$props'\]\)/);
       
       // Should return the correct Instance type
-      expect(result).toMatch(/\):___VERTER___Instance\s*}/);
+      expect(result).toMatch(/\):\s*___VERTER___Instance\s*}/);
     });
 
     it("generates TEST instance type for dev mode", () => {
@@ -172,7 +172,9 @@ describe("process ComponentInstancePlugin", () => {
       expect(result).toContain(`export type ___VERTER___Instance<__VERTER__TS__T = any>`);
 
       // Should include generic in Component constructor with props parameter
-      expect(result).toContain(`new<__VERTER__TS__T = any>(props?: ___VERTER___Instance<__VERTER__TS__T>['$props']):___VERTER___Instance<__VERTER__TS__T>`);
+      expect(result).toMatch(
+        /new<__VERTER__TS__T = any>\(props\?:\s*___VERTER___Instance<__VERTER__TS__T>\['\$props'\]\):\s*___VERTER___Instance<__VERTER__TS__T>/
+      );
     });
 
     // @ai-generated - Tests that generic constructor properly infers type from props
@@ -186,7 +188,7 @@ describe("process ComponentInstancePlugin", () => {
       expect(result).toMatch(/new<[^>]+>\(props\?: ___VERTER___Instance<[^>]+>\['\$props'\]\)/);
       
       // Constructor should return generic Instance
-      expect(result).toMatch(/\):___VERTER___Instance<[^>]+>\s*}/);
+      expect(result).toMatch(/\):\s*___VERTER___Instance<[^>]+>\s*}/);
     });
 
     it("handles generic with extends constraint", () => {

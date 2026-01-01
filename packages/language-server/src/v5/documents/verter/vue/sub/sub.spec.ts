@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { VueDocument } from "../vue.js";
 import { VueSubDocument, SubDocumentProcessContext } from "./sub.js";
+import { createSubDocumentUri } from "../../../utils.js";
 import { Position, Range } from "vscode-languageserver-textdocument";
 
 // /**
@@ -78,7 +79,7 @@ describe("VueSubDocument", () => {
     );
 
     // Suppose we have one block referencing subDoc
-    subUri = "file:///parent.vue._VERTER_.options.tsx";
+    subUri = createSubDocumentUri(parentDoc.uri, "options.ts");
   });
 
   it("should throw if block not found in parent", () => {
@@ -155,7 +156,7 @@ describe("VueSubDocument", () => {
       expect(genRange.start.line).toBeGreaterThanOrEqual(0);
       expect(genRange.end.character).toBeGreaterThanOrEqual(0);
 
-      expect(subDoc.getText(genRange)).toBe("const  = 42;");
+      expect(subDoc.getText(genRange)).toBe("t  = 42;");
     });
 
     it("toOriginalPosition / toOriginalRange should map from subDoc to parent's original", () => {
