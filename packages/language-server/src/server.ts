@@ -6,10 +6,12 @@ import {
   createConnection,
   DefinitionLink,
   InsertTextFormat,
+  InitializeParams,
   ProposedFeatures,
   TextDocumentSyncKind,
   WorkspaceFolder,
 } from "vscode-languageserver/node";
+import path from "node:path";
 import { DocumentManager } from "./v5/documents/manager/manager";
 import { VerterManager } from "./v5/documents/verter/manager";
 import {
@@ -36,6 +38,10 @@ import {
   VueStyleDocument,
 } from "./v5/documents/verter/vue/sub";
 import { DiagnosticsManager } from "./v5/DiagnosticsManager";
+import {
+  StatisticsManager,
+  StatisticsOptions,
+} from "./v5/StatisticsManager";
 
 export interface LsConnectionOption {
   /**
@@ -68,16 +74,20 @@ export function startServer(options: LsConnectionOption = {}) {
 
   const patchedConnection = patchClient(connection);
 
-  const documentManager = new DocumentManager();
+  const statisticsManager = new StatisticsManager();
+  const documentManager = new DocumentManager(statisticsManager);
   const verterManager = new VerterManager(documentManager);
   const diagnosticsManager = new DiagnosticsManager(
     connection,
     verterManager,
-    documentManager
+    documentManager,
+    statisticsManager
   );
 
   // @ts-expect-error TODO fix this with proper types
   connection.onInitialize((params) => {
+    const statsOptions = resolveStatisticsOptions(params);
+    statisticsManager.updateOptions(statsOptions);
     verterManager.init(params);
     return {
       capabilities: {
@@ -512,6 +522,10 @@ ${x.getText()}
     };
   });
 
+  patchedConnection.onRequest(RequestType.GetStatistics, (params) => {
+    return statisticsManager.snapshot(params);
+  });
+
   // patchedConnection.onNotification(
   //   NotificationType.OnFileChanged,
   //   async (params) => {
@@ -544,6 +558,24 @@ ${x.getText()}
 
   documentManager.listen(connection);
   connection.listen();
+}
+
+function resolveStatisticsOptions(params: InitializeParams): StatisticsOptions {
+  const statistics = (params.initializationOptions as any)?.statistics ?? {};
+  const persistToFile = Boolean(statistics.persistToFile);
+  const filePath =
+    statistics.filePath ||
+    (persistToFile
+      ? path.resolve(process.cwd(), ".verter", "statistics.json")
+      : undefined);
+
+  return {
+    enabled: Boolean(statistics.enabled),
+    persistToFile,
+    filePath,
+    maxSessionEntries: statistics.maxSessionEntries,
+    maxPersistedEntries: statistics.maxPersistedEntries,
+  };
 }
 
 startServer();

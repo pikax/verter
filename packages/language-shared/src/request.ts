@@ -1,3 +1,8 @@
+import type {
+  StatisticsRequestParams,
+  StatisticsSnapshot,
+} from "./statistics";
+
 // fluff
 export type RequestTyped = {
   onRequest: <T extends RequestType>(
@@ -17,9 +22,11 @@ export type PatchRequest<T> = OmitRequest<T> & RequestTyped;
 
 export enum RequestType {
   GetCompiledCode = "$/getCompiledCode",
+  GetStatistics = "$/verter/getStatistics",
 }
 export type RequestParams = {
   [RequestType.GetCompiledCode]: string;
+  [RequestType.GetStatistics]: StatisticsRequestParams | undefined;
 };
 
 export type RequestResponse = {
@@ -27,4 +34,5 @@ export type RequestResponse = {
     js: { code: string; map: any | undefined };
     css: { code: string; map: any | undefined };
   };
+  [RequestType.GetStatistics]: StatisticsSnapshot;
 };

@@ -7,6 +7,7 @@ import {
   ViewColumn,
   FileSystemWatcher,
   WorkspaceFolder,
+  OutputChannel,
 } from "vscode";
 import {
   LanguageClient,
@@ -16,10 +17,18 @@ import {
   RevealOutputChannelOn,
 } from "vscode-languageclient/node";
 
-import { normalize } from "path";
+import { join, normalize } from "path";
 
 import type { PatchClient } from "@verter/language-shared";
-import { patchClient, NotificationType } from "@verter/language-shared";
+import {
+  patchClient,
+  NotificationType,
+  RequestType,
+} from "@verter/language-shared";
+import type {
+  StatisticsSnapshot,
+  StatisticsSummary,
+} from "@verter/language-shared";
 import CompiledCodeContentProvider from "./CompiledCodeContentProvider";
 
 import { resolveAndDownloadBinding } from "@verter/oxc-bindings";
@@ -122,6 +131,7 @@ export function activateVueLanguageServer(context: ExtensionContext) {
         scss: workspace.getConfiguration("scss"),
         html: workspace.getConfiguration("html"),
       },
+      statistics: getStatisticsInitialization(rootPath),
       // dontFilterIncompleteCompletions: true,
     },
   };
@@ -160,6 +170,8 @@ export function activateVueLanguageServer(context: ExtensionContext) {
 
   addWriteVirtualFilesCommand(getClient, context);
 
+  addShowStatisticsCommand(getClient, context);
+
   addNodeModulesChangedListener(getClient);
 
   return {
@@ -172,6 +184,27 @@ function createLanguageServer(
   clientOptions: LanguageClientOptions
 ) {
   return new LanguageClient("verter", "Verter", serverOptions, clientOptions);
+}
+
+function getStatisticsInitialization(rootPath: string | undefined) {
+  const config = workspace.getConfiguration("verter.statistics");
+  const persistToFile = config.get<boolean>("persistToFile") ?? false;
+  const configuredPath = config.get<string>("filePath") || undefined;
+
+  const defaultPath =
+    persistToFile && rootPath
+      ? join(rootPath, ".verter", "statistics.json")
+      : persistToFile
+      ? join(process.cwd(), ".verter", "statistics.json")
+      : undefined;
+
+  return {
+    enabled: config.get<boolean>("enabled") ?? false,
+    persistToFile,
+    filePath: configuredPath || defaultPath,
+    maxSessionEntries: config.get<number>("maxSessionEntries") ?? undefined,
+    maxPersistedEntries: config.get<number>("maxPersistedEntries") ?? undefined,
+  };
 }
 
 function addDidChangeTextDocumentListener(getClient: GetClient) {
@@ -292,14 +325,97 @@ function addWriteVirtualFilesCommand(
   );
 }
 
+function addShowStatisticsCommand(
+  getClient: GetClient,
+  context: ExtensionContext
+) {
+  const channel = window.createOutputChannel("Verter Statistics");
+
+  context.subscriptions.push(
+    channel,
+    commands.registerCommand("verter.showStatistics", async () => {
+      try {
+        const snapshot = await getClient().sendRequest(
+          RequestType.GetStatistics,
+          { includeEvents: false, scope: "all" }
+        );
+
+        if (!snapshot) {
+          window.showWarningMessage(
+            "Verter statistics are not available from the language server."
+          );
+          return;
+        }
+
+        channel.clear();
+        renderStatisticsSnapshot(channel, snapshot);
+        channel.show(true);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        window.showErrorMessage(
+          `Failed to fetch Verter statistics: ${message}`
+        );
+      }
+    })
+  );
+}
+
+function renderStatisticsSnapshot(
+  channel: OutputChannel,
+  snapshot: StatisticsSnapshot
+) {
+  channel.appendLine(`Statistics ${snapshot.enabled ? "enabled" : "disabled"}`);
+  channel.appendLine("");
+
+  channel.appendLine("Session");
+  channel.appendLine(
+    formatSummarySection("  By type", snapshot.session.byType)
+  );
+  channel.appendLine(
+    formatSummarySection("  By file", snapshot.session.byFile)
+  );
+
+  if (snapshot.global) {
+    channel.appendLine("");
+    const persistedLabel = snapshot.global.path
+      ? `Global (persisted at ${snapshot.global.path})`
+      : "Global";
+    channel.appendLine(persistedLabel);
+    channel.appendLine(
+      formatSummarySection("  By type", snapshot.global.byType)
+    );
+    channel.appendLine(
+      formatSummarySection("  By file", snapshot.global.byFile)
+    );
+  }
+}
+
+function formatSummarySection(
+  title: string,
+  summary: Record<string, StatisticsSummary>
+) {
+  const entries = Object.entries(summary ?? {});
+  if (!entries.length) {
+    return `${title}: none`;
+  }
+
+  const lines = entries.map(([key, value]) => formatSummaryLine(key, value));
+  return [title, ...lines].join("\n");
+}
+
+function formatSummaryLine(key: string, summary: StatisticsSummary) {
+  const average = summary.count ? summary.averageMs.toFixed(2) : "0";
+  return `- ${key}: count=${
+    summary.count
+  }, avg=${average}ms, total=${summary.totalMs.toFixed(
+    2
+  )}ms, min=${summary.minMs.toFixed(2)}ms, max=${summary.maxMs.toFixed(2)}ms`;
+}
+
 function addNodeModulesChangedListener(getClient: GetClient) {
   const watchers = new Map<string, FileSystemWatcher>();
   function watchFolder(folder: WorkspaceFolder) {
-    // const fp = normalize(folder.uri.fsPath + "/node_modules/**/*").replace(
-    //   /\\/g,
-    //   "/"
-    // );
-    const fp = folder.uri.fsPath + "/node_modules/**/*";
+    const fp = normalize(join(folder.uri.fsPath, "node_modules/**/*"));
     const watcher = workspace.createFileSystemWatcher(fp);
     watcher.onDidChange((e) => {
       console.log("changed", e.fsPath);

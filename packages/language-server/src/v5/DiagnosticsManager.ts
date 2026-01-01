@@ -4,6 +4,7 @@ import {
   Connection,
   Diagnostic,
 } from "vscode-languageserver";
+import { performance } from "node:perf_hooks";
 import { VerterManager } from "./documents/verter/manager";
 import { DocumentManager, VerterDocument, VueDocument } from "./documents";
 import { VueSubDocument } from "./documents/verter/vue/sub/sub";
@@ -14,6 +15,7 @@ import {
   VueBundleDocument,
 } from "./documents/verter/vue/sub";
 import { mapDiagnostic } from "./helpers";
+import { StatisticsManager } from "./StatisticsManager";
 
 type DiagnosticRequest = {
   version: number;
@@ -54,7 +56,8 @@ export class DiagnosticsManager {
   constructor(
     protected connection: Connection,
     protected verterManager: VerterManager,
-    protected documentManager: DocumentManager
+    protected documentManager: DocumentManager,
+    private readonly statistics?: StatisticsManager
   ) {
     this.processBatch = debounce(
       this.processBatchInternal.bind(this),
@@ -132,7 +135,20 @@ export class DiagnosticsManager {
       // }
       this.requests.delete(request.doc.uri);
 
+      const start = performance.now();
       const result = this.retrieveDiagnostics(request.doc, token);
+      const durationMs = performance.now() - start;
+      if (result) {
+        this.statistics?.recordEvent({
+          type: "diagnostics",
+          uri: request.doc.uri,
+          durationMs,
+          meta: {
+            version: request.version,
+            docs: request.doc instanceof VueDocument ? request.doc.docs.length : undefined,
+          },
+        });
+      }
       if (token.isCancellationRequested) {
         console.warn(
           `[diagnostics] Skipping sending diagnostics for ${request.doc.uri} - request was cancelled`
@@ -268,6 +284,7 @@ export class DiagnosticsManager {
         return null;
       }
 
+      const start = performance.now();
       console.time("diag" + doc.uri);
       const r = [
         tsService.getSemanticDiagnostics,
@@ -287,6 +304,13 @@ export class DiagnosticsManager {
       }
       console.timeEnd("diag" + doc.uri);
 
+      this.statistics?.recordEvent({
+        type: "diagnostics:document",
+        uri: doc.uri,
+        durationMs: performance.now() - start,
+        meta: { languageId: doc.languageId },
+      });
+
       return r;
     } else if (doc instanceof VueStyleDocument) {
       if (!doc.languageService) {
@@ -295,9 +319,21 @@ export class DiagnosticsManager {
         );
         return null;
       }
-      return doc.languageService.doValidation(doc, doc.stylesheet, {
-        validate: true,
+      const start = performance.now();
+      const diagnostics = doc.languageService.doValidation(
+        doc,
+        doc.stylesheet,
+        {
+          validate: true,
+        }
+      );
+      this.statistics?.recordEvent({
+        type: "diagnostics:style",
+        uri: doc.uri,
+        durationMs: performance.now() - start,
+        meta: { languageId: doc.languageId },
       });
+      return diagnostics;
     }
 
     return null;

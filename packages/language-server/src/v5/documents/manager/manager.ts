@@ -14,6 +14,7 @@ import type { IScriptSnapshot } from "typescript";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname } from "node:path";
+import { performance } from "node:perf_hooks";
 
 import {
   isVerterVirtual,
@@ -28,6 +29,7 @@ import {
 import { FileNotificationChange } from "@verter/language-shared";
 import { prefixWith } from "@verter/types/string";
 import verterTsx from "@verter/types/tsx-string";
+import { StatisticsManager } from "../../StatisticsManager";
 
 export type VersionScriptSnapshot = IScriptSnapshot & { version: number };
 
@@ -44,7 +46,7 @@ export class DocumentManager implements Disposable {
     return this._currentConnection;
   }
 
-  constructor() {
+  constructor(private readonly statistics?: StatisticsManager) {
     this.textDocuments = new TextDocuments({
       create: (uri, languageId, version, content): VerterDocument => {
         this.handleFileChange(uri, "create");
@@ -145,6 +147,7 @@ export class DocumentManager implements Disposable {
   }
 
   readFile(filepath: string, encoding: BufferEncoding = "utf-8") {
+    const start = performance.now();
     // if (isVerterVirtual(filepath)) {
     // normalise path
     filepath =
@@ -162,6 +165,11 @@ export class DocumentManager implements Disposable {
         const doc = TypescriptDocument.create(filepath, "ts", 0, content);
         this._files.set(filepath, doc);
         this._files.set(pathToUri(filepath), doc);
+        this.statistics?.recordEvent({
+          type: "read-file",
+          uri: filepath,
+          durationMs: performance.now() - start,
+        });
         return content;
       }
 
@@ -170,6 +178,11 @@ export class DocumentManager implements Disposable {
         const doc = TypescriptDocument.create(filepath, "tsx", 0, content);
         this._files.set(filepath, doc);
         this._files.set(pathToUri(filepath), doc);
+        this.statistics?.recordEvent({
+          type: "read-file",
+          uri: filepath,
+          durationMs: performance.now() - start,
+        });
         return content;
       }
 
@@ -190,10 +203,21 @@ export class DocumentManager implements Disposable {
 
       this._files.set(filepath, d);
       this._files.set(uri, d);
+      this.statistics?.recordEvent({
+        type: "read-file",
+        uri: filepath,
+        durationMs: performance.now() - start,
+      });
       return c;
     }
 
-    return d.getText();
+    const result = d.getText();
+    this.statistics?.recordEvent({
+      type: "read-file",
+      uri: filepath,
+      durationMs: performance.now() - start,
+    });
+    return result;
   }
 
   getDocument(filename: string) {
