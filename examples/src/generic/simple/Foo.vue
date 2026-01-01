@@ -1,11 +1,7 @@
 <script setup lang="ts">
-defineProps<{
-  item: string;
-}>();
-
-const emits = defineEmits<{
-  close: [arg: { item: string }];
-}>();
-
-// emits("close", {item:});
+import Child from "./Child.vue";
 </script>
+
+<template>
+  <Child :item="{ foo: 1 }" />
+</template>

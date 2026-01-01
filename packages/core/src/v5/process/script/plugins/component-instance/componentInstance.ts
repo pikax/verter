@@ -47,6 +47,9 @@ export const ComponentInstancePlugin = definePlugin({
       const defaultOptionsName = ctx.prefix("default_Component");
       const getRootComponentName = ctx.prefix("getRootComponent");
       const ExtractComponentProps = ctx.prefix("ExtractComponentProps");
+      const getRootComponentPassedProps = ctx.prefix(
+        "getRootComponentPassedProps"
+      );
 
       const genericDeclaration = ctx.generic
         ? `<${ctx.generic.declaration}>`
@@ -59,6 +62,8 @@ export const ComponentInstancePlugin = definePlugin({
 
       const publicConstructor = `new${genericDeclaration}(props?: ${instanceName}${sanitisedNames}['$props']): ${instanceName}${sanitisedNames}`;
 
+      const rootElementPassedProps = {};
+
       const rootElementStr = `type ${RootElement}${
         ctx.generic ? `<${ctx.generic.source}>` : ""
       }=ReturnType<typeof ${getRootComponentName}${
@@ -67,9 +72,11 @@ export const ComponentInstancePlugin = definePlugin({
       const RootElementProps = `${RootElement}Props`;
       const RootElementPropsStr = `type ${RootElementProps}${
         ctx.generic ? `<${ctx.generic.source}>` : ""
-      }=${ExtractComponentProps}<${RootElement}${
+      }=Omit<${ExtractComponentProps}<${RootElement}${
         ctx.generic ? `<${ctx.generic.names.join(",")}>` : ""
-      }>`;
+      }>,keyof ReturnType<typeof ${getRootComponentPassedProps}${
+        ctx.generic ? `<${ctx.generic.names.join(",")}>` : ""
+      }>>`;
 
       const PatchedInstanceKeys = [
         "$",

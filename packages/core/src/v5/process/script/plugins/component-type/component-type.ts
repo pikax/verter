@@ -187,6 +187,25 @@ export const ComponentTypePlugin = definePlugin({
     }
     s.append(`}\n`);
 
+    s.append(
+      `function ${ctx.prefix("getRootComponentPassedProps")}${
+        ctx.generic ? `<${ctx.generic.source}>` : ""
+      }(){`
+    );
+    if (rootComponent.length === 1) {
+      const props = resolveComponentProps(rootComponent[0], ctx);
+      const pre = availableContext(
+        rootComponent[0],
+        templateBindings,
+        extraContext,
+        ctx
+      );
+      s.append(`${pre}return ${props};`);
+    } else {
+      s.append(`return {};`);
+    }
+    s.append(`}\n`);
+
     s.append("\n" + allComponents.join("\n"));
 
     s.append(`\n`);
@@ -289,7 +308,10 @@ function propToString(
  * @param ctx - The script context
  * @returns A string like `{ "id": "app", "class": myClass }`
  */
-function resolveComponentProps(element: TemplateElement, ctx: ScriptContext) {
+export function resolveComponentProps(
+  element: TemplateElement,
+  ctx: ScriptContext
+) {
   const node = element.node;
 
   const props = node.props
