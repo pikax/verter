@@ -1,15 +1,17 @@
 {
   "name": "verter-vscode",
-  "displayName": "Verter",
-  "version": "0.0.1-alpha.1",
+  "displayName": "Verter VSCode",
+  "version": "1.0.0",
   "description": "Verter VSCode Extension",
   "main": "dist/extension.js",
   "type": "commonjs",
   "scripts": {
+    "prepackage": "node ./scripts/prepackage-package.js",
     "build": "tsc -b",
     "watch": "pnpm build --watch",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "package": "vsce package"
+    "package": "vsce package",
+    "update-all": "npx npm-check-updates -i"
   },
   "keywords": [
     "vue",
@@ -48,6 +50,7 @@
   "activationEvents": [
     "onLanguage:vue",
     "onCommand:verter.restartLanguageServer",
+    "onCommand:verter.showStatistics",
     "onLanguage:javascript",
     "onLanguage:typescript",
     "onLanguage:typescriptreact",
@@ -63,6 +66,31 @@
           "type": "boolean",
           "default": true,
           "description": "Enable/Disable Verter"
+        },
+        "verter.statistics.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Collect processing statistics (diagnostics, file reads)."
+        },
+        "verter.statistics.persistToFile": {
+          "type": "boolean",
+          "default": false,
+          "description": "Persist statistics to disk for cumulative analysis."
+        },
+        "verter.statistics.filePath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path for persisted statistics. Defaults to <workspace>/.verter/statistics.json when persistence is enabled."
+        },
+        "verter.statistics.maxSessionEntries": {
+          "type": "number",
+          "default": 500,
+          "description": "Maximum number of in-memory statistics events to retain per session."
+        },
+        "verter.statistics.maxPersistedEntries": {
+          "type": "number",
+          "default": 2000,
+          "description": "Maximum number of events persisted to disk."
         }
       }
     },
@@ -185,10 +213,6 @@
     ],
     "commands": [
       {
-        "command": "verter.helloWorld",
-        "title": "Hello World"
-      },
-      {
         "command": "verter.restartLanguageServer",
         "title": "Verter: Restart Language Server"
       },
@@ -199,6 +223,10 @@
       {
         "command": "verter.writeVirtualFiles",
         "title": "Verter: Write Virtual Files for File"
+      },
+      {
+        "command": "verter.showStatistics",
+        "title": "Verter: Show Processing Statistics"
       }
     ]
   }

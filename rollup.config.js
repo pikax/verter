@@ -90,6 +90,8 @@ export default [
       file: "extensions/vscode/dist/extension.js",
       format: "cjs",
       exports: "auto",
+      // Force a single bundled file to keep VSIX packaging simple.
+      inlineDynamicImports: true,
     },
     external: [
       "vscode",
