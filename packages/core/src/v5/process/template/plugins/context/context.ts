@@ -38,9 +38,18 @@ export const ContextPlugin = {
       "extractComponents" as AvailableExports
     );
 
+    const getVueGlobalComponents = ctx.prefix(
+      "getVueGlobalComponents" as AvailableExports
+    );
+
     ctx.items.push(
       createHelperImport(
-        ["SlotsToRender", "extractComponents", "OmitNever"],
+        [
+          "SlotsToRender",
+          "extractComponents",
+          "OmitNever",
+          "getVueGlobalComponents",
+        ],
         ctx.prefix
       )
     );
@@ -93,18 +102,32 @@ export const ContextPlugin = {
       ...ctxItems,
     ].join(",")}};`;
 
-    const componentsStr = `const ${components} = ${ExtractComponents}({
-  ${[
-    `...{} as import('vue').GlobalComponents`,
-    `...${
-      ctx.isTS
-        ? `({} as Required<typeof ${DefaultName}.components> & {})`
-        : `${DefaultName}.components`
-    }`,
-    // `...${CTX}`,
-    ...ctxItems,
-  ].join(",\n")}
-})`;
+    //     const componentsStr = `const ${components} = ${ExtractComponents}({
+    //   ${[
+    //     `...{} as import('vue').GlobalComponents`,
+    //     `...${
+    //       ctx.isTS
+    //         ? `({} as Required<typeof ${DefaultName}.components> & {})`
+    //         : `${DefaultName}.components`
+    //     }`,
+    //     // `...${CTX}`,
+    //     ...ctxItems,
+    //   ].join(",\n")}
+    // })`;
+
+    // const componentsStr = `const ${components} = ${ExtractComponents}({${[
+    //   `...${retrieveDefaultComponents}(${DefaultName})`,
+    //   ...ctxItems,
+    // ]}});`;
+
+    const componentsStr = `const ${components} = {
+${[
+  `...${getVueGlobalComponents}()`,
+  isSetup
+    ? `...${ExtractComponents}({${ctxItems}})`
+    : `...${DefaultName}.components`,
+].join(",\n")}
+};`;
 
     const slotsCtx = `const ${ctx.prefix("$slot")} = ${CTX}['$slots'];`;
 

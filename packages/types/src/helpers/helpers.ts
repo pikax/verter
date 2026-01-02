@@ -72,3 +72,10 @@ export type UnionToIntersection<U> = (
 ) extends (x: infer I) => void
   ? I
   : never;
+
+// Source - https://stackoverflow.com/a/62502740
+// Posted by a pfp with melon
+// Retrieved 2026-01-02, License - CC BY-SA 4.0
+export type OmitConstructorSignature<T> = {
+  [K in keyof T]: T[K];
+} & (T extends (...args: infer R) => infer S ? (...args: R) => S : unknown);

@@ -264,18 +264,6 @@ export declare function extractRenderComponent<T>(
  */
 export declare function extractComponents<T>(t: T): ExtractComponents<T>;
 
-function fooA(p: {}) {}
-
-function FooB(p: { a: string }) {}
-
-const ctx = { fooA, FooB };
-
-const c = extractComponents(ctx);
-
-// @ts-expect-error
-c.fooA;
-c.FooB;
-
 /**
  * Enhances an element or component type with additional props.
  *
@@ -379,3 +367,5 @@ export type ExtractComponentProps<T> = T extends { new (): infer I }
   : T extends (p: infer P) => any
   ? P
   : {};
+
+export declare function getVueGlobalComponents(): import("vue").GlobalComponents;

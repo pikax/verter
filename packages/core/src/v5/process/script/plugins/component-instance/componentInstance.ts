@@ -18,7 +18,11 @@ export const ComponentInstancePlugin = definePlugin({
     if (ctx.isSetup) {
       ctx.items.push(
         createHelperImport(
-          ["PublicInstanceFromMacro", "ExtractComponentProps"],
+          [
+            "PublicInstanceFromMacro",
+            "ExtractComponentProps",
+            "OmitConstructorSignature",
+          ],
           ctx.prefix
         )
       );
@@ -49,6 +53,9 @@ export const ComponentInstancePlugin = definePlugin({
       const ExtractComponentProps = ctx.prefix("ExtractComponentProps");
       const getRootComponentPassedProps = ctx.prefix(
         "getRootComponentPassedProps"
+      );
+      const OmitConstructorSignature = ctx.prefix(
+        "OmitConstructorSignature" as AvailableExports
       );
 
       const genericDeclaration = ctx.generic
@@ -104,7 +111,7 @@ export const ComponentInstancePlugin = definePlugin({
           `export type ${instanceName}_TEST${genericDeclaration} = Omit<InstanceType<typeof ${defaultOptionsName}>,${PatchedInstanceKeys}> & ${macroToInstance}<${templateBinding}${sanitisedNames},{}&${attributes}${
             noInheritAttrs ? "" : "&" + RootElementProps
           },${RootElement}, true,true>;`,
-        `export const ${componentName}={} as typeof ${defaultOptionsName} & {${publicConstructor}};`,
+        `export declare const ${componentName}: ${OmitConstructorSignature}<typeof ${defaultOptionsName}> & {${publicConstructor}};`,
       ];
 
       s.append(declaration.filter(Boolean).join("\n"));

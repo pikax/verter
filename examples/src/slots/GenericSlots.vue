@@ -8,16 +8,16 @@ defineProps<{
 
 defineSlots<{
   default: (props: { item: T; index: number }) => any;
-  header: (props: { count: number }) => any;
+  header: (props: { items: T[]; count: number }) => any;
   empty: () => any;
-  footer: (props: { items: T[] }) => any;
+  footer: (props: { items: T[]; count: number }) => any;
 }>();
 </script>
 
 <template>
   <div class="generic-list">
     <header>
-      <slot name="header" :count="items.length" />
+      <slot name="header" :items :count="items.length" />
     </header>
 
     <ul v-if="items.length > 0">
@@ -31,7 +31,7 @@ defineSlots<{
     </div>
 
     <footer>
-      <slot name="footer" :items="items" />
+      <slot name="footer" :items :count="items.length" />
     </footer>
   </div>
 </template>
