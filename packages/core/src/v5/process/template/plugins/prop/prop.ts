@@ -6,6 +6,8 @@ import {
   ExpressionNode,
   NodeTypes,
   SourceLocation,
+  ElementNode,
+  ElementTypes,
 } from "@vue/compiler-core";
 import { camelize } from "vue";
 import { DirectivePlugin } from "../directive";
@@ -15,12 +17,16 @@ import { ImportItem, ImportModule } from "../../../types";
 
 function overrideCamelCase(
   loc: SourceLocation,
+  node: ElementNode,
   s: MagicString,
   ctx: {
     camelWhitelistAttributes(name: string): boolean;
   }
 ) {
-  if (ctx.camelWhitelistAttributes(loc.source)) {
+  if (
+    ctx.camelWhitelistAttributes(loc.source) ||
+    node.tagType === ElementTypes.ELEMENT
+  ) {
     return;
   }
   const offset = loc.start.offset;
@@ -155,7 +161,9 @@ export const PropPlugin = declareTemplatePlugin({
 
       s.appendRight(firstDirective.exp.loc.end.offset, "])");
     } else if (
-      (prop.name === "is" || (prop.node.type=== NodeTypes.DIRECTIVE && prop.node.rawName  === ":is")) &&
+      (prop.name === "is" ||
+        (prop.node.type === NodeTypes.DIRECTIVE &&
+          prop.node.rawName === ":is")) &&
       prop.element.tag === "component"
     ) {
       return;
@@ -168,7 +176,7 @@ export const PropPlugin = declareTemplatePlugin({
       }
 
       if (prop.node.nameLoc) {
-        overrideCamelCase(prop.node.nameLoc, s, ctx);
+        overrideCamelCase(prop.node.nameLoc, prop.element, s, ctx);
       }
     } else {
       // directive
@@ -176,7 +184,7 @@ export const PropPlugin = declareTemplatePlugin({
       // handle camelCase
       if (nameBinding?.ignore === true || nameBinding?.skip) {
         // const node = prop.name[0].node as DirectiveNode;
-        overrideCamelCase(nameBinding.node.loc, s, ctx);
+        overrideCamelCase(nameBinding.node.loc, prop.element, s, ctx);
       }
 
       // remove v-bind: or :
