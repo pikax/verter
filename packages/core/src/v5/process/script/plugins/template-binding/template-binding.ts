@@ -14,7 +14,9 @@ export const TemplateBindingPlugin = definePlugin({
   enforce: "post",
 
   pre(s, ctx) {
-    ctx.items.push(createHelperImport(["createMacroReturn"], ctx.prefix));
+    ctx.items.push(
+      createHelperImport(["createMacroReturn", "shallowUnwrapRef"], ctx.prefix)
+    );
   },
 
   post(s, ctx) {
@@ -94,6 +96,7 @@ export const TemplateBindingPlugin = definePlugin({
     const unref = ctx.prefix("unref");
     // const unwrapRef = ctx.prefix("UnwrapRef");
     const unwrapRef = `import('vue').UnwrapRef`;
+    const shallowUnwrapRef = ctx.prefix("shallowUnwrapRef");
     const createMacroReturn = ctx.prefix(
       "createMacroReturn" as AvailableExports
     );
@@ -166,7 +169,7 @@ export const TemplateBindingPlugin = definePlugin({
       (x) =>
         `${x.name}/*${x.start},${x.end}*/: ${
           isTS
-            ? `${x.name} as unknown as ${unwrapRef}<typeof ${x.name}>`
+            ? `${x.name} as unknown as typeof ${x.name}`
             : `${unref}(${x.name})`
         }`
     );
@@ -180,14 +183,14 @@ export const TemplateBindingPlugin = definePlugin({
 
     s.prependRight(
       tag.pos.close.start,
-      `;return{${[
+      `;return ${shallowUnwrapRef}({${[
         propsReturn,
         ...returnBindings,
         ...modelReturns,
         macroReturnStr,
       ]
         .filter((x) => x.length > 0)
-        .join(",\n")}}`
+        .join(",\n")}})`
     );
 
     if (!isTS) {

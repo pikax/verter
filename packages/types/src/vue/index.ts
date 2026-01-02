@@ -1,2 +1,2 @@
-// export * from './vue' // Empty file, no exports
-export * from './vue.macros'
+export * from "./vue";
+export * from "./vue.macros";

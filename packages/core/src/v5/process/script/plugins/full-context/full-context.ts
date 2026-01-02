@@ -9,22 +9,23 @@ export const FullContextPlugin = definePlugin({
   name: "VerterFullContext",
   enforce: "post",
   pre(s, ctx) {
-    const importItem = ctx.isTS
-      ? { name: "UnwrapRef", alias: ctx.prefix("UnwrapRef") }
-      : { name: "unref", alias: ctx.prefix("unref") };
-    ctx.items.push({
-      type: ProcessItemType.Import,
-      from: "vue",
-      asType: ctx.isTS,
-      items: [importItem],
-    });
+    // const importItem = ctx.isTS
+    //   ? { name: "UnwrapRef", alias: ctx.prefix("UnwrapRef") }
+    //   : { name: "unref", alias: ctx.prefix("unref") };
+    // ctx.items.push({
+    //   type: ProcessItemType.Import,
+    //   from: "vue",
+    //   asType: ctx.isTS,
+    //   items: [importItem],
+    // });
 
-    ctx.items.push(createHelperImport(["Prettify"], ctx.prefix));
+    ctx.items.push(createHelperImport(["Prettify", 'shallowUnwrapRef'], ctx.prefix));
   },
   post(s, ctx) {
     const isTS = ctx.block.lang === "ts";
     const isAsync = ctx.isAsync;
     const fullContext = ctx.prefix("FullContext");
+    const shallowUnwrapRef = ctx.prefix("shallowUnwrapRef");
 
     const unref = ctx.prefix("unref");
     const unwrapRef = ctx.prefix("UnwrapRef");
@@ -77,17 +78,17 @@ export const FullContextPlugin = definePlugin({
 
     const str = `;${isAsync ? "async " : ""}function ${fullContext}FN${
       ctx.generic ? `<${ctx.generic.source}>` : ""
-    }() {${[...content].join("\n")};return{${[...names]
+    }() {${[...content].join("\n")};return ${shallowUnwrapRef}({${[...names]
       .map(
         (x) =>
           `${x}${
             isTS
               ? // ? `: {} as ${prettify}<${unwrapRef}<typeof ${x}>>`
                 `: {} as typeof ${x}`
-              : `: ${unref}(${x})"`
+              : `: ${x}"`
           }`
       )
-      .join(",")}}};${typeStr}`;
+      .join(",")}})};${typeStr}`;
 
     s.prependRight(ctx.block.block.tag.pos.close.end, str);
   },

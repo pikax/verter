@@ -5,7 +5,7 @@ import {
   PropsWithDefaults,
 } from "../props";
 
-declare const MacroKey: unique symbol;
+declare const MacroKey: "____VERTER___MACRO_RETURN_KEY____";
 
 /**
  * Helper type to prettify types in TS playground and IDEs
