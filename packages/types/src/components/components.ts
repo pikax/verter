@@ -368,4 +368,18 @@ export type ExtractComponentProps<T> = T extends { new (): infer I }
   ? P
   : {};
 
-export declare function getVueGlobalComponents(): import("vue").GlobalComponents;
+export declare function getVueGlobalComponents(): /**
+ * Make sure the vue global components are included
+ */
+{
+  Transition: import("vue").DefineComponent<import("vue").TransitionProps>;
+  TransitionGroup: import("vue").DefineComponent<
+    import("vue").TransitionGroupProps
+  >;
+  Teleport: import("vue").DefineComponent<import("vue").TeleportProps>;
+  Suspense: import("vue").DefineComponent<import("vue").SuspenseProps>;
+  KeepAlive: import("vue").DefineComponent<import("vue").KeepAliveProps>;
+  BaseTransition: import("vue").DefineComponent<
+    import("vue").BaseTransitionProps
+  >;
+} & import("vue").GlobalComponents;

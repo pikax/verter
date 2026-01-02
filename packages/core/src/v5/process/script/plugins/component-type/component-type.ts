@@ -315,6 +315,8 @@ export function resolveComponentProps(
   const node = element.node;
 
   const props = node.props
+    // ignore class and style as they are handled differently
+    .filter((x) => x.name !== "class" && x.name !== "style")
     .map((p) => propToString(p, ctx))
     .filter((x) => x.length > 0)
     .join(", ");

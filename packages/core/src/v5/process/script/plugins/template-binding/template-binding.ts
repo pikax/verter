@@ -180,17 +180,16 @@ export const TemplateBindingPlugin = definePlugin({
     const macroReturnStr = macroReturn
       ? `...${createMacroReturn}(${macroReturn.content})`
       : "";
-
     s.prependRight(
       tag.pos.close.start,
-      `;return ${shallowUnwrapRef}({${[
+      `;return {...${shallowUnwrapRef}({${[
         propsReturn,
         ...returnBindings,
         ...modelReturns,
-        macroReturnStr,
       ]
         .filter((x) => x.length > 0)
-        .join(",\n")}})`
+        .join(",\n")}})
+${macroReturnStr ? `,${macroReturnStr}` : ""}})}`
     );
 
     if (!isTS) {

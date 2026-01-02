@@ -33,5 +33,7 @@ defineSlots<{
     <footer>
       <slot name="footer" :items :count="items.length" />
     </footer>
+
+    {{ $slots.default }}
   </div>
 </template>

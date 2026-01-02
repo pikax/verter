@@ -1,11 +1,4 @@
-import { ModelToEmits, ModelToProps } from "../model";
-import {
-  MakeInternalProps,
-  MakePublicProps,
-  PropsWithDefaults,
-} from "../props";
-
-declare const MacroKey: "____VERTER___MACRO_RETURN_KEY____";
+import { PropsWithDefaults } from "../props";
 
 /**
  * Helper type to prettify types in TS playground and IDEs
@@ -59,8 +52,8 @@ export declare function createMacroReturn<
   >
 >(o: T): CreateMacroReturn<T>;
 
-export type CreateMacroReturn<T> = { [MacroKey]: T };
-export type OmitMacroReturn<T> = Omit<T, typeof MacroKey>;
+export type CreateMacroReturn<T> = { ____VERTER___MACRO_RETURN_KEY____: T };
+export type OmitMacroReturn<T> = Omit<T, "____VERTER___MACRO_RETURN_KEY____">;
 
 /**
  * Extracts the macro metadata from a return type created by `createMacroReturn`.
@@ -75,7 +68,9 @@ export type OmitMacroReturn<T> = Omit<T, typeof MacroKey>;
  * // Macros = { props: { value: ..., type: ... } }
  * ```
  */
-export type ExtractMacroReturn<T> = T extends { [MacroKey]: infer R }
+export type ExtractMacroReturn<T> = T extends {
+  ____VERTER___MACRO_RETURN_KEY____: infer R;
+}
   ? R
   : never;
 

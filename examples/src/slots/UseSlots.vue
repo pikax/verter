@@ -43,9 +43,7 @@ const users: User[] = [
 
       <template #default="{ item, index }">
         <!-- item is typed as User -->
-        <div>
-          #{{ index }}: {{ item.name }} ({{ item.email }})
-        </div>
+        <div>#{{ index }}: {{ item.name }} ({{ item.email }})</div>
       </template>
 
       <template #empty>
@@ -58,7 +56,7 @@ const users: User[] = [
     </GenericSlots>
 
     <!-- Dynamic slot names -->
-    <GenericSlots :items="[]">
+    <GenericSlots :items="[]" class="test">
       <template v-for="name in ['header', 'empty', 'footer'] as const" #[name]>
         <div>Dynamic slot: {{ name }}</div>
       </template>
