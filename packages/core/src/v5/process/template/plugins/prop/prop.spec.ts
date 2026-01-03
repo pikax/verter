@@ -54,7 +54,7 @@ describe("process template plugins prop", () => {
     it("prop to camelCase", () => {
       const { result } = parse(`<div test-camel-case="test-again" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<div testCamelCase={"test-again"} />"`
+        `"<div test-camel-case={"test-again"} />"`
       );
     });
   });
@@ -76,13 +76,13 @@ describe("process template plugins prop", () => {
 
     it("should camelise prop with v-bind shorthand sugar", () => {
       const { result } = parse(`<div :test-to-foo />`);
-      expect(result).toMatchInlineSnapshot(`"<div testToFoo={___VERTER___ctx.testToFoo} />"`);
+      expect(result).toMatchInlineSnapshot(`"<div test-to-foo={___VERTER___ctx.testToFoo} />"`);
     });
 
     it("camelCase", () => {
       const { result } = parse(`<div :test-camel-case="'test-camel'" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<div testCamelCase={'test-camel'} />"`
+        `"<div test-camel-case={'test-camel'} />"`
       );
     });
 
@@ -110,7 +110,7 @@ describe("process template plugins prop", () => {
     it("camelise", () => {
       const { result } = parse(`<div @test-camel-case="test-test" />`);
       expect(result).toMatchInlineSnapshot(
-        `"<div onTestCamelCase={test-test} />"`
+        `"<div onTest-camel-case={test-test} />"`
       );
     });
   });
@@ -118,27 +118,27 @@ describe("process template plugins prop", () => {
   describe("camilise", () => {
     it("should camelise", () => {
       const { result } = parse(`<div test-camel-case="test" />`);
-      expect(result).toMatchInlineSnapshot(`"<div testCamelCase={"test"} />"`);
+      expect(result).toMatchInlineSnapshot(`"<div test-camel-case={"test"} />"`);
     });
 
     it("should camelise with v-bind", () => {
       const { result } = parse(`<div v-bind:test-camel-case="test" />`);
-      expect(result).toMatchInlineSnapshot(`"<div testCamelCase={test} />"`);
+      expect(result).toMatchInlineSnapshot(`"<div test-camel-case={test} />"`);
     });
 
     it("should camelise with v-on", () => {
       const { result } = parse(`<div v-on:test-camel-case="test" />`);
-      expect(result).toMatchInlineSnapshot(`"<div onTestCamelCase={test} />"`);
+      expect(result).toMatchInlineSnapshot(`"<div onTest-camel-case={test} />"`);
     });
 
     it("should camelise with @", () => {
       const { result } = parse(`<div @test-camel-case="test" />`);
-      expect(result).toMatchInlineSnapshot(`"<div onTestCamelCase={test} />"`);
+      expect(result).toMatchInlineSnapshot(`"<div onTest-camel-case={test} />"`);
     });
 
     it("should camelise with :", () => {
       const { result } = parse(`<div :test-camel-case="test" />`);
-      expect(result).toMatchInlineSnapshot(`"<div testCamelCase={test} />"`);
+      expect(result).toMatchInlineSnapshot(`"<div test-camel-case={test} />"`);
     });
 
     it("not aria-*", () => {

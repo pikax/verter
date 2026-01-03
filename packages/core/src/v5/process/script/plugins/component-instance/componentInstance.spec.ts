@@ -89,10 +89,10 @@ describe("process ComponentInstancePlugin", () => {
       const { result } = parse(`const foo = 1`);
 
       // Should export Component const
-      expect(result).toContain(`export const ___VERTER___Component=`);
+      expect(result).toContain(`export declare const ___VERTER___Component:`);
 
       // Should have constructor type with optional props parameter that references Instance['$props']
-      expect(result).toMatch(/\{\s*new\(props\?:\s*___VERTER___Instance\['\$props'\]\):\s*___VERTER___Instance\s*\}/);
+      expect(result).toMatch(/\{\s*new\(props\?:\s*___VERTER___Instance\['\$props'\]\):\s*___VERTER___Prettify<___VERTER___Instance>\s*\}/);
     });
 
     // @ai-generated - Tests the constructor accepts props for proper type inference
@@ -102,8 +102,8 @@ describe("process ComponentInstancePlugin", () => {
       // Constructor should accept props? parameter
       expect(result).toMatch(/new\(props\?: ___VERTER___Instance\['\$props'\]\)/);
       
-      // Should return the correct Instance type
-      expect(result).toMatch(/\):\s*___VERTER___Instance\s*}/);
+      // Should return the correct Instance type wrapped in Prettify
+      expect(result).toMatch(/\):\s*___VERTER___Prettify<___VERTER___Instance>\s*\}/);
     });
 
     it("generates TEST instance type for dev mode", () => {
@@ -173,7 +173,7 @@ describe("process ComponentInstancePlugin", () => {
 
       // Should include generic in Component constructor with props parameter
       expect(result).toMatch(
-        /new<__VERTER__TS__T = any>\(props\?:\s*___VERTER___Instance<__VERTER__TS__T>\['\$props'\]\):\s*___VERTER___Instance<__VERTER__TS__T>/
+        /new<__VERTER__TS__T = any>\(props\?:\s*___VERTER___Instance<__VERTER__TS__T>\['\$props'\]\):\s*___VERTER___Prettify<___VERTER___Instance<__VERTER__TS__T>>/
       );
     });
 
@@ -187,8 +187,8 @@ describe("process ComponentInstancePlugin", () => {
       // Constructor should accept props? parameter with generic Instance
       expect(result).toMatch(/new<[^>]+>\(props\?: ___VERTER___Instance<[^>]+>\['\$props'\]\)/);
       
-      // Constructor should return generic Instance
-      expect(result).toMatch(/\):\s*___VERTER___Instance<[^>]+>\s*}/);
+      // Constructor should return generic Instance wrapped in Prettify
+      expect(result).toMatch(/\):\s*___VERTER___Prettify<___VERTER___Instance<[^>]+>>\s*\}/);
     });
 
     it("handles generic with extends constraint", () => {

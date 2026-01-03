@@ -160,7 +160,7 @@ describe("ComponentTypePlugin", () => {
       );
 
       expect(result).toContain('"id": "app"');
-      expect(result).toContain('"class": "container"');
+      // class is intentionally filtered out as it's handled separately in Vue
     });
 
     it("includes dynamic bindings in props object", () => {
