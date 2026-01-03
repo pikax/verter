@@ -75,11 +75,11 @@ describe("InferFunctionPlugin fixtures", () => {
   });
 
   describe("native HTML element events", () => {
-    it("click event infers HTMLElementEventMap type", () => {
+    it("click event infers IntrinsicElementAttributes type", () => {
       const fixture = fixtures.find((f) => f.name === "click event on button");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('HTMLElementEventMap["click"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["button"]["onClick"]');
       expect(result).toContain("...[e]:");
     });
 
@@ -89,7 +89,7 @@ describe("InferFunctionPlugin fixtures", () => {
       );
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('HTMLElementEventMap["input"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["input"]["onInput"]');
     });
 
     it("change event infers correct type", () => {
@@ -98,7 +98,7 @@ describe("InferFunctionPlugin fixtures", () => {
       );
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('HTMLElementEventMap["change"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["select"]["onChange"]');
     });
 
     it("submit event infers correct type", () => {
@@ -107,7 +107,7 @@ describe("InferFunctionPlugin fixtures", () => {
       );
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('HTMLElementEventMap["submit"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["form"]["onSubmit"]');
     });
 
     it("keydown event infers correct type", () => {
@@ -116,7 +116,7 @@ describe("InferFunctionPlugin fixtures", () => {
       );
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('HTMLElementEventMap["keydown"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["input"]["onKeydown"]');
     });
 
     it("focus event infers correct type", () => {
@@ -125,7 +125,7 @@ describe("InferFunctionPlugin fixtures", () => {
       );
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('HTMLElementEventMap["focus"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["input"]["onFocus"]');
     });
 
     it("blur event infers correct type", () => {
@@ -134,7 +134,7 @@ describe("InferFunctionPlugin fixtures", () => {
       );
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('HTMLElementEventMap["blur"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["input"]["onBlur"]');
     });
 
     it("mouseenter event infers correct type", () => {
@@ -143,7 +143,7 @@ describe("InferFunctionPlugin fixtures", () => {
       );
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('HTMLElementEventMap["mouseenter"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["div"]["onMouseenter"]');
     });
 
     it("mouseleave event infers correct type", () => {
@@ -152,7 +152,7 @@ describe("InferFunctionPlugin fixtures", () => {
       );
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('HTMLElementEventMap["mouseleave"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["div"]["onMouseleave"]');
     });
   });
 
@@ -164,7 +164,7 @@ describe("InferFunctionPlugin fixtures", () => {
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain("...[a, b, c]:");
-      expect(result).toContain('HTMLElementEventMap["click"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["div"]["onClick"]');
     });
   });
 
@@ -176,7 +176,7 @@ describe("InferFunctionPlugin fixtures", () => {
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain("function unusedFunction(x)");
-      expect(result).not.toContain("HTMLElementEventMap");
+      expect(result).not.toContain("IntrinsicElementAttributes");
       expect(result).not.toContain("...[");
     });
 
@@ -197,7 +197,7 @@ describe("InferFunctionPlugin fixtures", () => {
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain("const handler = (e) => e.target");
-      expect(result).not.toContain("HTMLElementEventMap");
+      expect(result).not.toContain("IntrinsicElementAttributes");
     });
 
     it("does not transform function with no parameters", () => {
@@ -207,7 +207,7 @@ describe("InferFunctionPlugin fixtures", () => {
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain("function noParams()");
-      expect(result).not.toContain("HTMLElementEventMap");
+      expect(result).not.toContain("IntrinsicElementAttributes");
     });
   });
 
@@ -218,21 +218,21 @@ describe("InferFunctionPlugin fixtures", () => {
       );
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('HTMLElementEventMap["click"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["a"]["onClick"]');
     });
 
     it("double click event", () => {
       const fixture = fixtures.find((f) => f.name === "double click on div");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('HTMLElementEventMap["dblclick"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["div"]["onDblclick"]');
     });
 
     it("contextmenu event", () => {
       const fixture = fixtures.find((f) => f.name === "contextmenu event");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('HTMLElementEventMap["contextmenu"]');
+      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["div"]["onContextmenu"]');
     });
   });
 });

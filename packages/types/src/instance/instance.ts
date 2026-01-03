@@ -99,13 +99,7 @@ export type CreateTypedPublicInstanceFromNormalisedMacro<
 
   $data: DEV extends true ? T["$data"] : {};
   $props: Prettify<
-    (AttrsProps extends true
-      ? // remove v-slot from attrs if present
-        Attrs extends { "v-slot"?: any }
-        ? Omit<Attrs, "v-slot">
-        : Attrs
-      : {}) &
-      ToInstanceProps<T["props"], MakeDefaultsOptional> &
+    ToInstanceProps<T["props"], MakeDefaultsOptional> &
       // (ModelToProps<MacroToModelRecord<T["model"]>> extends infer M
       //   ? ExtractOptionalModel<T["model"]> extends infer O extends keyof M
       //     ? Omit<M, O> & Partial<Pick<M, O>>
@@ -124,7 +118,17 @@ export type CreateTypedPublicInstanceFromNormalisedMacro<
             MacroToPropEvents<M>
         : {}) &
       EmitsToProps<MacroToEmitValue<T["emits"]>>
-  >;
+  > extends infer P
+    ? (AttrsProps extends true
+        ? // remove v-slot from attrs if present
+          Omit<
+            Attrs extends { "v-slot"?: any } ? Omit<Attrs, "v-slot"> : Attrs,
+            // remove any props events, etc that might have the same name
+            keyof P
+          >
+        : {}) &
+        P
+    : {};
 
   $attrs: Attrs;
   $refs: T["templateRef"];

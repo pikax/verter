@@ -98,7 +98,11 @@ export const InferFunctionPlugin = definePlugin({
               s.overwrite(
                 end,
                 end + 1,
-                `]: [HTMLElementEventMap["${property}"]]${s.original[end]}`
+                `]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["${
+                  element.tag
+                }"]["${
+                  directive.event ? `on${capitalize(property)}` : property
+                }"]>>${s.original[end]}`
               );
             } else {
               const text = `]: Parameters<${type}["${property}"]>`;

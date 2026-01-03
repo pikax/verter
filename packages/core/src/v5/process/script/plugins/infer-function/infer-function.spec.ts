@@ -1,7 +1,7 @@
 /**
  * @ai-generated - This test file was generated with AI assistance.
  * Tests for the InferFunctionPlugin that infers parameter types from template event handlers.
- * - Infers HTMLElementEventMap types for native element events
+ * - Infers Vue IntrinsicElementAttributes types for native element events
  * - Infers component prop event types for component events
  * - Handles multiple parameters
  * - Handles generic components
@@ -77,7 +77,7 @@ describe("process InferFunctionPlugin", () => {
           '<template><button @click="handleClick"></button></template>'
         );
         expect(result).toContain(
-          `function handleClick(...[e]: [HTMLElementEventMap["click"]]) { return e }`
+          `function handleClick(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["button"]["onClick"]>>) { return e }`
         );
       });
 
@@ -90,7 +90,7 @@ describe("process InferFunctionPlugin", () => {
           '<template><input @input="handleInput" /></template>'
         );
         expect(result).toContain(
-          `function handleInput(...[event]: [HTMLElementEventMap["input"]])`
+          `function handleInput(...[event]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["input"]["onInput"]>>)`
         );
       });
 
@@ -103,7 +103,7 @@ describe("process InferFunctionPlugin", () => {
           '<template><select @change="onChange"></select></template>'
         );
         expect(result).toContain(
-          `function onChange(...[e]: [HTMLElementEventMap["change"]])`
+          `function onChange(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["select"]["onChange"]>>)`
         );
       });
 
@@ -116,7 +116,7 @@ describe("process InferFunctionPlugin", () => {
           '<template><form @submit="onSubmit"></form></template>'
         );
         expect(result).toContain(
-          `function onSubmit(...[e]: [HTMLElementEventMap["submit"]])`
+          `function onSubmit(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["form"]["onSubmit"]>>)`
         );
       });
 
@@ -129,7 +129,7 @@ describe("process InferFunctionPlugin", () => {
           '<template><input @keydown="handleKey" /></template>'
         );
         expect(result).toContain(
-          `function handleKey(...[e]: [HTMLElementEventMap["keydown"]])`
+          `function handleKey(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["input"]["onKeydown"]>>)`
         );
       });
 
@@ -142,17 +142,15 @@ describe("process InferFunctionPlugin", () => {
           '<template><input @focus="handleFocus" /></template>'
         );
         expect(result).toContain(
-          `function handleFocus(...[e]: [HTMLElementEventMap["focus"]])`
+          `function handleFocus(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["input"]["onFocus"]>>)`
         );
       });
     });
 
     describe("multiple parameters", () => {
       // NOTE: When a function has multiple parameters like `handler(a, b, c)` used in `@click="handler"`,
-      // the plugin transforms it to `handler(...[a, b, c]: [HTMLElementEventMap["click"]])`.
-      // TypeScript will destructure a single-element tuple into three parameters, where:
-      // - `a` is typed as the event (e.g., MouseEvent)
-      // - `b` and `c` are typed as `undefined` (since there are no additional tuple elements)
+      // the plugin transforms it to use Parameters<> from Vue's IntrinsicElementAttributes.
+      // TypeScript will destructure the parameters tuple into the function parameters.
       // This is the expected behavior for the current MVP implementation.
       it("handles function with multiple parameters", () => {
         const { result } = _parse(
@@ -163,7 +161,7 @@ describe("process InferFunctionPlugin", () => {
           '<template><div @click="handler"></div></template>'
         );
         expect(result).toContain(
-          `function handler(...[a, b, c]: [HTMLElementEventMap["click"]])`
+          `function handler(...[a, b, c]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["div"]["onClick"]>>)`
         );
       });
     });
@@ -179,7 +177,7 @@ describe("process InferFunctionPlugin", () => {
         );
         // Function should remain unchanged
         expect(result).toContain("function unusedFn(x) { return x }");
-        expect(result).not.toContain("HTMLElementEventMap");
+        expect(result).not.toContain("IntrinsicElementAttributes");
       });
     });
 
@@ -228,7 +226,7 @@ describe("process InferFunctionPlugin", () => {
       );
       // JS files should not have type inference
       expect(result).toContain("function handleClick(e) { return e }");
-      expect(result).not.toContain("HTMLElementEventMap");
+      expect(result).not.toContain("IntrinsicElementAttributes");
     });
   });
 

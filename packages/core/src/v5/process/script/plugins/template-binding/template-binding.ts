@@ -189,7 +189,7 @@ export const TemplateBindingPlugin = definePlugin({
       ]
         .filter((x) => x.length > 0)
         .join(",\n")}})
-${macroReturnStr ? `,${macroReturnStr}` : ""}})}`
+${macroReturnStr ? `,${macroReturnStr}` : ""}}`
     );
 
     if (!isTS) {

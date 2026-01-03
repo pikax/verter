@@ -22,6 +22,7 @@ export const ComponentInstancePlugin = definePlugin({
             "PublicInstanceFromMacro",
             "ExtractComponentProps",
             "OmitConstructorSignature",
+            "Prettify",
           ],
           ctx.prefix
         )
@@ -57,6 +58,7 @@ export const ComponentInstancePlugin = definePlugin({
       const OmitConstructorSignature = ctx.prefix(
         "OmitConstructorSignature" as AvailableExports
       );
+      const Prettify = ctx.prefix("Prettify" as AvailableExports);
 
       const genericDeclaration = ctx.generic
         ? `<${ctx.generic.declaration}>`
@@ -67,7 +69,7 @@ export const ComponentInstancePlugin = definePlugin({
 
       const instanceName = ctx.prefix("Instance");
 
-      const publicConstructor = `new${genericDeclaration}(props?: ${instanceName}${sanitisedNames}['$props']): ${instanceName}${sanitisedNames}`;
+      const publicConstructor = `new${genericDeclaration}(props?: ${instanceName}${sanitisedNames}['$props']): ${Prettify}<${instanceName}${sanitisedNames}>`;
 
       const rootElementStr = `type ${RootElement}${
         ctx.generic ? `<${ctx.generic.source}>` : ""
@@ -77,12 +79,11 @@ export const ComponentInstancePlugin = definePlugin({
       const RootElementProps = `${RootElement}Props`;
       const RootElementPropsStr = `type ${RootElementProps}${
         ctx.generic ? `<${ctx.generic.source}>` : ""
-      }=Omit<${ExtractComponentProps}<${RootElement}${
+      }=${Prettify}<Omit<${ExtractComponentProps}<${RootElement}${
         ctx.generic ? `<${ctx.generic.names.join(",")}>` : ""
       }>,keyof ReturnType<typeof ${getRootComponentPassedProps}${
         ctx.generic ? `<${ctx.generic.names.join(",")}>` : ""
-      }>>`;
-
+      }>>>`;
       const PatchedInstanceKeys = [
         "$",
         "$data",

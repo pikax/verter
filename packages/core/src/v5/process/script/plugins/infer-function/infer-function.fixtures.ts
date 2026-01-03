@@ -98,7 +98,7 @@ const fixtures: Fixture[] = [
     code: `function handleClick(e) { return e }`,
     template: `<button @click="handleClick">Click me</button>`,
     expectations: {
-      patterns: [`HTMLElementEventMap["click"]`, "...[e]:"],
+      patterns: [`import('vue').IntrinsicElementAttributes["button"]["onClick"]`, "...[e]:"],
       typeTests: [
         {
           target: "handleClick",
@@ -114,7 +114,7 @@ const fixtures: Fixture[] = [
     code: `function handleInput(event) { console.log(event.target) }`,
     template: `<input @input="handleInput" />`,
     expectations: {
-      patterns: [`HTMLElementEventMap["input"]`, "...[event]:"],
+      patterns: [`import('vue').IntrinsicElementAttributes["input"]["onInput"]`, "...[event]:"],
     },
   },
   {
@@ -122,7 +122,7 @@ const fixtures: Fixture[] = [
     code: `function handleChange(e) { }`,
     template: `<select @change="handleChange"></select>`,
     expectations: {
-      patterns: [`HTMLElementEventMap["change"]`],
+      patterns: [`import('vue').IntrinsicElementAttributes["select"]["onChange"]`],
     },
   },
   {
@@ -130,7 +130,7 @@ const fixtures: Fixture[] = [
     code: `function handleSubmit(e) { e.preventDefault() }`,
     template: `<form @submit="handleSubmit"></form>`,
     expectations: {
-      patterns: [`HTMLElementEventMap["submit"]`],
+      patterns: [`import('vue').IntrinsicElementAttributes["form"]["onSubmit"]`],
     },
   },
   {
@@ -138,7 +138,7 @@ const fixtures: Fixture[] = [
     code: `function handleKeydown(e) { if (e.key === 'Enter') {} }`,
     template: `<input @keydown="handleKeydown" />`,
     expectations: {
-      patterns: [`HTMLElementEventMap["keydown"]`],
+      patterns: [`import('vue').IntrinsicElementAttributes["input"]["onKeydown"]`],
     },
   },
   {
@@ -146,7 +146,7 @@ const fixtures: Fixture[] = [
     code: `function handleFocus(e) { }`,
     template: `<input @focus="handleFocus" />`,
     expectations: {
-      patterns: [`HTMLElementEventMap["focus"]`],
+      patterns: [`import('vue').IntrinsicElementAttributes["input"]["onFocus"]`],
     },
   },
   {
@@ -154,7 +154,7 @@ const fixtures: Fixture[] = [
     code: `function handleBlur(e) { }`,
     template: `<input @blur="handleBlur" />`,
     expectations: {
-      patterns: [`HTMLElementEventMap["blur"]`],
+      patterns: [`import('vue').IntrinsicElementAttributes["input"]["onBlur"]`],
     },
   },
   {
@@ -162,7 +162,7 @@ const fixtures: Fixture[] = [
     code: `function handleMouseEnter(e) { }`,
     template: `<div @mouseenter="handleMouseEnter"></div>`,
     expectations: {
-      patterns: [`HTMLElementEventMap["mouseenter"]`],
+      patterns: [`import('vue').IntrinsicElementAttributes["div"]["onMouseenter"]`],
     },
   },
   {
@@ -170,7 +170,7 @@ const fixtures: Fixture[] = [
     code: `function handleMouseLeave(e) { }`,
     template: `<div @mouseleave="handleMouseLeave"></div>`,
     expectations: {
-      patterns: [`HTMLElementEventMap["mouseleave"]`],
+      patterns: [`import('vue').IntrinsicElementAttributes["div"]["onMouseleave"]`],
     },
   },
 
@@ -182,7 +182,7 @@ const fixtures: Fixture[] = [
     code: `function handler(a, b, c) { return [a, b, c] }`,
     template: `<div @click="handler"></div>`,
     expectations: {
-      patterns: ["...[a, b, c]:", `HTMLElementEventMap["click"]`],
+      patterns: ["...[a, b, c]:", `import('vue').IntrinsicElementAttributes["div"]["onClick"]`],
     },
   },
 
@@ -195,7 +195,7 @@ const fixtures: Fixture[] = [
     template: `<div>No event binding here</div>`,
     expectations: {
       patterns: ["function unusedFunction(x)"],
-      antiPatterns: ["HTMLElementEventMap", "...["],
+      antiPatterns: ["IntrinsicElementAttributes", "...["],
     },
   },
 
@@ -225,7 +225,7 @@ const fixtures: Fixture[] = [
     template: `<div @click="handler"></div>`,
     expectations: {
       patterns: ["const handler = (e) => e.target"],
-      antiPatterns: ["HTMLElementEventMap"],
+      antiPatterns: ["IntrinsicElementAttributes"],
     },
   },
 
@@ -237,7 +237,7 @@ const fixtures: Fixture[] = [
     code: `function handleAnchorClick(e) { e.preventDefault() }`,
     template: `<a href="#" @click="handleAnchorClick">Link</a>`,
     expectations: {
-      patterns: [`HTMLElementEventMap["click"]`],
+      patterns: [`import('vue').IntrinsicElementAttributes["a"]["onClick"]`],
     },
   },
   {
@@ -245,7 +245,7 @@ const fixtures: Fixture[] = [
     code: `function handleDblClick(e) { }`,
     template: `<div @dblclick="handleDblClick"></div>`,
     expectations: {
-      patterns: [`HTMLElementEventMap["dblclick"]`],
+      patterns: [`import('vue').IntrinsicElementAttributes["div"]["onDblclick"]`],
     },
   },
   {
@@ -253,7 +253,7 @@ const fixtures: Fixture[] = [
     code: `function handleContextMenu(e) { e.preventDefault() }`,
     template: `<div @contextmenu="handleContextMenu"></div>`,
     expectations: {
-      patterns: [`HTMLElementEventMap["contextmenu"]`],
+      patterns: [`import('vue').IntrinsicElementAttributes["div"]["onContextmenu"]`],
     },
   },
 
@@ -266,7 +266,7 @@ const fixtures: Fixture[] = [
     template: `<div @click="noParams"></div>`,
     expectations: {
       patterns: ["function noParams()"],
-      antiPatterns: ["HTMLElementEventMap"],
+      antiPatterns: ["IntrinsicElementAttributes"],
     },
   },
 
@@ -279,7 +279,7 @@ const fixtures: Fixture[] = [
     template: `<MyComp @change="handleChange" />`,
     expectations: {
       patterns: ["Parameters<", '["onChange"]', "$props", "...[e]:"],
-      antiPatterns: ["HTMLElementEventMap"],
+      antiPatterns: ["IntrinsicElementAttributes"],
     },
   },
   {
@@ -288,7 +288,7 @@ const fixtures: Fixture[] = [
     template: `<MyButton @click="onClick" />`,
     expectations: {
       patterns: ["Parameters<", '["onClick"]', "$props"],
-      antiPatterns: ["HTMLElementEventMap"],
+      antiPatterns: ["IntrinsicElementAttributes"],
     },
   },
   {
