@@ -5,6 +5,7 @@ export default defineConfig({
         "import.meta.vitest": "undefined",
     },
     test: {
+        exclude: ['**/node_modules/**', '**/dist/**'],
         includeSource: ["src/**/*.{js,ts}"],
         globals: true
     },

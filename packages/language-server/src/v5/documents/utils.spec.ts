@@ -150,7 +150,7 @@ describe("document utils", () => {
       const filepath = "/some/path.vue";
       const virtualUri = pathToVerterVirtual(filepath);
       const parsed = URI.parse(virtualUri);
-      expect(parsed.scheme).toBe("file");
+      expect(parsed.scheme).toBe("verter-virtual");
       expect(parsed.fsPath.replace(/\\/g, "/")).toBe("/some/path.vue");
     });
 
@@ -159,7 +159,7 @@ describe("document utils", () => {
       const virtualUri = pathToVerterVirtual(filepath);
       const parsed = URI.parse(virtualUri);
       expect(parsed.scheme).toBe("file");
-      expect(parsed.fsPath.replace(/\\/g, "/")).toBe("/some/path.js");
+      expect(parsed.path).toBe("/some/path.js");
     });
 
     it("does not convert to verter-virtual if given a non-vue file", () => {
@@ -196,7 +196,7 @@ describe("document utils", () => {
       const uri = "file:///some/path.vue";
       const newUri = uriToVerterVirtual(uri);
       const parsed = URI.parse(newUri);
-      expect(parsed.scheme).toBe("file");
+      expect(parsed.scheme).toBe("verter-virtual");
       expect(parsed.fsPath.replace(/\\/g, "/")).toBe("/some/path.vue");
     });
 
@@ -209,7 +209,7 @@ describe("document utils", () => {
       const uri = "file:///some/path.vue._VERTER_.template.js";
       const converted = uriToVerterVirtual(uri);
       const parsed = URI.parse(converted);
-      expect(parsed.scheme).toBe("file");
+      expect(parsed.scheme).toBe("verter-virtual");
       expect(parsed.fsPath.replace(/\\/g, "/")).toBe(
         "/some/path.vue._VERTER_.template.js"
       );
@@ -233,7 +233,7 @@ describe("document utils", () => {
       // it tries to convert to file scheme if isVueFile returns true.
       const converted = uriToVerterVirtual(uri);
       const parsed = URI.parse(converted);
-      expect(parsed.scheme).toBe("file");
+      expect(parsed.scheme).toBe("verter-virtual");
     });
   });
 
@@ -261,7 +261,7 @@ describe("document utils", () => {
     });
 
     it("retrieves the vue document path from sub-document", () => {
-      const uri = "verter-virtual:///some/path.vue._VERTER_.bundle.js";
+      const uri = "verter-virtual:///some/path.vue._VERTER_.bundler.ts";
       expect(uriToPath(uri)).toBe("/some/path.vue");
     });
 

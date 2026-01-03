@@ -56,7 +56,7 @@ jobs:
         run: pnpm build
 
       - name: Run tests
-        run: pnpm --filter @verter/core test -- --run
+        run: pnpm test -- --run
 
   test-types:
     name: Test @verter/types

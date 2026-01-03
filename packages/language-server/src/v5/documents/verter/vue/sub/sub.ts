@@ -1,4 +1,4 @@
-import { VueDocument } from "../vue.js";
+import type { VueDocument } from "../vue.js";
 import { VerterDocument } from "../../verter.js";
 import { ParserResult } from "@verter/core";
 import { SourceMapConsumer } from "source-map-js";

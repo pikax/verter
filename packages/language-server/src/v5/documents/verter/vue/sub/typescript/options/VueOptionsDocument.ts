@@ -1,9 +1,9 @@
 import { buildOptions, ScriptItem } from "@verter/core";
-import { SubDocumentProcessContext } from "../../sub.js";
+import { SubDocumentProcessContext } from "../../sub";
 import { LanguageTypescript, VueTypescriptDocument } from "../typescript.js";
 import { ParsedBlockScript } from "@verter/core/dist/v5/parser/types.js";
 import { createSubDocumentUri, uriToPath } from "../../../../../utils.js";
-import { VueDocument } from "../../../vue.js";
+import type { VueDocument } from "../../../vue.js";
 
 export class VueOptionsDocument extends VueTypescriptDocument {
   static create(

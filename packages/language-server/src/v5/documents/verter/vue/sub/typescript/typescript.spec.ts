@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { VueTypescriptDocument, LanguageTypescript } from "./typescript.js";
-import { SubDocumentProcessContext } from "../sub.js";
-import { VueDocument } from "../../vue.js";
 import { createSubDocumentUri } from "../../../../utils.js";
+import { VueDocument } from "../../vue.js";
+import { SubDocumentProcessContext } from "../sub.js";
+import { VueTypescriptDocument, LanguageTypescript } from "./typescript.js";
 
 class MockTypeScriptElement extends VueTypescriptDocument {
   static create(

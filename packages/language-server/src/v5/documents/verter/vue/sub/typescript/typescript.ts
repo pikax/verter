@@ -1,6 +1,6 @@
 import ts from "typescript";
+import type { VueDocument } from "../../vue.js";
 import { VueSubDocument } from "../sub.js";
-import { VueDocument } from "../../vue.js";
 
 export type LanguageTypescript = "ts" | "tsx" | "js" | "jsx";
 

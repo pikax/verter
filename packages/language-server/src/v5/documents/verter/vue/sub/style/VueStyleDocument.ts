@@ -1,7 +1,7 @@
 import { LanguageService, Stylesheet } from "vscode-css-languageservice";
-import { VueDocument } from "../../index.js";
-import { SubDocumentProcessContext, VueSubDocument } from "../sub.js";
 import { ProcessedBlock } from "../../utils.js";
+import type { VueDocument } from "../../index.js";
+import { SubDocumentProcessContext, VueSubDocument } from "../sub.js";
 
 export class VueStyleDocument extends VueSubDocument {
   static create(

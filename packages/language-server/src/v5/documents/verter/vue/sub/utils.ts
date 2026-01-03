@@ -1,6 +1,6 @@
 import { getStyleLanguageService } from "../../../../services/style";
 import { ProcessedBlock } from "../utils";
-import { VueDocument } from "../vue";
+import type { VueDocument } from "../vue";
 import { VueStyleDocument } from "./style";
 import {
   VueOptionsDocument,

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { VueDocument } from "../vue.js";
 import { VueSubDocument, SubDocumentProcessContext } from "./sub.js";
 import { createSubDocumentUri } from "../../../utils.js";

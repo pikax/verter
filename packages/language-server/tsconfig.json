@@ -7,17 +7,20 @@
     "src/generator/_tests_",
     "src/**/*/_gen.ts",
     "generated",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "src/**/*.fixtures.ts",
+    "src/**/__bench__/**/*",
+    "src/**/__generated__/**/*"
   ],
   "compilerOptions": {
     "outDir": "./dist",
     "rootDir": "./src",
-
-    "target": "ES6",
+    "target": "ESNext",
     "module": "nodenext",
+    "moduleResolution": "nodenext",
     "types": ["vitest/importMeta", "vitest/globals"],
     "preserveConstEnums": true,
-    "jsx": "preserve",
-    "allowSyntheticDefaultImports": true,
-    "moduleResolution": "nodenext"
+    "jsx": "preserve"
   }
 }

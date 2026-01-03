@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["./src", "src/**/*.spec.ts", "src/**/*.spec.tsx", "src/**/*.fixtures.ts"],
+  "exclude": ["dist", "node_modules"],
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "jsx": "preserve"
+  }
+}
