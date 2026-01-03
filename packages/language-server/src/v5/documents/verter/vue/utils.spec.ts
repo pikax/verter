@@ -8,8 +8,8 @@ import {
   ProcessedBlock,
 } from "./utils";
 import { ParsedBlock } from "@verter/core";
-import { createSubDocumentUri } from "../../utils.js";
-import { RawSourceMap, SourceMapConsumer } from "source-map-js";
+import { createSubDocumentUri, uriToVerterVirtual } from "../../utils.js";
+import { RawSourceMap, SourceMapConsumer, SourceMapGenerator } from "source-map-js";
 
 describe("utils", () => {
   describe("processBlocks", () => {
@@ -31,8 +31,8 @@ describe("utils", () => {
     it("should return empty if there are no blocks", () => {
       const uri = "file:///some/path.vue";
       const result = processBlocks(uri, []);
-      // No blocks mean no template/script/style, and no leftovers, so no custom block either
-      expect(result).toHaveLength(0);
+      // Only the bundle document is emitted
+      expect(result).toHaveLength(1);
     });
 
     it("should handle a single template block without leftovers", () => {
@@ -40,12 +40,14 @@ describe("utils", () => {
       const blocks = [makeBlock("template")];
       const result = processBlocks(uri, blocks);
 
-      // Only a template block is processed, no leftovers means no custom block.
-      expect(result).toHaveLength(1);
+      // bundle + template block
+      expect(result).toHaveLength(2);
 
       const templateBlock = result.find((b) => b.type === "template")!;
       expect(templateBlock.languageId).toBe("tsx");
-      expect(templateBlock.uri).toBe(createSubDocumentUri(uri, "render.tsx"));
+      expect(templateBlock.uri).toBe(
+        uriToVerterVirtual(createSubDocumentUri(uri, "render.tsx"))
+      );
       expect(templateBlock.blocks).toHaveLength(1);
     });
 
@@ -58,13 +60,15 @@ describe("utils", () => {
       const blocks = [scriptJs, scriptTs, scriptTrue];
       const result = processBlocks(uri, blocks);
 
-      // Only script blocks processed, no leftovers => no custom block
-      expect(result).toHaveLength(1);
+      // bundle + script
+      expect(result).toHaveLength(2);
 
       const scriptBlock = result.find((b) => b.type === "script")!;
       // First script block had no lang => languageId = 'js'
       expect(scriptBlock.languageId).toBe("js");
-      expect(scriptBlock.uri).toBe(createSubDocumentUri(uri, "options.tsx"));
+      expect(scriptBlock.uri).toBe(
+        uriToVerterVirtual(createSubDocumentUri(uri, "options.ts"))
+      );
       expect(scriptBlock.blocks).toHaveLength(3);
     });
 
@@ -77,9 +81,8 @@ describe("utils", () => {
       const blocks = [styleNoLang, styleSass, styleTrue];
       const result = processBlocks(uri, blocks);
 
-      // Two style variants: css and sass, no leftovers => no custom block
-      // We get exactly two processed style blocks: one for css and one for sass
-      expect(result).toHaveLength(2);
+      // bundle + css + sass
+      expect(result).toHaveLength(3);
 
       const cssBlock = result.find(
         (b) => b.type === "style" && b.languageId === "css"
@@ -88,10 +91,14 @@ describe("utils", () => {
         (b) => b.type === "style" && b.languageId === "sass"
       )!;
 
-      expect(cssBlock.uri).toBe(createSubDocumentUri(uri, "style.css"));
+      expect(cssBlock.uri).toBe(
+        uriToVerterVirtual(createSubDocumentUri(uri, "style.css"))
+      );
       expect(cssBlock.blocks).toHaveLength(2); // noLang and true are both css
 
-      expect(sassBlock.uri).toBe(createSubDocumentUri(uri, "style.sass"));
+      expect(sassBlock.uri).toBe(
+        uriToVerterVirtual(createSubDocumentUri(uri, "style.sass"))
+      );
       expect(sassBlock.blocks).toHaveLength(1);
     });
 
@@ -105,7 +112,8 @@ describe("utils", () => {
       const result = processBlocks(uri, blocks);
 
       // Template is known, unknown and weird remain -> custom block produced
-      expect(result).toHaveLength(2);
+      // bundle + template + custom
+      expect(result).toHaveLength(3);
 
       const templateBlock = result.find((b) => b.type === "template")!;
       expect(templateBlock.blocks).toHaveLength(1);
@@ -115,7 +123,9 @@ describe("utils", () => {
         "unknown",
         "weird",
       ]);
-      expect(customBlock.uri).toBe(createSubDocumentUri(uri, "custom.temp"));
+      expect(customBlock.uri).toBe(
+        uriToVerterVirtual(createSubDocumentUri(uri, "custom.temp"))
+      );
     });
 
     it("should handle multiple known and leftover blocks producing a custom block", () => {
@@ -134,8 +144,8 @@ describe("utils", () => {
       // script: 1 block (ts)
       // style: 2 blocks: one less, one css
       // leftover: customtag
-      // total: template(1) + script(1) + style(2) + custom(1) = 5 blocks
-      expect(result).toHaveLength(5);
+      // total: bundle(1) + template(1) + script(1) + style(2) + custom(1) = 6 blocks
+      expect(result).toHaveLength(6);
 
       const templateBlock = result.find((b) => b.type === "template")!;
       expect(templateBlock.blocks).toHaveLength(1);
@@ -192,6 +202,33 @@ describe("utils", () => {
       // Expect no movement since our map doesn't define more columns:
       expect(genPosFar.line).toBe(0);
       expect(genPosFar.character).toBe(0);
+    });
+
+    // @ai-generated - Guards that we prefer the start column over the span end when column spans exist.
+    it("generatedPositionFor should prefer the mapped column when span covers multiple columns", () => {
+      const generator = new SourceMapGenerator({ file: "generated.js" });
+      generator.addMapping({
+        generated: { line: 1, column: 0 },
+        original: { line: 1, column: 0 },
+        source: ".",
+      });
+      generator.addMapping({
+        generated: { line: 1, column: 4 },
+        original: { line: 1, column: 1 },
+        source: ".",
+      });
+
+      const consumerWithSpans = new SourceMapConsumer(
+        generator.toJSON() as any
+      );
+      consumerWithSpans.computeColumnSpans();
+
+      const genPos = generatedPositionFor(consumerWithSpans, {
+        line: 0,
+        character: 0,
+      });
+
+      expect(genPos.character).toBe(0);
     });
 
     it("generatedRangeFor should map original range to generated range", () => {

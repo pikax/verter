@@ -167,8 +167,14 @@ export function generatedPositionFor(
   });
 
   return {
-    line: result.line - 1,
-    character: result.lastColumn ?? result.column,
+    line:
+      typeof result.line === "number" ? result.line - 1 : Number.POSITIVE_INFINITY,
+    character:
+      typeof result.column === "number"
+        ? result.column
+        : typeof result.lastColumn === "number"
+          ? result.lastColumn
+          : Number.POSITIVE_INFINITY,
   };
 }
 

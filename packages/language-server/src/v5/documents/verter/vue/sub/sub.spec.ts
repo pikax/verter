@@ -3,6 +3,7 @@ import { VueDocument } from "../vue.js";
 import { VueSubDocument, SubDocumentProcessContext } from "./sub.js";
 import { createSubDocumentUri } from "../../../utils.js";
 import { Position, Range } from "vscode-languageserver-textdocument";
+import { SourceMapConsumer, SourceMapGenerator } from "source-map-js";
 
 // /**
 //  * A minimal mock for VueDocument, just enough to make the sub-document logic work.
@@ -82,12 +83,10 @@ describe("VueSubDocument", () => {
     subUri = createSubDocumentUri(parentDoc.uri, "options.ts");
   });
 
-  it("should throw if block not found in parent", () => {
+  it("should still sync even if block uri is missing", () => {
     const badUri = "file:///parent.vue._VERTER_.template.ts";
-    // No block with this URI
-    expect(() => {
-      new TestVueSubDocument(badUri, parentDoc, "typescript", 1).getText();
-    }).toThrowError("Block not found!");
+    const text = new TestVueSubDocument(badUri, parentDoc, "typescript", 1).getText();
+    expect(text).toBe("const  = 42;");
   });
 
   it("should sync content from parent and process it on first access", () => {
@@ -156,7 +155,7 @@ describe("VueSubDocument", () => {
       expect(genRange.start.line).toBeGreaterThanOrEqual(0);
       expect(genRange.end.character).toBeGreaterThanOrEqual(0);
 
-      expect(subDoc.getText(genRange)).toBe("t  = 42;");
+      expect(subDoc.getText(genRange)).toBe("const  = 42");
     });
 
     it("toOriginalPosition / toOriginalRange should map from subDoc to parent's original", () => {
@@ -191,6 +190,77 @@ describe("VueSubDocument", () => {
       const subOffset = subDoc.getText().indexOf("42");
       const origOffset = subDoc.toOriginalOffset(subOffset);
       expect(origOffset).toBeGreaterThanOrEqual(30);
+    });
+
+    // @ai-generated - Ensures toGeneratedOffsetFromPosition uses the start of a mapped span, not the end.
+    it("toGeneratedOffsetFromPosition should use the start column when mappings span multiple generated columns", () => {
+      const generator = new SourceMapGenerator({ file: "generated.js" });
+      generator.addMapping({
+        generated: { line: 1, column: 0 },
+        original: { line: 1, column: 0 },
+        source: ".",
+      });
+      generator.addMapping({
+        generated: { line: 1, column: 4 },
+        original: { line: 1, column: 1 },
+        source: ".",
+      });
+
+      const consumerWithSpans = new SourceMapConsumer(
+        generator.toJSON() as any
+      );
+      consumerWithSpans.computeColumnSpans();
+
+      class SpanSubDocument extends VueSubDocument {
+        constructor(uri: string, parent: VueDocument) {
+          super(uri, parent, "typescript", parent.version);
+          this.update("abcd", parent.version);
+        }
+
+        protected process(): void {
+          // No-op: we provide the source map manually for this test.
+        }
+
+        protected sync(): SourceMapConsumer {
+          return consumerWithSpans;
+        }
+      }
+
+      const parent = VueDocument.create("file:///span.vue", "<script></script>");
+      const spanUri = createSubDocumentUri(parent.uri, "span.ts");
+      const spanDoc = new SpanSubDocument(spanUri, parent);
+      const generatedOffset = spanDoc.toGeneratedOffsetFromPosition({
+        line: 0,
+        character: 0,
+      });
+
+      expect(generatedOffset).toBe(0);
+    });
+
+    // @ai-generated - Covers docsForPos mapping for a property access inside <script setup>.
+    it("docsForPos should report the generated offset for a cursor after a dot", () => {
+      const source = `<script setup lang="ts">
+function onChange(e) {
+  e;
+}
+function onClick(e) {
+  e.foo;
+}
+</script>
+<template><div /></template>`;
+
+      const vueDoc = VueDocument.create("file:///App.vue", source);
+      const caretOffset = vueDoc.getText().indexOf(".foo") + 1; // position after the dot
+      const caretPosition = vueDoc.positionAt(caretOffset);
+
+      const [entry] = vueDoc.docsForPos(caretPosition);
+      expect(entry).toBeDefined();
+
+      const generatedText = entry!.doc.getText();
+      const generatedIndex = generatedText.indexOf(".foo");
+      expect(generatedIndex).toBeGreaterThanOrEqual(0);
+
+      expect(entry!.offset).toBe(generatedIndex + 1);
     });
   });
 });
