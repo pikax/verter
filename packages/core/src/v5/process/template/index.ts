@@ -13,6 +13,7 @@ export const DefaultPlugins = [
   Plugins.BlockPlugin,
   Plugins.ConditionalPlugin,
   Plugins.EventPlugin,
+  Plugins.DirectiveModifiersPlugin,
   Plugins.LoopPlugin,
   Plugins.DirectivePlugin,
   Plugins.ElementPlugin,

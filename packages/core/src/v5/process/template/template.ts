@@ -66,6 +66,7 @@ export type TemplateAccessors =
   | "directiveName"
   // accessor for directives, in setup is equivalent to ctx, but in object API should filter only declared in directives
   | "directiveAccessor";
+
 export type TemplateContext = ProcessContext & {
   prefix: (str: string) => string;
   isCustomElement: (tag: string) => boolean;
