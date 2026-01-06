@@ -20,6 +20,13 @@ interface PropOptions<T = any, D = T> {
     default?: D | DefaultFactory<D> | null | undefined | object;
     validator?(value: unknown, props: Data): boolean;
 }
+export type SystemModifiers = (typeof systemModifiers)[number];
+export declare const systemModifiers: readonly [
+    "ctrl",
+    "shift",
+    "alt",
+    "meta"
+];
 
 // Overrides for defineProps
 /**

@@ -24,7 +24,7 @@ const FUNCTIONS_TO_OVERRIDE = [
 
 // Helper types to import/inline from Vue (may be internal types not exported by 'vue')
 // These will be copied as local type definitions with their dependencies
-const HELPERS_TO_IMPORT = [];
+const HELPERS_TO_IMPORT = ["SystemModifiers", "systemModifiers"];
 
 const NAME_APPEND = "_Box";
 const NAME_PREPEND = "";
@@ -135,6 +135,14 @@ function resolveVueTypeFiles() {
             files.push(p);
           }
           if (
+            e.name === "runtime-dom.d.ts" &&
+            p.includes(
+              `${path.sep}@vue${path.sep}runtime-dom${path.sep}dist${path.sep}runtime-dom.d.ts`
+            )
+          ) {
+            files.push(p);
+          }
+          if (
             e.name === "shared.d.ts" &&
             p.includes(
               `${path.sep}@vue${path.sep}shared${path.sep}dist${path.sep}shared.d.ts`
@@ -194,13 +202,14 @@ function extractFunctionDeclarations(files, names) {
   return out;
 }
 
-function collectVueTypeNames(files) {
+function collectVueTypeNames(files, explicitTypesToCollect = []) {
   const exportedTypes = new Map(); // name -> package
   const internalTypes = new Set();
   const exportedInVue = new Set(); // names exported directly by 'vue'
+  const allTypesByName = new Map(); // all discovered types including internal ones
 
   // Priority order: prefer more specific packages over 'vue'
-  const pkgPriority = { "@vue/shared": 3, "@vue/runtime-core": 2, vue: 1 };
+  const pkgPriority = { "@vue/shared": 3, "@vue/runtime-core": 2, "@vue/runtime-dom": 2, vue: 1 };
 
   for (const filePath of files) {
     const source = fs.readFileSync(filePath, "utf-8");
@@ -220,6 +229,9 @@ function collectVueTypeNames(files) {
     } else if (filePath.includes("@vue/runtime-core")) {
       pkg = "@vue/runtime-core";
       priority = pkgPriority[pkg];
+    } else if (filePath.includes("@vue/runtime-dom")) {
+      pkg = "@vue/runtime-dom";
+      priority = pkgPriority[pkg];
     } else if (filePath.includes(path.join("vue", "dist", "vue.d.ts"))) {
       pkg = "vue";
       priority = pkgPriority[pkg];
@@ -228,11 +240,17 @@ function collectVueTypeNames(files) {
     const visit = (node) => {
       // Collect type names (interfaces, type aliases, etc.)
       if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
+        const name = node.name.text;
+        
+        // Store all types for later retrieval
+        if (!allTypesByName.has(name)) {
+          allTypesByName.set(name, { node, sf, filePath });
+        }
+        
         const isExported = node.modifiers?.some(
           (m) => m.kind === ts.SyntaxKind.ExportKeyword
         );
         if (isExported) {
-          const name = node.name.text;
           const existing = exportedTypes.get(name);
           // Only set if not already set or if current package has higher priority
           if (!existing || pkgPriority[existing] < priority) {
@@ -242,7 +260,7 @@ function collectVueTypeNames(files) {
             exportedInVue.add(name);
           }
         } else {
-          internalTypes.add(node.name.text);
+          internalTypes.add(name);
         }
       }
       ts.forEachChild(node, visit);
@@ -250,7 +268,7 @@ function collectVueTypeNames(files) {
     visit(sf);
   }
 
-  return { exportedTypes, internalTypes, exportedInVue };
+  return { exportedTypes, internalTypes, exportedInVue, allTypesByName };
 }
 
 function collectUsedInternalTypes(
@@ -259,7 +277,8 @@ function collectUsedInternalTypes(
   internalTypes,
   exportedTypes,
   exportedInVue,
-  helpersToImport
+  helpersToImport,
+  allTypesByName
 ) {
   const usedInternal = new Set();
   const neededLocalExternal = new Set();
@@ -339,6 +358,7 @@ function collectUsedInternalTypes(
 
   // Collect all type nodes first
   const typeNodes = new Map();
+  const constNodes = new Map();
   const printer = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed });
 
   for (const filePath of files) {
@@ -354,6 +374,15 @@ function collectUsedInternalTypes(
       if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
         const text = printer.printNode(ts.EmitHint.Unspecified, node, sf);
         typeNodes.set(node.name.text, { text, node, sf });
+      }
+      // Also collect const declarations
+      if (ts.isVariableStatement(node)) {
+        for (const decl of node.declarationList.declarations) {
+          if (ts.isIdentifier(decl.name)) {
+            const text = printer.printNode(ts.EmitHint.Unspecified, node, sf);
+            constNodes.set(decl.name.text, { text, node, sf });
+          }
+        }
       }
       ts.forEachChild(node, visit);
     };
@@ -392,11 +421,41 @@ function collectUsedInternalTypes(
     visit(typeInfo.node);
   }
 
-  // Populate local external type definitions (e.g., IfAny)
+  // Populate local external type definitions (e.g., IfAny, SystemModifiers)
   for (const name of neededLocalExternal) {
     const typeInfo = typeNodes.get(name);
+    const constInfo = constNodes.get(name);
+    
     if (typeInfo) {
       localExternalDefinitions.set(name, typeInfo.text);
+      
+      // Also process dependencies of explicitly requested types
+      const visit = (node) => {
+        if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName)) {
+          const depName = node.typeName.text;
+          // Add any internal type dependencies
+          if (internalTypes.has(depName) && !localExternalDefinitions.has(depName) && !processed.has(depName)) {
+            const depTypeInfo = typeNodes.get(depName);
+            if (depTypeInfo) {
+              localExternalDefinitions.set(depName, depTypeInfo.text);
+              processed.add(depName);
+            }
+          }
+          // Check for const dependencies (e.g., systemModifiers for SystemModifiers)
+          if (!localExternalDefinitions.has(depName)) {
+            const depConstInfo = constNodes.get(depName);
+            if (depConstInfo) {
+              localExternalDefinitions.set(depName, depConstInfo.text);
+            }
+          }
+        }
+        ts.forEachChild(node, visit);
+      };
+      visit(typeInfo.node);
+    } else if (constInfo) {
+      localExternalDefinitions.set(name, constInfo.text);
+    } else {
+      console.warn(`⚠️  Type '${name}' requested in HELPERS_TO_IMPORT but not found in Vue types`);
     }
   }
 
@@ -600,10 +659,12 @@ function generateOverrideFileFromDeclarations(
     imports.push("UnionToIntersection");
   }
   let header = `// This file is auto-generated by scripts/generate-vue-overrides.mjs\n// Do not edit manually\n\n`;
-  
+
   // Only add import if we have imports
   if (imports.length > 0) {
-    header += `import type { ${imports.join(", ")} } from '../helpers/helpers';\n`;
+    header += `import type { ${imports.join(
+      ", "
+    )} } from '../helpers/helpers';\n`;
   }
 
   // Merge all type definitions into a single set to avoid duplication
@@ -666,13 +727,13 @@ function generateOverrideFileFromDeclarations(
   for (const [name, decls] of declsMap.entries()) {
     if (!decls.length) continue;
     content += `// Overrides for ${name}\n`;
-    
+
     // Check if this function has a custom override
     if (CUSTOM_OVERRIDES[name]) {
       content += CUSTOM_OVERRIDES[name] + "\n\n";
       continue;
     }
-    
+
     const seen = new Set();
     for (const d of decls) {
       const text = transformSignatureReturnToArgTypeAppendUniqueKey(
@@ -713,7 +774,7 @@ function main() {
     "📄 Using type files:\n" + files.map((f) => "  - " + f).join("\n")
   );
 
-  const { exportedTypes, internalTypes, exportedInVue } =
+  const { exportedTypes, internalTypes, exportedInVue, allTypesByName } =
     collectVueTypeNames(files);
   console.log(
     `📦 Collected ${exportedTypes.size} exported and ${internalTypes.size} internal Vue type names`
@@ -733,7 +794,8 @@ function main() {
       internalTypes,
       exportedTypes,
       exportedInVue,
-      HELPERS_TO_IMPORT
+      HELPERS_TO_IMPORT,
+      allTypesByName
     );
   console.log(
     `🔍 Found ${
