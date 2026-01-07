@@ -1,3 +1,4 @@
+import { PickByValue } from "../helpers";
 import { SystemModifiers } from "../vue";
 
 // vOn
@@ -24,26 +25,25 @@ type ExactGard<T> = T extends {
   ? true
   : false;
 
-export type VOnValidModifiersObject<TEvent, TInstance> = {
-  stop: StopGuard<TEvent>;
-  prevent: PreventGuard<TEvent>;
-  self: SelfGuard<TEvent>;
+export type VOnValidModifiersObject<TInstance, TArg> = {
+  stop: StopGuard<TArg>;
+  prevent: PreventGuard<TArg>;
+  self: SelfGuard<TArg>;
 
-  ctrl: CtrlGuard<TEvent>;
-  shift: ShiftGuard<TEvent>;
-  alt: AltGuard<TEvent>;
-  meta: MetaGuard<TEvent>;
+  ctrl: CtrlGuard<TArg>;
+  shift: ShiftGuard<TArg>;
+  alt: AltGuard<TArg>;
+  meta: MetaGuard<TArg>;
 
-  left: LeftGuard<TEvent>;
-  right: RightGuard<TEvent>;
-  middle: MiddleGuard<TEvent>;
+  left: LeftGuard<TArg>;
+  right: RightGuard<TArg>;
+  middle: MiddleGuard<TArg>;
 
-  exact: ExactGard<TEvent>;
+  exact: ExactGard<TArg>;
 
   once: true;
-} & ExactKeyModifier<TEvent> &
-  DomModifiers<TEvent, TInstance>;
-
+} & ExactKeyModifier<TArg> &
+  DomModifiers<TArg, TInstance>;
 type ExactKeyModifier<TEvent> = ExactGard<TEvent> extends true
   ? {
       [K: string]: true;
@@ -59,17 +59,40 @@ type DomModifiers<TEvent, TInstance> = TEvent extends Event
     : {}
   : {};
 
-export type vOnModifiers<TArg, TInstance = {}> = VOnValidModifiersObject<
-  TArg,
-  TInstance
-> extends infer O
-  ? { [K in keyof O as O[K] extends true ? K : never]: O[K] }
+type OnlyEventKeys<TInstance> = TInstance extends HTMLElement
+  ? {
+      [K in keyof TInstance]: K extends `on${string}` ? K : never;
+    }[keyof TInstance]
   : never;
+type OnlyEventKeysFromProps<TInstance> = TInstance extends { $props: any }
+  ? {
+      [K in keyof TInstance["$props"]]: K extends `on${Capitalize<string>}`
+        ? K
+        : never;
+    }[keyof TInstance["$props"]]
+  : never;
+
+export type vOnModifiers<
+  TInstance,
+  TName extends TInstance extends { $props: any }
+    ? OnlyEventKeysFromProps<TInstance>
+    : OnlyEventKeys<TInstance>
+> = TInstance extends HTMLElement
+  ? TInstance[TName] extends ((e: infer E) => any) | null
+    ? PickByValue<VOnValidModifiersObject<TInstance, E>, true>
+    : {}
+  : TInstance extends {
+      $props: {
+        [K in TName]?: ((e: infer E) => any) | undefined;
+      };
+    }
+  ? PickByValue<VOnValidModifiersObject<TInstance, E>, true>
+  : {};
 
 // /vOn
 
 // vText
-export type vTextModifiers<TArg, TInstance = {}> = TArg extends {
+export type vTextModifiers<TInstance> = TInstance extends {
   textContent: string | null;
 }
   ? {}
@@ -77,7 +100,7 @@ export type vTextModifiers<TArg, TInstance = {}> = TArg extends {
 // /vText
 
 // vHtml
-export type vHtmlModifiers<TArg, TInstance = {}> = TArg extends {
+export type vHtmlModifiers<TInstance> = TInstance extends {
   innerHTML: string | null;
 }
   ? {}
@@ -85,16 +108,22 @@ export type vHtmlModifiers<TArg, TInstance = {}> = TArg extends {
 // /vHtml
 
 // vShow
-export type vShowModifiers<TArg, TInstance = {}> = TArg extends {
+export type vShowModifiers<TInstance> = TInstance extends {
   style: CSSStyleDeclaration;
 }
+  ? {}
+  : TInstance extends {
+      $props: {
+        style?: any;
+      };
+    }
   ? {}
   : never;
 // /vShow
 
 // vBind
 
-export type vBindModifiers<TArg, TInstance = {}> = TInstance extends HTMLElement
+export type vBindModifiers<TInstance> = TInstance extends HTMLElement
   ? {
       prop: true;
       attr: true;
@@ -109,7 +138,7 @@ export type vBindModifiers<TArg, TInstance = {}> = TInstance extends HTMLElement
 
 // vModel
 
-export type vModelModifiers<TArg, TInstance = {}> = TInstance extends
+export type vModelModifiers<TInstance, TName> = TInstance extends
   | HTMLInputElement
   | HTMLSelectElement
   | HTMLTextAreaElement
