@@ -123,7 +123,7 @@ export type vShowModifiers<TInstance> = TInstance extends {
 
 // vBind
 
-export type vBindModifiers<TInstance> = TInstance extends HTMLElement
+export type vBindModifiers<TInstance, TName> = TInstance extends HTMLElement
   ? {
       prop: true;
       attr: true;
@@ -168,3 +168,103 @@ export type vMemoModifiers<TArg, TInstance = {}> = {};
 // vCloak
 export type vCloakModifiers<TArg, TInstance = {}> = {};
 // /vCloak
+
+export type CustomDirectiveModifiers<T> = T extends import("vue").Directive<
+  any,
+  any,
+  infer M extends string
+>
+  ? { [K in M]: true }
+  : never;
+
+declare const myDirective: import("vue").Directive<
+  HTMLInputElement,
+  { color: "black" | "white" },
+  "foo" | "bar"
+>;
+
+export type MyDirectiveModifiers = CustomDirectiveModifiers<typeof myDirective>;
+// type MyDirectiveModifiers = { foo: true; bar: true }
+// /CustomDirectiveModifiers
+
+export type ExtractLeafElement<T> = T extends HTMLElement
+  ? T
+  : T extends { $el: infer E }
+  ? ExtractLeafElement<E>
+  : T extends { new (): infer I }
+  ? ExtractLeafElement<I>
+  : never;
+
+declare const bar: {
+  $el: {
+    $el: HTMLDivElement;
+  };
+};
+
+declare const baz: {
+  new (): {
+    $el: {
+      $el: {
+        $el: HTMLSpanElement;
+      };
+    };
+  };
+};
+
+declare const qux: {
+  new (): {
+    $el: {
+      new (): {
+        $el: [HTMLButtonElement, HTMLInputElement];
+      };
+    };
+  };
+};
+
+declare const inputEl: {
+  $el: HTMLInputElement;
+};
+
+declare const foo: {
+  $el: typeof bar | typeof baz | typeof qux;
+};
+
+export type FooElement = ExtractLeafElement<typeof foo>;
+
+export declare function runCustomDirective<
+  TInstance,
+  TDirective extends import("vue").Directive<ExtractLeafElement<TInstance>>
+>(
+  instance: TInstance,
+  directive: TDirective
+): ExtractLeafElement<TInstance> extends infer El extends HTMLElement
+  ? TDirective extends import("vue").Directive<
+      infer TElement,
+      infer TArg,
+      infer M extends string
+    >
+    ? El extends TElement
+      ? (instance: TInstance, arg: TArg, modifiers: { [K in M]?: true }) => void
+      : (instance: TElement, arg: TArg, modifiers: { [K in M]?: true }) => void
+    : false
+  : false;
+
+const r = runCustomDirective(foo, myDirective)(
+  foo,
+  { color: "black" },
+  { foo: true, bar: true }
+);
+
+runCustomDirective(foo, myDirective)(
+  foo,
+  { color: "black" },
+  { foo: true, bar: true }
+);
+
+runCustomDirective(inputEl, myDirective)(
+  inputEl,
+  { color: "black" },
+  { foo: true, bar: true }
+);
+
+// export function runDirective<TInstance, TDirective>():  TDirective extends import("vue").Directive<
