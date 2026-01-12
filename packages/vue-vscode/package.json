@@ -1,7 +1,7 @@
 {
   "name": "verter-vscode",
   "displayName": "Verter VSCode",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Verter VSCode Extension",
   "main": "dist/extension.js",
   "type": "commonjs",
