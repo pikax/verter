@@ -9,5 +9,6 @@ export * from "./render";
 export * from "./props";
 export * from "./setup";
 export * from "./slots";
+export * from "./directives";
 export * from "./vue/vue.macros";
 export * from "./vue/vue";

@@ -16,6 +16,7 @@ export const DefaultPlugins = [
   Plugins.DirectiveModifiersPlugin,
   Plugins.LoopPlugin,
   Plugins.DirectivePlugin,
+  Plugins.DirectiveRunnerPlugin,
   Plugins.ElementPlugin,
   Plugins.TemplateTagPlugin,
   Plugins.SFCCleanerPlugin,

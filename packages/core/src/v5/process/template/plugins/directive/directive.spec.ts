@@ -236,5 +236,14 @@ describe("process template plugins directive", () => {
         `div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vTest);___VERTER___directiveName.modifiers=["app"];___VERTER___directiveName.value=___VERTER___ctx.bar;}}} />`
       );
     });
+
+    // @ai-generated - Ensures v-directive runner emits custom directive calls with value, arg, and modifiers
+    it("adds v-directive runner for custom directives", () => {
+      const { result } = parse(`<div v-test:foo.app="bar" />`);
+
+      expect(result).toContain(
+        `v-directive={(___VERTER___slotInstance)=>{declare const ___VERTER___directiveElement: ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement, ___VERTER___directiveAccessor.vTest)(___VERTER___directiveElement, ___VERTER___ctx.bar, "foo", { app: true });}}`
+      );
+    });
   });
 });

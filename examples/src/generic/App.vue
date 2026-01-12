@@ -25,7 +25,7 @@ const foo = {} as InstanceType<typeof Comp>;
     >
     <template #header></template> -->
   </Comp>
-  <div @click="onClick"></div>
+  <div @click="onClick" v-focus="aas"></div>
 
   <!-- <span>{{ $data.bar + b }}</span> -->
 </template>

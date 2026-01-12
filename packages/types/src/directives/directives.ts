@@ -188,12 +188,22 @@ export declare function runCustomDirective<
 ): ExtractLeafElement<TInstance> extends infer El extends HTMLElement
   ? TDirective extends import("vue").Directive<
       infer TElement,
-      infer TArg,
+      infer TValue,
       infer M extends string
     >
     ? El extends TElement
-      ? (instance: TInstance, arg: TArg, modifiers: { [K in M]?: true }) => void
-      : (instance: TElement, arg: TArg, modifiers: { [K in M]?: true }) => void
+      ? (
+          instance: TInstance,
+          value: TValue,
+          arg: string | undefined,
+          modifiers: { [K in M]?: true }
+        ) => void
+      : (
+          instance: TElement,
+          value: TValue,
+          arg: string | undefined,
+          modifiers: { [K in M]?: true }
+        ) => void
     : false
   : false;
 // /custom directive
