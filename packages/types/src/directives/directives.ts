@@ -207,3 +207,20 @@ export declare function runCustomDirective<
     : false
   : false;
 // /custom directive
+
+export type ExtractDirectives<T> = {
+  [K in keyof T as T[K] extends import("vue").Directive<any, any, any, any>
+    ? K extends `v${Capitalize<string>}`
+      ? K
+      : never
+    : never]: T[K];
+};
+
+export declare function retrieveSetupDirectives<T>(
+  o: T
+): ExtractDirectives<T> extends infer D
+  ? ExtractDirectives<Omit<import("vue").GlobalDirectives, keyof D>> & D
+  : ExtractDirectives<import("vue").GlobalDirectives>;
+
+// NOTE for options, it needs to rely on the boxed value types from Vue,
+// because the defineComponent is too laxed

@@ -23,5 +23,5 @@ function fooClose(e) {
   <Child :item="{ myItem: 1 }" v-on:close="fooA"></Child>
   <Child :item="{ yourItem: 2 }" @close="fooB"></Child>
 
-  <Foo @close="fooClose" test="ss"/>
+  <Foo @close="fooClose" test="ss" v-foo/>
 </template>
