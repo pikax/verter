@@ -282,6 +282,16 @@ describe("directive runner", () => {
       expect(warnings.length).toBe(0);
     });
 
+    // @ai-generated - Tests event option modifiers on native elements (issue #78)
+    it("allows v-on event option modifiers on native elements", () => {
+      const { context, result } = parse(
+        `<button @click.capture.passive.once="handler" />`
+      );
+
+      expect(warningMessages(context)).toEqual([]);
+      expect(result).not.toContain("runCustomDirective");
+    });
+
     it("skips built-in directives in the custom directive runner output", () => {
       const { result, context } = parse(`<div v-show="visible" />`);
 
