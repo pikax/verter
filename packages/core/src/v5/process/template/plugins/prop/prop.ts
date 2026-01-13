@@ -10,7 +10,6 @@ import {
   ElementTypes,
 } from "@vue/compiler-core";
 import { camelize } from "vue";
-import { DirectivePlugin } from "../directive";
 import { ParseTemplateContext } from "../../../../parser/template";
 import { generateImport } from "../../../utils";
 import { ImportItem, ImportModule } from "../../../types";
@@ -250,13 +249,6 @@ export const PropPlugin = declareTemplatePlugin({
           );
         }
       }
-
-      DirectivePlugin.handleDirectiveModifiers(
-        node,
-        prop.context as ParseTemplateContext,
-        s,
-        ctx
-      );
     }
   },
 });

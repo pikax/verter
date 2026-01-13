@@ -1,4 +1,5 @@
 import { PickByValue } from "../helpers";
+import { ExtractFromHTMLElement } from "../tsx/components-tsx";
 import { SystemModifiers } from "../vue";
 
 export type ExtractLeafElement<T> = T extends HTMLElement
@@ -33,7 +34,7 @@ type ExactGard<T> = T extends {
   ? true
   : false;
 
-export type VOnValidModifiersObject<TInstance, TArg> = {
+type VOnValidModifiersObject<TInstance, TArg> = {
   stop?: StopGuard<TArg>;
   prevent?: PreventGuard<TArg>;
   self?: SelfGuard<TArg>;
@@ -68,9 +69,11 @@ type DomModifiers<TEvent, TInstance> = TEvent extends Event
   : {};
 
 type OnlyEventKeys<TInstance> = TInstance extends HTMLElement
-  ? {
-      [K in keyof TInstance]: K extends `on${string}` ? K : never;
-    }[keyof TInstance]
+  ? ExtractFromHTMLElement<TInstance> extends infer Event
+    ? {
+        [K in keyof Event]: K extends `on${string}` ? K : never;
+      }[keyof Event]
+    : never
   : never;
 type OnlyEventKeysFromProps<TInstance> = TInstance extends { $props: any }
   ? {
@@ -86,8 +89,12 @@ export type vOnModifiers<
     ? OnlyEventKeysFromProps<TInstance>
     : OnlyEventKeys<TInstance>
 > = TInstance extends HTMLElement
-  ? TInstance[TName] extends ((e: infer E) => any) | null
-    ? Partial<PickByValue<VOnValidModifiersObject<TInstance, E>, true>>
+  ? ExtractFromHTMLElement<TInstance> extends infer Event
+    ? Event[TName] extends ((e: infer E) => any) | null | undefined
+      ? Partial<
+          PickByValue<VOnValidModifiersObject<Event, E>, true | undefined>
+        >
+      : {}
     : {}
   : TInstance extends {
       $props: {

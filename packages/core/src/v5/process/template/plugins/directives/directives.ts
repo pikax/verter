@@ -1,26 +1,15 @@
-import { DirectiveNode, ElementNode, NodeTypes } from "@vue/compiler-core";
+import {
+  DirectiveNode,
+  ElementNode,
+  Namespaces,
+  NodeTypes,
+} from "@vue/compiler-core";
 import { TemplateDirective } from "../../../../parser";
 import { declareTemplatePlugin, TemplateContext } from "../../template";
 import { ProcessItemType } from "../../../types";
 import { createHelperImport } from "../../../utils";
-
-const BUILTIN_DIRECTIVE_NAMES = new Set([
-  "text",
-  "html",
-  "show",
-  "if",
-  "else-if",
-  "else",
-  "for",
-  "slot",
-  "pre",
-  "once",
-  "memo",
-  "cloak",
-  "model",
-  "bind",
-  "on",
-]);
+import { capitalize, isBuiltInDirective } from "@vue/shared";
+import { AvailableExports } from "@verter/types/string";
 
 function pushWarning(
   node: DirectiveNode,
@@ -44,48 +33,44 @@ function validateBuiltInDirective(
   node: DirectiveNode,
   ctx: TemplateContext
 ) {
-  if (!BUILTIN_DIRECTIVE_NAMES.has(name)) {
+  if (!isBuiltInDirective(name)) {
     return;
   }
 
-  const meta = BUILTIN_DIRECTIVE_META[name];
-  if (!meta) return;
+  const allowArg = BUILTIN_ALLOW_ARG.has(name);
+  const allowValue = BUILTIN_ALLOW_VALUE.has(name);
+  const allowModifiers = BUILTIN_ALLOW_MODIFIERS.has(name);
 
   const hasModifiers = node.modifiers && node.modifiers.length > 0;
 
-  if (!meta.allowModifiers && hasModifiers) {
+  if (!allowModifiers && hasModifiers) {
     pushWarning(node, ctx, "UNSUPPORTED_BUILTIN_DIRECTIVE_MODIFIER");
   }
 
-  if (!meta.allowArg && node.arg) {
+  if (!allowArg && node.arg) {
     pushWarning(node, ctx, "UNSUPPORTED_BUILTIN_DIRECTIVE_ARGUMENT");
   }
 
-  if (!meta.allowValue && node.exp) {
+  if (!allowValue && node.exp) {
     pushWarning(node, ctx, "UNSUPPORTED_BUILTIN_DIRECTIVE_VALUE");
   }
 }
 
-const BUILTIN_DIRECTIVE_META = {
-  text: { allowArg: false, allowValue: true, allowModifiers: false },
-  html: { allowArg: false, allowValue: true, allowModifiers: false },
-  show: { allowArg: false, allowValue: true, allowModifiers: false },
-  if: { allowArg: false, allowValue: true, allowModifiers: false },
-  "else-if": { allowArg: false, allowValue: true, allowModifiers: false },
-  else: { allowArg: false, allowValue: false, allowModifiers: false },
-  for: { allowArg: false, allowValue: true, allowModifiers: false },
-  slot: { allowArg: true, allowValue: true, allowModifiers: false },
-  pre: { allowArg: false, allowValue: false, allowModifiers: false },
-  once: { allowArg: false, allowValue: false, allowModifiers: false },
-  memo: { allowArg: false, allowValue: true, allowModifiers: false },
-  cloak: { allowArg: false, allowValue: false, allowModifiers: false },
-  model: { allowArg: true, allowValue: true, allowModifiers: true },
-  bind: { allowArg: true, allowValue: true, allowModifiers: true },
-  on: { allowArg: true, allowValue: true, allowModifiers: true },
-} as Record<
-  string,
-  { allowArg: boolean; allowValue: boolean; allowModifiers: boolean }
->;
+const BUILTIN_ALLOW_ARG = new Set(["slot", "model", "bind", "on"]);
+const BUILTIN_ALLOW_VALUE = new Set([
+  "text",
+  "html",
+  "show",
+  "if",
+  "else-if",
+  "for",
+  "memo",
+  "model",
+  "bind",
+  "on",
+  "slot",
+]);
+const BUILTIN_ALLOW_MODIFIERS = new Set(["model", "bind", "on"]);
 
 export const DirectiveRunnerPlugin = declareTemplatePlugin({
   name: "VerterDirectiveRunner",
@@ -98,8 +83,6 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
 
   transformDirective(directive, _s, ctx) {
     validateBuiltInDirective(directive.name, directive.node, ctx);
-    if (BUILTIN_DIRECTIVE_NAMES.has(directive.name as any)) return;
-
     const list = this.directivesByElement.get(directive.element) ?? [];
     list.push(directive);
     this.directivesByElement.set(directive.element, list);
@@ -109,6 +92,11 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
     const node = prop.node;
     if (!node || node.type !== NodeTypes.DIRECTIVE) return;
     validateBuiltInDirective(prop.name, node, ctx);
+    if (isBuiltInDirective(node.name)) {
+      const list = this.directivesByElement.get(prop.element) ?? [];
+      list.push(prop as any);
+      this.directivesByElement.set(prop.element, list);
+    }
   },
 
   post(s, ctx) {
@@ -120,21 +108,29 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
     const runCustomDirective = ctx.prefix("runCustomDirective");
     const extractLeafElement = ctx.prefix("ExtractLeafElement");
 
-    ctx.items.push(
-      createHelperImport(
-        ["runCustomDirective", "ExtractLeafElement"],
-        ctx.prefix
-      )
-    );
+    const helperImports = new Set<AvailableExports>();
+    helperImports.add("ExtractLeafElement");
 
-    for (const [element, directives] of this.directivesByElement.entries()) {
-      if (!directives.length) continue;
+    const needsRunCustomDirective = this.directivesByElement.size > 0;
+    if (needsRunCustomDirective) {
+      helperImports.add("runCustomDirective");
+    }
 
+    ctx.items.push(createHelperImport([...helperImports], ctx.prefix));
+
+    for (const [element, directives] of this.directivesByElement) {
       const insertPos = element.loc.start.offset + element.tag.length + 1;
+
+      const hasCustomDirective =
+        directives.filter((x) => !isBuiltInDirective(x.name)).length > 0;
+
+      const directiveElementStr = `const ${directiveElement}={} as ${extractLeafElement}<typeof ${slotInstance}>;`;
 
       s.appendLeft(
         insertPos,
-        ` v-directive={(${slotInstance})=>{declare const ${directiveElement}:${extractLeafElement}<typeof ${slotInstance}>;`
+        ` v-directive={(${slotInstance})=>{${
+          hasCustomDirective ? directiveElementStr : ""
+        }`
       );
 
       let lastPos = insertPos;
@@ -167,6 +163,45 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
           startName + 2 /* "v-".length */ + dir.name.length,
           node.loc.end.offset
         );
+        const moves = [] as Array<() => void>;
+
+        const isBuiltIn = isBuiltInDirective(dir.name);
+        if (isBuiltIn) {
+          if (node.modifiers && node.modifiers.length === 0) {
+            continue;
+          }
+          const name = `v${capitalize(dir.name)}Modifiers`;
+          ctx.items.push(
+            createHelperImport([name as AvailableExports], ctx.prefix)
+          );
+          prepend += "(";
+          processModifiers(false);
+
+          try {
+            const arg = node.arg
+              ? // TODO this is incorrect, it's not correctly prepending the context
+                "on" +
+                s.slice(node.arg.loc.start.offset, node.arg.loc.end.offset)
+              : "";
+            const isStaticArg =
+              node.arg &&
+              node.arg.type === NodeTypes.SIMPLE_EXPRESSION &&
+              node.arg.isStatic;
+            prepend = `satisfies ${ctx.prefix(name)}<typeof ${slotInstance},${
+              isStaticArg ? "'" : ""
+            }${arg}${isStaticArg ? "'" : ""}>)`;
+
+            moves.forEach((move) => move());
+          } catch (e) {
+            console.log("NOTE IT SHOULD NOT FAIL BUT IT DOES!!!", e);
+            debugger;
+            const arg = node.arg
+              ? s.slice(node.arg.loc.start.offset, node.arg.loc.end.offset)
+              : "";
+            console.log("asdasd", arg);
+          }
+          continue;
+        }
         lastPos = node.loc.end.offset;
 
         // remove - & capitalise first letter
@@ -198,8 +233,6 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
 
         prepend = "";
 
-        const moves = [] as Array<() => void>;
-
         moves.push(() => s.move(insertPos, startName, endName));
 
         if (exp) {
@@ -229,35 +262,52 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
           prepend += `,undefined`;
         }
 
-        if (node.modifiers && node.modifiers.length > 0) {
-          s.appendRight(node.modifiers[0].loc.start.offset, `${prepend},{`);
-          prepend = "";
-
-          for (let i = 0; i < node.modifiers.length; i++) {
-            const modifier = node.modifiers[i];
-            const isLast = i === node.modifiers.length - 1;
-
-            // remove dot "."
-            s.remove(modifier.loc.start.offset - 1, modifier.loc.start.offset);
-
-            s.appendRight(modifier.loc.start.offset, '"');
-            s.appendLeft(modifier.loc.end.offset, `":true${isLast ? "" : ","}`);
-
-            if (isLast) {
-              s.appendLeft(modifier.loc.end.offset, "});");
-            }
-
-            moves.push(() =>
-              s.move(
-                insertPos,
-                modifier.loc.start.offset,
-                modifier.loc.end.offset
-              )
+        function processModifiers(appendComma = true) {
+          if (node.modifiers && node.modifiers.length > 0) {
+            s.appendRight(
+              node.modifiers[0].loc.start.offset,
+              `${prepend}${appendComma ? "," : ""}{`
             );
+            prepend = "";
+
+            for (let i = 0; i < node.modifiers.length; i++) {
+              const modifier = node.modifiers[i];
+              const isLast = i === node.modifiers.length - 1;
+
+              // remove dot "."
+              s.remove(
+                modifier.loc.start.offset - 1,
+                modifier.loc.start.offset
+              );
+
+              s.appendRight(modifier.loc.start.offset, '"');
+              s.appendLeft(
+                modifier.loc.end.offset,
+                `":true${isLast ? "" : ","}`
+              );
+
+              if (isLast) {
+                // s.appendLeft(modifier.loc.end.offset, "});");
+                s.appendLeft(
+                  modifier.loc.end.offset,
+                  `}${appendComma ? ");" : ""}`
+                );
+              }
+
+              moves.push(() =>
+                s.move(
+                  insertPos,
+                  modifier.loc.start.offset,
+                  modifier.loc.end.offset
+                )
+              );
+            }
+          } else {
+            prepend += `,{});`;
           }
-        } else {
-          prepend += `,{});`;
         }
+
+        processModifiers();
 
         for (let i = 0; i < moves.length; i++) {
           const move = moves[i];

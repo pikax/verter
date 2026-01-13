@@ -49,7 +49,7 @@ describe("directive runner", () => {
       const normalized = normalize(result);
       expect(normalized).toContain(
         normalize(
-          "v-directive={(___VERTER___slotInstance)=>{declare const ___VERTER___directiveElement:___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor[\"v\"])(___VERTER___directiveElement,true,undefined,{});}}"
+          'v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["v"])(___VERTER___directiveElement,true,undefined,{});}}'
         )
       );
     });
@@ -71,7 +71,7 @@ describe("directive runner", () => {
 
       expect(normalized).toContain(
         normalize(
-          `v-directive={(___VERTER___slotInstance)=>{declare const ___VERTER___directiveElement:___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vTest"])(___VERTER___directiveElement,___VERTER___ctx.baz,"foo",{"bar":true});}}`
+          `v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vTest"])(___VERTER___directiveElement,___VERTER___ctx.baz,"foo",{"bar":true});}}`
         )
       );
     });
@@ -131,9 +131,9 @@ describe("directive runner", () => {
       const { result } = parse(`<div v-first="a" v-second="b" v-third="c" />`);
       const normalized = normalize(result);
 
-      const first = normalized.indexOf("directiveAccessor[\"vFirst\"]");
-      const second = normalized.indexOf("directiveAccessor[\"vSecond\"]");
-      const third = normalized.indexOf("directiveAccessor[\"vThird\"]");
+      const first = normalized.indexOf('directiveAccessor["vFirst"]');
+      const second = normalized.indexOf('directiveAccessor["vSecond"]');
+      const third = normalized.indexOf('directiveAccessor["vThird"]');
 
       expect(first).toBeGreaterThanOrEqual(0);
       expect(second).toBeGreaterThan(first);
@@ -218,7 +218,6 @@ describe("directive runner", () => {
 
       expect(warningMessages(context)).toEqual([]);
     });
-
   });
 
   describe("built-in directives", () => {
@@ -308,6 +307,20 @@ describe("directive runner", () => {
       expect(warningMessages(context)).toContain(
         "UNSUPPORTED_BUILTIN_DIRECTIVE_MODIFIER"
       );
+    });
+
+    it.only("injects modifier validators for built-in directives", () => {
+      const { result } = parse(`<button v-on:click.once="handler" />`);
+
+      expect(result).toMatchInlineSnapshot(`
+        "import { type ExtractLeafElement as ___VERTER___ExtractLeafElement, runCustomDirective as ___VERTER___runCustomDirective, type vOnModifiers as ___VERTER___vOnModifiers } from "$verter/types$";export function template(){
+        <><button v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;({"once":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'Click'>)}} onClick={___VERTER___ctx.handler} /></>}"
+      `);
+      // expect(normalize(result)).toContain(
+      //   normalize(
+      //     `({"once":true} satisfies ___VERTER___vOnModifiers<___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>,'onclick'>);`
+      //   )
+      // );
     });
   });
 });

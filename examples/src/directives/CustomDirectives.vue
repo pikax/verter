@@ -144,5 +144,9 @@ const color = "red" as "red" | "blue";
 
     <span v-too> </span>
     <span v-> </span>
+
+    <div>
+      <div @click.prevent.once="handleClickOutside" />
+    </div>
   </div>
 </template>
