@@ -15,6 +15,7 @@ import {
   TemplateTypes,
 } from "../../types";
 import { retrieveBindings } from "../../utils";
+import { camelize, capitalize } from "vue";
 
 export type PropsContext = {
   ignoredIdentifiers: string[];
@@ -180,6 +181,25 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
   >
 ] {
   if (prop.type === NodeTypes.ATTRIBUTE) {
+    if (prop.name === "v-" && prop.loc.source === "v-") {
+      // invalid directive
+      return [
+        {
+          type: TemplateTypes.Directive,
+          node: prop as unknown as DirectiveNode,
+          name: '',
+
+          arg: null,
+          exp: null,
+          static: false,
+          context,
+          element,
+
+          items: [],
+        },
+      ];
+    }
+
     return [
       {
         type: TemplateTypes.Prop,

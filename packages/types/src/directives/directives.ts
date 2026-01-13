@@ -34,22 +34,22 @@ type ExactGard<T> = T extends {
   : false;
 
 export type VOnValidModifiersObject<TInstance, TArg> = {
-  stop: StopGuard<TArg>;
-  prevent: PreventGuard<TArg>;
-  self: SelfGuard<TArg>;
+  stop?: StopGuard<TArg>;
+  prevent?: PreventGuard<TArg>;
+  self?: SelfGuard<TArg>;
 
-  ctrl: CtrlGuard<TArg>;
-  shift: ShiftGuard<TArg>;
-  alt: AltGuard<TArg>;
-  meta: MetaGuard<TArg>;
+  ctrl?: CtrlGuard<TArg>;
+  shift?: ShiftGuard<TArg>;
+  alt?: AltGuard<TArg>;
+  meta?: MetaGuard<TArg>;
 
-  left: LeftGuard<TArg>;
-  right: RightGuard<TArg>;
-  middle: MiddleGuard<TArg>;
+  left?: LeftGuard<TArg>;
+  right?: RightGuard<TArg>;
+  middle?: MiddleGuard<TArg>;
 
-  exact: ExactGard<TArg>;
+  exact?: ExactGard<TArg>;
 
-  once: true;
+  once?: true;
 } & ExactKeyModifier<TArg> &
   DomModifiers<TArg, TInstance>;
 type ExactKeyModifier<TEvent> = ExactGard<TEvent> extends true
@@ -87,14 +87,14 @@ export type vOnModifiers<
     : OnlyEventKeys<TInstance>
 > = TInstance extends HTMLElement
   ? TInstance[TName] extends ((e: infer E) => any) | null
-    ? PickByValue<VOnValidModifiersObject<TInstance, E>, true>
+    ? Partial<PickByValue<VOnValidModifiersObject<TInstance, E>, true>>
     : {}
   : TInstance extends {
       $props: {
         [K in TName]?: ((e: infer E) => any) | undefined;
       };
     }
-  ? PickByValue<VOnValidModifiersObject<TInstance, E>, true>
+  ? Partial<PickByValue<VOnValidModifiersObject<TInstance, E>, true>>
   : {};
 
 // /vOn
@@ -103,7 +103,7 @@ export type vOnModifiers<
 export type vTextModifiers<TInstance> = TInstance extends {
   textContent: string | null;
 }
-  ? {}
+  ? never
   : never;
 // /vText
 
@@ -111,7 +111,7 @@ export type vTextModifiers<TInstance> = TInstance extends {
 export type vHtmlModifiers<TInstance> = TInstance extends {
   innerHTML: string | null;
 }
-  ? {}
+  ? never
   : never;
 // /vHtml
 
@@ -119,13 +119,13 @@ export type vHtmlModifiers<TInstance> = TInstance extends {
 export type vShowModifiers<TInstance> = TInstance extends {
   style: CSSStyleDeclaration;
 }
-  ? {}
+  ? never
   : TInstance extends {
       $props: {
         style?: any;
       };
     }
-  ? {}
+  ? never
   : never;
 // /vShow
 
@@ -133,13 +133,13 @@ export type vShowModifiers<TInstance> = TInstance extends {
 
 export type vBindModifiers<TInstance, TName> = TInstance extends HTMLElement
   ? {
-      prop: true;
-      attr: true;
+      prop?: true;
+      attr?: true;
 
-      camel: true;
+      camel?: true;
     }
   : {
-      camel: true;
+      camel?: true;
     };
 
 // /vBind
@@ -154,27 +154,27 @@ export type vModelModifiers<TInstance, TName> = TInstance extends
   | (() => any)
   ? {
       // TODO change check if there's an `input` event or maybe this should only be available for HTMLElements
-      lazy: true;
+      lazy?: true;
       // TODO this should typecheck for number
-      number: true;
+      number?: true;
       // TODO this should typecheck for trim-able strings
-      trim: true;
+      trim?: true;
     }
   : {};
 
 // /vModel
 
 // vPre
-export type vPreModifiers<TArg, TInstance = {}> = {};
+export type vPreModifiers<TArg, TInstance = {}> = never;
 // /vPre
 // vOnce
-export type vOnceModifiers<TArg, TInstance = {}> = {};
+export type vOnceModifiers<TArg, TInstance = {}> = never;
 // /vOnce
 // vMemo
-export type vMemoModifiers<TArg, TInstance = {}> = {};
+export type vMemoModifiers<TArg, TInstance = {}> = never;
 // /vMemo
 // vCloak
-export type vCloakModifiers<TArg, TInstance = {}> = {};
+export type vCloakModifiers<TArg, TInstance = {}> = never;
 // /vCloak
 
 // custom directive

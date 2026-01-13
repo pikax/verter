@@ -9,7 +9,11 @@ const vFocus: Directive<HTMLInputElement> = {
 };
 
 // Full directive with all hooks
-const vHighlight: Directive<HTMLElement, string> = {
+const vHighlight: Directive<
+  HTMLElement,
+  string,
+  "important" | "normal" | "low"
+> = {
   created(el, binding) {
     // Called before element's attributes or event listeners are applied
   },
@@ -74,7 +78,10 @@ const vResize: Directive<HTMLElement, ResizeOptions> = {
     const { minWidth = 0, maxWidth = Infinity, onResize } = binding.value || {};
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const width = Math.min(Math.max(entry.contentRect.width, minWidth), maxWidth);
+        const width = Math.min(
+          Math.max(entry.contentRect.width, minWidth),
+          maxWidth
+        );
         onResize?.(width);
       }
     });
@@ -98,6 +105,8 @@ function handleClickOutside() {
 function handleResize(width: number) {
   console.log("Resized to:", width);
 }
+
+const color = "red" as "red" | "blue";
 </script>
 
 <template>
@@ -108,15 +117,13 @@ function handleResize(width: number) {
     <input v-focus placeholder="Auto-focused" />
 
     <!-- v-highlight with value -->
-    <p v-highlight="'lightblue'">Highlighted text</p>
+    <p v-highlight="'lightblue' + 'ddd'">Highlighted text</p>
 
     <!-- v-highlight with modifiers -->
     <p v-highlight.important="'pink'">Important highlight</p>
 
     <!-- v-click-outside -->
-    <div v-click-outside="handleClickOutside" class="box">
-      Click outside me
-    </div>
+    <div v-click-outside="handleClickOutside" class="box">Click outside me</div>
 
     <!-- v-tooltip with argument -->
     <button v-tooltip:top="'This is a tooltip'">Hover me</button>
@@ -129,5 +136,13 @@ function handleResize(width: number) {
 
     <!-- v-color function shorthand -->
     <span v-color="'red'">Red text</span>
+    <span v-color="color">Red text</span>
+    <span v-if="color === 'red'" v-color="color">Red text</span>
+    <div v-if="color === 'red'">
+      <span v-color="color">Red text</span>
+    </div>
+
+    <span v-too> </span>
+    <span v-> </span>
   </div>
 </template>

@@ -33,6 +33,9 @@ export const ContextPlugin = {
     const ComponentInstanceName = ctx.prefix("ComponentInstance");
     const instance = ctx.prefix("Instance");
     const components = ctx.prefix("components");
+    const retrieveSetupDirectives = ctx.prefix(
+      "retrieveSetupDirectives" as AvailableExports
+    );
     // const SlotsToRender = ctx.prefix("SlotsToRender" as AvailableExports);
     const ExtractComponents = ctx.prefix(
       "extractComponents" as AvailableExports
@@ -49,6 +52,7 @@ export const ContextPlugin = {
           "extractComponents",
           "OmitNever",
           "getVueGlobalComponents",
+          "retrieveSetupDirectives",
         ],
         ctx.prefix
       )
@@ -131,6 +135,9 @@ ${[
 
     const slotsCtx = `const ${ctx.prefix("$slot")} = ${CTX}['$slots'];`;
 
+    const directivesAccessor = ctx.retrieveAccessor("directiveAccessor");
+    const setupDirectives = `const ${directivesAccessor} = ${retrieveSetupDirectives}(${CTX});`;
+
     const debuggers = DEBUG
       ? [
           `const ___DEBUG_Verter = ${CTX};`,
@@ -147,7 +154,14 @@ ${[
       : "";
     s.prependLeft(
       ctx.block.block.block.loc.start.offset,
-      [instanceStr, ctxStr, componentsStr, slotsCtx, debuggers].join("\n")
+      [
+        instanceStr,
+        ctxStr,
+        componentsStr,
+        slotsCtx,
+        setupDirectives,
+        debuggers,
+      ].join("\n")
     );
 
     // add slots Helper
