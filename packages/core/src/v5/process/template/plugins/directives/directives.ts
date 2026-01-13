@@ -109,20 +109,33 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
     const extractLeafElement = ctx.prefix("ExtractLeafElement");
 
     const helperImports = new Set<AvailableExports>();
-    helperImports.add("ExtractLeafElement");
 
-    const needsRunCustomDirective = this.directivesByElement.size > 0;
-    if (needsRunCustomDirective) {
+    const hasAnyCustomDirective = Array.from(this.directivesByElement.values()).some(
+      (dirs) => dirs.some((x) => !isBuiltInDirective(x.name))
+    );
+
+    if (hasAnyCustomDirective) {
+      helperImports.add("ExtractLeafElement");
       helperImports.add("runCustomDirective");
     }
 
-    ctx.items.push(createHelperImport([...helperImports], ctx.prefix));
+    if (helperImports.size > 0) {
+      ctx.items.push(createHelperImport([...helperImports], ctx.prefix));
+    }
 
     for (const [element, directives] of this.directivesByElement) {
       const insertPos = element.loc.start.offset + element.tag.length + 1;
 
       const hasCustomDirective =
         directives.filter((x) => !isBuiltInDirective(x.name)).length > 0;
+      const hasBuiltInWithModifiers = directives.some(
+        (x) => isBuiltInDirective(x.name) && x.node.modifiers?.length
+      );
+
+      // Skip emitting when only built-ins without modifiers are present
+      if (!hasCustomDirective && !hasBuiltInWithModifiers) {
+        continue;
+      }
 
       const directiveElementStr = `const ${directiveElement}={} as ${extractLeafElement}<typeof ${slotInstance}>;`;
 
@@ -233,7 +246,7 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
 
         prepend = "";
 
-        moves.push(() => s.move(insertPos, startName, endName));
+        moves.push(() => s.move(startName, endName, insertPos));
 
         if (exp) {
           s.remove(exp.loc.start.offset - 2, exp.loc.start.offset); // remove ="
@@ -241,7 +254,7 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
           s.overwrite(exp.loc.end.offset, exp.loc.end.offset + 1, "");
           s.prependRight(exp.loc.start.offset, ",");
           moves.push(() =>
-            s.move(insertPos, exp.loc.start.offset, exp.loc.end.offset)
+            s.move(exp.loc.start.offset, exp.loc.end.offset, insertPos)
           );
         } else {
           prepend += ",true";
@@ -256,7 +269,7 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
             s.appendLeft(arg.loc.end.offset, `"`);
           }
           moves.push(() =>
-            s.move(insertPos, arg.loc.start.offset, arg.loc.end.offset)
+            s.move(arg.loc.start.offset, arg.loc.end.offset, insertPos)
           );
         } else {
           prepend += `,undefined`;
@@ -264,41 +277,34 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
 
         function processModifiers(appendComma = true) {
           if (node.modifiers && node.modifiers.length > 0) {
-            s.appendRight(
-              node.modifiers[0].loc.start.offset,
-              `${prepend}${appendComma ? "," : ""}{`
-            );
-            prepend = "";
-
             for (let i = 0; i < node.modifiers.length; i++) {
               const modifier = node.modifiers[i];
               const isLast = i === node.modifiers.length - 1;
 
               // remove dot "."
-              s.remove(
+              s.overwrite(
                 modifier.loc.start.offset - 1,
-                modifier.loc.start.offset
+                modifier.loc.start.offset,
+                '"'
               );
+              if (i === 0) {
+                s.appendRight(
+                  node.modifiers[0].loc.start.offset - 1,
+                  `${prepend}${appendComma ? "," : ""}{`
+                );
+                prepend = "";
+              }
 
-              s.appendRight(modifier.loc.start.offset, '"');
               s.appendLeft(
                 modifier.loc.end.offset,
-                `":true${isLast ? "" : ","}`
+                `":true${isLast ? `}${appendComma ? ");" : ""}` : ","}`
               );
-
-              if (isLast) {
-                // s.appendLeft(modifier.loc.end.offset, "});");
-                s.appendLeft(
-                  modifier.loc.end.offset,
-                  `}${appendComma ? ");" : ""}`
-                );
-              }
 
               moves.push(() =>
                 s.move(
-                  insertPos,
-                  modifier.loc.start.offset,
-                  modifier.loc.end.offset
+                  modifier.loc.start.offset - 1,
+                  modifier.loc.end.offset,
+                  insertPos
                 )
               );
             }

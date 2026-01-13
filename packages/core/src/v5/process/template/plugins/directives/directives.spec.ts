@@ -54,6 +54,16 @@ describe("directive runner", () => {
       );
     });
 
+    it('handles dot only', ()=> {
+      const { result } = parse(`<div v-foo. />`);
+      const normalized = normalize(result);
+      expect(normalized).toContain(
+        normalize(
+          'v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFoo"])(___VERTER___directiveElement,true,undefined,{"":true});}}'
+        )
+      );
+    })
+
     it("handles directives without arg and modifiers", () => {
       const { result } = parse(`<div v-focus />`);
       const normalized = normalize(result);
@@ -275,7 +285,8 @@ describe("directive runner", () => {
     it("skips built-in directives in the custom directive runner output", () => {
       const { result, context } = parse(`<div v-show="visible" />`);
 
-      expect(result).not.toContain("runCustomDirective");
+      expect(result).not.toContain("runCustomDirective(");
+      expect(result).not.toContain("directiveAccessor");
       expect(getWarnings(context).length).toBe(0);
     });
 
@@ -309,18 +320,15 @@ describe("directive runner", () => {
       );
     });
 
-    it.only("injects modifier validators for built-in directives", () => {
+    it("injects modifier validators for built-in directives", () => {
       const { result } = parse(`<button v-on:click.once="handler" />`);
 
-      expect(result).toMatchInlineSnapshot(`
-        "import { type ExtractLeafElement as ___VERTER___ExtractLeafElement, runCustomDirective as ___VERTER___runCustomDirective, type vOnModifiers as ___VERTER___vOnModifiers } from "$verter/types$";export function template(){
-        <><button v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;({"once":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'Click'>)}} onClick={___VERTER___ctx.handler} /></>}"
-      `);
-      // expect(normalize(result)).toContain(
-      //   normalize(
-      //     `({"once":true} satisfies ___VERTER___vOnModifiers<___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>,'onclick'>);`
-      //   )
-      // );
+      const normalized = normalize(result);
+      expect(normalized).toContain(
+        normalize("({\"once\":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'onClick'>)")
+      );
+      expect(normalized).not.toContain("runCustomDirective(");
+      expect(normalized).not.toContain("directiveAccessor");
     });
   });
 });
