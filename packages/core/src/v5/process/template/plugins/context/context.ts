@@ -60,21 +60,23 @@ export const ContextPlugin = {
 
     const macros = isSetup ? [] : [];
 
-    const importStr = generateImport([
-      {
-        from: `./${options}`,
-        items: [
-          { name: TemplateBindingName },
-          { name: FullContextName },
+    const importStr = ctx.isSingleFile
+      ? ""
+      : generateImport([
           {
-            name: DefaultName,
+            from: `./${options}`,
+            items: [
+              { name: TemplateBindingName },
+              { name: FullContextName },
+              {
+                name: DefaultName,
+              },
+              {
+                name: instance,
+              },
+            ],
           },
-          {
-            name: instance,
-          },
-        ],
-      },
-    ]);
+        ]);
 
     s.prepend(`${importStr}\n`);
 
@@ -138,7 +140,7 @@ ${[
     const directivesAccessor = ctx.retrieveAccessor("directiveAccessor");
     const setupDirectives = `const ${directivesAccessor} = ${retrieveSetupDirectives}(${CTX});`;
 
-    const debuggers = DEBUG
+    const debuggers = DEBUG && false
       ? [
           `const ___DEBUG_Verter = ${CTX};`,
           `const ___DEBUG_ComponentInstance = ${ComponentInstanceName};`,
@@ -147,7 +149,7 @@ ${[
           `const ___DEBUG_Components = ${components};`,
           // `const ___DEBUG_Props = ({} as ___VERTER___resolveProps${generic});`,
           // `const ___DEBUG_Components = ({} as Required<typeof ___VERTER___default.components> & {});`,
-          `const ___DEBUG_FullContext = ({} as ___VERTER___FullContext${generic});`,
+          `const ___DEBUG_FullContext = ({} as ${FullContextName}${generic});`,
           // `const ___DEBUG_Binding = ({} as ___VERTER___TemplateBinding${generic});`,
           // `const ___DEBUG_Slots = ___VERTER___ctx['$slots'];`,
         ].join("\n")

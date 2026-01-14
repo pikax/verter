@@ -14,6 +14,8 @@ export interface ScriptContext extends ProcessContext {
 
   templateBindings: TemplateBinding[];
   handledAttributes?: Set<string>;
+
+  isSingleFile?: boolean;
 }
 
 export type ScriptPlugin = ProcessPlugin<ScriptItem, ScriptContext> & {

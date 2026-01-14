@@ -17,6 +17,8 @@ export const ScriptDefaultPlugin = definePlugin({
 
     const defineComponent = ctx.prefix("defineComponent");
 
+    const exportStr = ctx.isSingleFile ? "" : "export";
+
     if (isSetup) {
       ctx.items.push({
         type: ProcessItemType.Import,
@@ -38,7 +40,7 @@ export const ScriptDefaultPlugin = definePlugin({
         options = boxInfo("defineOptions", null, ctx).boxedName;
       }
 
-      s.append(`\n;export const ${name}=${defineComponent}(${options});`);
+      s.append(`\n;${exportStr} const ${name}=${defineComponent}(${options});`);
     } else {
       const componentExport = ctx.block.result?.items.find(
         (x) => x.type === ScriptTypes.DefaultExport
@@ -55,7 +57,7 @@ export const ScriptDefaultPlugin = definePlugin({
             },
           ],
         });
-        s.append(`;export const ${name}=${defineComponent}({});`);
+        s.append(`;${exportStr} const ${name}=${defineComponent}({});`);
         return;
       }
 

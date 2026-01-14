@@ -314,9 +314,12 @@ export function generateConditionText(
   const negations = negationParts.join(" && ");
 
   const positive = conditions
-    .map((x) =>
-      s.slice(x.node.loc.start.offset, x.node.loc.end.offset).toString()
-    )
+    .map((x) => {
+      const r = s
+        .slice(x.node.loc.start.offset, x.node.loc.end.offset)
+        .toString();
+      return r;
+    })
     .filter((x) => x)
     .map((x) => parseConditionText(x))
     .filter((x) => x)

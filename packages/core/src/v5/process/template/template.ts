@@ -95,6 +95,8 @@ export type TemplateContext = ProcessContext & {
     },
     s: MagicString
   ) => void;
+
+  isSingleFile?: boolean;
 };
 
 export function declareTemplatePlugin<T extends TemplatePlugin>(plugin: T) {
@@ -123,7 +125,7 @@ export function processTemplate(
     prefix: defaultPrefix,
 
     retrieveAccessor: (name: TemplateAccessors) => {
-      return defaultPrefix(name);
+      return context.prefix(name);
     },
 
     items: [],

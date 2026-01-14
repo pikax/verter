@@ -6,7 +6,7 @@ import {
 } from "vscode-languageserver-textdocument";
 import { createSubDocumentUri, uriToVerterVirtual } from "../../utils";
 
-export type BlockId = "bundle" | "template" | "script" | "style";
+export type BlockId = "bundle" | "template" | "script" | "style" | "single";
 
 export interface ProcessedBlock {
   id: string;
@@ -19,7 +19,8 @@ export interface ProcessedBlock {
 
 export function processBlocks(
   uri: string,
-  blocks: ParsedBlock[]
+  blocks: ParsedBlock[],
+  isSingleFile: boolean
 ): ProcessedBlock[] {
   const byTag = new Map<string, ParsedBlock[]>();
 
@@ -36,48 +37,60 @@ export function processBlocks(
 
   const result: ProcessedBlock[] = [];
 
-  result.push({
-    id: `${uri}.bundle`,
-    blocks,
-    type: "bundle",
-    languageId: "ts",
-    uri: uriToVerterVirtual(createSubDocumentUri(uri, "bundle.ts")),
-  });
-  // template
-  {
-    const blocks = byTag.get("template");
-    if (blocks) {
-      byTag.delete("template");
-      result.push({
-        id: `${uri}.template${result.length}`,
-        blocks,
-        type: "template",
-        languageId: "tsx",
-        uri: uriToVerterVirtual(createSubDocumentUri(uri, "render.tsx")),
-      });
+  if (isSingleFile) {
+    byTag.delete("template");
+    byTag.delete("script");
+
+    result.push({
+      id: `${uri}.single`,
+      blocks,
+      type: "single",
+      languageId: "ts",
+      uri: uriToVerterVirtual(createSubDocumentUri(uri, "single.tsx")),
+    });
+  } else {
+    result.push({
+      id: `${uri}.bundle`,
+      blocks,
+      type: "bundle",
+      languageId: "ts",
+      uri: uriToVerterVirtual(createSubDocumentUri(uri, "bundle.ts")),
+    });
+    // template
+    {
+      const blocks = byTag.get("template");
+      if (blocks) {
+        byTag.delete("template");
+        result.push({
+          id: `${uri}.template${result.length}`,
+          blocks,
+          type: "template",
+          languageId: "tsx",
+          uri: uriToVerterVirtual(createSubDocumentUri(uri, "render.tsx")),
+        });
+      }
+    }
+
+    // script
+    {
+      const blocks = byTag.get("script");
+      if (blocks) {
+        byTag.delete("script");
+
+        // all the blocks must be the same language
+        const lang = blocks[0].block.block.attrs.lang;
+        const languageId = lang === true ? "js" : lang ?? "js";
+
+        result.push({
+          id: `${uri}.script${result.length}`,
+          blocks,
+          languageId,
+          type: "script",
+          uri: uriToVerterVirtual(createSubDocumentUri(uri, "options.ts")),
+        });
+      }
     }
   }
-
-  // script
-  {
-    const blocks = byTag.get("script");
-    if (blocks) {
-      byTag.delete("script");
-
-      // all the blocks must be the same language
-      const lang = blocks[0].block.block.attrs.lang;
-      const languageId = lang === true ? "js" : lang ?? "js";
-
-      result.push({
-        id: `${uri}.script${result.length}`,
-        blocks,
-        languageId,
-        type: "script",
-        uri: uriToVerterVirtual(createSubDocumentUri(uri, "options.ts")),
-      });
-    }
-  }
-
   // style
   {
     const blocks = byTag.get("style");
@@ -168,13 +181,15 @@ export function generatedPositionFor(
 
   return {
     line:
-      typeof result.line === "number" ? result.line - 1 : Number.POSITIVE_INFINITY,
+      typeof result.line === "number"
+        ? result.line - 1
+        : Number.POSITIVE_INFINITY,
     character:
       typeof result.column === "number"
         ? result.column
         : typeof result.lastColumn === "number"
-          ? result.lastColumn
-          : Number.POSITIVE_INFINITY,
+        ? result.lastColumn
+        : Number.POSITIVE_INFINITY,
   };
 }
 
