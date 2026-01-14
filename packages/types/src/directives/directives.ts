@@ -101,7 +101,9 @@ export type vOnModifiers<
         [K in TName]?: ((e: infer E) => any) | undefined;
       };
     }
-  ? Partial<PickByValue<VOnValidModifiersObject<TInstance, E>, true>>
+  ? Partial<
+      PickByValue<VOnValidModifiersObject<TInstance, E>, true | undefined>
+    >
   : {};
 
 // /vOn
