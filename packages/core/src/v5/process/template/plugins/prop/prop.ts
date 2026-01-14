@@ -190,7 +190,10 @@ export const PropPlugin = declareTemplatePlugin({
       const node = prop.node;
       if (node.rawName?.startsWith("v-bind:")) {
         s.remove(node.loc.start.offset, node.loc.start.offset + 7);
-      } else if (node.rawName?.startsWith(":")) {
+      } else if (
+        node.rawName?.startsWith(":") ||
+        node.rawName?.startsWith(".")
+      ) {
         s.remove(node.loc.start.offset, node.loc.start.offset + 1);
       } else if (node.rawName?.startsWith("v-on:")) {
         if (nameBinding?.ignore === true) {

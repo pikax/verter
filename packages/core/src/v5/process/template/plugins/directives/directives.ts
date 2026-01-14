@@ -110,9 +110,9 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
 
     const helperImports = new Set<AvailableExports>();
 
-    const hasAnyCustomDirective = Array.from(this.directivesByElement.values()).some(
-      (dirs) => dirs.some((x) => !isBuiltInDirective(x.name))
-    );
+    const hasAnyCustomDirective = Array.from(
+      this.directivesByElement.values()
+    ).some((dirs) => dirs.some((x) => !isBuiltInDirective(x.name)));
 
     if (hasAnyCustomDirective) {
       helperImports.add("ExtractLeafElement");
@@ -191,11 +191,18 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
           processModifiers(false);
 
           try {
-            const arg = node.arg
-              ? // TODO this is incorrect, it's not correctly prepending the context
-                "on" +
-                s.slice(node.arg.loc.start.offset, node.arg.loc.end.offset)
-              : "";
+            const arg =
+              node.name === "on"
+                ? node.arg
+                  ? // TODO this is incorrect, it's not correctly prepending the context
+                    "on" +
+                    s.slice(node.arg.loc.start.offset, node.arg.loc.end.offset)
+                  : ""
+                : node.name === "bind"
+                ? node.arg
+                  ? s.slice(node.arg.loc.start.offset, node.arg.loc.end.offset)
+                  : ""
+                : "";
             const isStaticArg =
               node.arg &&
               node.arg.type === NodeTypes.SIMPLE_EXPRESSION &&
@@ -281,32 +288,43 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
               const modifier = node.modifiers[i];
               const isLast = i === node.modifiers.length - 1;
 
-              // remove dot "."
-              s.overwrite(
-                modifier.loc.start.offset - 1,
-                modifier.loc.start.offset,
-                '"'
-              );
-              if (i === 0) {
+              const isDotShorthand =
+                node.rawName?.startsWith(".") && modifier.loc.source === "";
+              const posStart = isDotShorthand
+                ? node.loc.start.offset
+                : modifier.loc.start.offset;
+              const posEnd = isDotShorthand
+                ? posStart + 1
+                : modifier.loc.end.offset;
+
+              // source is empty when using dot shorthand
+              if (isDotShorthand) {
                 s.appendRight(
-                  node.modifiers[0].loc.start.offset - 1,
-                  `${prepend}${appendComma ? "," : ""}{`
+                  insertPos,
+                  `${prepend}{"prop":true${
+                    isLast ? `}${appendComma ? ");" : ""}` : ","
+                  }`
                 );
-                prepend = "";
+              } else {
+                // remove dot "."
+                s.overwrite(posStart - 1, posStart, '"');
+
+                if (i === 0) {
+                  s.appendRight(
+                    posStart - 1,
+                    `${prepend}${appendComma ? "," : ""}{`
+                  );
+                }
+                s.appendLeft(
+                  posEnd,
+                  `":true${isLast ? `}${appendComma ? ");" : ""}` : ","}`
+                );
               }
+              prepend = "";
 
-              s.appendLeft(
-                modifier.loc.end.offset,
-                `":true${isLast ? `}${appendComma ? ");" : ""}` : ","}`
-              );
-
-              moves.push(() =>
-                s.move(
-                  modifier.loc.start.offset - 1,
-                  modifier.loc.end.offset,
-                  insertPos
-                )
-              );
+              if (!isDotShorthand) {
+                moves.push(() => s.move(posStart - 1, posEnd, insertPos));
+              }
             }
           } else {
             prepend += `,{});`;

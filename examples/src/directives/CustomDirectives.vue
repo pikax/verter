@@ -107,6 +107,8 @@ function handleResize(width: number) {
 }
 
 const color = "red" as "red" | "blue";
+const someObject = { a: 1, b: 2 };
+const foo = "bar";
 </script>
 
 <template>
@@ -148,5 +150,12 @@ const color = "red" as "red" | "blue";
     <div>
       <div @click.prevent.once="handleClickOutside" />
     </div>
+
+    <!-- XLink -->
+    <svg><a :xlink:special="foo"></a></svg>
+
+    <div :about.prop="'test'"></div>
+    <!-- equivalent to -->
+    <div .about="'test'"></div>
   </div>
 </template>

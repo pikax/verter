@@ -54,7 +54,7 @@ describe("directive runner", () => {
       );
     });
 
-    it('handles dot only', ()=> {
+    it("handles dot only", () => {
       const { result } = parse(`<div v-foo. />`);
       const normalized = normalize(result);
       expect(normalized).toContain(
@@ -62,7 +62,7 @@ describe("directive runner", () => {
           'v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFoo"])(___VERTER___directiveElement,true,undefined,{"":true});}}'
         )
       );
-    })
+    });
 
     it("handles directives without arg and modifiers", () => {
       const { result } = parse(`<div v-focus />`);
@@ -335,10 +335,32 @@ describe("directive runner", () => {
 
       const normalized = normalize(result);
       expect(normalized).toContain(
-        normalize("({\"once\":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'onClick'>)")
+        normalize(
+          "({\"once\":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'onClick'>)"
+        )
       );
       expect(normalized).not.toContain("runCustomDirective(");
       expect(normalized).not.toContain("directiveAccessor");
+    });
+
+    it("keeps .prop modifier bound properties", () => {
+      const { result } = parse(`<div :someProperty.prop="someObject"></div>`);
+      const normalized = normalize(result);
+      expect(normalized).toContain(
+        normalize(
+          "({\"prop\":true}satisfies ___VERTER___vBindModifiers<typeof ___VERTER___slotInstance,'someProperty'>)"
+        )
+      );
+    });
+
+    it("supports dot shorthand for prop modifier", () => {
+      const { result } = parse(`<div .someProperty="someObject"></div>`);
+      const normalized = normalize(result);
+      expect(normalized).toContain(
+        normalize(
+          "({\"prop\":true}satisfies ___VERTER___vBindModifiers<typeof ___VERTER___slotInstance,'someProperty'>)"
+        )
+      );
     });
   });
 });
