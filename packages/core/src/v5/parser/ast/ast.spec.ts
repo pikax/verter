@@ -43,6 +43,7 @@ describe("parse AST", () => {
       expect(ast.errors[0].severity).toBe("Error");
       expect(ast.errors[0].labels).toHaveLength(1);
       expect(ast.errors[0].labels[0]).toEqual({
+        message: null,
         end: 12,
         start: 10,
       });
