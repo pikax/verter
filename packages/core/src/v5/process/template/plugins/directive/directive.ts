@@ -75,8 +75,8 @@ const BUILTIN_ALLOW_VALUE = new Set([
 ]);
 const BUILTIN_ALLOW_MODIFIERS = new Set(["model", "bind", "on"]);
 
-export const DirectiveRunnerPlugin = declareTemplatePlugin({
-  name: "VerterDirectiveRunner",
+export const DirectivePlugin = declareTemplatePlugin({
+  name: "VerterDirective",
 
   directivesByElement: new Map<ElementNode, TemplateDirective[]>(),
 
@@ -167,9 +167,11 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
               .slice(1, -1);
           }
 
+          const hasLazy = node.modifiers.find((x) => x.content === "lazy");
+
           const eventName =
             element.tagType === ElementTypes.ELEMENT
-              ? node.modifiers.find((x) => x.content === "lazy")
+              ? hasLazy
                 ? "onChange"
                 : "onInput"
               : isDynamic
@@ -180,7 +182,11 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
             element.tagType === ElementTypes.ELEMENT
               ? `${
                   node.modifiers.find((x) => x.content === "number") ? "+" : ""
-                }$event.target.value`
+                }${
+                  hasLazy
+                    ? "$event.type/*cannot correctly handle lazy modifier*/"
+                    : "$event.target.value"
+                }`
               : "$event";
           const pre = isDynamic
             ? `,[\`${eventName}:\${${bindingTo}}\`]:`

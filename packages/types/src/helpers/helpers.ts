@@ -61,8 +61,8 @@ export type OmitNever<T> = {
   [K in keyof T as [T[K]] extends [never] ? never : K]: T[K];
 };
 
-export type PickByValue<T, v> = {
-  [K in keyof T as T[K] extends v ? K : never]: T[K];
+export type PickByValue<T, V> = {
+  [K in keyof T as T[K] extends V ? K : never]: T[K];
 }
 
 //  --- External Sources ---

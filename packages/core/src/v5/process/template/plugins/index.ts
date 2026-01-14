@@ -8,8 +8,7 @@ export * from "./slot/index.js";
 export * from "./text/index.js";
 export * from "./event/index.js";
 export * from "./loop/index.js";
-export * from "./directives/index.js";
-export * from "./directives/index.js";
+export * from "./directive/index.js";
 export * from "./element/index.js";
 export * from "./template-tag/index.js";
 

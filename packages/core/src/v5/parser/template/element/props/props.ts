@@ -15,7 +15,6 @@ import {
   TemplateTypes,
 } from "../../types";
 import { retrieveBindings } from "../../utils";
-import { camelize, capitalize } from "vue";
 
 export type PropsContext = {
   ignoredIdentifiers: string[];
