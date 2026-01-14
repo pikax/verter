@@ -8,6 +8,7 @@ const vFocus: Directive<HTMLInputElement> = {
   },
 };
 
+
 // Full directive with all hooks
 const vHighlight: Directive<
   HTMLElement,
@@ -137,7 +138,7 @@ const count = 0;
     <!-- v-resize with complex options -->
     <div v-resize="{ minWidth: 100, maxWidth: 500, onResize: handleResize }">
       Resizable content
-    </div>
+    </div>  
 
     <span v-color.red.blue.green="color" />
     <span v-color.red="color" />

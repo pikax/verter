@@ -85,6 +85,10 @@ export const ConditionalPlugin = declareTemplatePlugin({
   // },
 
   transformCondition(item, s, ctx) {
+    if(this.processed.has(item.element)) {
+      return;
+    }
+
     const element = item.element;
     const node = item.node;
     const rawName = node.rawName!;

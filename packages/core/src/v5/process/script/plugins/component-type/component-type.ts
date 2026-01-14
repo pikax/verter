@@ -107,13 +107,12 @@ export const ComponentTypePlugin = definePlugin({
       .map((el) => {
         if (!el.condition) return;
 
-        ConditionalPlugin.transformCondition(el.condition, ctx.s, {
-          narrow: true,
-        } as any);
+          if(!ctx.isSingleFile) {
+          ConditionalPlugin.transformCondition(el.condition, ctx.s, {
+            narrow: true,
+          } as any);
+        }
       });
-    // ConditionalPlugin.transformCondition(element.condition, ctx.s, {
-    //   narrow: true,
-    // });
   },
 
   post(s, ctx) {

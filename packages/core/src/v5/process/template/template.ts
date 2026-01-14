@@ -110,7 +110,40 @@ export function processTemplate(
     Pick<
       ProcessContext,
       "filename" | "s" | "blocks" | "block" | "blockNameResolver"
-    >
+    >,
+    autorun?: true
+): {
+  context: TemplateContext;
+  s: MagicString;
+  result: string;
+};
+
+export function processTemplate(
+  items: TemplateItem[],
+  plugins: TemplatePlugin[],
+  _context: Partial<TemplateContext> &
+    Pick<
+      ProcessContext,
+      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
+    >,
+    autorun: false
+): {
+  context: TemplateContext;
+  s: MagicString;
+  pre: () => void;
+  main: () => void;
+  post: () => void;
+};
+
+export function processTemplate(
+  items: TemplateItem[],
+  plugins: TemplatePlugin[],
+  _context: Partial<TemplateContext> &
+    Pick<
+      ProcessContext,
+      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
+    >,
+    autorun = true
 ) {
   const context: TemplateContext = {
     generic: null,
@@ -218,24 +251,41 @@ export function processTemplate(
         }
       }
     });
-
-  for (const plugin of prePlugins) {
-    plugin(s, context);
-  }
-
-  for (const item of items) {
-    for (const plugin of pluginsByType[item.type]) {
-      plugin(item as any, s, context);
+  const pre = () => {
+    for (const plugin of prePlugins) {
+      plugin(s, context);
     }
-  }
+  };
 
-  for (const plugin of postPlugins) {
-    plugin(s, context);
-  }
+  const main = () => {
+    for (const item of items) {
+      for (const plugin of pluginsByType[item.type]) {
+        plugin(item as any, s, context);
+      }
+    }
+  };
+  const post = () => {
+    for (const plugin of postPlugins) {
+      plugin(s, context);
+    }
+  };
 
+  if (autorun) {
+    pre();
+    main();
+    post();
+
+    return {
+      context,
+      s: s,
+      result: s.toString(),
+    };
+  }
   return {
     context,
-    s: s,
-    result: s.toString(),
-  };
+    s,
+    pre,
+    main,
+    post
+  }
 }

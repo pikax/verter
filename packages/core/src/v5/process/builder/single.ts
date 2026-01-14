@@ -72,7 +72,8 @@ export function buildSingle(
           TemplateRefPlugin,
           InferFunctionPlugin,
         ],
-        scriptContext
+        scriptContext,
+        false
       )
     : undefined;
   const templateResult = template
@@ -88,12 +89,19 @@ export function buildSingle(
           override: true,
           block: template!,
           isSingleFile: true,
-        }
+        },
+        false
       )
     : undefined;
 
-  //   const items = [scriptContext.items
-  //   ImportsPlugin.post?.(s, scriptContext);
+  scriptResult?.pre();
+  templateResult?.pre();
+
+  scriptResult?.main();
+  templateResult?.main();
+
+  scriptResult?.post();
+  templateResult?.post();
 
   return {
     s,
