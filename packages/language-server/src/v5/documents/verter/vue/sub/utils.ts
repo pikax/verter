@@ -6,10 +6,19 @@ import {
   VueOptionsDocument,
   VueBundleDocument,
   VueRenderDocument,
+  VueSingleDocument,
 } from "./typescript";
 
 export function createSubDocument(parent: VueDocument, block: ProcessedBlock) {
   switch (block.type) {
+    case "single": {
+      return VueSingleDocument.create(
+        block.uri,
+        parent,
+        block.languageId as any,
+        parent.version
+      );
+    }
     case "bundle": {
       return VueBundleDocument.create(
         block.uri,

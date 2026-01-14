@@ -25,7 +25,7 @@
     "glob": "^13.0.0",
     "magic-string": "^0.30.21",
     "minimatch": "^10.1.1",
-    "oxc-parser": "^0.106.0",
+    "oxc-parser": "^0.108.0",
     "source-map-js": "^1.2.1",
     "sucrase": "^3.35.1",
     "typescript": "^5.9.3",
@@ -36,9 +36,9 @@
     "vscode-uri": "^3.1.0"
   },
   "devDependencies": {
-    "@babel/types": "^7.28.5",
-    "vite": "^7.3.0",
-    "vitest": "^4.0.16",
+    "@babel/types": "^7.28.6",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.17",
     "vue": "^3.5.26"
   }
 }

@@ -38,10 +38,7 @@ import {
   VueStyleDocument,
 } from "./v5/documents/verter/vue/sub";
 import { DiagnosticsManager } from "./v5/DiagnosticsManager";
-import {
-  StatisticsManager,
-  StatisticsOptions,
-} from "./v5/StatisticsManager";
+import { StatisticsManager, StatisticsOptions } from "./v5/StatisticsManager";
 
 export interface LsConnectionOption {
   /**
@@ -75,7 +72,10 @@ export function startServer(options: LsConnectionOption = {}) {
   const patchedConnection = patchClient(connection);
 
   const statisticsManager = new StatisticsManager();
-  const documentManager = new DocumentManager(statisticsManager);
+  const documentManager = new DocumentManager(
+    statisticsManager,
+    true /* TODO this should be a setting */
+  );
   const verterManager = new VerterManager(documentManager);
   const diagnosticsManager = new DiagnosticsManager(
     connection,
@@ -418,12 +418,12 @@ export function startServer(options: LsConnectionOption = {}) {
     // if (!document || !isVueDocument(document)) {
     //   return;
     // }
-    diagnosticsManager.requestDiagnostics(params.textDocument.uri)
+    diagnosticsManager.requestDiagnostics(params.textDocument.uri);
     // sendDiagnostics(document);
   });
 
   connection.onDidOpenTextDocument((params) => {
-    diagnosticsManager.requestDiagnostics(params.textDocument.uri)
+    diagnosticsManager.requestDiagnostics(params.textDocument.uri);
 
     // const doc = documentManager.getDocument(params.textDocument.uri);
     // if (!doc) {
@@ -497,6 +497,8 @@ export function startServer(options: LsConnectionOption = {}) {
     if (h) {
       s = JSON.stringify(h.getCompilationSettings());
     }
+
+    console.log('found', doc.docs)
 
     return {
       js: {

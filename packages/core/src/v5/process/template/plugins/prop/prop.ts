@@ -1,7 +1,6 @@
 import { MagicString } from "@vue/compiler-sfc";
-import { declareTemplatePlugin, TemplatePlugin } from "../../template";
+import { declareTemplatePlugin } from "../../template";
 import {
-  CAMELIZE,
   DirectiveNode,
   ExpressionNode,
   NodeTypes,
@@ -10,9 +9,8 @@ import {
   ElementTypes,
 } from "@vue/compiler-core";
 import { camelize } from "vue";
-import { ParseTemplateContext } from "../../../../parser/template";
 import { generateImport } from "../../../utils";
-import { ImportItem, ImportModule } from "../../../types";
+import { ImportItem } from "../../../types";
 
 function overrideCamelCase(
   loc: SourceLocation,

@@ -9,14 +9,14 @@ export const BindingPlugin = {
     }
     const accessor = ctx.retrieveAccessor("ctx");
 
-    if (DEBUG) {
-      if (
-        item.name?.startsWith("___DEBUG") ||
-        item.name?.startsWith(ctx.prefix(""))
-      ) {
-        return;
-      }
-    }
+    // if (DEBUG) {
+    //   if (
+    //     item.name?.startsWith("___DEBUG") ||
+    //     item.name?.startsWith(ctx.prefix(""))
+    //   ) {
+    //     return;
+    //   }
+    // }
 
     if (item.parent?.type === "ObjectProperty" && item.parent.shorthand) {
       s.prependRight(item.node.loc.start.offset, `${item.name}: ${accessor}.`);

@@ -15,7 +15,41 @@ export function processScript(
     Pick<
       ProcessContext,
       "filename" | "s" | "blocks" | "block" | "blockNameResolver"
-    >
+    >,
+
+  autorun?: true
+): {
+  context: ScriptContext;
+  s: MagicString;
+  result: string;
+}
+export function processScript(
+  items: ScriptItem[],
+  plugins: ScriptPlugin[],
+  _context: Partial<ScriptContext> &
+    Pick<
+      ProcessContext,
+      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
+    >,
+
+  autoRun: false
+): {
+  context: ScriptContext;
+  s: MagicString;
+  pre: () => void;
+  main: () => void;
+  post: () => void;
+}
+export function processScript(
+  items: ScriptItem[],
+  plugins: ScriptPlugin[],
+  _context: Partial<ScriptContext> &
+    Pick<
+      ProcessContext,
+      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
+    >,
+
+  autorun = true
 ) {
   const context: ScriptContext = {
     generic: null,
@@ -113,23 +147,42 @@ export function processScript(
       }
     });
 
-  for (const plugin of prePlugins) {
-    plugin(s, context);
-  }
+  const pre = () => {
+    for (const plugin of prePlugins) {
+      plugin(s, context);
+    }
+  };
 
-  for (const item of items) {
-    for (const plugin of pluginsByType[item.type]) {
-      plugin(item as any, s, context);
+  const main = () => {
+    for (const item of items) {
+      for (const plugin of pluginsByType[item.type]) {
+        plugin(item as any, s, context);
+      }
+    }
+  };
+
+  const post = () => {
+    for (const plugin of postPlugins) {
+      plugin(s, context);
+    }
+  };
+
+  
+  if(autorun)  {
+    pre();
+    main();
+    post();
+    return {
+      context,
+      s: s,
+      result: s.toString(),
     }
   }
-
-  for (const plugin of postPlugins) {
-    plugin(s, context);
-  }
-
   return {
     context,
     s: s,
-    result: s.toString(),
-  };
+    pre,
+    main,
+    post,
+  }
 }

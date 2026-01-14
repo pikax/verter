@@ -46,7 +46,10 @@ export class DocumentManager implements Disposable {
     return this._currentConnection;
   }
 
-  constructor(private readonly statistics?: StatisticsManager) {
+  constructor(
+    private readonly statistics?: StatisticsManager,
+    private readonly isSingleFile = false
+  ) {
     this.textDocuments = new TextDocuments({
       create: (uri, languageId, version, content): VerterDocument => {
         this.handleFileChange(uri, "create");
@@ -95,7 +98,9 @@ export class DocumentManager implements Disposable {
     console.log("createDocument doc", uri);
     const filepath = uriToPath(uri);
     if (isVueFile(uri)) {
-      const doc = VueDocument.create(uri, content, version);
+      const doc = this.isSingleFile
+        ? VueDocument.createSingle(uri, content, version)
+        : VueDocument.create(uri, content, version);
       this._files.set(uri, doc);
       this._files.set(filepath, doc);
       this._fileExistsMap.set(filepath, true);
@@ -123,7 +128,10 @@ export class DocumentManager implements Disposable {
     }
 
     // Virtual verter modules always exist
-    if (filepath.indexOf("$verter/types$") >= 0 || filepath.indexOf("$verter/tsx$") >= 0) {
+    if (
+      filepath.indexOf("$verter/types$") >= 0 ||
+      filepath.indexOf("$verter/tsx$") >= 0
+    ) {
       return true;
     }
 
@@ -154,8 +162,8 @@ export class DocumentManager implements Disposable {
       filepath.indexOf("$verter/types$") >= 0
         ? "$verter/types$"
         : filepath.indexOf("$verter/tsx$") >= 0
-          ? "$verter/tsx$"
-          : uriToPath(filepath);
+        ? "$verter/tsx$"
+        : uriToPath(filepath);
 
     // }
     let d = this._files.get(filepath);
@@ -191,7 +199,9 @@ export class DocumentManager implements Disposable {
       const uri = pathToUri(filepath);
 
       if (isVueFile(filepath)) {
-        d = VueDocument.create(uri, c, 0);
+        d = this.isSingleFile
+          ? VueDocument.createSingle(uri, c, 0)
+          : VueDocument.create(uri, c, 0);
       } else {
         d = TypescriptDocument.create(
           uri,

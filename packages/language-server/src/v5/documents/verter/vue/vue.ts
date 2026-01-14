@@ -1,20 +1,21 @@
 import {
   Position,
-  Range,
-  TextDocument,
 } from "vscode-languageserver-textdocument";
 import { VerterDocument } from "../verter";
 import { parser, ParserResult } from "@verter/core";
-import { createSubDocumentUri, pathToUri, uriToPath } from "../../utils";
+import { pathToUri, uriToPath } from "../../utils";
 import { processBlocks, ProcessedBlock } from "./utils";
 import { VueSubDocument } from "./sub/sub";
 import { createSubDocument } from "./sub/utils";
-import { pathToUrl } from "../../../../utils";
 import { VueBundleDocument, VueStyleDocument } from "./sub";
 
 export class VueDocument extends VerterDocument {
   static create(uri: string, content: string, version?: number) {
     return new VueDocument(uri, version ?? -1, content);
+  }
+
+  static createSingle(uri: string, content: string, version?: number) {
+    return new VueDocument(uri, version ?? -1, content, true);
   }
 
   private _docs_dirty = false;
@@ -30,7 +31,11 @@ export class VueDocument extends VerterDocument {
   private _blocks: ProcessedBlock[] | null = null;
   get blocks() {
     if (!this._blocks) {
-      this._blocks = processBlocks(this.uri, this.context.blocks);
+      this._blocks = processBlocks(
+        this.uri,
+        this.context.blocks,
+        this.isSingleFile
+      );
     }
     return this._blocks;
   }
@@ -74,7 +79,12 @@ export class VueDocument extends VerterDocument {
     return this._docs;
   }
 
-  protected constructor(uri: string, version: number, content: string) {
+  protected constructor(
+    uri: string,
+    version: number,
+    content: string,
+    private isSingleFile = false
+  ) {
     super(uri, "vue", version, content);
   }
 

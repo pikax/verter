@@ -26,9 +26,9 @@
     "esbuild-plugin-alias": "^0.2.1",
     "esbuild-plugin-alias-path": "^2.0.2",
     "glob": "^13.0.0",
-    "rollup": "^4.54.0",
+    "rollup": "^4.55.1",
     "rollup-plugin-esbuild": "^6.2.1",
-    "vitest": "^4.0.16"
+    "vitest": "^4.0.17"
   },
   "pnpm": {
     "onlyBuiltDependencies": [
