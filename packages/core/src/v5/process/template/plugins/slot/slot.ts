@@ -47,50 +47,6 @@ export const SlotPlugin = declareTemplatePlugin({
     this.processedParent.clear();
   },
 
-  // slots: new Set<ElementNode>(),
-  // pre() {
-  //   this.slots.clear();
-  // },
-  // post(s, ctx) {
-  //   const slotInstance = ctx.retrieveAccessor("slotInstance");
-  //   // const $slots = ctx.retrieveAccessor("$slot");
-
-  //   // move children to v-slot and initialise $slots
-  //   for (const element of this.slots) {
-  //     const children = element.children;
-
-  //     const first = children.shift();
-  //     // nothing to do if there's no children
-  //     if (!first) {
-  //       break;
-  //     }
-  //     const last = children.pop() ?? first;
-
-  //     const pos =
-  //       element.loc.start.offset +
-  //       element.loc.source
-  //         .slice(0, first.loc.start.offset - element.loc.start.offset)
-  //         .lastIndexOf(">");
-
-  //     const endPos =
-  //       element.loc.source
-  //         .slice(last.loc.end.offset - element.loc.start.offset)
-  //         .indexOf("<") + last.loc.end.offset;
-
-  //     if (pos === -1 || pos >= first.loc.start.offset) {
-  //       console.log("should not happen");
-  //       continue;
-  //     }
-
-  //     // TODO narrow
-  //     s.prependLeft(pos, ` v-slot={(${slotInstance})=>{`);
-
-  //     s.move(pos + 1, endPos, pos);
-
-  //     s.prependRight(pos, "}}");
-  //   }
-  // },
-
   handleSlotRender(
     slot: TemplateRenderSlot,
     s: MagicString,
@@ -419,8 +375,6 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
           }
 
           if (prop.node.exp) {
-            //todo
-
             // update = to )
             s.overwrite(
               prop.node.exp.loc.start.offset - 2,

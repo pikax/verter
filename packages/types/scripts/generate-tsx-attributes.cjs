@@ -178,6 +178,7 @@ function generate(packageRoot, workspaceRoot) {
     if (!elType) return; // skip SVG
     lines.push(`  interface ${iface} {`);
     lines.push(`    "v-slot"?: (instance: ${elType}) => any;`);
+    lines.push(`    "v-directive"?: (instance: ${elType}) => any;`);
     lines.push("  }");
   });
   lines.push("}");

@@ -11,10 +11,10 @@ declare module "vue" {
   }
   interface InputHTMLAttributes {
     "v-slot"?: (instance: HTMLInputElement) => any;
-    onInput?: (e: Event & { target: HTMLInputElement }) => void;
+    onInput?: (e: InputEvent & { target: HTMLInputElement }) => void;
   }
   interface SelectHTMLAttributes {
-    onInput?: (e: Event & { target: HTMLSelectElement }) => void;
+    onInput?: (e: InputEvent & { target: HTMLSelectElement }) => void;
   }
 }
 

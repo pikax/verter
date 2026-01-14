@@ -10,7 +10,6 @@ import {
   ElementTypes,
 } from "@vue/compiler-core";
 import { camelize } from "vue";
-import { DirectivePlugin } from "../directive";
 import { ParseTemplateContext } from "../../../../parser/template";
 import { generateImport } from "../../../utils";
 import { ImportItem, ImportModule } from "../../../types";
@@ -191,7 +190,10 @@ export const PropPlugin = declareTemplatePlugin({
       const node = prop.node;
       if (node.rawName?.startsWith("v-bind:")) {
         s.remove(node.loc.start.offset, node.loc.start.offset + 7);
-      } else if (node.rawName?.startsWith(":")) {
+      } else if (
+        node.rawName?.startsWith(":") ||
+        node.rawName?.startsWith(".")
+      ) {
         s.remove(node.loc.start.offset, node.loc.start.offset + 1);
       } else if (node.rawName?.startsWith("v-on:")) {
         if (nameBinding?.ignore === true) {
@@ -250,13 +252,6 @@ export const PropPlugin = declareTemplatePlugin({
           );
         }
       }
-
-      DirectivePlugin.handleDirectiveModifiers(
-        node,
-        prop.context as ParseTemplateContext,
-        s,
-        ctx
-      );
     }
   },
 });

@@ -3,155 +3,206 @@ import "vue/jsx";
 declare module "vue" {
   interface HTMLAttributes {
     "v-slot"?: (instance: HTMLElement) => any;
+    "v-directive"?: (instance: HTMLElement) => any;
   }
   interface AnchorHTMLAttributes {
     "v-slot"?: (instance: HTMLAnchorElement) => any;
+    "v-directive"?: (instance: HTMLAnchorElement) => any;
   }
   interface AreaHTMLAttributes {
     "v-slot"?: (instance: HTMLAreaElement) => any;
+    "v-directive"?: (instance: HTMLAreaElement) => any;
   }
   interface AudioHTMLAttributes {
     "v-slot"?: (instance: HTMLAudioElement) => any;
+    "v-directive"?: (instance: HTMLAudioElement) => any;
   }
   interface BaseHTMLAttributes {
     "v-slot"?: (instance: HTMLBaseElement) => any;
+    "v-directive"?: (instance: HTMLBaseElement) => any;
   }
   interface BlockquoteHTMLAttributes {
     "v-slot"?: (instance: HTMLQuoteElement) => any;
+    "v-directive"?: (instance: HTMLQuoteElement) => any;
   }
   interface ButtonHTMLAttributes {
     "v-slot"?: (instance: HTMLButtonElement) => any;
+    "v-directive"?: (instance: HTMLButtonElement) => any;
   }
   interface CanvasHTMLAttributes {
     "v-slot"?: (instance: HTMLCanvasElement) => any;
+    "v-directive"?: (instance: HTMLCanvasElement) => any;
   }
   interface ColHTMLAttributes {
     "v-slot"?: (instance: HTMLTableColElement) => any;
+    "v-directive"?: (instance: HTMLTableColElement) => any;
   }
   interface ColgroupHTMLAttributes {
     "v-slot"?: (instance: HTMLTableColElement) => any;
+    "v-directive"?: (instance: HTMLTableColElement) => any;
   }
   interface DataHTMLAttributes {
     "v-slot"?: (instance: HTMLDataElement) => any;
+    "v-directive"?: (instance: HTMLDataElement) => any;
   }
   interface DetailsHTMLAttributes {
     "v-slot"?: (instance: HTMLDetailsElement) => any;
+    "v-directive"?: (instance: HTMLDetailsElement) => any;
   }
   interface DelHTMLAttributes {
     "v-slot"?: (instance: HTMLModElement) => any;
+    "v-directive"?: (instance: HTMLModElement) => any;
   }
   interface DialogHTMLAttributes {
     "v-slot"?: (instance: HTMLDialogElement) => any;
+    "v-directive"?: (instance: HTMLDialogElement) => any;
   }
   interface EmbedHTMLAttributes {
     "v-slot"?: (instance: HTMLEmbedElement) => any;
+    "v-directive"?: (instance: HTMLEmbedElement) => any;
   }
   interface FieldsetHTMLAttributes {
     "v-slot"?: (instance: HTMLElement) => any;
+    "v-directive"?: (instance: HTMLElement) => any;
   }
   interface FormHTMLAttributes {
     "v-slot"?: (instance: HTMLFormElement) => any;
+    "v-directive"?: (instance: HTMLFormElement) => any;
   }
   interface HtmlHTMLAttributes {
     "v-slot"?: (instance: HTMLHtmlElement) => any;
+    "v-directive"?: (instance: HTMLHtmlElement) => any;
   }
   interface IframeHTMLAttributes {
     "v-slot"?: (instance: HTMLIFrameElement) => any;
+    "v-directive"?: (instance: HTMLIFrameElement) => any;
   }
   interface ImgHTMLAttributes {
     "v-slot"?: (instance: HTMLImageElement) => any;
+    "v-directive"?: (instance: HTMLImageElement) => any;
   }
   interface InsHTMLAttributes {
     "v-slot"?: (instance: HTMLModElement) => any;
+    "v-directive"?: (instance: HTMLModElement) => any;
   }
   interface InputHTMLAttributes {
     "v-slot"?: (instance: HTMLInputElement) => any;
+    "v-directive"?: (instance: HTMLInputElement) => any;
   }
   interface KeygenHTMLAttributes {
     "v-slot"?: (instance: HTMLElement) => any;
+    "v-directive"?: (instance: HTMLElement) => any;
   }
   interface LabelHTMLAttributes {
     "v-slot"?: (instance: HTMLLabelElement) => any;
+    "v-directive"?: (instance: HTMLLabelElement) => any;
   }
   interface LiHTMLAttributes {
     "v-slot"?: (instance: HTMLLIElement) => any;
+    "v-directive"?: (instance: HTMLLIElement) => any;
   }
   interface LinkHTMLAttributes {
     "v-slot"?: (instance: HTMLLinkElement) => any;
+    "v-directive"?: (instance: HTMLLinkElement) => any;
   }
   interface MapHTMLAttributes {
     "v-slot"?: (instance: HTMLMapElement) => any;
+    "v-directive"?: (instance: HTMLMapElement) => any;
   }
   interface MenuHTMLAttributes {
     "v-slot"?: (instance: HTMLMenuElement) => any;
+    "v-directive"?: (instance: HTMLMenuElement) => any;
   }
   interface MediaHTMLAttributes {
     "v-slot"?: (instance: HTMLMediaElement) => any;
+    "v-directive"?: (instance: HTMLMediaElement) => any;
   }
   interface MetaHTMLAttributes {
     "v-slot"?: (instance: HTMLMetaElement) => any;
+    "v-directive"?: (instance: HTMLMetaElement) => any;
   }
   interface MeterHTMLAttributes {
     "v-slot"?: (instance: HTMLMeterElement) => any;
+    "v-directive"?: (instance: HTMLMeterElement) => any;
   }
   interface QuoteHTMLAttributes {
     "v-slot"?: (instance: HTMLQuoteElement) => any;
+    "v-directive"?: (instance: HTMLQuoteElement) => any;
   }
   interface ObjectHTMLAttributes {
     "v-slot"?: (instance: HTMLObjectElement) => any;
+    "v-directive"?: (instance: HTMLObjectElement) => any;
   }
   interface OlHTMLAttributes {
     "v-slot"?: (instance: HTMLOListElement) => any;
+    "v-directive"?: (instance: HTMLOListElement) => any;
   }
   interface OptgroupHTMLAttributes {
     "v-slot"?: (instance: HTMLOptGroupElement) => any;
+    "v-directive"?: (instance: HTMLOptGroupElement) => any;
   }
   interface OptionHTMLAttributes {
     "v-slot"?: (instance: HTMLOptionElement) => any;
+    "v-directive"?: (instance: HTMLOptionElement) => any;
   }
   interface OutputHTMLAttributes {
     "v-slot"?: (instance: HTMLOutputElement) => any;
+    "v-directive"?: (instance: HTMLOutputElement) => any;
   }
   interface ParamHTMLAttributes {
     "v-slot"?: (instance: HTMLParamElement) => any;
+    "v-directive"?: (instance: HTMLParamElement) => any;
   }
   interface ProgressHTMLAttributes {
     "v-slot"?: (instance: HTMLProgressElement) => any;
+    "v-directive"?: (instance: HTMLProgressElement) => any;
   }
   interface ScriptHTMLAttributes {
     "v-slot"?: (instance: HTMLScriptElement) => any;
+    "v-directive"?: (instance: HTMLScriptElement) => any;
   }
   interface SelectHTMLAttributes {
     "v-slot"?: (instance: HTMLSelectElement) => any;
+    "v-directive"?: (instance: HTMLSelectElement) => any;
   }
   interface SourceHTMLAttributes {
     "v-slot"?: (instance: HTMLSourceElement) => any;
+    "v-directive"?: (instance: HTMLSourceElement) => any;
   }
   interface StyleHTMLAttributes {
     "v-slot"?: (instance: HTMLStyleElement) => any;
+    "v-directive"?: (instance: HTMLStyleElement) => any;
   }
   interface TableHTMLAttributes {
     "v-slot"?: (instance: HTMLTableElement) => any;
+    "v-directive"?: (instance: HTMLTableElement) => any;
   }
   interface TextareaHTMLAttributes {
     "v-slot"?: (instance: HTMLTextAreaElement) => any;
+    "v-directive"?: (instance: HTMLTextAreaElement) => any;
   }
   interface TdHTMLAttributes {
     "v-slot"?: (instance: HTMLTableCellElement) => any;
+    "v-directive"?: (instance: HTMLTableCellElement) => any;
   }
   interface ThHTMLAttributes {
     "v-slot"?: (instance: HTMLTableCellElement) => any;
+    "v-directive"?: (instance: HTMLTableCellElement) => any;
   }
   interface TimeHTMLAttributes {
     "v-slot"?: (instance: HTMLTimeElement) => any;
+    "v-directive"?: (instance: HTMLTimeElement) => any;
   }
   interface TrackHTMLAttributes {
     "v-slot"?: (instance: HTMLTrackElement) => any;
+    "v-directive"?: (instance: HTMLTrackElement) => any;
   }
   interface VideoHTMLAttributes {
     "v-slot"?: (instance: HTMLVideoElement) => any;
+    "v-directive"?: (instance: HTMLVideoElement) => any;
   }
   interface WebViewHTMLAttributes {
     "v-slot"?: (instance: HTMLElement) => any;
+    "v-directive"?: (instance: HTMLElement) => any;
   }
 }

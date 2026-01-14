@@ -153,6 +153,8 @@ export const ComponentTypePlugin = definePlugin({
         .map((x) =>
           x.type === TemplateTypes.Binding && x.name && !imports.has(x.name)
             ? x.name
+            : x.type === TemplateTypes.Binding && x.name
+            ? `v${capitalize(camelize(x.name))}`
             : null
         )
         .filter(Boolean) as string[]

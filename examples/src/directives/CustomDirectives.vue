@@ -9,7 +9,11 @@ const vFocus: Directive<HTMLInputElement> = {
 };
 
 // Full directive with all hooks
-const vHighlight: Directive<HTMLElement, string> = {
+const vHighlight: Directive<
+  HTMLElement,
+  string,
+  "important" | "normal" | "low"
+> = {
   created(el, binding) {
     // Called before element's attributes or event listeners are applied
   },
@@ -74,7 +78,10 @@ const vResize: Directive<HTMLElement, ResizeOptions> = {
     const { minWidth = 0, maxWidth = Infinity, onResize } = binding.value || {};
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const width = Math.min(Math.max(entry.contentRect.width, minWidth), maxWidth);
+        const width = Math.min(
+          Math.max(entry.contentRect.width, minWidth),
+          maxWidth
+        );
         onResize?.(width);
       }
     });
@@ -87,7 +94,10 @@ const vResize: Directive<HTMLElement, ResizeOptions> = {
 };
 
 // Function shorthand (mounted + updated)
-const vColor: Directive<HTMLElement, string> = (el, binding) => {
+const vColor: Directive<HTMLElement, string, "red" | "blue"> = (
+  el,
+  binding
+) => {
   el.style.color = binding.value;
 };
 
@@ -98,25 +108,27 @@ function handleClickOutside() {
 function handleResize(width: number) {
   console.log("Resized to:", width);
 }
+
+const color = "red" as "red" | "blue";
+const someObject = { a: 1, b: 2 };
+const foo = "bar";
+const count = 0;
 </script>
 
 <template>
   <div>
     <h2>Custom Directives</h2>
-
     <!-- v-focus -->
     <input v-focus placeholder="Auto-focused" />
 
     <!-- v-highlight with value -->
-    <p v-highlight="'lightblue'">Highlighted text</p>
+    <p v-highlight:[foo]="'lightblue' + foo">Highlighted text</p>
 
     <!-- v-highlight with modifiers -->
     <p v-highlight.important="'pink'">Important highlight</p>
 
     <!-- v-click-outside -->
-    <div v-click-outside="handleClickOutside" class="box">
-      Click outside me
-    </div>
+    <div v-click-outside="handleClickOutside" class="box">Click outside me</div>
 
     <!-- v-tooltip with argument -->
     <button v-tooltip:top="'This is a tooltip'">Hover me</button>
@@ -127,7 +139,31 @@ function handleResize(width: number) {
       Resizable content
     </div>
 
+    <span v-color.red.blue.green="color" />
+    <span v-color.red="color" />
+
     <!-- v-color function shorthand -->
     <span v-color="'red'">Red text</span>
+    <span v-color="color">Red text</span>
+    <span v-if="color === 'red'" v-color="color">Red text</span>
+    <div v-if="color === 'red'">
+      <span v-color="color">Red text</span>
+    </div>
+
+    <span v-too> </span>
+    <span v-> </span>
+
+    <div>
+      <div @click.prevent.once="handleClickOutside" />
+    </div>
+
+    <!-- XLink -->
+    <svg><a :xlink:special="foo"></a></svg>
+
+    <div :about.prop="'test'"></div>
+    <!-- equivalent to -->
+    <div .about="'test'"></div>
+
+    <input v-model.lazy.number.trim="count" />
   </div>
 </template>

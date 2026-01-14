@@ -25,9 +25,16 @@ defineProps<{
 // defineProps<true | { name: string }>();
 
 defineSlots<{ header: (a: { foo: string }) => any }>();
+
+const vFoo = (
+  el: HTMLInputElement,
+  binding: { value: string; oldValue: string }
+) => {
+  el.value = binding.value + binding.oldValue;
+};
 </script>
 <template>
-  <div>
+  <div v-foo="'test'">
     <slot name="header" :foo="'1'"></slot>
   </div>
 </template>

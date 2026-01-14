@@ -7,6 +7,10 @@ defineEmits<{
   change: [name: T];
 }>();
 
+defineOptions({
+  inheritAttrs: false,
+});
+
 // const slots = defineSlots<{
 //   foo: (a: { name: T }) => any;
 // }>();

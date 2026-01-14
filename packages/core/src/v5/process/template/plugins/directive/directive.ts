@@ -1,128 +1,97 @@
 import {
-  ElementTypes,
   DirectiveNode,
+  ElementNode,
+  ElementTypes,
+  Namespaces,
+  NodeTypes,
   SimpleExpressionNode,
 } from "@vue/compiler-core";
-import { MagicString } from "@vue/compiler-sfc";
+import { ParseTemplateContext, TemplateDirective } from "../../../../parser";
 import { declareTemplatePlugin, TemplateContext } from "../../template";
-import { BindingPlugin } from "../binding";
-import { ParseTemplateContext } from "../../../../parser/template";
-import {
-  capitalize,
-  Directive,
-  GlobalDirectives,
-  ObjectDirective,
-  vModelCheckbox,
-  vModelDynamic,
-  vModelRadio,
-  vModelSelect,
-  vModelText,
-} from "vue";
 import { ProcessItemType } from "../../../types";
+import { createHelperImport } from "../../../utils";
+import { capitalize, isBuiltInDirective } from "@vue/shared";
+import { AvailableExports } from "@verter/types/string";
+import { BindingPlugin } from "../binding";
 
-/**
- * Vmodel 
- * 
- * type DirectiveRenderBetter<T extends HTMLElement> =
-
-    | (<Value = any, Modifiers extends string = string, Arg extends string = string>(directive: Directive<T & { _assigning?: boolean }, Value, Modifiers, Arg>) => {
-        value: Value,
-        arg: Arg,
-        modifiers: Modifiers[]
-    });
-
-
-// TODO maybe add the instance and also support binding instance
-declare function ___VERTER___instanceToDirectiveFn<T extends HTMLElement>(node: T): DirectiveRenderBetter<T>
-
- * 
-accessor= {
-    vModelText: {} as ModelDirective<
-        any,
-        'trim' | 'number' | 'lazy'
-    >,
+function pushWarning(
+  node: DirectiveNode,
+  ctx: import("../../template").TemplateContext,
+  message:
+    | "UNSUPPORTED_BUILTIN_DIRECTIVE_MODIFIER"
+    | "UNSUPPORTED_BUILTIN_DIRECTIVE_ARGUMENT"
+    | "UNSUPPORTED_BUILTIN_DIRECTIVE_VALUE"
+) {
+  ctx.items.push({
+    type: ProcessItemType.Warning,
+    message,
+    start: node.loc.start.offset,
+    end: node.loc.end.offset,
+    node,
+  });
 }
- */
+
+function validateBuiltInDirective(
+  name: string,
+  node: DirectiveNode,
+  ctx: TemplateContext
+) {
+  if (!isBuiltInDirective(name)) {
+    return;
+  }
+
+  const allowArg = BUILTIN_ALLOW_ARG.has(name);
+  const allowValue = BUILTIN_ALLOW_VALUE.has(name);
+  const allowModifiers = BUILTIN_ALLOW_MODIFIERS.has(name);
+
+  const hasModifiers = node.modifiers && node.modifiers.length > 0;
+
+  if (!allowModifiers && hasModifiers) {
+    pushWarning(node, ctx, "UNSUPPORTED_BUILTIN_DIRECTIVE_MODIFIER");
+  }
+
+  if (!allowArg && node.arg) {
+    pushWarning(node, ctx, "UNSUPPORTED_BUILTIN_DIRECTIVE_ARGUMENT");
+  }
+
+  if (!allowValue && node.exp) {
+    pushWarning(node, ctx, "UNSUPPORTED_BUILTIN_DIRECTIVE_VALUE");
+  }
+}
+
+const BUILTIN_ALLOW_ARG = new Set(["slot", "model", "bind", "on"]);
+const BUILTIN_ALLOW_VALUE = new Set([
+  "text",
+  "html",
+  "show",
+  "if",
+  "else-if",
+  "for",
+  "memo",
+  "model",
+  "bind",
+  "on",
+  "slot",
+]);
+const BUILTIN_ALLOW_MODIFIERS = new Set(["model", "bind", "on"]);
 
 export const DirectivePlugin = declareTemplatePlugin({
   name: "VerterDirective",
 
-  // create type safe modifiers
-  handleDirectiveModifiers(
-    node: DirectiveNode,
-    context: ParseTemplateContext,
-    s: MagicString,
-    ctx: TemplateContext
-  ) {
-    if (node.modifiers.length === 0) {
-      return;
-    }
-    const directiveAccessor = ctx.retrieveAccessor("directiveAccessor");
-    const instancePropertySymbol = ctx.retrieveAccessor(
-      "instancePropertySymbol"
-    );
-    const slotInstance = ctx.retrieveAccessor("slotInstance");
-    const instanceToDirectiveFn = ctx.retrieveAccessor("instanceToDirectiveFn");
-    const instanceToDirectiveVar = ctx.retrieveAccessor(
-      "instanceToDirectiveVar"
-    );
-    const directiveName = ctx.retrieveAccessor("directiveName");
+  directivesByElement: new Map<ElementNode, TemplateDirective[]>(),
 
-    const index = node.loc.start.offset;
-
-    const declaration =
-      `const ${instanceToDirectiveVar}=${instanceToDirectiveFn}(${slotInstance});` +
-      `const ${directiveName}=${instanceToDirectiveVar}(${directiveAccessor}.${
-        // NOTE v-model text is the default, maybe we can add more here later
-        node.name === "model" ? "vModelText" : `v${capitalize(node.name)}`
-      });`;
-
-    s.prependLeft(index, declaration);
-    if (ctx.doNarrow && context.conditions.length > 0) {
-      ctx.doNarrow(
-        {
-          index: index,
-          conditions: context.conditions,
-          inBlock: true,
-          type: "prepend",
-          direction: "left",
-        },
-        s
-      );
-    }
-    s.prependLeft(
-      index,
-      `{...{[${instancePropertySymbol}]:(${slotInstance})=>{`
-    );
-
-    if (node.modifiers.length > 0) {
-      const start = node.modifiers[0].loc.start.offset - 1;
-      const end = node.modifiers[node.modifiers.length - 1].loc.end.offset;
-      s.move(start, end, index);
-
-      s.overwrite(start, start + 1, `${directiveName}.modifiers=[`);
-
-      // s.overwrite(start - 1, start, `${directiveName}.modifiers=[`);
-      s.prependLeft(end, "];");
-
-      for (let i = 0; i < node.modifiers.length; i++) {
-        const modifier = node.modifiers[i];
-        if (i > 0) {
-          s.overwrite(
-            modifier.loc.start.offset - 1,
-            modifier.loc.start.offset,
-            ","
-          );
-        }
-        s.prependRight(modifier.loc.start.offset, '"');
-        s.prependLeft(modifier.loc.end.offset, '"');
-      }
-    }
-
-    s.prependRight(index, "}}} ");
+  pre() {
+    this.directivesByElement.clear();
   },
 
   transformDirective(item, s, ctx) {
+    // handle type checking for directives
+    validateBuiltInDirective(item.name, item.node, ctx);
+    const list = this.directivesByElement.get(item.element) ?? [];
+    list.push(item);
+    this.directivesByElement.set(item.element, list);
+    // /handle type checking for directives
+
     const element = item.element;
     const node = item.node;
 
@@ -198,16 +167,26 @@ export const DirectivePlugin = declareTemplatePlugin({
               .slice(1, -1);
           }
 
+          const hasLazy = node.modifiers.find((x) => x.content === "lazy");
+
           const eventName =
             element.tagType === ElementTypes.ELEMENT
-              ? "onInput"
+              ? hasLazy
+                ? "onChange"
+                : "onInput"
               : isDynamic
               ? "onUpdate"
               : `onUpdate:${bindingTo}`;
 
           const valueAccessor =
             element.tagType === ElementTypes.ELEMENT
-              ? "$event.target.value"
+              ? `${
+                  node.modifiers.find((x) => x.content === "number") ? "+" : ""
+                }${
+                  hasLazy
+                    ? "$event.type/*cannot correctly handle lazy modifier*/"
+                    : "$event.target.value"
+                }`
               : "$event";
           const pre = isDynamic
             ? `,[\`${eventName}:\${${bindingTo}}\`]:`
@@ -233,12 +212,6 @@ export const DirectivePlugin = declareTemplatePlugin({
           });
         }
 
-        this.handleDirectiveModifiers(
-          node,
-          item.context as ParseTemplateContext,
-          s,
-          ctx
-        );
         break;
       }
       case "is": {
@@ -246,107 +219,285 @@ export const DirectivePlugin = declareTemplatePlugin({
           return;
         }
       }
-      default: {
-        const directiveAccessor = ctx.retrieveAccessor("directiveAccessor");
-        const instancePropertySymbol = ctx.retrieveAccessor(
-          "instancePropertySymbol"
-        );
-        const slotInstance = ctx.retrieveAccessor("slotInstance");
-        const instanceToDirectiveFn = ctx.retrieveAccessor(
-          "instanceToDirectiveFn"
-        );
-        const instanceToDirectiveVar = ctx.retrieveAccessor(
-          "instanceToDirectiveVar"
-        );
-        const directiveName = ctx.retrieveAccessor("directiveName");
+    }
+  },
 
-        const context = item.context as ParseTemplateContext;
-        if (ctx.doNarrow && context.conditions.length > 0) {
-          ctx.doNarrow(
-            {
-              index: node.loc.start.offset,
-              conditions: context.conditions,
-              inBlock: true,
-              type: "prepend",
-              direction: "left",
-            },
-            s
-          );
-        }
+  transformProp(prop, _s, ctx) {
+    const node = prop.node;
+    if (!node || node.type !== NodeTypes.DIRECTIVE) return;
+    validateBuiltInDirective(prop.name, node, ctx);
+    if (isBuiltInDirective(node.name)) {
+      const list = this.directivesByElement.get(prop.element) ?? [];
+      list.push(prop as any);
+      this.directivesByElement.set(prop.element, list);
+    }
+  },
 
-        const declaration =
-          `const ${instanceToDirectiveVar}=${instanceToDirectiveFn}(${slotInstance});` +
-          `const ${directiveName}=${instanceToDirectiveVar}(`;
+  post(s, ctx) {
+    if (this.directivesByElement.size === 0) return;
 
-        s.prependLeft(
-          node.loc.start.offset,
-          `{...{[${instancePropertySymbol}]:(${slotInstance})=>{`
-        );
+    const slotInstance = ctx.retrieveAccessor("slotInstance");
+    const directiveAccessor = ctx.retrieveAccessor("directiveAccessor");
+    const directiveElement = ctx.prefix("directiveElement");
+    const runCustomDirective = ctx.prefix("runCustomDirective");
+    const extractLeafElement = ctx.prefix("ExtractLeafElement");
 
-        s.prependRight(node.loc.start.offset, `${directiveAccessor}.`);
-        s.prependRight(node.loc.start.offset, declaration);
+    const helperImports = new Set<AvailableExports>();
 
-        // replace ={\w} with {\w} uppercase letter
-        s.overwrite(
-          node.loc.start.offset + 1,
-          node.loc.start.offset + 3,
-          item.name[0].toUpperCase()
-        );
+    const hasAnyCustomDirective = Array.from(
+      this.directivesByElement.values()
+    ).some((dirs) => dirs.some((x) => !isBuiltInDirective(x.name)));
 
-        s.prependLeft(node.loc.start.offset + 2 + item.name.length, ");");
+    if (hasAnyCustomDirective) {
+      helperImports.add("ExtractLeafElement");
+      helperImports.add("runCustomDirective");
+    }
 
-        if (node.arg) {
-          const arg = node.arg as SimpleExpressionNode;
-          // replace ':' with '='
-          s.overwrite(arg.loc.start.offset - 1, arg.loc.start.offset, "=");
+    if (helperImports.size > 0) {
+      ctx.items.push(createHelperImport([...helperImports], ctx.prefix));
+    }
 
-          s.prependRight(arg.loc.start.offset - 1, `${directiveName}.arg`);
-          s.prependLeft(arg.loc.end.offset, ";");
+    for (const [element, directives] of this.directivesByElement) {
+      const insertPos = element.loc.start.offset + element.tag.length + 1;
 
-          if (arg.isStatic) {
-            // add quotes
-            s.prependLeft(arg.loc.start.offset, '"');
-            s.prependLeft(arg.loc.end.offset, '"');
+      const hasCustomDirective =
+        directives.filter((x) => !isBuiltInDirective(x.name)).length > 0;
+      const hasBuiltInWithModifiers = directives.some(
+        (x) => isBuiltInDirective(x.name) && x.node.modifiers?.length
+      );
+
+      // Skip emitting when only built-ins without modifiers are present
+      if (!hasCustomDirective && !hasBuiltInWithModifiers) {
+        continue;
+      }
+
+      const directiveElementStr = `const ${directiveElement}={} as ${extractLeafElement}<typeof ${slotInstance}>;`;
+
+      s.appendLeft(
+        insertPos,
+        ` v-directive={(${slotInstance})=>{${
+          hasCustomDirective ? directiveElementStr : ""
+        }`
+      );
+
+      let lastPos = insertPos;
+      let prepend = "";
+
+      // for (const dir of directives) {
+      for (let i = 0; i < directives.length; i++) {
+        const dir = directives[i];
+        const node = dir.node;
+        const arg = node.arg;
+        const exp = node.exp;
+
+        if (i === 0) {
+          const context = dir.context;
+          if (ctx.doNarrow && context.conditions.length > 0) {
+            ctx.doNarrow(
+              {
+                index: insertPos,
+                inBlock: false,
+                conditions: context.conditions,
+                type: "append",
+              },
+              s
+            );
           }
         }
 
-        if (node.modifiers.length > 0) {
-          const start = node.modifiers[0].loc.start.offset;
-          const end = node.modifiers[node.modifiers.length - 1].loc.end.offset;
+        const startName = node.loc.start.offset;
+        const endName = Math.min(
+          startName + 2 /* "v-".length */ + dir.name.length,
+          node.loc.end.offset
+        );
+        const moves = [] as Array<() => void>;
 
-          s.overwrite(start - 1, start, `${directiveName}.modifiers=[`);
-          s.prependLeft(end, "];");
+        const isBuiltIn = isBuiltInDirective(dir.name);
+        if (isBuiltIn) {
+          if (node.modifiers && node.modifiers.length === 0) {
+            continue;
+          }
+          const name = `v${capitalize(dir.name)}Modifiers`;
+          ctx.items.push(
+            createHelperImport([name as AvailableExports], ctx.prefix)
+          );
+          prepend += "(";
+          processModifiers(false);
 
-          for (let i = 0; i < node.modifiers.length; i++) {
-            const modifier = node.modifiers[i];
-            if (i > 0) {
-              s.overwrite(
-                modifier.loc.start.offset - 1,
-                modifier.loc.start.offset,
-                ","
-              );
+          try {
+            const arg =
+              node.name === "on"
+                ? node.arg
+                  ? // TODO this is incorrect, it's not correctly prepending the context
+                    "on" +
+                    s.slice(node.arg.loc.start.offset, node.arg.loc.end.offset)
+                  : ""
+                : node.name === "bind"
+                ? node.arg
+                  ? s.slice(node.arg.loc.start.offset, node.arg.loc.end.offset)
+                  : ""
+                : node.name === "model"
+                ? node.arg
+                  ? node.arg
+                  : dir.element.tagType === ElementTypes.ELEMENT
+                  ? "value"
+                  : "modelValue"
+                : "";
+            const isStaticArg =
+              (node.arg &&
+                node.arg.type === NodeTypes.SIMPLE_EXPRESSION &&
+                node.arg.isStatic) ??
+              true;
+            prepend = `satisfies ${ctx.prefix(name)}<typeof ${slotInstance},${
+              isStaticArg ? "'" : ""
+            }${arg}${isStaticArg ? "'" : ""}>)`;
+
+            moves.forEach((move) => move());
+          } catch (e) {
+            console.log("NOTE IT SHOULD NOT FAIL BUT IT DOES!!!", e);
+            debugger;
+            const arg = node.arg
+              ? s.slice(node.arg.loc.start.offset, node.arg.loc.end.offset)
+              : "";
+            console.log("asdasd", arg);
+          }
+          continue;
+        }
+        lastPos = node.loc.end.offset;
+
+        // remove - & capitalise first letter
+        if (dir.name) {
+          s.overwrite(
+            node.loc.start.offset + 1,
+            node.loc.start.offset + 3,
+            dir.name.charAt(0).toUpperCase()
+          );
+
+          // if contains hyphen, remove and capitalise next letter
+          dir.name.replace(/-([a-zA-Z])/g, (_, char, index) => {
+            s.overwrite(
+              node.loc.start.offset + 2 + index,
+              node.loc.start.offset + 4 + index,
+              char.toUpperCase()
+            );
+            return "";
+          });
+        } else {
+          s.overwrite(node.loc.start.offset + 1, node.loc.start.offset + 2, "");
+        }
+
+        s.appendRight(
+          startName,
+          `${prepend}${runCustomDirective}(${directiveElement},${directiveAccessor}["`
+        );
+        s.appendLeft(endName, `"])(${directiveElement}`);
+
+        prepend = "";
+
+        moves.push(() => s.move(startName, endName, insertPos));
+
+        if (exp) {
+          s.remove(exp.loc.start.offset - 2, exp.loc.start.offset); // remove ="
+          // s.remove(exp.loc.end.offset, exp.loc.end.offset + 1); // remove ending "
+          s.overwrite(exp.loc.end.offset, exp.loc.end.offset + 1, "");
+          s.prependRight(exp.loc.start.offset, ",");
+          moves.push(() =>
+            s.move(exp.loc.start.offset, exp.loc.end.offset, insertPos)
+          );
+        } else {
+          prepend += ",true";
+        }
+
+        if (arg) {
+          const isStatic =
+            arg.type == NodeTypes.SIMPLE_EXPRESSION && arg.isStatic;
+          s.remove(
+            arg.loc.start.offset - 1,
+            arg.loc.start.offset + (isStatic ? 0 : 1)
+          );
+
+          if (isStatic) {
+            // remove ":"
+            s.appendRight(arg.loc.start.offset, `${prepend},`);
+
+            s.appendRight(arg.loc.start.offset, `"`);
+            s.appendLeft(arg.loc.end.offset, `"`);
+          } else {
+            s.remove(arg.loc.end.offset, arg.loc.end.offset + 1); // remove starting [
+            s.remove(arg.loc.end.offset - 1, arg.loc.end.offset); // remove ending ]
+
+            s.appendRight(arg.loc.start.offset, `${prepend},`);
+          }
+          prepend = "";
+
+          moves.push(() =>
+            s.move(arg.loc.start.offset, arg.loc.end.offset, insertPos)
+          );
+        } else {
+          prepend += `,undefined`;
+        }
+
+        function processModifiers(appendComma = true) {
+          if (node.modifiers && node.modifiers.length > 0) {
+            for (let i = 0; i < node.modifiers.length; i++) {
+              const modifier = node.modifiers[i];
+              const isLast = i === node.modifiers.length - 1;
+
+              const isDotShorthand =
+                node.rawName?.startsWith(".") && modifier.loc.source === "";
+              const posStart = isDotShorthand
+                ? node.loc.start.offset
+                : modifier.loc.start.offset;
+              const posEnd = isDotShorthand
+                ? posStart + 1
+                : modifier.loc.end.offset;
+
+              // source is empty when using dot shorthand
+              if (isDotShorthand) {
+                s.appendRight(
+                  insertPos,
+                  `${prepend}{"prop":true${
+                    isLast ? `}${appendComma ? ");" : ""}` : ","
+                  }`
+                );
+              } else {
+                // remove dot "."
+                s.overwrite(posStart - 1, posStart, '"');
+
+                if (i === 0) {
+                  s.appendRight(
+                    posStart - 1,
+                    `${prepend}${appendComma ? "," : ""}{`
+                  );
+                }
+                s.appendLeft(
+                  posEnd,
+                  `":true${isLast ? `}${appendComma ? ");" : ""}` : ","}`
+                );
+              }
+              prepend = "";
+
+              if (!isDotShorthand) {
+                moves.push(() => s.move(posStart - 1, posEnd, insertPos));
+              }
             }
-            s.prependRight(modifier.loc.start.offset, '"');
-            s.prependLeft(modifier.loc.end.offset, '"');
+          } else {
+            prepend += `,{});`;
           }
         }
 
-        if (node.exp) {
-          // replace ="
-          s.overwrite(
-            node.exp.loc.start.offset - 2,
-            node.exp.loc.start.offset,
-            `${directiveName}.value=`
-          );
+        processModifiers();
 
-          s.overwrite(
-            node.exp.loc.end.offset,
-            node.exp.loc.end.offset + 1,
-            ";"
-          );
+        for (let i = 0; i < moves.length; i++) {
+          const move = moves[i];
+
+          move();
         }
+      }
 
-        s.prependRight(node.loc.end.offset, "}}}");
+      prepend += "}}";
+      if (prepend) {
+        s.appendRight(lastPos, prepend);
       }
     }
   },

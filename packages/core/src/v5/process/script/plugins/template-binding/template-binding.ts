@@ -1,5 +1,5 @@
 import { AvailableExports } from "@verter/types/string";
-import { VerterASTNode } from "../../../../parser";
+import { TemplateTypes, VerterASTNode } from "../../../../parser";
 import {
   ProcessItemDefineModel,
   ProcessItemMacroBinding,
@@ -8,6 +8,8 @@ import {
 import { createHelperImport } from "../../../utils";
 import { definePlugin } from "../../types";
 import { generateTypeString } from "../utils";
+import { camelize, capitalize } from "vue";
+import { isBuiltInDirective } from "@vue/shared";
 
 export const TemplateBindingPlugin = definePlugin({
   name: "VerterTemplateBinding",
@@ -40,6 +42,11 @@ export const TemplateBindingPlugin = definePlugin({
       s.prependRight(tag.pos.close.end, [declaration, typeStr].join(";"));
       return;
     }
+
+    const templateDirectivesItems =
+      ctx.blocks
+        .find((x) => x.type === "template")
+        ?.result?.items.filter((x) => x.type === TemplateTypes.Directive) ?? [];
 
     // const bindings = new Set(
     //   ctx.items
@@ -127,8 +134,18 @@ export const TemplateBindingPlugin = definePlugin({
     //   })
     //   // .map((x) => (x.name ? bindings.get(x.name) : undefined))
     //   .filter((x) => !!x);
+
+    const namedDirectives = templateDirectivesItems.map((x) =>
+      isBuiltInDirective(x.node.name)
+        ? undefined
+        : `v${capitalize(camelize(x.node.name))}`
+    );
+
     const usedBindings = Array.from(
-      new Set(ctx.templateBindings.map((x) => x.name)).values()
+      new Set([
+        ...ctx.templateBindings.map((x) => x.name),
+        ...namedDirectives,
+      ]).values()
     )
       .map((x) => {
         if (!x) return;

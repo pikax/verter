@@ -22,6 +22,13 @@ declare module "vue/jsx-runtime" {
        */
       "v-slot"?: (c: T) => any;
 
+      /**
+       * Helper to retrieve the current instance in TSX/JSX
+       * ONLY TO BE USED in Verter
+       * @param c Type of the component instance
+       */
+      "v-directive"?: (c: T) => any;
+
       "onVue:before-create"?: (vnode: VNode<T>) => void;
       "onVue:created"?: (vnode: VNode<T>) => void;
       "onVue:before-mount"?: (vnode: VNode<T>, old: VNode<T> | null) => void;
@@ -53,6 +60,12 @@ declare global {
        * @param c Type of the component instance
        */
       "v-slot"?: (c: T) => any;
+      /**
+       * Helper to retrieve the current instance in TSX/JSX
+       * ONLY TO BE USED in Verter
+       * @param c Type of the component instance
+       */
+      "v-directive"?: (c: T) => any;
 
       "onVue:before-create"?: (vnode: VNode<T>) => void;
       "onVue:created"?: (vnode: VNode<T>) => void;

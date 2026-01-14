@@ -95,6 +95,27 @@ describe("process template plugins prop", () => {
       const { result } = parse(`<div v-bind:[msg]="msg" />`);
       expect(result).toMatchInlineSnapshot(`"<div {...{[msg]:msg}} />"`);
     });
+
+    it("supports xlink attributes in svg namespace", () => {
+      const { result } = parse(`<svg><a :xlink:special="foo"></a></svg>`);
+      expect(result).toMatchInlineSnapshot(
+        `"<svg><a xlink:special={foo}></a></svg>"`
+      );
+    });
+
+    it("keeps .prop modifier bound properties", () => {
+      const { result } = parse(`<div :someProperty.prop="someObject"></div>`);
+      expect(result).toMatchInlineSnapshot(
+        `"<div someProperty.prop={someObject}></div>"`
+      );
+    });
+
+    it("supports dot shorthand for prop modifier", () => {
+      const { result } = parse(`<div .someProperty="someObject"></div>`);
+      expect(result).toMatchInlineSnapshot(
+        `"<div someProperty={someObject}></div>"`
+      );
+    });
   });
 
   describe("events", () => {

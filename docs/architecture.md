@@ -185,6 +185,34 @@ type __VERTER_TemplateBindings__ = {
 };
 ```
 
+**Directive Runner Plugin** - Provides fully typed directive support:
+
+Custom directives are transformed into type-safe function calls with:
+- **Resolved component "leaf" type**: The exact `$el` type is correctly resolved down the component render tree, ensuring directives operate on the correct element type
+- **Strict modifier validation**: Directives provide valid modifiers based on the event's available methods (e.g., `preventDefault` for click events), mimicking Vue runtime behavior
+
+```typescript
+// Input (custom directive with modifiers)
+<button v-click-outside.capture="handler" />
+
+// Output (type-safe directive call)
+v-directive={(___VERTER___slotInstance)=>{
+  const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;
+  ___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vClickOutside"])(
+    ___VERTER___directiveElement,
+    ___VERTER___ctx.handler,
+    undefined,
+    {"capture":true}
+  );
+}}
+```
+
+Built-in directives (v-show, v-if, v-model, v-bind, v-on) are validated:
+- Modifiers are checked for support and typed based on the directive
+- Arguments are validated per directive specification
+- Values are required/forbidden according to Vue specifications
+- Warnings are emitted for unsupported combinations
+
 ## Language Server Architecture
 
 ### Document Management
