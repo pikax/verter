@@ -2,8 +2,7 @@
 
 Verter is a Vue Language Server Protocol (LSP) implementation that provides enhanced TypeScript support for Vue Single File Components (SFCs). Verter converts Vue SFCs to **typed TSX representations** that TypeScript can analyze for type-checking, completions, and error reporting.
 
-> [!WARNING]
-> **This project is in active development.** Not everything is working perfectly yet. APIs may change, and you may encounter bugs or incomplete features. Use at your own risk and please report any issues you find.
+> [!WARNING] > **This project is in active development.** Not everything is working perfectly yet. APIs may change, and you may encounter bugs or incomplete features. Use at your own risk and please report any issues you find.
 
 > [!IMPORTANT]
 > The generated TSX is syntactically valid TypeScript/TSX used for **type analysis only** — it's not meant to be executed or compiled as actual JSX/TSX code.
@@ -42,7 +41,7 @@ defineSlots<
 import Comp from "./Comp.vue";
 
 // Get a typed instance with specific generic parameter
-const foo = {} as InstanceType<typeof Comp<'myName'>>;
+const foo = {} as InstanceType<typeof Comp<"myName">>;
 foo.$props.name; // Type: 'myName'
 ```
 
@@ -57,12 +56,12 @@ Verter automatically infers types for function parameters used as event handlers
 // No type annotation needed - Verter infers the type automatically!
 function handleClick(e) {
   // e is inferred as MouseEvent from HTMLElementEventMap["click"]
-  console.log(e.clientX, e.clientY)
+  console.log(e.clientX, e.clientY);
 }
 
 function handleInput(event) {
   // event is inferred as Event from HTMLElementEventMap["input"]
-  console.log(event.target)
+  console.log(event.target);
 }
 </script>
 
@@ -73,9 +72,40 @@ function handleInput(event) {
 ```
 
 This works for:
+
 - **Native HTML elements**: Infers types from `HTMLElementEventMap` (e.g., `click` → `MouseEvent`, `input` → `Event`)
 - **Vue components**: Infers types from the component's emits/props definitions
 - **Multiple parameters**: When a function has multiple parameters, the plugin wraps all parameters using rest/spread syntax with the first parameter typed as the event and additional parameters typed as `undefined`
+
+### Fully Typed Vue Directives
+
+Verter provides complete type safety for Vue directives with strict validation:
+
+- **Resolved component "leaf" type**: The exact `$el` type is correctly resolved down the component render tree, ensuring directives operate on the correct element type
+- **Strict modifier validation**: Custom directives validate modifiers, and built-in directives provide modifier checking that mimics Vue runtime behavior (e.g., `preventDefault` for click events)
+- **Argument validation**: Built-in directives validate arguments per Vue specification
+- **Value validation**: Built-in directives enforce whether values are required or forbidden
+
+```vue
+<script setup lang="ts">
+const vColor: Directive<HTMLElement, string, "red" | "blue"> = (
+  el,
+  binding
+) => {
+  el.style.color = binding.value;
+};
+</script>
+
+<template>
+  <!-- Type-safe custom directive with modifiers -->
+  <span v-color.blue="'red'" />
+  <!-- invalid -->
+  <span v-color.green="'red'" />
+
+  <!-- Built-in directive with strict modifier validation -->
+  <input v-model.number.trim="count" />
+</template>
+```
 
 ## Why Verter?
 
@@ -94,12 +124,12 @@ The generated TSX is syntactically valid TypeScript that represents the Vue comp
 
 ### Verter vs Volar
 
-| Aspect | Verter | Volar |
-|--------|--------|-------|
-| Maturity | Experimental | Production-ready |
-| Approach | SFC → Typed TSX representation | Virtual file mapping |
-| Focus | Best TypeScript integration | Feature-rich IDE support |
-| Use case | When you need strict type safety | General Vue development |
+| Aspect   | Verter                           | Volar                    |
+| -------- | -------------------------------- | ------------------------ |
+| Maturity | Experimental                     | Production-ready         |
+| Approach | SFC → Typed TSX representation   | Virtual file mapping     |
+| Focus    | Best TypeScript integration      | Feature-rich IDE support |
+| Use case | When you need strict type safety | General Vue development  |
 
 > [!NOTE]
 > If you haven't encountered specific issues with Volar, there's no reason to switch. Verter is for developers who need enhanced TypeScript support.

@@ -1,6 +1,7 @@
 import {
   DirectiveNode,
   ElementNode,
+  ElementTypes,
   Namespaces,
   NodeTypes,
 } from "@vue/compiler-core";
@@ -202,11 +203,18 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
                 ? node.arg
                   ? s.slice(node.arg.loc.start.offset, node.arg.loc.end.offset)
                   : ""
+                : node.name === "model"
+                ? node.arg
+                  ? node.arg
+                  : dir.element.tagType === ElementTypes.ELEMENT
+                  ? "value"
+                  : "modelValue"
                 : "";
             const isStaticArg =
-              node.arg &&
-              node.arg.type === NodeTypes.SIMPLE_EXPRESSION &&
-              node.arg.isStatic;
+              (node.arg &&
+                node.arg.type === NodeTypes.SIMPLE_EXPRESSION &&
+                node.arg.isStatic) ??
+              true;
             prepend = `satisfies ${ctx.prefix(name)}<typeof ${slotInstance},${
               isStaticArg ? "'" : ""
             }${arg}${isStaticArg ? "'" : ""}>)`;

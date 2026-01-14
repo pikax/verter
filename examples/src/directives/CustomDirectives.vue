@@ -94,7 +94,10 @@ const vResize: Directive<HTMLElement, ResizeOptions> = {
 };
 
 // Function shorthand (mounted + updated)
-const vColor: Directive<HTMLElement, string> = (el, binding) => {
+const vColor: Directive<HTMLElement, string, "red" | "blue"> = (
+  el,
+  binding
+) => {
   el.style.color = binding.value;
 };
 
@@ -109,6 +112,7 @@ function handleResize(width: number) {
 const color = "red" as "red" | "blue";
 const someObject = { a: 1, b: 2 };
 const foo = "bar";
+const count = 0;
 </script>
 
 <template>
@@ -136,6 +140,9 @@ const foo = "bar";
       Resizable content
     </div>
 
+    <span v-color.red.blue.green="color" />
+    <span v-color.red="color" />
+
     <!-- v-color function shorthand -->
     <span v-color="'red'">Red text</span>
     <span v-color="color">Red text</span>
@@ -157,5 +164,7 @@ const foo = "bar";
     <div :about.prop="'test'"></div>
     <!-- equivalent to -->
     <div .about="'test'"></div>
+
+    <input v-model.number.trim="count" />
   </div>
 </template>

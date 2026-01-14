@@ -275,6 +275,25 @@ describe("directive runner", () => {
       ).toBe(false);
     });
 
+    it("emits v-model modifier guards", () => {
+      const { result } = parse(`<input v-model.number.trim="count" />`);
+
+      expect(normalize(result)).toContain(
+        normalize(
+          `({"number":true,"trim":true} satisfies ___VERTER___vModelModifiers<typeof ___VERTER___slotInstance,'value'>)`
+        )
+      );
+    });
+    it("emits v-model modifier guards", () => {
+      const { result } = parse(`<Comp v-model.number.trim="count" />`);
+
+      expect(normalize(result)).toContain(
+        normalize(
+          `({"number":true,"trim":true} satisfies ___VERTER___vModelModifiers<typeof ___VERTER___slotInstance,'modelValue'>)`
+        )
+      );
+    });
+
     it("handles v-bind modifiers on props without warnings", () => {
       const { context } = parse(`<div v-bind:title.camel="label" />`);
 
