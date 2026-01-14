@@ -165,6 +165,6 @@ const count = 0;
     <!-- equivalent to -->
     <div .about="'test'"></div>
 
-    <input v-model.number.trim="count" />
+    <input v-model.lazy.number.trim="count" />
   </div>
 </template>

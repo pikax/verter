@@ -293,7 +293,17 @@ describe("directive runner", () => {
       it('v-model.lazy="foo"', () => {
         const { result } = parse(`<input v-model.lazy="foo" />`);
         expect(result).toContain(
-          `<input {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vModelText);___VERTER___directiveName.modifiers=["lazy"];}}} value={___VERTER___ctx.foo} onInput={($event)=>(___VERTER___ctx.foo=$event.target.value)} />`
+          `v-directive={(___VERTER___slotInstance)=>{({"lazy":true}satisfies ___VERTER___vModelModifiers<typeof ___VERTER___slotInstance,'value'>)}}`
+        );
+        expect(result).toContain(
+          `value={___VERTER___ctx.foo} onChange={($event)=>(___VERTER___ctx.foo=$event.target.value)}`
+        );
+      });
+
+      it('v-model="foo"', () => {
+        const { result } = parse(`<input v-model="foo" />`);
+        expect(result).toContain(
+          `value={___VERTER___ctx.foo} onInput={($event)=>(___VERTER___ctx.foo=$event.target.value)}`
         );
       });
 
@@ -323,15 +333,17 @@ describe("directive runner", () => {
       it('div v-on:click.bar="foo"', () => {
         const { result } = parse(`<div v-on:click.bar="foo" />`);
         expect(result).toContain(
-          `<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vOn);___VERTER___directiveName.modifiers=["bar"];}}} onClick={___VERTER___ctx.foo} />`
+          `v-directive={(___VERTER___slotInstance)=>{({"bar":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'onClick'>)}}`
         );
+        expect(result).toContain(`onClick={___VERTER___ctx.foo}`);
       });
 
       it('div v-if="foo" v-on:click.bar="foo"', () => {
         const { result } = parse(`<div v-if="foo" v-on:click.bar="foo" />`);
         expect(result).toContain(
-          `<div  {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.foo))) return;const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vOn);___VERTER___directiveName.modifiers=["bar"];}}} onClick={___VERTER___ctx.foo} />}}}`
+          `v-directive={(___VERTER___slotInstance)=>{!((___VERTER___ctx.foo))? undefined :({"bar":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'onClick'>)}}`
         );
+        expect(result).toContain(`onClick={___VERTER___ctx.foo}`);
       });
     });
 
@@ -339,15 +351,17 @@ describe("directive runner", () => {
       it('div v-bind:click.bar="foo"', () => {
         const { result } = parse(`<div v-bind:click.bar="foo" />`);
         expect(result).toContain(
-          `<div {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vBind);___VERTER___directiveName.modifiers=["bar"];}}} click={___VERTER___ctx.foo} />`
+          `v-directive={(___VERTER___slotInstance)=>{({"bar":true}satisfies ___VERTER___vBindModifiers<typeof ___VERTER___slotInstance,'click'>)}}`
         );
+        expect(result).toContain(`click={___VERTER___ctx.foo}`);
       });
 
       it('div v-if="foo" v-bind:click.bar="foo"', () => {
         const { result } = parse(`<div v-if="foo" v-bind:click.bar="foo" />`);
         expect(result).toContain(
-          `<div  {...{[___VERTER___instancePropertySymbol]:(___VERTER___slotInstance)=>{if(!((___VERTER___ctx.foo))) return;const ___VERTER___instanceToDirectiveVar=___VERTER___instanceToDirectiveFn(___VERTER___slotInstance);const ___VERTER___directiveName=___VERTER___instanceToDirectiveVar(___VERTER___directiveAccessor.vBind);___VERTER___directiveName.modifiers=["bar"];}}} click={___VERTER___ctx.foo} />}}}`
+          `v-directive={(___VERTER___slotInstance)=>{!((___VERTER___ctx.foo))? undefined :({"bar":true}satisfies ___VERTER___vBindModifiers<typeof ___VERTER___slotInstance,'click'>)}}`
         );
+        expect(result).toContain(`click={___VERTER___ctx.foo}`);
       });
     });
 

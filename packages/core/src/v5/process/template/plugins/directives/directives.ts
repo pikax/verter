@@ -169,14 +169,18 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
 
           const eventName =
             element.tagType === ElementTypes.ELEMENT
-              ? "onInput"
+              ? node.modifiers.find((x) => x.content === "lazy")
+                ? "onChange"
+                : "onInput"
               : isDynamic
               ? "onUpdate"
               : `onUpdate:${bindingTo}`;
 
           const valueAccessor =
             element.tagType === ElementTypes.ELEMENT
-              ? "$event.target.value"
+              ? `${
+                  node.modifiers.find((x) => x.content === "number") ? "+" : ""
+                }$event.target.value`
               : "$event";
           const pre = isDynamic
             ? `,[\`${eventName}:\${${bindingTo}}\`]:`
@@ -208,108 +212,6 @@ export const DirectiveRunnerPlugin = declareTemplatePlugin({
         if (item.element.tag === "component") {
           return;
         }
-      }
-      default: {
-        const directiveAccessor = ctx.retrieveAccessor("directiveAccessor");
-        const instancePropertySymbol = ctx.retrieveAccessor(
-          "instancePropertySymbol"
-        );
-        const slotInstance = ctx.retrieveAccessor("slotInstance");
-        const instanceToDirectiveFn = ctx.retrieveAccessor(
-          "instanceToDirectiveFn"
-        );
-        const instanceToDirectiveVar = ctx.retrieveAccessor(
-          "instanceToDirectiveVar"
-        );
-        const directiveName = ctx.retrieveAccessor("directiveName");
-
-        const context = item.context as ParseTemplateContext;
-        if (ctx.doNarrow && context.conditions.length > 0) {
-          ctx.doNarrow(
-            {
-              index: node.loc.start.offset,
-              conditions: context.conditions,
-              inBlock: true,
-              type: "prepend",
-              direction: "left",
-            },
-            s
-          );
-        }
-
-        const declaration =
-          `const ${instanceToDirectiveVar}=${instanceToDirectiveFn}(${slotInstance});` +
-          `const ${directiveName}=${instanceToDirectiveVar}(`;
-
-        s.prependLeft(
-          node.loc.start.offset,
-          `{...{[${instancePropertySymbol}]:(${slotInstance})=>{`
-        );
-
-        s.prependRight(node.loc.start.offset, `${directiveAccessor}.`);
-        s.prependRight(node.loc.start.offset, declaration);
-
-        // replace ={\w} with {\w} uppercase letter
-        s.overwrite(
-          node.loc.start.offset + 1,
-          node.loc.start.offset + 3,
-          item.name[0].toUpperCase()
-        );
-
-        s.prependLeft(node.loc.start.offset + 2 + item.name.length, ");");
-
-        if (node.arg) {
-          const arg = node.arg as SimpleExpressionNode;
-          // replace ':' with '='
-          s.overwrite(arg.loc.start.offset - 1, arg.loc.start.offset, "=");
-
-          s.prependRight(arg.loc.start.offset - 1, `${directiveName}.arg`);
-          s.prependLeft(arg.loc.end.offset, ";");
-
-          if (arg.isStatic) {
-            // add quotes
-            s.prependLeft(arg.loc.start.offset, '"');
-            s.prependLeft(arg.loc.end.offset, '"');
-          }
-        }
-
-        if (node.modifiers.length > 0) {
-          const start = node.modifiers[0].loc.start.offset;
-          const end = node.modifiers[node.modifiers.length - 1].loc.end.offset;
-
-          s.overwrite(start - 1, start, `${directiveName}.modifiers=[`);
-          s.prependLeft(end, "];");
-
-          for (let i = 0; i < node.modifiers.length; i++) {
-            const modifier = node.modifiers[i];
-            if (i > 0) {
-              s.overwrite(
-                modifier.loc.start.offset - 1,
-                modifier.loc.start.offset,
-                ","
-              );
-            }
-            s.prependRight(modifier.loc.start.offset, '"');
-            s.prependLeft(modifier.loc.end.offset, '"');
-          }
-        }
-
-        if (node.exp) {
-          // replace ="
-          s.overwrite(
-            node.exp.loc.start.offset - 2,
-            node.exp.loc.start.offset,
-            `${directiveName}.value=`
-          );
-
-          s.overwrite(
-            node.exp.loc.end.offset,
-            node.exp.loc.end.offset + 1,
-            ";"
-          );
-        }
-
-        s.prependRight(node.loc.end.offset, "}}}");
       }
     }
   },
