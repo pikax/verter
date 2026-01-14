@@ -131,7 +131,7 @@ describe("directive runner", () => {
 
       expect(normalize(result)).toContain(
         normalize(
-          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vPin"])(___VERTER___directiveElement,___VERTER___ctx.distance,[___VERTER___ctx.side],{"round":true,"exact":true});`
+          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vPin"])(___VERTER___directiveElement,___VERTER___ctx.distance,___VERTER___ctx.side,{"round":true,"exact":true});`
         )
       );
     });
@@ -148,6 +148,16 @@ describe("directive runner", () => {
       expect(first).toBeGreaterThanOrEqual(0);
       expect(second).toBeGreaterThan(first);
       expect(third).toBeGreaterThan(second);
+    });
+
+    it("handles dynamic arguments", () => {
+      const { result } = parse(`<div v-highlight:[foo] />`);
+      const normalized = normalize(result);
+      expect(normalized).toContain(
+        normalize(
+          '___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vHighlight"])(___VERTER___directiveElement,true,___VERTER___ctx.foo,{});}}'
+        )
+      );
     });
 
     // @ai-generated - Tests directives alongside DOM event handlers
@@ -296,7 +306,7 @@ describe("directive runner", () => {
           `v-directive={(___VERTER___slotInstance)=>{({"lazy":true}satisfies ___VERTER___vModelModifiers<typeof ___VERTER___slotInstance,'value'>)}}`
         );
         expect(result).toContain(
-          `value={___VERTER___ctx.foo} onChange={($event)=>(___VERTER___ctx.foo=$event.target.value)}`
+          `value={___VERTER___ctx.foo} onChange={($event)=>(___VERTER___ctx.foo=$event.type/*cannot correctly handle lazy modifier*/)}`
         );
       });
 

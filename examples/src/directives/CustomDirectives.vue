@@ -118,12 +118,11 @@ const count = 0;
 <template>
   <div>
     <h2>Custom Directives</h2>
-
     <!-- v-focus -->
     <input v-focus placeholder="Auto-focused" />
 
     <!-- v-highlight with value -->
-    <p v-highlight="'lightblue' + 'ddd'">Highlighted text</p>
+    <p v-highlight:[foo]="'lightblue' + foo">Highlighted text</p>
 
     <!-- v-highlight with modifiers -->
     <p v-highlight.important="'pink'">Important highlight</p>

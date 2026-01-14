@@ -409,13 +409,27 @@ export const DirectivePlugin = declareTemplatePlugin({
         }
 
         if (arg) {
-          s.remove(arg.loc.start.offset - 1, arg.loc.start.offset); // remove ":"
-          s.appendRight(arg.loc.start.offset, `${prepend},`);
-          prepend = "";
-          if (arg.type === NodeTypes.SIMPLE_EXPRESSION && arg.isStatic) {
+          const isStatic =
+            arg.type == NodeTypes.SIMPLE_EXPRESSION && arg.isStatic;
+          s.remove(
+            arg.loc.start.offset - 1,
+            arg.loc.start.offset + (isStatic ? 0 : 1)
+          );
+
+          if (isStatic) {
+            // remove ":"
+            s.appendRight(arg.loc.start.offset, `${prepend},`);
+
             s.appendRight(arg.loc.start.offset, `"`);
             s.appendLeft(arg.loc.end.offset, `"`);
+          } else {
+            s.remove(arg.loc.end.offset, arg.loc.end.offset + 1); // remove starting [
+            s.remove(arg.loc.end.offset - 1, arg.loc.end.offset); // remove ending ]
+
+            s.appendRight(arg.loc.start.offset, `${prepend},`);
           }
+          prepend = "";
+
           moves.push(() =>
             s.move(arg.loc.start.offset, arg.loc.end.offset, insertPos)
           );
