@@ -1,0 +1,142 @@
+name: Nightly
+
+on:
+  push:
+    branches: main
+    paths:
+      - 'crates/**'
+      - 'packages/wasm/**'
+      - 'packages/playground/**'
+
+concurrency:
+  group: nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-deploy:
+    name: Build WASM & Deploy Playground
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Rust + wasm-pack ---
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      # --- Node + pnpm ---
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      # --- Build WASM ---
+      - name: Build WASM
+        run: pnpm run build:wasm
+
+      - name: Smoke test WASM
+        run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
+
+      # --- Upload WASM to nightly release ---
+      - name: Upload WASM to nightly release
+        run: |
+          SHA_SHORT=$(echo "$GITHUB_SHA" | cut -c1-7)
+          echo "SHA_SHORT=$SHA_SHORT" >> $GITHUB_ENV
+
+          # Ensure nightly release exists
+          gh release view nightly >/dev/null 2>&1 || \
+            gh release create nightly --prerelease --title "Nightly Builds" --notes "Rolling nightly WASM builds from main branch."
+
+          # Upload WASM + glue JS with commit-suffixed names
+          cp packages/wasm/wasm/verter_wasm_bg.wasm "verter_wasm_bg-${SHA_SHORT}.wasm"
+          cp packages/wasm/wasm/verter_wasm.js "verter_wasm-${SHA_SHORT}.js"
+          gh release upload nightly "verter_wasm_bg-${SHA_SHORT}.wasm" "verter_wasm-${SHA_SHORT}.js" --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Update nightly manifest ---
+      - name: Update nightly manifest
+        run: |
+          # Download existing manifest or create empty
+          gh release download nightly -p nightly-manifest.json -D /tmp 2>/dev/null || \
+            echo '{"commits":[]}' > /tmp/nightly-manifest.json
+
+          COMMIT_MSG=$(git log -1 --pretty=%s | head -c 200)
+
+          # Prepend new commit, keep last 50
+          node -e "
+            const fs = require('fs');
+            const m = JSON.parse(fs.readFileSync('/tmp/nightly-manifest.json', 'utf8'));
+            m.commits.unshift({
+              sha: process.env.GITHUB_SHA,
+              short: process.env.SHA_SHORT,
+              date: new Date().toISOString(),
+              message: process.env.COMMIT_MSG
+            });
+            m.commits = m.commits.slice(0, 50);
+            m.latest = process.env.SHA_SHORT;
+            fs.writeFileSync('/tmp/nightly-manifest.json', JSON.stringify(m, null, 2));
+          "
+          gh release upload nightly /tmp/nightly-manifest.json --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_SHA: ${{ github.sha }}
+          SHA_SHORT: ${{ env.SHA_SHORT }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+
+      # --- Cleanup old assets ---
+      - name: Cleanup old nightly assets
+        run: |
+          KEEP=$(node -e "
+            const m = JSON.parse(require('fs').readFileSync('/tmp/nightly-manifest.json', 'utf8'));
+            const keep = new Set(['nightly-manifest.json']);
+            m.commits.forEach(c => {
+              keep.add('verter_wasm_bg-' + c.short + '.wasm');
+              keep.add('verter_wasm-' + c.short + '.js');
+            });
+            keep.forEach(k => console.log(k));
+          ")
+
+          ASSETS=$(gh release view nightly --json assets -q '.assets[].name')
+
+          for asset in $ASSETS; do
+            if ! echo "$KEEP" | grep -qxF "$asset"; then
+              echo "Deleting stale asset: $asset"
+              gh release delete-asset nightly "$asset" -y || true
+            fi
+          done
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Build & deploy playground ---
+      - name: Build TS packages
+        run: pnpm run build:ts
+
+      - name: Build playground
+        run: pnpm run build:playground
+
+      - name: Deploy to Firebase
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          channelId: live
+          projectId: verterjs-prod
+          target: play
+          entryPoint: packages/playground

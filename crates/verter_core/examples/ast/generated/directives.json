@@ -1,0 +1,503 @@
+{
+  "type": 0,
+  "source": "<template>\n  <div v-show=\"visible\" v-once>\n    <span v-text=\"textContent\"></span>\n    <span v-html=\"htmlContent\"></span>\n    <div v-pre>{{ this will not be compiled }}</div>\n    <div v-cloak>Loading...</div>\n    <div v-memo=\"[item]\">Memoized content</div>\n\n    <div\n      @click=\"\n        (e) => {\n          let a = 1;\n\n          console.log(a);\n\n          return a;\n        }\n      \"\n    ></div>\n  </div>\n</template>\n",
+  "children": [
+    {
+      "type": 1,
+      "tag": "template",
+      "ns": 0,
+      "tagType": 0,
+      "props": [],
+      "children": [
+        {
+          "type": 1,
+          "tag": "div",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "type": 7,
+              "name": "show",
+              "rawName": "v-show",
+              "exp": {
+                "type": 4,
+                "loc": {
+                  "start": {
+                    "column": 16,
+                    "line": 2,
+                    "offset": 26
+                  },
+                  "end": {
+                    "column": 23,
+                    "line": 2,
+                    "offset": 33
+                  },
+                  "source": "visible"
+                },
+                "content": "visible",
+                "isStatic": false,
+                "constType": 0
+              },
+              "modifiers": [],
+              "loc": {
+                "start": {
+                  "column": 8,
+                  "line": 2,
+                  "offset": 18
+                },
+                "end": {
+                  "column": 24,
+                  "line": 2,
+                  "offset": 34
+                },
+                "source": "v-show=\"visible\""
+              }
+            },
+            {
+              "type": 7,
+              "name": "once",
+              "rawName": "v-once",
+              "modifiers": [],
+              "loc": {
+                "start": {
+                  "column": 25,
+                  "line": 2,
+                  "offset": 35
+                },
+                "end": {
+                  "column": 31,
+                  "line": 2,
+                  "offset": 41
+                },
+                "source": "v-once"
+              }
+            }
+          ],
+          "children": [
+            {
+              "type": 1,
+              "tag": "span",
+              "ns": 0,
+              "tagType": 0,
+              "props": [
+                {
+                  "type": 7,
+                  "name": "text",
+                  "rawName": "v-text",
+                  "exp": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 19,
+                        "line": 3,
+                        "offset": 61
+                      },
+                      "end": {
+                        "column": 30,
+                        "line": 3,
+                        "offset": 72
+                      },
+                      "source": "textContent"
+                    },
+                    "content": "textContent",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "modifiers": [],
+                  "loc": {
+                    "start": {
+                      "column": 11,
+                      "line": 3,
+                      "offset": 53
+                    },
+                    "end": {
+                      "column": 31,
+                      "line": 3,
+                      "offset": 73
+                    },
+                    "source": "v-text=\"textContent\""
+                  }
+                }
+              ],
+              "children": [],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 3,
+                  "offset": 47
+                },
+                "end": {
+                  "column": 39,
+                  "line": 3,
+                  "offset": 81
+                },
+                "source": "<span v-text=\"textContent\"></span>"
+              }
+            },
+            {
+              "type": 1,
+              "tag": "span",
+              "ns": 0,
+              "tagType": 0,
+              "props": [
+                {
+                  "type": 7,
+                  "name": "html",
+                  "rawName": "v-html",
+                  "exp": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 19,
+                        "line": 4,
+                        "offset": 100
+                      },
+                      "end": {
+                        "column": 30,
+                        "line": 4,
+                        "offset": 111
+                      },
+                      "source": "htmlContent"
+                    },
+                    "content": "htmlContent",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "modifiers": [],
+                  "loc": {
+                    "start": {
+                      "column": 11,
+                      "line": 4,
+                      "offset": 92
+                    },
+                    "end": {
+                      "column": 31,
+                      "line": 4,
+                      "offset": 112
+                    },
+                    "source": "v-html=\"htmlContent\""
+                  }
+                }
+              ],
+              "children": [],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 4,
+                  "offset": 86
+                },
+                "end": {
+                  "column": 39,
+                  "line": 4,
+                  "offset": 120
+                },
+                "source": "<span v-html=\"htmlContent\"></span>"
+              }
+            },
+            {
+              "type": 1,
+              "tag": "div",
+              "ns": 0,
+              "tagType": 0,
+              "props": [],
+              "children": [
+                {
+                  "type": 2,
+                  "content": "{{ this will not be compiled }}",
+                  "loc": {
+                    "start": {
+                      "column": 16,
+                      "line": 5,
+                      "offset": 136
+                    },
+                    "end": {
+                      "column": 47,
+                      "line": 5,
+                      "offset": 167
+                    },
+                    "source": "{{ this will not be compiled }}"
+                  }
+                }
+              ],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 5,
+                  "offset": 125
+                },
+                "end": {
+                  "column": 53,
+                  "line": 5,
+                  "offset": 173
+                },
+                "source": "<div v-pre>{{ this will not be compiled }}</div>"
+              }
+            },
+            {
+              "type": 1,
+              "tag": "div",
+              "ns": 0,
+              "tagType": 0,
+              "props": [
+                {
+                  "type": 7,
+                  "name": "cloak",
+                  "rawName": "v-cloak",
+                  "modifiers": [],
+                  "loc": {
+                    "start": {
+                      "column": 10,
+                      "line": 6,
+                      "offset": 183
+                    },
+                    "end": {
+                      "column": 17,
+                      "line": 6,
+                      "offset": 190
+                    },
+                    "source": "v-cloak"
+                  }
+                }
+              ],
+              "children": [
+                {
+                  "type": 2,
+                  "content": "Loading...",
+                  "loc": {
+                    "start": {
+                      "column": 18,
+                      "line": 6,
+                      "offset": 191
+                    },
+                    "end": {
+                      "column": 28,
+                      "line": 6,
+                      "offset": 201
+                    },
+                    "source": "Loading..."
+                  }
+                }
+              ],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 6,
+                  "offset": 178
+                },
+                "end": {
+                  "column": 34,
+                  "line": 6,
+                  "offset": 207
+                },
+                "source": "<div v-cloak>Loading...</div>"
+              }
+            },
+            {
+              "type": 1,
+              "tag": "div",
+              "ns": 0,
+              "tagType": 0,
+              "props": [
+                {
+                  "type": 7,
+                  "name": "memo",
+                  "rawName": "v-memo",
+                  "exp": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 18,
+                        "line": 7,
+                        "offset": 225
+                      },
+                      "end": {
+                        "column": 24,
+                        "line": 7,
+                        "offset": 231
+                      },
+                      "source": "[item]"
+                    },
+                    "content": "[item]",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "modifiers": [],
+                  "loc": {
+                    "start": {
+                      "column": 10,
+                      "line": 7,
+                      "offset": 217
+                    },
+                    "end": {
+                      "column": 25,
+                      "line": 7,
+                      "offset": 232
+                    },
+                    "source": "v-memo=\"[item]\""
+                  }
+                }
+              ],
+              "children": [
+                {
+                  "type": 2,
+                  "content": "Memoized content",
+                  "loc": {
+                    "start": {
+                      "column": 26,
+                      "line": 7,
+                      "offset": 233
+                    },
+                    "end": {
+                      "column": 42,
+                      "line": 7,
+                      "offset": 249
+                    },
+                    "source": "Memoized content"
+                  }
+                }
+              ],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 7,
+                  "offset": 212
+                },
+                "end": {
+                  "column": 48,
+                  "line": 7,
+                  "offset": 255
+                },
+                "source": "<div v-memo=\"[item]\">Memoized content</div>"
+              }
+            },
+            {
+              "type": 1,
+              "tag": "div",
+              "ns": 0,
+              "tagType": 0,
+              "props": [
+                {
+                  "type": 7,
+                  "name": "on",
+                  "rawName": "@click",
+                  "exp": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 15,
+                        "line": 10,
+                        "offset": 280
+                      },
+                      "end": {
+                        "column": 7,
+                        "line": 18,
+                        "offset": 383
+                      },
+                      "source": "\n        (e) => {\n          let a = 1;\n\n          console.log(a);\n\n          return a;\n        }\n      "
+                    },
+                    "content": "\n        (e) => {\n          let a = 1;\n\n          console.log(a);\n\n          return a;\n        }\n      ",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "arg": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 8,
+                        "line": 10,
+                        "offset": 273
+                      },
+                      "end": {
+                        "column": 13,
+                        "line": 10,
+                        "offset": 278
+                      },
+                      "source": "click"
+                    },
+                    "content": "click",
+                    "isStatic": true,
+                    "constType": 3
+                  },
+                  "modifiers": [],
+                  "loc": {
+                    "start": {
+                      "column": 7,
+                      "line": 10,
+                      "offset": 272
+                    },
+                    "end": {
+                      "column": 8,
+                      "line": 18,
+                      "offset": 384
+                    },
+                    "source": "@click=\"\n        (e) => {\n          let a = 1;\n\n          console.log(a);\n\n          return a;\n        }\n      \""
+                  }
+                }
+              ],
+              "children": [],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 9,
+                  "offset": 261
+                },
+                "end": {
+                  "column": 12,
+                  "line": 19,
+                  "offset": 396
+                },
+                "source": "<div\n      @click=\"\n        (e) => {\n          let a = 1;\n\n          console.log(a);\n\n          return a;\n        }\n      \"\n    ></div>"
+              }
+            }
+          ],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 2,
+              "offset": 13
+            },
+            "end": {
+              "column": 9,
+              "line": 20,
+              "offset": 405
+            },
+            "source": "<div v-show=\"visible\" v-once>\n    <span v-text=\"textContent\"></span>\n    <span v-html=\"htmlContent\"></span>\n    <div v-pre>{{ this will not be compiled }}</div>\n    <div v-cloak>Loading...</div>\n    <div v-memo=\"[item]\">Memoized content</div>\n\n    <div\n      @click=\"\n        (e) => {\n          let a = 1;\n\n          console.log(a);\n\n          return a;\n        }\n      \"\n    ></div>\n  </div>"
+          }
+        }
+      ],
+      "loc": {
+        "start": {
+          "column": 1,
+          "line": 1,
+          "offset": 0
+        },
+        "end": {
+          "column": 12,
+          "line": 21,
+          "offset": 417
+        },
+        "source": "<template>\n  <div v-show=\"visible\" v-once>\n    <span v-text=\"textContent\"></span>\n    <span v-html=\"htmlContent\"></span>\n    <div v-pre>{{ this will not be compiled }}</div>\n    <div v-cloak>Loading...</div>\n    <div v-memo=\"[item]\">Memoized content</div>\n\n    <div\n      @click=\"\n        (e) => {\n          let a = 1;\n\n          console.log(a);\n\n          return a;\n        }\n      \"\n    ></div>\n  </div>\n</template>"
+      }
+    }
+  ],
+  "helpers": {},
+  "components": [],
+  "directives": [],
+  "hoists": [],
+  "imports": [],
+  "cached": [],
+  "temps": 0,
+  "loc": {
+    "start": {
+      "column": 1,
+      "line": 1,
+      "offset": 0
+    },
+    "end": {
+      "column": 1,
+      "line": 22,
+      "offset": 418
+    },
+    "source": "<template>\n  <div v-show=\"visible\" v-once>\n    <span v-text=\"textContent\"></span>\n    <span v-html=\"htmlContent\"></span>\n    <div v-pre>{{ this will not be compiled }}</div>\n    <div v-cloak>Loading...</div>\n    <div v-memo=\"[item]\">Memoized content</div>\n\n    <div\n      @click=\"\n        (e) => {\n          let a = 1;\n\n          console.log(a);\n\n          return a;\n        }\n      \"\n    ></div>\n  </div>\n</template>\n"
+  }
+}

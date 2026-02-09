@@ -32,6 +32,7 @@ import {
 import ts, { CompletionsTriggerCharacter } from "typescript";
 
 import { patchClient, RequestType } from "@verter/language-shared";
+import { compile as nativeCompile } from "@verter/native";
 import { VueSubDocument } from "./v5/documents/verter/vue/sub/sub";
 import {
   VueBundleDocument,
@@ -500,6 +501,26 @@ export function startServer(options: LsConnectionOption = {}) {
 
     console.log('found', doc.docs)
 
+    // Compile with native/WASM compiler (Rust-based verter_core)
+    let wasmResult = { code: "", map: undefined as any };
+    try {
+      const sourceCode = doc.getText();
+      const filename = uriToPath(doc.uri) || doc.uri;
+      const compiled = nativeCompile(sourceCode, {
+        filename,
+        include_source_content: true,
+      });
+      wasmResult = {
+        code: compiled.code,
+        map: compiled.source_map ? JSON.parse(compiled.source_map) : undefined,
+      };
+    } catch (e) {
+      wasmResult = {
+        code: `// Compilation error: ${e}`,
+        map: undefined,
+      };
+    }
+
     return {
       js: {
         code:
@@ -521,6 +542,7 @@ ${x.getText()}
         code: "code",
         map: "map",
       },
+      wasm: wasmResult,
     };
   });
 

@@ -1,0 +1,17 @@
+[package]
+name = "verter_napi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+verter_core = { path = "../verter_core", version = "0.0.1-alpha.1" }
+oxc_allocator = "0.112.0"
+napi = { version = "2", default-features = false, features = ["napi8", "serde-json"] }
+napi-derive = "2"
+
+[build-dependencies]
+napi-build = "2"

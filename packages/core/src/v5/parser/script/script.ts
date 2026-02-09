@@ -8,7 +8,7 @@ import { createSetupContext, handleSetupNode } from "./setup/index.js";
 
 export function parseScript(
   ast: VerterAST,
-  attrs: Record<string, string | true>
+  attrs: Record<string, string | true>,
 ): ParsedScriptResult {
   let isAsync = false;
   const items: ScriptItem[] = [];
@@ -39,10 +39,7 @@ export function parseScript(
   };
 }
 
-export function parseScriptBetter(
-  ast: VerterAST,
-  attrs: Record<string, string | true>
-) {
+export function parseScriptBetter(ast: VerterAST, attrs: Record<string, string | true>) {
   // todo default lang to config
   const lang = (typeof attrs.lang === "string" ? attrs.lang : "js") || "js";
   const isSetup = !!attrs.setup;
@@ -74,7 +71,7 @@ export function parseScriptBetter(
     (node, parent, key) => {
       visitorCtx.leave(node, parent, key);
       sharedCtx.leave(node, parent, key);
-    }
+    },
   );
 
   return {

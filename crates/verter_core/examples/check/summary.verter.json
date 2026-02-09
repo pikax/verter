@@ -1,0 +1,51 @@
+{
+  "count": 16250,
+  "ms": 74361,
+  "codegen_ms": 103192,
+  "size_bytes": 306346750,
+  "errored_files": 0,
+  "comparison": {
+    "total_pairs": 81605,
+    "matched": 2,
+    "mismatched": 22806,
+    "verter_missing": 2740,
+    "vue_parse_error": 21278,
+    "verter_parse_error": 22058,
+    "previously_matched": 12721,
+    "render_dev": {
+      "total": 15865,
+      "matched": 5048,
+      "mismatched": 10817
+    },
+    "script_dev": {
+      "total": 13631,
+      "matched": 3285,
+      "mismatched": 10346
+    },
+    "render_ssr": {
+      "total": 15871,
+      "matched": 6,
+      "mismatched": 15865
+    },
+    "script_prod": {
+      "total": 13628,
+      "matched": 31,
+      "mismatched": 13597
+    },
+    "script_ssr": {
+      "total": 13631,
+      "matched": 3285,
+      "mismatched": 10346
+    },
+    "styles": {
+      "total": 6279,
+      "matched": 1068,
+      "mismatched": 5211
+    },
+    "custom": {
+      "total": 2700,
+      "matched": 0,
+      "mismatched": 2700
+    }
+  }
+}

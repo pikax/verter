@@ -1,0 +1,325 @@
+{
+  "type": 0,
+  "source": "<template>\n<div class=\"hello\" v-if=\"show\">\n  {{ message }}\n  <span @click:foo.bar=\"onClick\">text</span>\n</div>\n</template>\n",
+  "children": [
+    {
+      "type": 1,
+      "tag": "template",
+      "ns": 0,
+      "tagType": 0,
+      "props": [],
+      "children": [
+        {
+          "type": 1,
+          "tag": "div",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "type": 6,
+              "name": "class",
+              "nameLoc": {
+                "start": {
+                  "column": 6,
+                  "line": 2,
+                  "offset": 16
+                },
+                "end": {
+                  "column": 11,
+                  "line": 2,
+                  "offset": 21
+                },
+                "source": "class"
+              },
+              "value": {
+                "type": 2,
+                "content": "hello",
+                "loc": {
+                  "start": {
+                    "column": 12,
+                    "line": 2,
+                    "offset": 22
+                  },
+                  "end": {
+                    "column": 19,
+                    "line": 2,
+                    "offset": 29
+                  },
+                  "source": "\"hello\""
+                }
+              },
+              "loc": {
+                "start": {
+                  "column": 6,
+                  "line": 2,
+                  "offset": 16
+                },
+                "end": {
+                  "column": 19,
+                  "line": 2,
+                  "offset": 29
+                },
+                "source": "class=\"hello\""
+              }
+            },
+            {
+              "type": 7,
+              "name": "if",
+              "rawName": "v-if",
+              "exp": {
+                "type": 4,
+                "loc": {
+                  "start": {
+                    "column": 26,
+                    "line": 2,
+                    "offset": 36
+                  },
+                  "end": {
+                    "column": 30,
+                    "line": 2,
+                    "offset": 40
+                  },
+                  "source": "show"
+                },
+                "content": "show",
+                "isStatic": false,
+                "constType": 0
+              },
+              "modifiers": [],
+              "loc": {
+                "start": {
+                  "column": 20,
+                  "line": 2,
+                  "offset": 30
+                },
+                "end": {
+                  "column": 31,
+                  "line": 2,
+                  "offset": 41
+                },
+                "source": "v-if=\"show\""
+              }
+            }
+          ],
+          "children": [
+            {
+              "type": 5,
+              "content": {
+                "type": 4,
+                "loc": {
+                  "start": {
+                    "column": 6,
+                    "line": 3,
+                    "offset": 48
+                  },
+                  "end": {
+                    "column": 13,
+                    "line": 3,
+                    "offset": 55
+                  },
+                  "source": "message"
+                },
+                "content": "message",
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 3,
+                  "line": 3,
+                  "offset": 45
+                },
+                "end": {
+                  "column": 16,
+                  "line": 3,
+                  "offset": 58
+                },
+                "source": "{{ message }}"
+              }
+            },
+            {
+              "type": 2,
+              "content": " ",
+              "loc": {
+                "start": {
+                  "column": 16,
+                  "line": 3,
+                  "offset": 58
+                },
+                "end": {
+                  "column": 3,
+                  "line": 4,
+                  "offset": 61
+                },
+                "source": "\n  "
+              }
+            },
+            {
+              "type": 1,
+              "tag": "span",
+              "ns": 0,
+              "tagType": 0,
+              "props": [
+                {
+                  "type": 7,
+                  "name": "on",
+                  "rawName": "@click:foo.bar",
+                  "exp": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 25,
+                        "line": 4,
+                        "offset": 83
+                      },
+                      "end": {
+                        "column": 32,
+                        "line": 4,
+                        "offset": 90
+                      },
+                      "source": "onClick"
+                    },
+                    "content": "onClick",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "arg": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 10,
+                        "line": 4,
+                        "offset": 68
+                      },
+                      "end": {
+                        "column": 19,
+                        "line": 4,
+                        "offset": 77
+                      },
+                      "source": "click:foo"
+                    },
+                    "content": "click:foo",
+                    "isStatic": true,
+                    "constType": 3
+                  },
+                  "modifiers": [
+                    {
+                      "type": 4,
+                      "loc": {
+                        "start": {
+                          "column": 20,
+                          "line": 4,
+                          "offset": 78
+                        },
+                        "end": {
+                          "column": 23,
+                          "line": 4,
+                          "offset": 81
+                        },
+                        "source": "bar"
+                      },
+                      "content": "bar",
+                      "isStatic": true,
+                      "constType": 3
+                    }
+                  ],
+                  "loc": {
+                    "start": {
+                      "column": 9,
+                      "line": 4,
+                      "offset": 67
+                    },
+                    "end": {
+                      "column": 33,
+                      "line": 4,
+                      "offset": 91
+                    },
+                    "source": "@click:foo.bar=\"onClick\""
+                  }
+                }
+              ],
+              "children": [
+                {
+                  "type": 2,
+                  "content": "text",
+                  "loc": {
+                    "start": {
+                      "column": 34,
+                      "line": 4,
+                      "offset": 92
+                    },
+                    "end": {
+                      "column": 38,
+                      "line": 4,
+                      "offset": 96
+                    },
+                    "source": "text"
+                  }
+                }
+              ],
+              "loc": {
+                "start": {
+                  "column": 3,
+                  "line": 4,
+                  "offset": 61
+                },
+                "end": {
+                  "column": 45,
+                  "line": 4,
+                  "offset": 103
+                },
+                "source": "<span @click:foo.bar=\"onClick\">text</span>"
+              }
+            }
+          ],
+          "loc": {
+            "start": {
+              "column": 1,
+              "line": 2,
+              "offset": 11
+            },
+            "end": {
+              "column": 7,
+              "line": 5,
+              "offset": 110
+            },
+            "source": "<div class=\"hello\" v-if=\"show\">\n  {{ message }}\n  <span @click:foo.bar=\"onClick\">text</span>\n</div>"
+          }
+        }
+      ],
+      "loc": {
+        "start": {
+          "column": 1,
+          "line": 1,
+          "offset": 0
+        },
+        "end": {
+          "column": 12,
+          "line": 6,
+          "offset": 122
+        },
+        "source": "<template>\n<div class=\"hello\" v-if=\"show\">\n  {{ message }}\n  <span @click:foo.bar=\"onClick\">text</span>\n</div>\n</template>"
+      }
+    }
+  ],
+  "helpers": {},
+  "components": [],
+  "directives": [],
+  "hoists": [],
+  "imports": [],
+  "cached": [],
+  "temps": 0,
+  "loc": {
+    "start": {
+      "column": 1,
+      "line": 1,
+      "offset": 0
+    },
+    "end": {
+      "column": 1,
+      "line": 7,
+      "offset": 123
+    },
+    "source": "<template>\n<div class=\"hello\" v-if=\"show\">\n  {{ message }}\n  <span @click:foo.bar=\"onClick\">text</span>\n</div>\n</template>\n"
+  }
+}

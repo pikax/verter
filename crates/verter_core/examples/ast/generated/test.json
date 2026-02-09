@@ -1,0 +1,793 @@
+{
+  "type": 0,
+  "source": "<script setup lang=\"ts\">\nimport { computed, watch } from 'vue'\n\n// Reactive Props Destructure (Vue 3.5+)\nconst {\n  name,\n  count = 0,\n  disabled = false,\n  items = []\n} = defineProps<{\n  name?: string\n  count?: number\n  disabled?: boolean\n  items?: string[]\n}>()\n\nconst emit = defineEmits<{\n  update: [number]\n}>()\n\n// Destructured props are reactive!\nconst doubled = computed(() => count * 2)\nconst itemCount = computed(() => items.length)\n\nwatch(() => count, (newVal) => {\n  console.log('count changed:', newVal)\n})\n\nfunction increment() {\n  emit('update', count + 1)\n}\n</script>\n\n<template>\n  <div>\n    <div v-if=\"((arg) => doubled + itemCount || arg)(true)\" class=\"card\">\n      <h2>{{ name }}</h2>\n      <p>Count: {{ count }} (doubled: {{ doubled }})</p>\n      <p>Items: {{ itemCount }}</p>\n      <button @click=\"increment\" :disabled=\"disabled\">\n        Increment\n      </button>\n    </div>\n  </div>\n</template>\n\n<style scoped>\n.card {\n  padding: 1rem;\n  border: 1px solid #42d392;\n  border-radius: 8px;\n}\n\nbutton:disabled {\n  opacity: 0.5;\n  cursor: not-allowed;\n}\n</style>",
+  "children": [
+    {
+      "type": 1,
+      "tag": "script",
+      "ns": 0,
+      "tagType": 0,
+      "props": [
+        {
+          "type": 6,
+          "name": "setup",
+          "nameLoc": {
+            "start": {
+              "column": 9,
+              "line": 1,
+              "offset": 8
+            },
+            "end": {
+              "column": 14,
+              "line": 1,
+              "offset": 13
+            },
+            "source": "setup"
+          },
+          "loc": {
+            "start": {
+              "column": 9,
+              "line": 1,
+              "offset": 8
+            },
+            "end": {
+              "column": 14,
+              "line": 1,
+              "offset": 13
+            },
+            "source": "setup"
+          }
+        },
+        {
+          "type": 6,
+          "name": "lang",
+          "nameLoc": {
+            "start": {
+              "column": 15,
+              "line": 1,
+              "offset": 14
+            },
+            "end": {
+              "column": 19,
+              "line": 1,
+              "offset": 18
+            },
+            "source": "lang"
+          },
+          "value": {
+            "type": 2,
+            "content": "ts",
+            "loc": {
+              "start": {
+                "column": 20,
+                "line": 1,
+                "offset": 19
+              },
+              "end": {
+                "column": 24,
+                "line": 1,
+                "offset": 23
+              },
+              "source": "\"ts\""
+            }
+          },
+          "loc": {
+            "start": {
+              "column": 15,
+              "line": 1,
+              "offset": 14
+            },
+            "end": {
+              "column": 24,
+              "line": 1,
+              "offset": 23
+            },
+            "source": "lang=\"ts\""
+          }
+        }
+      ],
+      "children": [
+        {
+          "type": 2,
+          "content": " import { computed, watch } from 'vue' // Reactive Props Destructure (Vue 3.5+) const { name, count = 0, disabled = false, items = [] } = defineProps<{ name?: string count?: number disabled?: boolean items?: string[] }>() const emit = defineEmits<{ update: [number] }>() // Destructured props are reactive! const doubled = computed(() => count * 2) const itemCount = computed(() => items.length) watch(() => count, (newVal) => { console.log('count changed:', newVal) }) function increment() { emit('update', count + 1) } ",
+          "loc": {
+            "start": {
+              "column": 25,
+              "line": 1,
+              "offset": 24
+            },
+            "end": {
+              "column": 1,
+              "line": 32,
+              "offset": 572
+            },
+            "source": "\nimport { computed, watch } from 'vue'\n\n// Reactive Props Destructure (Vue 3.5+)\nconst {\n  name,\n  count = 0,\n  disabled = false,\n  items = []\n} = defineProps<{\n  name?: string\n  count?: number\n  disabled?: boolean\n  items?: string[]\n}>()\n\nconst emit = defineEmits<{\n  update: [number]\n}>()\n\n// Destructured props are reactive!\nconst doubled = computed(() => count * 2)\nconst itemCount = computed(() => items.length)\n\nwatch(() => count, (newVal) => {\n  console.log('count changed:', newVal)\n})\n\nfunction increment() {\n  emit('update', count + 1)\n}\n"
+          }
+        }
+      ],
+      "loc": {
+        "start": {
+          "column": 1,
+          "line": 1,
+          "offset": 0
+        },
+        "end": {
+          "column": 10,
+          "line": 32,
+          "offset": 581
+        },
+        "source": "<script setup lang=\"ts\">\nimport { computed, watch } from 'vue'\n\n// Reactive Props Destructure (Vue 3.5+)\nconst {\n  name,\n  count = 0,\n  disabled = false,\n  items = []\n} = defineProps<{\n  name?: string\n  count?: number\n  disabled?: boolean\n  items?: string[]\n}>()\n\nconst emit = defineEmits<{\n  update: [number]\n}>()\n\n// Destructured props are reactive!\nconst doubled = computed(() => count * 2)\nconst itemCount = computed(() => items.length)\n\nwatch(() => count, (newVal) => {\n  console.log('count changed:', newVal)\n})\n\nfunction increment() {\n  emit('update', count + 1)\n}\n</script>"
+      }
+    },
+    {
+      "type": 1,
+      "tag": "template",
+      "ns": 0,
+      "tagType": 0,
+      "props": [],
+      "children": [
+        {
+          "type": 1,
+          "tag": "div",
+          "ns": 0,
+          "tagType": 0,
+          "props": [],
+          "children": [
+            {
+              "type": 1,
+              "tag": "div",
+              "ns": 0,
+              "tagType": 0,
+              "props": [
+                {
+                  "type": 7,
+                  "name": "if",
+                  "rawName": "v-if",
+                  "exp": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 16,
+                        "line": 36,
+                        "offset": 617
+                      },
+                      "end": {
+                        "column": 59,
+                        "line": 36,
+                        "offset": 660
+                      },
+                      "source": "((arg) => doubled + itemCount || arg)(true)"
+                    },
+                    "content": "((arg) => doubled + itemCount || arg)(true)",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "modifiers": [],
+                  "loc": {
+                    "start": {
+                      "column": 10,
+                      "line": 36,
+                      "offset": 611
+                    },
+                    "end": {
+                      "column": 60,
+                      "line": 36,
+                      "offset": 661
+                    },
+                    "source": "v-if=\"((arg) => doubled + itemCount || arg)(true)\""
+                  }
+                },
+                {
+                  "type": 6,
+                  "name": "class",
+                  "nameLoc": {
+                    "start": {
+                      "column": 61,
+                      "line": 36,
+                      "offset": 662
+                    },
+                    "end": {
+                      "column": 66,
+                      "line": 36,
+                      "offset": 667
+                    },
+                    "source": "class"
+                  },
+                  "value": {
+                    "type": 2,
+                    "content": "card",
+                    "loc": {
+                      "start": {
+                        "column": 67,
+                        "line": 36,
+                        "offset": 668
+                      },
+                      "end": {
+                        "column": 73,
+                        "line": 36,
+                        "offset": 674
+                      },
+                      "source": "\"card\""
+                    }
+                  },
+                  "loc": {
+                    "start": {
+                      "column": 61,
+                      "line": 36,
+                      "offset": 662
+                    },
+                    "end": {
+                      "column": 73,
+                      "line": 36,
+                      "offset": 674
+                    },
+                    "source": "class=\"card\""
+                  }
+                }
+              ],
+              "children": [
+                {
+                  "type": 1,
+                  "tag": "h2",
+                  "ns": 0,
+                  "tagType": 0,
+                  "props": [],
+                  "children": [
+                    {
+                      "type": 5,
+                      "content": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 14,
+                            "line": 37,
+                            "offset": 689
+                          },
+                          "end": {
+                            "column": 18,
+                            "line": 37,
+                            "offset": 693
+                          },
+                          "source": "name"
+                        },
+                        "content": "name",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "loc": {
+                        "start": {
+                          "column": 11,
+                          "line": 37,
+                          "offset": 686
+                        },
+                        "end": {
+                          "column": 21,
+                          "line": 37,
+                          "offset": 696
+                        },
+                        "source": "{{ name }}"
+                      }
+                    }
+                  ],
+                  "loc": {
+                    "start": {
+                      "column": 7,
+                      "line": 37,
+                      "offset": 682
+                    },
+                    "end": {
+                      "column": 26,
+                      "line": 37,
+                      "offset": 701
+                    },
+                    "source": "<h2>{{ name }}</h2>"
+                  }
+                },
+                {
+                  "type": 1,
+                  "tag": "p",
+                  "ns": 0,
+                  "tagType": 0,
+                  "props": [],
+                  "children": [
+                    {
+                      "type": 2,
+                      "content": "Count: ",
+                      "loc": {
+                        "start": {
+                          "column": 10,
+                          "line": 38,
+                          "offset": 711
+                        },
+                        "end": {
+                          "column": 17,
+                          "line": 38,
+                          "offset": 718
+                        },
+                        "source": "Count: "
+                      }
+                    },
+                    {
+                      "type": 5,
+                      "content": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 20,
+                            "line": 38,
+                            "offset": 721
+                          },
+                          "end": {
+                            "column": 25,
+                            "line": 38,
+                            "offset": 726
+                          },
+                          "source": "count"
+                        },
+                        "content": "count",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "loc": {
+                        "start": {
+                          "column": 17,
+                          "line": 38,
+                          "offset": 718
+                        },
+                        "end": {
+                          "column": 28,
+                          "line": 38,
+                          "offset": 729
+                        },
+                        "source": "{{ count }}"
+                      }
+                    },
+                    {
+                      "type": 2,
+                      "content": " (doubled: ",
+                      "loc": {
+                        "start": {
+                          "column": 28,
+                          "line": 38,
+                          "offset": 729
+                        },
+                        "end": {
+                          "column": 39,
+                          "line": 38,
+                          "offset": 740
+                        },
+                        "source": " (doubled: "
+                      }
+                    },
+                    {
+                      "type": 5,
+                      "content": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 42,
+                            "line": 38,
+                            "offset": 743
+                          },
+                          "end": {
+                            "column": 49,
+                            "line": 38,
+                            "offset": 750
+                          },
+                          "source": "doubled"
+                        },
+                        "content": "doubled",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "loc": {
+                        "start": {
+                          "column": 39,
+                          "line": 38,
+                          "offset": 740
+                        },
+                        "end": {
+                          "column": 52,
+                          "line": 38,
+                          "offset": 753
+                        },
+                        "source": "{{ doubled }}"
+                      }
+                    },
+                    {
+                      "type": 2,
+                      "content": ")",
+                      "loc": {
+                        "start": {
+                          "column": 52,
+                          "line": 38,
+                          "offset": 753
+                        },
+                        "end": {
+                          "column": 53,
+                          "line": 38,
+                          "offset": 754
+                        },
+                        "source": ")"
+                      }
+                    }
+                  ],
+                  "loc": {
+                    "start": {
+                      "column": 7,
+                      "line": 38,
+                      "offset": 708
+                    },
+                    "end": {
+                      "column": 57,
+                      "line": 38,
+                      "offset": 758
+                    },
+                    "source": "<p>Count: {{ count }} (doubled: {{ doubled }})</p>"
+                  }
+                },
+                {
+                  "type": 1,
+                  "tag": "p",
+                  "ns": 0,
+                  "tagType": 0,
+                  "props": [],
+                  "children": [
+                    {
+                      "type": 2,
+                      "content": "Items: ",
+                      "loc": {
+                        "start": {
+                          "column": 10,
+                          "line": 39,
+                          "offset": 768
+                        },
+                        "end": {
+                          "column": 17,
+                          "line": 39,
+                          "offset": 775
+                        },
+                        "source": "Items: "
+                      }
+                    },
+                    {
+                      "type": 5,
+                      "content": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 20,
+                            "line": 39,
+                            "offset": 778
+                          },
+                          "end": {
+                            "column": 29,
+                            "line": 39,
+                            "offset": 787
+                          },
+                          "source": "itemCount"
+                        },
+                        "content": "itemCount",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "loc": {
+                        "start": {
+                          "column": 17,
+                          "line": 39,
+                          "offset": 775
+                        },
+                        "end": {
+                          "column": 32,
+                          "line": 39,
+                          "offset": 790
+                        },
+                        "source": "{{ itemCount }}"
+                      }
+                    }
+                  ],
+                  "loc": {
+                    "start": {
+                      "column": 7,
+                      "line": 39,
+                      "offset": 765
+                    },
+                    "end": {
+                      "column": 36,
+                      "line": 39,
+                      "offset": 794
+                    },
+                    "source": "<p>Items: {{ itemCount }}</p>"
+                  }
+                },
+                {
+                  "type": 1,
+                  "tag": "button",
+                  "ns": 0,
+                  "tagType": 0,
+                  "props": [
+                    {
+                      "type": 7,
+                      "name": "on",
+                      "rawName": "@click",
+                      "exp": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 23,
+                            "line": 40,
+                            "offset": 817
+                          },
+                          "end": {
+                            "column": 32,
+                            "line": 40,
+                            "offset": 826
+                          },
+                          "source": "increment"
+                        },
+                        "content": "increment",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "arg": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 16,
+                            "line": 40,
+                            "offset": 810
+                          },
+                          "end": {
+                            "column": 21,
+                            "line": 40,
+                            "offset": 815
+                          },
+                          "source": "click"
+                        },
+                        "content": "click",
+                        "isStatic": true,
+                        "constType": 3
+                      },
+                      "modifiers": [],
+                      "loc": {
+                        "start": {
+                          "column": 15,
+                          "line": 40,
+                          "offset": 809
+                        },
+                        "end": {
+                          "column": 33,
+                          "line": 40,
+                          "offset": 827
+                        },
+                        "source": "@click=\"increment\""
+                      }
+                    },
+                    {
+                      "type": 7,
+                      "name": "bind",
+                      "rawName": ":disabled",
+                      "exp": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 45,
+                            "line": 40,
+                            "offset": 839
+                          },
+                          "end": {
+                            "column": 53,
+                            "line": 40,
+                            "offset": 847
+                          },
+                          "source": "disabled"
+                        },
+                        "content": "disabled",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "arg": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 35,
+                            "line": 40,
+                            "offset": 829
+                          },
+                          "end": {
+                            "column": 43,
+                            "line": 40,
+                            "offset": 837
+                          },
+                          "source": "disabled"
+                        },
+                        "content": "disabled",
+                        "isStatic": true,
+                        "constType": 3
+                      },
+                      "modifiers": [],
+                      "loc": {
+                        "start": {
+                          "column": 34,
+                          "line": 40,
+                          "offset": 828
+                        },
+                        "end": {
+                          "column": 54,
+                          "line": 40,
+                          "offset": 848
+                        },
+                        "source": ":disabled=\"disabled\""
+                      }
+                    }
+                  ],
+                  "children": [
+                    {
+                      "type": 2,
+                      "content": " Increment ",
+                      "loc": {
+                        "start": {
+                          "column": 55,
+                          "line": 40,
+                          "offset": 849
+                        },
+                        "end": {
+                          "column": 7,
+                          "line": 42,
+                          "offset": 874
+                        },
+                        "source": "\n        Increment\n      "
+                      }
+                    }
+                  ],
+                  "loc": {
+                    "start": {
+                      "column": 7,
+                      "line": 40,
+                      "offset": 801
+                    },
+                    "end": {
+                      "column": 16,
+                      "line": 42,
+                      "offset": 883
+                    },
+                    "source": "<button @click=\"increment\" :disabled=\"disabled\">\n        Increment\n      </button>"
+                  }
+                }
+              ],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 36,
+                  "offset": 606
+                },
+                "end": {
+                  "column": 11,
+                  "line": 43,
+                  "offset": 894
+                },
+                "source": "<div v-if=\"((arg) => doubled + itemCount || arg)(true)\" class=\"card\">\n      <h2>{{ name }}</h2>\n      <p>Count: {{ count }} (doubled: {{ doubled }})</p>\n      <p>Items: {{ itemCount }}</p>\n      <button @click=\"increment\" :disabled=\"disabled\">\n        Increment\n      </button>\n    </div>"
+              }
+            }
+          ],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 35,
+              "offset": 596
+            },
+            "end": {
+              "column": 9,
+              "line": 44,
+              "offset": 903
+            },
+            "source": "<div>\n    <div v-if=\"((arg) => doubled + itemCount || arg)(true)\" class=\"card\">\n      <h2>{{ name }}</h2>\n      <p>Count: {{ count }} (doubled: {{ doubled }})</p>\n      <p>Items: {{ itemCount }}</p>\n      <button @click=\"increment\" :disabled=\"disabled\">\n        Increment\n      </button>\n    </div>\n  </div>"
+          }
+        }
+      ],
+      "loc": {
+        "start": {
+          "column": 1,
+          "line": 34,
+          "offset": 583
+        },
+        "end": {
+          "column": 12,
+          "line": 45,
+          "offset": 915
+        },
+        "source": "<template>\n  <div>\n    <div v-if=\"((arg) => doubled + itemCount || arg)(true)\" class=\"card\">\n      <h2>{{ name }}</h2>\n      <p>Count: {{ count }} (doubled: {{ doubled }})</p>\n      <p>Items: {{ itemCount }}</p>\n      <button @click=\"increment\" :disabled=\"disabled\">\n        Increment\n      </button>\n    </div>\n  </div>\n</template>"
+      }
+    },
+    {
+      "type": 1,
+      "tag": "style",
+      "ns": 0,
+      "tagType": 0,
+      "props": [
+        {
+          "type": 6,
+          "name": "scoped",
+          "nameLoc": {
+            "start": {
+              "column": 8,
+              "line": 47,
+              "offset": 924
+            },
+            "end": {
+              "column": 14,
+              "line": 47,
+              "offset": 930
+            },
+            "source": "scoped"
+          },
+          "loc": {
+            "start": {
+              "column": 8,
+              "line": 47,
+              "offset": 924
+            },
+            "end": {
+              "column": 14,
+              "line": 47,
+              "offset": 930
+            },
+            "source": "scoped"
+          }
+        }
+      ],
+      "children": [
+        {
+          "type": 2,
+          "content": " .card { padding: 1rem; border: 1px solid #42d392; border-radius: 8px; } button:disabled { opacity: 0.5; cursor: not-allowed; } ",
+          "loc": {
+            "start": {
+              "column": 15,
+              "line": 47,
+              "offset": 931
+            },
+            "end": {
+              "column": 1,
+              "line": 58,
+              "offset": 1070
+            },
+            "source": "\n.card {\n  padding: 1rem;\n  border: 1px solid #42d392;\n  border-radius: 8px;\n}\n\nbutton:disabled {\n  opacity: 0.5;\n  cursor: not-allowed;\n}\n"
+          }
+        }
+      ],
+      "loc": {
+        "start": {
+          "column": 1,
+          "line": 47,
+          "offset": 917
+        },
+        "end": {
+          "column": 9,
+          "line": 58,
+          "offset": 1078
+        },
+        "source": "<style scoped>\n.card {\n  padding: 1rem;\n  border: 1px solid #42d392;\n  border-radius: 8px;\n}\n\nbutton:disabled {\n  opacity: 0.5;\n  cursor: not-allowed;\n}\n</style>"
+      }
+    }
+  ],
+  "helpers": {},
+  "components": [],
+  "directives": [],
+  "hoists": [],
+  "imports": [],
+  "cached": [],
+  "temps": 0,
+  "loc": {
+    "start": {
+      "column": 1,
+      "line": 1,
+      "offset": 0
+    },
+    "end": {
+      "column": 9,
+      "line": 58,
+      "offset": 1078
+    },
+    "source": "<script setup lang=\"ts\">\nimport { computed, watch } from 'vue'\n\n// Reactive Props Destructure (Vue 3.5+)\nconst {\n  name,\n  count = 0,\n  disabled = false,\n  items = []\n} = defineProps<{\n  name?: string\n  count?: number\n  disabled?: boolean\n  items?: string[]\n}>()\n\nconst emit = defineEmits<{\n  update: [number]\n}>()\n\n// Destructured props are reactive!\nconst doubled = computed(() => count * 2)\nconst itemCount = computed(() => items.length)\n\nwatch(() => count, (newVal) => {\n  console.log('count changed:', newVal)\n})\n\nfunction increment() {\n  emit('update', count + 1)\n}\n</script>\n\n<template>\n  <div>\n    <div v-if=\"((arg) => doubled + itemCount || arg)(true)\" class=\"card\">\n      <h2>{{ name }}</h2>\n      <p>Count: {{ count }} (doubled: {{ doubled }})</p>\n      <p>Items: {{ itemCount }}</p>\n      <button @click=\"increment\" :disabled=\"disabled\">\n        Increment\n      </button>\n    </div>\n  </div>\n</template>\n\n<style scoped>\n.card {\n  padding: 1rem;\n  border: 1px solid #42d392;\n  border-radius: 8px;\n}\n\nbutton:disabled {\n  opacity: 0.5;\n  cursor: not-allowed;\n}\n</style>"
+  }
+}

@@ -1,0 +1,351 @@
+{
+  "source": "<template>\r\n  <svg>\r\n    <circle cx=\"50\" cy=\"50\" r=\"40\" stroke=\"black\" stroke-width=\"3\" fill=\"red\" />\r\n  </svg>\r\n</template>\r\n",
+  "children": [
+    {
+      "tag": "template",
+      "ns": 0,
+      "tagType": 3,
+      "props": [],
+      "children": [
+        {
+          "tag": "svg",
+          "ns": 0,
+          "tagType": 0,
+          "props": [],
+          "children": [
+            {
+              "tag": "circle",
+              "ns": 0,
+              "tagType": 0,
+              "props": [
+                {
+                  "name": "cx",
+                  "nameLoc": {
+                    "start": {
+                      "column": 13,
+                      "line": 3,
+                      "offset": 33
+                    },
+                    "end": {
+                      "column": 15,
+                      "line": 3,
+                      "offset": 35
+                    },
+                    "source": "cx"
+                  },
+                  "value": {
+                    "content": "50",
+                    "loc": {
+                      "start": {
+                        "column": 17,
+                        "line": 3,
+                        "offset": 37
+                      },
+                      "end": {
+                        "column": 19,
+                        "line": 3,
+                        "offset": 39
+                      },
+                      "source": "50"
+                    }
+                  },
+                  "loc": {
+                    "start": {
+                      "column": 13,
+                      "line": 3,
+                      "offset": 33
+                    },
+                    "end": {
+                      "column": 20,
+                      "line": 3,
+                      "offset": 40
+                    },
+                    "source": "cx=\"50\""
+                  }
+                },
+                {
+                  "name": "cy",
+                  "nameLoc": {
+                    "start": {
+                      "column": 21,
+                      "line": 3,
+                      "offset": 41
+                    },
+                    "end": {
+                      "column": 23,
+                      "line": 3,
+                      "offset": 43
+                    },
+                    "source": "cy"
+                  },
+                  "value": {
+                    "content": "50",
+                    "loc": {
+                      "start": {
+                        "column": 25,
+                        "line": 3,
+                        "offset": 45
+                      },
+                      "end": {
+                        "column": 27,
+                        "line": 3,
+                        "offset": 47
+                      },
+                      "source": "50"
+                    }
+                  },
+                  "loc": {
+                    "start": {
+                      "column": 21,
+                      "line": 3,
+                      "offset": 41
+                    },
+                    "end": {
+                      "column": 28,
+                      "line": 3,
+                      "offset": 48
+                    },
+                    "source": "cy=\"50\""
+                  }
+                },
+                {
+                  "name": "r",
+                  "nameLoc": {
+                    "start": {
+                      "column": 29,
+                      "line": 3,
+                      "offset": 49
+                    },
+                    "end": {
+                      "column": 30,
+                      "line": 3,
+                      "offset": 50
+                    },
+                    "source": "r"
+                  },
+                  "value": {
+                    "content": "40",
+                    "loc": {
+                      "start": {
+                        "column": 32,
+                        "line": 3,
+                        "offset": 52
+                      },
+                      "end": {
+                        "column": 34,
+                        "line": 3,
+                        "offset": 54
+                      },
+                      "source": "40"
+                    }
+                  },
+                  "loc": {
+                    "start": {
+                      "column": 29,
+                      "line": 3,
+                      "offset": 49
+                    },
+                    "end": {
+                      "column": 35,
+                      "line": 3,
+                      "offset": 55
+                    },
+                    "source": "r=\"40\""
+                  }
+                },
+                {
+                  "name": "stroke",
+                  "nameLoc": {
+                    "start": {
+                      "column": 36,
+                      "line": 3,
+                      "offset": 56
+                    },
+                    "end": {
+                      "column": 42,
+                      "line": 3,
+                      "offset": 62
+                    },
+                    "source": "stroke"
+                  },
+                  "value": {
+                    "content": "black",
+                    "loc": {
+                      "start": {
+                        "column": 44,
+                        "line": 3,
+                        "offset": 64
+                      },
+                      "end": {
+                        "column": 49,
+                        "line": 3,
+                        "offset": 69
+                      },
+                      "source": "black"
+                    }
+                  },
+                  "loc": {
+                    "start": {
+                      "column": 36,
+                      "line": 3,
+                      "offset": 56
+                    },
+                    "end": {
+                      "column": 50,
+                      "line": 3,
+                      "offset": 70
+                    },
+                    "source": "stroke=\"black\""
+                  }
+                },
+                {
+                  "name": "stroke-width",
+                  "nameLoc": {
+                    "start": {
+                      "column": 51,
+                      "line": 3,
+                      "offset": 71
+                    },
+                    "end": {
+                      "column": 63,
+                      "line": 3,
+                      "offset": 83
+                    },
+                    "source": "stroke-width"
+                  },
+                  "value": {
+                    "content": "3",
+                    "loc": {
+                      "start": {
+                        "column": 65,
+                        "line": 3,
+                        "offset": 85
+                      },
+                      "end": {
+                        "column": 66,
+                        "line": 3,
+                        "offset": 86
+                      },
+                      "source": "3"
+                    }
+                  },
+                  "loc": {
+                    "start": {
+                      "column": 51,
+                      "line": 3,
+                      "offset": 71
+                    },
+                    "end": {
+                      "column": 67,
+                      "line": 3,
+                      "offset": 87
+                    },
+                    "source": "stroke-width=\"3\""
+                  }
+                },
+                {
+                  "name": "fill",
+                  "nameLoc": {
+                    "start": {
+                      "column": 68,
+                      "line": 3,
+                      "offset": 88
+                    },
+                    "end": {
+                      "column": 72,
+                      "line": 3,
+                      "offset": 92
+                    },
+                    "source": "fill"
+                  },
+                  "value": {
+                    "content": "red",
+                    "loc": {
+                      "start": {
+                        "column": 74,
+                        "line": 3,
+                        "offset": 94
+                      },
+                      "end": {
+                        "column": 77,
+                        "line": 3,
+                        "offset": 97
+                      },
+                      "source": "red"
+                    }
+                  },
+                  "loc": {
+                    "start": {
+                      "column": 68,
+                      "line": 3,
+                      "offset": 88
+                    },
+                    "end": {
+                      "column": 78,
+                      "line": 3,
+                      "offset": 98
+                    },
+                    "source": "fill=\"red\""
+                  }
+                }
+              ],
+              "children": [],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 3,
+                  "offset": 25
+                },
+                "end": {
+                  "column": 81,
+                  "line": 3,
+                  "offset": 101
+                },
+                "source": "<circle cx=\"50\" cy=\"50\" r=\"40\" stroke=\"black\" stroke-width=\"3\" fill=\"red\" />"
+              }
+            }
+          ],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 2,
+              "offset": 14
+            },
+            "end": {
+              "column": 9,
+              "line": 4,
+              "offset": 111
+            },
+            "source": "<svg>\r\n    <circle cx=\"50\" cy=\"50\" r=\"40\" stroke=\"black\" stroke-width=\"3\" fill=\"red\" />\r\n  </svg>"
+          }
+        }
+      ],
+      "loc": {
+        "start": {
+          "column": 1,
+          "line": 1,
+          "offset": 0
+        },
+        "end": {
+          "column": 12,
+          "line": 5,
+          "offset": 124
+        },
+        "source": "<template>\r\n  <svg>\r\n    <circle cx=\"50\" cy=\"50\" r=\"40\" stroke=\"black\" stroke-width=\"3\" fill=\"red\" />\r\n  </svg>\r\n</template>"
+      }
+    }
+  ],
+  "loc": {
+    "start": {
+      "column": 1,
+      "line": 1,
+      "offset": 0
+    },
+    "end": {
+      "column": 1,
+      "line": 6,
+      "offset": 126
+    },
+    "source": "<template>\r\n  <svg>\r\n    <circle cx=\"50\" cy=\"50\" r=\"40\" stroke=\"black\" stroke-width=\"3\" fill=\"red\" />\r\n  </svg>\r\n</template>\r\n"
+  }
+}

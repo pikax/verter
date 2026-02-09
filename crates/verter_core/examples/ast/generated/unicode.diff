@@ -1,0 +1,49 @@
+ {
+-  type: 0
+-  helpers: {
+-  }
+-  components: [
+-  ]
+-  directives: [
+-  ]
+-  hoists: [
+-  ]
+-  imports: [
+-  ]
+-  cached: [
+-  ]
+-  temps: 0
+   children: [
+     {
+-      type: 1
+-      tagType: 0
++      tagType: 3
+       children: [
+         {
+-          type: 1
+           children: [
+             {
+-              type: 2
+             }
+           ]
+         }
+         {
+-          type: 1
+           children: [
+             {
+-              type: 2
+             }
+           ]
+         }
+         {
+-          type: 1
+           children: [
+             {
+-              type: 2
+             }
+           ]
+         }
+       ]
+     }
+   ]
+ }

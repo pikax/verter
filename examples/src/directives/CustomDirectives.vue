@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Directive, DirectiveBinding } from "vue";
+import { defineComponent, type Directive, type DirectiveBinding } from "vue";
 
 // Simple directive - just the mounted hook
 const vFocus: Directive<HTMLInputElement> = {
@@ -7,7 +7,6 @@ const vFocus: Directive<HTMLInputElement> = {
     el.focus();
   },
 };
-
 
 // Full directive with all hooks
 const vHighlight: Directive<
@@ -81,7 +80,7 @@ const vResize: Directive<HTMLElement, ResizeOptions> = {
       for (const entry of entries) {
         const width = Math.min(
           Math.max(entry.contentRect.width, minWidth),
-          maxWidth
+          maxWidth,
         );
         onResize?.(width);
       }
@@ -97,7 +96,7 @@ const vResize: Directive<HTMLElement, ResizeOptions> = {
 // Function shorthand (mounted + updated)
 const vColor: Directive<HTMLElement, string, "red" | "blue"> = (
   el,
-  binding
+  binding,
 ) => {
   el.style.color = binding.value;
 };
@@ -114,13 +113,32 @@ const color = "red" as "red" | "blue";
 const someObject = { a: 1, b: 2 };
 const foo = "bar";
 const count = 0;
+
+function e(e: MouseEvent) {
+  e.preventDefault();
+}
+
+const Comp = defineComponent({
+  emits: {
+    click: () => true,
+  },
+  setup() {
+    return ()=> h('div')
+  }
+});
 </script>
 
 <template>
   <div>
     <h2>Custom Directives</h2>
+
+    <Comp @click.prevent="" />
+
+    <div @click="e" />
+    <div @click.prevent="" />
     <!-- v-focus -->
     <input v-focus placeholder="Auto-focused" />
+    <div v-focus placeholder="Auto-focused" />
 
     <!-- v-highlight with value -->
     <p v-highlight:[foo]="'lightblue' + foo">Highlighted text</p>
@@ -138,7 +156,7 @@ const count = 0;
     <!-- v-resize with complex options -->
     <div v-resize="{ minWidth: 100, maxWidth: 500, onResize: handleResize }">
       Resizable content
-    </div>  
+    </div>
 
     <span v-color.red.blue.green="color" />
     <span v-color.red="color" />
@@ -165,6 +183,7 @@ const count = 0;
     <!-- equivalent to -->
     <div .about="'test'"></div>
 
+    <div v-model.lazy.number.trim="count" />
     <input v-model.lazy.number.trim="count" />
   </div>
 </template>

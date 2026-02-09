@@ -1,0 +1,150 @@
+{
+  "source": "<template>\n  <div>😊 Unicode Test 😊</div>\n  <div>😊 Unicode Test 😊</div>\n  <div>😊 Unicode Test 😊</div>\n</template>\n",
+  "children": [
+    {
+      "tag": "template",
+      "ns": 0,
+      "tagType": 3,
+      "props": [],
+      "children": [
+        {
+          "tag": "div",
+          "ns": 0,
+          "tagType": 0,
+          "props": [],
+          "children": [
+            {
+              "content": "😊 Unicode Test 😊",
+              "loc": {
+                "start": {
+                  "column": 8,
+                  "line": 2,
+                  "offset": 18
+                },
+                "end": {
+                  "column": 26,
+                  "line": 2,
+                  "offset": 36
+                },
+                "source": "😊 Unicode Test 😊"
+              }
+            }
+          ],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 2,
+              "offset": 13
+            },
+            "end": {
+              "column": 32,
+              "line": 2,
+              "offset": 42
+            },
+            "source": "<div>😊 Unicode Test 😊</div>"
+          }
+        },
+        {
+          "tag": "div",
+          "ns": 0,
+          "tagType": 0,
+          "props": [],
+          "children": [
+            {
+              "content": "😊 Unicode Test 😊",
+              "loc": {
+                "start": {
+                  "column": 8,
+                  "line": 3,
+                  "offset": 50
+                },
+                "end": {
+                  "column": 26,
+                  "line": 3,
+                  "offset": 68
+                },
+                "source": "😊 Unicode Test 😊"
+              }
+            }
+          ],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 3,
+              "offset": 45
+            },
+            "end": {
+              "column": 32,
+              "line": 3,
+              "offset": 74
+            },
+            "source": "<div>😊 Unicode Test 😊</div>"
+          }
+        },
+        {
+          "tag": "div",
+          "ns": 0,
+          "tagType": 0,
+          "props": [],
+          "children": [
+            {
+              "content": "😊 Unicode Test 😊",
+              "loc": {
+                "start": {
+                  "column": 8,
+                  "line": 4,
+                  "offset": 82
+                },
+                "end": {
+                  "column": 26,
+                  "line": 4,
+                  "offset": 100
+                },
+                "source": "😊 Unicode Test 😊"
+              }
+            }
+          ],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 4,
+              "offset": 77
+            },
+            "end": {
+              "column": 32,
+              "line": 4,
+              "offset": 106
+            },
+            "source": "<div>😊 Unicode Test 😊</div>"
+          }
+        }
+      ],
+      "loc": {
+        "start": {
+          "column": 1,
+          "line": 1,
+          "offset": 0
+        },
+        "end": {
+          "column": 12,
+          "line": 5,
+          "offset": 118
+        },
+        "source": "<template>\n  <div>😊 Unicode Test 😊</div>\n  <div>😊 Unicode Test 😊</div>\n  <div>😊 Unicode Test 😊</div>\n</template>"
+      }
+    }
+  ],
+  "loc": {
+    "start": {
+      "column": 1,
+      "line": 1,
+      "offset": 0
+    },
+    "end": {
+      "column": 1,
+      "line": 6,
+      "offset": 119
+    },
+    "source": "<template>\n  <div>😊 Unicode Test 😊</div>\n  <div>😊 Unicode Test 😊</div>\n  <div>😊 Unicode Test 😊</div>\n</template>\n"
+  }
+}

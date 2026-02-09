@@ -1,0 +1,400 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Validate
+  # ---------------------------------------------------------------------------
+  validate:
+    name: Validate Tag
+    runs-on: ubuntu-latest
+    outputs:
+      is-prerelease: ${{ steps.check.outputs.is-prerelease }}
+      dist-tag: ${{ steps.check.outputs.dist-tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          echo "Tag: $TAG"
+
+          if [[ "$TAG" == *"-alpha"* ]]; then
+            echo "is-prerelease=true" >> $GITHUB_OUTPUT
+            echo "dist-tag=alpha" >> $GITHUB_OUTPUT
+          elif [[ "$TAG" == *"-beta"* ]]; then
+            echo "is-prerelease=true" >> $GITHUB_OUTPUT
+            echo "dist-tag=beta" >> $GITHUB_OUTPUT
+          elif [[ "$TAG" == *"-rc"* ]]; then
+            echo "is-prerelease=true" >> $GITHUB_OUTPUT
+            echo "dist-tag=rc" >> $GITHUB_OUTPUT
+          else
+            echo "is-prerelease=false" >> $GITHUB_OUTPUT
+            echo "dist-tag=latest" >> $GITHUB_OUTPUT
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Build native binaries (matrix)
+  # ---------------------------------------------------------------------------
+  build-native:
+    name: Build Native (${{ matrix.target }})
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build native
+        working-directory: packages/native
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cargo install cross --locked
+            npx napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml --target ${{ matrix.target }} --cross-compile
+          else
+            npx napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml --target ${{ matrix.target }}
+          fi
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.target }}
+          path: packages/native/dist/*.node
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Build WASM
+  # ---------------------------------------------------------------------------
+  build-wasm:
+    name: Build WASM
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build WASM
+        run: pnpm run build:wasm
+      - name: Smoke test WASM
+        run: node -e "const fs = require('fs'); const wasm = fs.readFileSync('packages/wasm/wasm/verter_wasm_bg.wasm'); console.log('WASM size:', wasm.length, 'bytes'); if (wasm.length < 1000) throw new Error('WASM too small');"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm
+          path: |
+            packages/wasm/wasm/
+            packages/wasm/dist/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish Rust crates
+  # ---------------------------------------------------------------------------
+  publish-crates:
+    name: Publish Crates
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Publish verter_core
+        run: |
+          # Check if this version is already published
+          PUBLISHED=$(cargo search verter_core --limit 1 2>/dev/null | grep -oP 'verter_core = "\K[^"]+' || echo "")
+          LOCAL=$(grep -oP 'version = "\K[^"]+' Cargo.toml | head -1)
+
+          if [ "$PUBLISHED" = "$LOCAL" ]; then
+            echo "verter_core $LOCAL already published, skipping"
+          else
+            echo "Publishing verter_core $LOCAL (currently: ${PUBLISHED:-none})"
+            cargo publish -p verter_core --allow-dirty
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Publish npm packages
+  # ---------------------------------------------------------------------------
+  publish-npm:
+    name: Publish npm
+    needs: [validate, build-native, build-wasm]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - run: pnpm install --frozen-lockfile
+
+      # Download all native artifacts into platform package dirs
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: /tmp/native-artifacts
+
+      - name: Move native artifacts to platform packages
+        run: |
+          for dir in /tmp/native-artifacts/native-*/; do
+            for node_file in "$dir"*.node; do
+              [ -f "$node_file" ] || continue
+              filename=$(basename "$node_file")
+              # Extract platform from filename: verter-native.{platform}.node
+              platform=$(echo "$filename" | sed 's/verter-native\.\(.*\)\.node/\1/')
+              target_dir="packages/native/npm/${platform}"
+              if [ -d "$target_dir" ]; then
+                cp "$node_file" "$target_dir/"
+                echo "Copied $filename -> $target_dir/"
+              else
+                echo "Warning: no platform dir for $platform"
+              fi
+            done
+          done
+
+      # Download WASM artifact
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm
+          path: packages/wasm/
+
+      # Build TS packages
+      - name: Build TS packages
+        run: pnpm run build:ts
+
+      # Publish all packages that need publishing
+      - name: Publish packages
+        run: |
+          DIST_TAG="${{ needs.validate.outputs.dist-tag }}"
+          PUBLISH_ARGS="--access public --no-git-checks --provenance"
+
+          if [ "$DIST_TAG" != "latest" ]; then
+            PUBLISH_ARGS="$PUBLISH_ARGS --tag $DIST_TAG"
+          fi
+
+          # Publish platform packages first
+          for platform_dir in packages/native/npm/*/; do
+            if [ -f "$platform_dir/package.json" ]; then
+              echo "Publishing $(basename $platform_dir)..."
+              cd "$platform_dir"
+              pnpm publish $PUBLISH_ARGS || echo "Already published or failed: $(basename $platform_dir)"
+              cd "$GITHUB_WORKSPACE"
+            fi
+          done
+
+          # Publish in topological order
+          ORDER=$(node scripts/check-versions.mjs --json | node -e "
+            const data = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8'));
+            console.log(data.order.join('\n'));
+          ")
+
+          for pkg_dir in $ORDER; do
+            echo "Publishing $pkg_dir..."
+            cd "packages/$pkg_dir"
+            pnpm publish $PUBLISH_ARGS || echo "Already published or failed: $pkg_dir"
+            cd "$GITHUB_WORKSPACE"
+          done
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # GitHub Release
+  # ---------------------------------------------------------------------------
+  github-release:
+    name: GitHub Release
+    needs: [validate, build-native, build-wasm, publish-npm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install git-cliff
+        run: cargo install git-cliff --locked
+
+      - name: Generate changelog
+        run: git-cliff --latest --strip header > /tmp/RELEASE_NOTES.md
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: /tmp/release-assets/native
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm
+          path: /tmp/release-assets/wasm
+
+      - name: Create GitHub Release
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          IS_PRE="${{ needs.validate.outputs.is-prerelease }}"
+
+          PRERELEASE_FLAG=""
+          if [ "$IS_PRE" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          # Collect all .node and .wasm files
+          ASSETS=""
+          for f in $(find /tmp/release-assets -name '*.node' -o -name '*.wasm' -o -name '*.js' | head -50); do
+            ASSETS="$ASSETS $f"
+          done
+
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --notes-file /tmp/RELEASE_NOTES.md \
+            $PRERELEASE_FLAG \
+            $ASSETS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Deploy playground
+  # ---------------------------------------------------------------------------
+  deploy-playground:
+    name: Deploy Playground
+    needs: [build-wasm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm
+          path: packages/wasm/
+
+      - name: Build TS packages
+        run: pnpm run build:ts
+
+      - name: Build playground
+        run: pnpm run build:playground
+
+      - name: Deploy to Netlify
+        uses: nwtgck/actions-netlify@v2.1
+        with:
+          publish-dir: './packages/playground/dist'
+          production-branch: main
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          deploy-message: Release ${{ github.ref_name }}
+          enable-pull-request-comment: true
+          enable-commit-comment: true
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+
+  # ---------------------------------------------------------------------------
+  # Deploy preview playground (label-triggered for PRs)
+  # ---------------------------------------------------------------------------
+  deploy-preview-playground:
+    name: Deploy Preview Playground
+    if: github.event.pull_request && contains(github.event.pull_request.labels.*.name, 'preview')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-wasm-
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Build WASM
+        run: pnpm run build:wasm
+
+      - name: Build TS packages
+        run: pnpm run build:ts
+
+      - name: Build playground
+        run: pnpm run build:playground
+
+      - name: Deploy preview to Netlify
+        uses: nwtgck/actions-netlify@v2.1
+        with:
+          publish-dir: './packages/playground/dist'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          deploy-message: Preview for PR #${{ github.event.pull_request.number }}
+          enable-pull-request-comment: true
+          enable-commit-comment: false
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
