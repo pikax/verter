@@ -53,7 +53,7 @@ All exported functions are annotated with `#[napi]` and available as synchronous
 
 ### `compile(input, options?) -> CodegenResult`
 
-Compiles a Vue SFC string into JavaScript with source maps.
+Compiles a Vue SFC string or Buffer into JavaScript with source maps.
 
 ```javascript
 const { compile } = require('@verter/native');
@@ -69,13 +69,15 @@ const result = compile('<template><div>{{ msg }}</div></template>', {
   },
 });
 
+const bufferResult = compile(Buffer.from('<template><div>{{ msg }}</div></template>'));
+
 console.log(result.code);       // compiled JavaScript
 console.log(result.sourceMap);   // source map JSON string
 ```
 
 ### `compileSync(input, options?) -> CodegenResult`
 
-Identical to `compile` -- kept for API compatibility.
+Identical to `compile` -- kept for API compatibility (accepts string or Buffer).
 
 ### `compileForVite(input, options?) -> ViteCodegenResult`
 
@@ -98,6 +100,8 @@ const result = compileForVite(sfcSource, {
 ```
 
 ### Type Definitions
+
+All compile entry points accept `input` as `string | Buffer`.
 
 | NAPI Type | Fields |
 |---|---|

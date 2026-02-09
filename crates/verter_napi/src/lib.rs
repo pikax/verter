@@ -1,10 +1,22 @@
 use napi::bindgen_prelude::*;
+use napi::{Error, Status};
 use napi_derive::napi;
 use verter_core::builder::codegen::{
     generate as core_generate, generate_for_vite as core_generate_for_vite,
     CodegenOptions as CoreOptions, FeatureFlags as CoreFeatures,
     ViteCodegenOptions as CoreViteOptions,
 };
+
+fn with_input_str<T>(input: Either<String, Buffer>, f: impl FnOnce(&str) -> T) -> Result<T> {
+    match input {
+        Either::A(input) => Ok(f(&input)),
+        Either::B(buf) => {
+            let input_str = std::str::from_utf8(buf.as_ref())
+                .map_err(|e| Error::new(Status::InvalidArg, format!("input must be valid UTF-8: {}", e)))?;
+            Ok(f(input_str))
+        }
+    }
+}
 
 #[napi(object)]
 #[derive(Default)]
@@ -46,11 +58,11 @@ pub struct CodegenResult {
 
 /// Compile a Vue SFC to JavaScript.
 ///
-/// @param input - The Vue SFC source code
+/// @param input - The Vue SFC source code (string or Buffer)
 /// @param options - Optional compilation options
 /// @returns The compiled result with code, source map, and code with inline source map
 #[napi]
-pub fn compile(input: String, options: Option<CodegenOptions>) -> Result<CodegenResult> {
+pub fn compile(input: Either<String, Buffer>, options: Option<CodegenOptions>) -> Result<CodegenResult> {
     // Create allocator internally - this is critical for memory safety
     // The allocator manages memory for the OXC AST and cannot cross the FFI boundary
     let allocator = oxc_allocator::Allocator::new();
@@ -70,7 +82,7 @@ pub fn compile(input: String, options: Option<CodegenOptions>) -> Result<Codegen
         },
     };
 
-    let result = core_generate(&input, &core_options, &allocator);
+    let result = with_input_str(input, |input| core_generate(input, &core_options, &allocator))?;
 
     Ok(CodegenResult {
         code: result.code,
@@ -82,7 +94,7 @@ pub fn compile(input: String, options: Option<CodegenOptions>) -> Result<Codegen
 
 /// Synchronous version of compile (same as compile, kept for API compatibility)
 #[napi]
-pub fn compile_sync(input: String, options: Option<CodegenOptions>) -> Result<CodegenResult> {
+pub fn compile_sync(input: Either<String, Buffer>, options: Option<CodegenOptions>) -> Result<CodegenResult> {
     compile(input, options)
 }
 
@@ -166,12 +178,12 @@ pub struct ViteCodegenResult {
 /// Returns split blocks (script, template, styles) for virtual module serving.
 /// Each block has its own code, source map, and import metadata with UTF-16 offsets.
 ///
-/// @param input - The Vue SFC source code
+/// @param input - The Vue SFC source code (string or Buffer)
 /// @param options - Optional compilation options
 /// @returns Compiled result with split blocks for virtual modules
 #[napi]
 pub fn compile_for_vite(
-    input: String,
+    input: Either<String, Buffer>,
     options: Option<ViteCodegenOptions>,
 ) -> Result<ViteCodegenResult> {
     use verter_core::cursor::position::PositionResolver;
@@ -188,7 +200,7 @@ pub fn compile_for_vite(
         sourcemap: opts.sourcemap.unwrap_or(true),
     };
 
-    let result = core_generate_for_vite(&input, &core_options, &allocator);
+    let result = with_input_str(input, |input| core_generate_for_vite(input, &core_options, &allocator))?;
 
     // Convert BlockOutput to JsBlockOutput with UTF-16 offsets
     let convert_block = |block: verter_core::builder::codegen::BlockOutput| -> JsBlockOutput {

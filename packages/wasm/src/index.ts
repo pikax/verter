@@ -31,12 +31,24 @@ export interface CodegenResult {
   durationMs: number;
 }
 
+export type WasmInput = string | Uint8Array;
+
 type WasmCompileFn = (input: string, options?: unknown) => CodegenResult;
+type WasmCompileBytesFn = (input: Uint8Array, options?: unknown) => CodegenResult;
 type WasmInitFn = () => Promise<unknown>;
 
 let wasmCompile: WasmCompileFn | null = null;
+let wasmCompileBytes: WasmCompileBytesFn | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
+
+function decodeUtf8(input: Uint8Array): string {
+  if (typeof TextDecoder === 'undefined') {
+    throw new Error('TextDecoder is required to decode Uint8Array input');
+  }
+
+  return new TextDecoder('utf-8', { fatal: true }).decode(input);
+}
 
 /**
  * Initialize the WASM module. Must be called before compile().
@@ -51,6 +63,7 @@ export async function initialize(): Promise<void> {
     const wasm = await import('../wasm/verter_wasm.js');
     await (wasm.default as WasmInitFn)();
     wasmCompile = wasm.compile as WasmCompileFn;
+    wasmCompileBytes = (wasm.compileBytes as WasmCompileBytesFn) ?? null;
     initialized = true;
   })();
 
@@ -67,13 +80,13 @@ export function isInitialized(): boolean {
 /**
  * Compile a Vue SFC to JavaScript.
  *
- * @param input - The Vue SFC source code
+ * @param input - The Vue SFC source code (string or Uint8Array)
  * @param options - Optional compilation options
  * @returns The compiled result with code, source map, and code with inline source map
  * @throws If the WASM module has not been initialized
  */
 export async function compile(
-  input: string,
+  input: WasmInput,
   options?: CodegenOptions
 ): Promise<CodegenResult> {
   await initialize();
@@ -82,24 +95,40 @@ export async function compile(
     throw new Error('WASM module not initialized');
   }
 
-  return wasmCompile(input, options);
+  if (typeof input === 'string') {
+    return wasmCompile(input, options);
+  }
+
+  if (wasmCompileBytes) {
+    return wasmCompileBytes(input, options);
+  }
+
+  return wasmCompile(decodeUtf8(input), options);
 }
 
 /**
  * Synchronous compile - requires initialize() to have been called first.
  *
- * @param input - The Vue SFC source code
+ * @param input - The Vue SFC source code (string or Uint8Array)
  * @param options - Optional compilation options
  * @returns The compiled result with code, source map, and code with inline source map
  * @throws If the WASM module has not been initialized
  */
 export function compileSync(
-  input: string,
+  input: WasmInput,
   options?: CodegenOptions
 ): CodegenResult {
   if (!initialized || !wasmCompile) {
     throw new Error('WASM module not initialized. Call initialize() first.');
   }
 
-  return wasmCompile(input, options);
+  if (typeof input === 'string') {
+    return wasmCompile(input, options);
+  }
+
+  if (wasmCompileBytes) {
+    return wasmCompileBytes(input, options);
+  }
+
+  return wasmCompile(decodeUtf8(input), options);
 }

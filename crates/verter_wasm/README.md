@@ -81,6 +81,19 @@ console.log(result.sourceMap);         // source map JSON string
 console.log(result.codeWithSourceMap); // code with inline source map
 ```
 
+### `compileBytes(input, options?) -> CodegenResult`
+
+Compiles a Vue SFC from UTF-8 bytes (Uint8Array) into JavaScript with source maps.
+
+```javascript
+import init, { compileBytes } from '@verter/wasm';
+
+await init(); // load and instantiate WASM
+
+const bytes = new TextEncoder().encode('<template><div>{{ msg }}</div></template>');
+const result = compileBytes(bytes, { filename: 'App.vue' });
+```
+
 ### Serde Types (camelCase for JavaScript)
 
 All types use `#[serde(rename_all = "camelCase")]` for JavaScript-friendly field names:

@@ -1,3 +1,5 @@
+export type InputBuffer = string | Uint8Array;
+
 /**
  * Feature flags for Vue compilation
  */
@@ -193,24 +195,24 @@ export interface ViteCodegenResult {
 /**
  * Compile a Vue SFC to JavaScript.
  *
- * @param input - The Vue SFC source code
+ * @param input - The Vue SFC source code (string or Buffer)
  * @param options - Optional compilation options
  * @returns The compiled result with code, source map, and code with inline source map
  */
 export declare function compile(
-  input: string,
+  input: InputBuffer,
   options?: CodegenOptions
 ): CodegenResult;
 
 /**
  * Synchronous version of compile (same as compile, kept for API compatibility)
  *
- * @param input - The Vue SFC source code
+ * @param input - The Vue SFC source code (string or Buffer)
  * @param options - Optional compilation options
  * @returns The compiled result with code, source map, and code with inline source map
  */
 export declare function compileSync(
-  input: string,
+  input: InputBuffer,
   options?: CodegenOptions
 ): CodegenResult;
 
@@ -220,12 +222,12 @@ export declare function compileSync(
  * Returns split blocks (script, template, styles) for virtual module serving.
  * Each block has its own code, source map, and import metadata with UTF-16 offsets.
  *
- * @param input - The Vue SFC source code
+ * @param input - The Vue SFC source code (string or Buffer)
  * @param options - Optional compilation options
  * @returns Compiled result with split blocks for virtual modules
  */
 export declare function compileForVite(
-  input: string,
+  input: InputBuffer,
   options?: ViteCodegenOptions
 ): ViteCodegenResult;
 

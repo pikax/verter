@@ -96,7 +96,7 @@ await initialize();
 
 ### `compile(input, options?): Promise<CodegenResult>`
 
-Async compilation. Automatically calls `initialize()` if the module has not been loaded yet, so it is safe to call without explicit initialization.
+Async compilation. Accepts `string` or `Uint8Array` input. Automatically calls `initialize()` if the module has not been loaded yet, so it is safe to call without explicit initialization.
 
 ```typescript
 import { compile } from '@verter/wasm';
@@ -106,6 +106,9 @@ const result = await compile('<template><div>{{ msg }}</div></template>', {
   isProduction: false,
 });
 
+const bytes = new TextEncoder().encode('<template><div>{{ msg }}</div></template>');
+const bytesResult = await compile(bytes, { filename: 'App.vue' });
+
 console.log(result.code);
 console.log(result.sourceMap);
 console.log(result.codeWithSourceMap);
@@ -113,7 +116,7 @@ console.log(result.codeWithSourceMap);
 
 ### `compileSync(input, options?): CodegenResult`
 
-Synchronous compilation. Requires `initialize()` to have been called and completed beforehand. Throws if the WASM module is not yet loaded.
+Synchronous compilation. Accepts `string` or `Uint8Array`. Requires `initialize()` to have been called and completed beforehand. Throws if the WASM module is not yet loaded.
 
 ```typescript
 import { initialize, compileSync } from '@verter/wasm';
@@ -136,6 +139,8 @@ if (!isInitialized()) {
 ```
 
 ### Types
+
+All compile entry points accept `input` as `string | Uint8Array`.
 
 ```typescript
 interface CodegenOptions {

@@ -59,13 +59,7 @@ pub struct CodegenResult {
     pub duration_ms: f64,
 }
 
-/// Compile a Vue SFC to JavaScript.
-///
-/// @param input - The Vue SFC source code
-/// @param options - Optional compilation options (as JS object)
-/// @returns The compiled result with code, source map, and code with inline source map
-#[wasm_bindgen]
-pub fn compile(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
+fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
     // Create allocator internally - this is critical for memory safety
     // The allocator manages memory for the OXC AST and cannot cross the WASM boundary
     let allocator = oxc_allocator::Allocator::new();
@@ -100,4 +94,26 @@ pub fn compile(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
 
     serde_wasm_bindgen::to_value(&js_result)
         .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+/// Compile a Vue SFC to JavaScript.
+///
+/// @param input - The Vue SFC source code
+/// @param options - Optional compilation options (as JS object)
+/// @returns The compiled result with code, source map, and code with inline source map
+#[wasm_bindgen]
+pub fn compile(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
+    compile_inner(input, options)
+}
+
+/// Compile a Vue SFC to JavaScript from UTF-8 bytes.
+///
+/// @param input - The Vue SFC source code as UTF-8 bytes (Uint8Array)
+/// @param options - Optional compilation options (as JS object)
+/// @returns The compiled result with code, source map, and code with inline source map
+#[wasm_bindgen(js_name = compileBytes)]
+pub fn compile_bytes(input: &[u8], options: JsValue) -> Result<JsValue, JsValue> {
+    let input_str = std::str::from_utf8(input)
+        .map_err(|e| JsValue::from_str(&format!("input must be valid UTF-8: {}", e)))?;
+    compile_inner(input_str, options)
 }

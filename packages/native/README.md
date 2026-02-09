@@ -89,7 +89,7 @@ The correct platform-specific binary is pulled in automatically via optional dep
 
 ### `compile(input, options?): CodegenResult`
 
-Compiles a Vue SFC template to JavaScript. Despite the NAPI-RS async signature, compilation is CPU-bound and executes synchronously on the Rust side.
+Compiles a Vue SFC template to JavaScript. Accepts `string` or `Buffer` input. Despite the NAPI-RS async signature, compilation is CPU-bound and executes synchronously on the Rust side.
 
 ```typescript
 import { compile } from '@verter/native';
@@ -99,6 +99,8 @@ const result = compile('<template><div>{{ msg }}</div></template>', {
   isProduction: false,
 });
 
+const bufferResult = compile(Buffer.from('<template><div>{{ msg }}</div></template>'));
+
 console.log(result.code);
 console.log(result.sourceMap);       // Source map as JSON string
 console.log(result.codeWithSourceMap); // Code with inline source map appended
@@ -106,7 +108,7 @@ console.log(result.codeWithSourceMap); // Code with inline source map appended
 
 ### `compileSync(input, options?): CodegenResult`
 
-Synchronous version of `compile`. Identical behavior, provided for API symmetry.
+Synchronous version of `compile`. Identical behavior, provided for API symmetry (accepts `string` or `Buffer`).
 
 ```typescript
 import { compileSync } from '@verter/native';
@@ -136,6 +138,8 @@ const result = compileForVite(vueSfcSource, {
 ```
 
 ### Types
+
+All compile entry points accept `input` as `string | Buffer`.
 
 ```typescript
 interface CodegenOptions {
