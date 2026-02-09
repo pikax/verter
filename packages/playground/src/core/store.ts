@@ -130,7 +130,11 @@ export function useStore(): Store {
     }
 
     // Compile all files on init and capture timing from the last one compiled
-    let lastTiming: CompileTiming = { verter: null, verterNative: null, oxc: null };
+    let lastTiming: CompileTiming = {
+      verter: null,
+      verterNative: null,
+      oxc: null,
+    };
     for (const file of Object.values(files.value)) {
       lastTiming = await compileFile(file, compilerOptions);
     }

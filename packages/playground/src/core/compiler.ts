@@ -153,7 +153,7 @@ export async function compileFile(file: File, options?: CompilerOptions): Promis
       timing.verter = performance.now() - verterStart;
       timing.verterNative = (verterResult as any).durationMs ?? null;
       console.log(
-        `Compiled ${file.filename} in ${timing.verter}ms (WASM: ${verterResult.durationMs ?? "N/A"}ms)`,
+        `Compiled ${file.filename} in ${timing.verter}ms (WASM:${verterResult.durationMs ?? "N/A"}ms)`,
       );
 
       // Store source map from Verter

@@ -69,13 +69,13 @@ Mention Rust migration plans if relevant.}
 
 Use Mermaid diagrams for architecture and flow visualizations. GitHub renders Mermaid natively in markdown code blocks.
 
-````markdown
+```markdown
 ​`mermaid
 graph TD
     A[Input] --> B[Processing]
     B --> C[Output]
 ​`
-````
+```
 
 **Guidelines:**
 
