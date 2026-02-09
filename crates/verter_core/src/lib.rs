@@ -12,3 +12,4 @@ pub mod code_transform;
 pub mod codegen;
 
 pub mod analysis;
+pub mod strip_types;

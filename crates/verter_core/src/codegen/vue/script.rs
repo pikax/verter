@@ -9,9 +9,10 @@ use crate::codegen::vue::macros::types::MacroProcessReturn;
 use crate::codegen::vue::template::types::{BindingMetadata, BindingType};
 use crate::cursor::ScriptLanguage;
 use crate::syntax::types::AnalysisScriptInfo;
-use crate::utils::oxc::vue::{ScriptItem, ScriptMacro, VueMacroKind};
+use crate::utils::oxc::vue::{ScriptItem, ScriptMacro, TypeDeclarationKind, VueMacroKind};
 
 use super::macros::process_macro;
+use super::strip_types::strip_typescript_types;
 
 // =============================================================================
 // Helper Functions
@@ -282,6 +283,7 @@ pub fn extract_binding_metadata(
 /// * `source` - The source code
 /// * `component_name` - The component name (typically derived from filename)
 /// * `is_production` - Production mode (inline render, no expose/returned)
+/// * `keep_ts` - When true, preserve TypeScript syntax; when false, strip type annotations
 ///
 /// # Returns
 /// A tuple of (imports, script_end_position, binding_metadata, closing_paren).
@@ -296,6 +298,7 @@ pub fn process_script<'a>(
     component_name: &str,
     is_production: bool,
     inline_template: bool,
+    keep_ts: bool,
 ) -> (Vec<ImportInfo>, u32, BindingMetadata, String, String) {
     if info.event.setup.is_none() {
         // Regular <script> (no setup): strip the <script> and </script> tags
@@ -384,14 +387,26 @@ pub fn process_script<'a>(
                 }
             }
             ScriptItem::TypeDeclaration(type_decl) => {
-                // Move TypeScript declarations outside the component (to where imports go)
-                // This ensures interfaces/types are at module scope, not inside setup()
-                code_transform.move_with_suffix(
-                    type_decl.span.start,
-                    type_decl.span.end,
-                    info.event.tag_open_start,
-                    "\n",
-                );
+                if keep_ts {
+                    // Move TypeScript declarations outside the component (to where imports go)
+                    // This ensures interfaces/types are at module scope, not inside setup()
+                    code_transform.move_with_suffix(
+                        type_decl.span.start,
+                        type_decl.span.end,
+                        info.event.tag_open_start,
+                        "\n",
+                    );
+                } else {
+                    match type_decl.kind {
+                        TypeDeclarationKind::Enum => {
+                            // Leave enums for the strip_types visitor to convert to JS
+                        }
+                        _ => {
+                            // Remove interfaces, type aliases, namespaces
+                            code_transform.remove(type_decl.span.start, type_decl.span.end);
+                        }
+                    }
+                }
             }
             ScriptItem::Async(e) => {
                 // Wrap top-level await with async context helper
@@ -590,6 +605,18 @@ return __returned__
     // to the end of the file, the script block naturally appears first in the output.
     // This avoids complex move interactions.
 
+    // Strip TypeScript type annotations when keep_ts is false (playground mode)
+    if !keep_ts {
+        let script_content =
+            &source[info.event.content_start as usize..info.event.content_end as usize];
+        strip_typescript_types(
+            &info.event.program,
+            code_transform,
+            info.event.content_start,
+            script_content,
+        );
+    }
+
     let binding_metadata = extract_binding_metadata(&info.parsed);
     (
         imports,
@@ -711,6 +738,7 @@ mod tests {
             "App",
             false,
             false,
+            true, // keep_ts
         );
 
         code_transform.to_string()
@@ -1596,6 +1624,7 @@ const x = ref(0)"#,
             "test",
             false,
             false,
+            true, // keep_ts
         );
 
         // Generate source map - should not panic

@@ -42,6 +42,14 @@ function verterTimingTitle(): string {
       </button>
       <button
         class="toggle-btn"
+        :class="{ active: store.showTS }"
+        @click="store.toggleShowTS"
+        title="Show TypeScript output tab (compile with types preserved)"
+      >
+        TS {{ store.showTS ? "ON" : "OFF" }}
+      </button>
+      <button
+        class="toggle-btn"
         :class="{ active: store.autoSave }"
         @click="store.toggleAutoSave"
         :title="store.autoSave ? 'Auto-save enabled' : 'Manual save (Ctrl+S)'"
@@ -50,7 +58,7 @@ function verterTimingTitle(): string {
       </button>
       <div
         class="timing"
-        v-if="store.compileTiming.verter !== null || store.compileTiming.oxc !== null"
+        v-if="store.compileTiming.verter !== null || store.compileTiming.stripTypes !== null"
       >
         <span
           v-if="store.compileTiming.verter !== null"
@@ -60,11 +68,11 @@ function verterTimingTitle(): string {
           V: {{ store.compileTiming.verter.toFixed(1) }}ms
         </span>
         <span
-          v-if="store.compileTiming.oxc !== null"
+          v-if="store.compileTiming.stripTypes !== null"
           class="timing-item"
-          title="OXC: TypeScript → JavaScript"
+          title="Strip Types: TypeScript → JavaScript"
         >
-          O: {{ store.compileTiming.oxc.toFixed(1) }}ms
+          S: {{ store.compileTiming.stripTypes.toFixed(1) }}ms
         </span>
       </div>
       <button

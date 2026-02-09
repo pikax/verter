@@ -21,7 +21,7 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    exclude: ["@verter/wasm", "@oxc-transform/binding-wasm32-wasi"],
+    exclude: ["@verter/wasm"],
   },
   server: {
     fs: {

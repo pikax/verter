@@ -66,7 +66,7 @@ impl Default for FeatureFlags {
 }
 
 /// Options for the codegen process
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CodegenOptions {
     /// The filename for source map generation
     pub filename: Option<String>,
@@ -80,6 +80,23 @@ pub struct CodegenOptions {
     pub component_id: Option<String>,
     /// Feature flags for codegen
     pub features: FeatureFlags,
+    /// When true (default), preserve TypeScript syntax in output.
+    /// Set to false to strip type annotations for browser execution (playground).
+    pub keep_ts: bool,
+}
+
+impl Default for CodegenOptions {
+    fn default() -> Self {
+        Self {
+            filename: None,
+            include_source_content: false,
+            ssr: false,
+            is_production: false,
+            component_id: None,
+            features: FeatureFlags::default(),
+            keep_ts: true,
+        }
+    }
 }
 
 impl CodegenOptions {
@@ -502,6 +519,9 @@ pub fn generate(
 
     // Set production mode
     vue_codegen.set_production(options.is_production);
+
+    // Set keep_ts mode (when false, TypeScript type annotations are stripped)
+    vue_codegen.set_keep_ts(options.keep_ts);
 
     // Pre-scan for scoped styles to set scope_id before template processing
     // (template elements need data-v-xxx attribute, but style comes after template)
@@ -6643,5 +6663,160 @@ export default {
                 template.code
             );
         }
+    }
+
+    // =========================================================================
+    // keep_ts E2E Tests
+    // =========================================================================
+
+    /// Helper to generate with keep_ts: false and validate the output is valid JS
+    fn gen_strip_ts(source: &str) -> String {
+        let allocator = oxc_allocator::Allocator::new();
+        let options = CodegenOptions {
+            filename: Some("test.vue".to_string()),
+            keep_ts: false,
+            ..Default::default()
+        };
+        let result = generate(source, &options, &allocator);
+
+        // Validate output is valid JavaScript (not TypeScript)
+        let alloc2 = oxc_allocator::Allocator::default();
+        let source_type = oxc_span::SourceType::mjs();
+        let p = oxc_parser::Parser::new(&alloc2, &result.code, source_type).parse();
+        assert!(
+            p.errors.is_empty(),
+            "keep_ts:false output has JS parse errors: {:?}\n---\n{}",
+            p.errors,
+            result.code
+        );
+
+        result.code
+    }
+
+    #[test]
+    fn test_keep_ts_false_strips_type_annotations() {
+        let source = r#"<script setup lang="ts">
+const count: number = 0
+const message: string = 'hello'
+function greet(name: string): void {
+  console.log(name)
+}
+</script>
+<template><div>{{ count }}</div></template>"#;
+
+        let code = gen_strip_ts(source);
+        // Types should be stripped
+        assert!(!code.contains(": number"), "should strip : number");
+        assert!(!code.contains(": string"), "should strip : string");
+        assert!(!code.contains(": void"), "should strip : void");
+        // Runtime code preserved
+        assert!(code.contains("count"));
+        assert!(code.contains("message"));
+        assert!(code.contains("greet"));
+        assert!(code.contains("_defineComponent"));
+    }
+
+    #[test]
+    fn test_keep_ts_true_preserves_types() {
+        let source = r#"<script setup lang="ts">
+const count: number = 0
+</script>
+<template><div>{{ count }}</div></template>"#;
+
+        let allocator = oxc_allocator::Allocator::new();
+        let options = CodegenOptions {
+            filename: Some("test.vue".to_string()),
+            keep_ts: true,
+            ..Default::default()
+        };
+        let result = generate(source, &options, &allocator);
+
+        // Types should be preserved with default keep_ts: true
+        assert!(
+            result.code.contains(": number"),
+            "keep_ts:true should preserve : number"
+        );
+    }
+
+    #[test]
+    fn test_keep_ts_false_strips_interface() {
+        let source = r#"<script setup lang="ts">
+interface User {
+  name: string
+  age: number
+}
+const user: User = { name: 'test', age: 0 }
+</script>
+<template><div>{{ user.name }}</div></template>"#;
+
+        let code = gen_strip_ts(source);
+        assert!(!code.contains("interface"), "should strip interface");
+        assert!(code.contains("user"), "should preserve user variable");
+    }
+
+    #[test]
+    fn test_keep_ts_false_converts_enum() {
+        let source = r#"<script setup lang="ts">
+enum Color { Red, Green, Blue }
+const c = Color.Red
+</script>
+<template><div>{{ c }}</div></template>"#;
+
+        let code = gen_strip_ts(source);
+        assert!(!code.contains("enum "), "should convert enum");
+        assert!(code.contains("var Color"), "should have JS IIFE for enum");
+        assert!(
+            code.contains("Color[Color[\"Red\"]"),
+            "should have enum member assignment"
+        );
+    }
+
+    #[test]
+    fn test_keep_ts_false_strips_generics() {
+        let source = r#"<script setup lang="ts">
+function identity<T>(value: T): T {
+  return value
+}
+const x = identity('hello')
+</script>
+<template><div>{{ x }}</div></template>"#;
+
+        let code = gen_strip_ts(source);
+        assert!(!code.contains("<T>"), "should strip generic <T>");
+        assert!(code.contains("identity"), "should preserve function name");
+    }
+
+    #[test]
+    fn test_keep_ts_false_strips_as_expression() {
+        let source = r#"<script setup lang="ts">
+const el = document.getElementById('app') as HTMLElement
+</script>
+<template><div>{{ el }}</div></template>"#;
+
+        let code = gen_strip_ts(source);
+        assert!(
+            !code.contains("as HTMLElement"),
+            "should strip as expression"
+        );
+        assert!(
+            code.contains("getElementById"),
+            "should preserve runtime code"
+        );
+    }
+
+    #[test]
+    fn test_keep_ts_false_js_file_unchanged() {
+        let source = r#"<script setup>
+const count = 0
+function greet(name) {
+  console.log(name)
+}
+</script>
+<template><div>{{ count }}</div></template>"#;
+
+        // JS file should not be affected by keep_ts
+        let code = gen_strip_ts(source);
+        assert!(code.contains("count"));
+        assert!(code.contains("greet"));
     }
 }

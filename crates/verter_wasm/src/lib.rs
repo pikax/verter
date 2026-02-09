@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use verter_core::builder::codegen::{
     generate as core_generate, CodegenOptions as CoreOptions, FeatureFlags as CoreFeatures,
 };
+use verter_core::strip_types::strip_types as core_strip_types;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(start)]
@@ -44,6 +45,10 @@ pub struct CodegenOptions {
     /// Feature flags for codegen
     #[serde(default)]
     pub features: FeatureFlags,
+    /// When true (default), preserve TypeScript syntax in output.
+    /// Set to false to strip type annotations for browser execution (playground).
+    #[serde(default = "default_true")]
+    pub keep_ts: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -81,6 +86,7 @@ fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
             options_api: opts.features.options_api,
             props_destructure: opts.features.props_destructure,
         },
+        keep_ts: opts.keep_ts,
     };
 
     let result = core_generate(input, &core_options, &allocator);
@@ -116,4 +122,38 @@ pub fn compile_bytes(input: &[u8], options: JsValue) -> Result<JsValue, JsValue>
     let input_str = std::str::from_utf8(input)
         .map_err(|e| JsValue::from_str(&format!("input must be valid UTF-8: {}", e)))?;
     compile_inner(input_str, options)
+}
+
+// =============================================================================
+// Standalone TypeScript Stripping
+// =============================================================================
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StripTypesResult {
+    /// The JavaScript output with TypeScript syntax removed.
+    pub code: String,
+    /// Any parse errors encountered.
+    pub errors: Vec<String>,
+}
+
+/// Strip TypeScript syntax from a standalone `.ts`/`.tsx` file.
+///
+/// Removes type annotations, interfaces, type aliases, and converts enums to JavaScript.
+/// Useful for the playground to execute TypeScript without a separate transform step.
+///
+/// @param source - The TypeScript source code
+/// @returns The stripped JavaScript code and any parse errors
+#[wasm_bindgen(js_name = stripTypes)]
+pub fn strip_types(source: &str) -> Result<JsValue, JsValue> {
+    let allocator = oxc_allocator::Allocator::new();
+    let result = core_strip_types(source, &allocator);
+
+    let js_result = StripTypesResult {
+        code: result.code,
+        errors: result.errors,
+    };
+
+    serde_wasm_bindgen::to_value(&js_result)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }

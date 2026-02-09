@@ -1,22 +1,10 @@
-import type { CodegenResult } from "@verter/wasm";
+import type { CodegenResult, StripTypesResult } from "@verter/wasm";
 import type { File, CompilerOptions, CompileTiming } from "./types";
 import { loadLocalWasm, loadCommitWasm, loadReleaseWasm, type WasmModule } from "./wasmLoader";
 import type { VersionEntry } from "./versions";
 
-interface TransformResult {
-  code: string;
-  errors?: Array<{ message: string }>;
-}
-
-interface TransformOptions {
-  lang?: "ts" | "js" | "tsx" | "jsx";
-  sourceType?: "module" | "script";
-}
-
 let wasmCompile: ((input: string, options?: unknown) => CodegenResult) | null = null;
-let oxcTransform:
-  | ((filename: string, code: string, options?: TransformOptions) => Promise<TransformResult>)
-  | null = null;
+let wasmStripTypes: ((source: string) => StripTypesResult) | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
 
@@ -25,14 +13,9 @@ export async function initCompilers(): Promise<void> {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    // Initialize @verter/wasm (local build)
     const wasmModule = await loadLocalWasm();
     wasmCompile = wasmModule.compile as typeof wasmCompile;
-
-    // Initialize oxc-transform (dynamic import to handle top-level await)
-    const oxc = await import("oxc-transform");
-    oxcTransform = oxc.transform as typeof oxcTransform;
-
+    wasmStripTypes = (wasmModule.stripTypes as typeof wasmStripTypes) ?? null;
     initialized = true;
   })();
 
@@ -57,6 +40,7 @@ export async function switchWasmVersion(entry: VersionEntry): Promise<void> {
   }
 
   wasmCompile = wasmModule.compile as typeof wasmCompile;
+  wasmStripTypes = (wasmModule.stripTypes as typeof wasmStripTypes) ?? null;
 }
 
 /**
@@ -88,12 +72,12 @@ function mergeRenderIntoComponent(code: string): string {
   return merged;
 }
 
-export async function compileVueSFC(
+function compileInner(
   source: string,
   filename: string,
   options?: CompilerOptions,
-): Promise<CodegenResult> {
-  await initCompilers();
+  keepTs?: boolean,
+): CodegenResult {
   if (!wasmCompile) {
     throw new Error("WASM compiler not initialized");
   }
@@ -102,34 +86,19 @@ export async function compileVueSFC(
     includeSourceContent: true,
     isProduction: options?.isProduction ?? false,
     ssr: options?.ssr ?? false,
+    keepTs: keepTs ?? false,
   });
   result.code = mergeRenderIntoComponent(result.code);
   return result;
 }
 
-export async function transpileTS(
-  code: string,
+export async function compileVueSFC(
+  source: string,
   filename: string,
-): Promise<{ code: string; errors: string[] }> {
-  if (!oxcTransform) {
-    return { code: "", errors: ["oxc-transform not initialized"] };
-  }
-
-  try {
-    const result = await oxcTransform(filename, code, {
-      lang: "tsx",
-      sourceType: "module",
-    });
-    return {
-      code: result.code,
-      errors: result.errors?.map((e) => e.message) ?? [],
-    };
-  } catch (e) {
-    return {
-      code: "",
-      errors: [e instanceof Error ? e.message : String(e)],
-    };
-  }
+  options?: CompilerOptions,
+): Promise<CodegenResult> {
+  await initCompilers();
+  return compileInner(source, filename, options, false);
 }
 
 /** Extract raw CSS from <style> blocks in a Vue SFC source */
@@ -143,50 +112,92 @@ function extractStyles(source: string): string {
   return styles.join("\n");
 }
 
-export async function compileFile(file: File, options?: CompilerOptions): Promise<CompileTiming> {
-  const timing: CompileTiming = { verter: null, verterNative: null, oxc: null };
+export async function compileFile(
+  file: File,
+  options?: CompilerOptions,
+  showTS?: boolean,
+): Promise<CompileTiming> {
+  await initCompilers();
+  const timing: CompileTiming = { verter: null, verterNative: null, stripTypes: null };
 
   if (file.filename.endsWith(".vue")) {
     try {
-      const verterStart = performance.now();
-      const verterResult = await compileVueSFC(file.code, file.filename, options);
-      timing.verter = performance.now() - verterStart;
-      timing.verterNative = (verterResult as any).durationMs ?? null;
-      console.log(
-        `Compiled ${file.filename} in ${timing.verter}ms (WASM:${verterResult.durationMs ?? "N/A"}ms)`,
-      );
+      if (showTS && file.isTS) {
+        // Show TS mode: compile with keepTs: true, then stripTypes for JS
+        const verterStart = performance.now();
+        const verterResult = compileInner(file.code, file.filename, options, true);
+        timing.verter = performance.now() - verterStart;
+        timing.verterNative = (verterResult as any).durationMs ?? null;
 
-      // Store source map from Verter
-      file.compiled.sourceMap = verterResult.sourceMap ?? "";
-
-      // Extract CSS from source for the preview
-      file.compiled.css = extractStyles(file.code);
-
-      if (file.isTS) {
-        // TypeScript: TS tab gets Verter output (with types), JS tab gets OXC output (types stripped)
+        file.compiled.sourceMap = verterResult.sourceMap ?? "";
+        file.compiled.css = extractStyles(file.code);
         file.compiled.ts = verterResult.code;
 
-        const oxcStart = performance.now();
-        const jsResult = await transpileTS(verterResult.code, file.filename.replace(".vue", ".ts"));
-        timing.oxc = performance.now() - oxcStart;
-        file.compiled.js = jsResult.code;
-        file.compiled.errors = jsResult.errors;
+        // Strip types for JS tab
+        if (wasmStripTypes) {
+          const stripStart = performance.now();
+          const jsResult = wasmStripTypes(verterResult.code);
+          timing.stripTypes = performance.now() - stripStart;
+          file.compiled.js = jsResult.code;
+          file.compiled.errors = jsResult.errors ?? [];
+        } else {
+          file.compiled.js = verterResult.code;
+          file.compiled.errors = [];
+        }
       } else {
-        // JavaScript: no TS tab needed, JS tab gets Verter output directly
-        file.compiled.ts = "";
+        // Default: compile with keepTs: false → JS directly
+        const verterStart = performance.now();
+        const verterResult = compileInner(file.code, file.filename, options, false);
+        timing.verter = performance.now() - verterStart;
+        timing.verterNative = (verterResult as any).durationMs ?? null;
+
+        file.compiled.sourceMap = verterResult.sourceMap ?? "";
+        file.compiled.css = extractStyles(file.code);
         file.compiled.js = verterResult.code;
+        file.compiled.ts = "";
         file.compiled.errors = [];
       }
+
+      console.log(
+        `Compiled ${file.filename} in ${timing.verter}ms (WASM:${timing.verterNative ?? "N/A"}ms)`,
+      );
     } catch (e) {
       file.compiled.errors = [e instanceof Error ? e.message : String(e)];
     }
   } else if (file.filename.endsWith(".ts")) {
-    file.compiled.ts = file.code;
-    const oxcStart = performance.now();
-    const jsResult = await transpileTS(file.code, file.filename);
-    timing.oxc = performance.now() - oxcStart;
-    file.compiled.js = jsResult.code;
-    file.compiled.errors = jsResult.errors;
+    // Standalone .ts files: wrap in SFC and compile
+    try {
+      const sfc = `<script setup lang="ts">\n${file.code}\n</script>`;
+      if (showTS) {
+        // Show TS mode: compile with keepTs: true, then stripTypes
+        file.compiled.ts = file.code;
+        const verterStart = performance.now();
+        const result = compileInner(sfc, file.filename.replace(".ts", ".vue"), undefined, true);
+        timing.verter = performance.now() - verterStart;
+
+        if (wasmStripTypes) {
+          const stripStart = performance.now();
+          const jsResult = wasmStripTypes(result.code);
+          timing.stripTypes = performance.now() - stripStart;
+          file.compiled.js = jsResult.code;
+          file.compiled.errors = jsResult.errors ?? [];
+        } else {
+          file.compiled.js = result.code;
+          file.compiled.errors = [];
+        }
+      } else {
+        // Default: compile with keepTs: false → JS directly
+        file.compiled.ts = "";
+        const verterStart = performance.now();
+        const result = compileInner(sfc, file.filename.replace(".ts", ".vue"), undefined, false);
+        timing.verter = performance.now() - verterStart;
+        file.compiled.js = result.code;
+        file.compiled.errors = [];
+      }
+    } catch (e) {
+      file.compiled.js = "";
+      file.compiled.errors = [e instanceof Error ? e.message : String(e)];
+    }
   } else if (file.filename.endsWith(".js")) {
     file.compiled.js = file.code;
     file.compiled.ts = "";

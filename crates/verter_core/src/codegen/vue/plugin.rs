@@ -24,6 +24,8 @@ pub struct VueCodegenPlugin<'a> {
     component_name: String,
     /// Production mode - affects code generation (inline render, no expose, etc.)
     is_production: bool,
+    /// When true, preserve TypeScript syntax. When false, strip type annotations.
+    keep_ts: bool,
 }
 
 impl<'a> VueCodegenPlugin<'a> {
@@ -34,6 +36,7 @@ impl<'a> VueCodegenPlugin<'a> {
             state: TemplateCodegenState::new(),
             component_name: "App".to_string(),
             is_production: false,
+            keep_ts: true,
         }
     }
 
@@ -45,6 +48,7 @@ impl<'a> VueCodegenPlugin<'a> {
             state: TemplateCodegenState::new(),
             component_name: name.to_string(),
             is_production: false,
+            keep_ts: true,
         }
     }
 
@@ -61,6 +65,7 @@ impl<'a> VueCodegenPlugin<'a> {
             state: TemplateCodegenState::new(),
             component_name: name.to_string(),
             is_production,
+            keep_ts: true,
         }
     }
 
@@ -72,6 +77,11 @@ impl<'a> VueCodegenPlugin<'a> {
         // Monolithic generate() inlines the template into setup() in production,
         // so inline_mode = is_production.
         self.state.is_inline_mode = is_production;
+    }
+
+    /// Set keep_ts mode. When false, TypeScript type annotations are stripped.
+    pub fn set_keep_ts(&mut self, keep_ts: bool) {
+        self.keep_ts = keep_ts;
     }
 
     /// Set the component name.
@@ -285,6 +295,7 @@ impl<'a> VueCodegenPlugin<'a> {
                         &self.component_name,
                         self.is_production,
                         inline_template,
+                        self.keep_ts,
                     );
                 // Store script end position for template placement
                 self.state.script_end_position = Some(script_end);

@@ -18,6 +18,8 @@ export interface CodegenOptions {
   componentId?: string;
   /** Feature flags for codegen */
   features?: FeatureFlags;
+  /** When true (default), preserve TypeScript syntax in output. Set to false to strip types. */
+  keepTs?: boolean;
 }
 
 export interface CodegenResult {
@@ -31,14 +33,23 @@ export interface CodegenResult {
   durationMs: number;
 }
 
+export interface StripTypesResult {
+  /** The JavaScript output with TypeScript syntax removed */
+  code: string;
+  /** Any parse errors encountered */
+  errors: string[];
+}
+
 export type WasmInput = string | Uint8Array;
 
 type WasmCompileFn = (input: string, options?: unknown) => CodegenResult;
 type WasmCompileBytesFn = (input: Uint8Array, options?: unknown) => CodegenResult;
+type WasmStripTypesFn = (source: string) => StripTypesResult;
 type WasmInitFn = () => Promise<unknown>;
 
 let wasmCompile: WasmCompileFn | null = null;
 let wasmCompileBytes: WasmCompileBytesFn | null = null;
+let wasmStripTypes: WasmStripTypesFn | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
 
@@ -64,6 +75,7 @@ export async function initialize(): Promise<void> {
     await (wasm.default as WasmInitFn)();
     wasmCompile = wasm.compile as WasmCompileFn;
     wasmCompileBytes = (wasm.compileBytes as WasmCompileBytesFn) ?? null;
+    wasmStripTypes = (wasm.stripTypes as WasmStripTypesFn) ?? null;
     initialized = true;
   })();
 
@@ -125,4 +137,36 @@ export function compileSync(input: WasmInput, options?: CodegenOptions): Codegen
   }
 
   return wasmCompile(decodeUtf8(input), options);
+}
+
+/**
+ * Strip TypeScript syntax from a standalone .ts/.tsx file.
+ *
+ * @param source - The TypeScript source code
+ * @returns The stripped JavaScript code and any parse errors
+ * @throws If the WASM module has not been initialized
+ */
+export async function stripTypes(source: string): Promise<StripTypesResult> {
+  await initialize();
+
+  if (!wasmStripTypes) {
+    throw new Error("WASM module not initialized or stripTypes not available");
+  }
+
+  return wasmStripTypes(source);
+}
+
+/**
+ * Synchronous stripTypes - requires initialize() to have been called first.
+ *
+ * @param source - The TypeScript source code
+ * @returns The stripped JavaScript code and any parse errors
+ * @throws If the WASM module has not been initialized
+ */
+export function stripTypesSync(source: string): StripTypesResult {
+  if (!initialized || !wasmStripTypes) {
+    throw new Error("WASM module not initialized. Call initialize() first.");
+  }
+
+  return wasmStripTypes(source);
 }

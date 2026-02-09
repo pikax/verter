@@ -31,6 +31,8 @@ pub struct ScriptCodegenPlugin<'a> {
     setup_closing_text: Option<String>,
     component_name: String,
     is_production: bool,
+    /// When true, preserve TypeScript syntax. When false, strip type annotations.
+    keep_ts: bool,
     /// Regular <script> tag range (tag_open_start, tag_close_end).
     normal_script_tag_start: Option<u32>,
     normal_script_tag_end: Option<u32>,
@@ -58,6 +60,7 @@ impl<'a> ScriptCodegenPlugin<'a> {
             normal_script_tag_end: None,
             component_name: "App".to_string(),
             is_production: false,
+            keep_ts: true,
             template_region: None,
             style_regions: Vec::new(),
             scope_id: None,
@@ -70,6 +73,10 @@ impl<'a> ScriptCodegenPlugin<'a> {
 
     pub fn set_production(&mut self, is_production: bool) {
         self.is_production = is_production;
+    }
+
+    pub fn set_keep_ts(&mut self, keep_ts: bool) {
+        self.keep_ts = keep_ts;
     }
 
     pub fn set_scope_id(&mut self, scope_id: [u8; 8]) {
@@ -220,6 +227,7 @@ impl<'a> SyntaxPlugin<'a> for ScriptCodegenPlugin<'a> {
                         &self.component_name,
                         self.is_production,
                         false, // inline_template = false for Vite split mode
+                        self.keep_ts,
                     );
 
                 // Save setup closing text for potential dual-script re-overwrite in end()

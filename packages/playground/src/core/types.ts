@@ -31,7 +31,7 @@ export class File {
     return "typescript";
   }
 
-  /** Whether this file contains TypeScript that needs OXC transpilation */
+  /** Whether this file contains TypeScript */
   get isTS(): boolean {
     if (this.filename.endsWith(".ts") || this.filename.endsWith(".tsx")) return true;
     if (this.filename.endsWith(".vue")) {
@@ -49,9 +49,9 @@ export interface CompilerOptions {
 }
 
 export interface CompileTiming {
-  verter: number | null; // ms for Vue SFC → TS (JS-measured)
+  verter: number | null; // ms for Vue SFC compilation (JS-measured)
   verterNative: number | null; // ms for Rust pipeline (reported by Rust)
-  oxc: number | null; // ms for TS → JS
+  stripTypes: number | null; // ms for stripTypes call (when showTS is enabled)
 }
 
 export interface StoreState {
@@ -63,6 +63,7 @@ export interface StoreState {
   loading: boolean;
   darkMode: boolean;
   autoSave: boolean;
+  showTS: boolean;
   compilerOptions: CompilerOptions;
   compileTiming: CompileTiming;
 }

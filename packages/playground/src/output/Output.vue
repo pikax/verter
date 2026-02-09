@@ -16,11 +16,11 @@ const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "css", label: "CSS" },
 ];
 
-/** Only show the TS tab when the active file contains TypeScript */
+/** Show TS tab only when showTS option is enabled and file contains TypeScript */
 const tabs = computed(() => {
   const file = props.store.activeFile;
-  const isTS = file?.isTS ?? false;
-  return allTabs.filter((tab) => tab.mode !== "ts" || isTS);
+  const showTSTab = props.store.showTS && (file?.isTS ?? false);
+  return allTabs.filter((tab) => tab.mode !== "ts" || showTSTab);
 });
 
 function openSourceMapVisualization() {
@@ -46,19 +46,18 @@ function openSourceMapVisualization() {
 }
 
 function getTabTiming(mode: OutputMode): string | null {
-  const { verter, oxc } = props.store.compileTiming;
-  const isTS = props.store.activeFile?.isTS ?? false;
+  const { verter, stripTypes } = props.store.compileTiming;
   switch (mode) {
     case "preview": {
-      const total = (verter ?? 0) + (oxc ?? 0);
+      const total = (verter ?? 0) + (stripTypes ?? 0);
       return total > 0 ? `${total.toFixed(1)}ms` : null;
     }
     case "ts":
       return verter !== null ? `${verter.toFixed(1)}ms` : null;
     case "js":
-      // When file is TS, JS tab shows OXC timing; otherwise it shows Verter timing
-      if (isTS) {
-        return oxc !== null ? `${oxc.toFixed(1)}ms` : null;
+      // When showTS is on and file is TS, JS tab shows stripTypes timing
+      if (props.store.showTS && (props.store.activeFile?.isTS ?? false)) {
+        return stripTypes !== null ? `${stripTypes.toFixed(1)}ms` : null;
       }
       return verter !== null ? `${verter.toFixed(1)}ms` : null;
     case "css":

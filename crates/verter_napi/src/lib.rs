@@ -6,6 +6,7 @@ use verter_core::builder::codegen::{
     CodegenOptions as CoreOptions, FeatureFlags as CoreFeatures,
     ViteCodegenOptions as CoreViteOptions,
 };
+use verter_core::strip_types::strip_types as core_strip_types;
 
 fn with_input_str<T>(input: Either<String, Buffer>, f: impl FnOnce(&str) -> T) -> Result<T> {
     match input {
@@ -46,6 +47,9 @@ pub struct CodegenOptions {
     pub component_id: Option<String>,
     /// Feature flags for codegen
     pub features: Option<FeatureFlags>,
+    /// When true (default), preserve TypeScript syntax in output.
+    /// Set to false to strip type annotations for browser execution (playground).
+    pub keep_ts: Option<bool>,
 }
 
 #[napi(object)]
@@ -87,6 +91,7 @@ pub fn compile(
             options_api: features.options_api.unwrap_or(true),
             props_destructure: features.props_destructure.unwrap_or(true),
         },
+        keep_ts: opts.keep_ts.unwrap_or(true),
     };
 
     let result = with_input_str(input, |input| {
@@ -263,5 +268,35 @@ pub fn compile_for_vite(
             })
             .collect(),
         duration_ms: result.duration_ms,
+    })
+}
+
+// =============================================================================
+// Standalone TypeScript Stripping
+// =============================================================================
+
+#[napi(object)]
+pub struct StripTypesResult {
+    /// The JavaScript output with TypeScript syntax removed.
+    pub code: String,
+    /// Any parse errors encountered.
+    pub errors: Vec<String>,
+}
+
+/// Strip TypeScript syntax from a standalone `.ts`/`.tsx` file.
+///
+/// Removes type annotations, interfaces, type aliases, and converts enums to JavaScript.
+///
+/// @param source - The TypeScript source code (string or Buffer)
+/// @returns The stripped JavaScript code and any parse errors
+#[napi]
+pub fn strip_types(source: Either<String, Buffer>) -> Result<StripTypesResult> {
+    let allocator = oxc_allocator::Allocator::new();
+
+    let result = with_input_str(source, |s| core_strip_types(s, &allocator))?;
+
+    Ok(StripTypesResult {
+        code: result.code,
+        errors: result.errors,
     })
 }
