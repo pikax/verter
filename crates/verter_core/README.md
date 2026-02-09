@@ -198,7 +198,6 @@ cargo test --package verter_core 2>&1 | tail -60
 
 | Benchmark | Focus |
 |---|---|
-| `utf16_col_bench` | UTF-16 column offset resolution |
 | `real_world_bench` | Full compilation of real-world components |
 | `lang_detect_bench` | Script language detection |
 | `comment_aware_bench` | Comment-aware parsing |
@@ -231,4 +230,4 @@ cargo bench --package verter_core --bench real_world_bench
 
 ## License
 
-ISC
+MIT

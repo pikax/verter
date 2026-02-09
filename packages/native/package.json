@@ -45,5 +45,5 @@
     "@verter/native-linux-arm64-musl": "workspace:*",
     "@verter/native-win32-x64-msvc": "workspace:*"
   },
-  "license": "ISC"
+  "license": "MIT"
 }

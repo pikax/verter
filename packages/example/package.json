@@ -9,7 +9,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@verter/typescript-plugin": "workspace:^",
     "typescript": "^5.9.3",

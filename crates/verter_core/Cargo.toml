@@ -50,10 +50,6 @@ name = "bindings_bench"
 harness = false
 
 [[bench]]
-name = "utf16_col_bench"
-harness = false
-
-[[bench]]
 name = "vfor_bench"
 harness = false
 

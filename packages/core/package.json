@@ -22,7 +22,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "dependencies": {
     "@ampproject/remapping": "^2.3.0",
     "@babel/parser": "^7.29.0",

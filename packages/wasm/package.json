@@ -29,5 +29,5 @@
     "dist",
     "wasm"
   ],
-  "license": "ISC"
+  "license": "MIT"
 }
