@@ -55,7 +55,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             use-cross: true
@@ -66,9 +66,9 @@ jobs:
             os: ubuntu-latest
             use-cross: true
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-15
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
@@ -83,16 +83,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Setup Zig
+        if: matrix.use-cross
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      - name: Install cargo-zigbuild
+        if: matrix.use-cross
+        run: cargo install cargo-zigbuild --locked
       - name: Build native
         working-directory: packages/native
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
-            cargo install cross --locked
             npx napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml --target ${{ matrix.target }} --cross-compile
           else
             npx napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml --target ${{ matrix.target }}
           fi
         shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ startsWith(matrix.target, 'aarch64-apple') && '11.0' || startsWith(matrix.target, 'x86_64-apple') && '10.12' || '' }}
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.target }}
