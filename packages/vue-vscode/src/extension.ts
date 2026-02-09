@@ -122,7 +122,7 @@ export function activateVueLanguageServer(context: ExtensionContext) {
     initializationOptions: {
       configuration: {
         vue: workspace.getConfiguration("vue"),
-        prettier: workspace.getConfiguration("prettier"),
+        oxcfmt: workspace.getConfiguration("oxcfmt"),
         emmet: workspace.getConfiguration("emmet"),
         typescript: workspace.getConfiguration("typescript"),
         javascript: workspace.getConfiguration("javascript"),

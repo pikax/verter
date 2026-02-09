@@ -1,6 +1,6 @@
 {
   "name": "@verter/types",
-  "version": "1.0.0",
+  "version": "0.0.1-alpha.1",
   "description": "Type helpers for Verter",
   "main": "dist/index.js",
   "module": "dist/index.js",
@@ -51,7 +51,7 @@
   ],
   "devDependencies": {
     "typescript": "^5.9.3",
-    "vitest": "^4.0.17",
-    "vue": "^3.5.26"
+    "vitest": "^4.0.18",
+    "vue": "^3.5.27"
   }
 }

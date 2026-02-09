@@ -1,0 +1,445 @@
+ {
+-  type: 0
+-  helpers: {
+-  }
+-  components: [
+-  ]
+-  directives: [
+-  ]
+-  hoists: [
+-  ]
+-  imports: [
+-  ]
+-  cached: [
+-  ]
+-  temps: 0
+   children: [
+     {
+-      type: 1
+-      tagType: 0
++      tagType: 3
+       children: [
+         {
+-          type: 1
+           props: [
+             {
+-              type: 6
+               value: {
+-                type: 2
+                 loc: {
+                   start: {
+-                    column: 11
++                    column: 12
+-                    offset: 21
++                    offset: 22
+                   }
+                   end: {
+-                    column: 16
++                    column: 15
+-                    offset: 26
++                    offset: 25
+                   }
+-                  source: "\"app\""
++                  source: "app"
+                 }
+               }
+             }
+             {
+-              type: 6
+               value: {
+-                type: 2
+                 loc: {
+                   start: {
+-                    column: 23
++                    column: 24
+-                    offset: 33
++                    offset: 34
+                   }
+                   end: {
+-                    column: 34
++                    column: 33
+-                    offset: 44
++                    offset: 43
+                   }
+-                  source: "\"container\""
++                  source: "container"
+                 }
+               }
+             }
+           ]
+           children: [
+             {
+-              type: 1
+               children: [
+                 {
+-                  type: 5
+                   content: {
+-                    type: 4
+                   }
+                 }
+               ]
+             }
+             {
+-              type: 1
+               props: [
+                 {
+-                  type: 7
+-                  modifiers: [
+-                  ]
+                   exp: {
+-                    type: 4
+                   }
+                 }
+               ]
+               children: [
+                 {
+-                  type: 5
+                   content: {
+-                    type: 4
+                   }
+                 }
+               ]
+             }
+             {
+-              type: 1
+               props: [
+                 {
+-                  type: 7
+-                  modifiers: [
+-                  ]
+-                  rawName: "@click"
++                  rawName: "@"
+                   exp: {
+-                    type: 4
+                   }
+                   arg: {
+-                    type: 4
+                   }
+                 }
+                 {
+-                  type: 7
+-                  modifiers: [
+-                  ]
+-                  rawName: ":disabled"
++                  rawName: ":"
+                   exp: {
+-                    type: 4
+                   }
+                   arg: {
+-                    type: 4
+                   }
+                 }
+               ]
+               children: [
+                 {
+-                  type: 2
+                 }
+               ]
+             }
+             {
+-              type: 1
+               children: [
+                 {
+-                  type: 1
+                   props: [
+                     {
+-                      type: 7
+-                      modifiers: [
+-                      ]
+-                      forParseResult: {
+-                        source: {
+-                          type: 4
+-                          loc: {
+-                            start: {
+-                              column: 26
+-                              line: 9
+-                              offset: 235
+-                            }
+-                            end: {
+-                              column: 31
+-                              line: 9
+-                              offset: 240
+-                            }
+-                            source: "items"
+-                          }
+-                          content: "items"
+-                          isStatic: false
+-                          constType: 0
+-                        }
+-                        value: {
+-                          type: 4
+-                          loc: {
+-                            start: {
+-                              column: 18
+-                              line: 9
+-                              offset: 227
+-                            }
+-                            end: {
+-                              column: 22
+-                              line: 9
+-                              offset: 231
+-                            }
+-                            source: "item"
+-                          }
+-                          content: "item"
+-                          isStatic: false
+-                          constType: 0
+-                        }
+-                        finalized: false
+-                      }
+                       exp: {
+-                        type: 4
+                       }
+                     }
+                     {
+-                      type: 7
+-                      modifiers: [
+-                      ]
+-                      rawName: ":key"
++                      rawName: ":"
+                       exp: {
+-                        type: 4
+                       }
+                       arg: {
+-                        type: 4
+                       }
+                     }
+                   ]
+                   children: [
+                     {
+-                      type: 5
+                       content: {
+-                        type: 4
+                       }
+                     }
+                   ]
+                 }
+                 {
+-                  type: 1
+                   props: [
+                     {
+-                      type: 7
+-                      modifiers: [
+-                      ]
+-                      forParseResult: {
+-                        source: {
+-                          type: 4
+-                          loc: {
+-                            start: {
+-                              column: 28
+-                              line: 10
+-                              offset: 305
+-                            }
+-                            end: {
+-                              column: 33
+-                              line: 10
+-                              offset: 310
+-                            }
+-                            source: "items"
+-                          }
+-                          content: "items"
+-                          isStatic: false
+-                          constType: 0
+-                        }
+-                        value: {
+-                          type: 4
+-                          loc: {
+-                            start: {
+-                              column: 20
+-                              line: 10
+-                              offset: 297
+-                            }
+-                            end: {
+-                              column: 24
+-                              line: 10
+-                              offset: 301
+-                            }
+-                            source: "item"
+-                          }
+-                          content: "item"
+-                          isStatic: false
+-                          constType: 0
+-                        }
+-                        finalized: false
+-                      }
+                       exp: {
+-                        type: 4
+                       }
+                     }
+                     {
+-                      type: 7
+-                      modifiers: [
+-                      ]
+-                      rawName: ":key"
++                      rawName: ":"
+                       exp: {
+-                        type: 4
+                       }
+                       arg: {
+-                        type: 4
+                       }
+                     }
+                   ]
+                   children: [
+                     {
+-                      type: 5
+                       content: {
+-                        type: 4
+                       }
+                     }
+                   ]
+                 }
+                 {
+-                  type: 1
+                   props: [
+                     {
+-                      type: 7
+-                      modifiers: [
+-                      ]
+-                      forParseResult: {
+-                        source: {
+-                          type: 4
+-                          loc: {
+-                            start: {
+-                              column: 26
+-                              line: 12
+-                              offset: 377
+-                            }
+-                            end: {
+-                              column: 31
+-                              line: 12
+-                              offset: 382
+-                            }
+-                            source: "items"
+-                          }
+-                          content: "items"
+-                          isStatic: false
+-                          constType: 0
+-                        }
+-                        value: {
+-                          type: 4
+-                          loc: {
+-                            start: {
+-                              column: 18
+-                              line: 12
+-                              offset: 369
+-                            }
+-                            end: {
+-                              column: 22
+-                              line: 12
+-                              offset: 373
+-                            }
+-                            source: "item"
+-                          }
+-                          content: "item"
+-                          isStatic: false
+-                          constType: 0
+-                        }
+-                        finalized: false
+-                      }
+                       exp: {
+-                        type: 4
+                       }
+                     }
+                     {
+-                      type: 7
+-                      modifiers: [
+-                      ]
+-                      rawName: ":key"
++                      rawName: ":"
+                       exp: {
+-                        type: 4
+                       }
+                       arg: {
+-                        type: 4
+                       }
+                     }
+                   ]
+                   children: [
+                     {
+-                      type: 5
+                       content: {
+-                        type: 4
+                       }
+                     }
+                   ]
+                 }
+               ]
+             }
+             {
+-              type: 3
+             }
+             {
+-              type: 1
+-              isSelfClosing: true
+               props: [
+                 {
+-                  type: 6
+                   value: {
+-                    type: 2
+                     loc: {
+                       start: {
+-                        column: 17
++                        column: 18
+-                        offset: 477
++                        offset: 478
+                       }
+                       end: {
+-                        column: 23
++                        column: 22
+-                        offset: 483
++                        offset: 482
+                       }
+-                      source: "\"text\""
++                      source: "text"
+                     }
+                   }
+                 }
+                 {
+-                  type: 7
+-                  modifiers: [
+-                  ]
+                   exp: {
+-                    type: 4
+                   }
+                 }
+               ]
+             }
+             {
+-              type: 1
+-              isSelfClosing: true
+               props: [
+                 {
+-                  type: 7
+-                  modifiers: [
+-                  ]
+-                  rawName: ":prop"
++                  rawName: ":"
+                   exp: {
+-                    type: 4
+                   }
+                   arg: {
+-                    type: 4
+                   }
+                 }
+                 {
+-                  type: 7
+-                  modifiers: [
+-                  ]
+-                  rawName: "@event"
++                  rawName: "@"
+                   exp: {
+-                    type: 4
+                   }
+                   arg: {
+-                    type: 4
+                   }
+                 }
+               ]
+             }
+           ]
+         }
+       ]
+     }
+   ]
+ }

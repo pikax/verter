@@ -1,145 +1,218 @@
 # @verter/language-shared
 
-Shared protocol types and utilities for Verter's language client and server communication.
+> [!WARNING]
+> This project is **experimental and under active development**. APIs, architecture, and package boundaries may change without notice.
+
+Type-safe communication bridge between the Verter VS Code extension (LSP client) and the language server. `@verter/language-shared` defines custom notification types, request types, virtual file utilities, and statistics data structures -- all as pure TypeScript definitions with zero production dependencies.
 
 ## Overview
 
-`@verter/language-shared` provides:
-
-- Custom notification types for Verter-specific LSP extensions
-- Custom request types for extended functionality
-- Virtual file utilities for `.vue` sub-document management
-- Type-safe client/server communication helpers
+- Zero production dependencies -- pure TypeScript type definitions and thin runtime helpers
+- Provides `patchClient()` to overlay type-safe custom notification and request methods onto any LSP connection
+- Defines custom `NotificationType` and `RequestType` enums used by both client and server
+- Exports `VirtualFiles` utilities for working with `.vue` sub-document URIs
+- Exports `StatisticsSnapshot` and `StatisticsSummary` types for performance telemetry
 
 ## Installation
 
 ```bash
+npm install @verter/language-shared
+# or
 pnpm add @verter/language-shared
 ```
 
+## Architecture
+
+```mermaid
+graph LR
+    subgraph "VS Code Extension (Client)"
+        EXT["Extension activate()"]
+        EXT -->|creates| LC["LanguageClient"]
+        LC -->|patched with| PC1["patchClient(client)"]
+    end
+
+    subgraph "@verter/language-shared"
+        PATCH["patchClient()"]
+        NT["NotificationType"]
+        RT["RequestType"]
+        VF["VirtualFiles"]
+        STATS["Statistics types"]
+    end
+
+    subgraph "Language Server"
+        SRV["startServer()"]
+        SRV -->|creates| CONN["Connection"]
+        CONN -->|patched with| PC2["patchClient(connection)"]
+    end
+
+    PC1 -.->|typed send/receive| PATCH
+    PC2 -.->|typed send/receive| PATCH
+    PC1 <-->|"JSON-RPC"| PC2
+```
+
+Both sides import the same enum values and type definitions, ensuring that notification payloads and request/response shapes stay in sync at compile time.
+
 ## API
 
-### Client Patching
+### `patchClient(connection)`
 
-The `patchClient` function adds type-safe notification and request methods:
+Wraps an existing LSP connection (client or server) to add type-safe `sendNotification`, `onNotification`, `sendRequest`, and `onRequest` overloads that are constrained to Verter's custom protocol methods.
 
 ```typescript
 import { patchClient } from "@verter/language-shared";
-import { LanguageClient } from "vscode-languageclient/node";
 
-const client = new LanguageClient(/* ... */);
-const patchedClient = patchClient(client);
-
-// Now has typed notification methods
-patchedClient.sendNotification(NotificationType.ShowCompiledCode, {
-  uri: "file:///path/to/file.vue",
-  code: "// Generated TSX..."
-});
+// Works with any object that has onNotification/sendNotification/onRequest/sendRequest
+const typed = patchClient(connection);
 ```
 
-### Notification Types
+The return type is `PatchClient<T>`, which replaces the generic notification and request signatures with strongly-typed versions while preserving all other methods on the original connection.
 
-Custom notifications for Verter-specific features:
+### `NotificationType`
+
+Custom LSP notifications for Verter-specific features:
 
 ```typescript
 import { NotificationType } from "@verter/language-shared";
-
-// Show compiled TSX code
-NotificationType.ShowCompiledCode
-
-// Progress updates
-NotificationType.Progress
 ```
 
-### Request Types
+| Enum Member | Method String | Payload |
+|-------------|--------------|---------|
+| `OnDidChangeTsOrJsFile` | `$/onDidChangeTsOrJsFile` | `{ uri: string; changes: Array<{ text: string; range: Range }> }` |
+| `OnFileChanged` | `$/onFileChanged` | `{ uri: string; type: "create" \| "update" \| "delete" }` |
 
-Custom request/response pairs:
+### `RequestType`
+
+Custom LSP request/response pairs:
 
 ```typescript
 import { RequestType } from "@verter/language-shared";
-
-// Get compiled code for a file
-const compiled = await client.sendRequest(RequestType.GetCompiledCode, {
-  uri: "file:///path/to/file.vue"
-});
 ```
 
-### Virtual Files
+| Enum Member | Method String | Params | Response |
+|-------------|--------------|--------|----------|
+| `GetCompiledCode` | `$/getCompiledCode` | `string` (document URI) | `{ js, css, wasm }` each with `{ code: string; map: any }` |
+| `GetStatistics` | `$/verter/getStatistics` | `StatisticsRequestParams \| undefined` | `StatisticsSnapshot` |
 
-Utilities for managing virtual sub-documents:
+### `VirtualFiles`
+
+Utilities for working with Verter's virtual sub-document URIs:
 
 ```typescript
 import { VirtualFiles } from "@verter/language-shared";
 
-// Check if URI is a virtual sub-document
-VirtualFiles.isVirtual(uri);
+// Check if a URI points to a virtual sub-document
+VirtualFiles.isVirtual(uri);          // boolean
 
-// Get parent .vue file from virtual URI
-VirtualFiles.getParentUri(virtualUri);
+// Get the parent .vue file URI from a virtual URI
+VirtualFiles.getParentUri(virtualUri); // string
 
-// Create virtual URI for sub-document
-VirtualFiles.createUri(parentUri, type);
+// Create a virtual URI for a sub-document
+VirtualFiles.createUri(parentUri, type); // string
 ```
 
-## Usage with Language Server
+### Statistics Types
+
+Data structures for performance telemetry, used by the language server's `StatisticsManager` and the `GetStatistics` request:
 
 ```typescript
-// Server side
-import { patchClient } from "@verter/language-shared";
-import { createConnection } from "vscode-languageserver/node";
+import type {
+  StatisticsSnapshot,
+  StatisticsSummary,
+  StatisticsEvent,
+  StatisticsEventType,
+  StatisticsRequestParams,
+} from "@verter/language-shared";
+```
 
-const connection = createConnection();
-const patchedConnection = patchClient(connection);
+| Type | Description |
+|------|-------------|
+| `StatisticsEventType` | Union of known event kinds: `"diagnostics"`, `"diagnostics:document"`, `"diagnostics:style"`, `"read-file"`, `"parse"`, `"process"` |
+| `StatisticsEvent` | A single recorded event with `id`, `type`, `uri`, `durationMs`, `startedAt`, and optional `meta` |
+| `StatisticsSummary` | Aggregated stats: `count`, `totalMs`, `averageMs`, `minMs`, `maxMs` |
+| `StatisticsSnapshot` | Full snapshot with `session` (events, byType, byFile) and optional `global` (byType, byFile, path, updatedAt) |
+| `StatisticsRequestParams` | Request options: `includeEvents?`, `scope?: "session" \| "global" \| "all"` |
 
-// Handle custom requests
-patchedConnection.onRequest(RequestType.GetCompiledCode, async (params) => {
-  const compiled = await compileVueFile(params.uri);
-  return { code: compiled };
+## Usage
+
+### Server-Side
+
+```typescript
+import { createConnection, ProposedFeatures } from "vscode-languageserver/node";
+import { patchClient, RequestType, NotificationType } from "@verter/language-shared";
+
+const connection = createConnection(ProposedFeatures.all);
+const typed = patchClient(connection);
+
+// Handle a custom request -- params and return type are fully typed
+typed.onRequest(RequestType.GetCompiledCode, async (uri) => {
+  const compiled = await compileVueFile(uri);
+  return {
+    js:   { code: compiled.js,   map: compiled.jsMap },
+    css:  { code: compiled.css,  map: compiled.cssMap },
+    wasm: { code: compiled.wasm, map: compiled.wasmMap },
+  };
+});
+
+// Handle a custom notification
+typed.onNotification(NotificationType.OnFileChanged, async ({ uri, type }) => {
+  // type is "create" | "update" | "delete"
+  documentManager.handleFileChange(uri, type);
 });
 ```
 
-## Usage with VS Code Extension
+### Client-Side (VS Code Extension)
 
 ```typescript
-// Client side
-import { patchClient, NotificationType } from "@verter/language-shared";
 import { LanguageClient } from "vscode-languageclient/node";
+import { patchClient, RequestType, NotificationType } from "@verter/language-shared";
 
 const client = new LanguageClient(/* ... */);
-const patchedClient = patchClient(client);
+const typed = patchClient(client);
 
-// Listen for notifications
-patchedClient.onNotification(NotificationType.ShowCompiledCode, (params) => {
-  showCompiledCodePanel(params.uri, params.code);
+// Send a typed request
+const result = await typed.sendRequest(RequestType.GetCompiledCode, documentUri);
+// result is { js: { code, map }, css: { code, map }, wasm: { code, map } }
+
+// Send a typed notification
+typed.sendNotification(NotificationType.OnFileChanged, {
+  uri: "file:///path/to/Component.vue",
+  type: "update",
 });
-```
-
-## Type Safety
-
-The package provides full type safety for custom protocol extensions:
-
-```typescript
-import type { PatchClient } from "@verter/language-shared";
-
-// PatchClient<T> adds typed notification and request methods
-type TypedClient = PatchClient<LanguageClient>;
 ```
 
 ## Directory Structure
 
 ```
 src/
-├── index.ts           # Main exports
-├── notifications.ts   # Custom notification types
-├── request.ts         # Custom request types
-└── virtual.ts         # Virtual file utilities
+├── index.ts           # Re-exports + patchClient()
+├── notifications.ts   # NotificationType enum, NotificationParams, helpers
+├── request.ts         # RequestType enum, RequestParams, RequestResponse
+├── statistics.ts      # StatisticsSnapshot, StatisticsSummary, StatisticsEvent
+└── virtual.ts         # VirtualFiles utilities (isVirtual, getParentUri, createUri)
 ```
+
+## Development
+
+### Build
+
+```bash
+pnpm --filter @verter/language-shared build
+```
+
+The package compiles with `tsc -b` to CommonJS (`dist/`).
 
 ## Dependencies
 
-- `vscode-languageserver-protocol` - LSP types
+**Production**: None. This package is pure TypeScript definitions and lightweight runtime helpers.
+
+**Development only**:
+
+| Package | Purpose |
+|---------|---------|
+| `typescript` | Compilation |
+| `vite` | Build tooling |
+| `vite-plugin-dts` | Declaration file generation |
 
 ## License
 
-MIT
-
+[MIT](../../LICENSE)

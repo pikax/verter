@@ -1,0 +1,77 @@
+[package]
+name = "verter_core"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+description = "Vue 3 SFC compiler - transforms Vue Single File Components to render functions with TypeScript support"
+repository = "https://github.com/pikax/verter"
+documentation = "https://github.com/pikax/verter"
+homepage = "https://play.verterjs.dev/"
+authors = ["pikax"]
+keywords = ["vue", "compiler", "sfc", "typescript", "codegen"]
+categories = ["compilers", "template-engine"]
+
+[features]
+dhat-heap = []
+
+[dependencies]
+memchr = "2.7.6"
+rustc-hash = "2.1"
+smallvec = "1.13"
+lazy_static = "1.5"
+oxc_allocator = "0.112.0"
+oxc_ast = "0.112.0"
+oxc_parser = "0.112.0"
+oxc_span = "0.112.0"
+oxc_diagnostics = "0.112.0"
+bumpalo = { version = "3.15.0", features = ["collections"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_repr = "0.1"
+serde_json = "1.0"
+allocator-api2 = "0.4.0"
+oxc_sourcemap = "6.0.1"
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
+lightningcss = { version = "1.0.0-alpha.70", features = ["visitor"] }
+
+[dev-dependencies]
+criterion = { version = "0.8.1", features = ["html_reports"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+vize_armature = "0.0.1-alpha.31"
+vize_atelier_sfc = "0.0.1-alpha.31"
+dhat = "0.3"
+walkdir = "2"
+rayon = "1.7"
+
+[[bench]]
+name = "bindings_bench"
+harness = false
+
+[[bench]]
+name = "vfor_bench"
+harness = false
+
+[[bench]]
+name = "vslot_bench"
+harness = false
+
+
+[[example]]
+name = "codegen"
+path = "examples/codegen.rs"
+
+
+[[example]]
+name = "check"
+path = "examples/check.rs"
+
+
+[[example]]
+name = "expression_validator"
+path = "examples/expression_validator.rs"
+
+[[example]]
+name = "check_matrix"
+path = "examples/check_matrix.rs"

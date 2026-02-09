@@ -1,231 +1,463 @@
-@verter/types
+# @verter/types
 
-TypeScript-first utility types and Vue emits helpers for Verter. Includes a string-build variant designed for language-server injection with safe name-prefixing.
+> [!WARNING]
+> **Experimental** -- This package is under active development and APIs may change without notice. It is not yet recommended for production use.
 
-Features
-- Type helpers: `PatchHidden`, `ExtractHidden`, `PartialUndefined`, `UnionToIntersection`.
-- Vue emits helpers: `FunctionToObject`, `IntersectionFunctionToObject`, `EmitsToProps`, `ComponentEmitsToProps`.
-- **Slots helpers**: `StrictRenderSlot` for type-safe slot content validation ([RFC 733](https://github.com/vuejs/rfcs/discussions/733)).
-- String export for embedding in tooling: all declarations prefixed with `$V_` to avoid collisions, comments removable by flag.
-- Bench harness to measure TypeScript checker performance for these helpers.
+TypeScript utility types and Vue helpers for the [Verter](https://github.com/nickmessing/vue-typescript) project. Provides type-level primitives for SFC-to-TSX transformation, emit/slot/prop inference, directive typing, and a string-export variant designed for safe injection into the language server.
 
-API Reference
-- `UniqueKey`: unique symbol used to attach hidden properties in helper results.
-- `PatchHidden<T, E>`: add hidden metadata of type `E` to `T` via `UniqueKey`.
-- `ExtractHidden<T, R = never>`: retrieve hidden metadata from `T` or fallback to `R`.
-- `FunctionToObject<T>`: converts a single emit function signature to an object map `{ [event]: args }` while preserving the function type.
-- `IntersectionFunctionToObject<T>`: merges multiple emit function signatures into a single event→args object map.
-- `PartialUndefined<T>`: properties in `T` that can be `undefined` become optional, others remain required.
-- `UnionToIntersection<U>`: transforms a union of types into their intersection.
-- `EmitsToProps<T>`: converts an emits function signature to Vue-style props `{ onXxx: (...args) => void }`.
-- `ComponentEmitsToProps<T>`: infers emits from a Vue component instance and derives corresponding props.
+## Overview
 
-Install
-- In a pnpm workspace: add as a dev dependency where you need type helpers.
+`@verter/types` is a types-only package (no runtime side-effects) that serves two purposes:
 
-```sh
+1. **Type utilities** consumed by `@verter/core` and other Verter packages to correctly type Vue component props, emits, slots, models, directives, and instances.
+2. **String export** for the Verter language server, where all type declarations are serialized as a string with `$V_` prefixed identifiers to avoid naming collisions when injected into user projects.
+
+### Key Capabilities
+
+- Hidden metadata attachment via unique symbols (`PatchHidden` / `ExtractHidden`)
+- Vue emit function-to-object conversion and emit-to-prop mapping
+- Strict slot rendering with type-safe content validation
+- Props with defaults handling (`PropsWithDefaults`, `MakePublicProps`, `MakeInternalProps`)
+- Model-to-emit and model-to-prop type inference (`ModelToEmits`, `ModelToProps`)
+- Directive modifier type checking (`vOnModifiers`, `vModelModifiers`, `vBindModifiers`)
+- TSX augmentations for `v-slot`, `v-directive`, and `onVue:*` lifecycle attributes
+- Multiple export paths for different consumption contexts
+- Benchmark harness for TypeScript checker performance regression testing
+
+## Installation
+
+```bash
+# pnpm (recommended)
 pnpm add -D @verter/types
+
+# npm
+npm install -D @verter/types
+
+# yarn
+yarn add -D @verter/types
 ```
 
-Usage (TypeScript)
-- Import the types you need from the package.
+## Architecture
 
-```ts
+### Type System Overview
+
+```mermaid
+flowchart TB
+    subgraph Helpers ["Core Helpers (helpers/)"]
+        PH["PatchHidden&lt;T, E&gt;"]
+        EH["ExtractHidden&lt;T, R&gt;"]
+        PU["PartialUndefined&lt;T&gt;"]
+        UI["UnionToIntersection&lt;U&gt;"]
+        ON["OmitNever&lt;T&gt;"]
+        PBV["PickByValue&lt;T, V&gt;"]
+    end
+
+    subgraph Emits ["Emits (emits/)"]
+        FTO["FunctionToObject&lt;T&gt;"]
+        IFTO["IntersectionFunctionToObject&lt;T&gt;"]
+        ETP["EmitsToProps&lt;T&gt;"]
+        CETP["ComponentEmitsToProps&lt;T&gt;"]
+    end
+
+    subgraph Props ["Props (props/)"]
+        PWD["PropsWithDefaults&lt;P, D&gt;"]
+        MPP["MakePublicProps&lt;T&gt;"]
+        MIP["MakeInternalProps&lt;T&gt;"]
+        MBO["MakeBooleanOptional&lt;T&gt;"]
+    end
+
+    subgraph Model ["Model (model/)"]
+        MTE["ModelToEmits&lt;T&gt;"]
+        MTP["ModelToProps&lt;T&gt;"]
+        MTPE["MacroToPropEvents&lt;T&gt;"]
+    end
+
+    subgraph Slots ["Slots (slots/)"]
+        SRR["strictRenderSlot()"]
+        STR["SlotsToRender&lt;T&gt;"]
+        RJSX["renderSlotJSX()"]
+        EARS["extractArgumentsFromRenderSlot()"]
+    end
+
+    subgraph Directives ["Directives (directives/)"]
+        VON["vOnModifiers"]
+        VMD["vModelModifiers"]
+        VBD["vBindModifiers"]
+        RCD["runCustomDirective()"]
+    end
+
+    subgraph TSX ["TSX Augmentations (tsx/)"]
+        VSLOT["v-slot"]
+        VDIR["v-directive"]
+        LIFECYCLE["onVue:* lifecycle hooks"]
+    end
+
+    PH --> FTO
+    EH --> ETP
+    UI --> MTE
+    ON --> MTP
+    FTO --> IFTO --> ETP
+    ETP --> CETP
+    PBV --> VON
+
+    style Helpers fill:#3178c6,color:#fff
+    style Emits fill:#42b883,color:#fff
+    style TSX fill:#e44d26,color:#fff
+```
+
+### Export Paths
+
+```mermaid
+flowchart LR
+    PKG["@verter/types"]
+
+    Main[". (main)\nAll type helpers"]
+    Str["./string\nPrefixed string export\nfor LSP injection"]
+    Tsx["./tsx\nJSX/TSX augmentations\nv-slot, onVue:*"]
+    TsxStr["./tsx-string\nTSX augmentations\nas string export"]
+
+    PKG --> Main
+    PKG --> Str
+    PKG --> Tsx
+    PKG --> TsxStr
+```
+
+| Export Path | Entry Point | Purpose |
+|-------------|-------------|---------|
+| `.` | `dist/index.d.ts` | All type helpers (PatchHidden, EmitsToProps, etc.) |
+| `./string` | `dist/string-export.js` | All declarations as a JS string with `$V_` prefix |
+| `./tsx` | `dist/tsx-export.d.ts` | JSX `IntrinsicClassAttributes` augmentations |
+| `./tsx-string` | `dist/tsx-string-export.js` | TSX augmentations as a string export |
+
+### Package Structure
+
+```
+src/
+├── index.ts                  # Main entry (re-exports all modules)
+├── helpers/
+│   ├── helpers.ts            # PatchHidden, ExtractHidden, PartialUndefined, etc.
+│   └── helpers.spec.ts       # Type tests
+├── emits/
+│   ├── emits.ts              # FunctionToObject, EmitsToProps, ComponentEmitsToProps
+│   └── emits.spec.ts         # Type tests
+├── props/
+│   ├── props.ts              # PropsWithDefaults, MakePublicProps, MakeInternalProps
+│   └── props.spec.ts         # Type tests
+├── model/
+│   ├── model.ts              # ModelToEmits, ModelToProps, MacroToPropEvents
+│   └── model.spec.ts         # Type tests
+├── slots/
+│   ├── slots.ts              # strictRenderSlot, SlotsToRender, renderSlotJSX
+│   └── slots.spec.ts         # Type tests
+├── directives/
+│   ├── directives.ts         # vOnModifiers, vModelModifiers, runCustomDirective
+│   └── (no spec -- tested via integration)
+├── render/
+│   └── render.ts             # extractArgumentsFromRenderSlot, SlotToRender
+├── instance/
+│   ├── instance.ts           # Component instance type helpers
+│   └── instance.spec.ts      # Type tests
+├── components/
+│   ├── components.ts         # Component type helpers
+│   └── components.spec.ts    # Type tests
+├── loops/
+│   ├── loops.ts              # v-for loop type helpers
+│   └── loops.spec.ts         # Type tests
+├── setup/
+│   ├── setup.ts              # Setup return type helpers
+│   └── setup.spec.ts         # Type tests
+├── name/
+│   ├── name.ts               # Component name resolution
+│   └── name.spec.ts          # Type tests
+├── vue/
+│   ├── vue.ts                # Vue-specific type overrides
+│   ├── vue.macros.ts         # Vue macro type helpers
+│   └── vue.macros.spec.ts    # Type tests
+├── tsx/
+│   ├── tsx.tsx               # JSX IntrinsicClassAttributes augmentation
+│   ├── tsx.attributes.ts     # HTML attribute type augmentations
+│   ├── components-tsx.ts     # Component TSX helpers
+│   └── tsx.spec.tsx          # Type tests
+└── exports.spec.ts           # Validates all exports are accessible
+```
+
+## API / Usage
+
+### Core Helpers
+
+```typescript
 import type {
   PatchHidden,
   ExtractHidden,
   PartialUndefined,
   UnionToIntersection,
-} from '@verter/types';
+  OmitNever,
+  PickByValue,
+} from "@verter/types";
 
-type WithHidden = PatchHidden<{ id: number }, { meta: true }>;
-type OnlyHidden = ExtractHidden<WithHidden>; // { meta: true }
+// Attach hidden metadata to a type via a unique symbol key
+type Tagged = PatchHidden<{ id: number }, { __brand: "user" }>;
+type Meta = ExtractHidden<Tagged>;  // { __brand: "user" }
+type Clean = ExtractHidden<{ id: number }>;  // never (no hidden data)
 
-type A = { a?: number; b: string | undefined; c: string };
-type Optionalized = PartialUndefined<A>; // `{ a?: number; b?: string; c: string }`
+// Make undefined-able properties optional
+type A = { a: string; b: number | undefined; c: boolean };
+type Opt = PartialUndefined<A>;  // { a: string; b?: number | undefined; c: boolean }
 
+// Convert a union into an intersection
 type U = { x: 1 } | { y: 2 };
-type I = UnionToIntersection<U>; // `{ x: 1 } & { y: 2 }`
+type I = UnionToIntersection<U>;  // { x: 1 } & { y: 2 }
+
+// Filter out never-valued properties
+type WithNever = { a: string; b: never; c: number };
+type Cleaned = OmitNever<WithNever>;  // { a: string; c: number }
+
+// Pick properties by value type
+type Obj = { name: string; age: number; active: boolean };
+type Strings = PickByValue<Obj, string>;  // { name: string }
 ```
 
-Usage (Vue emits helpers)
+### Vue Emits Helpers
 
-```ts
+```typescript
 import type {
   FunctionToObject,
   IntersectionFunctionToObject,
   EmitsToProps,
   ComponentEmitsToProps,
-} from '@verter/types';
+} from "@verter/types";
 
-// Single function → object of event payloads
-type EmitFn = (e: 'save', id: number) => void;
+// Convert a single emit function to an event-args object
+type EmitFn = (e: "save", id: number) => void;
 type AsObject = FunctionToObject<EmitFn>;
-// { [UniqueKey]?: { save: [number] } } & ((e: 'save', id: number) => void)
+// { [UniqueKey]?: { save: [number] } } & ((e: "save", id: number) => void)
 
-// Multiple overloads → merged object of event payloads
+// Merge multiple emit overloads into a single event map
 type Overloads =
-  & ((e: 'open', path: string) => void)
-  & ((e: 'close') => void);
+  & ((e: "open", path: string) => void)
+  & ((e: "close") => void);
 type Merged = IntersectionFunctionToObject<Overloads>;
 
-// Props from emits signature
-type PropsFromEmits = EmitsToProps<Overloads>; // { onOpen: (path: string) => void; onClose: () => void }
+// Convert emits to Vue-style onXxx props
+type Props = EmitsToProps<Overloads>;
+// { onOpen?: (path: string) => void; onClose?: () => void }
+
+// Extract emits from a component constructor and derive props
+type CompProps = ComponentEmitsToProps<typeof MyComponent>;
 ```
 
-Usage (Slots helpers)
+### Props Helpers
 
-```ts
-import { defineComponent, SlotsType } from 'vue';
-import { StrictRenderSlot } from '@verter/types/slots';
+```typescript
+import type {
+  PropsWithDefaults,
+  MakePublicProps,
+  MakeInternalProps,
+  MakeBooleanOptional,
+} from "@verter/types";
 
-const TabItem = defineComponent({
-  props: { id: { type: String, required: true } }
-});
+// Mark specific props as having defaults
+type Props = { name: string; count: number; active: boolean };
+type WithDefs = PropsWithDefaults<Props, "count" | "active">;
 
-const Tabs = defineComponent({
+// Public API: props with defaults become optional
+type Public = MakePublicProps<WithDefs>;
+// { name: string; count?: number | undefined; active?: boolean | undefined }
+
+// Internal API: props with defaults are always defined
+type Internal = MakeInternalProps<WithDefs>;
+// { name: string; count: number; active: boolean }
+```
+
+### Model Helpers
+
+```typescript
+import type { ModelToEmits, ModelToProps } from "@verter/types";
+
+// Given defineModel() return types, derive emits and props
+type Models = {
+  modelValue: import("vue").ModelRef<string>;
+  count: import("vue").ModelRef<number>;
+};
+
+type Emits = ModelToEmits<Models>;
+// ((event: "update:modelValue", arg: string) => any)
+// & ((event: "update:count", arg: number) => any)
+
+type Props = ModelToProps<Models>;
+// { modelValue: string; count: number }
+```
+
+### Slots Helpers
+
+```typescript
+import type { SlotsToRender, SlotToRender } from "@verter/types";
+import { defineComponent, type SlotsType } from "vue";
+
+const MyComponent = defineComponent({
   slots: {} as SlotsType<{
-    default: () => (typeof TabItem)[];
-    // Non-empty pattern: at least one item required
-    items: () => [typeof TabItem, ...Array<typeof TabItem>];
-  }>
+    default: (props: { msg: string }) => any;
+    header: (props: { title: string }) => any;
+    footer: () => any;
+  }>,
 });
 
-const tabs = new Tabs();
-
-// ✅ Valid: array of TabItem
-StrictRenderSlot(tabs.$slots.default, [TabItem, TabItem]);
-StrictRenderSlot(tabs.$slots.default, []); // Empty allowed
-
-// ✅ Valid: non-empty enforced by tuple type
-StrictRenderSlot(tabs.$slots.items, [TabItem, TabItem]);
-// ❌ Error: empty array not allowed for items slot
-StrictRenderSlot(tabs.$slots.items, []);
+// Convert slots to renderable component types for JSX
+type RenderSlots = SlotsToRender<InstanceType<typeof MyComponent>["$slots"]>;
+// {
+//   default: { new(): { $props: { msg: string } } };
+//   header: { new(): { $props: { title: string } } };
+//   footer: { new(): { $props: {} } };
+// }
 ```
 
-For comprehensive documentation including non-empty slots pattern, literal types, HTML elements, and limitations, see [src/slots/readme.md](src/slots/readme.md).
+### Directive Type Helpers
 
-String Export (for language servers / tooling)
-- Import the prebuilt TypeScript source as a string with all declarations prefixed (`$V_…`).
-- Comments are stripped by default; use the flag below to keep them.
+```typescript
+import type { vOnModifiers, vModelModifiers, vBindModifiers } from "@verter/types";
 
-```ts
-import typeHelpersSource from '@verter/types/string';
+// Type-safe v-on modifier checking
+// Returns which modifiers are valid for a given event on a given element
+type ClickMods = vOnModifiers<HTMLButtonElement, "onclick">;
+// Partial<{ stop: true; prevent: true; self: true; ctrl: true; ... }>
 
-// `typeHelpersSource` is a string containing TypeScript declarations like:
+// v-model modifiers
+type InputModelMods = vModelModifiers<HTMLInputElement, "value">;
+// { lazy?: true; number?: true; trim?: true }
+
+// v-bind modifiers
+type BindMods = vBindModifiers<HTMLDivElement, "class">;
+// { prop?: true; attr?: true; camel?: true }
+```
+
+### TSX Augmentations
+
+The `./tsx` export augments the JSX namespace with Verter-specific attributes:
+
+```typescript
+// Automatically available when @verter/types/tsx is imported
+// These are added to JSX.IntrinsicClassAttributes<T>:
+
+// v-slot: retrieve component instance type in TSX
+<MyComponent v-slot={(instance) => instance.$slots} />
+
+// v-directive: retrieve component instance for directive typing
+<MyComponent v-directive={(instance) => instance} />
+
+// onVue:* lifecycle hooks on any component
+<MyComponent onVue:mounted={(vnode) => console.log(vnode)} />
+<MyComponent onVue:before-unmount={(vnode, old) => cleanup()} />
+```
+
+### String Export (for Language Servers)
+
+The `./string` export provides all type declarations as a JavaScript string with `$V_`-prefixed identifiers, suitable for injection into the TypeScript language service:
+
+```typescript
+import typeHelpersSource from "@verter/types/string";
+import { prefixWith, ExportedTypes } from "@verter/types/string";
+
+// typeHelpersSource contains declarations like:
 //   export declare const $V_UniqueKey: unique symbol;
-//   export type $V_ExtractHidden<...> = ...
+//   export type $V_PatchHidden<T, E> = { [$V_UniqueKey]?: E } & T;
+//   export type $V_ExtractHidden<T, R = never> = ...
+
+// Use a custom prefix instead of $V_
+const customPrefixed = prefixWith("__MY_PREFIX_");
+
+// Set of originally exported type/interface names (unprefixed)
+console.log(ExportedTypes);
+// Set { "PatchHidden", "ExtractHidden", "EmitsToProps", ... }
 ```
 
-Notes on string export
-- All declarations are prefixed with `$V_` and internal references are updated to match.
-- Comments are stripped by default (smaller payload); pass `--keep-comments` to retain JSDoc.
-- Output is a single JS module exporting a template string; safe to embed into language tools.
+The string export process:
+1. Reads all source files discovered from `src/index.ts` exports
+2. Collects all declaration names (types, interfaces, functions, variables)
+3. Rewrites every identifier with the `$V_` prefix via a TypeScript AST transformer
+4. Strips comments (unless `--keep-comments` is passed)
+5. Inlines all local imports into a single file
+6. Outputs a JS module exporting the declaration string
 
-Build
-- Build both the compiled package and the string export:
+## Development
 
-```sh
-pnpm -w run -C packages/types build
+### Building
+
+```bash
+pnpm build              # Full build: string export + TSX build + tsc
+pnpm build:string       # Rebuild string export only
+pnpm build:tsx          # Rebuild TSX export only
+pnpm dev                # Watch mode (tsc only)
 ```
 
-- Only rebuild the string export (strip comments by default):
+### Building with comments preserved
 
-```sh
-pnpm -w run -C packages/types build:string
-```
-
-- Keep comments in the string export:
-
-```sh
+```bash
 node packages/types/scripts/build-string.mjs --keep-comments
 ```
 
-Test
-- Tests are type-only and run in Vitest “typecheck-only” mode (no runtime assertions).
-- Files live alongside sources as `*.spec.ts` in `src/`.
-- Config: see `vitest.config.ts` (typecheck.only, checker `tsc`, `tsconfig.test.json`).
-- Globals: `src/test-utils.d.ts` provides `assertType` and `assertNever` as ambient helpers.
+### Testing
 
-Run
-```sh
-# from repo root
-pnpm -w run -C packages/types test
+Tests are type-only and run via Vitest in typecheck mode (no runtime assertions).
 
-# or explicitly enable typecheck mode
-pnpm -w run -C packages/types vitest --typecheck
+```bash
+pnpm test               # Run all type tests (vitest --typecheck --run)
 ```
 
-Writing tests
-- Positive type assertions:
-```ts
-import { assertType } from 'vitest';
-import type { PartialUndefined } from './helpers';
+#### Writing Type Tests
 
-type Original = { a: string; b: number | undefined };
-type Result = PartialUndefined<Original>;
-type Expected = { a: string; b?: number | undefined };
+Always include both a positive assertion and a `@ts-expect-error` negative assertion. This prevents `any`, `unknown`, or `never` types from silently passing tests.
 
-assertType<Result>({} as Expected);
+```typescript
+import { assertType } from "vitest";
+import type { PartialUndefined } from "./helpers";
+
+it("makes undefined properties optional", () => {
+  type Input = { a: string; b: number | undefined };
+  type Result = PartialUndefined<Input>;
+  type Expected = { a: string; b?: number | undefined };
+
+  // Positive: result matches expected type
+  assertType<Result>({} as Expected);
+  assertType<Expected>({} as Result);
+
+  // Negative: result is not any/unknown/never
+  // @ts-expect-error - Unrelated type should not match
+  assertType<{ unrelated: true }>({} as Result);
+});
 ```
 
-- Negative assertions with `@ts-expect-error` to ensure incorrect shapes are rejected:
-```ts
-// @ts-expect-error missing required property
-assertType<Result>({} as { b?: number });
-```
+### Benchmarking
 
-- Emits helpers and intersections:
-```ts
-import { assertType } from 'vitest';
-import type { IntersectionFunctionToObject, ExtractHidden } from './helpers';
+Measure TypeScript checker performance to catch regressions in type computation:
 
-type Emits =
-  & ((e: 'open', path: string) => void)
-  & ((e: 'close') => void);
-
-type AsObj = ExtractHidden<IntersectionFunctionToObject<Emits>>;
-assertType<AsObj>({} as { open: [path: string]; close: [] });
-```
-
-Benchmark (TypeScript checker performance)
-- Generate scalable bench files and run `tsc --extendedDiagnostics` for several sizes.
-
-```sh
-# Default sizes (10,50,100,200,500)
-pnpm -w run -C packages/types bench
+```bash
+pnpm bench              # Default sizes (10, 50, 100, 200, 500)
+pnpm bench:trace        # With TypeScript trace for Chrome DevTools
 
 # Custom sizes
 node packages/types/scripts/bench-types.mjs --sizes=10,25,50,75,100
-
-# With TypeScript trace (inspect in Chrome DevTools Performance)
-pnpm -w run -C packages/types bench:trace
 ```
 
-Benchmark details
-- Sizes control number of properties and union members; event signatures are capped to avoid `TS2589` on very large intersections.
-- Reported metrics come from `--extendedDiagnostics`: total/check time, memory, nodes, types.
-- Compare before/after changes or across branches to catch regressions.
+The benchmark generates scalable type files with varying numbers of properties and union members, then runs `tsc --extendedDiagnostics` to report total check time, memory usage, node count, and type count.
 
-Compatibility
-- TypeScript: tested with `5.8.x`. Other 5.x versions may work, but are not verified.
-- Vue: designed around Vue 3’s emits pattern; Vue 2 is not supported.
-- Runtime: types-only (no runtime side-effects). The string entry exports a string.
+## Dependencies
 
-Notes
-- The string export prefixes all declarations (types, interfaces, classes, enums, functions, variables, namespaces) with `$V_` and updates references in type positions (`typeof`, `TypeReference`, computed keys) to avoid collisions.
-- The benchmark caps extremely large unions/intersections to avoid `TS2589` and focuses on realistic growth patterns.
+This is a types-only package with minimal dependencies:
 
-Contributing
-- Useful scripts while iterating:
+| Dependency | Scope | Purpose |
+|-----------|-------|---------|
+| `typescript` | dev | Type checking and string export build script |
+| `vitest` | dev | Type test runner (`--typecheck` mode) |
+| `vue` | dev | Vue 3 types for testing compatibility |
 
-```sh
-# TypeScript watch build
-pnpm -w run -C packages/types dev
+## Compatibility
 
-# Clean outputs
-pnpm -w run -C packages/types clean
-```
+| Requirement | Version |
+|-------------|---------|
+| TypeScript | 5.x (tested with 5.8+) |
+| Vue | 3.5+ |
+| Runtime | None (types-only, zero runtime side-effects) |
 
-License
-- MIT — see repository root `LICENSE`.
+## License
+
+MIT

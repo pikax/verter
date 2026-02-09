@@ -1,0 +1,22 @@
+{
+  "name": "@verter/native-linux-arm64-gnu",
+  "version": "0.0.1-alpha.1",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "verter-native.linux-arm64-gnu.node",
+  "files": [
+    "verter-native.linux-arm64-gnu.node"
+  ],
+  "description": "Native Node.js bindings for Verter Vue compiler",
+  "license": "ISC",
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

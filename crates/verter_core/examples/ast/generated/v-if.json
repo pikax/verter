@@ -1,0 +1,209 @@
+{
+  "type": 0,
+  "source": "<template>\r\n  <div v-if=\"foo\"></div>\r\n  <div v-else-if=\"bar\"></div>\r\n  <div v-else></div>\r\n</template>\r\n",
+  "children": [
+    {
+      "type": 1,
+      "tag": "template",
+      "ns": 0,
+      "tagType": 0,
+      "props": [],
+      "children": [
+        {
+          "type": 1,
+          "tag": "div",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "type": 7,
+              "name": "if",
+              "rawName": "v-if",
+              "exp": {
+                "type": 4,
+                "loc": {
+                  "start": {
+                    "column": 14,
+                    "line": 2,
+                    "offset": 25
+                  },
+                  "end": {
+                    "column": 17,
+                    "line": 2,
+                    "offset": 28
+                  },
+                  "source": "foo"
+                },
+                "content": "foo",
+                "isStatic": false,
+                "constType": 0
+              },
+              "modifiers": [],
+              "loc": {
+                "start": {
+                  "column": 8,
+                  "line": 2,
+                  "offset": 19
+                },
+                "end": {
+                  "column": 18,
+                  "line": 2,
+                  "offset": 29
+                },
+                "source": "v-if=\"foo\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 2,
+              "offset": 14
+            },
+            "end": {
+              "column": 25,
+              "line": 2,
+              "offset": 36
+            },
+            "source": "<div v-if=\"foo\"></div>"
+          }
+        },
+        {
+          "type": 1,
+          "tag": "div",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "type": 7,
+              "name": "else-if",
+              "rawName": "v-else-if",
+              "exp": {
+                "type": 4,
+                "loc": {
+                  "start": {
+                    "column": 19,
+                    "line": 3,
+                    "offset": 56
+                  },
+                  "end": {
+                    "column": 22,
+                    "line": 3,
+                    "offset": 59
+                  },
+                  "source": "bar"
+                },
+                "content": "bar",
+                "isStatic": false,
+                "constType": 0
+              },
+              "modifiers": [],
+              "loc": {
+                "start": {
+                  "column": 8,
+                  "line": 3,
+                  "offset": 45
+                },
+                "end": {
+                  "column": 23,
+                  "line": 3,
+                  "offset": 60
+                },
+                "source": "v-else-if=\"bar\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 3,
+              "offset": 40
+            },
+            "end": {
+              "column": 30,
+              "line": 3,
+              "offset": 67
+            },
+            "source": "<div v-else-if=\"bar\"></div>"
+          }
+        },
+        {
+          "type": 1,
+          "tag": "div",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "type": 7,
+              "name": "else",
+              "rawName": "v-else",
+              "modifiers": [],
+              "loc": {
+                "start": {
+                  "column": 8,
+                  "line": 4,
+                  "offset": 76
+                },
+                "end": {
+                  "column": 14,
+                  "line": 4,
+                  "offset": 82
+                },
+                "source": "v-else"
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 4,
+              "offset": 71
+            },
+            "end": {
+              "column": 21,
+              "line": 4,
+              "offset": 89
+            },
+            "source": "<div v-else></div>"
+          }
+        }
+      ],
+      "loc": {
+        "start": {
+          "column": 1,
+          "line": 1,
+          "offset": 0
+        },
+        "end": {
+          "column": 12,
+          "line": 5,
+          "offset": 102
+        },
+        "source": "<template>\r\n  <div v-if=\"foo\"></div>\r\n  <div v-else-if=\"bar\"></div>\r\n  <div v-else></div>\r\n</template>"
+      }
+    }
+  ],
+  "helpers": {},
+  "components": [],
+  "directives": [],
+  "hoists": [],
+  "imports": [],
+  "cached": [],
+  "temps": 0,
+  "loc": {
+    "start": {
+      "column": 1,
+      "line": 1,
+      "offset": 0
+    },
+    "end": {
+      "column": 1,
+      "line": 6,
+      "offset": 104
+    },
+    "source": "<template>\r\n  <div v-if=\"foo\"></div>\r\n  <div v-else-if=\"bar\"></div>\r\n  <div v-else></div>\r\n</template>\r\n"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "dependencies": {
+    "@vue/compiler-sfc": "^3.5.0",
+    "source-map": "^0.7.6"
+  },
+  "optionalDependencies": {
+    "sass": "^1.77.0",
+    "less": "^4.2.0",
+    "stylus": "^0.63.0"
+  }
+}

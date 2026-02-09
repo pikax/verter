@@ -1,0 +1,1403 @@
+{
+  "source": "<template>\r\n  <div v-for=\"user in users\" :key=\"user.id\"></div>\r\n  <li v-for=\"(item, index, key) in items\" :key=\"index\"></li>\r\n  <li v-for=\"{ id, name, email } in users\" :key=\"id\"></li>\r\n  <li v-for=\"({ id, name, email }, index) in users\" :key=\"id\"></li>\r\n  <li v-for=\"(item, index) in 8\" :key=\"index\"></li>\r\n  <li v-for=\"(item, index) in [1]\" :key=\"index\"></li>\r\n  <li v-for=\"n in even(numbers)\"></li>\r\n\r\n  <div v-for=\"user of users\" :key=\"user.id\"></div>\r\n  <li v-for=\"(item, index, key) of items\" :key=\"index\"></li>\r\n  <li v-for=\"{ id, name, email } of users\" :key=\"id\"></li>\r\n  <li v-for=\"({ id, name, email }, index) of users\" :key=\"id\"></li>\r\n  <li v-for=\"(item, index) of 8\" :key=\"index\"></li>\r\n  <li v-for=\"(item, index) of [1]\" :key=\"index\"></li>\r\n</template>\r\n",
+  "children": [
+    {
+      "tag": "template",
+      "ns": 0,
+      "tagType": 3,
+      "props": [],
+      "children": [
+        {
+          "tag": "div",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "user in users",
+                "loc": {
+                  "start": {
+                    "column": 15,
+                    "line": 2,
+                    "offset": 26
+                  },
+                  "end": {
+                    "column": 28,
+                    "line": 2,
+                    "offset": 39
+                  },
+                  "source": "user in users"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 8,
+                  "line": 2,
+                  "offset": 19
+                },
+                "end": {
+                  "column": 29,
+                  "line": 2,
+                  "offset": 40
+                },
+                "source": "v-for=\"user in users\""
+              }
+            },
+            {
+              "name": "bind",
+              "rawName": ":",
+              "exp": {
+                "content": "user.id",
+                "loc": {
+                  "start": {
+                    "column": 36,
+                    "line": 2,
+                    "offset": 47
+                  },
+                  "end": {
+                    "column": 43,
+                    "line": 2,
+                    "offset": 54
+                  },
+                  "source": "user.id"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "arg": {
+                "content": "key",
+                "loc": {
+                  "start": {
+                    "column": 31,
+                    "line": 2,
+                    "offset": 42
+                  },
+                  "end": {
+                    "column": 34,
+                    "line": 2,
+                    "offset": 45
+                  },
+                  "source": "key"
+                },
+                "isStatic": true,
+                "constType": 3
+              },
+              "loc": {
+                "start": {
+                  "column": 30,
+                  "line": 2,
+                  "offset": 41
+                },
+                "end": {
+                  "column": 44,
+                  "line": 2,
+                  "offset": 55
+                },
+                "source": ":key=\"user.id\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 2,
+              "offset": 14
+            },
+            "end": {
+              "column": 51,
+              "line": 2,
+              "offset": 62
+            },
+            "source": "<div v-for=\"user in users\" :key=\"user.id\"></div>"
+          }
+        },
+        {
+          "tag": "li",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "(item, index, key) in items",
+                "loc": {
+                  "start": {
+                    "column": 14,
+                    "line": 3,
+                    "offset": 77
+                  },
+                  "end": {
+                    "column": 41,
+                    "line": 3,
+                    "offset": 104
+                  },
+                  "source": "(item, index, key) in items"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 7,
+                  "line": 3,
+                  "offset": 70
+                },
+                "end": {
+                  "column": 42,
+                  "line": 3,
+                  "offset": 105
+                },
+                "source": "v-for=\"(item, index, key) in items\""
+              }
+            },
+            {
+              "name": "bind",
+              "rawName": ":",
+              "exp": {
+                "content": "index",
+                "loc": {
+                  "start": {
+                    "column": 49,
+                    "line": 3,
+                    "offset": 112
+                  },
+                  "end": {
+                    "column": 54,
+                    "line": 3,
+                    "offset": 117
+                  },
+                  "source": "index"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "arg": {
+                "content": "key",
+                "loc": {
+                  "start": {
+                    "column": 44,
+                    "line": 3,
+                    "offset": 107
+                  },
+                  "end": {
+                    "column": 47,
+                    "line": 3,
+                    "offset": 110
+                  },
+                  "source": "key"
+                },
+                "isStatic": true,
+                "constType": 3
+              },
+              "loc": {
+                "start": {
+                  "column": 43,
+                  "line": 3,
+                  "offset": 106
+                },
+                "end": {
+                  "column": 55,
+                  "line": 3,
+                  "offset": 118
+                },
+                "source": ":key=\"index\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 3,
+              "offset": 66
+            },
+            "end": {
+              "column": 61,
+              "line": 3,
+              "offset": 124
+            },
+            "source": "<li v-for=\"(item, index, key) in items\" :key=\"index\"></li>"
+          }
+        },
+        {
+          "tag": "li",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "{ id, name, email } in users",
+                "loc": {
+                  "start": {
+                    "column": 14,
+                    "line": 4,
+                    "offset": 139
+                  },
+                  "end": {
+                    "column": 42,
+                    "line": 4,
+                    "offset": 167
+                  },
+                  "source": "{ id, name, email } in users"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 7,
+                  "line": 4,
+                  "offset": 132
+                },
+                "end": {
+                  "column": 43,
+                  "line": 4,
+                  "offset": 168
+                },
+                "source": "v-for=\"{ id, name, email } in users\""
+              }
+            },
+            {
+              "name": "bind",
+              "rawName": ":",
+              "exp": {
+                "content": "id",
+                "loc": {
+                  "start": {
+                    "column": 50,
+                    "line": 4,
+                    "offset": 175
+                  },
+                  "end": {
+                    "column": 52,
+                    "line": 4,
+                    "offset": 177
+                  },
+                  "source": "id"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "arg": {
+                "content": "key",
+                "loc": {
+                  "start": {
+                    "column": 45,
+                    "line": 4,
+                    "offset": 170
+                  },
+                  "end": {
+                    "column": 48,
+                    "line": 4,
+                    "offset": 173
+                  },
+                  "source": "key"
+                },
+                "isStatic": true,
+                "constType": 3
+              },
+              "loc": {
+                "start": {
+                  "column": 44,
+                  "line": 4,
+                  "offset": 169
+                },
+                "end": {
+                  "column": 53,
+                  "line": 4,
+                  "offset": 178
+                },
+                "source": ":key=\"id\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 4,
+              "offset": 128
+            },
+            "end": {
+              "column": 59,
+              "line": 4,
+              "offset": 184
+            },
+            "source": "<li v-for=\"{ id, name, email } in users\" :key=\"id\"></li>"
+          }
+        },
+        {
+          "tag": "li",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "({ id, name, email }, index) in users",
+                "loc": {
+                  "start": {
+                    "column": 14,
+                    "line": 5,
+                    "offset": 199
+                  },
+                  "end": {
+                    "column": 51,
+                    "line": 5,
+                    "offset": 236
+                  },
+                  "source": "({ id, name, email }, index) in users"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 7,
+                  "line": 5,
+                  "offset": 192
+                },
+                "end": {
+                  "column": 52,
+                  "line": 5,
+                  "offset": 237
+                },
+                "source": "v-for=\"({ id, name, email }, index) in users\""
+              }
+            },
+            {
+              "name": "bind",
+              "rawName": ":",
+              "exp": {
+                "content": "id",
+                "loc": {
+                  "start": {
+                    "column": 59,
+                    "line": 5,
+                    "offset": 244
+                  },
+                  "end": {
+                    "column": 61,
+                    "line": 5,
+                    "offset": 246
+                  },
+                  "source": "id"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "arg": {
+                "content": "key",
+                "loc": {
+                  "start": {
+                    "column": 54,
+                    "line": 5,
+                    "offset": 239
+                  },
+                  "end": {
+                    "column": 57,
+                    "line": 5,
+                    "offset": 242
+                  },
+                  "source": "key"
+                },
+                "isStatic": true,
+                "constType": 3
+              },
+              "loc": {
+                "start": {
+                  "column": 53,
+                  "line": 5,
+                  "offset": 238
+                },
+                "end": {
+                  "column": 62,
+                  "line": 5,
+                  "offset": 247
+                },
+                "source": ":key=\"id\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 5,
+              "offset": 188
+            },
+            "end": {
+              "column": 68,
+              "line": 5,
+              "offset": 253
+            },
+            "source": "<li v-for=\"({ id, name, email }, index) in users\" :key=\"id\"></li>"
+          }
+        },
+        {
+          "tag": "li",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "(item, index) in 8",
+                "loc": {
+                  "start": {
+                    "column": 14,
+                    "line": 6,
+                    "offset": 268
+                  },
+                  "end": {
+                    "column": 32,
+                    "line": 6,
+                    "offset": 286
+                  },
+                  "source": "(item, index) in 8"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 7,
+                  "line": 6,
+                  "offset": 261
+                },
+                "end": {
+                  "column": 33,
+                  "line": 6,
+                  "offset": 287
+                },
+                "source": "v-for=\"(item, index) in 8\""
+              }
+            },
+            {
+              "name": "bind",
+              "rawName": ":",
+              "exp": {
+                "content": "index",
+                "loc": {
+                  "start": {
+                    "column": 40,
+                    "line": 6,
+                    "offset": 294
+                  },
+                  "end": {
+                    "column": 45,
+                    "line": 6,
+                    "offset": 299
+                  },
+                  "source": "index"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "arg": {
+                "content": "key",
+                "loc": {
+                  "start": {
+                    "column": 35,
+                    "line": 6,
+                    "offset": 289
+                  },
+                  "end": {
+                    "column": 38,
+                    "line": 6,
+                    "offset": 292
+                  },
+                  "source": "key"
+                },
+                "isStatic": true,
+                "constType": 3
+              },
+              "loc": {
+                "start": {
+                  "column": 34,
+                  "line": 6,
+                  "offset": 288
+                },
+                "end": {
+                  "column": 46,
+                  "line": 6,
+                  "offset": 300
+                },
+                "source": ":key=\"index\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 6,
+              "offset": 257
+            },
+            "end": {
+              "column": 52,
+              "line": 6,
+              "offset": 306
+            },
+            "source": "<li v-for=\"(item, index) in 8\" :key=\"index\"></li>"
+          }
+        },
+        {
+          "tag": "li",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "(item, index) in [1]",
+                "loc": {
+                  "start": {
+                    "column": 14,
+                    "line": 7,
+                    "offset": 321
+                  },
+                  "end": {
+                    "column": 34,
+                    "line": 7,
+                    "offset": 341
+                  },
+                  "source": "(item, index) in [1]"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 7,
+                  "line": 7,
+                  "offset": 314
+                },
+                "end": {
+                  "column": 35,
+                  "line": 7,
+                  "offset": 342
+                },
+                "source": "v-for=\"(item, index) in [1]\""
+              }
+            },
+            {
+              "name": "bind",
+              "rawName": ":",
+              "exp": {
+                "content": "index",
+                "loc": {
+                  "start": {
+                    "column": 42,
+                    "line": 7,
+                    "offset": 349
+                  },
+                  "end": {
+                    "column": 47,
+                    "line": 7,
+                    "offset": 354
+                  },
+                  "source": "index"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "arg": {
+                "content": "key",
+                "loc": {
+                  "start": {
+                    "column": 37,
+                    "line": 7,
+                    "offset": 344
+                  },
+                  "end": {
+                    "column": 40,
+                    "line": 7,
+                    "offset": 347
+                  },
+                  "source": "key"
+                },
+                "isStatic": true,
+                "constType": 3
+              },
+              "loc": {
+                "start": {
+                  "column": 36,
+                  "line": 7,
+                  "offset": 343
+                },
+                "end": {
+                  "column": 48,
+                  "line": 7,
+                  "offset": 355
+                },
+                "source": ":key=\"index\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 7,
+              "offset": 310
+            },
+            "end": {
+              "column": 54,
+              "line": 7,
+              "offset": 361
+            },
+            "source": "<li v-for=\"(item, index) in [1]\" :key=\"index\"></li>"
+          }
+        },
+        {
+          "tag": "li",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "n in even(numbers)",
+                "loc": {
+                  "start": {
+                    "column": 14,
+                    "line": 8,
+                    "offset": 376
+                  },
+                  "end": {
+                    "column": 32,
+                    "line": 8,
+                    "offset": 394
+                  },
+                  "source": "n in even(numbers)"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 7,
+                  "line": 8,
+                  "offset": 369
+                },
+                "end": {
+                  "column": 33,
+                  "line": 8,
+                  "offset": 395
+                },
+                "source": "v-for=\"n in even(numbers)\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 8,
+              "offset": 365
+            },
+            "end": {
+              "column": 39,
+              "line": 8,
+              "offset": 401
+            },
+            "source": "<li v-for=\"n in even(numbers)\"></li>"
+          }
+        },
+        {
+          "tag": "div",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "user of users",
+                "loc": {
+                  "start": {
+                    "column": 15,
+                    "line": 10,
+                    "offset": 419
+                  },
+                  "end": {
+                    "column": 28,
+                    "line": 10,
+                    "offset": 432
+                  },
+                  "source": "user of users"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 8,
+                  "line": 10,
+                  "offset": 412
+                },
+                "end": {
+                  "column": 29,
+                  "line": 10,
+                  "offset": 433
+                },
+                "source": "v-for=\"user of users\""
+              }
+            },
+            {
+              "name": "bind",
+              "rawName": ":",
+              "exp": {
+                "content": "user.id",
+                "loc": {
+                  "start": {
+                    "column": 36,
+                    "line": 10,
+                    "offset": 440
+                  },
+                  "end": {
+                    "column": 43,
+                    "line": 10,
+                    "offset": 447
+                  },
+                  "source": "user.id"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "arg": {
+                "content": "key",
+                "loc": {
+                  "start": {
+                    "column": 31,
+                    "line": 10,
+                    "offset": 435
+                  },
+                  "end": {
+                    "column": 34,
+                    "line": 10,
+                    "offset": 438
+                  },
+                  "source": "key"
+                },
+                "isStatic": true,
+                "constType": 3
+              },
+              "loc": {
+                "start": {
+                  "column": 30,
+                  "line": 10,
+                  "offset": 434
+                },
+                "end": {
+                  "column": 44,
+                  "line": 10,
+                  "offset": 448
+                },
+                "source": ":key=\"user.id\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 10,
+              "offset": 407
+            },
+            "end": {
+              "column": 51,
+              "line": 10,
+              "offset": 455
+            },
+            "source": "<div v-for=\"user of users\" :key=\"user.id\"></div>"
+          }
+        },
+        {
+          "tag": "li",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "(item, index, key) of items",
+                "loc": {
+                  "start": {
+                    "column": 14,
+                    "line": 11,
+                    "offset": 470
+                  },
+                  "end": {
+                    "column": 41,
+                    "line": 11,
+                    "offset": 497
+                  },
+                  "source": "(item, index, key) of items"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 7,
+                  "line": 11,
+                  "offset": 463
+                },
+                "end": {
+                  "column": 42,
+                  "line": 11,
+                  "offset": 498
+                },
+                "source": "v-for=\"(item, index, key) of items\""
+              }
+            },
+            {
+              "name": "bind",
+              "rawName": ":",
+              "exp": {
+                "content": "index",
+                "loc": {
+                  "start": {
+                    "column": 49,
+                    "line": 11,
+                    "offset": 505
+                  },
+                  "end": {
+                    "column": 54,
+                    "line": 11,
+                    "offset": 510
+                  },
+                  "source": "index"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "arg": {
+                "content": "key",
+                "loc": {
+                  "start": {
+                    "column": 44,
+                    "line": 11,
+                    "offset": 500
+                  },
+                  "end": {
+                    "column": 47,
+                    "line": 11,
+                    "offset": 503
+                  },
+                  "source": "key"
+                },
+                "isStatic": true,
+                "constType": 3
+              },
+              "loc": {
+                "start": {
+                  "column": 43,
+                  "line": 11,
+                  "offset": 499
+                },
+                "end": {
+                  "column": 55,
+                  "line": 11,
+                  "offset": 511
+                },
+                "source": ":key=\"index\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 11,
+              "offset": 459
+            },
+            "end": {
+              "column": 61,
+              "line": 11,
+              "offset": 517
+            },
+            "source": "<li v-for=\"(item, index, key) of items\" :key=\"index\"></li>"
+          }
+        },
+        {
+          "tag": "li",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "{ id, name, email } of users",
+                "loc": {
+                  "start": {
+                    "column": 14,
+                    "line": 12,
+                    "offset": 532
+                  },
+                  "end": {
+                    "column": 42,
+                    "line": 12,
+                    "offset": 560
+                  },
+                  "source": "{ id, name, email } of users"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 7,
+                  "line": 12,
+                  "offset": 525
+                },
+                "end": {
+                  "column": 43,
+                  "line": 12,
+                  "offset": 561
+                },
+                "source": "v-for=\"{ id, name, email } of users\""
+              }
+            },
+            {
+              "name": "bind",
+              "rawName": ":",
+              "exp": {
+                "content": "id",
+                "loc": {
+                  "start": {
+                    "column": 50,
+                    "line": 12,
+                    "offset": 568
+                  },
+                  "end": {
+                    "column": 52,
+                    "line": 12,
+                    "offset": 570
+                  },
+                  "source": "id"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "arg": {
+                "content": "key",
+                "loc": {
+                  "start": {
+                    "column": 45,
+                    "line": 12,
+                    "offset": 563
+                  },
+                  "end": {
+                    "column": 48,
+                    "line": 12,
+                    "offset": 566
+                  },
+                  "source": "key"
+                },
+                "isStatic": true,
+                "constType": 3
+              },
+              "loc": {
+                "start": {
+                  "column": 44,
+                  "line": 12,
+                  "offset": 562
+                },
+                "end": {
+                  "column": 53,
+                  "line": 12,
+                  "offset": 571
+                },
+                "source": ":key=\"id\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 12,
+              "offset": 521
+            },
+            "end": {
+              "column": 59,
+              "line": 12,
+              "offset": 577
+            },
+            "source": "<li v-for=\"{ id, name, email } of users\" :key=\"id\"></li>"
+          }
+        },
+        {
+          "tag": "li",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "({ id, name, email }, index) of users",
+                "loc": {
+                  "start": {
+                    "column": 14,
+                    "line": 13,
+                    "offset": 592
+                  },
+                  "end": {
+                    "column": 51,
+                    "line": 13,
+                    "offset": 629
+                  },
+                  "source": "({ id, name, email }, index) of users"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 7,
+                  "line": 13,
+                  "offset": 585
+                },
+                "end": {
+                  "column": 52,
+                  "line": 13,
+                  "offset": 630
+                },
+                "source": "v-for=\"({ id, name, email }, index) of users\""
+              }
+            },
+            {
+              "name": "bind",
+              "rawName": ":",
+              "exp": {
+                "content": "id",
+                "loc": {
+                  "start": {
+                    "column": 59,
+                    "line": 13,
+                    "offset": 637
+                  },
+                  "end": {
+                    "column": 61,
+                    "line": 13,
+                    "offset": 639
+                  },
+                  "source": "id"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "arg": {
+                "content": "key",
+                "loc": {
+                  "start": {
+                    "column": 54,
+                    "line": 13,
+                    "offset": 632
+                  },
+                  "end": {
+                    "column": 57,
+                    "line": 13,
+                    "offset": 635
+                  },
+                  "source": "key"
+                },
+                "isStatic": true,
+                "constType": 3
+              },
+              "loc": {
+                "start": {
+                  "column": 53,
+                  "line": 13,
+                  "offset": 631
+                },
+                "end": {
+                  "column": 62,
+                  "line": 13,
+                  "offset": 640
+                },
+                "source": ":key=\"id\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 13,
+              "offset": 581
+            },
+            "end": {
+              "column": 68,
+              "line": 13,
+              "offset": 646
+            },
+            "source": "<li v-for=\"({ id, name, email }, index) of users\" :key=\"id\"></li>"
+          }
+        },
+        {
+          "tag": "li",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "(item, index) of 8",
+                "loc": {
+                  "start": {
+                    "column": 14,
+                    "line": 14,
+                    "offset": 661
+                  },
+                  "end": {
+                    "column": 32,
+                    "line": 14,
+                    "offset": 679
+                  },
+                  "source": "(item, index) of 8"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 7,
+                  "line": 14,
+                  "offset": 654
+                },
+                "end": {
+                  "column": 33,
+                  "line": 14,
+                  "offset": 680
+                },
+                "source": "v-for=\"(item, index) of 8\""
+              }
+            },
+            {
+              "name": "bind",
+              "rawName": ":",
+              "exp": {
+                "content": "index",
+                "loc": {
+                  "start": {
+                    "column": 40,
+                    "line": 14,
+                    "offset": 687
+                  },
+                  "end": {
+                    "column": 45,
+                    "line": 14,
+                    "offset": 692
+                  },
+                  "source": "index"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "arg": {
+                "content": "key",
+                "loc": {
+                  "start": {
+                    "column": 35,
+                    "line": 14,
+                    "offset": 682
+                  },
+                  "end": {
+                    "column": 38,
+                    "line": 14,
+                    "offset": 685
+                  },
+                  "source": "key"
+                },
+                "isStatic": true,
+                "constType": 3
+              },
+              "loc": {
+                "start": {
+                  "column": 34,
+                  "line": 14,
+                  "offset": 681
+                },
+                "end": {
+                  "column": 46,
+                  "line": 14,
+                  "offset": 693
+                },
+                "source": ":key=\"index\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 14,
+              "offset": 650
+            },
+            "end": {
+              "column": 52,
+              "line": 14,
+              "offset": 699
+            },
+            "source": "<li v-for=\"(item, index) of 8\" :key=\"index\"></li>"
+          }
+        },
+        {
+          "tag": "li",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "name": "for",
+              "rawName": "v-for",
+              "exp": {
+                "content": "(item, index) of [1]",
+                "loc": {
+                  "start": {
+                    "column": 14,
+                    "line": 15,
+                    "offset": 714
+                  },
+                  "end": {
+                    "column": 34,
+                    "line": 15,
+                    "offset": 734
+                  },
+                  "source": "(item, index) of [1]"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "loc": {
+                "start": {
+                  "column": 7,
+                  "line": 15,
+                  "offset": 707
+                },
+                "end": {
+                  "column": 35,
+                  "line": 15,
+                  "offset": 735
+                },
+                "source": "v-for=\"(item, index) of [1]\""
+              }
+            },
+            {
+              "name": "bind",
+              "rawName": ":",
+              "exp": {
+                "content": "index",
+                "loc": {
+                  "start": {
+                    "column": 42,
+                    "line": 15,
+                    "offset": 742
+                  },
+                  "end": {
+                    "column": 47,
+                    "line": 15,
+                    "offset": 747
+                  },
+                  "source": "index"
+                },
+                "isStatic": false,
+                "constType": 0
+              },
+              "arg": {
+                "content": "key",
+                "loc": {
+                  "start": {
+                    "column": 37,
+                    "line": 15,
+                    "offset": 737
+                  },
+                  "end": {
+                    "column": 40,
+                    "line": 15,
+                    "offset": 740
+                  },
+                  "source": "key"
+                },
+                "isStatic": true,
+                "constType": 3
+              },
+              "loc": {
+                "start": {
+                  "column": 36,
+                  "line": 15,
+                  "offset": 736
+                },
+                "end": {
+                  "column": 48,
+                  "line": 15,
+                  "offset": 748
+                },
+                "source": ":key=\"index\""
+              }
+            }
+          ],
+          "children": [],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 15,
+              "offset": 703
+            },
+            "end": {
+              "column": 54,
+              "line": 15,
+              "offset": 754
+            },
+            "source": "<li v-for=\"(item, index) of [1]\" :key=\"index\"></li>"
+          }
+        }
+      ],
+      "loc": {
+        "start": {
+          "column": 1,
+          "line": 1,
+          "offset": 0
+        },
+        "end": {
+          "column": 12,
+          "line": 16,
+          "offset": 767
+        },
+        "source": "<template>\r\n  <div v-for=\"user in users\" :key=\"user.id\"></div>\r\n  <li v-for=\"(item, index, key) in items\" :key=\"index\"></li>\r\n  <li v-for=\"{ id, name, email } in users\" :key=\"id\"></li>\r\n  <li v-for=\"({ id, name, email }, index) in users\" :key=\"id\"></li>\r\n  <li v-for=\"(item, index) in 8\" :key=\"index\"></li>\r\n  <li v-for=\"(item, index) in [1]\" :key=\"index\"></li>\r\n  <li v-for=\"n in even(numbers)\"></li>\r\n\r\n  <div v-for=\"user of users\" :key=\"user.id\"></div>\r\n  <li v-for=\"(item, index, key) of items\" :key=\"index\"></li>\r\n  <li v-for=\"{ id, name, email } of users\" :key=\"id\"></li>\r\n  <li v-for=\"({ id, name, email }, index) of users\" :key=\"id\"></li>\r\n  <li v-for=\"(item, index) of 8\" :key=\"index\"></li>\r\n  <li v-for=\"(item, index) of [1]\" :key=\"index\"></li>\r\n</template>"
+      }
+    }
+  ],
+  "loc": {
+    "start": {
+      "column": 1,
+      "line": 1,
+      "offset": 0
+    },
+    "end": {
+      "column": 1,
+      "line": 17,
+      "offset": 769
+    },
+    "source": "<template>\r\n  <div v-for=\"user in users\" :key=\"user.id\"></div>\r\n  <li v-for=\"(item, index, key) in items\" :key=\"index\"></li>\r\n  <li v-for=\"{ id, name, email } in users\" :key=\"id\"></li>\r\n  <li v-for=\"({ id, name, email }, index) in users\" :key=\"id\"></li>\r\n  <li v-for=\"(item, index) in 8\" :key=\"index\"></li>\r\n  <li v-for=\"(item, index) in [1]\" :key=\"index\"></li>\r\n  <li v-for=\"n in even(numbers)\"></li>\r\n\r\n  <div v-for=\"user of users\" :key=\"user.id\"></div>\r\n  <li v-for=\"(item, index, key) of items\" :key=\"index\"></li>\r\n  <li v-for=\"{ id, name, email } of users\" :key=\"id\"></li>\r\n  <li v-for=\"({ id, name, email }, index) of users\" :key=\"id\"></li>\r\n  <li v-for=\"(item, index) of 8\" :key=\"index\"></li>\r\n  <li v-for=\"(item, index) of [1]\" :key=\"index\"></li>\r\n</template>\r\n"
+  }
+}

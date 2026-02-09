@@ -1,18 +1,17 @@
 # @verter/typescript-plugin
 
-TypeScript plugin that enables `.vue` file import resolution in TypeScript/JavaScript files.
+TypeScript plugin enabling `.vue` import resolution in TS/JS files.
+
+> [!WARNING]
+> This project is **experimental and under active development**. APIs, architecture, and package boundaries may change without notice.
 
 ## Overview
 
-`@verter/typescript-plugin` intercepts TypeScript's module resolution to handle `.vue` imports. When you import a Vue component in a `.ts` or `.tsx` file, this plugin:
+`@verter/typescript-plugin` intercepts TypeScript's module resolution to handle `.vue` single-file component imports. When a `.vue` import is detected, the plugin reads the file, parses it with `@verter/core`, transforms it to TypeScript, caches the result, and returns type information back to the TypeScript language service.
 
-1. Detects the `.vue` import
-2. Parses and transforms the SFC using `@verter/core`
-3. Returns the generated type declarations to the TypeScript language service
+This enables full type checking, autocompletion, and go-to-definition for `.vue` imports inside `.ts` and `.js` files — without requiring manual type stubs or ambient declarations.
 
-This enables full type inference for Vue components in non-Vue files.
-
-> **Note**: The plugin generates typed representations for TypeScript analysis — the output is used for type-checking and IDE features, not for runtime execution.
+> **Note:** The plugin generates typed representations for TypeScript analysis — the output is used for type-checking and IDE features, not for runtime execution.
 
 ## Installation
 
@@ -20,58 +19,80 @@ This enables full type inference for Vue components in non-Vue files.
 pnpm add -D @verter/typescript-plugin
 ```
 
-## Configuration
-
 Add the plugin to your `tsconfig.json`:
 
-```json
+```jsonc
 {
   "compilerOptions": {
     "plugins": [
-      {
-        "name": "@verter/typescript-plugin"
-      }
+      { "name": "@verter/typescript-plugin" }
     ]
   }
 }
 ```
 
-## How It Works
+> If you are using the [Verter VS Code extension](../vue-vscode), the plugin is configured automatically — no manual `tsconfig.json` changes are needed.
 
-### Module Resolution
+## Architecture
 
-The plugin intercepts TypeScript's module resolution:
-
-```typescript
-// TypeScript 5.x
-languageServiceHost.resolveModuleNameLiterals = (moduleNames, containingFile) => {
-  return moduleNames.map(({ text: moduleName }) => {
-    if (isVue(moduleName)) {
-      // Parse .vue file and return resolved module
-      return { resolvedModule: parseVueModule(moduleName) };
-    }
-    // Fall back to default resolution
-    return defaultResolve(moduleName);
-  });
-};
-
-// TypeScript 4.x (legacy support)
-languageServiceHost.resolveModuleNames = (moduleNames, containingFile) => {
-  // Similar handling for older TS versions
-};
+```
+src/
+├── index.ts              # Plugin entry point (factory function)
+└── helpers/
+    ├── utils.ts          # Utility functions
+    └── getDtsSnapshot.ts # SFC parsing, transformation, and caching
 ```
 
-### SFC Transformation
+### Resolution Flow
 
-When a `.vue` import is detected:
+When a `.vue` import is encountered in any `.ts` or `.js` file, the following pipeline executes:
 
-1. The plugin reads the `.vue` file
-2. Parses it using `@verter/core`
-3. Transforms it to TypeScript
-4. Caches the result for performance
-5. Returns type information to TypeScript
+```mermaid
+flowchart TD
+    A[".vue import detected in TS/JS file"] --> B["Read .vue file from disk"]
+    B --> C["Compute content hash"]
+    C --> D{"Cache hit?\n(hash matches cached entry)"}
+    D -- Yes --> F["Return cached type declarations to TS"]
+    D -- No --> E["Parse and transform SFC\nwith @verter/core"]
+    E --> G["Store result in cache\n(keyed by content hash)"]
+    G --> F
+    F --> H["TypeScript receives full type info\n(props, emits, slots, expose)"]
+```
 
-### Type Inference
+### Plugin Lifecycle
+
+The plugin follows the standard TypeScript language service plugin factory pattern:
+
+```mermaid
+flowchart LR
+    subgraph Factory
+        A["init(modules)"] --> B["create(info)"]
+    end
+    subgraph Proxy
+        B --> C["Proxy on LanguageServiceHost"]
+        C --> D["resolveModuleNameLiterals\n(TS 5.x)"]
+        C --> E["resolveModuleNames\n(TS 4.x fallback)"]
+    end
+    subgraph Result
+        B --> F["Returns { create, getExternalFiles }"]
+    end
+```
+
+1. **`init()`** — Called once when TypeScript loads the plugin module. Receives the TypeScript module reference.
+2. **`create(info)`** — Called per project. Creates a `Proxy` on the `LanguageServiceHost` that intercepts module resolution calls.
+3. **Module resolution override** — When a `.vue` module specifier is encountered, the plugin resolves it to a virtual TypeScript snapshot generated from the SFC.
+4. **`getExternalFiles()`** — Reports `.vue` files to TypeScript so they are included in the project.
+
+## API / Usage
+
+Once installed and configured, the plugin works transparently. Any `.vue` import in a `.ts` or `.js` file will be resolved with full type information:
+
+```typescript
+import MyComponent from "./MyComponent.vue";
+
+// Props, emits, slots, and exposed methods are all fully typed
+<MyComponent message="hello" @update="handler" />
+```
 
 For a Vue component like:
 
@@ -88,28 +109,7 @@ defineEmits<{
 </script>
 ```
 
-The plugin generates type information allowing:
-
-```typescript
-import MyComponent from './MyComponent.vue';
-
-// Full type inference for props and events
-<MyComponent 
-  message="hello"  // ✓ Required
-  count={5}        // ✓ Optional
-  onUpdate={(v) => {}} // ✓ Event handler
-/>;
-```
-
-## Architecture
-
-```
-src/
-├── index.ts           # Plugin entry point
-└── helpers/
-    ├── utils.ts       # Utility functions
-    └── getDtsSnapshot.ts # SFC parsing and caching
-```
+TypeScript will infer the full component interface — required/optional props, event handlers, slot types, and exposed members — just as it would for a native `.tsx` component.
 
 ### Plugin Factory
 
@@ -117,77 +117,81 @@ src/
 const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
   return {
     create(info: tsModule.server.PluginCreateInfo) {
-      // Create proxied language service host
       const languageServiceHost = new Proxy(info.languageServiceHost, {
         get(target, key) {
-          // Override module resolution methods
           if (key === 'resolveModuleNameLiterals') {
-            return customResolver;
+            return customResolver; // TS 5.x
+          }
+          if (key === 'resolveModuleNames') {
+            return legacyResolver; // TS 4.x
           }
           return target[key];
         }
       });
-      
-      // Return language service with custom host
+
       return ts.createLanguageService(languageServiceHost);
+    },
+    getExternalFiles(project) {
+      return getVueFilesInProject(project);
     }
   };
 };
 ```
 
-## Usage with VS Code
+### Caching
 
-The Verter VS Code extension automatically configures this plugin when you open a Vue project:
+The plugin uses content-hash-based cache invalidation to avoid redundant parsing:
+
+- When a `.vue` file is imported, its content is read and hashed.
+- If the hash matches a cached entry, the cached TypeScript snapshot is returned immediately.
+- If the hash differs (file changed), the SFC is re-parsed and re-transformed, and the cache is updated.
+- The cache is cleared on project reload.
+
+### VS Code Integration
+
+The Verter VS Code extension automatically configures this plugin on activation:
 
 ```typescript
-// In extension activation
 commands.executeCommand(
   "_typescript.configurePlugin",
-  require.resolve("@verter/typescript-plugin"),
+  "@verter/typescript-plugin",
   { enable: true }
 );
 ```
 
-## Caching
+## Development / Build
 
-The plugin caches parsed Vue files for performance:
+```bash
+# Build the plugin
+pnpm --filter @verter/typescript-plugin build
 
-- File content hash-based cache invalidation
-- Watches for file changes
-- Clears cache on project reload
+# Watch mode for iterative development
+pnpm --filter @verter/typescript-plugin dev
+```
 
-## Compatibility
+To test changes inside VS Code, rebuild the plugin and then reload the TypeScript language service via `TypeScript: Restart TS Server` from the command palette.
 
-| TypeScript Version | Support |
-|-------------------|---------|
-| 5.x | Full support via `resolveModuleNameLiterals` |
-| 4.x | Support via `resolveModuleNames` |
+### Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| Plugin not loading | Ensure `@verter/typescript-plugin` is listed in `tsconfig.json` `compilerOptions.plugins`, then restart the TS server |
+| Missing type inference | Verify `@verter/core` is installed; check for SFC parse errors |
+| Slow first load | Expected on large projects — subsequent loads use the content-hash cache |
+
+## TypeScript Compatibility
+
+| TypeScript Version | Resolution Hook | Status |
+|--------------------|-----------------|--------|
+| 5.x | `resolveModuleNameLiterals` | Full support |
+| 4.x | `resolveModuleNames` | Supported (legacy path) |
 
 ## Dependencies
 
-- `typescript` - TypeScript language service types
-- `@verter/core` - SFC transformation
-
-## Troubleshooting
-
-### Plugin Not Loading
-
-1. Ensure the plugin is in `tsconfig.json` plugins array
-2. Restart the TypeScript language server
-3. Check that the package is installed
-
-### Type Inference Issues
-
-1. Verify `@verter/core` is installed
-2. Check for parsing errors in the `.vue` file
-3. Ensure the SFC uses `<script setup lang="ts">`
-
-### Performance
-
-For large projects:
-- The plugin caches transformed files
-- First load may be slower as files are parsed
-- Subsequent loads use cached results
+| Dependency | Purpose |
+|------------|---------|
+| `typescript` | TypeScript compiler API (peer dependency) |
+| `@verter/core` | SFC parsing and TSX transformation |
 
 ## License
 

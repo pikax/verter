@@ -1,0 +1,29 @@
+{
+  "name": "@verter/playground",
+  "version": "0.0.1-alpha.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "generate:vue-language": "tsx scripts/generate-vue-language.ts"
+  },
+  "dependencies": {
+    "@verter/wasm": "workspace:*",
+    "lz-string": "^1.5.0",
+    "vue": "^3.5.27"
+  },
+  "devDependencies": {
+    "@oxc-transform/binding-wasm32-wasi": "^0.112.0",
+    "@shikijs/monaco": "^3.9.2",
+    "@verter/vite-plugin": "workspace:*",
+    "@vitejs/plugin-vue": "^6.0.4",
+    "monaco-editor-core": "^0.55.1",
+    "oxc-transform": "^0.112.0",
+    "shiki": "^3.9.2",
+    "tsx": "^4.19.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1"
+  }
+}

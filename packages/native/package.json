@@ -1,0 +1,49 @@
+{
+  "name": "@verter/native",
+  "version": "0.0.1-alpha.1",
+  "description": "Native Node.js bindings for Verter Vue compiler",
+  "main": "index.js",
+  "types": "dist/index.d.ts",
+  "napi": {
+    "binaryName": "verter-native",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-gnu",
+      "aarch64-unknown-linux-musl",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build:types": "pnpm exec tsc --declaration --emitDeclarationOnly --outDir dist index.ts",
+    "build": "pnpm run build:types && napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml",
+    "build:debug": "pnpm run build:types && napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml",
+    "prepublishOnly": "napi prepublish -t npm",
+    "artifacts": "napi artifacts",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.5.1",
+    "typescript": "^5.7.3",
+    "vitest": "^4.0.18"
+  },
+  "files": [
+    "index.js",
+    "dist"
+  ],
+  "optionalDependencies": {
+    "@verter/native-darwin-x64": "workspace:*",
+    "@verter/native-darwin-arm64": "workspace:*",
+    "@verter/native-linux-x64-gnu": "workspace:*",
+    "@verter/native-linux-x64-musl": "workspace:*",
+    "@verter/native-linux-arm64-gnu": "workspace:*",
+    "@verter/native-linux-arm64-musl": "workspace:*",
+    "@verter/native-win32-x64-msvc": "workspace:*"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,1338 @@
+{
+  "type": 0,
+  "source": "<template>\n  <div id=\"app\" class=\"container\">\n    <h1>{{ title }}</h1>\n    <p v-if=\"showMessage\">{{ message }}</p>\n    <button @click=\"handleClick\" :disabled=\"isDisabled\">\n      Click me\n    </button>\n    <ul>\n      <li v-for=\"item in items\" :key=\"item.id\">{{ item.name }}</li>\n      <li v-for=\"  item in items   \" :key=\"item.id\">{{ item.name }}</li>\n\n      <li v-for=\"item of items\" :key=\"item.id\">{{ item.name }}</li>\n    </ul>\n    <!-- This is a comment -->\n    <input type=\"text\" v-model=\"inputValue\" />\n    <CustomComponent :prop=\"value\" @event=\"handler\" />\n  </div>\n</template>\n",
+  "children": [
+    {
+      "type": 1,
+      "tag": "template",
+      "ns": 0,
+      "tagType": 0,
+      "props": [],
+      "children": [
+        {
+          "type": 1,
+          "tag": "div",
+          "ns": 0,
+          "tagType": 0,
+          "props": [
+            {
+              "type": 6,
+              "name": "id",
+              "nameLoc": {
+                "start": {
+                  "column": 8,
+                  "line": 2,
+                  "offset": 18
+                },
+                "end": {
+                  "column": 10,
+                  "line": 2,
+                  "offset": 20
+                },
+                "source": "id"
+              },
+              "value": {
+                "type": 2,
+                "content": "app",
+                "loc": {
+                  "start": {
+                    "column": 11,
+                    "line": 2,
+                    "offset": 21
+                  },
+                  "end": {
+                    "column": 16,
+                    "line": 2,
+                    "offset": 26
+                  },
+                  "source": "\"app\""
+                }
+              },
+              "loc": {
+                "start": {
+                  "column": 8,
+                  "line": 2,
+                  "offset": 18
+                },
+                "end": {
+                  "column": 16,
+                  "line": 2,
+                  "offset": 26
+                },
+                "source": "id=\"app\""
+              }
+            },
+            {
+              "type": 6,
+              "name": "class",
+              "nameLoc": {
+                "start": {
+                  "column": 17,
+                  "line": 2,
+                  "offset": 27
+                },
+                "end": {
+                  "column": 22,
+                  "line": 2,
+                  "offset": 32
+                },
+                "source": "class"
+              },
+              "value": {
+                "type": 2,
+                "content": "container",
+                "loc": {
+                  "start": {
+                    "column": 23,
+                    "line": 2,
+                    "offset": 33
+                  },
+                  "end": {
+                    "column": 34,
+                    "line": 2,
+                    "offset": 44
+                  },
+                  "source": "\"container\""
+                }
+              },
+              "loc": {
+                "start": {
+                  "column": 17,
+                  "line": 2,
+                  "offset": 27
+                },
+                "end": {
+                  "column": 34,
+                  "line": 2,
+                  "offset": 44
+                },
+                "source": "class=\"container\""
+              }
+            }
+          ],
+          "children": [
+            {
+              "type": 1,
+              "tag": "h1",
+              "ns": 0,
+              "tagType": 0,
+              "props": [],
+              "children": [
+                {
+                  "type": 5,
+                  "content": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 12,
+                        "line": 3,
+                        "offset": 57
+                      },
+                      "end": {
+                        "column": 17,
+                        "line": 3,
+                        "offset": 62
+                      },
+                      "source": "title"
+                    },
+                    "content": "title",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "loc": {
+                    "start": {
+                      "column": 9,
+                      "line": 3,
+                      "offset": 54
+                    },
+                    "end": {
+                      "column": 20,
+                      "line": 3,
+                      "offset": 65
+                    },
+                    "source": "{{ title }}"
+                  }
+                }
+              ],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 3,
+                  "offset": 50
+                },
+                "end": {
+                  "column": 25,
+                  "line": 3,
+                  "offset": 70
+                },
+                "source": "<h1>{{ title }}</h1>"
+              }
+            },
+            {
+              "type": 1,
+              "tag": "p",
+              "ns": 0,
+              "tagType": 0,
+              "props": [
+                {
+                  "type": 7,
+                  "name": "if",
+                  "rawName": "v-if",
+                  "exp": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 14,
+                        "line": 4,
+                        "offset": 84
+                      },
+                      "end": {
+                        "column": 25,
+                        "line": 4,
+                        "offset": 95
+                      },
+                      "source": "showMessage"
+                    },
+                    "content": "showMessage",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "modifiers": [],
+                  "loc": {
+                    "start": {
+                      "column": 8,
+                      "line": 4,
+                      "offset": 78
+                    },
+                    "end": {
+                      "column": 26,
+                      "line": 4,
+                      "offset": 96
+                    },
+                    "source": "v-if=\"showMessage\""
+                  }
+                }
+              ],
+              "children": [
+                {
+                  "type": 5,
+                  "content": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 30,
+                        "line": 4,
+                        "offset": 100
+                      },
+                      "end": {
+                        "column": 37,
+                        "line": 4,
+                        "offset": 107
+                      },
+                      "source": "message"
+                    },
+                    "content": "message",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "loc": {
+                    "start": {
+                      "column": 27,
+                      "line": 4,
+                      "offset": 97
+                    },
+                    "end": {
+                      "column": 40,
+                      "line": 4,
+                      "offset": 110
+                    },
+                    "source": "{{ message }}"
+                  }
+                }
+              ],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 4,
+                  "offset": 75
+                },
+                "end": {
+                  "column": 44,
+                  "line": 4,
+                  "offset": 114
+                },
+                "source": "<p v-if=\"showMessage\">{{ message }}</p>"
+              }
+            },
+            {
+              "type": 1,
+              "tag": "button",
+              "ns": 0,
+              "tagType": 0,
+              "props": [
+                {
+                  "type": 7,
+                  "name": "on",
+                  "rawName": "@click",
+                  "exp": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 21,
+                        "line": 5,
+                        "offset": 135
+                      },
+                      "end": {
+                        "column": 32,
+                        "line": 5,
+                        "offset": 146
+                      },
+                      "source": "handleClick"
+                    },
+                    "content": "handleClick",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "arg": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 14,
+                        "line": 5,
+                        "offset": 128
+                      },
+                      "end": {
+                        "column": 19,
+                        "line": 5,
+                        "offset": 133
+                      },
+                      "source": "click"
+                    },
+                    "content": "click",
+                    "isStatic": true,
+                    "constType": 3
+                  },
+                  "modifiers": [],
+                  "loc": {
+                    "start": {
+                      "column": 13,
+                      "line": 5,
+                      "offset": 127
+                    },
+                    "end": {
+                      "column": 33,
+                      "line": 5,
+                      "offset": 147
+                    },
+                    "source": "@click=\"handleClick\""
+                  }
+                },
+                {
+                  "type": 7,
+                  "name": "bind",
+                  "rawName": ":disabled",
+                  "exp": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 45,
+                        "line": 5,
+                        "offset": 159
+                      },
+                      "end": {
+                        "column": 55,
+                        "line": 5,
+                        "offset": 169
+                      },
+                      "source": "isDisabled"
+                    },
+                    "content": "isDisabled",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "arg": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 35,
+                        "line": 5,
+                        "offset": 149
+                      },
+                      "end": {
+                        "column": 43,
+                        "line": 5,
+                        "offset": 157
+                      },
+                      "source": "disabled"
+                    },
+                    "content": "disabled",
+                    "isStatic": true,
+                    "constType": 3
+                  },
+                  "modifiers": [],
+                  "loc": {
+                    "start": {
+                      "column": 34,
+                      "line": 5,
+                      "offset": 148
+                    },
+                    "end": {
+                      "column": 56,
+                      "line": 5,
+                      "offset": 170
+                    },
+                    "source": ":disabled=\"isDisabled\""
+                  }
+                }
+              ],
+              "children": [
+                {
+                  "type": 2,
+                  "content": " Click me ",
+                  "loc": {
+                    "start": {
+                      "column": 57,
+                      "line": 5,
+                      "offset": 171
+                    },
+                    "end": {
+                      "column": 5,
+                      "line": 7,
+                      "offset": 191
+                    },
+                    "source": "\n      Click me\n    "
+                  }
+                }
+              ],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 5,
+                  "offset": 119
+                },
+                "end": {
+                  "column": 14,
+                  "line": 7,
+                  "offset": 200
+                },
+                "source": "<button @click=\"handleClick\" :disabled=\"isDisabled\">\n      Click me\n    </button>"
+              }
+            },
+            {
+              "type": 1,
+              "tag": "ul",
+              "ns": 0,
+              "tagType": 0,
+              "props": [],
+              "children": [
+                {
+                  "type": 1,
+                  "tag": "li",
+                  "ns": 0,
+                  "tagType": 0,
+                  "props": [
+                    {
+                      "type": 7,
+                      "name": "for",
+                      "rawName": "v-for",
+                      "exp": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 18,
+                            "line": 9,
+                            "offset": 227
+                          },
+                          "end": {
+                            "column": 31,
+                            "line": 9,
+                            "offset": 240
+                          },
+                          "source": "item in items"
+                        },
+                        "content": "item in items",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "modifiers": [],
+                      "loc": {
+                        "start": {
+                          "column": 11,
+                          "line": 9,
+                          "offset": 220
+                        },
+                        "end": {
+                          "column": 32,
+                          "line": 9,
+                          "offset": 241
+                        },
+                        "source": "v-for=\"item in items\""
+                      },
+                      "forParseResult": {
+                        "source": {
+                          "type": 4,
+                          "loc": {
+                            "start": {
+                              "column": 26,
+                              "line": 9,
+                              "offset": 235
+                            },
+                            "end": {
+                              "column": 31,
+                              "line": 9,
+                              "offset": 240
+                            },
+                            "source": "items"
+                          },
+                          "content": "items",
+                          "isStatic": false,
+                          "constType": 0
+                        },
+                        "value": {
+                          "type": 4,
+                          "loc": {
+                            "start": {
+                              "column": 18,
+                              "line": 9,
+                              "offset": 227
+                            },
+                            "end": {
+                              "column": 22,
+                              "line": 9,
+                              "offset": 231
+                            },
+                            "source": "item"
+                          },
+                          "content": "item",
+                          "isStatic": false,
+                          "constType": 0
+                        },
+                        "finalized": false
+                      }
+                    },
+                    {
+                      "type": 7,
+                      "name": "bind",
+                      "rawName": ":key",
+                      "exp": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 39,
+                            "line": 9,
+                            "offset": 248
+                          },
+                          "end": {
+                            "column": 46,
+                            "line": 9,
+                            "offset": 255
+                          },
+                          "source": "item.id"
+                        },
+                        "content": "item.id",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "arg": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 34,
+                            "line": 9,
+                            "offset": 243
+                          },
+                          "end": {
+                            "column": 37,
+                            "line": 9,
+                            "offset": 246
+                          },
+                          "source": "key"
+                        },
+                        "content": "key",
+                        "isStatic": true,
+                        "constType": 3
+                      },
+                      "modifiers": [],
+                      "loc": {
+                        "start": {
+                          "column": 33,
+                          "line": 9,
+                          "offset": 242
+                        },
+                        "end": {
+                          "column": 47,
+                          "line": 9,
+                          "offset": 256
+                        },
+                        "source": ":key=\"item.id\""
+                      }
+                    }
+                  ],
+                  "children": [
+                    {
+                      "type": 5,
+                      "content": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 51,
+                            "line": 9,
+                            "offset": 260
+                          },
+                          "end": {
+                            "column": 60,
+                            "line": 9,
+                            "offset": 269
+                          },
+                          "source": "item.name"
+                        },
+                        "content": "item.name",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "loc": {
+                        "start": {
+                          "column": 48,
+                          "line": 9,
+                          "offset": 257
+                        },
+                        "end": {
+                          "column": 63,
+                          "line": 9,
+                          "offset": 272
+                        },
+                        "source": "{{ item.name }}"
+                      }
+                    }
+                  ],
+                  "loc": {
+                    "start": {
+                      "column": 7,
+                      "line": 9,
+                      "offset": 216
+                    },
+                    "end": {
+                      "column": 68,
+                      "line": 9,
+                      "offset": 277
+                    },
+                    "source": "<li v-for=\"item in items\" :key=\"item.id\">{{ item.name }}</li>"
+                  }
+                },
+                {
+                  "type": 1,
+                  "tag": "li",
+                  "ns": 0,
+                  "tagType": 0,
+                  "props": [
+                    {
+                      "type": 7,
+                      "name": "for",
+                      "rawName": "v-for",
+                      "exp": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 18,
+                            "line": 10,
+                            "offset": 295
+                          },
+                          "end": {
+                            "column": 36,
+                            "line": 10,
+                            "offset": 313
+                          },
+                          "source": "  item in items   "
+                        },
+                        "content": "  item in items   ",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "modifiers": [],
+                      "loc": {
+                        "start": {
+                          "column": 11,
+                          "line": 10,
+                          "offset": 288
+                        },
+                        "end": {
+                          "column": 37,
+                          "line": 10,
+                          "offset": 314
+                        },
+                        "source": "v-for=\"  item in items   \""
+                      },
+                      "forParseResult": {
+                        "source": {
+                          "type": 4,
+                          "loc": {
+                            "start": {
+                              "column": 28,
+                              "line": 10,
+                              "offset": 305
+                            },
+                            "end": {
+                              "column": 33,
+                              "line": 10,
+                              "offset": 310
+                            },
+                            "source": "items"
+                          },
+                          "content": "items",
+                          "isStatic": false,
+                          "constType": 0
+                        },
+                        "value": {
+                          "type": 4,
+                          "loc": {
+                            "start": {
+                              "column": 20,
+                              "line": 10,
+                              "offset": 297
+                            },
+                            "end": {
+                              "column": 24,
+                              "line": 10,
+                              "offset": 301
+                            },
+                            "source": "item"
+                          },
+                          "content": "item",
+                          "isStatic": false,
+                          "constType": 0
+                        },
+                        "finalized": false
+                      }
+                    },
+                    {
+                      "type": 7,
+                      "name": "bind",
+                      "rawName": ":key",
+                      "exp": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 44,
+                            "line": 10,
+                            "offset": 321
+                          },
+                          "end": {
+                            "column": 51,
+                            "line": 10,
+                            "offset": 328
+                          },
+                          "source": "item.id"
+                        },
+                        "content": "item.id",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "arg": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 39,
+                            "line": 10,
+                            "offset": 316
+                          },
+                          "end": {
+                            "column": 42,
+                            "line": 10,
+                            "offset": 319
+                          },
+                          "source": "key"
+                        },
+                        "content": "key",
+                        "isStatic": true,
+                        "constType": 3
+                      },
+                      "modifiers": [],
+                      "loc": {
+                        "start": {
+                          "column": 38,
+                          "line": 10,
+                          "offset": 315
+                        },
+                        "end": {
+                          "column": 52,
+                          "line": 10,
+                          "offset": 329
+                        },
+                        "source": ":key=\"item.id\""
+                      }
+                    }
+                  ],
+                  "children": [
+                    {
+                      "type": 5,
+                      "content": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 56,
+                            "line": 10,
+                            "offset": 333
+                          },
+                          "end": {
+                            "column": 65,
+                            "line": 10,
+                            "offset": 342
+                          },
+                          "source": "item.name"
+                        },
+                        "content": "item.name",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "loc": {
+                        "start": {
+                          "column": 53,
+                          "line": 10,
+                          "offset": 330
+                        },
+                        "end": {
+                          "column": 68,
+                          "line": 10,
+                          "offset": 345
+                        },
+                        "source": "{{ item.name }}"
+                      }
+                    }
+                  ],
+                  "loc": {
+                    "start": {
+                      "column": 7,
+                      "line": 10,
+                      "offset": 284
+                    },
+                    "end": {
+                      "column": 73,
+                      "line": 10,
+                      "offset": 350
+                    },
+                    "source": "<li v-for=\"  item in items   \" :key=\"item.id\">{{ item.name }}</li>"
+                  }
+                },
+                {
+                  "type": 1,
+                  "tag": "li",
+                  "ns": 0,
+                  "tagType": 0,
+                  "props": [
+                    {
+                      "type": 7,
+                      "name": "for",
+                      "rawName": "v-for",
+                      "exp": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 18,
+                            "line": 12,
+                            "offset": 369
+                          },
+                          "end": {
+                            "column": 31,
+                            "line": 12,
+                            "offset": 382
+                          },
+                          "source": "item of items"
+                        },
+                        "content": "item of items",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "modifiers": [],
+                      "loc": {
+                        "start": {
+                          "column": 11,
+                          "line": 12,
+                          "offset": 362
+                        },
+                        "end": {
+                          "column": 32,
+                          "line": 12,
+                          "offset": 383
+                        },
+                        "source": "v-for=\"item of items\""
+                      },
+                      "forParseResult": {
+                        "source": {
+                          "type": 4,
+                          "loc": {
+                            "start": {
+                              "column": 26,
+                              "line": 12,
+                              "offset": 377
+                            },
+                            "end": {
+                              "column": 31,
+                              "line": 12,
+                              "offset": 382
+                            },
+                            "source": "items"
+                          },
+                          "content": "items",
+                          "isStatic": false,
+                          "constType": 0
+                        },
+                        "value": {
+                          "type": 4,
+                          "loc": {
+                            "start": {
+                              "column": 18,
+                              "line": 12,
+                              "offset": 369
+                            },
+                            "end": {
+                              "column": 22,
+                              "line": 12,
+                              "offset": 373
+                            },
+                            "source": "item"
+                          },
+                          "content": "item",
+                          "isStatic": false,
+                          "constType": 0
+                        },
+                        "finalized": false
+                      }
+                    },
+                    {
+                      "type": 7,
+                      "name": "bind",
+                      "rawName": ":key",
+                      "exp": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 39,
+                            "line": 12,
+                            "offset": 390
+                          },
+                          "end": {
+                            "column": 46,
+                            "line": 12,
+                            "offset": 397
+                          },
+                          "source": "item.id"
+                        },
+                        "content": "item.id",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "arg": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 34,
+                            "line": 12,
+                            "offset": 385
+                          },
+                          "end": {
+                            "column": 37,
+                            "line": 12,
+                            "offset": 388
+                          },
+                          "source": "key"
+                        },
+                        "content": "key",
+                        "isStatic": true,
+                        "constType": 3
+                      },
+                      "modifiers": [],
+                      "loc": {
+                        "start": {
+                          "column": 33,
+                          "line": 12,
+                          "offset": 384
+                        },
+                        "end": {
+                          "column": 47,
+                          "line": 12,
+                          "offset": 398
+                        },
+                        "source": ":key=\"item.id\""
+                      }
+                    }
+                  ],
+                  "children": [
+                    {
+                      "type": 5,
+                      "content": {
+                        "type": 4,
+                        "loc": {
+                          "start": {
+                            "column": 51,
+                            "line": 12,
+                            "offset": 402
+                          },
+                          "end": {
+                            "column": 60,
+                            "line": 12,
+                            "offset": 411
+                          },
+                          "source": "item.name"
+                        },
+                        "content": "item.name",
+                        "isStatic": false,
+                        "constType": 0
+                      },
+                      "loc": {
+                        "start": {
+                          "column": 48,
+                          "line": 12,
+                          "offset": 399
+                        },
+                        "end": {
+                          "column": 63,
+                          "line": 12,
+                          "offset": 414
+                        },
+                        "source": "{{ item.name }}"
+                      }
+                    }
+                  ],
+                  "loc": {
+                    "start": {
+                      "column": 7,
+                      "line": 12,
+                      "offset": 358
+                    },
+                    "end": {
+                      "column": 68,
+                      "line": 12,
+                      "offset": 419
+                    },
+                    "source": "<li v-for=\"item of items\" :key=\"item.id\">{{ item.name }}</li>"
+                  }
+                }
+              ],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 8,
+                  "offset": 205
+                },
+                "end": {
+                  "column": 10,
+                  "line": 13,
+                  "offset": 429
+                },
+                "source": "<ul>\n      <li v-for=\"item in items\" :key=\"item.id\">{{ item.name }}</li>\n      <li v-for=\"  item in items   \" :key=\"item.id\">{{ item.name }}</li>\n\n      <li v-for=\"item of items\" :key=\"item.id\">{{ item.name }}</li>\n    </ul>"
+              }
+            },
+            {
+              "type": 3,
+              "content": " This is a comment ",
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 14,
+                  "offset": 434
+                },
+                "end": {
+                  "column": 31,
+                  "line": 14,
+                  "offset": 460
+                },
+                "source": "<!-- This is a comment -->"
+              }
+            },
+            {
+              "type": 1,
+              "tag": "input",
+              "ns": 0,
+              "tagType": 0,
+              "props": [
+                {
+                  "type": 6,
+                  "name": "type",
+                  "nameLoc": {
+                    "start": {
+                      "column": 12,
+                      "line": 15,
+                      "offset": 472
+                    },
+                    "end": {
+                      "column": 16,
+                      "line": 15,
+                      "offset": 476
+                    },
+                    "source": "type"
+                  },
+                  "value": {
+                    "type": 2,
+                    "content": "text",
+                    "loc": {
+                      "start": {
+                        "column": 17,
+                        "line": 15,
+                        "offset": 477
+                      },
+                      "end": {
+                        "column": 23,
+                        "line": 15,
+                        "offset": 483
+                      },
+                      "source": "\"text\""
+                    }
+                  },
+                  "loc": {
+                    "start": {
+                      "column": 12,
+                      "line": 15,
+                      "offset": 472
+                    },
+                    "end": {
+                      "column": 23,
+                      "line": 15,
+                      "offset": 483
+                    },
+                    "source": "type=\"text\""
+                  }
+                },
+                {
+                  "type": 7,
+                  "name": "model",
+                  "rawName": "v-model",
+                  "exp": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 33,
+                        "line": 15,
+                        "offset": 493
+                      },
+                      "end": {
+                        "column": 43,
+                        "line": 15,
+                        "offset": 503
+                      },
+                      "source": "inputValue"
+                    },
+                    "content": "inputValue",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "modifiers": [],
+                  "loc": {
+                    "start": {
+                      "column": 24,
+                      "line": 15,
+                      "offset": 484
+                    },
+                    "end": {
+                      "column": 44,
+                      "line": 15,
+                      "offset": 504
+                    },
+                    "source": "v-model=\"inputValue\""
+                  }
+                }
+              ],
+              "children": [],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 15,
+                  "offset": 465
+                },
+                "end": {
+                  "column": 47,
+                  "line": 15,
+                  "offset": 507
+                },
+                "source": "<input type=\"text\" v-model=\"inputValue\" />"
+              },
+              "isSelfClosing": true
+            },
+            {
+              "type": 1,
+              "tag": "CustomComponent",
+              "ns": 0,
+              "tagType": 1,
+              "props": [
+                {
+                  "type": 7,
+                  "name": "bind",
+                  "rawName": ":prop",
+                  "exp": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 29,
+                        "line": 16,
+                        "offset": 536
+                      },
+                      "end": {
+                        "column": 34,
+                        "line": 16,
+                        "offset": 541
+                      },
+                      "source": "value"
+                    },
+                    "content": "value",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "arg": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 23,
+                        "line": 16,
+                        "offset": 530
+                      },
+                      "end": {
+                        "column": 27,
+                        "line": 16,
+                        "offset": 534
+                      },
+                      "source": "prop"
+                    },
+                    "content": "prop",
+                    "isStatic": true,
+                    "constType": 3
+                  },
+                  "modifiers": [],
+                  "loc": {
+                    "start": {
+                      "column": 22,
+                      "line": 16,
+                      "offset": 529
+                    },
+                    "end": {
+                      "column": 35,
+                      "line": 16,
+                      "offset": 542
+                    },
+                    "source": ":prop=\"value\""
+                  }
+                },
+                {
+                  "type": 7,
+                  "name": "on",
+                  "rawName": "@event",
+                  "exp": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 44,
+                        "line": 16,
+                        "offset": 551
+                      },
+                      "end": {
+                        "column": 51,
+                        "line": 16,
+                        "offset": 558
+                      },
+                      "source": "handler"
+                    },
+                    "content": "handler",
+                    "isStatic": false,
+                    "constType": 0
+                  },
+                  "arg": {
+                    "type": 4,
+                    "loc": {
+                      "start": {
+                        "column": 37,
+                        "line": 16,
+                        "offset": 544
+                      },
+                      "end": {
+                        "column": 42,
+                        "line": 16,
+                        "offset": 549
+                      },
+                      "source": "event"
+                    },
+                    "content": "event",
+                    "isStatic": true,
+                    "constType": 3
+                  },
+                  "modifiers": [],
+                  "loc": {
+                    "start": {
+                      "column": 36,
+                      "line": 16,
+                      "offset": 543
+                    },
+                    "end": {
+                      "column": 52,
+                      "line": 16,
+                      "offset": 559
+                    },
+                    "source": "@event=\"handler\""
+                  }
+                }
+              ],
+              "children": [],
+              "loc": {
+                "start": {
+                  "column": 5,
+                  "line": 16,
+                  "offset": 512
+                },
+                "end": {
+                  "column": 55,
+                  "line": 16,
+                  "offset": 562
+                },
+                "source": "<CustomComponent :prop=\"value\" @event=\"handler\" />"
+              },
+              "isSelfClosing": true
+            }
+          ],
+          "loc": {
+            "start": {
+              "column": 3,
+              "line": 2,
+              "offset": 13
+            },
+            "end": {
+              "column": 9,
+              "line": 17,
+              "offset": 571
+            },
+            "source": "<div id=\"app\" class=\"container\">\n    <h1>{{ title }}</h1>\n    <p v-if=\"showMessage\">{{ message }}</p>\n    <button @click=\"handleClick\" :disabled=\"isDisabled\">\n      Click me\n    </button>\n    <ul>\n      <li v-for=\"item in items\" :key=\"item.id\">{{ item.name }}</li>\n      <li v-for=\"  item in items   \" :key=\"item.id\">{{ item.name }}</li>\n\n      <li v-for=\"item of items\" :key=\"item.id\">{{ item.name }}</li>\n    </ul>\n    <!-- This is a comment -->\n    <input type=\"text\" v-model=\"inputValue\" />\n    <CustomComponent :prop=\"value\" @event=\"handler\" />\n  </div>"
+          }
+        }
+      ],
+      "loc": {
+        "start": {
+          "column": 1,
+          "line": 1,
+          "offset": 0
+        },
+        "end": {
+          "column": 12,
+          "line": 18,
+          "offset": 583
+        },
+        "source": "<template>\n  <div id=\"app\" class=\"container\">\n    <h1>{{ title }}</h1>\n    <p v-if=\"showMessage\">{{ message }}</p>\n    <button @click=\"handleClick\" :disabled=\"isDisabled\">\n      Click me\n    </button>\n    <ul>\n      <li v-for=\"item in items\" :key=\"item.id\">{{ item.name }}</li>\n      <li v-for=\"  item in items   \" :key=\"item.id\">{{ item.name }}</li>\n\n      <li v-for=\"item of items\" :key=\"item.id\">{{ item.name }}</li>\n    </ul>\n    <!-- This is a comment -->\n    <input type=\"text\" v-model=\"inputValue\" />\n    <CustomComponent :prop=\"value\" @event=\"handler\" />\n  </div>\n</template>"
+      }
+    }
+  ],
+  "helpers": {},
+  "components": [],
+  "directives": [],
+  "hoists": [],
+  "imports": [],
+  "cached": [],
+  "temps": 0,
+  "loc": {
+    "start": {
+      "column": 1,
+      "line": 1,
+      "offset": 0
+    },
+    "end": {
+      "column": 1,
+      "line": 19,
+      "offset": 584
+    },
+    "source": "<template>\n  <div id=\"app\" class=\"container\">\n    <h1>{{ title }}</h1>\n    <p v-if=\"showMessage\">{{ message }}</p>\n    <button @click=\"handleClick\" :disabled=\"isDisabled\">\n      Click me\n    </button>\n    <ul>\n      <li v-for=\"item in items\" :key=\"item.id\">{{ item.name }}</li>\n      <li v-for=\"  item in items   \" :key=\"item.id\">{{ item.name }}</li>\n\n      <li v-for=\"item of items\" :key=\"item.id\">{{ item.name }}</li>\n    </ul>\n    <!-- This is a comment -->\n    <input type=\"text\" v-model=\"inputValue\" />\n    <CustomComponent :prop=\"value\" @event=\"handler\" />\n  </div>\n</template>\n"
+  }
+}

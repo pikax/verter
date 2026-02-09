@@ -1,0 +1,33 @@
+{
+  "name": "@verter/wasm",
+  "version": "0.0.1-alpha.1",
+  "description": "WASM bindings for Verter Vue compiler",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build:wasm": "wasm-pack build ../../crates/verter_wasm --target web --out-dir ../../packages/wasm/wasm",
+    "build:ts": "tsdown src/index.ts --format cjs,esm --dts --outDir dist",
+    "build:copy-playground": "npx shx cp wasm/verter_wasm_bg.wasm ../playground/public/verter_wasm_bg.wasm",
+    "build": "pnpm run build:wasm && pnpm run build:ts && pnpm run build:copy-playground",
+    "test": "vitest run"
+  },
+  "sideEffects": false,
+  "devDependencies": {
+    "tsdown": "^0.12.4",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "files": [
+    "dist",
+    "wasm"
+  ],
+  "license": "MIT"
+}

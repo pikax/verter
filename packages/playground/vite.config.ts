@@ -1,0 +1,66 @@
+import { defineConfig } from "vite";
+import verter from "@verter/vite-plugin";
+import vue from "@vitejs/plugin-vue";
+import { resolve } from "path";
+import { readFileSync } from "fs";
+
+const pkg = JSON.parse(
+  readFileSync(resolve(__dirname, "../wasm/package.json"), "utf8"),
+);
+
+export default defineConfig({
+  define: {
+    __VERTER_VERSION__: JSON.stringify(pkg.version),
+  },
+  plugins: [
+    // verter(),
+    vue(),
+  ],
+  resolve: {
+    alias: {
+      "@": resolve(__dirname, "src"),
+      "verter-wasm-glue": resolve(__dirname, "../wasm/wasm/verter_wasm.js"),
+    },
+  },
+  optimizeDeps: {
+    exclude: ["@verter/wasm", "@oxc-transform/binding-wasm32-wasi"],
+  },
+  server: {
+    fs: {
+      allow: ["..", "../../node_modules"],
+    },
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
+  },
+  build: {
+    target: "esnext",
+    minify: false,
+    rollupOptions: {
+      output: {
+        format: "es",
+        // entryFileNames: "[name].js",
+        // chunkFileNames: "[name].js",
+        // manualChunks: (id) => {
+        //   // Separate each .vue file into its own chunk
+        //   if (id.includes(".vue")) {
+        //     const match = id.match(/([^/\\]+)\.vue$/);
+        //     if (match) {
+        //       return match[1];
+        //     }
+        //   }
+        // },
+        
+        manualChunks: {
+          monaco: ["monaco-editor-core"],
+          shiki: ["shiki", "@shikijs/monaco"],
+        },
+      },
+    },
+  },
+  worker: {
+    format: "es",
+  },
+  assetsInclude: ["**/*.wasm"],
+});

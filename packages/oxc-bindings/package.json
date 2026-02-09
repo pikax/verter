@@ -1,14 +1,14 @@
 {
   "name": "@verter/oxc-bindings",
   "displayName": "Verter OXC bindings",
-  "version": "1.0.0",
+  "version": "0.0.1-alpha.1",
   "description": "Resolves and downloads OXC bindings",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -b"
   },
   "devDependencies": {
-    "@types/node": "^25.0.8",
+    "@types/node": "^25.2.1",
     "typescript": "^5.9.3"
   }
 }

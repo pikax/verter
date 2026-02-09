@@ -33,6 +33,7 @@ export type RequestResponse = {
   [RequestType.GetCompiledCode]: {
     js: { code: string; map: any | undefined };
     css: { code: string; map: any | undefined };
+    wasm: { code: string; map: any | undefined };
   };
   [RequestType.GetStatistics]: StatisticsSnapshot;
 };

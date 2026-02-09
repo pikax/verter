@@ -1,0 +1,168 @@
+ {
+-  type: 0
+-  helpers: {
+-  }
+-  components: [
+-  ]
+-  directives: [
+-  ]
+-  hoists: [
+-  ]
+-  imports: [
+-  ]
+-  cached: [
+-  ]
+-  temps: 0
+   children: [
+     {
+-      type: 1
+-      tagType: 0
++      tagType: 3
+       children: [
+         {
+-          type: 1
+           children: [
+             {
+-              type: 1
+-              isSelfClosing: true
+               props: [
+                 {
+-                  type: 6
+                   value: {
+-                    type: 2
+                     loc: {
+                       start: {
+-                        column: 16
++                        column: 17
+-                        offset: 36
++                        offset: 37
+                       }
+                       end: {
+-                        column: 20
++                        column: 19
+-                        offset: 40
++                        offset: 39
+                       }
+-                      source: "\"50\""
++                      source: "50"
+                     }
+                   }
+                 }
+                 {
+-                  type: 6
+                   value: {
+-                    type: 2
+                     loc: {
+                       start: {
+-                        column: 24
++                        column: 25
+-                        offset: 44
++                        offset: 45
+                       }
+                       end: {
+-                        column: 28
++                        column: 27
+-                        offset: 48
++                        offset: 47
+                       }
+-                      source: "\"50\""
++                      source: "50"
+                     }
+                   }
+                 }
+                 {
+-                  type: 6
+                   value: {
+-                    type: 2
+                     loc: {
+                       start: {
+-                        column: 31
++                        column: 32
+-                        offset: 51
++                        offset: 52
+                       }
+                       end: {
+-                        column: 35
++                        column: 34
+-                        offset: 55
++                        offset: 54
+                       }
+-                      source: "\"40\""
++                      source: "40"
+                     }
+                   }
+                 }
+                 {
+-                  type: 6
+                   value: {
+-                    type: 2
+                     loc: {
+                       start: {
+-                        column: 43
++                        column: 44
+-                        offset: 63
++                        offset: 64
+                       }
+                       end: {
+-                        column: 50
++                        column: 49
+-                        offset: 70
++                        offset: 69
+                       }
+-                      source: "\"black\""
++                      source: "black"
+                     }
+                   }
+                 }
+                 {
+-                  type: 6
+                   value: {
+-                    type: 2
+                     loc: {
+                       start: {
+-                        column: 64
++                        column: 65
+-                        offset: 84
++                        offset: 85
+                       }
+                       end: {
+-                        column: 67
++                        column: 66
+-                        offset: 87
++                        offset: 86
+                       }
+-                      source: "\"3\""
++                      source: "3"
+                     }
+                   }
+                 }
+                 {
+-                  type: 6
+                   value: {
+-                    type: 2
+                     loc: {
+                       start: {
+-                        column: 73
++                        column: 74
+-                        offset: 93
++                        offset: 94
+                       }
+                       end: {
+-                        column: 78
++                        column: 77
+-                        offset: 98
++                        offset: 97
+                       }
+-                      source: "\"red\""
++                      source: "red"
+                     }
+                   }
+                 }
+               ]
+             }
+           ]
+         }
+       ]
+     }
+   ]
+ }

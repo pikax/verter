@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <style>
+      html.dark {
+        color-scheme: dark;
+      }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+          Oxygen, Ubuntu, Cantarell, sans-serif;
+        margin: 0;
+        padding: 0;
+      }
+    </style>
+    <script>
+      ;(() => {
+        window.process = { env: {} }
+        window.__modules__ = {}
+        window.__css__ = []
+
+        window.__export__ = (mod, key, get) => {
+          Object.defineProperty(mod, key, {
+            enumerable: true,
+            configurable: true,
+            get,
+          })
+        }
+
+        window.__dynamic_import__ = (key) => {
+          return Promise.resolve(window.__modules__[key])
+        }
+
+        const originalConsole = { ...console }
+        ;['log', 'info', 'warn', 'error'].forEach((method) => {
+          console[method] = (...args) => {
+            originalConsole[method](...args)
+            parent.postMessage(
+              {
+                action: 'console',
+                method,
+                args: args.map((arg) =>
+                  typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
+                ),
+              },
+              '*'
+            )
+          }
+        })
+
+        window.onerror = (msg, url, line, col, err) => {
+          parent.postMessage(
+            {
+              action: 'error',
+              message: msg,
+              stack: err?.stack,
+            },
+            '*'
+          )
+        }
+
+        window.addEventListener('unhandledrejection', (e) => {
+          parent.postMessage(
+            {
+              action: 'error',
+              message: e.reason?.message || String(e.reason),
+              stack: e.reason?.stack,
+            },
+            '*'
+          )
+        })
+
+        window.addEventListener('message', async (ev) => {
+          const { action, scripts, css, darkMode } = ev.data
+
+          if (action === 'eval') {
+            try {
+              window.__modules__ = {}
+              window.__css__ = []
+
+              if (darkMode) {
+                document.documentElement.classList.add('dark')
+              } else {
+                document.documentElement.classList.remove('dark')
+              }
+
+              // Remove old styles
+              document.querySelectorAll('style[data-v]').forEach((el) => el.remove())
+
+              // Add CSS
+              if (css) {
+                const style = document.createElement('style')
+                style.setAttribute('data-v', '')
+                style.textContent = css
+                document.head.appendChild(style)
+              }
+
+              // Clear app
+              const app = document.getElementById('app')
+              if (app) app.innerHTML = ''
+
+              // Remove old dynamically-added scripts
+              document.querySelectorAll('script[data-preview]').forEach((el) => el.remove())
+
+              // Load Vue and expose on window (import map must be in the HTML)
+              if (!window.Vue) {
+                const Vue = await import('vue')
+                window.Vue = Vue
+              }
+
+              // Evaluate scripts sequentially, each wrapped in an IIFE so const
+              // declarations don't conflict between re-evaluations
+              for (const script of scripts) {
+                const scriptEl = document.createElement('script')
+                scriptEl.setAttribute('data-preview', '')
+                scriptEl.textContent = `;(function(){${script}})()`
+                document.body.appendChild(scriptEl)
+              }
+
+              parent.postMessage({ action: 'ready' }, '*')
+            } catch (e) {
+              parent.postMessage(
+                {
+                  action: 'error',
+                  message: e.message,
+                  stack: e.stack,
+                },
+                '*'
+              )
+            }
+          }
+        })
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>
