@@ -194,23 +194,17 @@ cargo test --package verter_core 2>&1 | tail -60
 
 ### Benchmarks
 
-10 benchmark suites are available using [Criterion](https://github.com/bheisler/criterion.rs):
+4 benchmark suites are available using [Criterion](https://github.com/bheisler/criterion.rs):
 
 | Benchmark | Focus |
 |---|---|
-| `real_world_bench` | Full compilation of real-world components |
-| `lang_detect_bench` | Script language detection |
-| `comment_aware_bench` | Comment-aware parsing |
 | `bindings_bench` | Binding metadata extraction |
-| `real_expressions_bench` | Template expression compilation |
 | `vfor_bench` | `v-for` directive compilation |
 | `vslot_bench` | `v-slot` directive compilation |
-| `analysis_bench` | Scope analysis |
-| `real_world_analysis_bench` | Full analysis on real-world components |
 
 ```bash
 cargo bench --package verter_core
-cargo bench --package verter_core --bench real_world_bench
+cargo bench --package verter_core --bench bindings_bench
 ```
 
 ## Dependencies
