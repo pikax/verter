@@ -123,20 +123,3 @@ jobs:
           done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # --- Build & deploy playground ---
-      - name: Build TS packages
-        run: pnpm run build:ts
-
-      - name: Build playground
-        run: pnpm run build:playground
-
-      - name: Deploy to Firebase
-        uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
-          channelId: live
-          projectId: verterjs-prod
-          target: play
-          entryPoint: packages/playground
