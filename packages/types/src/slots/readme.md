@@ -5,6 +5,7 @@ Type-safe helpers for rendering Vue slots with strict type validation based on [
 ## Overview
 
 `StrictRenderSlot` provides compile-time validation that slot content matches the expected return type. It enforces:
+
 - **Array slots**: Accept arrays of the expected component/type
 - **Single slots**: Require single-element tuples (wraps single values)
 - **Non-empty slots**: Enforce at least one element using tuple types
@@ -24,6 +25,7 @@ declare function StrictRenderSlot<T, U>(
 ```
 
 The function has two overloads:
+
 1. **Single-value overload**: For non-array slot return types, wraps the value in a tuple
 2. **Array/tuple overload**: For array or tuple return types, validates element types
 
@@ -34,17 +36,17 @@ The function has two overloads:
 For slots returning arrays of components:
 
 ```ts
-import { defineComponent, SlotsType } from 'vue';
-import { StrictRenderSlot } from '@verter/types/slots';
+import { defineComponent, SlotsType } from "vue";
+import { StrictRenderSlot } from "@verter/types/slots";
 
 const TabItem = defineComponent({
-  props: { id: { type: String, required: true } }
+  props: { id: { type: String, required: true } },
 });
 
 const Tabs = defineComponent({
   slots: {} as SlotsType<{
     default: () => (typeof TabItem)[];
-  }>
+  }>,
 });
 
 const tabs = new Tabs();
@@ -70,7 +72,7 @@ For slots returning a single value (not an array):
 const Panel = defineComponent({
   slots: {} as SlotsType<{
     header: () => typeof HeaderComponent;
-  }>
+  }>,
 });
 
 const panel = new Panel();
@@ -91,7 +93,7 @@ const List = defineComponent({
   slots: {} as SlotsType<{
     // [Item, ...Item[]] means "at least one Item"
     items: () => [typeof ListItem, ...Array<typeof ListItem>];
-  }>
+  }>,
 });
 
 const list = new List();
@@ -105,6 +107,7 @@ StrictRenderSlot(list.$slots.items, []);
 ```
 
 **Why this pattern is useful:**
+
 - Enforces business logic at compile time (e.g., "a list must have items")
 - Prevents runtime errors from empty arrays
 - Documents intent in the type signature
@@ -118,7 +121,7 @@ For slots requiring exact number and types of elements:
 const Dialog = defineComponent({
   slots: {} as SlotsType<{
     actions: () => [typeof CancelButton, typeof ConfirmButton];
-  }>
+  }>,
 });
 
 const dialog = new Dialog();
@@ -141,7 +144,7 @@ For slots returning string literals:
 const Badge = defineComponent({
   slots: {} as SlotsType<{
     status: () => "success" | "error" | "warning";
-  }>
+  }>,
 });
 
 const badge = new Badge();
@@ -161,7 +164,7 @@ For slots returning arrays of literals:
 const Tags = defineComponent({
   slots: {} as SlotsType<{
     categories: () => ("tech" | "design" | "marketing")[];
-  }>
+  }>,
 });
 
 const tags = new Tags();
@@ -180,6 +183,7 @@ StrictRenderSlot(tags.$slots.categories, ["invalid" as const]);
 ```
 
 **Limitation explanation:**
+
 - TypeScript automatically widens array literals: `["foo"]` becomes `string[]`
 - The type system cannot distinguish `["foo"]` from `["bar"]` after widening
 - For strict literal validation, use `as const` or define the slot with a tuple type instead
@@ -193,30 +197,22 @@ const Container = defineComponent({
   slots: {} as SlotsType<{
     icon: () => HTMLSpanElement;
     icons: () => HTMLSpanElement[];
-  }>
+  }>,
 });
 
 const container = new Container();
 
 // ✅ Valid: correct element type
-StrictRenderSlot(container.$slots.icon, [
-  document.createElement("span") as HTMLSpanElement
-]);
+StrictRenderSlot(container.$slots.icon, [document.createElement("span") as HTMLSpanElement]);
 
 // ❌ Error: wrong element type (despite structural compatibility)
-StrictRenderSlot(container.$slots.icon, [
-  document.createElement("div") as HTMLDivElement
-]);
+StrictRenderSlot(container.$slots.icon, [document.createElement("div") as HTMLDivElement]);
 
 // ✅ Valid: array of correct elements
-StrictRenderSlot(container.$slots.icons, [
-  document.createElement("span") as HTMLSpanElement
-]);
+StrictRenderSlot(container.$slots.icons, [document.createElement("span") as HTMLSpanElement]);
 
 // ❌ Error: array of wrong elements
-StrictRenderSlot(container.$slots.icons, [
-  document.createElement("div") as HTMLDivElement
-]);
+StrictRenderSlot(container.$slots.icons, [document.createElement("div") as HTMLDivElement]);
 ```
 
 **Note:** HTMLElement discrimination uses exact type equality checking to prevent structural typing issues where `HTMLDivElement` would otherwise be compatible with `HTMLSpanElement`.
@@ -230,10 +226,10 @@ const Card = defineComponent({
   slots: {} as SlotsType<{
     // Union of string and component
     content: () => string | typeof TextBlock;
-    
+
     // Tuple of literal and component
     header: () => ["title", typeof IconComponent];
-  }>
+  }>,
 });
 
 const card = new Card();
@@ -251,21 +247,25 @@ StrictRenderSlot(card.$slots.header, ["title", IconComponent]);
 ## Type Checking Behavior
 
 ### Primitive Types (string, number, boolean, etc.)
+
 - **Check**: Expected type extends provided type
 - **Behavior**: Allows type widening (e.g., `"foo"` → `string`)
 - **Trade-off**: Cannot reject wrong literals without `as const`
 
 ### Object Types (Components, HTMLElements, etc.)
+
 - **Check**: Exact type equality using `IsExactlyEqual` helper
 - **Behavior**: Strict discrimination, no structural compatibility
 - **Benefit**: Prevents accidental type mismatches
 
 ### Empty Arrays
+
 - **Special case**: Always accepted for array slots
 - **Type**: Inferred as `never[]` by TypeScript
 - **Reason**: Practically useful for conditional rendering
 
 ### Tuples
+
 - **Check**: Exact type and length matching
 - **Behavior**: Must match signature precisely
 - **Use case**: Fixed-size content with specific types
@@ -288,10 +288,8 @@ The `StrictRenderSlot` function uses TypeScript's conditional types and generic 
 The `IsExactlyEqual` type helper ensures true type equality:
 
 ```ts
-type IsExactlyEqual<A, B> = 
-  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
-    ? true
-    : false;
+type IsExactlyEqual<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 ```
 
 This prevents structural typing issues where TypeScript would consider `HTMLDivElement` assignable to `HTMLSpanElement`.

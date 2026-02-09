@@ -136,16 +136,16 @@ let result: ViteCodegenResult = generate_for_vite(input, &options, &allocator);
 
 ### Key Types
 
-| Type | Description |
-|---|---|
-| `CodegenOptions` | Compilation configuration (filename, SSR, production, features) |
-| `FeatureFlags` | `options_api`, `props_destructure` |
-| `CodegenResult` | Output: `code`, `source_map`, `code_with_source_map` |
-| `ViteCodegenOptions` | Vite-specific options (filename, SSR, production, sourcemap) |
-| `ViteCodegenResult` | Split blocks: `script`, `template`, `styles`, `duration_ms` |
-| `BlockOutput` | Per-block output: `code`, `source_map`, `imports`, `body_start` |
-| `TemplateCodegenState` | Internal state for template code generation |
-| `BindingMetadata` | Tracks variable scopes for template expression resolution |
+| Type                   | Description                                                     |
+| ---------------------- | --------------------------------------------------------------- |
+| `CodegenOptions`       | Compilation configuration (filename, SSR, production, features) |
+| `FeatureFlags`         | `options_api`, `props_destructure`                              |
+| `CodegenResult`        | Output: `code`, `source_map`, `code_with_source_map`            |
+| `ViteCodegenOptions`   | Vite-specific options (filename, SSR, production, sourcemap)    |
+| `ViteCodegenResult`    | Split blocks: `script`, `template`, `styles`, `duration_ms`     |
+| `BlockOutput`          | Per-block output: `code`, `source_map`, `imports`, `body_start` |
+| `TemplateCodegenState` | Internal state for template code generation                     |
+| `BindingMetadata`      | Tracks variable scopes for template expression resolution       |
 
 ## Key Design Patterns
 
@@ -196,11 +196,11 @@ cargo test --package verter_core 2>&1 | tail -60
 
 4 benchmark suites are available using [Criterion](https://github.com/bheisler/criterion.rs):
 
-| Benchmark | Focus |
-|---|---|
-| `bindings_bench` | Binding metadata extraction |
-| `vfor_bench` | `v-for` directive compilation |
-| `vslot_bench` | `v-slot` directive compilation |
+| Benchmark        | Focus                          |
+| ---------------- | ------------------------------ |
+| `bindings_bench` | Binding metadata extraction    |
+| `vfor_bench`     | `v-for` directive compilation  |
+| `vslot_bench`    | `v-slot` directive compilation |
 
 ```bash
 cargo bench --package verter_core
@@ -209,18 +209,18 @@ cargo bench --package verter_core --bench bindings_bench
 
 ## Dependencies
 
-| Crate | Purpose |
-|---|---|
+| Crate                                                                   | Purpose                                       |
+| ----------------------------------------------------------------------- | --------------------------------------------- |
 | `oxc_allocator`, `oxc_ast`, `oxc_parser`, `oxc_span`, `oxc_diagnostics` | JavaScript/TypeScript parsing (OXC toolchain) |
-| `oxc_sourcemap` | Source map generation |
-| `lightningcss` | CSS parsing, scoped styles, CSS modules |
-| `serde`, `serde_json`, `serde_repr` | Serialization for options and results |
-| `bumpalo` | Bump allocator for collections |
-| `rustc-hash` | Fast hashing (FxHashMap/FxHashSet) |
-| `smallvec` | Stack-allocated small vectors |
-| `sha2`, `hex` | SHA-256 hashing for component IDs |
-| `base64` | Base64 encoding for inline source maps |
-| `memchr` | Fast byte searching |
+| `oxc_sourcemap`                                                         | Source map generation                         |
+| `lightningcss`                                                          | CSS parsing, scoped styles, CSS modules       |
+| `serde`, `serde_json`, `serde_repr`                                     | Serialization for options and results         |
+| `bumpalo`                                                               | Bump allocator for collections                |
+| `rustc-hash`                                                            | Fast hashing (FxHashMap/FxHashSet)            |
+| `smallvec`                                                              | Stack-allocated small vectors                 |
+| `sha2`, `hex`                                                           | SHA-256 hashing for component IDs             |
+| `base64`                                                                | Base64 encoding for inline source maps        |
+| `memchr`                                                                | Fast byte searching                           |
 
 ## License
 

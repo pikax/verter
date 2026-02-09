@@ -18,21 +18,14 @@ function overrideCamelCase(
   s: MagicString,
   ctx: {
     camelWhitelistAttributes(name: string): boolean;
-  }
+  },
 ) {
-  if (
-    ctx.camelWhitelistAttributes(loc.source) ||
-    node.tagType === ElementTypes.ELEMENT
-  ) {
+  if (ctx.camelWhitelistAttributes(loc.source) || node.tagType === ElementTypes.ELEMENT) {
     return;
   }
   const offset = loc.start.offset;
   for (const match of loc.source.matchAll(/-([a-z])/g)) {
-    s.overwrite(
-      offset + match.index,
-      offset + match.index + 2,
-      match[1].toUpperCase()
-    );
+    s.overwrite(offset + match.index, offset + match.index + 2, match[1].toUpperCase());
   }
 }
 
@@ -76,15 +69,14 @@ export const PropPlugin = declareTemplatePlugin({
   transformProp(prop, s, ctx) {
     // mergers aka style & class
     if (prop.node === null) {
-      const accessorType =
-        prop.name === "style" ? "normalizeStyle" : "normalizeClass";
+      const accessorType = prop.name === "style" ? "normalizeStyle" : "normalizeClass";
       const normaliseAccessor = ctx.retrieveAccessor(accessorType);
 
       const nodes = prop.props.map((x) => x.node).filter((x) => x !== null);
 
       // move to the first directive we find
       const firstDirective = nodes.find(
-        (x) => x.type === NodeTypes.DIRECTIVE && x.exp
+        (x) => x.type === NodeTypes.DIRECTIVE && x.exp,
       ) as DirectiveNode & { exp: ExpressionNode };
 
       if (!firstDirective) {
@@ -97,33 +89,20 @@ export const PropPlugin = declareTemplatePlugin({
 
       // update and handle the directive binding
       if (firstDirective.rawName?.startsWith("v-bind:")) {
-        s.remove(
-          firstDirective.loc.start.offset,
-          firstDirective.loc.start.offset + 7
-        );
+        s.remove(firstDirective.loc.start.offset, firstDirective.loc.start.offset + 7);
       } else if (firstDirective.rawName?.startsWith(":")) {
-        s.remove(
-          firstDirective.loc.start.offset,
-          firstDirective.loc.start.offset + 1
-        );
+        s.remove(firstDirective.loc.start.offset, firstDirective.loc.start.offset + 1);
       }
 
       // replace " with { }
       s.overwrite(
         firstDirective.exp.loc.start.offset - 1,
         firstDirective.exp.loc.start.offset,
-        "{"
+        "{",
       );
-      s.overwrite(
-        firstDirective.exp.loc.end.offset,
-        firstDirective.exp.loc.end.offset + 1,
-        "}"
-      );
+      s.overwrite(firstDirective.exp.loc.end.offset, firstDirective.exp.loc.end.offset + 1, "}");
 
-      s.prependLeft(
-        firstDirective.exp.loc.start.offset,
-        `${normaliseAccessor}([`
-      );
+      s.prependLeft(firstDirective.exp.loc.start.offset, `${normaliseAccessor}([`);
 
       for (let i = 0; i < nodes.length; i++) {
         const node = nodes[i];
@@ -132,24 +111,17 @@ export const PropPlugin = declareTemplatePlugin({
         }
 
         const loc =
-          node.type === NodeTypes.DIRECTIVE
-            ? (node.exp ?? node.arg)?.loc
-            : node.value?.loc;
+          node.type === NodeTypes.DIRECTIVE ? (node.exp ?? node.arg)?.loc : node.value?.loc;
 
         if (loc) {
           s.prependRight(loc.start.offset, `,`);
-          s.move(
-            loc.start.offset,
-            loc.end.offset,
-            firstDirective.exp.loc.end.offset
-          );
+          s.move(loc.start.offset, loc.end.offset, firstDirective.exp.loc.end.offset);
 
           //   s.remove(prop.loc.start.offset, loc.start.offset);
           //   s.remove(loc.end.offset, prop.loc.end.offset);
         }
 
-        const nameLoc =
-          node.type === NodeTypes.DIRECTIVE ? node.arg?.loc : node.nameLoc;
+        const nameLoc = node.type === NodeTypes.DIRECTIVE ? node.arg?.loc : node.nameLoc;
 
         if (nameLoc) {
           s.remove(nameLoc.start.offset, nameLoc.end.offset + 1);
@@ -159,8 +131,7 @@ export const PropPlugin = declareTemplatePlugin({
       s.appendRight(firstDirective.exp.loc.end.offset, "])");
     } else if (
       (prop.name === "is" ||
-        (prop.node.type === NodeTypes.DIRECTIVE &&
-          prop.node.rawName === ":is")) &&
+        (prop.node.type === NodeTypes.DIRECTIVE && prop.node.rawName === ":is")) &&
       prop.element.tag === "component"
     ) {
       return;
@@ -188,17 +159,14 @@ export const PropPlugin = declareTemplatePlugin({
       const node = prop.node;
       if (node.rawName?.startsWith("v-bind:")) {
         s.remove(node.loc.start.offset, node.loc.start.offset + 7);
-      } else if (
-        node.rawName?.startsWith(":") ||
-        node.rawName?.startsWith(".")
-      ) {
+      } else if (node.rawName?.startsWith(":") || node.rawName?.startsWith(".")) {
         s.remove(node.loc.start.offset, node.loc.start.offset + 1);
       } else if (node.rawName?.startsWith("v-on:")) {
         if (nameBinding?.ignore === true) {
           s.overwrite(
             node.loc.start.offset + 5,
             node.loc.start.offset + 6,
-            nameBinding.name.at(0)?.toUpperCase() ?? ""
+            nameBinding.name.at(0)?.toUpperCase() ?? "",
           );
         }
         s.overwrite(node.loc.start.offset, node.loc.start.offset + 5, "on");
@@ -207,7 +175,7 @@ export const PropPlugin = declareTemplatePlugin({
           s.overwrite(
             node.loc.start.offset + 1,
             node.loc.start.offset + 2,
-            nameBinding.name.at(0)?.toUpperCase() ?? ""
+            nameBinding.name.at(0)?.toUpperCase() ?? "",
           );
         }
         s.overwrite(node.loc.start.offset, node.loc.start.offset + 1, "on");
@@ -219,11 +187,7 @@ export const PropPlugin = declareTemplatePlugin({
         s.prependRight(node.arg.loc.start.offset, "{...{");
         if (node.exp) {
           // replace ={ to :
-          s.overwrite(
-            node.exp.loc.start.offset - 2,
-            node.exp.loc.start.offset,
-            ":"
-          );
+          s.overwrite(node.exp.loc.start.offset - 2, node.exp.loc.start.offset, ":");
 
           // remove last "
           s.remove(node.exp.loc.end.offset, node.exp.loc.end.offset + 1);
@@ -232,22 +196,11 @@ export const PropPlugin = declareTemplatePlugin({
       } else {
         // append { and } to value
         if (node.exp) {
-          s.overwrite(
-            node.exp.loc.start.offset - 1,
-            node.exp.loc.start.offset,
-            "{"
-          );
-          s.overwrite(
-            node.exp.loc.end.offset,
-            node.exp.loc.end.offset + 1,
-            "}"
-          );
+          s.overwrite(node.exp.loc.start.offset - 1, node.exp.loc.start.offset, "{");
+          s.overwrite(node.exp.loc.end.offset, node.exp.loc.end.offset + 1, "}");
         } else if (nameBinding?.ignore === true || nameBinding?.skip) {
           const accessor = ctx.retrieveAccessor("ctx");
-          s.appendLeft(
-            node.loc.end.offset,
-            `={${accessor}.${camelize(nameBinding.name)}}`
-          );
+          s.appendLeft(node.loc.end.offset, `={${accessor}.${camelize(nameBinding.name)}}`);
         }
       }
     }

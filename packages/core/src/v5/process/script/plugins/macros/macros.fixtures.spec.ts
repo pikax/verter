@@ -5,11 +5,7 @@
  */
 import * as ts from "typescript";
 import { createFixtures } from "./macros.fixtures";
-import type {
-  Fixture,
-  WithPrefixString,
-  TypeTest,
-} from "../../../../../fixtures/types";
+import type { Fixture, WithPrefixString, TypeTest } from "../../../../../fixtures/types";
 import { resolveWithPrefix } from "../../../../../fixtures/types";
 import {
   runTypeTest,
@@ -57,7 +53,7 @@ function resolveExpectation(value: WithPrefixString): string {
 function parseVueSFC(
   content: string,
   lang: "ts" | "js" | "tsx" | "jsx" = "ts",
-  generic?: string
+  generic?: string,
 ): { result: string; context: any } {
   // processMacros expects a Fixture object, not separate arguments
   const result = processMacros({
@@ -74,19 +70,11 @@ function parseVueSFC(
 
 // Parse TypeScript source code into an AST
 function parseTypeScript(code: string): ts.SourceFile {
-  return ts.createSourceFile(
-    "test.ts",
-    code,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS
-  );
+  return ts.createSourceFile("test.ts", code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 }
 
 // Find all type alias declarations in the AST
-function findTypeAliases(
-  sourceFile: ts.SourceFile
-): Map<string, ts.TypeAliasDeclaration> {
+function findTypeAliases(sourceFile: ts.SourceFile): Map<string, ts.TypeAliasDeclaration> {
   const aliases = new Map<string, ts.TypeAliasDeclaration>();
 
   function visit(node: ts.Node) {
@@ -101,9 +89,7 @@ function findTypeAliases(
 }
 
 // Find all variable declarations in the AST
-function findVariableDeclarations(
-  sourceFile: ts.SourceFile
-): Map<string, ts.VariableDeclaration> {
+function findVariableDeclarations(sourceFile: ts.SourceFile): Map<string, ts.VariableDeclaration> {
   const declarations = new Map<string, ts.VariableDeclaration>();
 
   function visit(node: ts.Node) {
@@ -153,17 +139,14 @@ const { fixtures } = createFixtures(PREFIX);
  * Test a single fixture for syntax validity.
  * Can be called directly in a debugger or from a .only test.
  */
-export function testSyntaxValidity(
-  fixtureName: string,
-  sourceFile: ts.SourceFile
-): void {
+export function testSyntaxValidity(fixtureName: string, sourceFile: ts.SourceFile): void {
   const errors = hasSyntaxErrors(sourceFile);
 
   if (errors.length > 0) {
     console.log(`Fixture: ${fixtureName}`);
     console.log(
       "Syntax errors:",
-      errors.map((e) => e.messageText)
+      errors.map((e) => e.messageText),
     );
     console.log("Generated code:", sourceFile.getFullText());
   }
@@ -175,10 +158,7 @@ export function testSyntaxValidity(
  * Test a single fixture for semantic validity.
  * Can be called directly in a debugger or from a .only test.
  */
-export function testSemanticValidity(
-  fixtureName: string,
-  content: string
-): void {
+export function testSemanticValidity(fixtureName: string, content: string): void {
   assertNoTypeErrors(content, fixtureName);
 }
 
@@ -186,18 +166,12 @@ export function testSemanticValidity(
  * Test a single type test for a fixture.
  * Can be called directly in a debugger or from a .only test.
  */
-export function testTypeTest(
-  fixture: Fixture,
-  typeTestDescription: string,
-  content: string
-): void {
+export function testTypeTest(fixture: Fixture, typeTestDescription: string, content: string): void {
   const typeTest = fixture.expectations?.typeTests?.find(
-    (t) => t.description === typeTestDescription
+    (t) => t.description === typeTestDescription,
   );
   if (!typeTest) {
-    throw new Error(
-      `Type test not found: ${typeTestDescription} in fixture ${fixture.name}`
-    );
+    throw new Error(`Type test not found: ${typeTestDescription} in fixture ${fixture.name}`);
   }
 
   const testResult = runTypeTest(content, typeTest, PREFIX);
@@ -237,7 +211,7 @@ describe("macros fixtures validation", () => {
       (fixtureName) => {
         const { sourceFile } = getFixture(fixtureName);
         testSyntaxValidity(fixtureName, sourceFile);
-      }
+      },
     );
   });
 
@@ -248,7 +222,7 @@ describe("macros fixtures validation", () => {
       (fixtureName) => {
         const { code } = getFixture(fixtureName);
         testSemanticValidity(fixtureName, code);
-      }
+      },
     );
   });
 
@@ -260,9 +234,7 @@ describe("macros fixtures validation", () => {
       describe(fixture.name, () => {
         const { code, sourceFile } = getFixture(fixture.name);
         if (fixture.expectations?.typeAliases) {
-          const typeAliases = fixture.expectations.typeAliases.map((t) =>
-            resolveExpectation(t)
-          );
+          const typeAliases = fixture.expectations.typeAliases.map((t) => resolveExpectation(t));
           it.each(typeAliases)("should create type alias: %s", (typeAlias) => {
             const aliases = findTypeAliases(sourceFile);
             expect(aliases.has(typeAlias)).toBe(true);
@@ -270,9 +242,7 @@ describe("macros fixtures validation", () => {
         }
 
         if (fixture.expectations?.boxedVariables) {
-          const boxedVars = fixture.expectations.boxedVariables.map((b) =>
-            resolveExpectation(b)
-          );
+          const boxedVars = fixture.expectations.boxedVariables.map((b) => resolveExpectation(b));
           it.each(boxedVars)("should create boxed variable: %s", (boxedVar) => {
             const declarations = findVariableDeclarations(sourceFile);
             expect(declarations.has(boxedVar)).toBe(true);
@@ -280,18 +250,14 @@ describe("macros fixtures validation", () => {
         }
 
         if (fixture.expectations?.patterns) {
-          const patterns = fixture.expectations.patterns.map((p) =>
-            resolveExpectation(p)
-          );
+          const patterns = fixture.expectations.patterns.map((p) => resolveExpectation(p));
           it.each(patterns)("should contain pattern: %s", (pattern) => {
             expect(code).toContain(pattern);
           });
         }
 
         if (fixture.expectations?.antiPatterns) {
-          const antiPatterns = fixture.expectations.antiPatterns.map((a) =>
-            resolveExpectation(a)
-          );
+          const antiPatterns = fixture.expectations.antiPatterns.map((a) => resolveExpectation(a));
           it.each(antiPatterns)("should NOT contain: %s", (antiPattern) => {
             expect(code).not.toContain(antiPattern);
           });
@@ -307,7 +273,7 @@ describe("macros fixtures validation", () => {
               if (!testResult.success) {
                 throw new Error(testResult.error);
               }
-            }
+            },
           );
         }
       });

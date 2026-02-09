@@ -1,24 +1,24 @@
 # Netlify configuration for Verter playground
 
 [build]
-  publish = "packages/playground/dist"
-  command = "pnpm install && cargo install wasm-pack && pnpm run build:wasm && pnpm run build:ts && pnpm run build:playground"
+publish = "packages/playground/dist"
+command = "pnpm install && cargo install wasm-pack && pnpm run build:wasm && pnpm run build:ts && pnpm run build:playground"
 
 # Deploy previews are built by GitHub Actions, but this config supports manual deployments
 [build.environment]
-  PNPM_VERSION = "10.22.0"
-  NODE_VERSION = "20"
-  RUST_VERSION = "stable"
+PNPM_VERSION = "10.22.0"
+NODE_VERSION = "20"
+RUST_VERSION = "stable"
 
 # HTTP headers for SharedArrayBuffer and WASM support
 [[headers]]
-  for = "/*"
-  [headers.values]
-    Cross-Origin-Opener-Policy = "same-origin"
-    Cross-Origin-Embedder-Policy = "require-corp"
+for = "/*"
+[headers.values]
+Cross-Origin-Opener-Policy = "same-origin"
+Cross-Origin-Embedder-Policy = "require-corp"
 
 # Redirect rules
 [[redirects]]
-  from = "/*"
-  to = "/index.html"
-  status = 200
+from = "/*"
+to = "/index.html"
+status = 200

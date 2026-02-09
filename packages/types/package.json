@@ -2,10 +2,19 @@
   "name": "@verter/types",
   "version": "0.0.1-alpha.1",
   "description": "Type helpers for Verter",
+  "keywords": [],
+  "license": "MIT",
+  "author": "",
+  "files": [
+    "dist",
+    "readme.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
   "main": "dist/index.js",
   "module": "dist/index.js",
   "types": "dist/index.d.ts",
-  "type": "module",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -40,15 +49,6 @@
     "bench": "node scripts/bench-types.mjs",
     "bench:trace": "node scripts/bench-types.mjs --trace"
   },
-  "keywords": [],
-  "author": "",
-  "license": "MIT",
-  "sideEffects": false,
-  "files": [
-    "dist",
-    "readme.md",
-    "LICENSE"
-  ],
   "devDependencies": {
     "typescript": "^5.9.3",
     "vitest": "^4.0.18",

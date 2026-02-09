@@ -16,7 +16,7 @@ export default defineComponent({
     // Refs available in mounted hook
     console.log("Input ref:", this.$refs.inputEl);
     console.log("Div ref:", this.$refs.divEl);
-    
+
     // Focus on mount
     (this.$refs.inputEl as HTMLInputElement)?.focus();
   },
@@ -44,7 +44,7 @@ export default defineComponent({
         ctx.fillRect(10, 10, 100, 100);
       }
     },
-    
+
     // Component ref methods
     callChildMethod(): void {
       const child = this.$refs.childComp as { focus?: () => void } | undefined;
@@ -58,7 +58,7 @@ export default defineComponent({
       const child = this.$refs.childComp as { reset?: () => void } | undefined;
       child?.reset?.();
     },
-    
+
     // v-for refs
     setListItemRef(el: HTMLLIElement | null, index: number): void {
       if (el) {
@@ -68,7 +68,7 @@ export default defineComponent({
     focusListItem(index: number): void {
       this.listItemRefs[index]?.focus();
     },
-    
+
     // Form methods
     submitForm(): void {
       const form = this.$refs.formEl as HTMLFormElement | undefined;
@@ -82,7 +82,7 @@ export default defineComponent({
       const textarea = this.$refs.textareaEl as HTMLTextAreaElement | undefined;
       return textarea?.value ?? "";
     },
-    
+
     // Component refs map
     setComponentRef(name: string) {
       return (el: ComponentPublicInstance | null) => {

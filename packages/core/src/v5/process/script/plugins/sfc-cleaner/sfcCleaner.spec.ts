@@ -15,7 +15,7 @@ describe("process script plugin sfc-cleaner", () => {
 
     pre = "",
     post = "",
-    attrs = ""
+    attrs = "",
   ) {
     const prepend = `${pre}<script ${
       wrapper === false ? "setup" : ""
@@ -27,7 +27,7 @@ describe("process script plugin sfc-cleaner", () => {
 
     const scriptBlock = parsed.blocks.find(
       // @ts-expect-error TODO this should not be error because x.type narrows the type
-      (x) => x.type === "script" && x.isMain
+      (x) => x.type === "script" && x.isMain,
     ) as ParsedBlockScript;
 
     const r = processScript(
@@ -41,20 +41,14 @@ describe("process script plugin sfc-cleaner", () => {
         block: scriptBlock,
         isAsync: parsed.isAsync,
         blockNameResolver: (name) => name,
-      }
+      },
     );
 
     return r;
   }
 
   it("comments non-script blocks (single line)", () => {
-    const { result } = parse(
-      `let a = 0`,
-      false,
-      "js",
-      "<template></template>",
-      "<style></style>"
-    );
+    const { result } = parse(`let a = 0`, false, "js", "<template></template>", "<style></style>");
     expect(result).toMatchInlineSnapshot(`
       "// <template></template>
       ;function script  (){let a = 0}

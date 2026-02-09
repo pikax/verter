@@ -16,10 +16,7 @@ import {
 } from "vscode-languageserver/node";
 import { DocumentManager, isVueDocument, pathToUri } from "./documents";
 
-export function formatQuickInfo(
-  quickInfo: ts.QuickInfo,
-  document: VueSubDocument
-) {
+export function formatQuickInfo(quickInfo: ts.QuickInfo, document: VueSubDocument) {
   const contents = itemToMarkdown(quickInfo);
 
   const str =
@@ -53,17 +50,14 @@ export function itemToMarkdown(item: ts.CompletionEntryDetails | ts.QuickInfo) {
             .map(
               (tag) =>
                 `_@${tag.name}_ — \`${ts.displayPartsToString(
-                  tag.text?.slice(0, 1)
-                )}\` ${ts.displayPartsToString(tag.text?.slice(1))}\n`
+                  tag.text?.slice(0, 1),
+                )}\` ${ts.displayPartsToString(tag.text?.slice(1))}\n`,
             )
             .join("\n")
         : ""),
   };
 }
-function mapTextSpanToRange(
-  span: ts.TextSpan,
-  document: VueSubDocument
-): Range | undefined {
+function mapTextSpanToRange(span: ts.TextSpan, document: VueSubDocument): Range | undefined {
   const start = document.toOriginalPositionFromOffset(span.start);
   const end = document.toOriginalPositionFromOffset(span.start + span.length);
   if (start.line === -1 || end.line === -1) {
@@ -72,9 +66,7 @@ function mapTextSpanToRange(
   return Range.create(start, end);
 }
 
-function categoryToSeverity(
-  category: ts.DiagnosticCategory
-): DiagnosticSeverity {
+function categoryToSeverity(category: ts.DiagnosticCategory): DiagnosticSeverity {
   switch (category) {
     case ts.DiagnosticCategory.Error: {
       return DiagnosticSeverity.Error;
@@ -95,7 +87,7 @@ function categoryToSeverity(
 export function mapDefinitionInfo(
   info: ts.DefinitionInfo,
   documentManager: DocumentManager,
-  fallback = false
+  fallback = false,
 ): (DefinitionLink & { key: string }) | undefined {
   const filename = info.fileName;
 
@@ -105,13 +97,13 @@ export function mapDefinitionInfo(
   let contextRange = info.contextSpan
     ? Range.create(
         doc.positionAt(info.contextSpan.start),
-        doc.positionAt(info.contextSpan.start + info.contextSpan.length)
+        doc.positionAt(info.contextSpan.start + info.contextSpan.length),
       )
     : undefined;
 
   let textSpan: Range | undefined = Range.create(
     doc.positionAt(info.textSpan.start),
-    doc.positionAt(info.textSpan.start + info.textSpan.length)
+    doc.positionAt(info.textSpan.start + info.textSpan.length),
   );
 
   if (isVueDocument(doc)) {
@@ -125,11 +117,11 @@ export function mapDefinitionInfo(
     if (info.contextSpan) {
       const textSpanStr = text.slice(
         info.textSpan.start,
-        info.textSpan.start + info.textSpan.length
+        info.textSpan.start + info.textSpan.length,
       );
       const contextRangeStr = text.slice(
         info.contextSpan!.start,
-        info.contextSpan!.start + info.contextSpan!.length
+        info.contextSpan!.start + info.contextSpan!.length,
       );
 
       const rrr = contextRangeStr.split(":")[0].replace(textSpanStr, "");
@@ -141,10 +133,7 @@ export function mapDefinitionInfo(
         const originalStartPos = doc.positionAt(+startOffset);
         const originalEndPos = doc.positionAt(+endOffset);
 
-        textSpan = contextRange = Range.create(
-          originalStartPos,
-          originalEndPos
-        );
+        textSpan = contextRange = Range.create(originalStartPos, originalEndPos);
       } else {
         contextRange = mapTextSpanToRange(info.contextSpan, subDoc);
       }
@@ -171,7 +160,7 @@ export function mapCompletion(
     index: number;
     triggerKind: CompletionTriggerKind | undefined;
     triggerCharacter: string | undefined;
-  }
+  },
 ) {
   const item: CompletionItem = {
     label: tsCompletion.name,
@@ -212,12 +201,10 @@ const KindMap: Record<ts.ScriptElementKind, CompletionItemKind> = {
   [ts.ScriptElementKind.memberGetAccessorElement]: CompletionItemKind.Property,
   [ts.ScriptElementKind.memberSetAccessorElement]: CompletionItemKind.Property,
   [ts.ScriptElementKind.memberVariableElement]: CompletionItemKind.Field,
-  [ts.ScriptElementKind.constructorImplementationElement]:
-    CompletionItemKind.Constructor,
+  [ts.ScriptElementKind.constructorImplementationElement]: CompletionItemKind.Constructor,
   [ts.ScriptElementKind.callSignatureElement]: CompletionItemKind.Method,
   [ts.ScriptElementKind.indexSignatureElement]: CompletionItemKind.Property,
-  [ts.ScriptElementKind.constructSignatureElement]:
-    CompletionItemKind.Constructor,
+  [ts.ScriptElementKind.constructSignatureElement]: CompletionItemKind.Constructor,
   [ts.ScriptElementKind.parameterElement]: CompletionItemKind.Variable,
   [ts.ScriptElementKind.typeParameterElement]: CompletionItemKind.TypeParameter,
   [ts.ScriptElementKind.primitiveType]: CompletionItemKind.Class,
@@ -235,13 +222,10 @@ const KindMap: Record<ts.ScriptElementKind, CompletionItemKind> = {
 
   [ts.ScriptElementKind.variableAwaitUsingElement]: CompletionItemKind.Variable,
   [ts.ScriptElementKind.variableUsingElement]: CompletionItemKind.Variable,
-  [ts.ScriptElementKind.memberAccessorVariableElement]:
-    CompletionItemKind.Property,
+  [ts.ScriptElementKind.memberAccessorVariableElement]: CompletionItemKind.Property,
 };
 
-function retrieveKindBasedOnSymbol(
-  symbol?: ts.Symbol
-): CompletionItemKind | null {
+function retrieveKindBasedOnSymbol(symbol?: ts.Symbol): CompletionItemKind | null {
   if (!symbol) return null;
   const flags = symbol.getFlags();
 
@@ -272,10 +256,7 @@ function retrieveKindBasedOnSymbol(
     return CompletionItemKind.Variable;
   } else if (flags & ts.SymbolFlags.ClassMember) {
     return CompletionItemKind.Class;
-  } else if (
-    (flags & ts.SymbolFlags.Property) !== 0 ||
-    (flags & ts.SymbolFlags.Accessor) !== 0
-  ) {
+  } else if ((flags & ts.SymbolFlags.Property) !== 0 || (flags & ts.SymbolFlags.Accessor) !== 0) {
     return CompletionItemKind.Property;
   } else if ((flags & ts.SymbolFlags.GetAccessor) !== 0) {
     return CompletionItemKind.Property; // No direct mapping for getters; Property is a reasonable approximation
@@ -294,7 +275,7 @@ function retrieveKindBasedOnSymbol(
 
 export function mapDiagnostic(
   diagnostic: ts.Diagnostic,
-  document: VueSubDocument
+  document: VueSubDocument,
 ): Diagnostic | undefined {
   // @ts-expect-error TODO fix this with proper types
   const range = mapTextSpanToRange(diagnostic, document);

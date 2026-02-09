@@ -4,7 +4,7 @@ import { ScriptDeclaration, ScriptTypes } from "./types";
 export function retrieveDeclarations(
   node: VerterASTNode,
   parent: VerterASTNode,
-  overrideNode: VerterASTNode = node
+  overrideNode: VerterASTNode = node,
 ): ScriptDeclaration[] {
   const items: ScriptDeclaration[] = [];
   switch (node.type) {

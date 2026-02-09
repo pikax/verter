@@ -1,9 +1,4 @@
-import {
-  parseOXC,
-  parseAcornLoose,
-  sanitisePosition,
-  parseAST,
-} from "./ast.js";
+import { parseOXC, parseAcornLoose, sanitisePosition, parseAST } from "./ast.js";
 import { bench } from "vitest";
 import { MagicString, walk } from "@vue/compiler-sfc";
 import { basename } from "node:path";

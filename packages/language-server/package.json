@@ -2,6 +2,9 @@
   "name": "@verter/language-server",
   "version": "0.0.1-alpha.1",
   "description": "A language server for Vue",
+  "keywords": [],
+  "license": "MIT",
+  "author": "Carlos Rodrigues <pikax>",
   "type": "commonjs",
   "main": "dist/server.js",
   "scripts": {
@@ -9,12 +12,6 @@
     "x:build": "vite build",
     "x:watch": "pnpm build --watch",
     "test": "vitest"
-  },
-  "keywords": [],
-  "author": "Carlos Rodrigues <pikax>",
-  "license": "MIT",
-  "engines": {
-    "node": ">=14.0.0"
   },
   "dependencies": {
     "@verter/core": "workspace:^",
@@ -41,5 +38,8 @@
     "vite": "^7.3.1",
     "vitest": "^4.0.18",
     "vue": "^3.5.27"
+  },
+  "engines": {
+    "node": ">=14.0.0"
   }
 }

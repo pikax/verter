@@ -2,6 +2,12 @@
   "name": "@verter/wasm",
   "version": "0.0.1-alpha.1",
   "description": "WASM bindings for Verter Vue compiler",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "wasm"
+  ],
+  "sideEffects": false,
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -19,15 +25,9 @@
     "build": "pnpm run build:wasm && pnpm run build:ts && pnpm run build:copy-playground",
     "test": "vitest run"
   },
-  "sideEffects": false,
   "devDependencies": {
     "tsdown": "^0.12.4",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"
-  },
-  "files": [
-    "dist",
-    "wasm"
-  ],
-  "license": "MIT"
+  }
 }

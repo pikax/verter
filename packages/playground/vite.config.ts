@@ -4,9 +4,7 @@ import vue from "@vitejs/plugin-vue";
 import { resolve } from "path";
 import { readFileSync } from "fs";
 
-const pkg = JSON.parse(
-  readFileSync(resolve(__dirname, "../wasm/package.json"), "utf8"),
-);
+const pkg = JSON.parse(readFileSync(resolve(__dirname, "../wasm/package.json"), "utf8"));
 
 export default defineConfig({
   define: {
@@ -51,7 +49,7 @@ export default defineConfig({
         //     }
         //   }
         // },
-        
+
         manualChunks: {
           monaco: ["monaco-editor-core"],
           shiki: ["shiki", "@shikijs/monaco"],

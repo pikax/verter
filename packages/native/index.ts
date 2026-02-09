@@ -199,10 +199,7 @@ export interface ViteCodegenResult {
  * @param options - Optional compilation options
  * @returns The compiled result with code, source map, and code with inline source map
  */
-export declare function compile(
-  input: InputBuffer,
-  options?: CodegenOptions
-): CodegenResult;
+export declare function compile(input: InputBuffer, options?: CodegenOptions): CodegenResult;
 
 /**
  * Synchronous version of compile (same as compile, kept for API compatibility)
@@ -211,10 +208,7 @@ export declare function compile(
  * @param options - Optional compilation options
  * @returns The compiled result with code, source map, and code with inline source map
  */
-export declare function compileSync(
-  input: InputBuffer,
-  options?: CodegenOptions
-): CodegenResult;
+export declare function compileSync(input: InputBuffer, options?: CodegenOptions): CodegenResult;
 
 /**
  * Compile a Vue SFC for Vite plugin usage.
@@ -228,7 +222,7 @@ export declare function compileSync(
  */
 export declare function compileForVite(
   input: InputBuffer,
-  options?: ViteCodegenOptions
+  options?: ViteCodegenOptions,
 ): ViteCodegenResult;
 
 export {};

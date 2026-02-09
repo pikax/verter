@@ -1,17 +1,10 @@
 import { ElementNode, NodeTypes } from "@vue/compiler-core";
-import {
-  parse as parseSFC,
-  compileTemplate,
-  extractRuntimeProps,
-} from "@vue/compiler-sfc";
+import { parse as parseSFC, compileTemplate, extractRuntimeProps } from "@vue/compiler-sfc";
 import { handleProps, PropsContext } from "./index.js";
 import { TemplateTypes } from "../../types.js";
 
 describe("parser template element props", () => {
-  function parse(
-    content: string,
-    context: PropsContext = { ignoredIdentifiers: [] }
-  ) {
+  function parse(content: string, context: PropsContext = { ignoredIdentifiers: [] }) {
     const source = `<template>${content}</template>`;
 
     const sfc = parseSFC(source, {});
@@ -29,9 +22,7 @@ describe("parser template element props", () => {
 
   function expectMapping(result: any, source: string) {
     for (const p of result) {
-      expect(source.slice(p.node.loc.start.offset, p.node.loc.end.offset)).toBe(
-        p.node.loc.source
-      );
+      expect(source.slice(p.node.loc.start.offset, p.node.loc.end.offset)).toBe(p.node.loc.source);
     }
   }
 
@@ -556,7 +547,7 @@ describe("parser template element props", () => {
         expectMapping(result, source);
       });
 
-      it('shorthand :foo', ()=>{
+      it("shorthand :foo", () => {
         const { result, source } = parse(`<span :foo/>`);
 
         expect(result).toMatchObject([
@@ -586,7 +577,7 @@ describe("parser template element props", () => {
         ]);
 
         expectMapping(result, source);
-      })
+      });
 
       it("v-bind + props", () => {
         const { result, source } = parse(`<span v-bind="bar" foo="bar"/>`);
@@ -712,9 +703,7 @@ describe("parser template element props", () => {
       });
 
       it("props + binding complex", () => {
-        const { result, source } = parse(
-          `<span :foo="isFoo ? { myFoo: foo } : undefined" />`
-        );
+        const { result, source } = parse(`<span :foo="isFoo ? { myFoo: foo } : undefined" />`);
 
         expect(result).toMatchObject([
           {
@@ -1063,9 +1052,7 @@ describe("parser template element props", () => {
       });
 
       it("should append ctx inside of functions", () => {
-        const { result, source } = parse(
-          `<span :check-for-something="e=> { foo = e }"></span>`
-        );
+        const { result, source } = parse(`<span :check-for-something="e=> { foo = e }"></span>`);
 
         expect(result).toMatchObject([
           {
@@ -1135,9 +1122,7 @@ describe("parser template element props", () => {
       });
 
       it("should  append ctx inside a string interpolation", () => {
-        const { result, source } = parse(
-          '<span :check-for-something="`foo=${bar}`"></span>'
-        );
+        const { result, source } = parse('<span :check-for-something="`foo=${bar}`"></span>');
 
         expect(result).toMatchObject([
           {
@@ -1572,9 +1557,7 @@ describe("parser template element props", () => {
         }
       });
       it("multiple", () => {
-        const { result, source } = parse(
-          `<div class="foo bar" :class="baz" />`
-        );
+        const { result, source } = parse(`<div class="foo bar" :class="baz" />`);
 
         expect(result).toMatchObject([
           {

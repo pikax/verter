@@ -32,7 +32,7 @@ export const SlotTypeCheckPlugin = declareTemplatePlugin({
         break;
       case ElementTypes.ELEMENT: {
         const slotProp = node.props.find(
-          (x) => x.type === NodeTypes.DIRECTIVE && x.name === "slot"
+          (x) => x.type === NodeTypes.DIRECTIVE && x.name === "slot",
         );
 
         if (node.children.length === 0) {
@@ -40,7 +40,6 @@ export const SlotTypeCheckPlugin = declareTemplatePlugin({
         }
 
         if (slotProp) {
-            
         } else {
         }
       }

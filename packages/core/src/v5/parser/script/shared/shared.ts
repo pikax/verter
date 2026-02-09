@@ -65,16 +65,14 @@ export function handleShared(node: VerterASTNode): ScriptItem[] | false {
   }
 }
 
-export function createSharedContext(opts: {
-  lang: string | "ts" | "tsx" | "js" | "jsx";
-}) {
+export function createSharedContext(opts: { lang: string | "ts" | "tsx" | "js" | "jsx" }) {
   const isTs = opts.lang === "ts" || opts.lang === "tsx";
 
   function visit(
     node: VerterASTNode,
     parent: VerterASTNode | null,
     key?: string,
-    context: { skip: () => void } = { skip: NOOP }
+    context: { skip: () => void } = { skip: NOOP },
   ): void | ScriptItem | ScriptItem[] {
     switch (node.type) {
       case "ExportNamedDeclaration":
@@ -119,11 +117,7 @@ export function createSharedContext(opts: {
     }
   }
 
-  function leave(
-    node: VerterASTNode,
-    parent: VerterASTNode | null,
-    key?: string
-  ) {}
+  function leave(node: VerterASTNode, parent: VerterASTNode | null, key?: string) {}
 
   return {
     visit,

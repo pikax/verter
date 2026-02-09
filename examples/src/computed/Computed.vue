@@ -36,17 +36,14 @@ const nameStats = computed<Stats>(() => ({
 }));
 
 // Computed with debugger options
-const debuggedComputed = computed(
-  () => firstName.value.toUpperCase(),
-  {
-    onTrack(e) {
-      console.log("Tracked:", e.target, e.type);
-    },
-    onTrigger(e) {
-      console.log("Triggered:", e.target, e.type, e.key);
-    },
-  }
-);
+const debuggedComputed = computed(() => firstName.value.toUpperCase(), {
+  onTrack(e) {
+    console.log("Tracked:", e.target, e.type);
+  },
+  onTrigger(e) {
+    console.log("Triggered:", e.target, e.type, e.key);
+  },
+});
 
 // Chained computed
 const upperFullName = computed(() => fullName.value.toUpperCase());

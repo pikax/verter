@@ -40,7 +40,7 @@ import { InferFunctionPlugin } from "../infer-function";
 function processComponentType(
   template: string,
   scriptCode: string = "",
-  options: { prefix?: string; lang?: string; generic?: string } = {}
+  options: { prefix?: string; lang?: string; generic?: string } = {},
 ) {
   const { prefix = "___VERTER___", lang = "ts", generic } = options;
   const genericAttr = generic ? ` generic="${generic}"` : "";
@@ -80,7 +80,7 @@ function processComponentType(
       block: scriptBlock!,
       prefix: (name: string) => prefix + name,
       blockNameResolver: (name: string) => name,
-    }
+    },
   );
 
   return {
@@ -114,9 +114,7 @@ describe("ComponentTypePlugin", () => {
     });
 
     it("generates separate functions for nested elements", () => {
-      const { result } = processComponentType(
-        "<div><span>nested</span></div>"
-      );
+      const { result } = processComponentType("<div><span>nested</span></div>");
 
       // Should have functions for both div and span
       expect(result).toContain('HTMLElementTagNameMap["div"]');
@@ -124,9 +122,7 @@ describe("ComponentTypePlugin", () => {
     });
 
     it("handles multiple root elements (fragment)", () => {
-      const { result } = processComponentType(
-        "<div>first</div><span>second</span>"
-      );
+      const { result } = processComponentType("<div>first</div><span>second</span>");
 
       expect(result).toContain('HTMLElementTagNameMap["div"]');
       expect(result).toContain('HTMLElementTagNameMap["span"]');
@@ -139,9 +135,7 @@ describe("ComponentTypePlugin", () => {
     });
 
     it("handles form elements", () => {
-      const { result } = processComponentType(
-        "<form><input /><button>Submit</button></form>"
-      );
+      const { result } = processComponentType("<form><input /><button>Submit</button></form>");
 
       expect(result).toContain('HTMLElementTagNameMap["form"]');
       expect(result).toContain('HTMLElementTagNameMap["input"]');
@@ -155,19 +149,14 @@ describe("ComponentTypePlugin", () => {
 
   describe("attributes and bindings", () => {
     it("includes static attributes in props object", () => {
-      const { result } = processComponentType(
-        '<div id="app" class="container"></div>'
-      );
+      const { result } = processComponentType('<div id="app" class="container"></div>');
 
       expect(result).toContain('"id": "app"');
       // class is intentionally filtered out as it's handled separately in Vue
     });
 
     it("includes dynamic bindings in props object", () => {
-      const { result } = processComponentType(
-        '<div :id="myId"></div>',
-        "const myId = 'test';"
-      );
+      const { result } = processComponentType('<div :id="myId"></div>', "const myId = 'test';");
 
       expect(result).toContain('"id": myId');
     });
@@ -175,7 +164,7 @@ describe("ComponentTypePlugin", () => {
     it("handles multiple dynamic bindings", () => {
       const { result } = processComponentType(
         '<div :id="id" :class="className"></div>',
-        "const id = 'test'; const className = 'active';"
+        "const id = 'test'; const className = 'active';",
       );
 
       expect(result).toContain('"id": id');
@@ -183,10 +172,7 @@ describe("ComponentTypePlugin", () => {
     });
 
     it("handles boolean attributes", () => {
-      const { result } = processComponentType(
-        '<input disabled />',
-        ""
-      );
+      const { result } = processComponentType("<input disabled />", "");
 
       expect(result).toContain('"disabled": true');
     });
@@ -200,7 +186,7 @@ describe("ComponentTypePlugin", () => {
     it("generates conditional narrowing for v-if", () => {
       const { result } = processComponentType(
         '<div v-if="show">Visible</div>',
-        "const show = true;"
+        "const show = true;",
       );
 
       // Should generate a function with narrowing logic
@@ -210,7 +196,7 @@ describe("ComponentTypePlugin", () => {
     it("handles v-if with v-else", () => {
       const { result } = processComponentType(
         '<div v-if="show">Shown</div><div v-else>Hidden</div>',
-        "const show = true;"
+        "const show = true;",
       );
 
       // Both divs should have component functions
@@ -223,7 +209,7 @@ describe("ComponentTypePlugin", () => {
         `<div v-if="status === 'a'">A</div>
          <div v-else-if="status === 'b'">B</div>
          <div v-else>C</div>`,
-        "const status = 'a' as 'a' | 'b' | 'c';"
+        "const status = 'a' as 'a' | 'b' | 'c';",
       );
 
       // All three divs should have component functions
@@ -235,7 +221,7 @@ describe("ComponentTypePlugin", () => {
     it("generates correct narrowing for v-if condition", () => {
       const { result } = processComponentType(
         '<div v-if="isTypeA">A</div>',
-        "const isTypeA = true;"
+        "const isTypeA = true;",
       );
 
       // v-if should have narrowing with the condition
@@ -248,15 +234,15 @@ describe("ComponentTypePlugin", () => {
       const { result } = processComponentType(
         `<div v-if="isTypeA">A</div>
          <div v-else-if="isTypeB">B</div>`,
-        "const isTypeA = true; const isTypeB = true;"
+        "const isTypeA = true; const isTypeB = true;",
       );
 
       // v-else-if should negate the v-if condition and include its own condition
       // Expected: if(!(!((isTypeA)) && (isTypeB))) return null;
       expect(result).toContain("isTypeA");
       expect(result).toContain("isTypeB");
-      
-      // The v-else-if narrowing should negate isTypeA 
+
+      // The v-else-if narrowing should negate isTypeA
       const elseIfNarrowing = result.match(/if\(!\(.*isTypeA.*\)\) return null/);
       expect(elseIfNarrowing).toBeTruthy();
     });
@@ -265,7 +251,7 @@ describe("ComponentTypePlugin", () => {
       const { result } = processComponentType(
         `<div v-if="isTypeA">A</div>
          <div v-else>B</div>`,
-        "const isTypeA = true;"
+        "const isTypeA = true;",
       );
 
       // v-else should negate the v-if condition
@@ -279,12 +265,12 @@ describe("ComponentTypePlugin", () => {
          <div v-else-if="isTypeB">B</div>
          <div v-else-if="isTypeC">C</div>
          <div v-else>D</div>`,
-        "const isTypeA = true; const isTypeB = true; const isTypeC = true;"
+        "const isTypeA = true; const isTypeB = true; const isTypeC = true;",
       );
 
       // Extract the narrowing statements (if(!(...)) return null;)
       const narrowingStatements = result.match(/if\(!\(.*?\)\) return null;/g) || [];
-      
+
       // Should have 4 narrowing statements (one per element)
       expect(narrowingStatements.length).toBe(4);
 
@@ -295,10 +281,14 @@ describe("ComponentTypePlugin", () => {
       expect(narrowingStatements[1]).toBe("if(!(!((isTypeA)) && (isTypeB))) return null;");
 
       // v-else-if="isTypeC" narrowing: should negate both prior conditions
-      expect(narrowingStatements[2]).toBe("if(!(!((isTypeA)) && !((isTypeB)) && (isTypeC))) return null;");
+      expect(narrowingStatements[2]).toBe(
+        "if(!(!((isTypeA)) && !((isTypeB)) && (isTypeC))) return null;",
+      );
 
       // v-else narrowing: should negate all three conditions
-      expect(narrowingStatements[3]).toBe("if(!(!((isTypeA)) && !((isTypeB)) && !((isTypeC)))) return null;");
+      expect(narrowingStatements[3]).toBe(
+        "if(!(!((isTypeA)) && !((isTypeB)) && !((isTypeC)))) return null;",
+      );
     });
 
     it("generates correct narrowing for typeof conditions", () => {
@@ -306,21 +296,20 @@ describe("ComponentTypePlugin", () => {
         `<div v-if="typeof test === 'string'">String</div>
          <div v-else-if="typeof test === 'number'">Number</div>
          <div v-else>Other</div>`,
-        "const test = 'hello' as string | number | boolean;"
+        "const test = 'hello' as string | number | boolean;",
       );
 
       // Check that typeof conditions are present
       expect(result).toContain("typeof test");
-      
+
       // Each typeof condition should appear a limited number of times
       const stringTypeofMatches = result.match(/typeof test === 'string'/g) || [];
       const numberTypeofMatches = result.match(/typeof test === 'number'/g) || [];
-      
+
       // Should not have excessive duplication
       expect(stringTypeofMatches.length).toBeLessThanOrEqual(4);
       expect(numberTypeofMatches.length).toBeLessThanOrEqual(3);
     });
-
   });
 
   // ============================================================================
@@ -331,7 +320,7 @@ describe("ComponentTypePlugin", () => {
     it("generates extractLoops call for basic v-for", () => {
       const { result } = processComponentType(
         '<li v-for="item in items" :key="item">{{ item }}</li>',
-        "const items = ['a', 'b', 'c'];"
+        "const items = ['a', 'b', 'c'];",
       );
 
       // Must include the prefix - bare "extractLoops" without prefix would be a bug
@@ -342,7 +331,7 @@ describe("ComponentTypePlugin", () => {
     it("extracts both key and value for v-for with index", () => {
       const { result } = processComponentType(
         '<li v-for="(item, index) in items" :key="index"></li>',
-        "const items = ['a', 'b', 'c'];"
+        "const items = ['a', 'b', 'c'];",
       );
 
       expect(result).toContain("___VERTER___extractLoops");
@@ -355,7 +344,7 @@ describe("ComponentTypePlugin", () => {
         `<div v-for="(row, i) in matrix" :key="i">
            <span v-for="(cell, j) in row" :key="j">{{ cell }}</span>
          </div>`,
-        "const matrix = [[1, 2], [3, 4]];"
+        "const matrix = [[1, 2], [3, 4]];",
       );
 
       // Should have prefixed extractLoops calls for both loops
@@ -366,7 +355,7 @@ describe("ComponentTypePlugin", () => {
     it("handles v-for with destructuring", () => {
       const { result } = processComponentType(
         '<li v-for="{ id, name } in users" :key="id">{{ name }}</li>',
-        "const users = [{ id: 1, name: 'John' }];"
+        "const users = [{ id: 1, name: 'John' }];",
       );
 
       expect(result).toContain("___VERTER___extractLoops");
@@ -383,7 +372,7 @@ describe("ComponentTypePlugin", () => {
         `<MyComponent>
            <template #default>Content</template>
          </MyComponent>`,
-        "import MyComponent from './MyComponent.vue';"
+        "import MyComponent from './MyComponent.vue';",
       );
 
       // MyComponent should be treated as a component (new syntax)
@@ -397,7 +386,7 @@ describe("ComponentTypePlugin", () => {
              <div>{{ item.name }}</div>
            </template>
          </MyList>`,
-        "import MyList from './MyList.vue';"
+        "import MyList from './MyList.vue';",
       );
 
       // Must include the prefix - bare function name without prefix would be a bug
@@ -410,7 +399,7 @@ describe("ComponentTypePlugin", () => {
            <template #header>Header</template>
            <template #footer>Footer</template>
          </MyComponent>`,
-        "import MyComponent from './MyComponent.vue';"
+        "import MyComponent from './MyComponent.vue';",
       );
 
       expect(result).toContain("new MyComponent");
@@ -425,7 +414,7 @@ describe("ComponentTypePlugin", () => {
     it("generates new constructor call for Vue components", () => {
       const { result } = processComponentType(
         "<MyComponent />",
-        "import MyComponent from './MyComponent.vue';"
+        "import MyComponent from './MyComponent.vue';",
       );
 
       expect(result).toContain("new MyComponent");
@@ -434,7 +423,7 @@ describe("ComponentTypePlugin", () => {
     it("includes props in component constructor call", () => {
       const { result } = processComponentType(
         '<MyComponent title="Hello" :count="42" />',
-        "import MyComponent from './MyComponent.vue';"
+        "import MyComponent from './MyComponent.vue';",
       );
 
       expect(result).toContain("new MyComponent");
@@ -445,7 +434,7 @@ describe("ComponentTypePlugin", () => {
     it("handles component in v-for", () => {
       const { result } = processComponentType(
         '<UserCard v-for="user in users" :key="user.id" :user="user" />',
-        "import UserCard from './UserCard.vue'; const users = [{ id: 1 }];"
+        "import UserCard from './UserCard.vue'; const users = [{ id: 1 }];",
       );
 
       expect(result).toContain("new UserCard");
@@ -473,9 +462,7 @@ describe("ComponentTypePlugin", () => {
     });
 
     it("returns empty object for multiple roots (fragment)", () => {
-      const { result } = processComponentType(
-        "<div>First</div><span>Second</span>"
-      );
+      const { result } = processComponentType("<div>First</div><span>Second</span>");
 
       expect(result).toContain("return {};");
     });
@@ -490,18 +477,16 @@ describe("ComponentTypePlugin", () => {
       const { result } = processComponentType(
         "<div>{{ item }}</div>",
         "const item = defineProps<{ item: T }>();",
-        { generic: "T" }
+        { generic: "T" },
       );
 
       expect(result).toMatch(/function.*<T>/);
     });
 
     it("includes generic parameters in getRootComponent", () => {
-      const { result } = processComponentType(
-        "<div>{{ item }}</div>",
-        "",
-        { generic: "T extends string" }
-      );
+      const { result } = processComponentType("<div>{{ item }}</div>", "", {
+        generic: "T extends string",
+      });
 
       // Note: The current implementation appends generic source directly
       // which results in `getRootComponent<T extends string>()` format
@@ -526,7 +511,7 @@ describe("ComponentTypePlugin", () => {
     it("imports extractLoops when v-for is used", () => {
       const { result } = processComponentType(
         '<li v-for="item in items" :key="item"></li>',
-        "const items = [1, 2, 3];"
+        "const items = [1, 2, 3];",
       );
 
       // extractLoops is imported and used in the generated code
@@ -538,7 +523,7 @@ describe("ComponentTypePlugin", () => {
         `<MyComponent>
            <template #default="props">{{ props.msg }}</template>
          </MyComponent>`,
-        "import MyComponent from './MyComponent.vue';"
+        "import MyComponent from './MyComponent.vue';",
       );
 
       // extractArgumentsFromRenderSlot is imported and used
@@ -561,7 +546,7 @@ describe("ComponentTypePlugin", () => {
 
     it("handles deeply nested elements", () => {
       const { result } = processComponentType(
-        "<div><div><div><div><span>Deep</span></div></div></div></div>"
+        "<div><div><div><div><span>Deep</span></div></div></div></div>",
       );
 
       // All elements should have component functions
@@ -572,7 +557,7 @@ describe("ComponentTypePlugin", () => {
 
     it("handles special HTML elements", () => {
       const { result } = processComponentType(
-        "<table><thead><tr><th>Header</th></tr></thead></table>"
+        "<table><thead><tr><th>Header</th></tr></thead></table>",
       );
 
       expect(result).toContain('HTMLElementTagNameMap["table"]');
@@ -584,7 +569,7 @@ describe("ComponentTypePlugin", () => {
     it("handles v-html directive", () => {
       const { result } = processComponentType(
         '<div v-html="htmlContent"></div>',
-        "const htmlContent = '<b>bold</b>';"
+        "const htmlContent = '<b>bold</b>';",
       );
 
       expect(result).toContain('HTMLElementTagNameMap["div"]');
@@ -595,7 +580,7 @@ describe("ComponentTypePlugin", () => {
     it("handles v-text directive", () => {
       const { result } = processComponentType(
         '<div v-text="textContent"></div>',
-        "const textContent = 'Hello';"
+        "const textContent = 'Hello';",
       );
 
       expect(result).toContain('HTMLElementTagNameMap["div"]');
@@ -624,7 +609,7 @@ describe("ComponentTypePlugin", () => {
          </div>
          <div v-else>No items</div>`,
         `import MyComponent from './MyComponent.vue';
-         const items = [{ id: 1 }];`
+         const items = [{ id: 1 }];`,
       );
 
       // Should have all the necessary pieces with proper prefixes
@@ -646,7 +631,7 @@ describe("ComponentTypePlugin", () => {
          </form>`,
         `const name = ref('');
          const selected = ref('');
-         const options = [{ value: 'a', label: 'A' }];`
+         const options = [{ value: 'a', label: 'A' }];`,
       );
 
       expect(result).toContain('HTMLElementTagNameMap["form"]');

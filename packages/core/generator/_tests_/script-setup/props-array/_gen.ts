@@ -17,9 +17,9 @@ expectType<{
 }>(props);
 
 // @ts-expect-error doesn't exist
-props.random
+props.random;
 
 expectType<Array<"foo" | "bar">>(Comp.props);
 
 // @ts-expect-error doesn't exist
-expectType<Array<'somthing-else'>>(Comp.props);
+expectType<Array<"somthing-else">>(Comp.props);

@@ -76,15 +76,13 @@ export type TemplateFunction = {
   // ) & {
   //   loc: Node["loc"] & babel_types.Node["loc"];
   // };
-  node:
-    | Omit<babel_types.Node, "loc"> & {
-        loc: Node["loc"] & babel_types.Node["loc"];
-      };
+  node: Omit<babel_types.Node, "loc"> & {
+    loc: Node["loc"] & babel_types.Node["loc"];
+  };
 
-  body:
-    | Omit<babel_types.Node, "loc"> & {
-        loc: Node["loc"] & babel_types.Node["loc"];
-      };
+  body: Omit<babel_types.Node, "loc"> & {
+    loc: Node["loc"] & babel_types.Node["loc"];
+  };
 
   context: Record<string, any>;
 };

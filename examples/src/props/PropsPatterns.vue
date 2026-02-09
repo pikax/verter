@@ -46,7 +46,7 @@ const booleanProps = defineProps({
   visible: { type: Boolean, default: true },
   // String | Boolean (String takes precedence)
   value: [String, Boolean],
-  // Boolean | String (Boolean takes precedence)  
+  // Boolean | String (Boolean takes precedence)
   flag: [Boolean, String],
 });
 

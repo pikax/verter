@@ -20,7 +20,9 @@ const genericRef = ref<{
   items: { id: number; name: string }[];
   addItem: (item: { id: number; name: string }) => void;
   getItems: () => { id: number; name: string }[];
-  findItem: (predicate: (item: { id: number; name: string }) => boolean) => { id: number; name: string } | undefined;
+  findItem: (
+    predicate: (item: { id: number; name: string }) => boolean,
+  ) => { id: number; name: string } | undefined;
 } | null>(null);
 
 // Accessing exposed methods (for type checking)

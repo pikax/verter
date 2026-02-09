@@ -53,9 +53,7 @@ const { i18n, $ts: ts } = useI18n();
       <template #label>
         <span>{{ i18n.contact.form.info.websites.label }}</span>
         <h-pill v-if="item.websites.length > 1">
-          {{
-            ts("contact.form.info.websites.more", [item.websites.length - 1])
-          }}
+          {{ ts("contact.form.info.websites.more", [item.websites.length - 1]) }}
         </h-pill>
       </template>
       <template #default="{ value, type }">
@@ -71,9 +69,7 @@ const { i18n, $ts: ts } = useI18n();
       <template #label>
         <span>{{ i18n.contact.form.info.addresses.label }}</span>
         <h-pill v-if="item.addresses.length > 1">
-          {{
-            ts("contact.form.info.addresses.more", [item.addresses.length - 1])
-          }}
+          {{ ts("contact.form.info.addresses.more", [item.addresses.length - 1]) }}
         </h-pill>
       </template>
       <template #default="address">

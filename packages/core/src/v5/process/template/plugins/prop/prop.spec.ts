@@ -12,9 +12,7 @@ describe("process template plugins prop", () => {
 
     const s = new MagicString(source);
 
-    const templateBlock = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processTemplate(
       templateBlock.result.items,
@@ -33,8 +31,9 @@ describe("process template plugins prop", () => {
         s,
         filename: "test.vue",
         blocks: parsed.blocks,
-        block: templateBlock,blockNameResolver: (name) => name,
-      }
+        block: templateBlock,
+        blockNameResolver: (name) => name,
+      },
     );
 
     return r;
@@ -53,9 +52,7 @@ describe("process template plugins prop", () => {
 
     it("prop to camelCase", () => {
       const { result } = parse(`<div test-camel-case="test-again" />`);
-      expect(result).toMatchInlineSnapshot(
-        `"<div test-camel-case={"test-again"} />"`
-      );
+      expect(result).toMatchInlineSnapshot(`"<div test-camel-case={"test-again"} />"`);
     });
   });
   describe("v-bind", () => {
@@ -70,7 +67,7 @@ describe("process template plugins prop", () => {
     });
 
     it("should handle prop with v-bind shorthand sugar", () => {
-      const { result,  } = parse(`<div :test />`);
+      const { result } = parse(`<div :test />`);
       expect(result).toMatchInlineSnapshot(`"<div test={___VERTER___ctx.test} />"`);
     });
 
@@ -81,9 +78,7 @@ describe("process template plugins prop", () => {
 
     it("camelCase", () => {
       const { result } = parse(`<div :test-camel-case="'test-camel'" />`);
-      expect(result).toMatchInlineSnapshot(
-        `"<div test-camel-case={'test-camel'} />"`
-      );
+      expect(result).toMatchInlineSnapshot(`"<div test-camel-case={'test-camel'} />"`);
     });
 
     it(':[msg]="msg"', () => {
@@ -98,23 +93,17 @@ describe("process template plugins prop", () => {
 
     it("supports xlink attributes in svg namespace", () => {
       const { result } = parse(`<svg><a :xlink:special="foo"></a></svg>`);
-      expect(result).toMatchInlineSnapshot(
-        `"<svg><a xlink:special={foo}></a></svg>"`
-      );
+      expect(result).toMatchInlineSnapshot(`"<svg><a xlink:special={foo}></a></svg>"`);
     });
 
     it("keeps .prop modifier bound properties", () => {
       const { result } = parse(`<div :someProperty.prop="someObject"></div>`);
-      expect(result).toMatchInlineSnapshot(
-        `"<div someProperty.prop={someObject}></div>"`
-      );
+      expect(result).toMatchInlineSnapshot(`"<div someProperty.prop={someObject}></div>"`);
     });
 
     it("supports dot shorthand for prop modifier", () => {
       const { result } = parse(`<div .someProperty="someObject"></div>`);
-      expect(result).toMatchInlineSnapshot(
-        `"<div someProperty={someObject}></div>"`
-      );
+      expect(result).toMatchInlineSnapshot(`"<div someProperty={someObject}></div>"`);
     });
   });
 
@@ -130,9 +119,7 @@ describe("process template plugins prop", () => {
 
     it("camelise", () => {
       const { result } = parse(`<div @test-camel-case="test-test" />`);
-      expect(result).toMatchInlineSnapshot(
-        `"<div onTest-camel-case={test-test} />"`
-      );
+      expect(result).toMatchInlineSnapshot(`"<div onTest-camel-case={test-test} />"`);
     });
   });
 
@@ -183,41 +170,35 @@ describe("process template plugins prop", () => {
 
   describe("merge", () => {
     it("style", () => {
-      const { result } = parse(
-        `<div :style="{ color: 'red' }" style="color: blue" />`
-      );
+      const { result } = parse(`<div :style="{ color: 'red' }" style="color: blue" />`);
       expect(result).toContain(
-        `<div style={___VERTER___normalizeStyle([{ color: 'red' },"color: blue"])}  />`
+        `<div style={___VERTER___normalizeStyle([{ color: 'red' },"color: blue"])}  />`,
       );
     });
     it("class", () => {
-      const { result } = parse(
-        `<div :class="{ color: 'red' }" class="color" />`
-      );
+      const { result } = parse(`<div :class="{ color: 'red' }" class="color" />`);
       expect(result).toContain(
-        `<div class={___VERTER___normalizeClass([{ color: 'red' },"color"])}  />`
+        `<div class={___VERTER___normalizeClass([{ color: 'red' },"color"])}  />`,
       );
     });
 
     it("style and class", () => {
       const { result } = parse(
-        `<div :style="{ color: 'red' }" style="color: blue" :class="{ color: 'red' }" class="color" />`
+        `<div :style="{ color: 'red' }" style="color: blue" :class="{ color: 'red' }" class="color" />`,
       );
       expect(result).toContain(
-        `<div style={___VERTER___normalizeStyle([{ color: 'red' },"color: blue"])}  class={___VERTER___normalizeClass([{ color: 'red' },"color"])}  />`
+        `<div style={___VERTER___normalizeStyle([{ color: 'red' },"color: blue"])}  class={___VERTER___normalizeClass([{ color: 'red' },"color"])}  />`,
       );
     });
 
     it("with other props", () => {
       const { result } = parse(
-        `<div v-if="test" :style="{ color: 'red' }" :foo style="color: blue" :class="{ color: 'red' }" @test="onTest" class="color" :test="test" />`
+        `<div v-if="test" :style="{ color: 'red' }" :foo style="color: blue" :class="{ color: 'red' }" @test="onTest" class="color" :test="test" />`,
       );
       expect(result).toContain(
-        `style={___VERTER___normalizeStyle([{ color: 'red' },"color: blue"])}`
+        `style={___VERTER___normalizeStyle([{ color: 'red' },"color: blue"])}`,
       );
-      expect(result).toContain(
-        `class={___VERTER___normalizeClass([{ color: 'red' },"color"])}`
-      );
+      expect(result).toContain(`class={___VERTER___normalizeClass([{ color: 'red' },"color"])}`);
     });
   });
 });

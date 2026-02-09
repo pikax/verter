@@ -1,9 +1,4 @@
-import {
-  ProcessItemImport,
-  ProcessItemType,
-  type ImportItem,
-  type ImportModule,
-} from "./types";
+import { ProcessItemImport, ProcessItemType, type ImportItem, type ImportModule } from "./types";
 import { ExportedTypes } from "@verter/types/string";
 import type { AvailableExports } from "@verter/types/string";
 
@@ -15,7 +10,7 @@ export const VERTER_HELPERS_IMPORT = "$verter/types$";
 
 export function createHelperImport(
   items: Array<AvailableExports>,
-  prefix: (str: string) => string
+  prefix: (str: string) => string,
 ): ProcessItemImport {
   return {
     type: ProcessItemType.Import,
@@ -60,9 +55,7 @@ export function handleHelpers(source: string) {
 
   const imports = retriveImportFromHelpers(source);
 
-  const content = source
-    .slice(source.indexOf(VERTER_START) + VERTER_START.length)
-    .trim();
+  const content = source.slice(source.indexOf(VERTER_START) + VERTER_START.length).trim();
 
   function withPrefix(prefix: string) {
     return {
@@ -75,7 +68,7 @@ export function handleHelpers(source: string) {
               ...i,
               alias: i.alias ? i.alias.replaceAll("$V_", prefix) : undefined,
             })),
-          } as ImportModule)
+          }) as ImportModule,
       ),
     };
   }
@@ -130,11 +123,8 @@ export function generateImport(items: ImportModule[]) {
     }
     imports.push(
       `import { ${toAdd
-        .map(
-          (i) =>
-            (i.type ? `type ` : "") + i.name + (i.alias ? ` as ${i.alias}` : "")
-        )
-        .join(", ")} } from "${key}";`
+        .map((i) => (i.type ? `type ` : "") + i.name + (i.alias ? ` as ${i.alias}` : ""))
+        .join(", ")} } from "${key}";`,
     );
   }
   return imports.join("\n");

@@ -10,6 +10,11 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use sha2::{Digest, Sha256};
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
 use crate::{
     code_transform::SourceMapOptions,
     codegen::vue::{
@@ -472,8 +477,7 @@ pub fn generate(
     options: &CodegenOptions,
     allocator: &oxc_allocator::Allocator,
 ) -> CodegenResult {
-    #[cfg(not(target_arch = "wasm32"))]
-    let start = std::time::Instant::now();
+    let start = Instant::now();
 
     let bytes = input.as_bytes();
 
@@ -586,10 +590,7 @@ pub fn generate(
         code, source_map_base64
     );
 
-    #[cfg(not(target_arch = "wasm32"))]
     let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
-    #[cfg(target_arch = "wasm32")]
-    let duration_ms = 0.0;
 
     CodegenResult {
         code,
@@ -628,8 +629,7 @@ pub fn generate_for_vite(
     allocator: &oxc_allocator::Allocator,
 ) -> ViteCodegenResult {
     use crate::codegen::vue::style_plugin::StyleCodegenPlugin;
-    #[cfg(not(target_arch = "wasm32"))]
-    let start = std::time::Instant::now();
+    let start = Instant::now();
 
     let bytes = input.as_bytes();
 
@@ -854,10 +854,7 @@ pub fn generate_for_vite(
         })
         .collect();
 
-    #[cfg(not(target_arch = "wasm32"))]
     let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
-    #[cfg(target_arch = "wasm32")]
-    let duration_ms = 0.0;
 
     ViteCodegenResult {
         script: script_output,

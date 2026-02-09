@@ -151,6 +151,15 @@ cargo test --package verter_core test_name   # Specific Rust test
 cargo test --package verter_core 2>&1 | tail -60  # Full suite with truncated output
 ```
 
+### End-of-change Checks
+
+Run these after making changes:
+
+```bash
+cargo clippy --fix --allow-dirty --allow-staged --workspace -- -D warnings
+cargo fmt --all
+```
+
 ### Testing Requirements
 
 **IMPORTANT**: When making any code changes, always add corresponding tests whenever possible:

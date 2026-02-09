@@ -1,9 +1,5 @@
 import { MagicString } from "@vue/compiler-sfc";
-import {
-  ScriptItem,
-  ScriptItemByType,
-  ScriptTypes,
-} from "../../parser/script/types";
+import { ScriptItem, ScriptItemByType, ScriptTypes } from "../../parser/script/types";
 import { ProcessContext, ProcessPlugin } from "../types";
 import { TemplateBinding } from "../../parser/template/types";
 
@@ -20,11 +16,9 @@ export interface ScriptContext extends ProcessContext {
 
 export type ScriptPlugin = ProcessPlugin<ScriptItem, ScriptContext> & {
   [K in `transform${ScriptTypes}`]?: (
-    item: K extends `transform${infer C extends ScriptTypes}`
-      ? ScriptItemByType[C]
-      : ScriptItem,
+    item: K extends `transform${infer C extends ScriptTypes}` ? ScriptItemByType[C] : ScriptItem,
     s: MagicString,
-    context: ScriptContext
+    context: ScriptContext,
   ) => void;
 };
 

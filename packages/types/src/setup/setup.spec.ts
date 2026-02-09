@@ -91,9 +91,7 @@ describe("Setup helpers", () => {
       required: true,
     },
   });
-  type GenericObjectType<T extends string> = ReturnType<
-    typeof createGenericObject<T>
-  >;
+  type GenericObjectType<T extends string> = ReturnType<typeof createGenericObject<T>>;
   type GenericType<T extends string> = {
     foo: T;
   };
@@ -171,10 +169,7 @@ describe("Setup helpers", () => {
     });
 
     it("preserves value and type generics", () => {
-      type GenericMacro<T extends string> = MacroReturnType<
-        GenericValueType,
-        GenericType<T>
-      >;
+      type GenericMacro<T extends string> = MacroReturnType<GenericValueType, GenericType<T>>;
 
       assertType<GenericMacro<"test">["value"]>(genericValue);
       assertType<GenericMacro<"test">["type"]>({} as GenericType<"test">);
@@ -224,10 +219,7 @@ describe("Setup helpers", () => {
     });
 
     it("preserves value and object generics", () => {
-      type GenericMacro = MacroReturnObject<
-        GenericValueType,
-        GenericObjectType<"test">
-      >;
+      type GenericMacro = MacroReturnObject<GenericValueType, GenericObjectType<"test">>;
 
       assertType<GenericMacro["value"]>(genericValue);
       assertType<GenericMacro["object"]>(createGenericObject<"test">());
@@ -237,10 +229,7 @@ describe("Setup helpers", () => {
     });
 
     it("works with complex object types", () => {
-      type ComplexMacro = MacroReturnObject<
-        ComplexObjectType,
-        ComplexObjectType
-      >;
+      type ComplexMacro = MacroReturnObject<ComplexObjectType, ComplexObjectType>;
       assertType<ComplexMacro["value"]>(complexObject);
       assertType<ComplexMacro["object"]>({} as ComplexObjectType);
 
@@ -737,9 +726,7 @@ describe("Setup helpers", () => {
 
       assertType<Normalized["props"]["props"]["value"]>({} as { id: number });
       assertType<Normalized["props"]["props"]["type"]>("Props");
-      assertType<Normalized["props"]["defaults"]>(
-        {} as { value: { id: number } }
-      );
+      assertType<Normalized["props"]["defaults"]>({} as { value: { id: number } });
       assertType<Normalized["emits"]["value"]>({} as () => void);
       assertType<Normalized["slots"]["value"]>({} as {});
       assertType<Normalized["options"]["value"]>({} as { name: string });
@@ -795,9 +782,7 @@ describe("Setup helpers", () => {
 
       type Normalized = NormaliseMacroReturn<typeof result>;
 
-      assertType<Normalized["props"]["props"]["value"]>(
-        {} as { count: number }
-      );
+      assertType<Normalized["props"]["props"]["value"]>({} as { count: number });
       assertType<Normalized["props"]["props"]["type"]>("number");
       assertType<Normalized["model"]["modelValue"]["value"]>({} as string);
       assertType<Normalized["emits"]>({} as () => void);
@@ -1093,9 +1078,7 @@ describe("Setup helpers", () => {
         model: { value: "test", type: "ModelType" },
       });
       // @ts-expect-error incorrect type
-      assertType<ExtractMacroReturn<typeof result>["model"]["value"]>(
-        "wrong type"
-      );
+      assertType<ExtractMacroReturn<typeof result>["model"]["value"]>("wrong type");
     });
 
     it("handles empty model object", () => {
@@ -1293,7 +1276,7 @@ describe("Setup helpers", () => {
       assertType<Props>(
         {} as { props: MacroReturn<{ id: number; name: string }, "Props"> } & {
           defaults: { value: {} };
-        }
+        },
       );
 
       // @ts-expect-error incorrect type
@@ -1326,7 +1309,7 @@ describe("Setup helpers", () => {
       assertType<Props>(
         {} as { props: MacroReturnType<ComplexProps, "ComplexPropsType"> } & {
           defaults: { value: {} };
-        }
+        },
       );
 
       // @ts-expect-error incorrect type
@@ -1347,12 +1330,12 @@ describe("Setup helpers", () => {
       assertType<Props1>(
         {} as { props: MacroReturnType<{ id: number }, "PropsType"> } & {
           defaults: { value: {} };
-        }
+        },
       );
       assertType<Props2>(
         {} as { props: MacroReturnObject<{ id: number }, { id: "number" }> } & {
           defaults: { value: {} };
-        }
+        },
       );
 
       // @ts-expect-error incorrect type
@@ -1381,7 +1364,7 @@ describe("Setup helpers", () => {
       assertType<Props>(
         {} as { props: MacroReturn<{ id: number; name?: string }, "Props"> } & {
           defaults: MacroReturn<{ name: string }, "Defaults">;
-        }
+        },
       );
 
       // @ts-expect-error incorrect type
@@ -1397,7 +1380,7 @@ describe("Setup helpers", () => {
       assertType<Props>(
         {} as { props: MacroReturn<{ id: number }, "Props"> } & {
           defaults: { value: {} };
-        }
+        },
       );
 
       // @ts-expect-error incorrect type
@@ -1426,7 +1409,7 @@ describe("Setup helpers", () => {
       assertType<Props>(
         {} as { props: MacroReturnType<PropsType, "PropsType"> } & {
           defaults: MacroReturnType<DefaultsType, "DefaultsType">;
-        }
+        },
       );
 
       // @ts-expect-error incorrect type
@@ -1435,27 +1418,18 @@ describe("Setup helpers", () => {
 
     it("works with MacroReturnObject in defaults", () => {
       type Macros = {
-        props: MacroReturnObject<
-          { id: number; name?: string },
-          { id: "number"; name: "string" }
-        >;
-        withDefaults: MacroReturnObject<
-          { name: string },
-          { name: '"default"' }
-        >;
+        props: MacroReturnObject<{ id: number; name?: string }, { id: "number"; name: "string" }>;
+        withDefaults: MacroReturnObject<{ name: string }, { name: '"default"' }>;
       };
 
       type Props = ExtractMacroProps<Macros>;
 
       assertType<Props>(
         {} as {
-          props: MacroReturnObject<
-            { id: number; name?: string },
-            { id: "number"; name: "string" }
-          >;
+          props: MacroReturnObject<{ id: number; name?: string }, { id: "number"; name: "string" }>;
         } & {
           defaults: MacroReturnObject<{ name: string }, { name: '"default"' }>;
-        }
+        },
       );
       // @ts-expect-error incorrect type
       assertType<Props["props"]["value"]>({ id: "wrong type" });
@@ -1469,9 +1443,7 @@ describe("Setup helpers", () => {
       };
 
       type Defaults = ExtractMacro<Macros, "withDefaults">;
-      assertType<Defaults>(
-        {} as MacroReturn<{ foo: string; bar: number }, "Defaults">
-      );
+      assertType<Defaults>({} as MacroReturn<{ foo: string; bar: number }, "Defaults">);
 
       // @ts-expect-error incorrect type
       assertType<Defaults["props"]["value"]>({ id: "wrong type" });
@@ -1514,9 +1486,7 @@ describe("Setup helpers", () => {
       };
 
       type Defaults = ExtractMacro<Macros, "withDefaults">;
-      assertType<Defaults>(
-        {} as MacroReturnObject<DefaultsValue, DefaultsObject>
-      );
+      assertType<Defaults>({} as MacroReturnObject<DefaultsValue, DefaultsObject>);
       // @ts-expect-error incorrect type
       assertType<Defaults["props"]["value"]>({ id: "wrong type" });
     });
@@ -1546,7 +1516,7 @@ describe("Setup helpers", () => {
             value: { name: string };
             type: { name: string };
           };
-        }
+        },
       );
       // @ts-expect-error incorrect type
       assertType<Macros["props"]["value"]>({ id: "wrong type" });
@@ -1573,7 +1543,7 @@ describe("Setup helpers", () => {
         {} as {
           value: { label: string };
           type: { label: string };
-        }
+        },
       );
 
       // @ts-expect-error incorrect type
@@ -1602,7 +1572,7 @@ describe("Setup helpers", () => {
         {} as {
           value: { bar: string };
           type: { bar: string };
-        }
+        },
       );
 
       // @ts-expect-error incorrect type
@@ -1638,7 +1608,7 @@ describe("Setup helpers", () => {
       assertType<Props["defaults"]["value"]>(
         {} as {
           config: { theme: "light"; debug: boolean };
-        }
+        },
       );
 
       // @ts-expect-error incorrect type
@@ -1665,7 +1635,7 @@ describe("Setup helpers", () => {
         {} as {
           value: {};
           type: {};
-        }
+        },
       );
 
       // @ts-expect-error incorrect type
@@ -1773,10 +1743,7 @@ describe("Setup helpers", () => {
 
     it("handles scoped slot types", () => {
       type ScopedSlots = {
-        item: (props: {
-          item: { id: number; name: string };
-          index: number;
-        }) => any;
+        item: (props: { item: { id: number; name: string }; index: number }) => any;
       };
 
       type Macros = {
@@ -1784,9 +1751,7 @@ describe("Setup helpers", () => {
       };
 
       type Slots = ExtractSlots<Macros>;
-      assertType<Slots>(
-        {} as MacroReturnObject<ScopedSlots, "ScopedSlotsObject">
-      );
+      assertType<Slots>({} as MacroReturnObject<ScopedSlots, "ScopedSlotsObject">);
       // @ts-expect-error incorrect type
       assertType<Slots["props"]["value"]>({ id: "wrong type" });
     });
@@ -1829,9 +1794,7 @@ describe("Setup helpers", () => {
       };
 
       type Options = ExtractOptions<Macros>;
-      assertType<Options>(
-        {} as MacroReturnType<ComponentOptions, "OptionsType">
-      );
+      assertType<Options>({} as MacroReturnType<ComponentOptions, "OptionsType">);
 
       // @ts-expect-error incorrect type
       assertType<Options["props"]["value"]>({ id: "wrong type" });
@@ -1849,9 +1812,7 @@ describe("Setup helpers", () => {
       };
 
       type Options = ExtractOptions<Macros>;
-      assertType<Options>(
-        {} as MacroReturnObject<OptionsValue, "ComplexOptions">
-      );
+      assertType<Options>({} as MacroReturnObject<OptionsValue, "ComplexOptions">);
 
       // @ts-expect-error incorrect type
       assertType<Options["props"]["value"]>({ id: "wrong type" });
@@ -2055,7 +2016,7 @@ describe("Setup helpers", () => {
       assertType<Props>(
         {} as { props: MacroReturn<{ id: number }, "Props"> } & {
           defaults: { value: {} };
-        }
+        },
       );
       assertType<Emits>({} as MacroReturn<() => void, "Emits">);
       assertType<Slots>({} as MacroReturn<{}, "Slots">);
@@ -2091,7 +2052,7 @@ describe("Setup helpers", () => {
       assertType<Props>(
         {} as { props: MacroReturn<{ id: number }, "Props"> } & {
           defaults: { value: {} };
-        }
+        },
       );
       assertType<Emits>({} as MacroReturn<() => void, "Emits">);
       assertType<Slots>({} as {});
@@ -2149,12 +2110,8 @@ describe("Setup helpers", () => {
       type Props = ExtractMacroProps<Macros>;
       type Expose = ExtractExpose<Macros>;
 
-      assertType<Props["props"]["value"]>(
-        {} as { count: number; title: string }
-      );
-      assertType<Expose["value"]>(
-        {} as { increment: () => void; decrement: () => void }
-      );
+      assertType<Props["props"]["value"]>({} as { count: number; title: string });
+      assertType<Expose["value"]>({} as { increment: () => void; decrement: () => void });
 
       // @ts-expect-error incorrect type
       assertType<Props["props"]["value"]>({ id: "wrong type" });
@@ -2162,18 +2119,12 @@ describe("Setup helpers", () => {
 
     it("handles complex real-world setup pattern", () => {
       type SetupReturn = {
-        props: MacroReturnType<
-          { modelValue: string; disabled?: boolean },
-          "Props"
-        >;
+        props: MacroReturnType<{ modelValue: string; disabled?: boolean }, "Props">;
         emits: MacroReturnObject<
           (event: string, ...args: any[]) => void,
           { "update:modelValue": [value: string] }
         >;
-        expose: MacroReturnType<
-          { focus: () => void; blur: () => void },
-          "Expose"
-        >;
+        expose: MacroReturnType<{ focus: () => void; blur: () => void }, "Expose">;
         model: {
           modelValue: MacroReturnType<string, "string">;
         };
@@ -2184,15 +2135,9 @@ describe("Setup helpers", () => {
       type Expose = ExtractExpose<SetupReturn>;
       type Model = ExtractModel<SetupReturn>;
 
-      assertType<Props["props"]["value"]>(
-        {} as { modelValue: string; disabled?: boolean }
-      );
-      assertType<Emits["object"]>(
-        {} as { "update:modelValue": [value: string] }
-      );
-      assertType<Expose["value"]>(
-        {} as { focus: () => void; blur: () => void }
-      );
+      assertType<Props["props"]["value"]>({} as { modelValue: string; disabled?: boolean });
+      assertType<Emits["object"]>({} as { "update:modelValue": [value: string] });
+      assertType<Expose["value"]>({} as { focus: () => void; blur: () => void });
       assertType<Model["modelValue"]["value"]>({} as string);
 
       // @ts-expect-error incorrect type
@@ -2363,9 +2308,7 @@ describe("Setup helpers", () => {
       const expose = {} as Expose<boolean>;
       assertType<() => boolean>(expose.value.getValue);
       assertType<(value: boolean) => void>(expose.value.setValue);
-      assertType<(fn: (value: boolean) => boolean) => void>(
-        expose.value.transform
-      );
+      assertType<(fn: (value: boolean) => boolean) => void>(expose.value.transform);
 
       // @ts-expect-error incorrect type
       assertType<Expose["props"]["value"]>({ id: "wrong type" });
@@ -2419,9 +2362,7 @@ describe("Setup helpers", () => {
       const props = {} as Props<number, string>;
       assertType<number>(props.props.value.value);
       assertType<string[]>(props.props.value.items);
-      assertType<(value: number, items: string[]) => void>(
-        props.props.value.onChange
-      );
+      assertType<(value: number, items: string[]) => void>(props.props.value.onChange);
 
       // @ts-expect-error incorrect type
       assertType<Props["props"]["value"]>({ id: "wrong type" });
@@ -2442,9 +2383,7 @@ describe("Setup helpers", () => {
         });
       }
 
-      type Test<T extends { id: number; name: string }> = ReturnType<
-        typeof setup<T>
-      >;
+      type Test<T extends { id: number; name: string }> = ReturnType<typeof setup<T>>;
       type Props<T extends { id: number; name: string }> = ExtractMacroProps<
         ExtractMacroReturn<Test<T>>
       >;
@@ -2552,9 +2491,7 @@ describe("Setup helpers", () => {
 
       assertType<string>(props.props.value.value);
       assertType<(event: "change", value: string) => void>(emits.value);
-      assertType<string>(
-        {} as Parameters<typeof slots.value.default>[0]["value"]
-      );
+      assertType<string>({} as Parameters<typeof slots.value.default>[0]["value"]);
       assertType<() => string>(expose.value.getValue);
       assertType<string>(model.value.value);
 
@@ -2618,9 +2555,7 @@ describe("Setup helpers", () => {
       }
 
       type Test<T extends Record<string, any>> = ReturnType<typeof setup<T>>;
-      type Props<T extends Record<string, any>> = ExtractMacroProps<
-        ExtractMacroReturn<Test<T>>
-      >;
+      type Props<T extends Record<string, any>> = ExtractMacroProps<ExtractMacroReturn<Test<T>>>;
 
       type FormData = { name: string; age: number; active: boolean };
       const props = {} as Props<FormData>;

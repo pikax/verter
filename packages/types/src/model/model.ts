@@ -16,10 +16,10 @@ type ExtractModelInfo<T, D extends string> = T extends import("vue").ModelRef<
 >
   ? { type: G; setter: S; name: string extends N ? D : N }
   : undefined extends T
-  ? { type: undefined }
-  : T extends import("vue").ModelRef<infer TT>
-  ? { type: TT; name: "modelValue" }
-  : never;
+    ? { type: undefined }
+    : T extends import("vue").ModelRef<infer TT>
+      ? { type: TT; name: "modelValue" }
+      : never;
 
 /**
  * Maps an object type T of ModelRef properties to their model information.
@@ -49,23 +49,21 @@ type BAZ = ExtractModelInfo<typeof baz, "count">;
 export type ModelToEmits<T> = {} extends T
   ? () => any
   : ModelToModelInfo<T> extends infer O
-  ? UnionToIntersection<
-      {
-        [K in keyof O]-?: O[K] extends { name: never }
-          ? never
-          : (
-              event: `update:${O[K] extends { name: infer N extends string }
-                ? N
-                : K & string}`,
-              ...args: O[K] extends { type: infer C }
-                ? C extends never
-                  ? any[]
-                  : [arg: C]
-                : any[]
-            ) => any;
-      }[keyof O]
-    >
-  : never;
+    ? UnionToIntersection<
+        {
+          [K in keyof O]-?: O[K] extends { name: never }
+            ? never
+            : (
+                event: `update:${O[K] extends { name: infer N extends string } ? N : K & string}`,
+                ...args: O[K] extends { type: infer C }
+                  ? C extends never
+                    ? any[]
+                    : [arg: C]
+                  : any[]
+              ) => any;
+        }[keyof O]
+      >
+    : never;
 
 /**
  * Converts model definitions into Vue Props types.
@@ -73,38 +71,36 @@ export type ModelToEmits<T> = {} extends T
  * The prop name is the custom name if provided, otherwise the property key.
  * Properties with model info of never are excluded.
  */
-export type ModelToPropsOld<T> = ModelToModelInfo<T> extends infer O
-  ? {
-      [K in keyof O as O[K] extends never
-        ? never
-        : O[K] extends { name: infer N extends string }
-        ? N
-        : K & string]: O[K] extends { type: infer C } ? C : never;
-    } & {
-      [K in keyof O as O[K] extends never
-        ? never
-        : O[K] extends { name: infer N extends string }
-        ? `onUpdate:${N}`
-        : `onUpdate:${K & string}`]?: O[K] extends { type: infer C }
-        ? (v: C) => any
-        : never;
-    }
-  : never;
+export type ModelToPropsOld<T> =
+  ModelToModelInfo<T> extends infer O
+    ? {
+        [K in keyof O as O[K] extends never
+          ? never
+          : O[K] extends { name: infer N extends string }
+            ? N
+            : K & string]: O[K] extends { type: infer C } ? C : never;
+      } & {
+        [K in keyof O as O[K] extends never
+          ? never
+          : O[K] extends { name: infer N extends string }
+            ? `onUpdate:${N}`
+            : `onUpdate:${K & string}`]?: O[K] extends { type: infer C } ? (v: C) => any : never;
+      }
+    : never;
 
 export type ModelToProps<T> = OmitNever<{
   [K in keyof T]: T[K] extends import("vue").ModelRef<boolean | undefined>
     ? // make boolean default
       boolean
     : T[K] extends import("vue").ModelRef<infer TT>
-    ? TT
-    : T[K] extends undefined | import("vue").ModelRef<infer TT>
-    ? TT | undefined
-    : never;
+      ? TT
+      : T[K] extends undefined | import("vue").ModelRef<infer TT>
+        ? TT | undefined
+        : never;
 }>;
 
 export type MacroToPropEvents<T> = {
-  [K in keyof T as `onUpdate:${K &
-    string}`]?: T[K] extends import("vue").ModelRef<infer TT>
+  [K in keyof T as `onUpdate:${K & string}`]?: T[K] extends import("vue").ModelRef<infer TT>
     ? (v: TT) => any
     : never;
 };

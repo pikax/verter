@@ -1,47 +1,47 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import type { Store } from '../core/store'
-import type { VersionEntry } from '../core/versions'
-import { fetchVersions } from '../core/versions'
+import { ref, onMounted } from "vue";
+import type { Store } from "../core/store";
+import type { VersionEntry } from "../core/versions";
+import { fetchVersions } from "../core/versions";
 
 const props = defineProps<{
-  store: Store
-}>()
+  store: Store;
+}>();
 
-const versions = ref<VersionEntry[]>([])
-const loading = ref(false)
-const open = ref(false)
+const versions = ref<VersionEntry[]>([]);
+const loading = ref(false);
+const open = ref(false);
 
 onMounted(async () => {
-  loading.value = true
+  loading.value = true;
   try {
-    versions.value = await fetchVersions()
+    versions.value = await fetchVersions();
   } finally {
-    loading.value = false
+    loading.value = false;
   }
-})
+});
 
 async function selectVersion(entry: VersionEntry) {
-  open.value = false
-  if (entry.id === props.store.verterVersion) return
-  await props.store.switchVerterVersion(entry)
+  open.value = false;
+  if (entry.id === props.store.verterVersion) return;
+  await props.store.switchVerterVersion(entry);
 }
 
 function currentLabel(): string {
-  const current = versions.value.find(v => v.id === props.store.verterVersion)
-  return current?.label ?? 'This Build'
+  const current = versions.value.find((v) => v.id === props.store.verterVersion);
+  return current?.label ?? "This Build";
 }
 
 function closeDropdown(e: MouseEvent) {
-  const target = e.target as HTMLElement
-  if (!target.closest('.version-select')) {
-    open.value = false
+  const target = e.target as HTMLElement;
+  if (!target.closest(".version-select")) {
+    open.value = false;
   }
 }
 
 onMounted(() => {
-  document.addEventListener('click', closeDropdown)
-})
+  document.addEventListener("click", closeDropdown);
+});
 </script>
 
 <template>
@@ -66,7 +66,7 @@ onMounted(() => {
           </div>
         </template>
 
-        <template v-if="versions.some(v => v.type === 'release')">
+        <template v-if="versions.some((v) => v.type === 'release')">
           <div class="dropdown-section">Releases</div>
           <template v-for="entry in versions" :key="entry.id">
             <div
@@ -80,7 +80,7 @@ onMounted(() => {
           </template>
         </template>
 
-        <template v-if="versions.some(v => v.type === 'commit')">
+        <template v-if="versions.some((v) => v.type === 'commit')">
           <div class="dropdown-section">Nightly Commits</div>
           <template v-for="entry in versions" :key="entry.id">
             <div
@@ -90,7 +90,7 @@ onMounted(() => {
               @click="selectVersion(entry)"
             >
               <code>{{ entry.sha }}</code>
-              <span class="commit-msg">{{ entry.label.split(' - ').slice(1).join(' - ') }}</span>
+              <span class="commit-msg">{{ entry.label.split(" - ").slice(1).join(" - ") }}</span>
             </div>
           </template>
         </template>
@@ -148,7 +148,9 @@ onMounted(() => {
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .dropdown {

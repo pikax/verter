@@ -1,53 +1,53 @@
-<script setup lang="ts" >
-import type { GameVo, ListCategory, ListParams, ListSort } from '@/services/api/index'
-import { Popover, Tab, Tabs } from '@nexus/ui'
-import { useQueries } from '@tanstack/vue-query'
-import { computed, ref } from 'vue'
-import { useRouter } from 'vue-router'
-import { Icon } from '@/components/base'
-import GameItem from '@/components/common/GameItem/index.vue'
-import { useCommonApi } from '@/hooks'
-import { getGame } from '@/services/api/index'
-import { CompetitionPrize } from '@/views/index/components/CompetitionPrize'
-import { CompetitionRanking } from '@/views/index/components/CompetitionRanking'
-import { HotCategory, rankingTabList, SpecialTabIds } from '../../..'
-import { AdBanner } from '../../AdBanner'
-import { BettingRanking } from '../../BettingRanking'
+<script setup lang="ts">
+import type { GameVo, ListCategory, ListParams, ListSort } from "@/services/api/index";
+import { Popover, Tab, Tabs } from "@nexus/ui";
+import { useQueries } from "@tanstack/vue-query";
+import { computed, ref } from "vue";
+import { useRouter } from "vue-router";
+import { Icon } from "@/components/base";
+import GameItem from "@/components/common/GameItem/index.vue";
+import { useCommonApi } from "@/hooks";
+import { getGame } from "@/services/api/index";
+import { CompetitionPrize } from "@/views/index/components/CompetitionPrize";
+import { CompetitionRanking } from "@/views/index/components/CompetitionRanking";
+import { HotCategory, rankingTabList, SpecialTabIds } from "../../..";
+import { AdBanner } from "../../AdBanner";
+import { BettingRanking } from "../../BettingRanking";
 
-const router = useRouter()
+const router = useRouter();
 
-const active = ref(0)
-const showTip = ref(false)
-const { commonConfigData } = useCommonApi()
+const active = ref(0);
+const showTip = ref(false);
+const { commonConfigData } = useCommonApi();
 
 function goToAllGameList(id: number, name: string) {
   router.push({
     path: `/gameDetail/${id}`,
     query: { name },
-  })
+  });
 }
 
 const categoryList = computed(
-  () => commonConfigData.value?.category?.filter((tab) => tab.category !== SpecialTabIds.ALL) ?? []
-)
+  () => commonConfigData.value?.category?.filter((tab) => tab.category !== SpecialTabIds.ALL) ?? [],
+);
 
 // 热门 游戏查询方式 sort = 0 (按热门排序) category = 0 (全部分类)
 // 剔除全部的类型选项
 
 const filteredCategoryList = computed(() =>
-  categoryList.value.filter((section) => section.category !== SpecialTabIds.ALL)
-)
+  categoryList.value.filter((section) => section.category !== SpecialTabIds.ALL),
+);
 
 const gameListQueries = useQueries({
   queries: computed(() =>
     filteredCategoryList.value.map((section) => {
-      let sort = 4 as ListSort
-      let category = section.category as ListCategory
+      let sort = 4 as ListSort;
+      let category = section.category as ListCategory;
 
       // 热门特殊处理 热门分类 + 热门排序
       if (section.category === SpecialTabIds.HOT) {
-        sort = HotCategory.SORT // 热门排序
-        category = HotCategory.ALL as ListCategory // 全部分类
+        sort = HotCategory.SORT; // 热门排序
+        category = HotCategory.ALL as ListCategory; // 全部分类
       }
 
       const query: ListParams = {
@@ -55,28 +55,28 @@ const gameListQueries = useQueries({
         pageSize: 6,
         sort,
         category,
-      }
+      };
 
       return {
-        queryKey: ['game', 'list', section.category],
+        queryKey: ["game", "list", section.category],
         queryFn: () => getGame().list(query),
         staleTime: 1000 * 30,
-      }
-    })
+      };
+    }),
   ),
-})
+});
 
 const gameListData = computed(() => {
-  const data: Record<number, GameVo[]> = {}
+  const data: Record<number, GameVo[]> = {};
 
   filteredCategoryList.value.forEach((section, index) => {
-    const queryResult = gameListQueries.value[index]
-    if (!queryResult || !queryResult.data?.list?.length) return
-    data[section.category] = queryResult.data.list
-  })
+    const queryResult = gameListQueries.value[index];
+    if (!queryResult || !queryResult.data?.list?.length) return;
+    data[section.category] = queryResult.data.list;
+  });
 
-  return data
-})
+  return data;
+});
 </script>
 
 <template>
@@ -109,17 +109,17 @@ const gameListData = computed(() => {
       <div class="flex items-center px-3 pt-[2px] gap-[7px]">
         <h2 class="text-sm font-semibold text-theme-white">{{ rankingTabList[active].label }}</h2>
 
-<Popover
-  v-model:show="showTip"
-  placement="top"
-  show-arrow
-  :teleport="false"
-  :lock-scroll="false"
-  :flip="{ padding: { top: 102 } }"
-  :shift="{ padding: { top: 102 } }"
-  :overlay-style="{ background: 'transparent' }"
-  :offset="{ mainAxis: 8, crossAxis: 88 }"
->
+        <Popover
+          v-model:show="showTip"
+          placement="top"
+          show-arrow
+          :teleport="false"
+          :lock-scroll="false"
+          :flip="{ padding: { top: 102 } }"
+          :shift="{ padding: { top: 102 } }"
+          :overlay-style="{ background: 'transparent' }"
+          :offset="{ mainAxis: 8, crossAxis: 88 }"
+        >
           <template #reference>
             <div class="text-theme-grey-800">
               <Icon render="font" name="tip" size="14" />

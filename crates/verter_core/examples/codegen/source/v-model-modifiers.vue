@@ -29,14 +29,14 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const basicValue = ref('')
-const lazyValue = ref('')
-const numericValue = ref(0)
-const trimmedValue = ref('')
-const lazyTrimmed = ref('')
-const numberTrimmed = ref(0)
-const textareaValue = ref('')
-const selectValue = ref(1)
+const basicValue = ref("");
+const lazyValue = ref("");
+const numericValue = ref(0);
+const trimmedValue = ref("");
+const lazyTrimmed = ref("");
+const numberTrimmed = ref(0);
+const textareaValue = ref("");
+const selectValue = ref(1);
 </script>

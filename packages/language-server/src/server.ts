@@ -34,10 +34,7 @@ import ts, { CompletionsTriggerCharacter } from "typescript";
 import { patchClient, RequestType } from "@verter/language-shared";
 import { compile as nativeCompile } from "@verter/native";
 import { VueSubDocument } from "./v5/documents/verter/vue/sub/sub";
-import {
-  VueBundleDocument,
-  VueStyleDocument,
-} from "./v5/documents/verter/vue/sub";
+import { VueBundleDocument, VueStyleDocument } from "./v5/documents/verter/vue/sub";
 import { DiagnosticsManager } from "./v5/DiagnosticsManager";
 import { StatisticsManager, StatisticsOptions } from "./v5/StatisticsManager";
 
@@ -75,14 +72,14 @@ export function startServer(options: LsConnectionOption = {}) {
   const statisticsManager = new StatisticsManager();
   const documentManager = new DocumentManager(
     statisticsManager,
-    true /* TODO this should be a setting */
+    true /* TODO this should be a setting */,
   );
   const verterManager = new VerterManager(documentManager);
   const diagnosticsManager = new DiagnosticsManager(
     connection,
     verterManager,
     documentManager,
-    statisticsManager
+    statisticsManager,
   );
 
   // @ts-expect-error TODO fix this with proper types
@@ -174,10 +171,7 @@ export function startServer(options: LsConnectionOption = {}) {
 
         console.log("ddd", r);
       } else {
-        for (const x of tsService.getDefinitionAtPosition(
-          d.doc.uri,
-          d.offset
-        ) ?? []) {
+        for (const x of tsService.getDefinitionAtPosition(d.doc.uri, d.offset) ?? []) {
           const r = mapDefinitionInfo(x, documentManager, true);
           if (!r) continue;
           definitions.push(r);
@@ -205,9 +199,7 @@ export function startServer(options: LsConnectionOption = {}) {
     const docs = doc.docsForPos(params.position);
 
     try {
-      let anyResult = undefined as
-        | ReturnType<typeof formatQuickInfo>
-        | undefined;
+      let anyResult = undefined as ReturnType<typeof formatQuickInfo> | undefined;
       const quickInfo = docs
         .flatMap(({ doc, offset }) => {
           const ss = performance.now();
@@ -278,16 +270,11 @@ export function startServer(options: LsConnectionOption = {}) {
 
             const pos = d.doc.toGeneratedPosition(params.position);
 
-            const r = await d.doc.languageService.doComplete2(
-              d.doc,
-              pos,
-              d.doc.stylesheet,
-              {
-                resolveReference: (_ref, _base) => {
-                  return undefined; // todo: implement
-                },
-              }
-            );
+            const r = await d.doc.languageService.doComplete2(d.doc, pos, d.doc.stylesheet, {
+              resolveReference: (_ref, _base) => {
+                return undefined; // todo: implement
+              },
+            });
 
             console.log("resoilved", r);
 
@@ -303,25 +290,20 @@ export function startServer(options: LsConnectionOption = {}) {
             if (!tsService) {
               continue;
             }
-            const completions = tsService.getCompletionsAtPosition(
-              d.doc.uri,
-              offset,
-              {
-                triggerKind: params.context?.triggerKind,
-                triggerCharacter:
-                  params.context?.triggerCharacter === "@"
-                    ? " "
-                    : (params.context
-                        ?.triggerCharacter as CompletionsTriggerCharacter),
+            const completions = tsService.getCompletionsAtPosition(d.doc.uri, offset, {
+              triggerKind: params.context?.triggerKind,
+              triggerCharacter:
+                params.context?.triggerCharacter === "@"
+                  ? " "
+                  : (params.context?.triggerCharacter as CompletionsTriggerCharacter),
 
-                // includeSymbol: true,
-                includeAutomaticOptionalChainCompletions: true,
-                jsxAttributeCompletionStyle: "auto",
-                // importModuleSpecifierEnding: "auto",
-                // disableSuggestions: true,
-                // allowIncompleteCompletions: true,
-              }
-            );
+              // includeSymbol: true,
+              includeAutomaticOptionalChainCompletions: true,
+              jsxAttributeCompletionStyle: "auto",
+              // importModuleSpecifierEnding: "auto",
+              // disableSuggestions: true,
+              // allowIncompleteCompletions: true,
+            });
             if (completions) {
               items.push(
                 ...completions.entries
@@ -333,8 +315,8 @@ export function startServer(options: LsConnectionOption = {}) {
                       index: offset,
                       triggerKind: params.context?.triggerKind,
                       triggerCharacter: params.context?.triggerCharacter,
-                    })
-                  )
+                    }),
+                  ),
               );
             }
         }
@@ -343,7 +325,7 @@ export function startServer(options: LsConnectionOption = {}) {
       console.log("found docs", subDocs);
 
       const cssProp = items.find(
-        (x) => x.kind === CompletionItemKind.Function && x.label === "var()"
+        (x) => x.kind === CompletionItemKind.Function && x.label === "var()",
       );
       if (cssProp) {
         items.push({
@@ -402,7 +384,7 @@ export function startServer(options: LsConnectionOption = {}) {
       undefined,
       undefined,
       undefined,
-      undefined // item.data
+      undefined, // item.data
     );
     if (!details) return item;
 
@@ -463,8 +445,7 @@ export function startServer(options: LsConnectionOption = {}) {
       const diagnostics = document.docs
         .filter(
           (x) =>
-            (x.languageId === "ts" || x.languageId === "tsx") &&
-            !(x instanceof VueBundleDocument)
+            (x.languageId === "ts" || x.languageId === "tsx") && !(x instanceof VueBundleDocument),
         )
         .flatMap((x) => {
           return getDiagnostics(x);
@@ -499,7 +480,7 @@ export function startServer(options: LsConnectionOption = {}) {
       s = JSON.stringify(h.getCompilationSettings());
     }
 
-    console.log('found', doc.docs)
+    console.log("found", doc.docs);
 
     // Compile with native/WASM compiler (Rust-based verter_core)
     let wasmResult = { code: "", map: undefined as any };
@@ -533,7 +514,7 @@ export function startServer(options: LsConnectionOption = {}) {
 ${x.getText()}
 //# sourceMappingURL=${x.sourceMapURL()}
 
-//end ${x.uri}\n`
+//end ${x.uri}\n`,
             )
             .join("\n//-----\n"),
         map: "map",
@@ -589,9 +570,7 @@ function resolveStatisticsOptions(params: InitializeParams): StatisticsOptions {
   const persistToFile = Boolean(statistics.persistToFile);
   const filePath =
     statistics.filePath ||
-    (persistToFile
-      ? path.resolve(process.cwd(), ".verter", "statistics.json")
-      : undefined);
+    (persistToFile ? path.resolve(process.cwd(), ".verter", "statistics.json") : undefined);
 
   return {
     enabled: Boolean(statistics.enabled),

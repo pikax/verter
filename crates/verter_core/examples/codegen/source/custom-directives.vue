@@ -28,9 +28,9 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const tooltipText = ref('Dynamic tooltip text')
-const value = ref('directive value')
-const position = ref('top')
+const tooltipText = ref("Dynamic tooltip text");
+const value = ref("directive value");
+const position = ref("top");
 </script>

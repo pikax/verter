@@ -1,8 +1,4 @@
-import {
-  SFCScriptBlock,
-  SFCParseResult,
-  compileScript,
-} from "@vue/compiler-sfc";
+import { SFCScriptBlock, SFCParseResult, compileScript } from "@vue/compiler-sfc";
 import type * as _babel_types from "@babel/types";
 
 export const DEFAULT_FILENAME = "anonymous.vue";
@@ -12,12 +8,7 @@ const enum VariableName {
   InternalComponent = "__COMP__",
 }
 
-type VueAPISetup =
-  | "defineProps"
-  | "defineEmits"
-  | "defineSlots"
-  | "defineOptions"
-  | "defineModel";
+type VueAPISetup = "defineProps" | "defineEmits" | "defineSlots" | "defineOptions" | "defineModel";
 
 type ResolvedModel = {
   name: string;
@@ -81,7 +72,7 @@ function removeExportsAndDefineComponent(content: string) {
 function wrapWithDefineComponent(content: string) {
   return `const ${
     VariableName.Options
-} = defineComponent(${removeExportsAndDefineComponent(content)})`;
+  } = defineComponent(${removeExportsAndDefineComponent(content)})`;
 }
 
 function wrapGeneric(
@@ -90,7 +81,7 @@ function wrapGeneric(
   models: ResolvedModel[],
   props: string,
   emits: string,
-  slots: string = "{}"
+  slots: string = "{}",
 ) {
   const declarations = models
     .filter((x) => x.declare)
@@ -98,9 +89,7 @@ function wrapGeneric(
     .join("\n");
 
   const component = wrapWithDefineComponent(content);
-  const _props =
-    [props, emits && `EmitsToProps<${emits}>`].filter(Boolean).join(" & ") ||
-    "{}";
+  const _props = [props, emits && `EmitsToProps<${emits}>`].filter(Boolean).join(" & ") || "{}";
 
   const _data = `ComponentData<typeof ${VariableName.Options}>`;
   const _emits = emits || "{}";
@@ -126,20 +115,15 @@ function wrapGeneric(
 function resolveProps(scriptSetup: SFCScriptBlock, models: ResolvedModel[]) {
   const modelProps = resolveModelProps(models);
 
-  const props = resolveCompilerFunctions(scriptSetup, "defineProps").next()
-    .value;
+  const props = resolveCompilerFunctions(scriptSetup, "defineProps").next().value;
   if (!props) return ["", modelProps].filter(Boolean).join(" & ");
 
   if (props.typeParameters) {
-    return [props.typeParameters[0].value, modelProps]
-      .filter(Boolean)
-      .join(" & ");
+    return [props.typeParameters[0].value, modelProps].filter(Boolean).join(" & ");
   }
 
   if (props.args?.[0]) {
-    return [`typeof ${VariableName.Options}['props']`, modelProps]
-      .filter(Boolean)
-      .join(" & ");
+    return [`typeof ${VariableName.Options}['props']`, modelProps].filter(Boolean).join(" & ");
   }
 
   throw Error("props type parameters not found");
@@ -154,17 +138,14 @@ function resolveModelProps(models: ResolvedModel[]) {
 }
 function resolveModelEmits(models: ResolvedModel[]) {
   // using short syntax
-  const emits = models
-    .map((x) => `['update:${x.name}']: [${x.type || "any"}]`)
-    .join("\n");
+  const emits = models.map((x) => `['update:${x.name}']: [${x.type || "any"}]`).join("\n");
   if (!emits) return "";
   // return `DeclareEmits<{${emits}}>`;
   return `{${emits}}`;
 }
 
 function resolveSlots(scriptSetup: SFCScriptBlock) {
-  const slots = resolveCompilerFunctions(scriptSetup, "defineSlots").next()
-    .value;
+  const slots = resolveCompilerFunctions(scriptSetup, "defineSlots").next().value;
   if (!slots) return undefined;
 
   if (slots.typeParameters) {
@@ -177,8 +158,7 @@ function resolveSlots(scriptSetup: SFCScriptBlock) {
 }
 function resolveEmits(scriptSetup: SFCScriptBlock, models: ResolvedModel[]) {
   const modelEmits = resolveModelEmits(models);
-  const emits =
-    resolveCompilerFunctions(scriptSetup, "defineEmits").next().value ?? "";
+  const emits = resolveCompilerFunctions(scriptSetup, "defineEmits").next().value ?? "";
   if (!emits) return ["", modelEmits].filter(Boolean).join(" & ");
   if (emits.typeParameters) {
     return [`DeclareEmits<${emits.typeParameters[0].value}>`, modelEmits]
@@ -209,30 +189,21 @@ export function* resolveModels(scriptSetup: SFCScriptBlock) {
       name,
       type,
       declare,
-      declaration: declare
-        ? scriptSetup.loc.source.slice(it.node.start, it.node.end)
-        : undefined,
+      declaration: declare ? scriptSetup.loc.source.slice(it.node.start, it.node.end) : undefined,
     } satisfies ResolvedModel;
   }
 }
 
-function* resolveCompilerFunctions(
-  scriptSetup: SFCScriptBlock,
-  name: VueAPISetup
-) {
+function* resolveCompilerFunctions(scriptSetup: SFCScriptBlock, name: VueAPISetup) {
   if (!scriptSetup.scriptSetupAst) return "";
 
-  yield* retrieveFunctionCall(
-    scriptSetup.scriptSetupAst,
-    scriptSetup.loc.source,
-    name
-  );
+  yield* retrieveFunctionCall(scriptSetup.scriptSetupAst, scriptSetup.loc.source, name);
 }
 
 function* retrieveFunctionCall(
   statements: _babel_types.Statement[],
   source: string,
-  name: VueAPISetup
+  name: VueAPISetup,
 ): Generator<{
   name: string;
   node: _babel_types.CallExpression;
@@ -254,11 +225,9 @@ function* retrieveFunctionCall(
         yield {
           name,
           node: statement.expression,
-          args: statement.expression.arguments?.map((x) =>
-            retriveValue(x, source)
-          ),
+          args: statement.expression.arguments?.map((x) => retriveValue(x, source)),
           typeParameters: statement.expression.typeParameters?.params.map((x) =>
-            retriveValue(x, source)
+            retriveValue(x, source),
           ),
         };
       }
@@ -280,11 +249,9 @@ function* retrieveFunctionCall(
             yield {
               name,
               node: declaration.init,
-              args: declaration.init.arguments?.map((x) =>
-                retriveValue(x, source)
-              ),
+              args: declaration.init.arguments?.map((x) => retriveValue(x, source)),
               typeParameters: declaration.init.typeParameters?.params.map((x) =>
-                retriveValue(x, source)
+                retriveValue(x, source),
               ),
             };
           }
@@ -317,11 +284,10 @@ function retriveValue(
     | _babel_types.JSXNamespacedName
     | _babel_types.ArgumentPlaceholder
     | _babel_types.TSType,
-  source: string
+  source: string,
 ): RetrieveValue {
   const value =
-    (node.type === "StringLiteral" && node.value) ||
-    source.slice(node.start ?? 0, node.end ?? 0);
+    (node.type === "StringLiteral" && node.value) || source.slice(node.start ?? 0, node.end ?? 0);
   const type = node.type;
 
   return {

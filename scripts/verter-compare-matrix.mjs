@@ -13,16 +13,16 @@
  *   node scripts/verter-compare-matrix.mjs --project <path> [options]
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'fs';
-import { resolve, relative, basename, join, dirname } from 'path';
-import { createRequire } from 'module';
-import { spawnSync } from 'child_process';
-import { createHash } from 'crypto';
-import { fileURLToPath } from 'url';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "fs";
+import { resolve, relative, basename, join, dirname } from "path";
+import { createRequire } from "module";
+import { spawnSync } from "child_process";
+import { createHash } from "crypto";
+import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const VERTER_ROOT = resolve(__dirname, '..');
+const VERTER_ROOT = resolve(__dirname, "..");
 
 // ─── CLI Argument Parsing ────────────────────────────────────────────────────
 
@@ -31,7 +31,7 @@ function parseArgs() {
   const opts = {
     project: null,
     config: null,
-    modes: ['dev', 'prod', 'ssr', 'prod_ssr'],
+    modes: ["dev", "prod", "ssr", "prod_ssr"],
     out: null,
     fixInvalidJs: true,
     maxFixes: Infinity,
@@ -41,34 +41,32 @@ function parseArgs() {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     switch (arg) {
-      case '--project':
+      case "--project":
         opts.project = resolve(args[++i]);
         break;
-      case '--config':
+      case "--config":
         opts.config = args[++i];
         break;
-      case '--modes':
-        opts.modes = args[++i]
-          .split(',')
-          .map((m) => m.trim().toLowerCase());
+      case "--modes":
+        opts.modes = args[++i].split(",").map((m) => m.trim().toLowerCase());
         break;
-      case '--out':
+      case "--out":
         opts.out = resolve(args[++i]);
         break;
-      case '--fix-invalid-js':
-        opts.fixInvalidJs = args[++i] !== 'false';
+      case "--fix-invalid-js":
+        opts.fixInvalidJs = args[++i] !== "false";
         break;
-      case '--max-fixes':
+      case "--max-fixes":
         opts.maxFixes = parseInt(args[++i], 10);
         break;
-      case '--component-filter':
+      case "--component-filter":
         opts.componentFilter = args[++i];
         break;
-      case '--help':
+      case "--help":
         printUsage();
         process.exit(0);
       default:
-        if (!arg.startsWith('--') && !opts.project) {
+        if (!arg.startsWith("--") && !opts.project) {
           opts.project = resolve(arg);
         } else {
           console.error(`Unknown argument: ${arg}`);
@@ -79,13 +77,13 @@ function parseArgs() {
   }
 
   if (!opts.project) {
-    console.error('Error: --project <path> is required');
+    console.error("Error: --project <path> is required");
     printUsage();
     process.exit(1);
   }
 
   if (!opts.out) {
-    opts.out = join(opts.project, '.verter-compare');
+    opts.out = join(opts.project, ".verter-compare");
   }
 
   return opts;
@@ -110,39 +108,47 @@ Options:
 // ─── Mode Configuration ──────────────────────────────────────────────────────
 
 const MODE_CONFIG = {
-  dev: { isProduction: false, ssr: false, label: 'DEV' },
-  prod: { isProduction: true, ssr: false, label: 'PROD' },
-  ssr: { isProduction: false, ssr: true, label: 'SSR' },
-  prod_ssr: { isProduction: true, ssr: true, label: 'PROD_SSR' },
+  dev: { isProduction: false, ssr: false, label: "DEV" },
+  prod: { isProduction: true, ssr: false, label: "PROD" },
+  ssr: { isProduction: false, ssr: true, label: "SSR" },
+  prod_ssr: { isProduction: true, ssr: true, label: "PROD_SSR" },
 };
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
 function getHash(text) {
-  return createHash('sha256').update(text).digest('hex').substring(0, 8);
+  return createHash("sha256").update(text).digest("hex").substring(0, 8);
 }
 
 function timestamp() {
-  return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + 'Z';
+  return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19) + "Z";
 }
 
 function findVueFiles(dir, filter) {
   const results = [];
   const excludeDirs = new Set([
-    'node_modules', 'dist', 'dist_vue', 'dist_verter',
-    '.git', '.verter-compare',
+    "node_modules",
+    "dist",
+    "dist_vue",
+    "dist_verter",
+    ".git",
+    ".verter-compare",
   ]);
 
   function walk(d) {
     let entries;
-    try { entries = readdirSync(d, { withFileTypes: true }); } catch { return; }
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        if (!excludeDirs.has(entry.name) && !entry.name.startsWith('.')) {
+        if (!excludeDirs.has(entry.name) && !entry.name.startsWith(".")) {
           walk(join(d, entry.name));
         }
-      } else if (entry.isFile() && entry.name.endsWith('.vue')) {
-        const rel = relative(dir, join(d, entry.name)).replace(/\\/g, '/');
+      } else if (entry.isFile() && entry.name.endsWith(".vue")) {
+        const rel = relative(dir, join(d, entry.name)).replace(/\\/g, "/");
         if (!filter || simpleGlob(rel, filter)) {
           results.push(rel);
         }
@@ -157,10 +163,10 @@ function findVueFiles(dir, filter) {
 
 function simpleGlob(str, pattern) {
   const regex = pattern
-    .replace(/\*\*/g, '{{GLOBSTAR}}')
-    .replace(/\*/g, '[^/]*')
-    .replace(/{{GLOBSTAR}}/g, '.*')
-    .replace(/\?/g, '.');
+    .replace(/\*\*/g, "{{GLOBSTAR}}")
+    .replace(/\*/g, "[^/]*")
+    .replace(/{{GLOBSTAR}}/g, ".*")
+    .replace(/\?/g, ".");
   return new RegExp(`^${regex}$`).test(str);
 }
 
@@ -177,7 +183,7 @@ function resolveViteConfig(projectDir, configPath) {
     return abs;
   }
 
-  for (const c of ['vite.config.ts', 'vite.config.js', 'vite.config.mjs', 'vite.config.mts']) {
+  for (const c of ["vite.config.ts", "vite.config.js", "vite.config.mjs", "vite.config.mts"]) {
     const abs = join(projectDir, c);
     if (existsSync(abs)) return abs;
   }
@@ -190,16 +196,16 @@ function resolveViteConfig(projectDir, configPath) {
 function preflight(opts) {
   if (!existsSync(opts.project)) throw new Error(`Project does not exist: ${opts.project}`);
 
-  const nm = join(opts.project, 'node_modules');
+  const nm = join(opts.project, "node_modules");
   if (!existsSync(nm)) throw new Error(`No node_modules. Run npm install in ${opts.project}`);
 
-  const vuePlugin = join(nm, '@vitejs', 'plugin-vue');
+  const vuePlugin = join(nm, "@vitejs", "plugin-vue");
   if (!existsSync(vuePlugin)) {
-    console.warn('Warning: @vitejs/plugin-vue not found. Vue capture may fail.');
+    console.warn("Warning: @vitejs/plugin-vue not found. Vue capture may fail.");
   }
 
   // Check verter vite-plugin is built
-  const verterDist = join(VERTER_ROOT, 'packages', 'vite-plugin', 'dist', 'index.js');
+  const verterDist = join(VERTER_ROOT, "packages", "vite-plugin", "dist", "index.js");
   if (!existsSync(verterDist)) {
     throw new Error(`Verter vite-plugin not built. Run 'pnpm run build:ts' in ${VERTER_ROOT}`);
   }
@@ -210,80 +216,118 @@ function preflight(opts) {
 
 function captureMode(opts, mode, vueFiles, runDir, compiler) {
   const modeConf = MODE_CONFIG[mode];
-  const captureDir = join(runDir, 'captures', compiler, mode);
+  const captureDir = join(runDir, "captures", compiler, mode);
   ensureDir(captureDir);
 
   const configPath = resolveViteConfig(opts.project, opts.config);
-  const isDevLike = mode === 'dev' || mode === 'ssr';
+  const isDevLike = mode === "dev" || mode === "ssr";
 
   // Verter plugin path (absolute, forward slashes for JS)
-  const verterPluginPath = join(VERTER_ROOT, 'packages', 'vite-plugin', 'dist', 'index.mjs').replace(/\\/g, '/');
+  const verterPluginPath = join(
+    VERTER_ROOT,
+    "packages",
+    "vite-plugin",
+    "dist",
+    "index.mjs",
+  ).replace(/\\/g, "/");
 
   // Write a runner script that will execute inside the project's node context
   const runnerPath = join(runDir, `_runner_${compiler}_${mode}.mjs`);
 
   const vueFilesJson = JSON.stringify(vueFiles);
-  const captureDirFwd = captureDir.replace(/\\/g, '/');
-  const runDirFwd = runDir.replace(/\\/g, '/');
-  const configPathFwd = configPath.replace(/\\/g, '/');
+  const captureDirFwd = captureDir.replace(/\\/g, "/");
+  const runDirFwd = runDir.replace(/\\/g, "/");
+  const configPathFwd = configPath.replace(/\\/g, "/");
 
   let runnerCode;
   if (isDevLike) {
     runnerCode = generateDevRunner({
-      compiler, mode, modeConf, vueFilesJson,
-      captureDirFwd, runDirFwd, configPathFwd, verterPluginPath,
-      projectDir: opts.project.replace(/\\/g, '/'),
+      compiler,
+      mode,
+      modeConf,
+      vueFilesJson,
+      captureDirFwd,
+      runDirFwd,
+      configPathFwd,
+      verterPluginPath,
+      projectDir: opts.project.replace(/\\/g, "/"),
     });
   } else {
     runnerCode = generateProdRunner({
-      compiler, mode, modeConf, vueFilesJson,
-      captureDirFwd, runDirFwd, configPathFwd, verterPluginPath,
-      projectDir: opts.project.replace(/\\/g, '/'),
+      compiler,
+      mode,
+      modeConf,
+      vueFilesJson,
+      captureDirFwd,
+      runDirFwd,
+      configPathFwd,
+      verterPluginPath,
+      projectDir: opts.project.replace(/\\/g, "/"),
     });
   }
 
   writeFileSync(runnerPath, runnerCode);
 
   // Execute the runner in the project's directory context
-  const result = spawnSync('node', [runnerPath], {
+  const result = spawnSync("node", [runnerPath], {
     cwd: opts.project,
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: ["pipe", "pipe", "pipe"],
     timeout: 300_000,
-    encoding: 'utf-8',
-    env: { ...process.env, NODE_OPTIONS: '' },
+    encoding: "utf-8",
+    env: { ...process.env, NODE_OPTIONS: "" },
   });
 
   // Read the output manifest written by the runner
   const outputPath = join(runDir, `_output_${compiler}_${mode}.json`);
   if (existsSync(outputPath)) {
     try {
-      return JSON.parse(readFileSync(outputPath, 'utf-8'));
+      return JSON.parse(readFileSync(outputPath, "utf-8"));
     } catch {
       return {
         entries: [],
-        errors: [{
-          compiler, mode, source_vue_path: '*', block_kind: 'runner',
-          error: `Failed to parse runner output: ${result.stderr?.slice(0, 500)}`,
-        }],
+        errors: [
+          {
+            compiler,
+            mode,
+            source_vue_path: "*",
+            block_kind: "runner",
+            error: `Failed to parse runner output: ${result.stderr?.slice(0, 500)}`,
+          },
+        ],
       };
     }
   }
 
   return {
     entries: [],
-    errors: [{
-      compiler, mode, source_vue_path: '*', block_kind: 'runner',
-      error: `Runner failed (exit ${result.status}): ${(result.stderr || result.stdout || '').slice(0, 500)}`,
-    }],
+    errors: [
+      {
+        compiler,
+        mode,
+        source_vue_path: "*",
+        block_kind: "runner",
+        error: `Runner failed (exit ${result.status}): ${(result.stderr || result.stdout || "").slice(0, 500)}`,
+      },
+    ],
   };
 }
 
-function generateDevRunner({ compiler, mode, modeConf, vueFilesJson, captureDirFwd, runDirFwd, configPathFwd, verterPluginPath, projectDir }) {
+function generateDevRunner({
+  compiler,
+  mode,
+  modeConf,
+  vueFilesJson,
+  captureDirFwd,
+  runDirFwd,
+  configPathFwd,
+  verterPluginPath,
+  projectDir,
+}) {
   // Vue runs: use configFile directly (original config already has vue()).
   // Verter runs: use loadConfigFromFile() to get config, strip vite:vue, add verter(), pass inline.
   // This is necessary because Vite's config hook cannot remove already-registered plugins.
 
-  if (compiler === 'vue') {
+  if (compiler === "vue") {
     return `
 import { createServer } from 'vite';
 import { writeFileSync } from 'fs';
@@ -453,7 +497,17 @@ main().catch(err => {
 `;
 }
 
-function generateProdRunner({ compiler, mode, modeConf, vueFilesJson, captureDirFwd, runDirFwd, configPathFwd, verterPluginPath, projectDir }) {
+function generateProdRunner({
+  compiler,
+  mode,
+  modeConf,
+  vueFilesJson,
+  captureDirFwd,
+  runDirFwd,
+  configPathFwd,
+  verterPluginPath,
+  projectDir,
+}) {
   const outDir = `${runDirFwd}/build_${compiler}_${mode}`;
 
   const commonCode = `
@@ -486,7 +540,7 @@ function readBuiltFiles(dir) {
 
   const buildOpts = `{
       minify: false,
-      ${modeConf.ssr ? "ssr: true," : ''}
+      ${modeConf.ssr ? "ssr: true," : ""}
       outDir,
       rollupOptions: {
         output: {
@@ -527,7 +581,7 @@ main().catch(err => {
   process.exit(1);
 });`;
 
-  if (compiler === 'vue') {
+  if (compiler === "vue") {
     return `
 import { build } from 'vite';
 ${commonCode}
@@ -608,24 +662,28 @@ ${catchBlock}
 function runRustComparator(manifestPath, runDir) {
   console.log(`  Running Rust comparator...`);
   try {
-    const result = spawnSync('cargo', [
-      'run', '-p', 'verter_core', '--example', 'check_matrix',
-      '--', '--manifest', manifestPath,
-    ], {
-      cwd: VERTER_ROOT,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: 300_000,
-      encoding: 'utf-8',
-    });
+    const result = spawnSync(
+      "cargo",
+      ["run", "-p", "verter_core", "--example", "check_matrix", "--", "--manifest", manifestPath],
+      {
+        cwd: VERTER_ROOT,
+        stdio: ["pipe", "pipe", "pipe"],
+        timeout: 300_000,
+        encoding: "utf-8",
+      },
+    );
 
     if (result.status !== 0) {
       console.error(`  Comparator failed (exit ${result.status}): ${result.stderr?.slice(0, 500)}`);
       return null;
     }
 
-    const diffsPath = join(runDir, 'diffs.jsonl');
+    const diffsPath = join(runDir, "diffs.jsonl");
     if (existsSync(diffsPath)) {
-      return readFileSync(diffsPath, 'utf-8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+      return readFileSync(diffsPath, "utf-8")
+        .split("\n")
+        .filter(Boolean)
+        .map((l) => JSON.parse(l));
     }
     return [];
   } catch (err) {
@@ -639,18 +697,20 @@ function runRustComparator(manifestPath, runDir) {
 function generateReports(diffs, runDir, outRoot) {
   const diffsByCategory = {};
   for (const d of diffs) {
-    const cat = d.category || 'unknown';
+    const cat = d.category || "unknown";
     if (!diffsByCategory[cat]) diffsByCategory[cat] = [];
     diffsByCategory[cat].push(d);
   }
 
   const categoryNames = {
-    A: 'Invalid JS (P0)', B: 'Missing Module (P1)',
-    C: 'AST Structure (P2)', D: 'Wrong Values/Imports (P2)',
-    E: 'Cosmetic/Known Limitation (TRACKED)',
+    A: "Invalid JS (P0)",
+    B: "Missing Module (P1)",
+    C: "AST Structure (P2)",
+    D: "Wrong Values/Imports (P2)",
+    E: "Cosmetic/Known Limitation (TRACKED)",
   };
 
-  const categoryOrder = ['A', 'B', 'C', 'D', 'E'];
+  const categoryOrder = ["A", "B", "C", "D", "E"];
 
   // Differences report
   let differencesReport = `# Verter Differences Report\n\n`;
@@ -663,9 +723,9 @@ function generateReports(diffs, runDir, outRoot) {
     differencesReport += `## Category ${cat}: ${categoryNames[cat] || cat}\n\n`;
     differencesReport += `| Mode | Source | Reason |\n|------|--------|--------|\n`;
     for (const item of items) {
-      differencesReport += `| ${item.mode} | ${item.source_vue_path} | ${item.reason?.slice(0, 100) || 'n/a'} |\n`;
+      differencesReport += `| ${item.mode} | ${item.source_vue_path} | ${item.reason?.slice(0, 100) || "n/a"} |\n`;
     }
-    differencesReport += '\n';
+    differencesReport += "\n";
   }
 
   // Summary report
@@ -674,24 +734,33 @@ function generateReports(diffs, runDir, outRoot) {
   summaryReport += `| Category | Count | Severity |\n|----------|-------|----------|\n`;
   for (const cat of categoryOrder) {
     const items = diffsByCategory[cat] || [];
-    const sev = cat === 'A' ? 'P0' : cat === 'B' ? 'P1' : cat <= 'D' ? 'P2' : 'TRACKED';
+    const sev = cat === "A" ? "P0" : cat === "B" ? "P1" : cat <= "D" ? "P2" : "TRACKED";
     summaryReport += `| ${cat}: ${categoryNames[cat] || cat} | ${items.length} | ${sev} |\n`;
   }
   summaryReport += `\n**Total:** ${diffs.length} differences\n`;
 
-  writeFileSync(join(runDir, 'verter_differences.md'), differencesReport);
-  writeFileSync(join(runDir, 'verter_summary.md'), summaryReport);
-  writeFileSync(join(outRoot, 'verter_differences.md'), differencesReport);
-  writeFileSync(join(outRoot, 'verter_summary.md'), summaryReport);
+  writeFileSync(join(runDir, "verter_differences.md"), differencesReport);
+  writeFileSync(join(runDir, "verter_summary.md"), summaryReport);
+  writeFileSync(join(outRoot, "verter_differences.md"), differencesReport);
+  writeFileSync(join(outRoot, "verter_summary.md"), summaryReport);
 
-  const diffsPath = join(runDir, 'diffs.jsonl');
+  const diffsPath = join(runDir, "diffs.jsonl");
   if (existsSync(diffsPath)) {
-    writeFileSync(join(outRoot, 'diffs.jsonl'), readFileSync(diffsPath, 'utf-8'));
+    writeFileSync(join(outRoot, "diffs.jsonl"), readFileSync(diffsPath, "utf-8"));
   }
 
-  writeFileSync(join(outRoot, 'latest_run.json'), JSON.stringify({
-    run_id: basename(runDir), run_dir: runDir, timestamp: new Date().toISOString(),
-  }, null, 2));
+  writeFileSync(
+    join(outRoot, "latest_run.json"),
+    JSON.stringify(
+      {
+        run_id: basename(runDir),
+        run_dir: runDir,
+        timestamp: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+  );
 
   return { differencesReport, summaryReport };
 }
@@ -699,15 +768,20 @@ function generateReports(diffs, runDir, outRoot) {
 // ─── Category A Fix Queue ───────────────────────────────────────────────────
 
 function generateFixQueue(diffs, runDir, maxFixes) {
-  const catA = diffs.filter((d) => d.category === 'A');
+  const catA = diffs.filter((d) => d.category === "A");
   const queue = catA.slice(0, maxFixes).map((d, i) => ({
-    index: i, mode: d.mode, module_key: d.module_key,
-    source_vue_path: d.source_vue_path, reason: d.reason,
-    vue_file: d.vue_file, verter_file: d.verter_file,
+    index: i,
+    mode: d.mode,
+    module_key: d.module_key,
+    source_vue_path: d.source_vue_path,
+    reason: d.reason,
+    vue_file: d.vue_file,
+    verter_file: d.verter_file,
     recommended_test: d.recommended_test || `e2e parity test for ${d.source_vue_path} (${d.mode})`,
-    suspected_files: d.suspected_files || [], status: 'pending',
+    suspected_files: d.suspected_files || [],
+    status: "pending",
   }));
-  writeFileSync(join(runDir, 'invalid_js_queue.json'), JSON.stringify(queue, null, 2));
+  writeFileSync(join(runDir, "invalid_js_queue.json"), JSON.stringify(queue, null, 2));
   return queue;
 }
 
@@ -727,10 +801,13 @@ function runJsComparator(manifest, runDir) {
     const verterEntry = compilers.verter;
 
     if (!vueEntry || !verterEntry) {
-      const missing = !verterEntry ? 'verter' : 'vue';
+      const missing = !verterEntry ? "verter" : "vue";
       const present = compilers.vue || compilers.verter;
       diffs.push({
-        id: key, mode: present.mode, category: 'B', severity: 'P1',
+        id: key,
+        mode: present.mode,
+        category: "B",
+        severity: "P1",
         module_key: present.module_key || present.source_vue_path,
         source_vue_path: present.source_vue_path,
         vue_file: vueEntry?.captured_file || null,
@@ -746,19 +823,23 @@ function runJsComparator(manifest, runDir) {
     const verterPath = join(runDir, verterEntry.captured_file);
     if (!existsSync(vuePath) || !existsSync(verterPath)) continue;
 
-    const vueCode = readFileSync(vuePath, 'utf-8');
-    const verterCode = readFileSync(verterPath, 'utf-8');
+    const vueCode = readFileSync(vuePath, "utf-8");
+    const verterCode = readFileSync(verterPath, "utf-8");
 
     const verterParse = tryParseJs(verterCode);
     if (!verterParse.valid) {
       diffs.push({
-        id: key, mode: verterEntry.mode, category: 'A', severity: 'P0',
+        id: key,
+        mode: verterEntry.mode,
+        category: "A",
+        severity: "P0",
         module_key: verterEntry.module_key,
         source_vue_path: verterEntry.source_vue_path,
-        vue_file: vueEntry.captured_file, verter_file: verterEntry.captured_file,
+        vue_file: vueEntry.captured_file,
+        verter_file: verterEntry.captured_file,
         reason: `Verter JS parse failure: ${verterParse.error?.slice(0, 200)}`,
         recommended_test: `Add e2e parity test in codegen.rs`,
-        suspected_files: ['crates/verter_core/src/codegen/vue/template/element.rs'],
+        suspected_files: ["crates/verter_core/src/codegen/vue/template/element.rs"],
       });
       continue;
     }
@@ -769,11 +850,15 @@ function runJsComparator(manifest, runDir) {
 
     const category = classifyDifference(vueCode, verterCode);
     diffs.push({
-      id: key, mode: verterEntry.mode, category,
-      severity: category <= 'B' ? (category === 'A' ? 'P0' : 'P1') : category <= 'D' ? 'P2' : 'TRACKED',
+      id: key,
+      mode: verterEntry.mode,
+      category,
+      severity:
+        category <= "B" ? (category === "A" ? "P0" : "P1") : category <= "D" ? "P2" : "TRACKED",
       module_key: verterEntry.module_key,
       source_vue_path: verterEntry.source_vue_path,
-      vue_file: vueEntry.captured_file, verter_file: verterEntry.captured_file,
+      vue_file: vueEntry.captured_file,
+      verter_file: verterEntry.captured_file,
       reason: `Output differs (${category})`,
       recommended_test: `Add e2e parity test for ${verterEntry.source_vue_path}`,
       suspected_files: [],
@@ -784,30 +869,56 @@ function runJsComparator(manifest, runDir) {
 
 function tryParseJs(code) {
   try {
-    let braces = 0, parens = 0, brackets = 0;
-    let inString = false, stringChar = '', escaped = false;
+    let braces = 0,
+      parens = 0,
+      brackets = 0;
+    let inString = false,
+      stringChar = "",
+      escaped = false;
     for (const ch of code) {
-      if (escaped) { escaped = false; continue; }
-      if (ch === '\\') { escaped = true; continue; }
-      if (inString) { if (ch === stringChar) inString = false; continue; }
-      if (ch === '"' || ch === "'" || ch === '`') { inString = true; stringChar = ch; continue; }
-      if (ch === '{') braces++; else if (ch === '}') braces--;
-      else if (ch === '(') parens++; else if (ch === ')') parens--;
-      else if (ch === '[') brackets++; else if (ch === ']') brackets--;
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (inString) {
+        if (ch === stringChar) inString = false;
+        continue;
+      }
+      if (ch === '"' || ch === "'" || ch === "`") {
+        inString = true;
+        stringChar = ch;
+        continue;
+      }
+      if (ch === "{") braces++;
+      else if (ch === "}") braces--;
+      else if (ch === "(") parens++;
+      else if (ch === ")") parens--;
+      else if (ch === "[") brackets++;
+      else if (ch === "]") brackets--;
       if (braces < 0 || parens < 0 || brackets < 0)
         return { valid: false, error: `Unbalanced '${ch}'` };
     }
     if (braces !== 0) return { valid: false, error: `Unbalanced braces: ${braces}` };
     if (parens !== 0) return { valid: false, error: `Unbalanced parens: ${parens}` };
     if (brackets !== 0) return { valid: false, error: `Unbalanced brackets: ${brackets}` };
-    if (code.includes('_ctx.{')) return { valid: false, error: '_ctx.{ on object literal' };
+    if (code.includes("_ctx.{")) return { valid: false, error: "_ctx.{ on object literal" };
     return { valid: true };
-  } catch (err) { return { valid: false, error: String(err) }; }
+  } catch (err) {
+    return { valid: false, error: String(err) };
+  }
 }
 
 function normalizeJs(code) {
-  return code.replace(/\r\n/g, '\n').replace(/[ \t]+/g, ' ')
-    .replace(/\n\s*\n/g, '\n').replace(/,\s*([)\]}])/g, '$1').trim();
+  return code
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n\s*\n/g, "\n")
+    .replace(/,\s*([)\]}])/g, "$1")
+    .trim();
 }
 
 function classifyDifference(vueCode, verterCode) {
@@ -816,17 +927,19 @@ function classifyDifference(vueCode, verterCode) {
   const vueSet = new Set(vueImports.map((i) => i.source));
   const verterSet = new Set(verterImports.map((i) => i.source));
   if ([...vueSet].some((s) => !verterSet.has(s)) || [...verterSet].some((s) => !vueSet.has(s)))
-    return 'D';
+    return "D";
   const vueFn = (vueCode.match(/function\s/g) || []).length;
   const verterFn = (verterCode.match(/function\s/g) || []).length;
-  if (Math.abs(vueFn - verterFn) > 2) return 'C';
-  return 'E';
+  if (Math.abs(vueFn - verterFn) > 2) return "C";
+  return "E";
 }
 
 function extractImports(code) {
   const imports = [];
-  const re = /import\s+(?:{[^}]+}|\*\s+as\s+\w+|\w+)?\s*(?:,\s*(?:{[^}]+}|\*\s+as\s+\w+))?\s*from\s+['"]([^'"]+)['"]/g;
-  let m; while ((m = re.exec(code)) !== null) imports.push({ source: m[1] });
+  const re =
+    /import\s+(?:{[^}]+}|\*\s+as\s+\w+|\w+)?\s*(?:,\s*(?:{[^}]+}|\*\s+as\s+\w+))?\s*from\s+['"]([^'"]+)['"]/g;
+  let m;
+  while ((m = re.exec(code)) !== null) imports.push({ source: m[1] });
   return imports;
 }
 
@@ -835,39 +948,50 @@ function extractImports(code) {
 async function main() {
   const opts = parseArgs();
 
-  console.log('Verter Matrix Compare');
-  console.log('=====================');
+  console.log("Verter Matrix Compare");
+  console.log("=====================");
   console.log(`Project:  ${opts.project}`);
-  console.log(`Modes:    ${opts.modes.join(', ')}`);
+  console.log(`Modes:    ${opts.modes.join(", ")}`);
   console.log(`Output:   ${opts.out}`);
-  console.log('');
+  console.log("");
 
   preflight(opts);
 
   const runId = timestamp();
-  const runDir = join(opts.out, 'runs', runId);
+  const runDir = join(opts.out, "runs", runId);
   ensureDir(runDir);
-  ensureDir(join(runDir, 'logs'));
+  ensureDir(join(runDir, "logs"));
 
   const vueFiles = findVueFiles(opts.project, opts.componentFilter);
   console.log(`Found ${vueFiles.length} .vue files`);
-  if (vueFiles.length === 0) { console.log('No .vue files. Exiting.'); return; }
+  if (vueFiles.length === 0) {
+    console.log("No .vue files. Exiting.");
+    return;
+  }
 
   const runState = {
-    schema: 'verter.run_state.v1', run_id: runId, project_root: opts.project,
-    modes: opts.modes, status: 'in_progress', stages_completed: [],
-    vue_file_count: vueFiles.length, started_at: new Date().toISOString(),
+    schema: "verter.run_state.v1",
+    run_id: runId,
+    project_root: opts.project,
+    modes: opts.modes,
+    status: "in_progress",
+    stages_completed: [],
+    vue_file_count: vueFiles.length,
+    started_at: new Date().toISOString(),
   };
-  writeFileSync(join(runDir, 'run_state.json'), JSON.stringify(runState, null, 2));
+  writeFileSync(join(runDir, "run_state.json"), JSON.stringify(runState, null, 2));
 
   const manifest = {
-    schema: 'verter.capture_manifest.v1', run_id: runId,
-    project_root: opts.project, entries: [], errors: [],
+    schema: "verter.capture_manifest.v1",
+    run_id: runId,
+    project_root: opts.project,
+    entries: [],
+    errors: [],
   };
 
   // ─── Capture Phase ─────────────────────────────────────────────────
   for (const mode of opts.modes) {
-    for (const compiler of ['vue', 'verter']) {
+    for (const compiler of ["vue", "verter"]) {
       console.log(`\nCapturing: ${compiler} / ${mode}...`);
       const start = Date.now();
 
@@ -876,33 +1000,35 @@ async function main() {
       manifest.errors.push(...result.errors);
 
       const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-      console.log(`  ${result.entries.length} modules, ${result.errors.length} errors (${elapsed}s)`);
+      console.log(
+        `  ${result.entries.length} modules, ${result.errors.length} errors (${elapsed}s)`,
+      );
     }
     runState.stages_completed.push(`capture_${mode}`);
-    writeFileSync(join(runDir, 'run_state.json'), JSON.stringify(runState, null, 2));
+    writeFileSync(join(runDir, "run_state.json"), JSON.stringify(runState, null, 2));
   }
 
-  const manifestPath = join(runDir, 'capture_manifest.json');
+  const manifestPath = join(runDir, "capture_manifest.json");
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
   console.log(`\nManifest: ${manifest.entries.length} entries, ${manifest.errors.length} errors`);
 
   // ─── Comparison Phase ──────────────────────────────────────────────
-  console.log('\nRunning comparator...');
+  console.log("\nRunning comparator...");
   let diffs = runRustComparator(manifestPath, runDir);
 
   if (diffs === null) {
-    console.log('  Rust comparator unavailable. Using JS fallback...');
+    console.log("  Rust comparator unavailable. Using JS fallback...");
     diffs = runJsComparator(manifest, runDir);
-    writeFileSync(join(runDir, 'diffs.jsonl'), diffs.map((d) => JSON.stringify(d)).join('\n'));
+    writeFileSync(join(runDir, "diffs.jsonl"), diffs.map((d) => JSON.stringify(d)).join("\n"));
   }
 
-  runState.stages_completed.push('compare');
+  runState.stages_completed.push("compare");
 
   // ─── Report Phase ─────────────────────────────────────────────────
   generateReports(diffs, runDir, opts.out);
-  console.log('\nReports:');
-  console.log(`  ${join(opts.out, 'verter_differences.md')}`);
-  console.log(`  ${join(opts.out, 'verter_summary.md')}`);
+  console.log("\nReports:");
+  console.log(`  ${join(opts.out, "verter_differences.md")}`);
+  console.log(`  ${join(opts.out, "verter_summary.md")}`);
 
   if (opts.fixInvalidJs) {
     const queue = generateFixQueue(diffs, runDir, opts.maxFixes);
@@ -911,10 +1037,13 @@ async function main() {
     }
   }
 
-  runState.status = 'completed';
+  runState.status = "completed";
   runState.completed_at = new Date().toISOString();
-  writeFileSync(join(runDir, 'run_state.json'), JSON.stringify(runState, null, 2));
-  console.log('\nDone!');
+  writeFileSync(join(runDir, "run_state.json"), JSON.stringify(runState, null, 2));
+  console.log("\nDone!");
 }
 
-main().catch((err) => { console.error('Fatal:', err); process.exit(1); });
+main().catch((err) => {
+  console.error("Fatal:", err);
+  process.exit(1);
+});

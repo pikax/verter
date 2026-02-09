@@ -47,10 +47,7 @@ function writeDistFiles(merged) {
   fs.writeFileSync(tsOut, merged, "utf-8");
 
   // Write string export JS + d.ts
-  const escaped = merged
-    .replace(/`/g, "\\`")
-    .replace(/\\/g, "\\\\")
-    .replace(/\$\{/g, "\\${");
+  const escaped = merged.replace(/`/g, "\\`").replace(/\\/g, "\\\\").replace(/\$\{/g, "\\${");
   const jsOut = path.join(distDir, "tsx-string-export.js");
   const dtsOut = path.join(distDir, "tsx-string-export.d.ts");
 
@@ -64,9 +61,7 @@ function writeDistFiles(merged) {
 function main() {
   const merged = mergeTsx();
   writeDistFiles(merged);
-  console.log(
-    "✓ Built tsx merged outputs: dist/tsx.ts and dist/tsx-string-export.js"
-  );
+  console.log("✓ Built tsx merged outputs: dist/tsx.ts and dist/tsx-string-export.js");
 }
 
 main();

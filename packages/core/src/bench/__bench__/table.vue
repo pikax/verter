@@ -28,11 +28,7 @@
           </tr>
         </thead>
         <tbody>
-          <tr
-            v-for="(item, i) in pagination.result"
-            :key="i"
-            class="hover:bg-gray-300"
-          >
+          <tr v-for="(item, i) in pagination.result" :key="i" class="hover:bg-gray-300">
             <td
               v-for="(c, columnIndex) in columns"
               :key="c.path"
@@ -44,11 +40,7 @@
               ]"
             >
               <template v-if="navigateTo">
-                <router-link
-                  :to="navigateTo(item, i)"
-                  class="block"
-                  :class="cellClass"
-                >
+                <router-link :to="navigateTo(item, i)" class="block" :class="cellClass">
                   <slot
                     :name="`item:${c.name || c.path}`"
                     v-bind="{
@@ -107,14 +99,7 @@
   </div>
 </template>
 <script lang="ts">
-import {
-  type PropType,
-  computed,
-  defineComponent,
-  reactive,
-  ref,
-  watch,
-} from "vue";
+import { type PropType, computed, defineComponent, reactive, ref, watch } from "vue";
 import HIcon from "./icon.vue";
 import HSelect from "./select.vue";
 import HButton from "./button.vue";
@@ -141,19 +126,14 @@ export interface ColumnDef<TItem = any> {
 
   mobile?: boolean;
 
-  filter?: (
-    keyword: string,
-    value: any | undefined,
-    item?: TItem,
-    visible?: boolean
-  ) => boolean;
+  filter?: (keyword: string, value: any | undefined, item?: TItem, visible?: boolean) => boolean;
 
   sort?: (
     value1: unknown,
     value2: unknown,
     item1: TItem,
     item2: TItem,
-    descending: boolean
+    descending: boolean,
   ) => number;
 
   visible?: Boolean;
@@ -178,9 +158,7 @@ const _component = defineComponent({
 
     cellClass: String,
 
-    navigateTo: Function as PropType<
-      (item: any, index?: number) => RouteLocationRaw
-    >,
+    navigateTo: Function as PropType<(item: any, index?: number) => RouteLocationRaw>,
 
     pageSize: {
       type: Number,
@@ -205,7 +183,7 @@ const _component = defineComponent({
           ({
             path: x,
             title: x,
-          } as ColumnDef)
+          }) as ColumnDef,
       );
     });
 
@@ -239,9 +217,7 @@ const _component = defineComponent({
             if (!filter) continue;
             const accessor = accessors.value[colIndex];
 
-            items = items.filter((x: any) =>
-              filter(search, accessor(x), x, true)
-            );
+            items = items.filter((x: any) => filter(search, accessor(x), x, true));
 
             const foundIndex = [];
             for (let i = 0; i < noFound.length; i++) {
@@ -283,9 +259,7 @@ const _component = defineComponent({
     if (props.syncRouter) {
       const page = useQuery(
         "page",
-        pagination.currentPage.value < 2
-          ? "1"
-          : `${pagination.currentPage.value}`
+        pagination.currentPage.value < 2 ? "1" : `${pagination.currentPage.value}`,
       );
       const size = useQuery("size", `${pagination.pageSize.value}`);
 
@@ -298,7 +272,7 @@ const _component = defineComponent({
             page.value = v < 2 ? "1" : v.toString();
           },
         }),
-        pagination.currentPage
+        pagination.currentPage,
       );
       useValueSync(
         computed<number>({
@@ -309,7 +283,7 @@ const _component = defineComponent({
             size.value = v.toString();
           },
         }),
-        pagination.pageSize
+        pagination.pageSize,
       );
     }
     const { $t } = useI18n();
@@ -317,21 +291,14 @@ const _component = defineComponent({
     const { current: currentBreakpoint } = useBreakpointTailwindCSS();
 
     const i18n = reactive({
-      pageNumber: $t(
-        `app.table.pagination.${
-          currentBreakpoint.value ? "page" : "small-page"
-        }`,
-        [
-          computed(() =>
-            pagination.total.value === 0 ? 0 : pagination.offset.value
-          ),
-          computed(() => {
-            const last = pagination.offset.value + pagination.pageSize.value;
-            return Math.min(last, pagination.total.value);
-          }),
-          pagination.total,
-        ]
-      ),
+      pageNumber: $t(`app.table.pagination.${currentBreakpoint.value ? "page" : "small-page"}`, [
+        computed(() => (pagination.total.value === 0 ? 0 : pagination.offset.value)),
+        computed(() => {
+          const last = pagination.offset.value + pagination.pageSize.value;
+          return Math.min(last, pagination.total.value);
+        }),
+        pagination.total,
+      ]),
       pageResults: $t("app.table.pagination.pageResults"),
 
       search: $t("app.table.header.search"),

@@ -20,13 +20,13 @@
 </template>
 
 <script setup>
-const handleStop = () => console.log('stop')
-const handlePrevent = () => console.log('prevent')
-const handleSelf = () => console.log('self')
-const handleCapture = () => console.log('capture')
-const handleOnce = () => console.log('once')
-const handleScroll = () => console.log('scroll')
-const handleStopPrevent = () => console.log('stop+prevent')
-const handleLink = () => console.log('link')
-const handleCaptureOnce = () => console.log('capture+once')
+const handleStop = () => console.log("stop");
+const handlePrevent = () => console.log("prevent");
+const handleSelf = () => console.log("self");
+const handleCapture = () => console.log("capture");
+const handleOnce = () => console.log("once");
+const handleScroll = () => console.log("scroll");
+const handleStopPrevent = () => console.log("stop+prevent");
+const handleLink = () => console.log("link");
+const handleCaptureOnce = () => console.log("capture+once");
 </script>

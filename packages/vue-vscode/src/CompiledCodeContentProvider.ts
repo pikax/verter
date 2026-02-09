@@ -13,12 +13,10 @@ import {
 import { RequestType, type PatchClient } from "@verter/language-shared";
 
 // ContentProvider for "verter-compiled://" files
-export default class CompiledCodeContentProvider
-  implements TextDocumentContentProvider
-{
+export default class CompiledCodeContentProvider implements TextDocumentContentProvider {
   static previewWindowUri = Uri.parse("verter-compiled:///preview.tsx");
   static scheme = "verter-compiled";
- 
+
   private didChangeEmitter = new EventEmitter<Uri>();
   private selectedVueFile: string | undefined;
   private subscriptions: Disposable[] = [];
@@ -45,8 +43,8 @@ export default class CompiledCodeContentProvider
           if (event.document.languageId == "vue" && this.selectedVueFile) {
             this.refresh();
           }
-        }, 500)
-      )
+        }, 500),
+      ),
     );
 
     this.subscriptions.push(
@@ -63,7 +61,7 @@ export default class CompiledCodeContentProvider
           this.selectedVueFile = newFile;
           this.refresh();
         }
-      })
+      }),
     );
   }
 
@@ -84,7 +82,7 @@ export default class CompiledCodeContentProvider
 
     const response = await this.getLanguageClient().sendRequest(
       RequestType.GetCompiledCode,
-      this.selectedVueFile
+      this.selectedVueFile,
     );
 
     const path = this.selectedVueFile.replace("file://", "");

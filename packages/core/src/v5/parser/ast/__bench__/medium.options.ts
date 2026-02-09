@@ -23,9 +23,7 @@ export default {
       return this.largeArray.reduce((sum, item) => sum + item.value, 0);
     },
     averageValue() {
-      return this.largeArray.length
-        ? this.totalValue / this.largeArray.length
-        : 0;
+      return this.largeArray.length ? this.totalValue / this.largeArray.length : 0;
     },
     highValueItems() {
       return this.largeArray.filter((item) => item.value > 500);
@@ -96,10 +94,7 @@ export default {
     }
   },
   mounted() {
-    console.log(
-      "Component mounted. Initial high-value items:",
-      this.highValueItems
-    );
+    console.log("Component mounted. Initial high-value items:", this.highValueItems);
   },
   beforeDestroy() {
     console.log("Component about to be destroyed.");

@@ -71,16 +71,16 @@ export default defineComponent({
     return {
       // Complex data types
       complexMap: new Map<string, Set<number>>() as Map<string, Set<number>>,
-      
+
       // Dynamic key object
       dynamicKey: "computed" as string,
-      
+
       // Template literal in data
       templateLiteral: `
         Multi-line
         string
       ` as string,
-      
+
       // Regex patterns
       regexPattern: /\d+(?:\.\d+)?/g as RegExp,
     };
@@ -119,14 +119,14 @@ export default defineComponent({
     // Generic-like method pattern
     processItems<T extends ItemType>(
       items: T[],
-      transformer: (item: T) => T & { transformed: true }
+      transformer: (item: T) => T & { transformed: true },
     ): Array<ReturnType<typeof transformer>> {
       return items.map(transformer);
     },
 
     // Async method with complex return type
     async fetchData<T extends object>(
-      endpoint: string
+      endpoint: string,
     ): Promise<{ data: T; metadata: { timestamp: number } }> {
       return { data: {} as T, metadata: { timestamp: Date.now() } };
     },
@@ -181,48 +181,43 @@ export default defineComponent({
 <template>
   <div>
     <!-- Complex template expressions -->
-    <div>{{ typeof value === 'string' ? value.toUpperCase() : value }}</div>
-    
+    <div>{{ typeof value === "string" ? value.toUpperCase() : value }}</div>
+
     <!-- Optional chaining in template -->
     <span>{{ nested?.level1?.level2?.level3?.value }}</span>
-    
+
     <!-- Complex ternary -->
-    <div :class="value === 'active' 
-      ? 'active-class' 
-      : value === 'inactive' 
-        ? 'inactive-class' 
-        : 'default-class'"
+    <div
+      :class="
+        value === 'active'
+          ? 'active-class'
+          : value === 'inactive'
+            ? 'inactive-class'
+            : 'default-class'
+      "
     >
       Nested ternary
     </div>
-    
+
     <!-- Template literal in binding -->
-    <div :data-info="`Value: ${value}, Name: ${configName}`">
-      Template literal attribute
-    </div>
-    
+    <div :data-info="`Value: ${value}, Name: ${configName}`">Template literal attribute</div>
+
     <!-- Destructuring in v-for -->
-    <div v-for="{ id, ...rest } in items" :key="id">
-      {{ id }} - {{ JSON.stringify(rest) }}
-    </div>
-    
+    <div v-for="{ id, ...rest } in items" :key="id">{{ id }} - {{ JSON.stringify(rest) }}</div>
+
     <!-- Complex computed in template -->
     <ul>
       <li v-for="item in processedItems" :key="item.id">
         {{ item.processed }}
       </li>
     </ul>
-    
+
     <!-- Arrow function in event handler -->
-    <button @click="(e) => handleEvent({ target: { value: 'clicked' } })">
-      Arrow in handler
-    </button>
-    
+    <button @click="(e) => handleEvent({ target: { value: 'clicked' } })">Arrow in handler</button>
+
     <!-- Object spread in binding -->
-    <div v-bind="{ ...getSpreadObject(), 'data-spread': true }">
-      Spread in v-bind
-    </div>
-    
+    <div v-bind="{ ...getSpreadObject(), 'data-spread': true }">Spread in v-bind</div>
+
     <!-- Dynamic property access -->
     <span>{{ objectWithDynamicKey[dynamicKey] }}</span>
   </div>

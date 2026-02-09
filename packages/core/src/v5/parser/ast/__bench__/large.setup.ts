@@ -138,8 +138,7 @@ myAccount.email;
 // to fix this with generics - but it's also possible to fix
 // this with unknown.
 
-const jsonParserUnknown = (jsonString: string): unknown =>
-  JSON.parse(jsonString);
+const jsonParserUnknown = (jsonString: string): unknown => JSON.parse(jsonString);
 
 const myOtherAccount = jsonParserUnknown(`{ "name": "Samuel" }`);
 

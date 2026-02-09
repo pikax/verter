@@ -29,7 +29,8 @@
     <!-- Combined flags -->
     <div :class="cls" :style="stl">CLASS + STYLE (6)</div>
     <div :class="cls" :id="id">CLASS + PROPS (10)</div>
-    <span :class="cls">{{ text }}</span> <!-- TEXT + CLASS (3) -->
+    <span :class="cls">{{ text }}</span>
+    <!-- TEXT + CLASS (3) -->
 
     <!-- Static content (no flags, can be hoisted) -->
     <div class="static" id="static-id">Fully static element</div>
@@ -42,43 +43,43 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref } from "vue";
 
 // TEXT flag triggers
-const message = ref('Hello')
-const dynamicSuffix = ref('World')
+const message = ref("Hello");
+const dynamicSuffix = ref("World");
 
 // CLASS flag triggers
-const dynamicClass = ref('my-class')
-const isActive = ref(true)
-const baseClass = ref('base')
-const conditionalClass = ref('conditional')
+const dynamicClass = ref("my-class");
+const isActive = ref(true);
+const baseClass = ref("base");
+const conditionalClass = ref("conditional");
 
 // STYLE flag triggers
-const dynamicStyle = ref({ color: 'red' })
-const textColor = ref('blue')
-const fontSize = ref(16)
-const baseStyle = ref({ margin: '10px' })
-const overrideStyle = ref({ padding: '5px' })
+const dynamicStyle = ref({ color: "red" });
+const textColor = ref("blue");
+const fontSize = ref(16);
+const baseStyle = ref({ margin: "10px" });
+const overrideStyle = ref({ padding: "5px" });
 
 // PROPS flag triggers
-const dynamicId = ref('my-id')
-const dynamicTitle = ref('My Title')
-const dataValue = ref('123')
-const inputType = ref('text')
-const placeholder = ref('Enter value')
+const dynamicId = ref("my-id");
+const dynamicTitle = ref("My Title");
+const dataValue = ref("123");
+const inputType = ref("text");
+const placeholder = ref("Enter value");
 
 // FULL_PROPS flag triggers
-const allProps = ref({ id: 'spread-id', class: 'spread-class' })
-const dynamicPropName = ref('data-custom')
-const dynamicPropValue = ref('custom-value')
+const allProps = ref({ id: "spread-id", class: "spread-class" });
+const dynamicPropName = ref("data-custom");
+const dynamicPropValue = ref("custom-value");
 
 // Combined
-const cls = ref('combined-class')
-const stl = ref({ border: '1px solid' })
-const id = ref('combined-id')
-const text = ref('combined text')
-const show = ref(true)
+const cls = ref("combined-class");
+const stl = ref({ border: "1px solid" });
+const id = ref("combined-id");
+const text = ref("combined text");
+const show = ref(true);
 
-const handleClick = () => console.log('clicked')
+const handleClick = () => console.log("clicked");
 </script>

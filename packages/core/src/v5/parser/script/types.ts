@@ -122,9 +122,7 @@ export type ScriptFunctionCall = {
 };
 
 export type ScriptErrorMessage = "EXPORT_DEFAULT_SETUP" | "NO_RETURN_IN_SETUP";
-export type ScriptWarningMessage =
-  | "NO_MACROS_OUTSIDE_SETUP"
-  | "NO_MACROS_INSIDE_FUNCTIONS";
+export type ScriptWarningMessage = "NO_MACROS_OUTSIDE_SETUP" | "NO_MACROS_INSIDE_FUNCTIONS";
 
 export type ScriptError = {
   type: ScriptTypes.Error;

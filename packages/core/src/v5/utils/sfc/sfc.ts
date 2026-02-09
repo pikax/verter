@@ -34,11 +34,7 @@ export type AttributePosition = {
 } & BlockPosition;
 
 export interface VerterSFCBlock<
-  T extends SFCBlock =
-    | SFCTemplateBlock
-    | SFCScriptBlock
-    | SFCStyleBlock
-    | SFCBlock
+  T extends SFCBlock = SFCTemplateBlock | SFCScriptBlock | SFCStyleBlock | SFCBlock,
   // | SFCInvalidBlock
 > {
   block: T;
@@ -142,9 +138,7 @@ export function catchEmptyBlocks(descriptor: SFCDescriptor): SFCBlock[] {
   return blocks;
 }
 
-export function extractBlocksFromDescriptor(
-  descriptor: SFCDescriptor
-): Array<VerterSFCBlock> {
+export function extractBlocksFromDescriptor(descriptor: SFCDescriptor): Array<VerterSFCBlock> {
   const sfcBlocks = [
     descriptor.script,
     descriptor.scriptSetup,
@@ -180,8 +174,7 @@ export function extractBlocksFromDescriptor(
 
     const cleanTag = cleanHTMLComments(tagInit);
 
-    const tagMatch = cleanTag.matchAll(BLOCK_TAG_REGEX).next()
-      .value as RegExpMatchArray;
+    const tagMatch = cleanTag.matchAll(BLOCK_TAG_REGEX).next().value as RegExpMatchArray;
     if (!tagMatch.groups || tagMatch.index === undefined) continue;
 
     const hasClosingTagOnContent = cleanTag.indexOf(">") < cleanTag.length - 1;
@@ -191,9 +184,7 @@ export function extractBlocksFromDescriptor(
     const content =
       //   tagMatch.groups.content.length >= tagInit.length - "<script>".length
       // if there's many `>`
-      hasClosingTagOnContent
-        ? cleanTag.slice(tag.length + 1, -1)
-        : tagMatch.groups.content;
+      hasClosingTagOnContent ? cleanTag.slice(tag.length + 1, -1) : tagMatch.groups.content;
 
     const tagStartIndex =
       tagInit !== cleanTag
@@ -202,9 +193,7 @@ export function extractBlocksFromDescriptor(
 
     const startTagPos: BlockPosition = {
       start: tagStartIndex,
-      end:
-        tagStartIndex +
-        (hasClosingTagOnContent ? tagInit.length : tagMatch[0].length),
+      end: tagStartIndex + (hasClosingTagOnContent ? tagInit.length : tagMatch[0].length),
     };
 
     const tagEnd = source.slice(endTagOffset, nextOffsetEnd);
@@ -242,9 +231,7 @@ export function extractBlocksFromDescriptor(
       const strToNextTag = source.slice(lastEnding, nextBlock.loc.start.offset);
       // if blocks are commented between other blocks this tagInit will catch that
       // we need to remove it
-      const commentedBlocks = Array.from(
-        strToNextTag.matchAll(COMMENTED_BLOCKS_REGEX)
-      );
+      const commentedBlocks = Array.from(strToNextTag.matchAll(COMMENTED_BLOCKS_REGEX));
       // const firstCommentIndex = commentedBlocks.at(0)?.index ?? 0
       const lastComment = commentedBlocks.at(-1);
       if (lastComment) {
@@ -272,11 +259,7 @@ export function findBlockLanguage(block: VerterSFCBlock) {
   return lang || block.tag.type;
 }
 
-export function keepBlocks(
-  allBlocks: VerterSFCBlock[],
-  keepBlocks: string[],
-  s: MagicString
-) {
+export function keepBlocks(allBlocks: VerterSFCBlock[], keepBlocks: string[], s: MagicString) {
   // remove unknown blocks
   const toKeep = new Set(keepBlocks);
   const blocks = [] as VerterSFCBlock[];
@@ -298,7 +281,7 @@ export function removeBlockTag(block: VerterSFCBlock, s: MagicString) {
 export function retrieveAttributes(
   source: string,
   parsedAttributes: Record<string, string | true>,
-  offset: number = 0
+  offset: number = 0,
 ): Record<string, AttributePosition> {
   const attributes = {} as Record<string, AttributePosition>;
   const booleanAttributes = new Set<string>();
@@ -314,9 +297,7 @@ export function retrieveAttributes(
       booleanAttributes.add(key);
       continue;
     }
-    const match = source.match(
-      new RegExp(`\\s${key}[^=]{0,}=\\s{0,}["'].{${value.length}}["']`)
-    );
+    const match = source.match(new RegExp(`\\s${key}[^=]{0,}=\\s{0,}["'].{${value.length}}["']`));
     if (match?.index !== undefined) {
       const len = match[0].length - 1;
       const keyIndex = match.index + 1;

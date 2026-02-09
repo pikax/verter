@@ -37,7 +37,7 @@ const BATCH_DELAY = 250; // ms
 
 function debounce<T extends (...args: any[]) => void>(
   fn: T,
-  delay: number
+  delay: number,
 ): (...args: Parameters<T>) => void {
   let t: ReturnType<typeof setTimeout>;
   return (...args) => {
@@ -57,16 +57,10 @@ export class DiagnosticsManager {
     protected connection: Connection,
     protected verterManager: VerterManager,
     protected documentManager: DocumentManager,
-    private readonly statistics?: StatisticsManager
+    private readonly statistics?: StatisticsManager,
   ) {
-    this.processBatch = debounce(
-      this.processBatchInternal.bind(this),
-      BATCH_DELAY
-    );
-    this.processBatchResults = debounce(
-      this.processBatchResultsInternal.bind(this),
-      BATCH_DELAY
-    );
+    this.processBatch = debounce(this.processBatchInternal.bind(this), BATCH_DELAY);
+    this.processBatchResults = debounce(this.processBatchResultsInternal.bind(this), BATCH_DELAY);
   }
 
   requestDiagnostics(documentUri: string) {
@@ -74,9 +68,7 @@ export class DiagnosticsManager {
 
     const doc = this.documentManager.getDocument(documentUri);
     if (!doc) {
-      console.warn(
-        `[diagnostics] Diagnostics requested for unknown document: ${documentUri}`
-      );
+      console.warn(`[diagnostics] Diagnostics requested for unknown document: ${documentUri}`);
       return;
     }
 
@@ -151,7 +143,7 @@ export class DiagnosticsManager {
       }
       if (token.isCancellationRequested) {
         console.warn(
-          `[diagnostics] Skipping sending diagnostics for ${request.doc.uri} - request was cancelled`
+          `[diagnostics] Skipping sending diagnostics for ${request.doc.uri} - request was cancelled`,
         );
         continue;
       }
@@ -165,7 +157,7 @@ export class DiagnosticsManager {
       const { token, ...result } = this.batchResults.shift()!;
       if (token.isCancellationRequested) {
         console.warn(
-          `[diagnostics] Skipping sending diagnostics for ${result.uri} - request was cancelled`
+          `[diagnostics] Skipping sending diagnostics for ${result.uri} - request was cancelled`,
         );
         continue;
       }
@@ -176,7 +168,7 @@ export class DiagnosticsManager {
 
   private retrieveDiagnosticsSingle(
     doc: VerterDocument,
-    token: CancellationToken
+    token: CancellationToken,
   ): DiagnosticProcessingResult | null {
     const docs = doc instanceof VueDocument ? doc.docs : null;
     if (!docs) {
@@ -188,11 +180,9 @@ export class DiagnosticsManager {
     }
 
     const tsDocs = docs.filter(
-      (d): d is VueTypescriptDocument => d instanceof VueTypescriptDocument
+      (d): d is VueTypescriptDocument => d instanceof VueTypescriptDocument,
     );
-    const styleDocs = docs.filter(
-      (d): d is VueStyleDocument => d instanceof VueStyleDocument
-    );
+    const styleDocs = docs.filter((d): d is VueStyleDocument => d instanceof VueStyleDocument);
 
     const primaryTsDoc =
       tsDocs.find((d) => d instanceof VueRenderDocument) ||
@@ -205,9 +195,7 @@ export class DiagnosticsManager {
       return null;
     }
 
-    const diagnostics = docsToProcess.flatMap(
-      (d) => this.getDocDiagnostics(d, token) ?? []
-    );
+    const diagnostics = docsToProcess.flatMap((d) => this.getDocDiagnostics(d, token) ?? []);
     if (token.isCancellationRequested) {
       return null;
     }
@@ -221,7 +209,7 @@ export class DiagnosticsManager {
 
   private retrieveDiagnostics(
     doc: VerterDocument,
-    token: CancellationToken
+    token: CancellationToken,
   ): DiagnosticProcessingResult | null {
     const docs = doc instanceof VueDocument ? doc.docs : null;
     if (!docs) {
@@ -314,19 +302,13 @@ export class DiagnosticsManager {
       return r;
     } else if (doc instanceof VueStyleDocument) {
       if (!doc.languageService) {
-        console.warn(
-          `[diagnostics] No language service for style document: ${doc.uri}`
-        );
+        console.warn(`[diagnostics] No language service for style document: ${doc.uri}`);
         return null;
       }
       const start = performance.now();
-      const diagnostics = doc.languageService.doValidation(
-        doc,
-        doc.stylesheet,
-        {
-          validate: true,
-        }
-      );
+      const diagnostics = doc.languageService.doValidation(doc, doc.stylesheet, {
+        validate: true,
+      });
       this.statistics?.recordEvent({
         type: "diagnostics:style",
         uri: doc.uri,

@@ -138,11 +138,7 @@ export default defineComponent({
     <component :is="currentComponent" v-bind="dynamicProps" />
 
     <!-- Dynamic component with individual props -->
-    <component
-      :is="currentComponent"
-      :title="dynamicProps.title"
-      :count="dynamicProps.count"
-    />
+    <component :is="currentComponent" :title="dynamicProps.title" :count="dynamicProps.count" />
 
     <!-- Dynamic component with events -->
     <component
@@ -153,15 +149,9 @@ export default defineComponent({
 
     <!-- Dynamic component with slots -->
     <component :is="currentComponent">
-      <template #default>
-        Default slot content
-      </template>
-      <template #header>
-        Header slot content
-      </template>
-      <template #footer>
-        Footer slot content
-      </template>
+      <template #default> Default slot content </template>
+      <template #header> Header slot content </template>
+      <template #footer> Footer slot content </template>
     </component>
 
     <!-- Native element as dynamic component -->

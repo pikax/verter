@@ -1,16 +1,8 @@
 import { definePlugin, ScriptContext } from "../../types";
 import { CallExpression, ObjectProperty } from "../../../../parser/ast/types";
 import { MagicString } from "@vue/compiler-sfc";
-import {
-  TemplateElement,
-  TemplateTypes,
-} from "../../../../parser/template/types";
-import {
-  DirectiveNode,
-  ElementTypes,
-  Node,
-  SimpleExpressionNode,
-} from "@vue/compiler-core";
+import { TemplateElement, TemplateTypes } from "../../../../parser/template/types";
+import { DirectiveNode, ElementTypes, Node, SimpleExpressionNode } from "@vue/compiler-core";
 import { camelize, capitalize, HTMLAttributes } from "vue";
 import { ScriptDeclaration, ScriptTypes } from "../../../../parser/script";
 import { isHTMLTag } from "@vue/shared";
@@ -62,7 +54,7 @@ function handleExpression(
   node: CallExpression,
   s: MagicString,
   _name: string | undefined,
-  ctx: ScriptContext
+  ctx: ScriptContext,
 ) {
   // don't handle if there's explicit type parameters
   if (node.typeArguments !== null) return;
@@ -103,9 +95,7 @@ function handleExpression(
 
     if (!rawRefName) continue;
     possibleNames.push(rawRefName);
-    const refName = rawRefName.startsWith("typeof ")
-      ? rawRefName.slice(7)
-      : rawRefName;
+    const refName = rawRefName.startsWith("typeof ") ? rawRefName.slice(7) : rawRefName;
 
     if (!name || name === refName || ("value" in ref && name === ref.value)) {
       const tag = resolveTagNameType(item, ctx);
@@ -117,20 +107,13 @@ function handleExpression(
     } else if (ctx.block.result?.items) {
       for (const scriptItem of ctx.block.result.items) {
         if (scriptItem.type !== ScriptTypes.Declaration) continue;
-        let declarationValue: string | undefined =
-          retrieveDeclarationStringValue(scriptItem);
+        let declarationValue: string | undefined = retrieveDeclarationStringValue(scriptItem);
         if (!declarationValue) {
           if (refName.indexOf(".")) {
-            declarationValue = retrieveDeclarationStringValueFromObject(
-              scriptItem,
-              refName
-            );
+            declarationValue = retrieveDeclarationStringValueFromObject(scriptItem, refName);
           }
         }
-        if (
-          declarationValue === name &&
-          (~refName.indexOf(".") || scriptItem.name === refName)
-        ) {
+        if (declarationValue === name && (~refName.indexOf(".") || scriptItem.name === refName)) {
           const tag = resolveTagNameType(item, ctx);
           if (Array.isArray(tag)) {
             possibleTypes.push(...tag);
@@ -164,16 +147,11 @@ function handleExpression(
   } else {
     if (_name) {
       if (!types) return;
-      s.prependLeft(
-        node.callee.start,
-        `/**@type{typeof import('vue').ref<${types}|null>}*/(`
-      );
+      s.prependLeft(node.callee.start, `/**@type{typeof import('vue').ref<${types}|null>}*/(`);
     } else {
       s.prependLeft(
         node.callee.start,
-        `/**@type{typeof import('vue').useTemplateRef<${
-          types || "unknown"
-        },${names}>}*/(`
+        `/**@type{typeof import('vue').useTemplateRef<${types || "unknown"},${names}>}*/(`,
       );
     }
     s.prependLeft(node.callee.end, ")");
@@ -182,15 +160,13 @@ function handleExpression(
 
 function resolveTagNameType(
   item: TemplateElement,
-  ctx: ScriptContext
+  ctx: ScriptContext,
 ): string | string[] | undefined {
   if (item.tag === "component") {
     const propIs = item.props?.find(
       (x) =>
         x.name === "is" ||
-        (x.type === TemplateTypes.Prop &&
-          "arg" in x &&
-          x.arg?.[0]?.name === "is")
+        (x.type === TemplateTypes.Prop && "arg" in x && x.arg?.[0]?.name === "is"),
     );
     if (!propIs) return;
     if (propIs.static && propIs.value) {
@@ -292,10 +268,7 @@ function retrieveDeclarationStringValue(item: ScriptDeclaration) {
   return;
 }
 
-function retrieveDeclarationStringValueFromObject(
-  item: ScriptDeclaration,
-  path: string
-) {
+function retrieveDeclarationStringValueFromObject(item: ScriptDeclaration, path: string) {
   if (item.parent.type !== "VariableDeclarator") return undefined;
   const init = item.parent.init;
   if (!init || init.type !== "ObjectExpression") return undefined;
@@ -309,10 +282,7 @@ function retrieveDeclarationStringValueFromObject(
     const part = parts.shift();
     if (!part) break;
     const property = object.properties.find(
-      (x) =>
-        x.type === "Property" &&
-        x.key.type === "Identifier" &&
-        x.key.name === part
+      (x) => x.type === "Property" && x.key.type === "Identifier" && x.key.name === part,
     ) as ObjectProperty | undefined;
     if (!property) break;
 
@@ -320,10 +290,10 @@ function retrieveDeclarationStringValueFromObject(
       return property.value.type === "Literal"
         ? property.value.value?.toString()
         : "expression" in property.value &&
-          typeof property.value.expression === "object" &&
-          "value" in property.value.expression
-        ? property.value.expression?.value?.toString()
-        : "";
+            typeof property.value.expression === "object" &&
+            "value" in property.value.expression
+          ? property.value.expression?.value?.toString()
+          : "";
     }
 
     // init = findProperty(init, part);

@@ -1,6 +1,4 @@
-import {
-  Position,
-} from "vscode-languageserver-textdocument";
+import { Position } from "vscode-languageserver-textdocument";
 import { VerterDocument } from "../verter";
 import { parser, ParserResult } from "@verter/core";
 import { pathToUri, uriToPath } from "../../utils";
@@ -31,11 +29,7 @@ export class VueDocument extends VerterDocument {
   private _blocks: ProcessedBlock[] | null = null;
   get blocks() {
     if (!this._blocks) {
-      this._blocks = processBlocks(
-        this.uri,
-        this.context.blocks,
-        this.isSingleFile
-      );
+      this._blocks = processBlocks(this.uri, this.context.blocks, this.isSingleFile);
     }
     return this._blocks;
   }
@@ -83,7 +77,7 @@ export class VueDocument extends VerterDocument {
     uri: string,
     version: number,
     content: string,
-    private isSingleFile = false
+    private isSingleFile = false,
   ) {
     super(uri, "vue", version, content);
   }

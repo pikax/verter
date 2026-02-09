@@ -8,7 +8,7 @@ const { name, age } = defineProps<{
 }>();
 
 // With defaults using destructuring assignment defaults
-const { 
+const {
   title = "Default Title",
   count = 0,
   items = [] as string[],
@@ -19,28 +19,23 @@ const {
 }>();
 
 // Complex defaults
-const {
-  config = { theme: "light", lang: "en" },
-  callback = () => console.log("default"),
-} = defineProps<{
-  config?: { theme: string; lang: string };
-  callback?: () => void;
-}>();
+const { config = { theme: "light", lang: "en" }, callback = () => console.log("default") } =
+  defineProps<{
+    config?: { theme: string; lang: string };
+    callback?: () => void;
+  }>();
 
 // Renamed props with defaults
-const {
-  value: inputValue = "",
-  onChange: handleChange = (val: string) => {},
-} = defineProps<{
+const { value: inputValue = "", onChange: handleChange = (val: string) => {} } = defineProps<{
   value?: string;
   onChange?: (val: string) => void;
 }>();
 
 // Mixed required and optional with defaults
 const {
-  id,  // required, no default
-  label = "Label",  // optional with default
-  disabled = false,  // optional with default
+  id, // required, no default
+  label = "Label", // optional with default
+  disabled = false, // optional with default
 } = defineProps<{
   id: number;
   label?: string;

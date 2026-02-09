@@ -24,10 +24,7 @@ async function processDir(file) {
 
     const [compFile] = await Promise.all([fs.readFile(file, "utf8")]);
 
-    const outputFilePath = `.\\generated\\_dir\\${path.replace(
-      "D:\\",
-      ""
-    )}\\${name}.tsx`;
+    const outputFilePath = `.\\generated\\_dir\\${path.replace("D:\\", "")}\\${name}.tsx`;
 
     // const parsed = parse(compFile, {
     //   filename: "Comp.vue",
@@ -40,14 +37,10 @@ async function processDir(file) {
     //   "const Comp = __options as any as __COMP__;"
     // );
 
-    await fs.outputFile(
-      outputFilePath,
-      "/* @jsxImportSource vue */\n" + output,
-      {
-        encoding: "utf8",
-        // flag: "w",
-      }
-    );
+    await fs.outputFile(outputFilePath, "/* @jsxImportSource vue */\n" + output, {
+      encoding: "utf8",
+      // flag: "w",
+    });
   } catch (e) {
     console.error("Error parsing file", file);
     console.error(e);

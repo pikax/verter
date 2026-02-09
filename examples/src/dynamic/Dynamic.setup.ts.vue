@@ -39,8 +39,8 @@ const tabs = ref<Tab[]>([
 
 const activeTabId = ref<string>("tab1");
 
-const activeTab = computed<Tab | undefined>(() => 
-  tabs.value.find((tab) => tab.id === activeTabId.value)
+const activeTab = computed<Tab | undefined>(() =>
+  tabs.value.find((tab) => tab.id === activeTabId.value),
 );
 
 // Component with props
@@ -134,11 +134,7 @@ function forceRerender(): void {
     <component :is="currentComponent" v-bind="dynamicProps" />
 
     <!-- Dynamic component with individual props -->
-    <component
-      :is="currentComponent"
-      :title="dynamicProps.title"
-      :count="dynamicProps.count"
-    />
+    <component :is="currentComponent" :title="dynamicProps.title" :count="dynamicProps.count" />
 
     <!-- Dynamic component with events -->
     <component
@@ -149,15 +145,9 @@ function forceRerender(): void {
 
     <!-- Dynamic component with slots -->
     <component :is="currentComponent">
-      <template #default>
-        Default slot content
-      </template>
-      <template #header>
-        Header slot content
-      </template>
-      <template #footer>
-        Footer slot content
-      </template>
+      <template #default> Default slot content </template>
+      <template #header> Header slot content </template>
+      <template #footer> Footer slot content </template>
     </component>
 
     <!-- Native element as dynamic component -->

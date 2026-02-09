@@ -16,7 +16,6 @@ function onClick(e) {
   e;
 }
 const foo = {} as InstanceType<typeof Comp>;
-
 </script>
 
 <template>

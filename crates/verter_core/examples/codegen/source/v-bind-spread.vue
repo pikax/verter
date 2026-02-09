@@ -31,40 +31,40 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
-import MyComponent from './MyComponent.vue'
+import { ref, computed } from "vue";
+import MyComponent from "./MyComponent.vue";
 
 const attrs = ref({
-  id: 'my-id',
-  'data-test': 'test-value',
-  title: 'My title'
-})
+  id: "my-id",
+  "data-test": "test-value",
+  title: "My title",
+});
 
 const buttonAttrs = ref({
-  type: 'button',
+  type: "button",
   disabled: false,
-  'aria-label': 'Action button'
-})
+  "aria-label": "Action button",
+});
 
-const dynamicClass = ref('dynamic-class')
-const isDisabled = ref(false)
+const dynamicClass = ref("dynamic-class");
+const isDisabled = ref(false);
 
 const componentProps = ref({
-  title: 'Component Title',
+  title: "Component Title",
   count: 5,
-  items: [1, 2, 3]
-})
+  items: [1, 2, 3],
+});
 
-const baseAttrs = ref({ class: 'base', id: 'base-id' })
-const overrideAttrs = ref({ class: 'override', title: 'Override title' })
+const baseAttrs = ref({ class: "base", id: "base-id" });
+const overrideAttrs = ref({ class: "override", title: "Override title" });
 
 const buttonWithEvents = ref({
-  onClick: () => console.log('clicked'),
-  onMouseenter: () => console.log('hover')
-})
+  onClick: () => console.log("clicked"),
+  onMouseenter: () => console.log("hover"),
+});
 
 const computedAttrs = computed(() => ({
-  class: isDisabled.value ? 'disabled' : 'enabled',
-  'aria-disabled': isDisabled.value
-}))
+  class: isDisabled.value ? "disabled" : "enabled",
+  "aria-disabled": isDisabled.value,
+}));
 </script>

@@ -225,9 +225,7 @@ function logEvent<T extends Event>(event: T): void {
     <!-- v-on object syntax -->
     <section>
       <h3>v-on Object Syntax</h3>
-      <button v-on="{ click: handleClick, mouseenter: logEvent }">
-        Object Syntax
-      </button>
+      <button v-on="{ click: handleClick, mouseenter: logEvent }">Object Syntax</button>
     </section>
   </div>
 </template>

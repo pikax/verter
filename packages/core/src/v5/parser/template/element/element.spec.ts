@@ -9,7 +9,7 @@ describe("parser template element", () => {
       ignoredIdentifiers: [],
       conditions: [],
       inFor: false,
-    }
+    },
   ) {
     const source = `<template>${content}</template>`;
 
@@ -221,9 +221,7 @@ describe("parser template element", () => {
   });
 
   it('div v-if="temp" v-for="temp in items" :temp="temp"', () => {
-    const { result } = parse(
-      `<div v-if="temp" v-for="temp in items" :temp="temp"></div>`
-    );
+    const { result } = parse(`<div v-if="temp" v-for="temp in items" :temp="temp"></div>`);
 
     expect(result).toMatchObject({
       element: {
@@ -302,9 +300,7 @@ describe("parser template element", () => {
   });
 
   it('div :temp="temp" v-for="temp in items" v-if="temp" ', () => {
-    const { result } = parse(
-      `<div v-if="temp" v-for="temp in items" :temp="temp"></div>`
-    );
+    const { result } = parse(`<div v-if="temp" v-for="temp in items" :temp="temp"></div>`);
 
     expect(result).toMatchObject({
       element: {
@@ -383,9 +379,7 @@ describe("parser template element", () => {
   });
 
   it('v-slot="slotProps"', () => {
-    const { result } = parse(
-      `<div v-slot="slotProps" :name="slotProps.test">{{slotProps}}</div>`
-    );
+    const { result } = parse(`<div v-slot="slotProps" :name="slotProps.test">{{slotProps}}</div>`);
     expect(result).toMatchObject({
       element: {
         context: {

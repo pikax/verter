@@ -27,9 +27,7 @@ const clickOutsideDirective: Directive<HTMLElement, ClickOutsideBinding> = {
     const handler = (event: MouseEvent) => {
       const target = event.target as HTMLElement;
       const excluded = binding.value.exclude || [];
-      const isExcluded = excluded.some((selector) =>
-        target.closest(selector)
-      );
+      const isExcluded = excluded.some((selector) => target.closest(selector));
       if (!el.contains(target) && !isExcluded) {
         binding.value.handler(event);
       }
@@ -133,12 +131,8 @@ export default defineComponent({
       v-click-outside="{ handler: closeDropdown, exclude: ['.dropdown-toggle'] }"
       class="dropdown"
     >
-      <button class="dropdown-toggle" @click="toggleDropdown">
-        Toggle Dropdown
-      </button>
-      <div v-if="isDropdownOpen" class="dropdown-menu">
-        Dropdown content
-      </div>
+      <button class="dropdown-toggle" @click="toggleDropdown">Toggle Dropdown</button>
+      <div v-if="isDropdownOpen" class="dropdown-menu">Dropdown content</div>
     </div>
 
     <!-- v-tooltip with argument -->
@@ -151,8 +145,6 @@ export default defineComponent({
     <div v-draggable class="draggable">Drag any direction</div>
 
     <!-- v-permission with object binding -->
-    <button v-permission="{ role: 'admin', action: 'delete' }">
-      Admin Only Button
-    </button>
+    <button v-permission="{ role: 'admin', action: 'delete' }">Admin Only Button</button>
   </div>
 </template>

@@ -9,17 +9,17 @@ export const SFCCleanerPlugin = declareTemplatePlugin({
       if (block === ctx.block) {
         return;
       }
-      
+
       // Skip blocks that are outside the original source bounds
       // (e.g., empty script blocks added by parser)
       if (block.block.tag.pos.open.start >= s.original.length) {
         return;
       }
-      
+
       // comment out every line
       const content = s.original.slice(
         block.block.tag.pos.open.start,
-        block.block.tag.pos.close.end
+        block.block.tag.pos.close.end,
       );
 
       const lines = content.split("\n");

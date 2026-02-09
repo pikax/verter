@@ -17,7 +17,7 @@ export type TemplatePlugin = ProcessPlugin<TemplateItem, TemplateContext> & {
       ? TemplateItemByType[C]
       : TemplateItem,
     s: MagicString,
-    context: TemplateContext
+    context: TemplateContext,
   ) => void;
 };
 
@@ -93,7 +93,7 @@ export type TemplateContext = ProcessContext & {
 
       condition?: TemplateCondition | null;
     },
-    s: MagicString
+    s: MagicString,
   ) => void;
 
   isSingleFile?: boolean;
@@ -107,11 +107,8 @@ export function processTemplate(
   items: TemplateItem[],
   plugins: TemplatePlugin[],
   _context: Partial<TemplateContext> &
-    Pick<
-      ProcessContext,
-      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
-    >,
-    autorun?: true
+    Pick<ProcessContext, "filename" | "s" | "blocks" | "block" | "blockNameResolver">,
+  autorun?: true,
 ): {
   context: TemplateContext;
   s: MagicString;
@@ -122,11 +119,8 @@ export function processTemplate(
   items: TemplateItem[],
   plugins: TemplatePlugin[],
   _context: Partial<TemplateContext> &
-    Pick<
-      ProcessContext,
-      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
-    >,
-    autorun: false
+    Pick<ProcessContext, "filename" | "s" | "blocks" | "block" | "blockNameResolver">,
+  autorun: false,
 ): {
   context: TemplateContext;
   s: MagicString;
@@ -139,11 +133,8 @@ export function processTemplate(
   items: TemplateItem[],
   plugins: TemplatePlugin[],
   _context: Partial<TemplateContext> &
-    Pick<
-      ProcessContext,
-      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
-    >,
-    autorun = true
+    Pick<ProcessContext, "filename" | "s" | "blocks" | "block" | "blockNameResolver">,
+  autorun = true,
 ) {
   const context: TemplateContext = {
     generic: null,
@@ -185,21 +176,13 @@ export function processTemplate(
     [TemplateTypes.BrokenExpression]: [],
   } as {
     [K in TemplateTypes]: Array<
-      (
-        item: TemplateItemByType[K],
-        s: MagicString,
-        context: ProcessContext
-      ) => void
+      (item: TemplateItemByType[K], s: MagicString, context: ProcessContext) => void
     >;
   };
   const PLUGIN_TYPES = Object.keys(pluginsByType) as readonly TemplateTypes[];
 
-  const prePlugins = [] as Array<
-    (s: MagicString, context: ProcessContext) => void
-  >;
-  const postPlugins = [] as Array<
-    (s: MagicString, context: ProcessContext) => void
-  >;
+  const prePlugins = [] as Array<(s: MagicString, context: ProcessContext) => void>;
+  const postPlugins = [] as Array<(s: MagicString, context: ProcessContext) => void>;
 
   [...plugins]
     .sort((a, b) => {
@@ -286,6 +269,6 @@ export function processTemplate(
     s,
     pre,
     main,
-    post
-  }
+    post,
+  };
 }

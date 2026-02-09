@@ -33,7 +33,7 @@ import type AcornTypes from "acorn";
 
 const Keywords =
   "break,case,catch,class,const,continue,debugger,default,delete,do,else,export,extends,false,finally,for,function,if,import,in,instanceof,new,null,return,super,switch,this,throw,true,try,typeof,var,void,while,with,await".split(
-    ","
+    ",",
   );
 // only in strict
 const KeywordsInStrict = ["let", "static", "yield"];
@@ -48,18 +48,10 @@ export function retrieveBindings(
   context: {
     ignoredIdentifiers: string[];
   },
-  directive: null | DirectiveNode = null
-): Array<
-  | TemplateBinding
-  | TemplateFunction
-  | TemplateLiteral
-  | TemplateBrokenExpression
-> {
+  directive: null | DirectiveNode = null,
+): Array<TemplateBinding | TemplateFunction | TemplateLiteral | TemplateBrokenExpression> {
   const bindings: Array<
-    | TemplateBinding
-    | TemplateFunction
-    | TemplateLiteral
-    | TemplateBrokenExpression
+    TemplateBinding | TemplateFunction | TemplateLiteral | TemplateBrokenExpression
   > = [];
 
   if (exp.type !== NodeTypes.SIMPLE_EXPRESSION) {
@@ -73,9 +65,7 @@ export function retrieveBindings(
       name,
       parent: null,
       ignore:
-        context.ignoredIdentifiers.includes(name) ||
-        BindingIgnoreSet.has(name) ||
-        exp.isStatic,
+        context.ignoredIdentifiers.includes(name) || BindingIgnoreSet.has(name) || exp.isStatic,
       directive,
       exp,
     });
@@ -119,11 +109,9 @@ export function retrieveBindings(
 export function getASTBindings(
   ast: babel_types.Node | VerterASTNode | AcornTypes.Program,
   context: Record<string, any>,
-  exp?: Node
+  exp?: Node,
 ) {
-  const bindings = [] as Array<
-    TemplateBinding | TemplateFunction | TemplateLiteral
-  >;
+  const bindings = [] as Array<TemplateBinding | TemplateFunction | TemplateLiteral>;
 
   const isAcorn = "type" in ast && ast.type === "Program";
 
@@ -131,7 +119,7 @@ export function getASTBindings(
     enter(
       n: babel_types.Node | VerterASTNode,
       parent: babel_types.Node | VerterASTNode,
-      key: string | number | null
+      key: string | number | null,
     ) {
       const inheritedIgnoreBindings =
         // @ts-expect-error internal flag used at runtime
@@ -144,8 +132,7 @@ export function getASTBindings(
         !inheritedIgnoreBindings &&
         n.type === "ObjectExpression" &&
         parent &&
-        (parent.type === "TSAsExpression" ||
-          parent.type === "TSSatisfiesExpression")
+        (parent.type === "TSAsExpression" || parent.type === "TSSatisfiesExpression")
       ) {
         // Object literals used purely in type assertions/satisfies should not contribute bindings
         // @ts-expect-error internal flag used at runtime
@@ -169,8 +156,7 @@ export function getASTBindings(
               ("content" in exp &&
                 typeof exp.content === "string" &&
                 exp.content[
-                  n.start! -
-                    2 /* the AST always starts at 1 and we want the previous */
+                  n.start! - 2 /* the AST always starts at 1 and we want the previous */
                 ]) !== "[")) ||
           (parent.type === "TSTypeReference" && key === "typeName")
         ) {
@@ -191,28 +177,20 @@ export function getASTBindings(
           params.forEach((param) => {
             if (param.type === "Identifier") {
               ignoredIdentifiers.push(param.name);
-            } else if (
-              param.type === "RestElement" &&
-              param.argument.type === "Identifier"
-            ) {
+            } else if (param.type === "RestElement" && param.argument.type === "Identifier") {
               ignoredIdentifiers.push(param.argument.name);
             } else if (param.type === "AssignmentPattern") {
               const left = param.left;
               if (left.type === "Identifier") {
                 ignoredIdentifiers.push(left.name);
               }
-            } else if (
-              param.type === "ObjectPattern" ||
-              param.type === "ArrayPattern"
-            ) {
+            } else if (param.type === "ObjectPattern" || param.type === "ArrayPattern") {
               collectDeclaredIds(param as BindingPattern, ignoredIdentifiers);
             }
           });
 
           const pN = exp ? patchBabelNodeLoc(n as babel_types.Node, exp) : n;
-          const bN = exp
-            ? patchBabelNodeLoc(n.body as babel_types.Node, exp)
-            : n;
+          const bN = exp ? patchBabelNodeLoc(n.body as babel_types.Node, exp) : n;
           bindings.push({
             type: TemplateTypes.Function,
             // @ts-expect-error not correct type
@@ -251,8 +229,7 @@ export function getASTBindings(
           if (
             parent &&
             (parent.type === "ObjectProperty" || parent.type === "Property") &&
-            (parent as babel_types.ObjectProperty | babel_types.ObjectMethod)
-              .key === n
+            (parent as babel_types.ObjectProperty | babel_types.ObjectMethod).key === n
           ) {
             this.skip();
             return;
@@ -267,10 +244,7 @@ export function getASTBindings(
             const content =
               exp?.type === NodeTypes.SIMPLE_EXPRESSION
                 ? // @ts-expect-error TODO Fix
-                  exp.content.slice(
-                    parent.start! - ast.start!,
-                    parent.end! - ast.start!
-                  )
+                  exp.content.slice(parent.start! - ast.start!, parent.end! - ast.start!)
                 : (parent as any).loc.source;
 
             const accessor = content[n.start! - parent.start! - 1];
@@ -315,8 +289,7 @@ export function getASTBindings(
             parent,
             directive: null,
 
-            ignore:
-              ignoredIdentifiers.includes(name) || BindingIgnoreSet.has(name),
+            ignore: ignoredIdentifiers.includes(name) || BindingIgnoreSet.has(name),
             exp: exp as SimpleExpressionNode | null,
           });
           break;

@@ -1,5 +1,12 @@
 <script setup>
-import { onMounted, onUnmounted, onBeforeMount, onBeforeUnmount, onUpdated, onBeforeUpdate } from "vue";
+import {
+  onMounted,
+  onUnmounted,
+  onBeforeMount,
+  onBeforeUnmount,
+  onUpdated,
+  onBeforeUpdate,
+} from "vue";
 import { ref } from "vue";
 
 const count = ref(0);

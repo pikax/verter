@@ -106,7 +106,7 @@ export interface UseFetchReturn<T> {
 
 export function useFetch<T>(
   url: string | Ref<string>,
-  options: UseFetchOptions<T> = {}
+  options: UseFetchOptions<T> = {},
 ): UseFetchReturn<T> {
   const { immediate = true, initialData = null } = options;
 
@@ -151,9 +151,7 @@ export function useFetch<T>(
  */
 export function useLocalStorage<T>(key: string, defaultValue: T) {
   const storedValue = localStorage.getItem(key);
-  const data = ref<T>(
-    storedValue !== null ? JSON.parse(storedValue) : defaultValue
-  ) as Ref<T>;
+  const data = ref<T>(storedValue !== null ? JSON.parse(storedValue) : defaultValue) as Ref<T>;
 
   function set(value: T) {
     data.value = value;

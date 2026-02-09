@@ -20,9 +20,7 @@ export default {
     <h2>Multiple Blocks</h2>
     <p>Count: {{ count }}</p>
     <button @click="count++">Increment</button>
-    <button @click="theme = theme === 'light' ? 'dark' : 'light'">
-      Toggle Theme
-    </button>
+    <button @click="theme = theme === 'light' ? 'dark' : 'light'">Toggle Theme</button>
   </div>
 </template>
 
@@ -60,7 +58,7 @@ p {
   button {
     margin: 5px;
     padding: 8px 16px;
-    
+
     &:hover {
       opacity: 0.8;
     }

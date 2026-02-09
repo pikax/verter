@@ -37,22 +37,19 @@ import { GetVueComponent } from "../components";
  * - Invalid component names cause a compile-time error rather than returning `never`,
  *   providing better type safety by preventing invalid calls entirely.
  */
-export declare function toComponentRender<
-  T extends string,
-  C extends Record<string, any>
->(
+export declare function toComponentRender<T extends string, C extends Record<string, any>>(
   is: T extends keyof C | keyof import("vue").NativeElements ? T : never,
-  components: C
+  components: C,
 ): T extends keyof C
   ? C[T]
   : T extends keyof import("vue").NativeElements
-  ? (props: import("vue").NativeElements[T]) => JSX.Element
-  : never;
+    ? (props: import("vue").NativeElements[T]) => JSX.Element
+    : never;
 
 /**
  * @see {@link toComponentRender} for full documentation
  */
 export declare function toComponentRender<T, C extends Record<string, any>>(
   is: GetVueComponent<T> extends never ? never : T,
-  components: C
+  components: C,
 ): T;

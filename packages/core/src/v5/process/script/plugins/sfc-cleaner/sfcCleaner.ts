@@ -19,7 +19,7 @@ export const SFCCleanerPlugin = definePlugin({
       // comment out every line
       const content = s.original.slice(
         block.block.tag.pos.open.start,
-        block.block.tag.pos.close.end
+        block.block.tag.pos.close.end,
       );
 
       const lines = content.split("\n");

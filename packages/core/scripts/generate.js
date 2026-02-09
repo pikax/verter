@@ -49,7 +49,7 @@ async function processDir(dir) {
       {
         encoding: "utf8",
         // flag: "w",
-      }
+      },
     );
   } catch (e) {
     console.error("failed", dir, e);

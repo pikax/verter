@@ -33,7 +33,4 @@ export interface ParsedBlockUnknown {
   result: null;
 }
 
-export type ParsedBlock =
-  | ParsedBlockTemplate
-  | ParsedBlockScript
-  | ParsedBlockUnknown;
+export type ParsedBlock = ParsedBlockTemplate | ParsedBlockScript | ParsedBlockUnknown;

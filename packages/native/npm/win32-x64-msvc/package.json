@@ -1,19 +1,19 @@
 {
   "name": "@verter/native-win32-x64-msvc",
   "version": "0.0.1-alpha.1",
+  "description": "Native Node.js bindings for Verter Vue compiler",
+  "license": "ISC",
+  "files": [
+    "verter-native.win32-x64-msvc.node"
+  ],
+  "os": [
+    "win32"
+  ],
   "cpu": [
     "x64"
   ],
   "main": "verter-native.win32-x64-msvc.node",
-  "files": [
-    "verter-native.win32-x64-msvc.node"
-  ],
-  "description": "Native Node.js bindings for Verter Vue compiler",
-  "license": "ISC",
   "engines": {
     "node": ">=18"
-  },
-  "os": [
-    "win32"
-  ]
+  }
 }

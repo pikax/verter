@@ -2,10 +2,7 @@ import type { Node, Position } from "@vue/compiler-core";
 import type * as babel_types from "@babel/types";
 import type AcornTypes from "acorn";
 
-export function patchBabelNodeLoc<T extends babel_types.Node>(
-  node: T,
-  templateNode: Node
-) {
+export function patchBabelNodeLoc<T extends babel_types.Node>(node: T, templateNode: Node) {
   if (node.loc) {
     patchBabelPosition(node.loc.start, templateNode.loc.start);
     patchBabelPosition(node.loc.end, templateNode.loc.start);
@@ -14,10 +11,7 @@ export function patchBabelNodeLoc<T extends babel_types.Node>(
     node.loc.source =
       node.loc.identifierName ??
       // @ts-expect-error not part of loc
-      templateNode.content.slice(
-        node.loc.start.index - 1,
-        node.loc.end.index - 1
-      );
+      templateNode.content.slice(node.loc.start.index - 1, node.loc.end.index - 1);
   } else {
     return patchOXCNodeLoc(node as any, templateNode) as babel_types.Node & {
       loc: Node["loc"] & babel_types.Node["loc"];
@@ -29,10 +23,7 @@ export function patchBabelNodeLoc<T extends babel_types.Node>(
   };
 }
 
-export function patchOXCNodeLoc<T extends import("oxc-parser").Node>(
-  node: T,
-  templateNode: Node
-) {
+export function patchOXCNodeLoc<T extends import("oxc-parser").Node>(node: T, templateNode: Node) {
   const source = templateNode.loc.source;
   const lineOffsets: number[] = [];
   let currentOffset = 0;
@@ -68,10 +59,7 @@ export function patchOXCNodeLoc<T extends import("oxc-parser").Node>(
   return node;
 }
 
-export function patchBabelPosition(
-  pos: babel_types.SourceLocation["start"],
-  offsetPos: Position
-) {
+export function patchBabelPosition(pos: babel_types.SourceLocation["start"], offsetPos: Position) {
   pos.line = offsetPos.line + pos.line - 1;
   pos.column = offsetPos.column + pos.column - 1;
   // @ts-expect-error not part of pos
@@ -79,10 +67,7 @@ export function patchBabelPosition(
 
   return pos as babel_types.SourceLocation["start"] & Position;
 }
-export function patchAcornPosition(
-  pos: AcornTypes.SourceLocation["start"],
-  offsetPos: Position
-) {
+export function patchAcornPosition(pos: AcornTypes.SourceLocation["start"], offsetPos: Position) {
   pos.line = offsetPos.line + pos.line - 1;
   pos.column = offsetPos.column + pos.column - 1;
   // @ts-expect-error not part of pos
@@ -93,10 +78,7 @@ export function patchAcornPosition(
   return pos as babel_types.SourceLocation["start"] & Position;
 }
 
-export function patchAcornNodeLoc<T extends AcornTypes.AnyNode>(
-  node: T,
-  templateNode: Node
-) {
+export function patchAcornNodeLoc<T extends AcornTypes.AnyNode>(node: T, templateNode: Node) {
   if (node.loc) {
     patchAcornPosition(node.loc.start, templateNode.loc.start);
     patchAcornPosition(node.loc.end, templateNode.loc.start);

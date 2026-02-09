@@ -9,13 +9,10 @@ const great = ref(false);
       let a = {} as {
         foo: 1;
       };
- 
 
+      /*ffof*/ let {} = ___DEBUG_FullContext;
 
-/*ffof*/let { } = ___DEBUG_FullContext
-
-      a
-      
+      a;
     }
   }}
 </template>

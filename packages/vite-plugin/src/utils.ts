@@ -1,11 +1,11 @@
-import type { ViteCodegenResult } from '@verter/native';
+import type { ViteCodegenResult } from "@verter/native";
 
 /**
  * Query parameters for Vue virtual modules
  */
 export interface VueQuery {
   vue: boolean;
-  type?: 'script' | 'template' | 'style';
+  type?: "script" | "template" | "style";
   index?: number;
   scoped?: boolean;
   lang?: string;
@@ -23,7 +23,7 @@ export interface ParsedVueRequest {
  * Parse a Vue request ID into filename and query parameters
  */
 export function parseVueRequest(id: string): ParsedVueRequest {
-  const [filename, queryString] = id.split('?', 2);
+  const [filename, queryString] = id.split("?", 2);
 
   if (!queryString) {
     return { filename, query: { vue: false } };
@@ -32,11 +32,11 @@ export function parseVueRequest(id: string): ParsedVueRequest {
   const params = new URLSearchParams(queryString);
 
   const query: VueQuery = {
-    vue: params.has('vue'),
-    type: params.get('type') as VueQuery['type'],
-    index: params.has('index') ? parseInt(params.get('index')!, 10) : undefined,
-    scoped: params.has('scoped'),
-    lang: params.get('lang') || undefined,
+    vue: params.has("vue"),
+    type: params.get("type") as VueQuery["type"],
+    index: params.has("index") ? parseInt(params.get("index")!, 10) : undefined,
+    scoped: params.has("scoped"),
+    lang: params.get("lang") || undefined,
   };
 
   return { filename, query };

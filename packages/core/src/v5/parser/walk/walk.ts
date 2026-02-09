@@ -20,7 +20,7 @@ import { TemplateCondition } from "../template/types.js";
 
 export function shallowWalk(
   root: VerterAST | Function | ArrowFunctionExpression | FunctionBody,
-  cb: (node: Statement | ModuleDeclaration) => void
+  cb: (node: Statement | ModuleDeclaration) => void,
 ) {
   if (root.type === "Program") {
     for (let i = 0; i < root.body.length; i++) {
@@ -51,14 +51,14 @@ export function deepWalk(
     this: { skip: () => void },
     node: VerterASTNode,
     parent: VerterASTNode | null,
-    key: string
+    key: string,
   ) => void,
   leave?: (
     this: { skip: () => void },
     node: VerterASTNode,
     parent: VerterASTNode | null,
-    key: string
-  ) => void
+    key: string,
+  ) => void,
 ) {
   walk(root, {
     enter,
@@ -85,7 +85,7 @@ export type WalkOptions<Context extends TemplateWalkContext> = {
     /**
      * Same for siblings
      */
-    parentContext: Record<string, any>
+    parentContext: Record<string, any>,
   ) => Context | void;
   leave?: (
     node: VerterNode,
@@ -94,37 +94,29 @@ export type WalkOptions<Context extends TemplateWalkContext> = {
     /**
      * Same for siblings
      */
-    parentContext: Record<string, any>
+    parentContext: Record<string, any>,
   ) => Context | void;
 };
 
 export function templateWalk<Context extends TemplateWalkContext>(
   root: RootNode,
   options: WalkOptions<Context>,
-  context: Context
+  context: Context,
 ) {
   function visit(
     node: VerterNode | null,
     parent: VerterNode | null,
     context: Context,
-    parentContext: Record<string, any>
+    parentContext: Record<string, any>,
   ) {
     if (!node) {
       return;
     }
-    const returnedContext = options.enter?.(
-      node,
-      parent,
-      context,
-      parentContext
-    );
+    const returnedContext = options.enter?.(node, parent, context, parentContext);
     const overrideContext = returnedContext || context;
 
     const childContext = {
-      conditions:
-        parentContext.conditions?.length > 0
-          ? [...parentContext.conditions]
-          : [],
+      conditions: parentContext.conditions?.length > 0 ? [...parentContext.conditions] : [],
       inFor: !!parentContext.for || !!parentContext.inFor,
     } as Context;
 

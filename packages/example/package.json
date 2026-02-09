@@ -2,14 +2,14 @@
   "name": "example",
   "version": "0.0.1-alpha.1",
   "description": "",
+  "keywords": [],
+  "license": "MIT",
+  "author": "",
   "main": "index.js",
   "scripts": {
     "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "MIT",
   "dependencies": {
     "@verter/typescript-plugin": "workspace:^",
     "typescript": "^5.9.3",

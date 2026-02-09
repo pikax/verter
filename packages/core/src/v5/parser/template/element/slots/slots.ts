@@ -1,9 +1,4 @@
-import {
-  DirectiveNode,
-  ElementNode,
-  ElementTypes,
-  NodeTypes,
-} from "@vue/compiler-core";
+import { DirectiveNode, ElementNode, ElementTypes, NodeTypes } from "@vue/compiler-core";
 import { VerterNode } from "../../../walk";
 import {
   TemplateCondition,
@@ -28,7 +23,7 @@ export type SlotsContext = {
 export function handleSlotDeclaration<T extends SlotsContext>(
   node: VerterNode,
   parent: ElementNode,
-  parentContext: SlotsContext
+  parentContext: SlotsContext,
 ): {
   context: T;
   slot: TemplateSlot;
@@ -44,14 +39,10 @@ export function handleSlotDeclaration<T extends SlotsContext>(
   const items = [];
 
   const propItems = handleProps(node, parentContext) ?? [];
-  const props = propItems.filter(
-    (x) => x.type === TemplateTypes.Prop
-  ) as TemplateProp[];
+  const props = propItems.filter((x) => x.type === TemplateTypes.Prop) as TemplateProp[];
 
   const name =
-    (propItems.find((prop) => (prop as any).name === "name") as
-      | TemplateProp
-      | undefined) ?? null;
+    (propItems.find((prop) => (prop as any).name === "name") as TemplateProp | undefined) ?? null;
   // const name =
   //   (props.find((prop) => prop.name === "name") as TemplateProp | undefined) ??
   //   propItems.find(
@@ -95,7 +86,7 @@ export function handleSlotProp<T extends SlotsContext>(
   node: VerterNode,
   parent: VerterNode,
   parentContext: T,
-  condition?: TemplateCondition
+  condition?: TemplateCondition,
 ): {
   context: T;
   slot: TemplateRenderSlot;
@@ -106,28 +97,22 @@ export function handleSlotProp<T extends SlotsContext>(
   }
 
   const propDirective = node.props.find(
-    (x) => x.type === NodeTypes.DIRECTIVE && x.name === "slot"
+    (x) => x.type === NodeTypes.DIRECTIVE && x.name === "slot",
   ) as DirectiveNode | undefined;
 
   if (!propDirective) {
     return null;
   }
 
-  const [prop] = propToTemplateProp(propDirective, node, parentContext) as [
-    TemplateDirective
-  ];
+  const [prop] = propToTemplateProp(propDirective, node, parentContext) as [TemplateDirective];
 
-  const ignoredIdentifiers =
-    prop.exp?.map((x) => x.type === TemplateTypes.Binding && x.name) ?? [];
+  const ignoredIdentifiers = prop.exp?.map((x) => x.type === TemplateTypes.Binding && x.name) ?? [];
 
   const context =
     ignoredIdentifiers.length > 0
       ? {
           ...parentContext,
-          ignoredIdentifiers: [
-            ...parentContext.ignoredIdentifiers,
-            ...ignoredIdentifiers,
-          ],
+          ignoredIdentifiers: [...parentContext.ignoredIdentifiers, ...ignoredIdentifiers],
         }
       : parentContext;
 
@@ -135,9 +120,7 @@ export function handleSlotProp<T extends SlotsContext>(
     type: TemplateTypes.SlotRender,
     prop,
     parent:
-      node.type === NodeTypes.ELEMENT && node.tag !== "template"
-        ? null
-        : (parent as ElementNode),
+      node.type === NodeTypes.ELEMENT && node.tag !== "template" ? null : (parent as ElementNode),
     element: node,
     name: prop.arg,
     context,
@@ -149,9 +132,7 @@ export function handleSlotProp<T extends SlotsContext>(
   if (prop.type === TemplateTypes.Directive) {
     if (prop.arg && prop.arg.length) {
       // if there's any bindings
-      const b = prop.arg.filter(
-        (x) => x.type === TemplateTypes.Binding && !x.ignore
-      );
+      const b = prop.arg.filter((x) => x.type === TemplateTypes.Binding && !x.ignore);
       items.push(...b);
     }
   }

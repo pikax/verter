@@ -55,10 +55,13 @@ function renderBinding(
   el: HTMLElement,
   binding: DirectiveBinding<string>,
   vnode?: VNode,
-  prevVnode?: VNode
+  prevVnode?: VNode,
 ) {
   const { value, oldValue, arg, modifiers, instance, dir } = binding;
-  const vnodeType = typeof vnode?.type === "string" ? vnode.type : (vnode?.type as any)?.name ?? vnode?.type ?? "-";
+  const vnodeType =
+    typeof vnode?.type === "string"
+      ? vnode.type
+      : ((vnode?.type as any)?.name ?? vnode?.type ?? "-");
   const prevType =
     typeof prevVnode?.type === "string"
       ? prevVnode.type
@@ -156,9 +159,7 @@ function resetLifecycleLog() {
           <input v-model.number="pinDistance" type="number" min="0" />
         </label>
       </div>
-      <div class="pin-box" v-pin:[pinnedSide].round="pinDistance">
-        Pinned box
-      </div>
+      <div class="pin-box" v-pin:[pinnedSide].round="pinDistance">Pinned box</div>
     </div>
   </section>
 </template>

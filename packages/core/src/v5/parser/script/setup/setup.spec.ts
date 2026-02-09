@@ -63,9 +63,7 @@ describe("parser script setup", () => {
   });
 
   it('const props = withDefaults(defineProps(), { a: "a" })', () => {
-    const { items } = parse(
-      `const props = withDefaults(defineProps(), { a: "a" })`
-    );
+    const { items } = parse(`const props = withDefaults(defineProps(), { a: "a" })`);
     expect(items).toMatchObject([
       {
         type: ScriptTypes.Declaration,
@@ -127,9 +125,7 @@ describe("parser script setup", () => {
   });
 
   it("const { foo: { bar: a } } : Props = defineProps()", () => {
-    const { items } = parse(
-      `const { foo: { bar: a } } : Props = defineProps()`
-    );
+    const { items } = parse(`const { foo: { bar: a } } : Props = defineProps()`);
     expect(items).toMatchObject([
       {
         type: ScriptTypes.Declaration,
@@ -146,9 +142,7 @@ describe("parser script setup", () => {
   });
 
   it("const { foo: { bar: { a = 1 } } } : Props = defineProps()", () => {
-    const { items } = parse(
-      `const { foo: { bar: { a = 1 } } } : Props = defineProps()`
-    );
+    const { items } = parse(`const { foo: { bar: { a = 1 } } } : Props = defineProps()`);
     expect(items).toMatchObject([
       {
         type: ScriptTypes.Declaration,
@@ -165,9 +159,7 @@ describe("parser script setup", () => {
   });
 
   it("const { a } = defineProps({ a: String, foo: String})", () => {
-    const { items } = parse(
-      `const { a } = defineProps({ a: String, foo: String})`
-    );
+    const { items } = parse(`const { a } = defineProps({ a: String, foo: String})`);
     expect(items).toMatchObject([
       {
         type: ScriptTypes.Declaration,
@@ -322,9 +314,7 @@ describe("parser script setup", () => {
     });
 
     it("for(let i; i < 10; i++) { await Promise.resolve() }", () => {
-      const { items } = parse(
-        "for(let i; i < 10; i++) { await Promise.resolve() }"
-      );
+      const { items } = parse("for(let i; i < 10; i++) { await Promise.resolve() }");
       expect(items).toMatchObject([
         {
           type: ScriptTypes.Async,

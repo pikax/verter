@@ -23,28 +23,19 @@ describe("process defineOptions", () => {
     lang = "js",
 
     pre = "",
-    post = ""
+    post = "",
   ) {
-    const prepend = `${pre}<script ${
-      wrapper === false ? "setup" : ""
-    } lang="${lang}">`;
+    const prepend = `${pre}<script ${wrapper === false ? "setup" : ""} lang="${lang}">`;
     const source = `${prepend}${content}</script>${post}`;
     const parsed = parser(source);
 
     const s = new MagicString(source);
 
-    const scriptBlock = parsed.blocks.find(
-      (x) => x.type === "script"
-    ) as ParsedBlockScript;
+    const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
 
     const r = processScript(
       scriptBlock.result.items,
-      [
-        DefineOptionsPlugin,
-        TemplateBindingPlugin,
-        ScriptBlockPlugin,
-        BindingPlugin,
-      ],
+      [DefineOptionsPlugin, TemplateBindingPlugin, ScriptBlockPlugin, BindingPlugin],
       {
         s,
         filename: "test.vue",
@@ -52,7 +43,7 @@ describe("process defineOptions", () => {
         isSetup: wrapper === false,
         block: scriptBlock,
         blockNameResolver: (name) => name,
-      }
+      },
     );
 
     return r;
@@ -65,63 +56,63 @@ describe("process defineOptions", () => {
 
     it("should move and box defineOptions", () => {
       const { result, context } = parse(`defineOptions(myOptions)`);
-      
+
       // Should declare the boxed variable
       expect(result).toContain(`let ___VERTER___defineOptions_Boxed;`);
-      
+
       // Should box the options argument
-      expect(result).toContain(`___VERTER___defineOptions_Boxed=___VERTER___defineOptions_Box(myOptions)`);
-      
+      expect(result).toContain(
+        `___VERTER___defineOptions_Boxed=___VERTER___defineOptions_Box(myOptions)`,
+      );
+
       // Should move to beginning (before template binding function)
       expect(result).toContain(`defineOptions(`);
       expect(result).toContain(`function ___VERTER___TemplateBindingFN`);
-      
+
       // Should add helper import
       expect(context.items).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             type: ProcessItemType.Import,
             from: "$verter/types$",
-            items: expect.arrayContaining([
-              expect.objectContaining({ name: "defineOptions_Box" }),
-            ]),
+            items: expect.arrayContaining([expect.objectContaining({ name: "defineOptions_Box" })]),
           }),
-        ])
+        ]),
       );
     });
 
     it("should move and box defineOptions with declaration", () => {
       const { result, context } = parse(`const foo = defineOptions(myOptions)`);
-      
+
       // Should declare the boxed variable
       expect(result).toContain(`let ___VERTER___defineOptions_Boxed;`);
-      
+
       // Should box the options argument
-      expect(result).toContain(`___VERTER___defineOptions_Boxed=___VERTER___defineOptions_Box(myOptions)`);
-      
+      expect(result).toContain(
+        `___VERTER___defineOptions_Boxed=___VERTER___defineOptions_Box(myOptions)`,
+      );
+
       // Should keep original variable declaration structure
       expect(result).toContain(`const foo = defineOptions(`);
-      
+
       // Should move to beginning (before template binding function)
       expect(result).toContain(`function ___VERTER___TemplateBindingFN`);
-      
+
       // Should add helper import
       expect(context.items).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             type: ProcessItemType.Import,
             from: "$verter/types$",
-            items: expect.arrayContaining([
-              expect.objectContaining({ name: "defineOptions_Box" }),
-            ]),
+            items: expect.arrayContaining([expect.objectContaining({ name: "defineOptions_Box" })]),
           }),
-        ])
+        ]),
       );
     });
 
     it("should handle object literal options", () => {
       const { result } = parse(`defineOptions({ inheritAttrs: false })`);
-      
+
       // Should box the object literal
       expect(result).toContain(`___VERTER___defineOptions_Box({ inheritAttrs: false })`);
     });
@@ -132,7 +123,7 @@ describe("process defineOptions", () => {
         name: 'MyComponent',
         customOptions: { foo: 'bar' }
       })`);
-      
+
       // Should contain the boxed declaration
       expect(result).toContain(`let ___VERTER___defineOptions_Boxed;`);
       expect(result).toContain(`___VERTER___defineOptions_Box(`);
@@ -140,12 +131,12 @@ describe("process defineOptions", () => {
 
     it("should handle defineOptions with no arguments", () => {
       const { result } = parse(`defineOptions()`);
-      
+
       // Should not transform or box when no arguments are provided
       // MacrosPlugin will handle validation
       expect(result).not.toContain(`___VERTER___defineOptions_Boxed`);
       expect(result).not.toContain(`___VERTER___defineOptions_Box`);
-      
+
       // Original call should remain
       expect(result).toContain(`defineOptions()`);
     });
@@ -160,7 +151,7 @@ describe("process defineOptions", () => {
       // defineOptions is only valid in <script setup>
       // In options API, it produces a warning and is left untransformed
       const { result } = parse(`defineOptions({ inheritAttrs: false })`);
-      
+
       // The call should remain in the output unchanged
       expect(result).toContain(`defineOptions({ inheritAttrs: false })`);
     });

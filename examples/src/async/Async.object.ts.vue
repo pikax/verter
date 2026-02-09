@@ -9,9 +9,7 @@ import {
 } from "vue";
 
 // Define async components
-const AsyncBasic = defineAsyncComponent(() =>
-  import("./AsyncChild.vue")
-);
+const AsyncBasic = defineAsyncComponent(() => import("./AsyncChild.vue"));
 
 const AsyncWithLoading = defineAsyncComponent({
   loader: () => import("./AsyncChild.vue"),
@@ -87,7 +85,7 @@ export default defineComponent({
       return defineAsyncComponent(() =>
         this.componentName === "ComponentA"
           ? import("./ComponentA.vue")
-          : import("./ComponentB.vue")
+          : import("./ComponentB.vue"),
       );
     },
     currentLazyComponent() {
@@ -148,7 +146,7 @@ export default defineComponent({
       <h3>Route-based Lazy Loading</h3>
       <nav>
         <button
-          v-for="route in (['dashboard', 'settings', 'profile'] as const)"
+          v-for="route in ['dashboard', 'settings', 'profile'] as const"
           :key="route"
           :class="{ active: currentRoute === route }"
           @click="setRoute(route)"

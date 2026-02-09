@@ -38,10 +38,7 @@ interface CardSlots {
   footer?: () => any;
 }
 
-export const FunctionalCard: FunctionalComponent<CardProps, {}, CardSlots> = (
-  props,
-  { slots }
-) => {
+export const FunctionalCard: FunctionalComponent<CardProps, {}, CardSlots> = (props, { slots }) => {
   return (
     <div class="card">
       <header>{slots.header?.({ title: props.title }) ?? props.title}</header>

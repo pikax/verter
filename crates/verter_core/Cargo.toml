@@ -35,6 +35,9 @@ sha2 = "0.10"
 hex = "0.4"
 lightningcss = { version = "1.0.0-alpha.70", features = ["visitor"] }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+
 [dev-dependencies]
 criterion = { version = "0.8.1", features = ["html_reports"] }
 serde = { version = "1.0", features = ["derive"] }

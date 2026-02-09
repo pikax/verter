@@ -24,17 +24,15 @@ export const ComponentInstancePlugin = definePlugin({
             "OmitConstructorSignature",
             "Prettify",
           ],
-          ctx.prefix
-        )
+          ctx.prefix,
+        ),
       );
     }
   },
 
   post(s, ctx) {
     if (ctx.isSetup) {
-      const macroToInstance = ctx.prefix(
-        "PublicInstanceFromMacro" as AvailableExports
-      );
+      const macroToInstance = ctx.prefix("PublicInstanceFromMacro" as AvailableExports);
       const attributes = ctx.prefix("attributes");
       // TODO resolve the first element in template and use its type
       // NOTE that if inheritedAttrs is false, then it should be {}
@@ -42,8 +40,7 @@ export const ComponentInstancePlugin = definePlugin({
       const allowDev = true;
 
       const noInheritAttrs =
-        ctx.items.find((i) => i.type === ProcessItemType.InheritAttrs)
-          ?.value === false;
+        ctx.items.find((i) => i.type === ProcessItemType.InheritAttrs)?.value === false;
       const inheritAttrs = noInheritAttrs ? "false" : "true";
 
       const componentName = ctx.prefix("Component");
@@ -52,22 +49,14 @@ export const ComponentInstancePlugin = definePlugin({
       const defaultOptionsName = ctx.prefix("default_Component");
       const getRootComponentName = ctx.prefix("getRootComponent");
       const ExtractComponentProps = ctx.prefix("ExtractComponentProps");
-      const getRootComponentPassedProps = ctx.prefix(
-        "getRootComponentPassedProps"
-      );
-      const OmitConstructorSignature = ctx.prefix(
-        "OmitConstructorSignature" as AvailableExports
-      );
+      const getRootComponentPassedProps = ctx.prefix("getRootComponentPassedProps");
+      const OmitConstructorSignature = ctx.prefix("OmitConstructorSignature" as AvailableExports);
       const Prettify = ctx.prefix("Prettify" as AvailableExports);
 
       const exportStr = ctx.isSingleFile ? "" : "export";
 
-      const genericDeclaration = ctx.generic
-        ? `<${ctx.generic.declaration}>`
-        : "";
-      const sanitisedNames = ctx.generic
-        ? `<${ctx.generic.sanitisedNames.join(",")}>`
-        : "";
+      const genericDeclaration = ctx.generic ? `<${ctx.generic.declaration}>` : "";
+      const sanitisedNames = ctx.generic ? `<${ctx.generic.sanitisedNames.join(",")}>` : "";
 
       const instanceName = ctx.prefix("Instance");
 

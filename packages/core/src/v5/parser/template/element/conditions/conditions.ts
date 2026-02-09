@@ -1,11 +1,6 @@
 import { DirectiveNode, NodeTypes } from "@vue/compiler-core";
 import { VerterNode } from "../../../walk";
-import {
-  TemplateBinding,
-  TemplateCondition,
-  TemplateItem,
-  TemplateTypes,
-} from "../../types";
+import { TemplateBinding, TemplateCondition, TemplateItem, TemplateTypes } from "../../types";
 import { retrieveBindings } from "../../utils";
 
 export type ConditionsContext = {
@@ -16,7 +11,7 @@ export type ConditionsContext = {
 export function handleConditions<T extends ConditionsContext>(
   node: VerterNode,
   parent: VerterNode,
-  parentContext: T
+  parentContext: T,
 ): null | {
   context: T;
   condition: TemplateCondition;
@@ -29,7 +24,7 @@ export function handleConditions<T extends ConditionsContext>(
   const prop = node.props.find(
     (prop) =>
       prop.type === NodeTypes.DIRECTIVE &&
-      (prop.name === "if" || prop.name === "else-if" || prop.name === "else")
+      (prop.name === "if" || prop.name === "else-if" || prop.name === "else"),
   ) as DirectiveNode;
 
   if (!prop) {

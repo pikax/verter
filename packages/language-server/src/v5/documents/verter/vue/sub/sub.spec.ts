@@ -40,12 +40,7 @@ import { SourceMapConsumer, SourceMapGenerator } from "source-map-js";
  * A concrete subclass of VueSubDocument so we can test its behavior.
  */
 class TestVueSubDocument extends VueSubDocument {
-  constructor(
-    uri: string,
-    parent: VueDocument,
-    languageId: string,
-    version: number
-  ) {
+  constructor(uri: string, parent: VueDocument, languageId: string, version: number) {
     super(uri, parent, languageId, version);
   }
 
@@ -76,7 +71,7 @@ describe("VueSubDocument", () => {
     parentDoc = VueDocument.create(
       "file:///parent.vue",
       `<script lang="ts">${blockContent}</script>`,
-      1
+      1,
     );
 
     // Suppose we have one block referencing subDoc
@@ -206,9 +201,7 @@ describe("VueSubDocument", () => {
         source: ".",
       });
 
-      const consumerWithSpans = new SourceMapConsumer(
-        generator.toJSON() as any
-      );
+      const consumerWithSpans = new SourceMapConsumer(generator.toJSON() as any);
       consumerWithSpans.computeColumnSpans();
 
       class SpanSubDocument extends VueSubDocument {

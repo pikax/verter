@@ -73,15 +73,13 @@ describe("Instance Types", () => {
       TT.$slots.foo();
 
       assertType<boolean>(TT.$options.customOption);
-      assertType<(() => void) | (() => void)[] | undefined>(
-        TT.$options.beforeUpdate
-      );
+      assertType<(() => void) | (() => void)[] | undefined>(TT.$options.beforeUpdate);
 
       TT.$.attrs;
       // @ts-expect-error
       TT.$.attrs.foo;
 
-      TT.foo
+      TT.foo;
 
       assertType<number>(TT.$.uid);
 

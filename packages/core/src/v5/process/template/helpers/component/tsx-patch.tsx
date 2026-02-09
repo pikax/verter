@@ -54,10 +54,7 @@ declare global {
       "onVue:updated"?: (vnode: $V_ToVNode<T>, old: $V_ToVNode<T>) => void;
       "onVue:before-mounted"?: (vnode: $V_ToVNode<T>) => void;
       "onVue:before-unmounted"?: (vnode: $V_ToVNode<T>) => void;
-      "onVue:before-updated"?: (
-        vnode: $V_ToVNode<T>,
-        old: $V_ToVNode<T>
-      ) => void;
+      "onVue:before-updated"?: (vnode: $V_ToVNode<T>, old: $V_ToVNode<T>) => void;
     }
 
     interface LiHTMLAttributes {

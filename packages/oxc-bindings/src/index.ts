@@ -13,11 +13,7 @@ export async function resolveAndDownloadBinding(toPath: string) {
   } catch (e) {}
 
   await import("./download.js").then((x) => {
-    x.downloadPackage(
-      binding,
-      resolve(toPath, "node_modules", binding),
-      version
-    );
+    x.downloadPackage(binding, resolve(toPath, "node_modules", binding), version);
   });
 
   console.log("Verter: downloaded and extracted", binding);

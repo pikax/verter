@@ -1,13 +1,6 @@
 <script setup lang="ts">
 import { inject } from "vue";
-import {
-  ThemeKey,
-  UserKey,
-  CounterKey,
-  NotifyKey,
-  ConfigKey,
-  defaultConfig,
-} from "./keys";
+import { ThemeKey, UserKey, CounterKey, NotifyKey, ConfigKey, defaultConfig } from "./keys";
 
 // Inject with type safety (may be undefined if not provided)
 const theme = inject(ThemeKey);
@@ -19,11 +12,15 @@ const notify = inject(NotifyKey);
 const config = inject(ConfigKey, defaultConfig);
 
 // Inject with factory default
-const factoryConfig = inject(ConfigKey, () => ({
-  apiUrl: "/fallback",
-  debug: false,
-  version: "0.0.0",
-}), true);
+const factoryConfig = inject(
+  ConfigKey,
+  () => ({
+    apiUrl: "/fallback",
+    debug: false,
+    version: "0.0.0",
+  }),
+  true,
+);
 
 function sendNotification() {
   if (notify) {
@@ -62,9 +59,7 @@ function sendNotification() {
 
     <section>
       <h4>Notify</h4>
-      <button @click="sendNotification" :disabled="!notify">
-        Send Notification
-      </button>
+      <button @click="sendNotification" :disabled="!notify">Send Notification</button>
     </section>
   </div>
 </template>

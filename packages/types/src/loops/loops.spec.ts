@@ -117,9 +117,7 @@ describe("loops helpers", () => {
         type Item = { id: number; children?: Item[] };
         type Input = { parent: Item; child: Item };
         type Result = ExtractLoopsResult<Input>;
-        type Expected =
-          | { key: "parent"; value: Item }
-          | { key: "child"; value: Item };
+        type Expected = { key: "parent"; value: Item } | { key: "child"; value: Item };
 
         assertType<Result>({} as Expected);
         assertType<Expected>({} as Result);

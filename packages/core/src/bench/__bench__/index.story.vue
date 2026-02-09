@@ -107,7 +107,7 @@ function getMatter() {
 
 function setupApp(
   contacts: Array<DbContact & { id: string }>,
-  matters?: Array<DbMatter & { id: string }>
+  matters?: Array<DbMatter & { id: string }>,
 ) {
   router.currentRoute.value.params = { firmId: "firm-id" };
 
@@ -327,7 +327,7 @@ function setupContactFullDashboard() {
 
   setupApp(
     [contactFullInfo, otherContact, getCompany()],
-    [getMatter(), secondClientMatter, relatedMatterOne, relatedMatterTwo]
+    [getMatter(), secondClientMatter, relatedMatterOne, relatedMatterTwo],
   );
 }
 
@@ -340,7 +340,7 @@ function setupEnglishVariant({ app }: any) {
         ["en-GB"]: enGB,
       },
     },
-    app
+    app,
   );
 
   setupContactFullDashboard();

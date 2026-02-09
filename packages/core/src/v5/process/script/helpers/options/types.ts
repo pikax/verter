@@ -18,43 +18,37 @@ import { ModelRef as $V_ModelRef } from "vue";
  * Utility for extracting the parameters from a function overload (for typed emits)
  * https://github.com/microsoft/TypeScript/issues/32164#issuecomment-1146737709
  */
-export type $V_OverloadParameters<T extends (...args: any[]) => any> =
-  Parameters<$V_OverloadUnion<T>>;
+export type $V_OverloadParameters<T extends (...args: any[]) => any> = Parameters<
+  $V_OverloadUnion<T>
+>;
 
 export type $V_OverloadProps<TOverload> = Pick<TOverload, keyof TOverload>;
 
-export type $V_OverloadUnionRecursive<
-  TOverload,
-  TPartialOverload = unknown
-> = TOverload extends (...args: infer TArgs) => infer TReturn
+export type $V_OverloadUnionRecursive<TOverload, TPartialOverload = unknown> = TOverload extends (
+  ...args: infer TArgs
+) => infer TReturn
   ? TPartialOverload extends TOverload
     ? never
     :
         | $V_OverloadUnionRecursive<
             TPartialOverload & TOverload,
-            TPartialOverload &
-              ((...args: TArgs) => TReturn) &
-              $V_OverloadProps<TOverload>
+            TPartialOverload & ((...args: TArgs) => TReturn) & $V_OverloadProps<TOverload>
           >
         | ((...args: TArgs) => TReturn)
   : never;
 
-export type $V_OverloadUnion<TOverload extends (...args: any[]) => any> =
-  Exclude<
-    $V_OverloadUnionRecursive<(() => never) & TOverload>,
-    TOverload extends () => never ? never : () => never
-  >;
+export type $V_OverloadUnion<TOverload extends (...args: any[]) => any> = Exclude<
+  $V_OverloadUnionRecursive<(() => never) & TOverload>,
+  TOverload extends () => never ? never : () => never
+>;
 
-export type $V_UnionToIntersection<U> = (
-  U extends any ? (k: U) => void : never
-) extends (k: infer I) => void
+export type $V_UnionToIntersection<U> = (U extends any ? (k: U) => void : never) extends (
+  k: infer I,
+) => void
   ? I
   : never;
 
-export type $V_EmitMapToProps<T> = T extends [
-  infer E extends string,
-  ...infer A
-]
+export type $V_EmitMapToProps<T> = T extends [infer E extends string, ...infer A]
   ? { [K in `on${Capitalize<E>}`]?: (...args: A) => void }
   : never;
 
@@ -62,8 +56,8 @@ export type $V_ModelToProps<T> = {
   [K in keyof T]: T[K] extends $V_ModelRef<infer C>
     ? C
     : T[K] extends $V_ModelRef<infer C> | undefined
-    ? C | undefined
-    : null;
+      ? C | undefined
+      : null;
 };
 
 export type $V_ModelToEmits<T> = {} extends T
@@ -74,8 +68,8 @@ export type $V_ModelToEmits<T> = {} extends T
         arg: T[K] extends $V_ModelRef<infer C>
           ? C
           : T[K] extends $V_ModelRef<infer C> | undefined
-          ? C | undefined
-          : unknown
+            ? C | undefined
+            : unknown,
       ) => any;
     }[keyof T];
 
@@ -92,7 +86,7 @@ export type $V_MakeOptionalIfUndefined<T> = {
 export declare function $V_DefineOptions<
   T extends { name?: TName; inheritAttrs?: TAttr },
   TName extends string,
-  TAttr extends boolean
+  TAttr extends boolean,
 >(o: T): T;
 
 export type $V_NormaliseComponents<T extends Record<string, any>> = {
@@ -100,13 +94,13 @@ export type $V_NormaliseComponents<T extends Record<string, any>> = {
     ? C extends { new (): infer I }
       ? I
       : C extends (...args: any) => infer R
-      ? void extends R
-        ? typeof import("vue").Comment
-        : R extends Array<any>
-        ? typeof import("vue").Fragment
-        : HTMLElement
-      : C extends HTMLElement
-      ? C
-      : $V_NormaliseComponents<T>
+        ? void extends R
+          ? typeof import("vue").Comment
+          : R extends Array<any>
+            ? typeof import("vue").Fragment
+            : HTMLElement
+        : C extends HTMLElement
+          ? C
+          : $V_NormaliseComponents<T>
     : never;
 };

@@ -9,10 +9,7 @@
 //       );
 //     }
 import { definePlugin } from "../../types";
-import type {
-  CallExpression,
-  VerterASTNode,
-} from "../../../../parser/ast/types";
+import type { CallExpression, VerterASTNode } from "../../../../parser/ast/types";
 import { ProcessContext, ProcessItemType } from "../../../types";
 import { MagicString } from "@vue/compiler-sfc";
 import { createHelperImport } from "../../../utils";
@@ -28,18 +25,12 @@ export const DefineOptionsPlugin = definePlugin({
   },
 
   transformDeclaration(item, s, ctx) {
-    if (
-      item.parent.type === "VariableDeclarator" &&
-      item.parent.init?.type === "CallExpression"
-    ) {
+    if (item.parent.type === "VariableDeclarator" && item.parent.init?.type === "CallExpression") {
       if (item.parent.init.callee.type === "Identifier") {
         if (item.parent.init.callee.name !== "defineOptions") return;
 
         if (ctx.isSetup) {
-          if (
-            !item.parent.init.arguments ||
-            item.parent.init.arguments.length === 0
-          ) {
+          if (!item.parent.init.arguments || item.parent.init.arguments.length === 0) {
             return; // MacrosPlugin will handle validation
           }
           checkInheritAttrs(item.parent.init, ctx);
@@ -47,10 +38,7 @@ export const DefineOptionsPlugin = definePlugin({
 
           const info = boxInfo("defineOptions", null, ctx);
           s.prependRight(item.declarator.start!, `let ${info.boxedName};`);
-          s.prependLeft(
-            item.parent.init.arguments[0].start!,
-            `${info.boxedName}=${info.boxName}(`
-          );
+          s.prependLeft(item.parent.init.arguments[0].start!, `${info.boxedName}=${info.boxName}(`);
           s.prependRight(item.parent.init.arguments[0].end!, `)`);
 
           s.move(item.declarator.start!, item.parent.end, 0);
@@ -83,10 +71,7 @@ export const DefineOptionsPlugin = definePlugin({
 
       const info = boxInfo("defineOptions", null, ctx);
       s.prependRight(item.node.start, `let ${info.boxedName};`);
-      s.prependLeft(
-        item.node.arguments[0].start!,
-        `${info.boxedName}=${info.boxName}(`
-      );
+      s.prependLeft(item.node.arguments[0].start!, `${info.boxedName}=${info.boxName}(`);
       s.prependRight(item.node.arguments[0].end!, `)`);
       s.move(item.node.start, item.node.end, 0);
     } else {
@@ -107,11 +92,7 @@ function checkInheritAttrs(node: CallExpression, ctx: ProcessContext) {
     return;
   }
   const inheritAttrsProp = arg.properties.find((x) => {
-    return (
-      x.type === "Property" &&
-      x.key.type === "Identifier" &&
-      x.key.name === "inheritAttrs"
-    );
+    return x.type === "Property" && x.key.type === "Identifier" && x.key.name === "inheritAttrs";
   });
   if (!inheritAttrsProp) {
     return;

@@ -20,7 +20,7 @@ export interface ProcessedBlock {
 export function processBlocks(
   uri: string,
   blocks: ParsedBlock[],
-  isSingleFile: boolean
+  isSingleFile: boolean,
 ): ProcessedBlock[] {
   const byTag = new Map<string, ParsedBlock[]>();
 
@@ -79,7 +79,7 @@ export function processBlocks(
 
         // all the blocks must be the same language
         const lang = blocks[0].block.block.attrs.lang;
-        const languageId = lang === true ? "js" : lang ?? "js";
+        const languageId = lang === true ? "js" : (lang ?? "js");
 
         result.push({
           id: `${uri}.script${result.length}`,
@@ -101,9 +101,7 @@ export function processBlocks(
       for (let i = 0; i < blocks.length; i++) {
         const block = blocks[i];
         const language =
-          block.block.block.attrs.lang === true
-            ? "css"
-            : block.block.block.attrs.lang ?? "css";
+          block.block.block.attrs.lang === true ? "css" : (block.block.block.attrs.lang ?? "css");
         const arr = byLang.get(language);
         if (arr) {
           arr.push(block);
@@ -117,9 +115,7 @@ export function processBlocks(
           id: `${uri}.style${result.length}`,
           languageId,
           type: "style",
-          uri: uriToVerterVirtual(
-            createSubDocumentUri(uri, "style." + languageId)
-          ),
+          uri: uriToVerterVirtual(createSubDocumentUri(uri, "style." + languageId)),
           blocks: langBlocks,
         });
       }
@@ -153,9 +149,7 @@ export function toLowerCase(x: string) {
 const fileNameLowerCaseRegExp = /[^\u0130\u0131\u00DFa-z0-9\\/:\-_\. ]+/g;
 // FROM https://github.com/microsoft/TypeScript/blob/8192d550496d884263e292488e325ae96893dc78/src/compiler/core.ts#L1769-L1807
 export function toFileNameLowerCase(x: string) {
-  return fileNameLowerCaseRegExp.test(x)
-    ? x.replace(fileNameLowerCaseRegExp, toLowerCase)
-    : x;
+  return fileNameLowerCaseRegExp.test(x) ? x.replace(fileNameLowerCaseRegExp, toLowerCase) : x;
 }
 
 /**
@@ -170,7 +164,7 @@ export function toFileNameLowerCase(x: string) {
 export function generatedPositionFor(
   consumer: SourceMapConsumer,
   pos: DocumentPosition,
-  bias?: number
+  bias?: number,
 ): DocumentPosition {
   const result = consumer.generatedPositionFor({
     line: pos.line + 1,
@@ -180,16 +174,13 @@ export function generatedPositionFor(
   });
 
   return {
-    line:
-      typeof result.line === "number"
-        ? result.line - 1
-        : Number.POSITIVE_INFINITY,
+    line: typeof result.line === "number" ? result.line - 1 : Number.POSITIVE_INFINITY,
     character:
       typeof result.column === "number"
         ? result.column
         : typeof result.lastColumn === "number"
-        ? result.lastColumn
-        : Number.POSITIVE_INFINITY,
+          ? result.lastColumn
+          : Number.POSITIVE_INFINITY,
   };
 }
 
@@ -201,7 +192,7 @@ export function generatedPositionFor(
  */
 export function generatedRangeFor(
   consumer: SourceMapConsumer,
-  range: DocumentRange
+  range: DocumentRange,
 ): DocumentRange {
   return {
     start: generatedPositionFor(consumer, range.start),
@@ -217,7 +208,7 @@ export function generatedRangeFor(
  */
 export function originalPositionFor(
   consumer: SourceMapConsumer,
-  pos: DocumentPosition
+  pos: DocumentPosition,
 ): DocumentPosition {
   const result = consumer.originalPositionFor({
     line: pos.line + 1,
@@ -236,10 +227,7 @@ export function originalPositionFor(
  * @param range DocumentRange
  * @returns DocumentRange
  */
-export function originalRangeFor(
-  consumer: SourceMapConsumer,
-  range: DocumentRange
-): DocumentRange {
+export function originalRangeFor(consumer: SourceMapConsumer, range: DocumentRange): DocumentRange {
   return {
     start: originalPositionFor(consumer, range.start),
     end: originalPositionFor(consumer, range.end),

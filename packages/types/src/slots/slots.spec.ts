@@ -137,25 +137,17 @@ describe("StrictRenderSlot", () => {
   });
 
   it("support for named slot returning HTMLSpanElement", () => {
-    strictRenderSlot(c.$slots.spanElement, [
-      document.createElement("span") as HTMLSpanElement,
-    ]);
+    strictRenderSlot(c.$slots.spanElement, [document.createElement("span") as HTMLSpanElement]);
 
     // @ts-expect-error wrong type
-    strictRenderSlot(c.$slots.spanElement, [
-      document.createElement("div") as HTMLDivElement,
-    ]);
+    strictRenderSlot(c.$slots.spanElement, [document.createElement("div") as HTMLDivElement]);
   });
 
   it("support for named slot returning HTMLSpanElement[]", () => {
-    strictRenderSlot(c.$slots.spanElements, [
-      document.createElement("span") as HTMLSpanElement,
-    ]);
+    strictRenderSlot(c.$slots.spanElements, [document.createElement("span") as HTMLSpanElement]);
 
     // @ts-expect-error wrong type
-    strictRenderSlot(c.$slots.spanElements, [
-      document.createElement("div") as HTMLDivElement,
-    ]);
+    strictRenderSlot(c.$slots.spanElements, [document.createElement("div") as HTMLDivElement]);
   });
 });
 

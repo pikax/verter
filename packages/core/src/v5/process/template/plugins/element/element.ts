@@ -23,37 +23,28 @@ export const ElementPlugin = declareTemplatePlugin({
       ? -1
       : node.loc.source.lastIndexOf(
           `</${item.tag}`,
-          node.children.at(-1)?.loc.end.offset ?? undefined
+          node.children.at(-1)?.loc.end.offset ?? undefined,
         ) + 2;
 
     const shouldWrap = item.tag.includes("-");
 
     const isProp = node.props.find(
-      (x) =>
-        x.name === "is" ||
-        (x.type === NodeTypes.DIRECTIVE && x.rawName === ":is")
+      (x) => x.name === "is" || (x.type === NodeTypes.DIRECTIVE && x.rawName === ":is"),
     );
     // dynamic component
     if (node.tag === "component" && isProp) {
       if (isProp.type === NodeTypes.ATTRIBUTE) {
         s.update(tagNameStart, tagNameEnd, "");
-        s.move(
-          isProp.value!.loc.start.offset + 1,
-          isProp.value!.loc.end.offset - 1,
-          tagNameStart
-        );
+        s.move(isProp.value!.loc.start.offset + 1, isProp.value!.loc.end.offset - 1, tagNameStart);
 
         s.remove(isProp.loc.start.offset, isProp.value!.loc.start.offset + 1);
-        s.remove(
-          isProp.value!.loc.end.offset - 1,
-          isProp.value!.loc.end.offset
-        );
+        s.remove(isProp.value!.loc.end.offset - 1, isProp.value!.loc.end.offset);
 
         if (closingTagStartIndex !== -1) {
           s.update(
             offset + closingTagStartIndex,
             offset + closingTagStartIndex + item.tag.length,
-            isProp.value!.content
+            isProp.value!.content,
           );
         }
 
@@ -64,11 +55,7 @@ export const ElementPlugin = declareTemplatePlugin({
       ctx.items.push(createHelperImport(["extractRenderComponent"], ctx.prefix));
       const extractComponent = ctx.prefix("extractRenderComponent");
 
-      s.move(
-        isProp.exp!.loc.start.offset,
-        isProp.exp!.loc.end.offset,
-        node.loc.start.offset + 1
-      );
+      s.move(isProp.exp!.loc.start.offset, isProp.exp!.loc.end.offset, node.loc.start.offset + 1);
 
       if (!item.condition) {
         BlockPlugin.addItem(node, item, item.context as ParseTemplateContext);
@@ -77,7 +64,7 @@ export const ElementPlugin = declareTemplatePlugin({
       s.update(
         node.loc.start.offset,
         node.loc.start.offset + 1,
-        `const ${name}=${extractComponent}(`
+        `const ${name}=${extractComponent}(`,
       );
 
       s.appendRight(node.loc.start.offset + 1, ");\n<");
@@ -91,17 +78,14 @@ export const ElementPlugin = declareTemplatePlugin({
         s.update(
           offset + closingTagStartIndex,
           offset + closingTagStartIndex + item.tag.length,
-          name
+          name,
         );
       }
 
       return;
     }
     const componentAccessor = ctx.retrieveAccessor("components");
-    s.prependRight(
-      node.loc.start.offset + 1,
-      `${componentAccessor}${shouldWrap ? '["' : "."}`
-    );
+    s.prependRight(node.loc.start.offset + 1, `${componentAccessor}${shouldWrap ? '["' : "."}`);
     // if the component does not have a closing tag we should not apply double context
     if (!node.isSelfClosing && closingTagStartIndex > node.tag.length) {
       s.prependRight(offset + closingTagStartIndex, `${componentAccessor}.`);
@@ -128,7 +112,7 @@ function renameElementTag(
   delimiter: "." | "-", // delimiter to use
   closingTagStartIndex: number,
   s: MagicString,
-  ctx: TemplateContext
+  ctx: TemplateContext,
 ) {
   const node = item.node;
 
@@ -174,7 +158,7 @@ function renameElementTag(
     s.move(
       offset + closingTagStartIndex,
       offset + closingTagStartIndex + item.tag.length,
-      offset + closingTagStartIndex - 2
+      offset + closingTagStartIndex - 2,
     );
   }
 }

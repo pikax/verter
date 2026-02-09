@@ -1,9 +1,5 @@
 import { ElementTypes } from "@vue/compiler-core";
-import {
-  ParsedBlockTemplate,
-  TemplateProp,
-  TemplateTypes,
-} from "../../../../parser";
+import { ParsedBlockTemplate, TemplateProp, TemplateTypes } from "../../../../parser";
 import { definePlugin } from "../../types";
 import { capitalize } from "vue";
 
@@ -22,9 +18,7 @@ export const InferFunctionPlugin = definePlugin({
     ) {
       return;
     }
-    const templateBinding = ctx.templateBindings.find(
-      (x) => x.name === item.name
-    );
+    const templateBinding = ctx.templateBindings.find((x) => x.name === item.name);
     if (!templateBinding) {
       return;
     }
@@ -32,14 +26,10 @@ export const InferFunctionPlugin = definePlugin({
     // check if has types
     if (ctx.block.lang === "ts") {
       if (item.params && item.params.length > 0) {
-        if (
-          item.params.every((p) => p.type === "Identifier" && !p.typeAnnotation)
-        ) {
+        if (item.params.every((p) => p.type === "Identifier" && !p.typeAnnotation)) {
           // we can patch
 
-          const template = ctx.blocks.find(
-            (x) => x.type === "template"
-          ) as ParsedBlockTemplate;
+          const template = ctx.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
           // Limitation: This plugin does not currently support functions used in multiple event handlers.
           // When a function is used in multiple @event bindings, only the first binding is considered.
@@ -50,9 +40,8 @@ export const InferFunctionPlugin = definePlugin({
               x.type === TemplateTypes.Prop &&
               x.name === "on" &&
               x.node &&
-              x.node.loc.start.offset <=
-                templateBinding.node.loc.start.offset &&
-              x.node.loc.end.offset >= templateBinding.node.loc.end.offset
+              x.node.loc.start.offset <= templateBinding.node.loc.start.offset &&
+              x.node.loc.end.offset >= templateBinding.node.loc.end.offset,
           ) as TemplateProp | undefined;
           if (!directive) {
             // directive not found
@@ -80,9 +69,7 @@ export const InferFunctionPlugin = definePlugin({
               throw new Error("Unable to infer event name");
             }
             property =
-              element.tagType === ElementTypes.COMPONENT
-                ? "on" + capitalize(argName)
-                : argName;
+              element.tagType === ElementTypes.COMPONENT ? "on" + capitalize(argName) : argName;
           }
           if (element.tagType === ElementTypes.COMPONENT) {
             type = `Required<${type}['$props']>`;
@@ -102,7 +89,7 @@ export const InferFunctionPlugin = definePlugin({
                   element.tag
                 }"]["${
                   directive.event ? `on${capitalize(property)}` : property
-                }"]>>${s.original[end]}`
+                }"]>>${s.original[end]}`,
               );
             } else {
               const text = `]: Parameters<${type}["${property}"]>`;

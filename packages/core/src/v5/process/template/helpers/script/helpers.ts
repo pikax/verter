@@ -19,6 +19,5 @@ export type $V_PartialUndefined<T> = {
   ? Omit<T, U> & Partial<Pick<T, U>>
   : T;
 
-export type $V_ProcessProps<T> = T extends $V_DefineProps<infer U, infer BKeys>
-  ? $V_PartialUndefined<U>
-  : T;
+export type $V_ProcessProps<T> =
+  T extends $V_DefineProps<infer U, infer BKeys> ? $V_PartialUndefined<U> : T;

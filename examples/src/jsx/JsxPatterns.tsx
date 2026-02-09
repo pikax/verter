@@ -61,10 +61,7 @@ export const JsxComponent = defineComponent({
 
 // Using h() alongside JSX
 export function renderWithH(): VNode {
-  return h("div", { class: "h-rendered" }, [
-    h("span", "Using h()"),
-    <span>Using JSX</span>,
-  ]);
+  return h("div", { class: "h-rendered" }, [h("span", "Using h()"), <span>Using JSX</span>]);
 }
 
 // Slots in JSX
@@ -113,11 +110,11 @@ export function renderWithEvents(): VNode {
     e.preventDefault();
     console.log("Clicked");
   };
-  
+
   const handleInput = (e: Event) => {
     console.log((e.target as HTMLInputElement).value);
   };
-  
+
   return (
     <div>
       <button onClick={handleClick}>Click</button>
@@ -134,18 +131,14 @@ export function renderDynamic(component: any): VNode {
 
 // Transition in JSX
 export function renderTransition(show: boolean): VNode {
-  return (
-    <Transition name="fade">
-      {show && <div>Transitioning</div>}
-    </Transition>
-  );
+  return <Transition name="fade">{show && <div>Transitioning</div>}</Transition>;
 }
 
 // Class and style bindings in JSX
 export function renderWithBindings(): VNode {
   const isActive = true;
   const color = "red";
-  
+
   return (
     <div
       class={["base", { active: isActive, disabled: false }]}
@@ -160,7 +153,7 @@ export function renderWithBindings(): VNode {
 export const RefComponent = defineComponent({
   setup() {
     const inputRef = ref<HTMLInputElement | null>(null);
-    
+
     return () => (
       <div>
         <input ref={inputRef} type="text" />
@@ -172,11 +165,7 @@ export const RefComponent = defineComponent({
 
 // v-show equivalent in JSX
 export function renderVShow(visible: boolean): VNode {
-  return (
-    <div style={{ display: visible ? undefined : "none" }}>
-      Conditionally visible
-    </div>
-  );
+  return <div style={{ display: visible ? undefined : "none" }}>Conditionally visible</div>;
 }
 
 // Key prop in JSX

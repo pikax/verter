@@ -12,9 +12,7 @@ const borderWidth = ref(2);
   <div class="container">
     <h2>CSS v-bind</h2>
 
-    <div class="dynamic-box">
-      This box has dynamic styles
-    </div>
+    <div class="dynamic-box">This box has dynamic styles</div>
 
     <div class="controls">
       <label>
@@ -50,10 +48,10 @@ const borderWidth = ref(2);
 .dynamic-box {
   /* Direct v-bind with ref */
   color: v-bind(color);
-  font-size: v-bind(fontSize + 'px');
-  padding: v-bind(padding + 'px');
-  border: v-bind(borderWidth + 'px') solid v-bind(color);
-  
+  font-size: v-bind(fontSize + "px");
+  padding: v-bind(padding + "px");
+  border: v-bind(borderWidth + "px") solid v-bind(color);
+
   /* Conditional based on ref value */
   background-color: v-bind("theme === 'dark' ? '#333' : '#fff'");
 }

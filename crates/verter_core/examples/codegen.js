@@ -212,18 +212,16 @@ async function compileVueSFC(source, filename, filepath, isProd) {
       });
 
       if (templateResult.errors && templateResult.errors.length > 0) {
-        errors.push(
-          ...templateResult.errors.map((e) => `Template: ${e.message}`)
-        );
+        errors.push(...templateResult.errors.map((e) => `Template: ${e.message}`));
       } else {
         output += `// Template render function (${isProd ? "PRODUCTION" : "DEVELOPMENT"})\n`;
         output += `${templateResult.code}\n`;
 
         // Append inline source map if available (dev only)
         if (templateResult.map && options.sourceMap) {
-          const sourceMapBase64 = Buffer.from(
-            JSON.stringify(templateResult.map)
-          ).toString("base64");
+          const sourceMapBase64 = Buffer.from(JSON.stringify(templateResult.map)).toString(
+            "base64",
+          );
           output += `\n//# sourceMappingURL=data:application/json;charset=utf-8;base64,${sourceMapBase64}`;
         }
       }
@@ -258,9 +256,7 @@ async function compileVueSFC(source, filename, filepath, isProd) {
           : compileStyle(styleOptions);
 
         if (styleResult.errors && styleResult.errors.length > 0) {
-          errors.push(
-            ...styleResult.errors.map((e) => `Style[${i}]: ${e.message}`)
-          );
+          errors.push(...styleResult.errors.map((e) => `Style[${i}]: ${e.message}`));
         } else {
           compiledStyles.push({
             code: styleResult.code,

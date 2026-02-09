@@ -29,11 +29,7 @@ import { ScriptBlockPlugin } from "../script-block";
 import { BindingPlugin } from "../binding";
 import { ImportsPlugin } from "../imports";
 import { ComponentTypePlugin } from "./";
-import type {
-  Fixture,
-  FixtureConfig,
-  ProcessResult,
-} from "../../../../../fixtures/types";
+import type { Fixture, FixtureConfig, ProcessResult } from "../../../../../fixtures/types";
 import { SFCCleanerPlugin } from "../sfc-cleaner";
 import { AttributesPlugin } from "../attributes";
 import { DeclarePlugin } from "../declare";
@@ -51,12 +47,10 @@ function processComponentType(
   prefix: string,
   lang = "ts",
   generic?: string,
-  template?: string
+  template?: string,
 ): ProcessResult {
   const genericAttr = generic ? ` generic="${generic}"` : "";
-  const scriptPart = code
-    ? `<script setup lang="${lang}"${genericAttr}>${code}</script>`
-    : "";
+  const scriptPart = code ? `<script setup lang="${lang}"${genericAttr}>${code}</script>` : "";
   const templatePart = template ? `<template>${template}</template>` : "";
   const source = `${templatePart}${scriptPart}`;
   const parsed = parser(source);
@@ -93,12 +87,10 @@ function processComponentType(
       block: scriptBlock!,
       prefix: (name: string) => prefix + name,
       blockNameResolver: (name: string) => name,
-    }
+    },
   );
 
-  const sourcemap = parsed.s
-    .generateMap({ hires: true, includeContent: true })
-    .toUrl();
+  const sourcemap = parsed.s.generateMap({ hires: true, includeContent: true }).toUrl();
 
   return {
     result: result.result,
@@ -418,8 +410,7 @@ const conditionalFixtures: Fixture[] = [
   {
     name: "v-if with OR conditions",
     code: "const role = 'admin';",
-    template:
-      "<div v-if=\"role === 'admin' || role === 'moderator'\">Elevated</div>",
+    template: "<div v-if=\"role === 'admin' || role === 'moderator'\">Elevated</div>",
     expectations: {
       patterns: ["enhanceElementWithProps"],
     },
@@ -503,8 +494,7 @@ const loopFixtures: Fixture[] = [
   {
     name: "v-for with index",
     code: "const items = ['a', 'b', 'c'];",
-    template:
-      '<li v-for="(item, index) in items" :key="index">{{ index }}: {{ item }}</li>',
+    template: '<li v-for="(item, index) in items" :key="index">{{ index }}: {{ item }}</li>',
     expectations: {
       patterns: ["enhanceElementWithProps"],
     },
@@ -512,8 +502,7 @@ const loopFixtures: Fixture[] = [
   {
     name: "v-for with object iteration",
     code: "const obj: Record<string, number> = { a: 1, b: 2, c: 3 };",
-    template:
-      '<div v-for="(value, key) in obj" :key="key">{{ key }}: {{ value }}</div>',
+    template: '<div v-for="(value, key) in obj" :key="key">{{ key }}: {{ value }}</div>',
     expectations: {
       patterns: ["enhanceElementWithProps"],
     },
@@ -533,8 +522,7 @@ const loopFixtures: Fixture[] = [
 interface User { id: number; name: string; email: string; }
 const users: User[] = [{ id: 1, name: 'John', email: 'john@test.com' }];
     `,
-    template:
-      '<li v-for="{ id, name, email } in users" :key="id">{{ name }} ({{ email }})</li>',
+    template: '<li v-for="{ id, name, email } in users" :key="id">{{ name }} ({{ email }})</li>',
     expectations: {
       patterns: ["enhanceElementWithProps"],
     },
@@ -545,8 +533,7 @@ const users: User[] = [{ id: 1, name: 'John', email: 'john@test.com' }];
 interface Item { id: number; name: string; }
 const items: Item[] = [{ id: 1, name: 'First' }];
     `,
-    template:
-      '<li v-for="({ id, name }, index) in items" :key="id">#{{ index }}: {{ name }}</li>',
+    template: '<li v-for="({ id, name }, index) in items" :key="id">#{{ index }}: {{ name }}</li>',
     expectations: {
       patterns: ["enhanceElementWithProps"],
     },
@@ -620,8 +607,7 @@ const users: User[] = [{ id: 1, name: 'John', active: true }];
 const items = [1, 2, 3, 4, 5];
 function getActiveItems(items: number[]) { return items.filter(i => i > 2); }
     `,
-    template:
-      '<li v-for="item in getActiveItems(items)" :key="item">{{ item }}</li>',
+    template: '<li v-for="item in getActiveItems(items)" :key="item">{{ item }}</li>',
     expectations: {
       patterns: ["enhanceElementWithProps"],
     },
@@ -629,8 +615,7 @@ function getActiveItems(items: number[]) { return items.filter(i => i > 2); }
   {
     name: "v-for with computed expression",
     code: "const items = [1, 2, 3, 4, 5];",
-    template:
-      '<li v-for="item in items.filter(i => i % 2 === 0)" :key="item">{{ item }}</li>',
+    template: '<li v-for="item in items.filter(i => i % 2 === 0)" :key="item">{{ item }}</li>',
     expectations: {
       patterns: ["enhanceElementWithProps"],
     },
@@ -941,8 +926,7 @@ import UserForm from './UserForm.vue';
 const firstName = ref('');
 const lastName = ref('');
     `,
-    template:
-      '<UserForm v-model:first-name="firstName" v-model:last-name="lastName" />',
+    template: '<UserForm v-model:first-name="firstName" v-model:last-name="lastName" />',
     expectations: {
       patterns: ["enhanceElementWithProps"],
     },
@@ -1713,7 +1697,7 @@ export function createFixtures(prefix: string = ""): FixtureConfig {
         prefix,
         fixture.lang,
         fixture.generic,
-        fixture.template
+        fixture.template,
       );
     },
     prefix,

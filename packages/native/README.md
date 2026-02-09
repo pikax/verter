@@ -73,15 +73,15 @@ pnpm add @verter/native
 
 The correct platform-specific binary is pulled in automatically via optional dependencies:
 
-| Platform | Package |
-|----------|---------|
-| macOS x64 | `@verter/native-darwin-x64` |
-| macOS ARM64 | `@verter/native-darwin-arm64` |
-| Linux x64 (glibc) | `@verter/native-linux-x64-gnu` |
-| Linux x64 (musl) | `@verter/native-linux-x64-musl` |
-| Linux ARM64 (glibc) | `@verter/native-linux-arm64-gnu` |
-| Linux ARM64 (musl) | `@verter/native-linux-arm64-musl` |
-| Windows x64 | `@verter/native-win32-x64-msvc` |
+| Platform            | Package                           |
+| ------------------- | --------------------------------- |
+| macOS x64           | `@verter/native-darwin-x64`       |
+| macOS ARM64         | `@verter/native-darwin-arm64`     |
+| Linux x64 (glibc)   | `@verter/native-linux-x64-gnu`    |
+| Linux x64 (musl)    | `@verter/native-linux-x64-musl`   |
+| Linux ARM64 (glibc) | `@verter/native-linux-arm64-gnu`  |
+| Linux ARM64 (musl)  | `@verter/native-linux-arm64-musl` |
+| Windows x64         | `@verter/native-win32-x64-msvc`   |
 
 **Requirements:** Node.js >= 18
 
@@ -92,17 +92,17 @@ The correct platform-specific binary is pulled in automatically via optional dep
 Compiles a Vue SFC template to JavaScript. Accepts `string` or `Buffer` input. Despite the NAPI-RS async signature, compilation is CPU-bound and executes synchronously on the Rust side.
 
 ```typescript
-import { compile } from '@verter/native';
+import { compile } from "@verter/native";
 
-const result = compile('<template><div>{{ msg }}</div></template>', {
-  filename: 'App.vue',
+const result = compile("<template><div>{{ msg }}</div></template>", {
+  filename: "App.vue",
   isProduction: false,
 });
 
-const bufferResult = compile(Buffer.from('<template><div>{{ msg }}</div></template>'));
+const bufferResult = compile(Buffer.from("<template><div>{{ msg }}</div></template>"));
 
 console.log(result.code);
-console.log(result.sourceMap);       // Source map as JSON string
+console.log(result.sourceMap); // Source map as JSON string
 console.log(result.codeWithSourceMap); // Code with inline source map appended
 ```
 
@@ -111,9 +111,9 @@ console.log(result.codeWithSourceMap); // Code with inline source map appended
 Synchronous version of `compile`. Identical behavior, provided for API symmetry (accepts `string` or `Buffer`).
 
 ```typescript
-import { compileSync } from '@verter/native';
+import { compileSync } from "@verter/native";
 
-const result = compileSync('<template><div>Hello</div></template>');
+const result = compileSync("<template><div>Hello</div></template>");
 ```
 
 ### `compileForVite(input, options?): ViteCodegenResult`
@@ -121,13 +121,13 @@ const result = compileSync('<template><div>Hello</div></template>');
 Vite-optimized compilation that returns split blocks instead of a single output string. Each block includes its own code, source map, and import metadata with UTF-16 offsets for JavaScript interop.
 
 ```typescript
-import { compileForVite } from '@verter/native';
+import { compileForVite } from "@verter/native";
 
 const result = compileForVite(vueSfcSource, {
-  filename: 'App.vue',
+  filename: "App.vue",
   isProduction: false,
   ssr: false,
-  componentId: 'abc12345',
+  componentId: "abc12345",
   sourcemap: true,
 });
 
@@ -152,7 +152,7 @@ interface CodegenOptions {
 }
 
 interface FeatureFlags {
-  optionsApi?: boolean;      // default: true
+  optionsApi?: boolean; // default: true
   propsDestructure?: boolean; // default: true
 }
 
@@ -245,12 +245,12 @@ pnpm test                 # runs: vitest run
 
 ## Dependencies
 
-| Dependency | Purpose |
-|------------|---------|
-| `verter_core` (Rust) | Core Vue template compiler |
-| `oxc_allocator` (Rust) | Memory allocator for OXC AST nodes |
-| `napi` / `napi-derive` (Rust) | NAPI-RS bindings framework |
-| `@napi-rs/cli` (dev) | Build tooling for NAPI-RS |
+| Dependency                    | Purpose                            |
+| ----------------------------- | ---------------------------------- |
+| `verter_core` (Rust)          | Core Vue template compiler         |
+| `oxc_allocator` (Rust)        | Memory allocator for OXC AST nodes |
+| `napi` / `napi-derive` (Rust) | NAPI-RS bindings framework         |
+| `@napi-rs/cli` (dev)          | Build tooling for NAPI-RS          |
 
 ## License
 

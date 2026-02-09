@@ -65,20 +65,10 @@
     "forceConsistentCasingInFileNames": true,
     // See <https://github.com/vuejs/vue-cli/pull/5688>
     "skipLibCheck": true,
-    "lib": [
-      "ESNext",
-      "DOM"
-    ]
+    "lib": ["ESNext", "DOM"]
     // "baseUrl": ".",
   },
-  "exclude": [
-    "node_modules",
-    "dist",
-    "coverage",
-    "test",
-    "tests",
-    "stub"
-  ],
+  "exclude": ["node_modules", "dist", "coverage", "test", "tests", "stub"]
   // "references": [
   //   {
   //     "path": "./tsconfig.config.json"

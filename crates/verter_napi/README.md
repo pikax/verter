@@ -56,10 +56,10 @@ All exported functions are annotated with `#[napi]` and available as synchronous
 Compiles a Vue SFC string or Buffer into JavaScript with source maps.
 
 ```javascript
-const { compile } = require('@verter/native');
+const { compile } = require("@verter/native");
 
-const result = compile('<template><div>{{ msg }}</div></template>', {
-  filename: 'App.vue',
+const result = compile("<template><div>{{ msg }}</div></template>", {
+  filename: "App.vue",
   includeSourceContent: true,
   isProduction: false,
   ssr: false,
@@ -69,10 +69,10 @@ const result = compile('<template><div>{{ msg }}</div></template>', {
   },
 });
 
-const bufferResult = compile(Buffer.from('<template><div>{{ msg }}</div></template>'));
+const bufferResult = compile(Buffer.from("<template><div>{{ msg }}</div></template>"));
 
-console.log(result.code);       // compiled JavaScript
-console.log(result.sourceMap);   // source map JSON string
+console.log(result.code); // compiled JavaScript
+console.log(result.sourceMap); // source map JSON string
 ```
 
 ### `compileSync(input, options?) -> CodegenResult`
@@ -84,10 +84,10 @@ Identical to `compile` -- kept for API compatibility (accepts string or Buffer).
 Vite-optimized compilation returning split blocks for virtual module serving. Each block includes import metadata with UTF-16 offsets for JavaScript string manipulation.
 
 ```javascript
-const { compileForVite } = require('@verter/native');
+const { compileForVite } = require("@verter/native");
 
 const result = compileForVite(sfcSource, {
-  filename: 'App.vue',
+  filename: "App.vue",
   isProduction: false,
   ssr: false,
   sourcemap: true,
@@ -103,16 +103,16 @@ const result = compileForVite(sfcSource, {
 
 All compile entry points accept `input` as `string | Buffer`.
 
-| NAPI Type | Fields |
-|---|---|
-| `FeatureFlags` | `optionsApi?: boolean`, `propsDestructure?: boolean` |
-| `CodegenOptions` | `filename?`, `includeSourceContent?`, `ssr?`, `isProduction?`, `componentId?`, `features?` |
-| `CodegenResult` | `code`, `sourceMap`, `codeWithSourceMap` |
-| `ViteCodegenOptions` | `filename?`, `ssr?`, `isProduction?`, `componentId?`, `sourcemap?` |
-| `ViteCodegenResult` | `script?`, `template?`, `styles[]`, `durationMs` |
-| `JsBlockOutput` | `code`, `sourceMap?`, `imports[]`, `bodyStartUtf16` |
-| `JsBlockImport` | `source`, `specifiers[]`, `startUtf16`, `endUtf16` |
-| `JsStyleBlock` | `code`, `sourceMap?`, `scoped`, `isModule`, `lang?`, `moduleName?`, `moduleClasses[]` |
+| NAPI Type            | Fields                                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------------ |
+| `FeatureFlags`       | `optionsApi?: boolean`, `propsDestructure?: boolean`                                       |
+| `CodegenOptions`     | `filename?`, `includeSourceContent?`, `ssr?`, `isProduction?`, `componentId?`, `features?` |
+| `CodegenResult`      | `code`, `sourceMap`, `codeWithSourceMap`                                                   |
+| `ViteCodegenOptions` | `filename?`, `ssr?`, `isProduction?`, `componentId?`, `sourcemap?`                         |
+| `ViteCodegenResult`  | `script?`, `template?`, `styles[]`, `durationMs`                                           |
+| `JsBlockOutput`      | `code`, `sourceMap?`, `imports[]`, `bodyStartUtf16`                                        |
+| `JsBlockImport`      | `source`, `specifiers[]`, `startUtf16`, `endUtf16`                                         |
+| `JsStyleBlock`       | `code`, `sourceMap?`, `scoped`, `isModule`, `lang?`, `moduleName?`, `moduleClasses[]`      |
 
 ## Build
 
@@ -141,15 +141,15 @@ This produces a platform-specific `.node` file (e.g., `verter_napi.linux-x64-gnu
 
 The CI builds native binaries for 7 platform targets:
 
-| Platform | Target Triple |
-|---|---|
-| Linux x64 (glibc) | `x86_64-unknown-linux-gnu` |
-| Linux x64 (musl) | `x86_64-unknown-linux-musl` |
-| Linux arm64 (glibc) | `aarch64-unknown-linux-gnu` |
-| Linux arm64 (musl) | `aarch64-unknown-linux-musl` |
-| macOS x64 | `x86_64-apple-darwin` |
-| macOS arm64 | `aarch64-apple-darwin` |
-| Windows x64 | `x86_64-pc-windows-msvc` |
+| Platform            | Target Triple                |
+| ------------------- | ---------------------------- |
+| Linux x64 (glibc)   | `x86_64-unknown-linux-gnu`   |
+| Linux x64 (musl)    | `x86_64-unknown-linux-musl`  |
+| Linux arm64 (glibc) | `aarch64-unknown-linux-gnu`  |
+| Linux arm64 (musl)  | `aarch64-unknown-linux-musl` |
+| macOS x64           | `x86_64-apple-darwin`        |
+| macOS arm64         | `aarch64-apple-darwin`       |
+| Windows x64         | `x86_64-pc-windows-msvc`     |
 
 ### build.rs
 
@@ -157,13 +157,13 @@ The build script calls `napi_build::setup()` to configure NAPI-RS code generatio
 
 ## Dependencies
 
-| Crate | Purpose |
-|---|---|
-| `verter_core` | Core Rust template compiler |
-| `oxc_allocator` | Memory allocator for OXC AST (created per-call) |
-| `napi` (v2) | NAPI-RS runtime (features: `napi8`, `serde-json`) |
-| `napi-derive` | Procedural macros for `#[napi]` annotations |
-| `napi-build` | Build-time NAPI-RS setup |
+| Crate           | Purpose                                           |
+| --------------- | ------------------------------------------------- |
+| `verter_core`   | Core Rust template compiler                       |
+| `oxc_allocator` | Memory allocator for OXC AST (created per-call)   |
+| `napi` (v2)     | NAPI-RS runtime (features: `napi8`, `serde-json`) |
+| `napi-derive`   | Procedural macros for `#[napi]` annotations       |
+| `napi-build`    | Build-time NAPI-RS setup                          |
 
 ## License
 

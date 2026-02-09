@@ -18,11 +18,14 @@ const validFiles = Object.entries(
     query: "?raw",
     eager: true,
     import: "default",
-  }) as Record<string, string>
-).reduce((c, [k, v]) => {
-  c[basename(k)] = v;
-  return c;
-}, {} as Record<string, string>);
+  }) as Record<string, string>,
+).reduce(
+  (c, [k, v]) => {
+    c[basename(k)] = v;
+    return c;
+  },
+  {} as Record<string, string>,
+);
 
 /**
  * This is to benchmark acorn and OXC
@@ -57,9 +60,7 @@ describe("ast bench", () => {
 
   describe("multi", () => {
     bench("oxc async", async () => {
-      await Promise.all(
-        Object.values(validFiles).map((x) => parse("index.ts", x))
-      );
+      await Promise.all(Object.values(validFiles).map((x) => parse("index.ts", x)));
     });
 
     bench("oxc", () => {
@@ -217,7 +218,7 @@ describe("ast bench", () => {
             const parsed = await parse("test.ts", source);
             const s = new MagicString(source);
             makeChanges(s, parsed.program);
-          })
+          }),
         );
       });
 
@@ -227,7 +228,7 @@ describe("ast bench", () => {
             const parsed = await parse("test.ts", sanitisePosition(source));
             const s = new MagicString(source);
             makeChanges(s, parsed.program);
-          })
+          }),
         );
       });
     });

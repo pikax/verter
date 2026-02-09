@@ -8,9 +8,7 @@ const props = defineProps<{
 }>();
 
 const orderedItems = computed<T[]>(() =>
-  props.items.sort((item1, item2) =>
-    props.getLabel(item1).localeCompare(props.getLabel(item2))
-  )
+  props.items.sort((item1, item2) => props.getLabel(item1).localeCompare(props.getLabel(item2))),
 );
 
 function getItemAtIndex(index: number): T | undefined {

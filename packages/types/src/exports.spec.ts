@@ -100,16 +100,12 @@ describe("Package exports", () => {
     // Helper types
     type TestPatchHidden = PatchHidden<{ a: string }, { b: number }>;
     type TestExtractHidden = ExtractHidden<TestPatchHidden>;
-    type TestFunctionToObject = FunctionToObject<
-      (e: "test", val: number) => void
-    >;
+    type TestFunctionToObject = FunctionToObject<(e: "test", val: number) => void>;
     type TestIntersectionFunctionToObject = IntersectionFunctionToObject<
       ((e: "foo") => void) & ((e: "bar") => void)
     >;
     type TestPartialUndefined = PartialUndefined<{ a: string; b?: number }>;
-    type TestUnionToIntersection = UnionToIntersection<
-      { a: string } | { b: number }
-    >;
+    type TestUnionToIntersection = UnionToIntersection<{ a: string } | { b: number }>;
 
     // Emit types
     type TestEmitsToProps = EmitsToProps<(e: "update", val: number) => void>;
@@ -175,19 +171,17 @@ describe("Package exports", () => {
     type TestToInstanceProps = ToInstanceProps<any, true>;
     type TestCreateTypedPublicInstanceFromNormalisedMacro =
       CreateTypedPublicInstanceFromNormalisedMacro<any>;
-    type TestPublicInstanceFromMacro = PublicInstanceFromMacro<
+    type TestPublicInstanceFromMacro = PublicInstanceFromMacro<any, any, any, any, any>;
+    type TestPublicInstanceFromNormalisedMacro = PublicInstanceFromNormalisedMacro<
       any,
       any,
       any,
       any,
       any
     >;
-    type TestPublicInstanceFromNormalisedMacro =
-      PublicInstanceFromNormalisedMacro<any, any, any, any, any>;
     type TestCreateExportedInstanceFromNormalisedMacro =
       CreateExportedInstanceFromNormalisedMacro<any>;
-    type TestCreateExportedInstanceFromMacro =
-      CreateExportedInstanceFromMacro<any>;
+    type TestCreateExportedInstanceFromMacro = CreateExportedInstanceFromMacro<any>;
 
     // Verify function exports
     const testCreateMacroReturn = createMacroReturn({});

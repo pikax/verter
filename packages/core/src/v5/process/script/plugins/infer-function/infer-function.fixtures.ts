@@ -14,20 +14,13 @@
 
 import { MagicString } from "@vue/compiler-sfc";
 import { parser, TemplateTypes } from "../../../../parser";
-import {
-  ParsedBlockScript,
-  ParsedBlockTemplate,
-} from "../../../../parser/types";
+import { ParsedBlockScript, ParsedBlockTemplate } from "../../../../parser/types";
 import { processScript } from "../../script";
 import { InferFunctionPlugin } from "./index.js";
 import { MacrosPlugin } from "../macros";
 import { ScriptBlockPlugin } from "../script-block";
 import { BindingPlugin } from "../binding";
-import type {
-  Fixture,
-  FixtureConfig,
-  ProcessResult,
-} from "../../../../../fixtures/types";
+import type { Fixture, FixtureConfig, ProcessResult } from "../../../../../fixtures/types";
 
 /**
  * Process Vue SFC content through the infer-function plugin pipeline
@@ -37,7 +30,7 @@ function processInferFunction(
   prefix: string,
   lang = "ts",
   generic?: string,
-  template?: string
+  template?: string,
 ): ProcessResult {
   const genericAttr = generic ? ` generic="${generic}"` : "";
   const prepend = `<script setup lang="${lang}"${genericAttr}>`;
@@ -47,13 +40,9 @@ function processInferFunction(
 
   const s = new MagicString(source);
 
-  const scriptBlock = parsed.blocks.find(
-    (x) => x.type === "script"
-  ) as ParsedBlockScript;
+  const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
 
-  const templateBlock = parsed.blocks.find(
-    (x) => x.type === "template"
-  ) as ParsedBlockTemplate;
+  const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
   const result = processScript(
     scriptBlock.result.items,
@@ -69,15 +58,11 @@ function processInferFunction(
       prefix: (name: string) => prefix + name,
       blockNameResolver: (name: string) => name,
       templateBindings:
-        templateBlock?.result?.items.filter(
-          (x) => x.type === TemplateTypes.Binding
-        ) ?? [],
-    }
+        templateBlock?.result?.items.filter((x) => x.type === TemplateTypes.Binding) ?? [],
+    },
   );
 
-  const sourcemap = s
-    .generateMap({ hires: true, includeContent: true })
-    .toUrl();
+  const sourcemap = s.generateMap({ hires: true, includeContent: true }).toUrl();
 
   return {
     result: result.result,
@@ -210,9 +195,7 @@ const fixtures: Fixture[] = [
     code: `function handler(e: MouseEvent) { return e.clientX }`,
     template: `<div @click="handler"></div>`,
     expectations: {
-      patterns: [
-        "e: MouseEvent",
-      ],
+      patterns: ["e: MouseEvent"],
     },
   },
 
@@ -322,7 +305,7 @@ export function createFixtures(prefix: string): FixtureConfig {
         prefix,
         fixture.lang || "ts",
         fixture.generic,
-        fixture.template
+        fixture.template,
       );
     },
   };

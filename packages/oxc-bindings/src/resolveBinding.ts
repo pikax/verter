@@ -48,9 +48,7 @@ export function resolveBinding(): string {
     case "linux": {
       const musl = isMusl();
       if (arch === "x64") {
-        return musl
-          ? "@oxc-parser/binding-linux-x64-musl"
-          : "@oxc-parser/binding-linux-x64-gnu";
+        return musl ? "@oxc-parser/binding-linux-x64-musl" : "@oxc-parser/binding-linux-x64-gnu";
       }
       if (arch === "arm64") {
         return musl

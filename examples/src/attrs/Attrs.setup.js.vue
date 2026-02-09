@@ -82,19 +82,12 @@ export default {
 <template>
   <div class="attrs-wrapper">
     <label :for="getAttrId()">{{ label }}</label>
-    <input
-      v-bind="attrs"
-      :disabled="disabled"
-      @click="handleClick"
-      @focus="handleFocus"
-    />
-    
+    <input v-bind="attrs" :disabled="disabled" @click="handleClick" @focus="handleFocus" />
+
     <div class="custom-element">
-      <span :class="getAttrClass()" :style="getAttrStyle()">
-        Custom styled element
-      </span>
+      <span :class="getAttrClass()" :style="getAttrStyle()"> Custom styled element </span>
     </div>
-    
+
     <div class="attrs-info">
       <p>ID: {{ getAttrId() }}</p>
       <p>Tabindex: {{ tabindex }}</p>

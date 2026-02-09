@@ -20,15 +20,8 @@ import {
 import { join, normalize } from "path";
 
 import type { PatchClient } from "@verter/language-shared";
-import {
-  patchClient,
-  NotificationType,
-  RequestType,
-} from "@verter/language-shared";
-import type {
-  StatisticsSnapshot,
-  StatisticsSummary,
-} from "@verter/language-shared";
+import { patchClient, NotificationType, RequestType } from "@verter/language-shared";
+import type { StatisticsSnapshot, StatisticsSummary } from "@verter/language-shared";
 import CompiledCodeContentProvider from "./CompiledCodeContentProvider";
 
 import { resolveAndDownloadBinding } from "@verter/oxc-bindings";
@@ -55,7 +48,7 @@ export async function activate(context: ExtensionContext) {
       require.resolve("@verter/typescript-plugin"),
       {
         enable: true,
-      }
+      },
     );
   }
 }
@@ -71,13 +64,9 @@ export function activateVueLanguageServer(context: ExtensionContext) {
   const runtimeConfig = workspace.getConfiguration("verter.language-server");
 
   const { workspaceFolders } = workspace;
-  const rootPath = Array.isArray(workspaceFolders)
-    ? workspaceFolders[0].uri.fsPath
-    : undefined;
+  const rootPath = Array.isArray(workspaceFolders) ? workspaceFolders[0].uri.fsPath : undefined;
 
-  const serverModule = require.resolve(
-    "@verter/language-server/dist/server.js"
-  );
+  const serverModule = require.resolve("@verter/language-server/dist/server.js");
   console.log("Using server from", serverModule);
 
   const runExecArgv: string[] = [];
@@ -142,7 +131,7 @@ export function activateVueLanguageServer(context: ExtensionContext) {
   context.subscriptions.push(
     commands.registerCommand("verter.restartLanguageServer", async () => {
       await restartLS(true);
-    })
+    }),
   );
 
   let restarting = false;
@@ -179,10 +168,7 @@ export function activateVueLanguageServer(context: ExtensionContext) {
   };
 }
 
-function createLanguageServer(
-  serverOptions: ServerOptions,
-  clientOptions: LanguageClientOptions
-) {
+function createLanguageServer(serverOptions: ServerOptions, clientOptions: LanguageClientOptions) {
   return new LanguageClient("verter", "Verter", serverOptions, clientOptions);
 }
 
@@ -195,8 +181,8 @@ function getStatisticsInitialization(rootPath: string | undefined) {
     persistToFile && rootPath
       ? join(rootPath, ".verter", "statistics.json")
       : persistToFile
-      ? join(process.cwd(), ".verter", "statistics.json")
-      : undefined;
+        ? join(process.cwd(), ".verter", "statistics.json")
+        : undefined;
 
   return {
     enabled: config.get<boolean>("enabled") ?? false,
@@ -234,115 +220,90 @@ function addDidChangeTextDocumentListener(getClient: GetClient) {
   });
 }
 
-function addCompilePreviewCommand(
-  getClient: GetClient,
-  context: ExtensionContext
-) {
-  const compiledCodeContentProvider = new CompiledCodeContentProvider(
-    getClient
-  );
+function addCompilePreviewCommand(getClient: GetClient, context: ExtensionContext) {
+  const compiledCodeContentProvider = new CompiledCodeContentProvider(getClient);
 
   context.subscriptions.push(
     // Register the content provider for "vue-compiled://" files
     workspace.registerTextDocumentContentProvider(
       CompiledCodeContentProvider.scheme,
-      compiledCodeContentProvider
+      compiledCodeContentProvider,
     ),
-    compiledCodeContentProvider
+    compiledCodeContentProvider,
   );
 
   context.subscriptions.push(
-    commands.registerTextEditorCommand(
-      "verter.showCompiledCodeToSide",
-      async (editor) => {
-        if (editor?.document?.languageId !== "vue") {
-          window.showInformationMessage("Not a Vue file");
-          return;
-        }
-
-        window.withProgress(
-          { location: ProgressLocation.Window, title: "Compiling..." },
-          async () => {
-            // Open a new preview window for the compiled code
-            return await window.showTextDocument(
-              CompiledCodeContentProvider.previewWindowUri,
-              {
-                preview: true,
-                viewColumn: ViewColumn.Beside,
-                // TODO add selection to the window, it needs to be resolved
-                // selection: editor.selection,
-              }
-            );
-          }
-        );
+    commands.registerTextEditorCommand("verter.showCompiledCodeToSide", async (editor) => {
+      if (editor?.document?.languageId !== "vue") {
+        window.showInformationMessage("Not a Vue file");
+        return;
       }
-    )
+
+      window.withProgress(
+        { location: ProgressLocation.Window, title: "Compiling..." },
+        async () => {
+          // Open a new preview window for the compiled code
+          return await window.showTextDocument(CompiledCodeContentProvider.previewWindowUri, {
+            preview: true,
+            viewColumn: ViewColumn.Beside,
+            // TODO add selection to the window, it needs to be resolved
+            // selection: editor.selection,
+          });
+        },
+      );
+    }),
   );
 }
-function addWriteVirtualFilesCommand(
-  getClient: GetClient,
-  context: ExtensionContext
-) {
-  const compiledCodeContentProvider = new CompiledCodeContentProvider(
-    getClient
-  );
+function addWriteVirtualFilesCommand(getClient: GetClient, context: ExtensionContext) {
+  const compiledCodeContentProvider = new CompiledCodeContentProvider(getClient);
 
   context.subscriptions.push(
     // Register the content provider for "vue-compiled://" files
     workspace.registerTextDocumentContentProvider(
       CompiledCodeContentProvider.scheme,
-      compiledCodeContentProvider
+      compiledCodeContentProvider,
     ),
-    compiledCodeContentProvider
+    compiledCodeContentProvider,
   );
 
   context.subscriptions.push(
-    commands.registerTextEditorCommand(
-      "verter.writeVirtualFiles",
-      async (editor) => {
-        if (editor?.document?.languageId !== "vue") {
-          window.showInformationMessage("Not a Vue file");
-          return;
-        }
-
-        window.withProgress(
-          { location: ProgressLocation.Window, title: "Compiling..." },
-          async () => {
-            // Open a new preview window for the compiled code
-            return await window.showTextDocument(
-              CompiledCodeContentProvider.previewWindowUri,
-              {
-                preview: true,
-                viewColumn: ViewColumn.Beside,
-                // TODO add selection to the window, it needs to be resolved
-                // selection: editor.selection,
-              }
-            );
-          }
-        );
+    commands.registerTextEditorCommand("verter.writeVirtualFiles", async (editor) => {
+      if (editor?.document?.languageId !== "vue") {
+        window.showInformationMessage("Not a Vue file");
+        return;
       }
-    )
+
+      window.withProgress(
+        { location: ProgressLocation.Window, title: "Compiling..." },
+        async () => {
+          // Open a new preview window for the compiled code
+          return await window.showTextDocument(CompiledCodeContentProvider.previewWindowUri, {
+            preview: true,
+            viewColumn: ViewColumn.Beside,
+            // TODO add selection to the window, it needs to be resolved
+            // selection: editor.selection,
+          });
+        },
+      );
+    }),
   );
 }
 
-function addShowStatisticsCommand(
-  getClient: GetClient,
-  context: ExtensionContext
-) {
+function addShowStatisticsCommand(getClient: GetClient, context: ExtensionContext) {
   const channel = window.createOutputChannel("Verter Statistics");
 
   context.subscriptions.push(
     channel,
     commands.registerCommand("verter.showStatistics", async () => {
       try {
-        const snapshot = await getClient().sendRequest(
-          RequestType.GetStatistics,
-          { includeEvents: false, scope: "all" }
-        );
+        const snapshot = await getClient().sendRequest(RequestType.GetStatistics, {
+          includeEvents: false,
+          scope: "all",
+        });
 
         if (!snapshot) {
           window.showWarningMessage(
-            "Verter statistics are not available from the language server."
+            "Verter statistics are not available from the language server.",
           );
           return;
         }
@@ -352,28 +313,19 @@ function addShowStatisticsCommand(
         channel.show(true);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        window.showErrorMessage(
-          `Failed to fetch Verter statistics: ${message}`
-        );
+        window.showErrorMessage(`Failed to fetch Verter statistics: ${message}`);
       }
-    })
+    }),
   );
 }
 
-function renderStatisticsSnapshot(
-  channel: OutputChannel,
-  snapshot: StatisticsSnapshot
-) {
+function renderStatisticsSnapshot(channel: OutputChannel, snapshot: StatisticsSnapshot) {
   channel.appendLine(`Statistics ${snapshot.enabled ? "enabled" : "disabled"}`);
   channel.appendLine("");
 
   channel.appendLine("Session");
-  channel.appendLine(
-    formatSummarySection("  By type", snapshot.session.byType)
-  );
-  channel.appendLine(
-    formatSummarySection("  By file", snapshot.session.byFile)
-  );
+  channel.appendLine(formatSummarySection("  By type", snapshot.session.byType));
+  channel.appendLine(formatSummarySection("  By file", snapshot.session.byFile));
 
   if (snapshot.global) {
     channel.appendLine("");
@@ -381,19 +333,12 @@ function renderStatisticsSnapshot(
       ? `Global (persisted at ${snapshot.global.path})`
       : "Global";
     channel.appendLine(persistedLabel);
-    channel.appendLine(
-      formatSummarySection("  By type", snapshot.global.byType)
-    );
-    channel.appendLine(
-      formatSummarySection("  By file", snapshot.global.byFile)
-    );
+    channel.appendLine(formatSummarySection("  By type", snapshot.global.byType));
+    channel.appendLine(formatSummarySection("  By file", snapshot.global.byFile));
   }
 }
 
-function formatSummarySection(
-  title: string,
-  summary: Record<string, StatisticsSummary>
-) {
+function formatSummarySection(title: string, summary: Record<string, StatisticsSummary>) {
   const entries = Object.entries(summary ?? {});
   if (!entries.length) {
     return `${title}: none`;
@@ -405,10 +350,8 @@ function formatSummarySection(
 
 function formatSummaryLine(key: string, summary: StatisticsSummary) {
   const average = summary.count ? summary.averageMs.toFixed(2) : "0";
-  return `- ${key}: count=${
-    summary.count
-  }, avg=${average}ms, total=${summary.totalMs.toFixed(
-    2
+  return `- ${key}: count=${summary.count}, avg=${average}ms, total=${summary.totalMs.toFixed(
+    2,
   )}ms, min=${summary.minMs.toFixed(2)}ms, max=${summary.maxMs.toFixed(2)}ms`;
 }
 

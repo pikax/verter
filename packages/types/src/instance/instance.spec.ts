@@ -82,8 +82,7 @@ describe("instance helpers", () => {
         templateRef: {};
         $data: {};
       };
-      type Instance =
-        CreateTypedPublicInstanceFromNormalisedMacro<TestNormalized>;
+      type Instance = CreateTypedPublicInstanceFromNormalisedMacro<TestNormalized>;
 
       const instance = {} as Instance;
 
@@ -117,8 +116,7 @@ describe("instance helpers", () => {
         templateRef: {};
         $data: {};
       };
-      type Instance =
-        CreateTypedPublicInstanceFromNormalisedMacro<TestNormalized>;
+      type Instance = CreateTypedPublicInstanceFromNormalisedMacro<TestNormalized>;
 
       const instance = {} as Instance;
 
@@ -150,8 +148,7 @@ describe("instance helpers", () => {
         templateRef: {};
         $data: {};
       };
-      type Instance =
-        CreateTypedPublicInstanceFromNormalisedMacro<TestNormalized>;
+      type Instance = CreateTypedPublicInstanceFromNormalisedMacro<TestNormalized>;
 
       const instance = {} as Instance;
 
@@ -182,8 +179,7 @@ describe("instance helpers", () => {
         templateRef: {};
         $data: {};
       };
-      type Instance =
-        CreateTypedPublicInstanceFromNormalisedMacro<TestNormalized>;
+      type Instance = CreateTypedPublicInstanceFromNormalisedMacro<TestNormalized>;
 
       const instance = {} as Instance;
 
@@ -214,8 +210,7 @@ describe("instance helpers", () => {
         templateRef: {};
         $data: {};
       };
-      type Internal =
-        CreateTypedInternalInstanceFromNormalisedMacro<TestNormalized>;
+      type Internal = CreateTypedInternalInstanceFromNormalisedMacro<TestNormalized>;
 
       const internal = {} as Internal;
 
@@ -333,10 +328,7 @@ describe("instance helpers", () => {
 
       // Emit type check - includes model update
       type EmitType = Internal["emit"];
-      type CanEmitModelUpdate = EmitType extends (
-        e: "update:modelValue",
-        v: string
-      ) => void
+      type CanEmitModelUpdate = EmitType extends (e: "update:modelValue", v: string) => void
         ? true
         : false;
       assertType<CanEmitModelUpdate>({} as true);
@@ -431,17 +423,13 @@ describe("instance helpers", () => {
 
       // proxy should be typed as our enhanced public instance or null
       type ProxyType = Internal["proxy"];
-      type ProxyIsValid = ProxyType extends ComponentPublicInstance | null
-        ? true
-        : false;
+      type ProxyIsValid = ProxyType extends ComponentPublicInstance | null ? true : false;
       assertType<ProxyIsValid>({} as true);
 
       // Should have standard ComponentPublicInstance properties
       type NonNullProxy = NonNullable<ProxyType>;
       type HasEl = NonNullProxy extends { $el: Element | null } ? true : false;
-      type HasForceUpdate = NonNullProxy extends { $forceUpdate: () => void }
-        ? true
-        : false;
+      type HasForceUpdate = NonNullProxy extends { $forceUpdate: () => void } ? true : false;
       assertType<HasEl>({} as true);
       assertType<HasForceUpdate>({} as true);
     });
@@ -520,13 +508,9 @@ describe("instance helpers", () => {
       assertType<object>(instance.$options);
 
       // Reactivity methods
-      assertType<(source: any, cb: any, options?: any) => WatchStopHandle>(
-        instance.$watch
-      );
+      assertType<(source: any, cb: any, options?: any) => WatchStopHandle>(instance.$watch);
       assertType<() => void>(instance.$forceUpdate);
-      assertType<<T = void>(fn?: () => T) => Promise<Awaited<T>>>(
-        instance.$nextTick
-      );
+      assertType<<T = void>(fn?: () => T) => Promise<Awaited<T>>>(instance.$nextTick);
     });
 
     it("has ComponentPublicInstance structure", () => {
@@ -541,13 +525,7 @@ describe("instance helpers", () => {
         $data: {};
       };
 
-      type Instance = PublicInstanceFromNormalisedMacro<
-        TestNormalized,
-        {},
-        Element,
-        false,
-        false
-      >;
+      type Instance = PublicInstanceFromNormalisedMacro<TestNormalized, {}, Element, false, false>;
 
       // Verify all key ComponentPublicInstance properties exist
       type HasRequiredProperties = Instance extends {
@@ -590,11 +568,7 @@ describe("instance helpers", () => {
         $data: {};
       };
 
-      type Instance = CreateExportedInstanceFromNormalisedMacro<
-        TestNormalized,
-        {},
-        HTMLElement
-      >;
+      type Instance = CreateExportedInstanceFromNormalisedMacro<TestNormalized, {}, HTMLElement>;
 
       const instance = {} as Instance;
 
@@ -652,11 +626,7 @@ describe("instance helpers", () => {
         $data: {};
       };
 
-      type Instance = CreateExportedInstanceFromNormalisedMacro<
-        TestNormalized,
-        {},
-        HTMLDivElement
-      >;
+      type Instance = CreateExportedInstanceFromNormalisedMacro<TestNormalized, {}, HTMLDivElement>;
 
       const instance = {} as Instance;
 
@@ -667,13 +637,9 @@ describe("instance helpers", () => {
       assertType<object>(instance.$options);
 
       // Reactivity methods
-      assertType<(source: any, cb: any, options?: any) => WatchStopHandle>(
-        instance.$watch
-      );
+      assertType<(source: any, cb: any, options?: any) => WatchStopHandle>(instance.$watch);
       assertType<() => void>(instance.$forceUpdate);
-      assertType<<T = void>(fn?: () => T) => Promise<Awaited<T>>>(
-        instance.$nextTick
-      );
+      assertType<<T = void>(fn?: () => T) => Promise<Awaited<T>>>(instance.$nextTick);
 
       // Our custom overrides should also work
       assertType<string | undefined>(instance.value);
@@ -737,9 +703,7 @@ describe("instance helpers", () => {
       type Instance = CreateExportedInstanceFromMacro<MacroReturnType>;
 
       // Props accessible directly (exported instance has MakeDefaultsOptional=true)
-      type HasCount = Instance extends { count: number | undefined }
-        ? true
-        : false;
+      type HasCount = Instance extends { count: number | undefined } ? true : false;
       assertType<HasCount>({} as true);
 
       // $props type check
@@ -932,14 +896,10 @@ describe("instance helpers", () => {
       assertType<HasId>({} as true);
 
       // Exposed methods accessible
-      type HasRefresh = Instance extends { refresh: () => Promise<void> }
-        ? true
-        : false;
+      type HasRefresh = Instance extends { refresh: () => Promise<void> } ? true : false;
       assertType<HasRefresh>({} as true);
 
-      type HasGetData = Instance extends { getData: () => object }
-        ? true
-        : false;
+      type HasGetData = Instance extends { getData: () => object } ? true : false;
       assertType<HasGetData>({} as true);
     });
 
@@ -994,12 +954,7 @@ describe("instance helpers", () => {
         };
         type MacroReturn = typeof macroReturn;
 
-        type Instance = PublicInstanceFromMacro<
-          MacroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<MacroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1024,12 +979,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1051,12 +1001,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         // Just verify the type resolves without errors
         const instance = {} as Instance;
@@ -1075,12 +1020,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1108,19 +1048,11 @@ describe("instance helpers", () => {
           },
           withDefaults: {
             value: { title: "Default Title" } as const,
-            type: {} as [
-              { title: string; count: number },
-              { title: "Default Title" }
-            ],
+            type: {} as [{ title: string; count: number }, { title: "Default Title" }],
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          true
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, true>;
 
         const instance = {} as Instance;
 
@@ -1143,19 +1075,11 @@ describe("instance helpers", () => {
           },
           withDefaults: {
             value: { title: "Default Title" } as const,
-            type: {} as [
-              { title: string; count: number },
-              { title: "Default Title" }
-            ],
+            type: {} as [{ title: string; count: number }, { title: "Default Title" }],
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1181,23 +1105,14 @@ describe("instance helpers", () => {
           emits: { value: {} as EmitType, type: {} as EmitType },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
         // $emit should have the emit function type
         type EmitFn = Instance["$emit"];
-        type CanEmitUpdate = EmitFn extends (e: "update", val: number) => void
-          ? true
-          : false;
-        type CanEmitDelete = EmitFn extends (e: "delete") => void
-          ? true
-          : false;
+        type CanEmitUpdate = EmitFn extends (e: "update", val: number) => void ? true : false;
+        type CanEmitDelete = EmitFn extends (e: "delete") => void ? true : false;
 
         assertType<CanEmitUpdate>({} as true);
         assertType<CanEmitDelete>({} as true);
@@ -1214,17 +1129,10 @@ describe("instance helpers", () => {
           emits: { value: {} as EmitType, type: {} as EmitType },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         type EmitFn = Instance["$emit"];
-        type ValidEmit = EmitFn extends (e: "update", val: number) => void
-          ? true
-          : false;
+        type ValidEmit = EmitFn extends (e: "update", val: number) => void ? true : false;
         assertType<ValidEmit>({} as true);
       });
     });
@@ -1241,12 +1149,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1258,10 +1161,7 @@ describe("instance helpers", () => {
 
         // $emit should have update:modelValue
         type EmitFn = Instance["$emit"];
-        type CanEmitUpdate = EmitFn extends (
-          e: "update:modelValue",
-          val: string
-        ) => void
+        type CanEmitUpdate = EmitFn extends (e: "update:modelValue", val: string) => void
           ? true
           : false;
         assertType<CanEmitUpdate>({} as true);
@@ -1281,12 +1181,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1298,10 +1193,7 @@ describe("instance helpers", () => {
 
         // $emit should have update:count
         type EmitFn = Instance["$emit"];
-        type CanEmitCountUpdate = EmitFn extends (
-          e: "update:count",
-          val: number
-        ) => void
+        type CanEmitCountUpdate = EmitFn extends (e: "update:count", val: number) => void
           ? true
           : false;
         assertType<CanEmitCountUpdate>({} as true);
@@ -1329,12 +1221,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1365,12 +1252,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1395,12 +1277,7 @@ describe("instance helpers", () => {
           slots: { value: {} as SlotsType, type: {} as SlotsType },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1440,12 +1317,7 @@ describe("instance helpers", () => {
           expose: { object: {} as ExposeType },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1466,12 +1338,7 @@ describe("instance helpers", () => {
           expose: { object: {} as { getValue: () => number } },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1496,12 +1363,7 @@ describe("instance helpers", () => {
           emits: { value: {} as EmitType, type: {} as EmitType },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1509,9 +1371,7 @@ describe("instance helpers", () => {
         assertType<string>(instance.value);
 
         type EmitFn = Instance["$emit"];
-        type ValidEmit = EmitFn extends (e: "change", val: string) => void
-          ? true
-          : false;
+        type ValidEmit = EmitFn extends (e: "change", val: string) => void ? true : false;
         assertType<ValidEmit>({} as true);
 
         // @ts-expect-error - Should not be any/unknown/never
@@ -1533,12 +1393,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLInputElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLInputElement, false>;
 
         const instance = {} as Instance;
 
@@ -1572,10 +1427,7 @@ describe("instance helpers", () => {
           },
           withDefaults: {
             value: { submitLabel: "Submit" } as const,
-            type: {} as [
-              { title: string; submitLabel: string },
-              { submitLabel: "Submit" }
-            ],
+            type: {} as [{ title: string; submitLabel: string }, { submitLabel: "Submit" }],
           },
           emits: { value: {} as EmitType, type: {} as EmitType },
           model: {
@@ -1586,12 +1438,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLFormElement,
-          true
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLFormElement, true>;
 
         // Just verify type resolves - deep instantiation check
         const instance = {} as Instance;
@@ -1637,12 +1484,7 @@ describe("instance helpers", () => {
           expose: { object: {} as ExposeType },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLTableElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLTableElement, false>;
 
         // Just verify type resolves - complex type check
         const instance = {} as Instance;
@@ -1671,12 +1513,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1695,12 +1532,7 @@ describe("instance helpers", () => {
       it("empty macro return produces valid instance", () => {
         const macroReturn = createMacroReturn({});
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1745,12 +1577,7 @@ describe("instance helpers", () => {
           props: { value: {} as { src: string }, type: {} as { src: string } },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLImageElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLImageElement, false>;
 
         const instance = {} as Instance;
 
@@ -1763,12 +1590,7 @@ describe("instance helpers", () => {
           props: { value: {} as { id: number }, type: {} as { id: number } },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         // These would pass if Instance were any or unknown
         // @ts-expect-error - Instance should not be assignable to unrelated type
@@ -1780,12 +1602,7 @@ describe("instance helpers", () => {
           props: { value: {} as { id: number }, type: {} as { id: number } },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         // This would fail if Instance were never (never is assignable to everything)
         const _instance: Instance = {} as Instance;
@@ -1806,12 +1623,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1831,12 +1643,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1853,12 +1660,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
@@ -1877,7 +1679,7 @@ describe("instance helpers", () => {
                 string,
                 {
                   default: "";
-                }
+                },
               ],
             },
 
@@ -1888,12 +1690,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          true
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, true>;
 
         const instance = {} as Instance;
 
@@ -1974,20 +1771,13 @@ describe("instance helpers", () => {
           props: { value: {} as { id: number }, type: {} as { id: number } },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         const instance = {} as Instance;
 
         // All standard methods should exist
         assertType<() => void>(instance.$forceUpdate);
-        assertType<<T = void>(fn?: () => T) => Promise<Awaited<T>>>(
-          instance.$nextTick
-        );
+        assertType<<T = void>(fn?: () => T) => Promise<Awaited<T>>>(instance.$nextTick);
         assertType<Function>(instance.$watch);
       });
 
@@ -2000,12 +1790,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = PublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement,
-          false
-        >;
+        type Instance = PublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement, false>;
 
         // Check that instance has core ComponentPublicInstance properties
         const instance = {} as Instance;
@@ -2064,11 +1849,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = SFCPublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement
-        >;
+        type Instance = SFCPublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement>;
 
         const instance = {} as Instance;
 
@@ -2088,11 +1869,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = SFCPublicInstanceFromMacro<
-          typeof macroReturn,
-          CustomAttrs,
-          HTMLElement
-        >;
+        type Instance = SFCPublicInstanceFromMacro<typeof macroReturn, CustomAttrs, HTMLElement>;
 
         type PropsType = Instance["$props"];
 
@@ -2102,9 +1879,7 @@ describe("instance helpers", () => {
 
         // Attrs should be in $attrs, not $props
         type AttrsType = Instance["$attrs"];
-        type AttrsHasClass = AttrsType extends { class?: string }
-          ? true
-          : false;
+        type AttrsHasClass = AttrsType extends { class?: string } ? true : false;
         assertType<AttrsHasClass>({} as true);
       });
 
@@ -2118,11 +1893,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = SFCPublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement
-        >;
+        type Instance = SFCPublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement>;
 
         const instance = {} as Instance;
 
@@ -2143,11 +1914,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = ExternalPublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLDivElement
-        >;
+        type Instance = ExternalPublicInstanceFromMacro<typeof macroReturn, {}, HTMLDivElement>;
 
         const instance = {} as Instance;
 
@@ -2171,11 +1938,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = ExternalPublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement
-        >;
+        type Instance = ExternalPublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement>;
 
         const instance = {} as Instance;
 
@@ -2222,11 +1985,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = ExternalPublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement
-        >;
+        type Instance = ExternalPublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement>;
 
         const instance = {} as Instance;
 
@@ -2263,9 +2022,7 @@ describe("instance helpers", () => {
         type HasClass = PropsType extends { class?: string } ? true : false;
         assertType<HasClass>({} as true);
 
-        type HasTestId = PropsType extends { "data-testid"?: string }
-          ? true
-          : false;
+        type HasTestId = PropsType extends { "data-testid"?: string } ? true : false;
         assertType<HasTestId>({} as true);
       });
 
@@ -2281,11 +2038,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type Instance = TestExternalPublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement
-        >;
+        type Instance = TestExternalPublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement>;
 
         const instance = {} as Instance;
 
@@ -2327,9 +2080,7 @@ describe("instance helpers", () => {
         assertType<boolean | undefined>(instance.$props.disabled);
 
         // Fallthrough attrs merged in for testing
-        type HasStyle = PropsWithAttrs extends { style?: object }
-          ? true
-          : false;
+        type HasStyle = PropsWithAttrs extends { style?: object } ? true : false;
         assertType<HasStyle>({} as true);
 
         // Element type is correct
@@ -2346,11 +2097,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type SFCInstance = SFCPublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement
-        >;
+        type SFCInstance = SFCPublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement>;
         type ExternalInstance = ExternalPublicInstanceFromMacro<
           typeof macroReturn,
           {},
@@ -2395,11 +2142,7 @@ describe("instance helpers", () => {
           },
         });
 
-        type SFCInstance = SFCPublicInstanceFromMacro<
-          typeof macroReturn,
-          {},
-          HTMLElement
-        >;
+        type SFCInstance = SFCPublicInstanceFromMacro<typeof macroReturn, {}, HTMLElement>;
         type ExternalInstance = ExternalPublicInstanceFromMacro<
           typeof macroReturn,
           {},

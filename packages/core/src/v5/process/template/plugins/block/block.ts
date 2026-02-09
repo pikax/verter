@@ -1,9 +1,6 @@
 import { VerterASTNode } from "../../../../parser/ast";
 import { ParseTemplateContext } from "../../../../parser/template";
-import {
-  TemplateElement,
-  TemplateTypes,
-} from "../../../../parser/template/types";
+import { TemplateElement, TemplateTypes } from "../../../../parser/template/types";
 import { declareTemplatePlugin, TemplateContext } from "../../template";
 import { ElementNode, Node, NodeTypes } from "@vue/compiler-core";
 
@@ -15,7 +12,7 @@ export const BlockPlugin = declareTemplatePlugin({
   addItem(
     element: Node,
     parent: Node | VerterASTNode | TemplateElement,
-    ctx?: ParseTemplateContext
+    ctx?: ParseTemplateContext,
   ) {
     let parentBlock = this.conditions.get(parent);
     if (parentBlock) {
@@ -38,10 +35,7 @@ export const BlockPlugin = declareTemplatePlugin({
 
       const behaviour = parent.type === NodeTypes.ROOT ? "append" : "prepend";
 
-      s[`${behaviour}${conditions?.blockDirection ?? "Left"}`](
-        first.loc.start.offset,
-        "{()=>{"
-      );
+      s[`${behaviour}${conditions?.blockDirection ?? "Left"}`](first.loc.start.offset, "{()=>{");
 
       // TODO this is not 100% correct, since the child might have a v-if
       const isSlotElement =
@@ -57,12 +51,11 @@ export const BlockPlugin = declareTemplatePlugin({
             inBlock: true,
             conditions: conditions.conditions,
             type: behaviour,
-            direction:
-              conditions?.blockDirection === "Right" ? "right" : "left",
+            direction: conditions?.blockDirection === "Right" ? "right" : "left",
             condition: null,
             parent,
           },
-          s
+          s,
         );
       }
       s[`${behaviour}Right`](last.loc.end.offset, "}}");
@@ -72,17 +65,10 @@ export const BlockPlugin = declareTemplatePlugin({
 
   transformCondition(item) {
     // slot render have special conditions and places where the v-if should be placed
-    if (
-      item.element.tag === "template" &&
-      item.element.props.find((x) => x.name === "slot")
-    ) {
+    if (item.element.tag === "template" && item.element.props.find((x) => x.name === "slot")) {
       return;
     }
-    this.addItem(
-      item.element,
-      item.parent,
-      item.context as ParseTemplateContext
-    );
+    this.addItem(item.element, item.parent, item.context as ParseTemplateContext);
     // this.addItem(
     //   item.node,
     //   item.element,
@@ -103,10 +89,7 @@ export const BlockPlugin = declareTemplatePlugin({
   },
 
   transformElement(item) {
-    if (
-      item.tag === "template" &&
-      !item.node.props.find((x) => x.name === "slot")
-    ) {
+    if (item.tag === "template" && !item.node.props.find((x) => x.name === "slot")) {
       this.addItem(item.node, item.parent);
     }
   },

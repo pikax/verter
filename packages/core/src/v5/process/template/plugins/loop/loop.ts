@@ -19,18 +19,10 @@ export const LoopPlugin = declareTemplatePlugin({
     });
 
     // move v-for beginnning
-    s.move(
-      item.node.loc.start.offset,
-      item.node.loc.end.offset,
-      item.element.loc.start.offset
-    );
+    s.move(item.node.loc.start.offset, item.node.loc.end.offset, item.element.loc.start.offset);
 
     // replace v-for with {renderList}
-    s.overwrite(
-      item.node.loc.start.offset,
-      item.node.loc.start.offset + 5,
-      renderList
-    );
+    s.overwrite(item.node.loc.start.offset, item.node.loc.start.offset + 5, renderList);
 
     // // wrap in a block
     // if (item.context.conditions.length > 0 && ctx.doNarrow) {
@@ -52,11 +44,7 @@ export const LoopPlugin = declareTemplatePlugin({
     // s.prependLeft(item.element.loc.end.offset, "}}");
 
     // replace '=' with '('
-    s.overwrite(
-      item.node.loc.start.offset + 5,
-      item.node.loc.start.offset + 6,
-      "("
-    );
+    s.overwrite(item.node.loc.start.offset + 5, item.node.loc.start.offset + 6, "(");
 
     // s.update(
     //   item.node.exp!.loc.end.offset,
@@ -71,11 +59,7 @@ export const LoopPlugin = declareTemplatePlugin({
     const vforSource = item.node.loc.source;
 
     // move source to the beginning
-    s.move(
-      source.loc.start.offset,
-      source.loc.end.offset,
-      item.node.loc.start.offset + 6
-    );
+    s.move(source.loc.start.offset, source.loc.end.offset, item.node.loc.start.offset + 6);
 
     // find in or of and replace with ,
     let inOfIndex = -1;
@@ -84,7 +68,7 @@ export const LoopPlugin = declareTemplatePlugin({
     const fromIndex = Math.max(
       key?.loc.end.offset ?? 0,
       index?.loc.end.offset ?? 0,
-      value?.loc.end.offset ?? 0
+      value?.loc.end.offset ?? 0,
     );
 
     const condition = vforSource.slice(fromIndex - item.node.loc.start.offset);
@@ -112,7 +96,7 @@ export const LoopPlugin = declareTemplatePlugin({
     s.update(
       item.node.exp!.loc.start.offset - 1,
       item.node.exp!.loc.start.offset,
-      shouldWrapParams ? "(" : ""
+      shouldWrapParams ? "(" : "",
     );
     // add => { after the expression
     if (shouldWrapParams) {
@@ -133,20 +117,14 @@ export const LoopPlugin = declareTemplatePlugin({
           direction: "right",
           condition: null,
         },
-        s
+        s,
       );
     }
 
     if (
-      (item.element as ElementNode).props.every(
-        (x) => !["if", "else", "else-if"].includes(x.name)
-      )
+      (item.element as ElementNode).props.every((x) => !["if", "else", "else-if"].includes(x.name))
     ) {
-      BlockPlugin.addItem(
-        item.element,
-        item.parent,
-        item.context as ParseTemplateContext
-      );
+      BlockPlugin.addItem(item.element, item.parent, item.context as ParseTemplateContext);
     }
 
     s.prependLeft(item.element.loc.end.offset, "})");

@@ -5,7 +5,7 @@ withDefaults(
   defineProps({
     a: String,
   }),
-  {}
+  {},
 );
 
 ___VERTER___defineProps_Boxed.a = String;

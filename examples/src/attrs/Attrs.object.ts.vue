@@ -33,8 +33,8 @@ export default defineComponent({
       return typeof value === "number"
         ? value
         : typeof value === "string"
-        ? parseInt(value, 10)
-        : 0;
+          ? parseInt(value, 10)
+          : 0;
     },
     placeholder(): string | undefined {
       return this.$attrs.placeholder as string | undefined;
@@ -82,19 +82,12 @@ export default defineComponent({
 <template>
   <div class="attrs-wrapper">
     <label :for="attrId">{{ label }}</label>
-    <input
-      v-bind="$attrs"
-      :disabled="disabled"
-      @click="handleClick"
-      @focus="handleFocus"
-    />
-    
+    <input v-bind="$attrs" :disabled="disabled" @click="handleClick" @focus="handleFocus" />
+
     <div class="custom-element">
-      <span :class="attrClass" :style="attrStyle">
-        Custom styled element
-      </span>
+      <span :class="attrClass" :style="attrStyle"> Custom styled element </span>
     </div>
-    
+
     <div class="attrs-info">
       <p>ID: {{ attrId }}</p>
       <p>Tabindex: {{ tabindex }}</p>

@@ -43,17 +43,19 @@ const props = defineProps({
 const emit = defineEmits(["update", "change", "select"]);
 
 // Destructuring with defaults
-const { 
-  value = "default", 
-  config: { name: configName = "unnamed" } = { name: "unnamed", id: 0 },
-} = props;
+const { value = "default", config: { name: configName = "unnamed" } = { name: "unnamed", id: 0 } } =
+  props;
 
 // Multiple defineModel calls
 const basicModel = defineModel();
 const namedModel = defineModel("count", { required: true });
 const modelWithTransform = defineModel("search", {
-  get(v) { return v?.toUpperCase() ?? ""; },
-  set(v) { return v?.toLowerCase() ?? ""; },
+  get(v) {
+    return v?.toUpperCase() ?? "";
+  },
+  set(v) {
+    return v?.toLowerCase() ?? "";
+  },
 });
 
 // Complex computed
@@ -84,7 +86,7 @@ watch(
   ([newValue, newConfig], [oldValue, oldConfig]) => {
     console.log("Changed:", { newValue, newConfig, oldValue, oldConfig });
   },
-  { deep: true, immediate: true }
+  { deep: true, immediate: true },
 );
 
 // Slots definition (JS style)
@@ -102,7 +104,7 @@ const regexPattern = /\d+(?:\.\d+)?/g;
 const complexRegex = new RegExp(`^${configName}\\s+\\d+$`, "i");
 
 // Arrow functions with various syntaxes
-const noParens = x => x * 2;
+const noParens = (x) => x * 2;
 const withParens = (x) => x * 2;
 const multiLine = (x) => {
   const doubled = x * 2;
@@ -115,7 +117,9 @@ const objectWithDynamicKey = {
   staticKey: 1,
   [dynamicKey]: 2,
   [`${dynamicKey}2`]: 3,
-  [Symbol.iterator]: function* () { yield 1; },
+  [Symbol.iterator]: function* () {
+    yield 1;
+  },
 };
 
 // Destructuring in parameters
@@ -142,49 +146,46 @@ function narrowType(value) {
 <template>
   <div>
     <!-- Complex template expressions -->
-    <div>{{ typeof props.value === 'string' ? props.value.toUpperCase() : props.value }}</div>
-    
+    <div>{{ typeof props.value === "string" ? props.value.toUpperCase() : props.value }}</div>
+
     <!-- Optional chaining in template -->
     <span>{{ props.nested?.level1?.level2?.level3?.value }}</span>
-    
+
     <!-- Nullish coalescing in template -->
-    <span>{{ basicModel ?? 'No model value' }}</span>
-    
+    <span>{{ basicModel ?? "No model value" }}</span>
+
     <!-- Complex ternary -->
-    <div :class="props.value === 'active' 
-      ? 'active-class' 
-      : props.value === 'inactive' 
-        ? 'inactive-class' 
-        : 'default-class'"
+    <div
+      :class="
+        props.value === 'active'
+          ? 'active-class'
+          : props.value === 'inactive'
+            ? 'inactive-class'
+            : 'default-class'
+      "
     >
       Nested ternary
     </div>
-    
+
     <!-- Template literal in binding -->
-    <div :data-info="`Value: ${props.value}, Name: ${configName}`">
-      Template literal attribute
-    </div>
-    
+    <div :data-info="`Value: ${props.value}, Name: ${configName}`">Template literal attribute</div>
+
     <!-- Destructuring in v-for -->
     <div v-for="{ id, ...rest } in props.items" :key="id">
       {{ id }} - {{ JSON.stringify(rest) }}
     </div>
-    
+
     <!-- Complex computed in template -->
     <ul>
       <li v-for="item in complexComputed" :key="item.id">
         {{ item.processed }}
       </li>
     </ul>
-    
+
     <!-- Arrow function in event handler -->
-    <button @click="(e) => handleEvent({ target: { value: 'clicked' } })">
-      Arrow in handler
-    </button>
-    
+    <button @click="(e) => handleEvent({ target: { value: 'clicked' } })">Arrow in handler</button>
+
     <!-- Object spread in binding -->
-    <div v-bind="{ ...spreadObject, 'data-spread': true }">
-      Spread in v-bind
-    </div>
+    <div v-bind="{ ...spreadObject, 'data-spread': true }">Spread in v-bind</div>
   </div>
 </template>

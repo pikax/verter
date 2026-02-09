@@ -15,7 +15,7 @@ const model = defineModel({
     <span>1</span>
 </template>
         `).descriptor,
-      { id: "random" }
+      { id: "random" },
     );
 
     expect(Array.from(resolveModels(parsed))).toMatchInlineSnapshot(`
@@ -48,7 +48,7 @@ const model = defineModel({
       </template>
       
         `).descriptor,
-      { id: "random" }
+      { id: "random" },
     );
 
     expect(Array.from(resolveModels(parsed))).toMatchInlineSnapshot(`

@@ -5,8 +5,8 @@
  * Run with: npx tsx scripts/tokenize_folders.ts
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from "fs";
+import * as path from "path";
 
 // Polyfill the build-time flags
 (globalThis as any).__BROWSER__ = true;
@@ -32,64 +32,64 @@ class EventRecorder {
   events: TokenEvent[] = [];
 
   ontext(start: number, endIndex: number): void {
-    this.events.push({ type: 'Text', args: [start, endIndex] });
+    this.events.push({ type: "Text", args: [start, endIndex] });
   }
   ontextentity(char: string, start: number, endIndex: number): void {
-    this.events.push({ type: 'TextEntity', args: [start, endIndex] });
+    this.events.push({ type: "TextEntity", args: [start, endIndex] });
   }
   oninterpolation(start: number, endIndex: number): void {
-    this.events.push({ type: 'Interpolation', args: [start, endIndex] });
+    this.events.push({ type: "Interpolation", args: [start, endIndex] });
   }
   onopentagname(start: number, endIndex: number): void {
-    this.events.push({ type: 'OpenTagName', args: [start, endIndex] });
+    this.events.push({ type: "OpenTagName", args: [start, endIndex] });
   }
   onopentagend(endIndex: number): void {
-    this.events.push({ type: 'OpenTagEnd', args: [endIndex] });
+    this.events.push({ type: "OpenTagEnd", args: [endIndex] });
   }
   onselfclosingtag(endIndex: number): void {
-    this.events.push({ type: 'SelfClosingTag', args: [endIndex] });
+    this.events.push({ type: "SelfClosingTag", args: [endIndex] });
   }
   onclosetag(start: number, endIndex: number): void {
-    this.events.push({ type: 'CloseTag', args: [start, endIndex] });
+    this.events.push({ type: "CloseTag", args: [start, endIndex] });
   }
   onattribdata(start: number, endIndex: number): void {
-    this.events.push({ type: 'AttribData', args: [start, endIndex] });
+    this.events.push({ type: "AttribData", args: [start, endIndex] });
   }
   onattribentity(char: string, start: number, end: number): void {
-    this.events.push({ type: 'AttribEntity', args: [start, end] });
+    this.events.push({ type: "AttribEntity", args: [start, end] });
   }
   onattribend(quote: QuoteType, endIndex: number): void {
-    this.events.push({ type: 'AttribEnd', args: [quote, endIndex] });
+    this.events.push({ type: "AttribEnd", args: [quote, endIndex] });
   }
   onattribname(start: number, endIndex: number): void {
-    this.events.push({ type: 'AttribName', args: [start, endIndex] });
+    this.events.push({ type: "AttribName", args: [start, endIndex] });
   }
   onattribnameend(endIndex: number): void {
-    this.events.push({ type: 'AttribNameEnd', args: [endIndex] });
+    this.events.push({ type: "AttribNameEnd", args: [endIndex] });
   }
   ondirname(start: number, endIndex: number): void {
-    this.events.push({ type: 'DirName', args: [start, endIndex] });
+    this.events.push({ type: "DirName", args: [start, endIndex] });
   }
   ondirarg(start: number, endIndex: number): void {
-    this.events.push({ type: 'DirArg', args: [start, endIndex] });
+    this.events.push({ type: "DirArg", args: [start, endIndex] });
   }
   ondirmodifier(start: number, endIndex: number): void {
-    this.events.push({ type: 'DirModifier', args: [start, endIndex] });
+    this.events.push({ type: "DirModifier", args: [start, endIndex] });
   }
   oncomment(start: number, endIndex: number): void {
-    this.events.push({ type: 'Comment', args: [start, endIndex] });
+    this.events.push({ type: "Comment", args: [start, endIndex] });
   }
   oncdata(start: number, endIndex: number): void {
-    this.events.push({ type: 'Cdata', args: [start, endIndex] });
+    this.events.push({ type: "Cdata", args: [start, endIndex] });
   }
   onprocessinginstruction(start: number, endIndex: number): void {
-    this.events.push({ type: 'ProcessingInstruction', args: [start, endIndex] });
+    this.events.push({ type: "ProcessingInstruction", args: [start, endIndex] });
   }
   onend(): void {
-    this.events.push({ type: 'End', args: [] });
+    this.events.push({ type: "End", args: [] });
   }
   onerr(code: number, index: number): void {
-    this.events.push({ type: 'Error', args: [code, index] });
+    this.events.push({ type: "Error", args: [code, index] });
   }
 }
 
@@ -202,7 +202,7 @@ const Sequences = {
 
 class Tokenizer {
   state: State = State.Text;
-  private buffer = '';
+  private buffer = "";
   sectionStart = 0;
   private index = 0;
   private baseState = State.Text;
@@ -225,7 +225,7 @@ class Tokenizer {
 
   reset(): void {
     this.state = State.Text;
-    this.buffer = '';
+    this.buffer = "";
     this.sectionStart = 0;
     this.index = 0;
     this.baseState = State.Text;
@@ -464,9 +464,7 @@ class Tokenizer {
       this.state = State.Text;
       this.sectionStart = this.index + 1;
     } else {
-      this.state = isTagStartChar(c)
-        ? State.InClosingTagName
-        : State.InSpecialComment;
+      this.state = isTagStartChar(c) ? State.InClosingTagName : State.InSpecialComment;
       this.sectionStart = this.index;
     }
   }
@@ -548,11 +546,7 @@ class Tokenizer {
     if (c === CharCodes.Eq || isEndOfTagSection(c)) {
       this.cbs.onattribname(this.sectionStart, this.index);
       this.handleAttrNameEnd(c);
-    } else if (
-      c === CharCodes.DoubleQuote ||
-      c === CharCodes.SingleQuote ||
-      c === CharCodes.Lt
-    ) {
+    } else if (c === CharCodes.DoubleQuote || c === CharCodes.SingleQuote || c === CharCodes.Lt) {
       this.cbs.onerr(17, this.index);
     }
   }
@@ -641,7 +635,7 @@ class Tokenizer {
   }
 
   private handleInAttrValue(c: number, quote: number) {
-    if (c === quote || (this.fastForwardTo(quote))) {
+    if (c === quote || this.fastForwardTo(quote)) {
       this.cbs.onattribdata(this.sectionStart, this.index);
       this.sectionStart = -1;
       this.cbs.onattribend(
@@ -683,8 +677,7 @@ class Tokenizer {
       this.state = State.CDATASequence;
       this.sequenceIndex = 0;
     } else {
-      this.state =
-        c === CharCodes.Dash ? State.BeforeComment : State.InDeclaration;
+      this.state = c === CharCodes.Dash ? State.BeforeComment : State.InDeclaration;
     }
   }
 
@@ -933,10 +926,14 @@ function findVueFiles(dir: string): string[] {
         const fullPath = path.join(currentDir, entry.name);
         if (entry.isDirectory()) {
           // Skip node_modules and hidden directories
-          if (!entry.name.startsWith('.') && entry.name !== 'node_modules' && entry.name !== 'dist') {
+          if (
+            !entry.name.startsWith(".") &&
+            entry.name !== "node_modules" &&
+            entry.name !== "dist"
+          ) {
             scan(fullPath);
           }
-        } else if (entry.isFile() && entry.name.endsWith('.vue')) {
+        } else if (entry.isFile() && entry.name.endsWith(".vue")) {
           files.push(fullPath);
         }
       }
@@ -956,13 +953,13 @@ function findVueFiles(dir: string): string[] {
 // ============================================================================
 
 const folders = [
-  'D:\\dev\\accioresearch\\WLS\\avava\\src',
-  'D:\\dev\\accioresearch\\WLS\\sport\\src',
-  'D:\\dev\\accioresearch\\WLS\\nexus\\nexus-ui',
-  'D:\\dev\\csc-web\\csc-web\\src',
-  'D:\\dev\\hypermob\\judis-app\\packages',
-  'D:\\dev\\mpreis\\storefront\\src',
-  'D:\\dev\\spotqa\\frontend\\src',
+  "D:\\dev\\accioresearch\\WLS\\avava\\src",
+  "D:\\dev\\accioresearch\\WLS\\sport\\src",
+  "D:\\dev\\accioresearch\\WLS\\nexus\\nexus-ui",
+  "D:\\dev\\csc-web\\csc-web\\src",
+  "D:\\dev\\hypermob\\judis-app\\packages",
+  "D:\\dev\\mpreis\\storefront\\src",
+  "D:\\dev\\spotqa\\frontend\\src",
 ];
 
 interface FileResult {
@@ -978,7 +975,7 @@ let totalFiles = 0;
 let processedFiles = 0;
 let errorFiles = 0;
 
-console.error('Scanning folders for .vue files...');
+console.error("Scanning folders for .vue files...");
 
 for (const folder of folders) {
   if (!fs.existsSync(folder)) {
@@ -992,7 +989,7 @@ for (const folder of folders) {
 
   for (const file of files) {
     try {
-      const content = fs.readFileSync(file, 'utf-8');
+      const content = fs.readFileSync(file, "utf-8");
       // Tokenize the full .vue file content (no extraction)
       const events = tokenize(content);
       const relativePath = path.relative(folder, file);
@@ -1022,7 +1019,7 @@ const output = {
     errorFiles,
     totalEvents: results.reduce((sum, r) => sum + r.eventCount, 0),
   },
-  files: results.map(r => ({
+  files: results.map((r) => ({
     path: r.path,
     templateLength: r.templateLength,
     eventCount: r.eventCount,

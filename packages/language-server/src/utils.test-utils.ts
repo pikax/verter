@@ -4,18 +4,12 @@ import { MagicString } from "vue/compiler-sfc";
 import fs from "fs";
 
 export function getSourceMap({ s }: { s: MagicString }) {
-  return new SourceMapConsumer(
-    s.generateMap({ hires: true, includeContent: true }) as any
-  );
+  return new SourceMapConsumer(s.generateMap({ hires: true, includeContent: true }) as any);
 }
 
 export function expectFindStringWithMap(
   toFind: string,
-  {
-    content,
-    s,
-    loc: { source },
-  }: { content: string; s: MagicString; loc: { source: string } }
+  { content, s, loc: { source } }: { content: string; s: MagicString; loc: { source: string } },
 ) {
   function getLineOffsets(text: string) {
     const lineOffsets: number[] = [];
@@ -48,11 +42,7 @@ export function expectFindStringWithMap(
    * @param text The text for which the position should be retrived
    * @param lineOffsets number Array with offsets for each line. Computed if not given
    */
-  function positionAt(
-    offset: number,
-    text: string,
-    lineOffsets = getLineOffsets(text)
-  ): Position {
+  function positionAt(offset: number, text: string, lineOffsets = getLineOffsets(text)): Position {
     offset = clamp(offset, 0, text.length);
 
     let low = 0;
@@ -84,9 +74,7 @@ export function expectFindStringWithMap(
     // or array.length if no line offset is larger than the current offset
     const line = low;
     const column =
-      offset < lineOffsets[line]
-        ? offset - lineOffsets[line - 1]
-        : offset - lineOffsets[line];
+      offset < lineOffsets[line] ? offset - lineOffsets[line - 1] : offset - lineOffsets[line];
     return { line, column };
   }
 
@@ -111,14 +99,10 @@ export function testSourceMaps({
   content: string;
   map: ReturnType<MagicString["generateMap"]>;
 }) {
-  fs.writeFileSync(
-    "D:/Downloads/sourcemap-test/sourcemap-example.js",
-    content,
-    "utf-8"
-  );
+  fs.writeFileSync("D:/Downloads/sourcemap-test/sourcemap-example.js", content, "utf-8");
   fs.writeFileSync(
     "D:/Downloads/sourcemap-test/sourcemap-example.js.map",
     JSON.stringify(map),
-    "utf-8"
+    "utf-8",
   );
 }

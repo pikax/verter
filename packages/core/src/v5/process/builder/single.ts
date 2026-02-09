@@ -18,24 +18,18 @@ import {
   TemplateRefPlugin,
 } from "../script/plugins/";
 
-import {
-  TemplateItem,
-  TemplateTypes,
-} from "../script/../../parser/template/types";
+import { TemplateItem, TemplateTypes } from "../script/../../parser/template/types";
 import { ComponentTypePlugin } from "../script/plugins/component-type";
 import { ParsedBlockScript, ScriptItem } from "../../parser";
 import { DefaultPlugins, processTemplate } from "../template";
 import { ScriptContext } from "../script/types";
 
 export function buildSingle(
-  context: Omit<
-    ProcessContext,
-    "block" | "blockNameResolver" | "isSingleFile" | "items"
-  >
+  context: Omit<ProcessContext, "block" | "blockNameResolver" | "isSingleFile" | "items">,
 ) {
   const template = context.blocks.find((x) => x.type === "template");
   const block = context.blocks.find(
-    (block) => block.type === "script" && (block as ParsedBlockScript).isMain
+    (block) => block.type === "script" && (block as ParsedBlockScript).isMain,
   );
 
   const s = context.override ? context.s : context.s.clone();
@@ -73,14 +67,14 @@ export function buildSingle(
           InferFunctionPlugin,
         ],
         scriptContext,
-        false
+        false,
       )
     : undefined;
   const templateResult = template
     ? processTemplate(
         (template.result?.items as TemplateItem[]) ?? [],
         DefaultPlugins.filter(
-          (x) => x.name !== "VerterSFCCleaner" //&& x.name !== "VerterImports"
+          (x) => x.name !== "VerterSFCCleaner", //&& x.name !== "VerterImports"
         ),
         {
           ...context,
@@ -90,7 +84,7 @@ export function buildSingle(
           block: template!,
           isSingleFile: true,
         },
-        false
+        false,
       )
     : undefined;
 

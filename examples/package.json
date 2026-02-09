@@ -1,15 +1,15 @@
 {
   "name": "examples",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
   "private": true,
+  "description": "",
+  "keywords": [],
+  "license": "ISC",
+  "author": "",
+  "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "@vue/compiler-sfc": "^3.5.13",
     "@vue/runtime-core": "^3.5.13",

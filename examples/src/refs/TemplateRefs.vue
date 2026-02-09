@@ -1,12 +1,7 @@
 <script setup lang="ts">
 // Template ref patterns for parser testing
 
-import {
-  ref,
-  useTemplateRef,
-  onMounted,
-  type ComponentPublicInstance,
-} from "vue";
+import { ref, useTemplateRef, onMounted, type ComponentPublicInstance } from "vue";
 
 // DOM element refs
 const inputRef = ref(null);

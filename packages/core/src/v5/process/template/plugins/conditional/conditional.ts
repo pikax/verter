@@ -31,9 +31,7 @@ export const ConditionalPlugin = declareTemplatePlugin({
         if (this.processed.has(narrow.parent)) return;
         this.processed.add(narrow.parent);
       }
-      const conditions = narrow.conditions.filter(
-        (x) => x !== narrow.condition
-      );
+      const conditions = narrow.conditions.filter((x) => x !== narrow.condition);
       if (conditions.length > 0) {
         const condition = narrow.inBlock
           ? generateBlockCondition(conditions, s)
@@ -85,7 +83,7 @@ export const ConditionalPlugin = declareTemplatePlugin({
   // },
 
   transformCondition(item, s, ctx) {
-    if(this.processed.has(item.element)) {
+    if (this.processed.has(item.element)) {
       return;
     }
 
@@ -95,9 +93,7 @@ export const ConditionalPlugin = declareTemplatePlugin({
     this.processed.add(element);
 
     // slot render have special conditions and places where the v-if should be placed
-    const canMove = !(
-      element.tag === "template" && element.props.find((x) => x.name === "slot")
-    );
+    const canMove = !(element.tag === "template" && element.props.find((x) => x.name === "slot"));
 
     // Move comments to after the element contition narrow and
     // before the element condition
@@ -129,11 +125,7 @@ export const ConditionalPlugin = declareTemplatePlugin({
 
     if (canMove) {
       // move v-* to the beginning of the element
-      s.move(
-        node.loc.start.offset,
-        node.loc.end.offset,
-        element.loc.start.offset
-      );
+      s.move(node.loc.start.offset, node.loc.end.offset, element.loc.start.offset);
     }
 
     if (node.name === "else-if") {
@@ -157,17 +149,10 @@ export const ConditionalPlugin = declareTemplatePlugin({
       // );
 
       // remove =
-      s.remove(
-        node.loc.start.offset + rawName.length,
-        node.loc.start.offset + rawName.length + 1
-      );
+      s.remove(node.loc.start.offset + rawName.length, node.loc.start.offset + rawName.length + 1);
 
       // update delimiters
-      s.overwrite(
-        node.exp.loc.start.offset - 1,
-        node.exp.loc.start.offset,
-        "("
-      );
+      s.overwrite(node.exp.loc.start.offset - 1, node.exp.loc.start.offset, "(");
       s.overwrite(node.exp.loc.end.offset, node.exp.loc.end.offset + 1, "){");
       // s.overwrite(node.exp.loc.end.offset, node.exp.loc.end.offset + 1, ")?");
 
@@ -238,25 +223,17 @@ export const ConditionalPlugin = declareTemplatePlugin({
 
     s.prependLeft(
       item.body.loc.start.offset,
-      inBlock
-        ? generateBlockCondition(conditions, s)
-        : generateTernaryCondition(conditions, s)
+      inBlock ? generateBlockCondition(conditions, s) : generateTernaryCondition(conditions, s),
     );
   },
 });
 
-function generateBlockCondition(
-  conditions: TemplateCondition[],
-  s: MagicString
-) {
+function generateBlockCondition(conditions: TemplateCondition[], s: MagicString) {
   const text = generateConditionText(conditions, s);
   return `if(!(${text})) return;`;
 }
 
-function generateTernaryCondition(
-  conditions: TemplateCondition[],
-  s: MagicString
-) {
+function generateTernaryCondition(conditions: TemplateCondition[], s: MagicString) {
   const text = generateConditionText(conditions, s);
   return `!(${text})? undefined :`;
 }
@@ -278,10 +255,7 @@ function generateTernaryCondition(
  * @param s - MagicString containing the source code for extracting condition text
  * @returns A TypeScript expression that represents when this branch would be taken
  */
-export function generateConditionText(
-  conditions: TemplateCondition[],
-  s: MagicString
-): string {
+export function generateConditionText(conditions: TemplateCondition[], s: MagicString): string {
   // Collect all unique siblings from all conditions (direct siblings only, no recursion)
   // Each condition's siblings are all prior conditions in the v-if/v-else-if chain
   const allSiblings = conditions
@@ -303,9 +277,7 @@ export function generateConditionText(
   // Generate negation text for each sibling (without recursive sibling processing)
   const negationParts: string[] = [];
   for (const sibling of uniqueSiblings.values()) {
-    const condText = s
-      .slice(sibling.node.loc.start.offset, sibling.node.loc.end.offset)
-      .toString();
+    const condText = s.slice(sibling.node.loc.start.offset, sibling.node.loc.end.offset).toString();
     if (condText) {
       const parsed = parseConditionText(condText);
       if (parsed) {
@@ -319,9 +291,7 @@ export function generateConditionText(
 
   const positive = conditions
     .map((x) => {
-      const r = s
-        .slice(x.node.loc.start.offset, x.node.loc.end.offset)
-        .toString();
+      const r = s.slice(x.node.loc.start.offset, x.node.loc.end.offset).toString();
       return r;
     })
     .filter((x) => x)

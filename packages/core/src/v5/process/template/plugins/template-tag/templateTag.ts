@@ -8,7 +8,7 @@ export const TemplateTagPlugin = {
     s.overwrite(
       pos.open.start,
       pos.open.start + 1,
-      `export ${ctx.isAsync ? "async " : ""}function `
+      `export ${ctx.isAsync ? "async " : ""}function `,
     );
     s.update(pos.open.end - 1, pos.open.end, `(){`);
 
@@ -26,11 +26,7 @@ export const TemplateTagPlugin = {
     // move generic to template
     if (ctx.generic) {
       s.prependLeft(pos.open.end - 1, `<`);
-      s.move(
-        ctx.generic.position.start,
-        ctx.generic.position.end,
-        pos.open.end - 1
-      );
+      s.move(ctx.generic.position.start, ctx.generic.position.end, pos.open.end - 1);
       s.prependRight(pos.open.end - 1, `>`);
     }
 

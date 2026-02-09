@@ -11,7 +11,7 @@ export abstract class VueTypescriptDocument extends VueSubDocument {
     uri: string,
     parent: VueDocument,
     languageId: LanguageTypescript,
-    version: number
+    version: number,
   ) {
     super(uri, parent, languageId, version);
   }
@@ -22,10 +22,7 @@ export abstract class VueTypescriptDocument extends VueSubDocument {
       this.sync(true);
     }
 
-    return (
-      this._snapshot ??
-      (this._snapshot = ts.ScriptSnapshot.fromString(this.getText()))
-    );
+    return this._snapshot ?? (this._snapshot = ts.ScriptSnapshot.fromString(this.getText()));
   }
 
   update(content: string, version?: number) {

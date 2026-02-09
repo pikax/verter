@@ -1,8 +1,5 @@
-type IsExactlyEqual<A, B> = (<T>() => T extends A ? 1 : 2) extends <
-  T
->() => T extends B ? 1 : 2
-  ? true
-  : false;
+type IsExactlyEqual<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 
 /**
  * Strictly render the slot, see https://github.com/vuejs/rfcs/discussions/733
@@ -15,11 +12,11 @@ export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(
     ? R extends Array<any>
       ? never
       : R extends string
-      ? [R]
-      : R extends U
-      ? [U]
-      : R
-    : ReturnType<T>
+        ? [R]
+        : R extends U
+          ? [U]
+          : R
+    : ReturnType<T>,
 ): any;
 
 export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(
@@ -28,35 +25,26 @@ export declare function strictRenderSlot<T extends (...args: any[]) => any, U>(
     ? R extends readonly [any, ...any[]]
       ? R // Tuple: exact match
       : R extends Array<infer E>
-      ? U extends Array<infer UE>
-        ? [UE] extends [never]
-          ? U // Empty array: UE is never
-          : E extends
-              | string
-              | number
-              | boolean
-              | symbol
-              | bigint
-              | null
-              | undefined
-          ? E extends UE
-            ? U // For primitives: accept if expected extends provided (allows widening)
-            : never
-          : UE extends E
-          ? IsExactlyEqual<UE, E> extends true
-            ? U // For objects: use exact equality check
-            : never
+        ? U extends Array<infer UE>
+          ? [UE] extends [never]
+            ? U // Empty array: UE is never
+            : E extends string | number | boolean | symbol | bigint | null | undefined
+              ? E extends UE
+                ? U // For primitives: accept if expected extends provided (allows widening)
+                : never
+              : UE extends E
+                ? IsExactlyEqual<UE, E> extends true
+                  ? U // For objects: use exact equality check
+                  : never
+                : never
           : never
         : never
-      : never
-    : ReturnType<T>
+    : ReturnType<T>,
 ): any;
 
 export declare function renderSlotJSX<T>(
-  slot: T
-): T extends (...args: infer A) => any
-  ? (cb: (...a: A) => any) => JSX.Element
-  : never;
+  slot: T,
+): T extends (...args: infer A) => any ? (cb: (...a: A) => any) => JSX.Element : never;
 
 /**
  * Converts Vue slot types into JSX-compatible component types for rendering slots as components.
@@ -104,8 +92,8 @@ export type SlotsToRender<T> = {
 export type SlotToRender<T> = T extends (props: infer P) => any
   ? { new (): { $props: P & {} } }
   : T extends () => any
-  ? { new (): { $props: {} } }
-  : { new (): { $props: {} } };
+    ? { new (): { $props: {} } }
+    : { new (): { $props: {} } };
 
 export declare function slotToRender<T>(slot: T): SlotToRender<T>;
 
@@ -165,5 +153,5 @@ export declare function slotToRender<T>(slot: T): SlotToRender<T>;
  */
 export declare function extractArgumentsFromRenderSlot<
   T extends { $slots: { [K in N]: any } },
-  N extends string
+  N extends string,
 >(component: T, slotName: N): Parameters<T["$slots"][N]>[0];

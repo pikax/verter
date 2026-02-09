@@ -1,7 +1,6 @@
 type __COMP__ = {};
 declare const Comp: __COMP__;
 
-
 const emits = getComponentEmits(Comp);
 const props = getComponentProps(Comp);
 
@@ -14,7 +13,6 @@ expectType<{
   (event: "onUpdate:modelValue"): void;
   // @ts-expect-error not any
 }>(emits);
-
 
 props.modelValue;
 props.test;

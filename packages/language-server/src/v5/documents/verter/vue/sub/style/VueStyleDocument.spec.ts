@@ -46,7 +46,7 @@ describe("VueStyleDocument", () => {
       "css",
       mockLanguageService,
       1,
-      styleBlock
+      styleBlock,
     );
     expect(styleDoc.uri).toBe(styleUri);
     expect(styleDoc.languageId).toBe("css");
@@ -60,7 +60,7 @@ describe("VueStyleDocument", () => {
       "css",
       mockLanguageService,
       1,
-      styleBlock
+      styleBlock,
     );
     // No parse yet
     expect(mockLanguageService.parseStylesheet).not.toHaveBeenCalled();
@@ -83,7 +83,7 @@ describe("VueStyleDocument", () => {
       "css",
       mockLanguageService,
       1,
-      styleBlock
+      styleBlock,
     );
 
     // The first time we call getText(), it runs sync() => process()
@@ -104,7 +104,7 @@ describe("VueStyleDocument", () => {
       "css",
       mockLanguageService,
       1,
-      styleBlock
+      styleBlock,
     );
     // First get => triggers parse
     styleDoc.getText();
@@ -129,14 +129,14 @@ describe("VueStyleDocument", () => {
       "css",
       mockLanguageService,
       1,
-      styleBlock
+      styleBlock,
     );
     // Access => sync once
     styleDoc.getText();
 
     // Parent changes content (new version)
     parentDoc.update(parentDoc.getText().replace("red", "green"), 2);
-    
+
     // Update the styleBlock reference to the new block from updated parent
     const newStyleBlock = parentDoc.blocks.find((b) => b.type === "style");
     if (newStyleBlock) {
@@ -165,7 +165,7 @@ describe("VueStyleDocument", () => {
       "css",
       mockLanguageService,
       1,
-      badBlock
+      badBlock,
     );
     const text = doc.getText();
     // The text should be processed but all blocks blanked out since none match

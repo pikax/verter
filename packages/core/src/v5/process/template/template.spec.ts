@@ -11,9 +11,7 @@ describe("process template", () => {
 
     const s = new MagicString(source);
 
-    const templateBlock = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processTemplate(
       templateBlock.result.items,
@@ -25,7 +23,7 @@ describe("process template", () => {
         blocks: parsed.blocks,
         block: templateBlock,
         blockNameResolver: (name) => name,
-      }
+      },
     );
 
     return r;
@@ -40,24 +38,20 @@ describe("process template", () => {
   describe("props", () => {
     it("class with bindings", () => {
       const { result } = parse(
-        `<div :style="{ color: 'red' }" class="color: green" :class="{ color: 'red', test, super: foo }" />`
+        `<div :style="{ color: 'red' }" class="color: green" :class="{ color: 'red', test, super: foo }" />`,
       );
+      expect(result).toContain(`style={___VERTER___normalizeStyle([{ color: 'red' }])}`);
       expect(result).toContain(
-        `style={___VERTER___normalizeStyle([{ color: 'red' }])}`
-      );
-      expect(result).toContain(
-        `class={___VERTER___normalizeClass([{ color: 'red', test: ___VERTER___ctx.test, super: ___VERTER___ctx.foo },"color: green"])}`
+        `class={___VERTER___normalizeClass([{ color: 'red', test: ___VERTER___ctx.test, super: ___VERTER___ctx.foo },"color: green"])}`,
       );
     });
   });
 
   describe("conditionals", () => {
     it("v-if", () => {
-      const { result } = parse(
-        `<div v-if="typeof test === 'string'" :test="()=>test" />`
-      );
+      const { result } = parse(`<div v-if="typeof test === 'string'" :test="()=>test" />`);
       expect(result).toContain(
-        `if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}`
+        `if(typeof ___VERTER___ctx.test === 'string'){<div  test={()=>___VERTER___ctx.test} />}`,
       );
     });
 
@@ -66,13 +60,11 @@ describe("process template", () => {
         `<div v-if="test === 'app'"> 
           <!-- @ts-expect-error no overlap -->
           <div v-if="test === 'foo'"> Error </div>
-        </div>`
+        </div>`,
       );
       expect(result).toContain(`if(___VERTER___ctx.test === 'app'){<div >`);
       expect(result).toContain(`/* @ts-expect-error no overlap */`);
-      expect(result).toContain(
-        `if(___VERTER___ctx.test === 'foo'){<div > Error </div>}`
-      );
+      expect(result).toContain(`if(___VERTER___ctx.test === 'foo'){<div > Error </div>}`);
     });
   });
 
@@ -94,9 +86,7 @@ describe("process template", () => {
     });
 
     it("slot with parent v-else", () => {
-      const { result } = parse(
-        `<div v-if="false"> <slot /> </div><div v-else> <slot/> </div>`
-      );
+      const { result } = parse(`<div v-if="false"> <slot /> </div><div v-else> <slot/> </div>`);
       expect(result).toMatchInlineSnapshot(`
         "import { slotToRender as ___VERTER___slotToRender } from "$verter/types$";export function template(){
         <>{()=>{if(false){<div > {()=>{const ___VERTER___slotComponent29=___VERTER___slotToRender(___VERTER___$slot.default);<___VERTER___slotComponent29 />}} </div>}else{<div > {()=>{const ___VERTER___slotComponent57=___VERTER___slotToRender(___VERTER___$slot.default);<___VERTER___slotComponent57/>}} </div>}}}</>}"
@@ -104,7 +94,7 @@ describe("process template", () => {
     });
     it("slot with parent v-else-if", () => {
       const { result } = parse(
-        `<div v-if="disableDrag"> <slot /> </div><div v-else-if="!disableDrag"> <slot/> </div><div v-else> <slot/> </div>`
+        `<div v-if="disableDrag"> <slot /> </div><div v-else-if="!disableDrag"> <slot/> </div><div v-else> <slot/> </div>`,
       );
       expect(result).toMatchInlineSnapshot(`
         "import { slotToRender as ___VERTER___slotToRender } from "$verter/types$";export function template(){

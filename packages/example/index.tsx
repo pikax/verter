@@ -1,3 +1,3 @@
-import Test from './Test.vue'
+import Test from "./Test.vue";
 
-Test
+Test;

@@ -23,19 +23,14 @@ import {
 import { TemplateTypes } from "../../../../parser/template/types";
 import { ComponentTypePlugin } from "../../plugins/component-type";
 
-export function ResolveOptionsFilename(
-  ctx: Required<Pick<ProcessContext, "blockNameResolver">>
-) {
+export function ResolveOptionsFilename(ctx: Required<Pick<ProcessContext, "blockNameResolver">>) {
   return ctx.blockNameResolver(`options`);
 }
 
 export function buildOptions(
   items: ScriptItem[],
   context: Partial<ScriptContext> &
-    Pick<
-      ProcessContext,
-      "filename" | "s" | "blocks" | "block" | "override" | "blockNameResolver"
-    >
+    Pick<ProcessContext, "filename" | "s" | "blocks" | "block" | "override" | "blockNameResolver">,
 ) {
   const template = context.blocks.find((x) => x.type === "template");
 
@@ -63,6 +58,6 @@ export function buildOptions(
       templateBindings: template?.result?.items
         ? template.result?.items.filter((x) => x.type === TemplateTypes.Binding)
         : [],
-    }
+    },
   );
 }

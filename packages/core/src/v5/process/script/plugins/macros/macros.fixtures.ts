@@ -18,21 +18,12 @@ import { TemplateBindingPlugin } from "../template-binding";
 import { ScriptBlockPlugin } from "../script-block";
 import { BindingPlugin } from "../binding";
 import { ImportsPlugin } from "../imports";
-import type {
-  Fixture,
-  FixtureConfig,
-  ProcessResult,
-} from "../../../../../fixtures/types";
+import type { Fixture, FixtureConfig, ProcessResult } from "../../../../../fixtures/types";
 
 /**
  * Process Vue SFC content through the macros pipeline
  */
-function processMacros(
-  code: string,
-  prefix: string,
-  lang = "ts",
-  generic?: string
-): ProcessResult {
+function processMacros(code: string, prefix: string, lang = "ts", generic?: string): ProcessResult {
   const genericAttr = generic ? ` generic="${generic}"` : "";
   const prepend = `<script setup lang="${lang}"${genericAttr}>`;
   const source = `${prepend}${code}</script>`;
@@ -40,19 +31,11 @@ function processMacros(
 
   const s = new MagicString(source);
 
-  const scriptBlock = parsed.blocks.find(
-    (x) => x.type === "script"
-  ) as ParsedBlockScript;
+  const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
 
   const result = processScript(
     scriptBlock.result.items,
-    [
-      MacrosPlugin,
-      TemplateBindingPlugin,
-      ScriptBlockPlugin,
-      BindingPlugin,
-      ImportsPlugin,
-    ],
+    [MacrosPlugin, TemplateBindingPlugin, ScriptBlockPlugin, BindingPlugin, ImportsPlugin],
     {
       s,
       filename: "test.vue",
@@ -61,12 +44,10 @@ function processMacros(
       block: scriptBlock,
       prefix: (name: string) => prefix + name,
       blockNameResolver: (name: string) => name,
-    }
+    },
   );
 
-  const sourcemap = s
-    .generateMap({ hires: true, includeContent: true })
-    .toUrl();
+  const sourcemap = s.generateMap({ hires: true, includeContent: true }).toUrl();
 
   return {
     result: result.result,
@@ -125,11 +106,7 @@ const props = defineProps({
 `,
     expectations: {
       boxedVariables: [(p) => p + "defineProps_Boxed"],
-      patterns: [
-        (p) => p + "defineProps_Box(",
-        "msg: String",
-        "count: { type: Number",
-      ],
+      patterns: [(p) => p + "defineProps_Box(", "msg: String", "count: { type: Number"],
       antiPatterns: [(p) => p + "defineProps_Type"],
       typeTests: [
         {
@@ -166,8 +143,7 @@ const props = withDefaults(defineProps<{
       typeTests: [
         {
           target: (p) => `${p}defineProps_Type`,
-          description:
-            "Props type should contain all properties including optional",
+          description: "Props type should contain all properties including optional",
           shouldContain: ["msg", "count", "enabled"],
           notAny: true,
         },
@@ -245,10 +221,7 @@ const model = defineModel<string>();
 `,
     expectations: {
       typeAliases: [(p) => p + "modelValue_defineModel_Type"],
-      patterns: [
-        (p) => `defineModel<${p}modelValue_defineModel_Type>`,
-        (p) => p + "Prettify",
-      ],
+      patterns: [(p) => `defineModel<${p}modelValue_defineModel_Type>`, (p) => p + "Prettify"],
       typeTests: [
         {
           target: (p) => `${p}modelValue_defineModel_Type`,
@@ -298,10 +271,7 @@ const count = defineModel<number>('count');
 const name = defineModel<string>('name', { required: true });
 `,
     expectations: {
-      typeAliases: [
-        (p) => p + "count_defineModel_Type",
-        (p) => p + "name_defineModel_Type",
-      ],
+      typeAliases: [(p) => p + "count_defineModel_Type", (p) => p + "name_defineModel_Type"],
       boxedVariables: [(p) => p + "name_defineModel_Boxed"],
       patterns: [
         (p) => `defineModel<${p}count_defineModel_Type>`,
@@ -454,11 +424,7 @@ const { msg, count = 0 } = defineProps<{
 `,
     expectations: {
       typeAliases: [(p) => p + "defineProps_Type"],
-      patterns: [
-        (p) => `defineProps<${p}defineProps_Type`,
-        "msg: string",
-        "count?: number",
-      ],
+      patterns: [(p) => `defineProps<${p}defineProps_Type`, "msg: string", "count?: number"],
     },
   },
   {
@@ -651,10 +617,7 @@ const typeInspectionFixtures: Fixture[] = [
   // Required models should be reflected in types
   `,
     expectations: {
-      typeAliases: [
-        (p) => p + "modelValue_defineModel_Type",
-        (p) => p + "count_defineModel_Type",
-      ],
+      typeAliases: [(p) => p + "modelValue_defineModel_Type", (p) => p + "count_defineModel_Type"],
       boxedVariables: [
         (p) => p + "modelValue_defineModel_Boxed",
         (p) => p + "count_defineModel_Boxed",
@@ -1067,13 +1030,7 @@ const emit = defineEmits<{
   defineOptions({ inheritAttrs: false });
   `,
     expectations: {
-      patterns: [
-        "defineProps<",
-        "defineEmits<",
-        "defineSlots<",
-        "defineExpose(",
-        "defineOptions(",
-      ],
+      patterns: ["defineProps<", "defineEmits<", "defineSlots<", "defineExpose(", "defineOptions("],
       typeTests: [
         {
           target: (p) => `${p}props`,
@@ -1110,10 +1067,7 @@ const emit = defineEmits<{
   `,
     expectations: {
       typeAliases: [(p) => p + "defineProps_Type"],
-      patterns: [
-        "'small' | 'medium' | 'large'",
-        "'primary' | 'secondary' | 'danger'",
-      ],
+      patterns: ["'small' | 'medium' | 'large'", "'primary' | 'secondary' | 'danger'"],
     },
   },
   {
@@ -1150,8 +1104,7 @@ const emit = defineEmits<{
         {
           target: "emit",
           kind: "variable" as const,
-          description:
-            "emit function should have complex tuple call signatures",
+          description: "emit function should have complex tuple call signatures",
           shouldContain: ["update", "batch"],
           notAny: true,
           notUnknown: true,
@@ -1209,10 +1162,7 @@ const emit = defineEmits<{
   const end = defineModel<Date>('end');
   `,
     expectations: {
-      typeAliases: [
-        (p) => p + "start_defineModel_Type",
-        (p) => p + "end_defineModel_Type",
-      ],
+      typeAliases: [(p) => p + "start_defineModel_Type", (p) => p + "end_defineModel_Type"],
     },
   },
   {
@@ -1314,12 +1264,7 @@ defineExpose({
         (p) => p + "filter_defineModel_Type",
         (p) => p + "defineSlots_Type",
       ],
-      patterns: [
-        "items: T[]",
-        "selected: T | null",
-        "labelKey: K",
-        "select: [item: T]",
-      ],
+      patterns: ["items: T[]", "selected: T | null", "labelKey: K", "select: [item: T]"],
       typeTests: [
         {
           target: (p) => `${p}defineProps_Type`,
@@ -1345,10 +1290,7 @@ const props = defineProps<{ item: T }>();
 const emit = defineEmits<{ select: [item: T] }>();
 `,
     expectations: {
-      typeAliases: [
-        (p) => p + "defineProps_Type",
-        (p) => p + "defineEmits_Type",
-      ],
+      typeAliases: [(p) => p + "defineProps_Type", (p) => p + "defineEmits_Type"],
       patterns: ["item: T"],
     },
   },
@@ -1386,8 +1328,7 @@ const props = defineProps<{
 export function createFixtures(prefix: string = ""): FixtureConfig {
   return {
     fixtures: [...fixtures, ...typeInspectionFixtures],
-    process: (fixture) =>
-      processMacros(fixture.code, prefix, fixture.lang, fixture.generic),
+    process: (fixture) => processMacros(fixture.code, prefix, fixture.lang, fixture.generic),
     // Use empty prefix for cleaner output
     prefix,
   };

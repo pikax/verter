@@ -1,23 +1,23 @@
 <script setup lang="ts">
-import { onMounted, provide } from 'vue'
-import { useStore } from './core/store'
-import Header from './components/Header.vue'
-import SplitPane from './components/SplitPane.vue'
-import Message from './components/Message.vue'
-import FileSelector from './editor/FileSelector.vue'
-import Editor from './editor/Editor.vue'
-import Output from './output/Output.vue'
+import { onMounted, provide } from "vue";
+import { useStore } from "./core/store";
+import Header from "./components/Header.vue";
+import SplitPane from "./components/SplitPane.vue";
+import Message from "./components/Message.vue";
+import FileSelector from "./editor/FileSelector.vue";
+import Editor from "./editor/Editor.vue";
+import Output from "./output/Output.vue";
 
-const store = useStore()
+const store = useStore();
 
-provide('store', store)
+provide("store", store);
 
 onMounted(async () => {
   if (store.darkMode) {
-    document.documentElement.classList.add('dark')
+    document.documentElement.classList.add("dark");
   }
-  await store.init()
-})
+  await store.init();
+});
 </script>
 
 <template>

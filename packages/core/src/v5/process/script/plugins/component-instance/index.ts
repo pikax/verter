@@ -1,2 +1,1 @@
-
-export * from './componentInstance'
+export * from "./componentInstance";

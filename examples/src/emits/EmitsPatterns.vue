@@ -5,7 +5,7 @@
 const emit1 = defineEmits<{
   change: [value: string];
   update: [id: number, data: { name: string }];
-  submit: [];  // no payload
+  submit: []; // no payload
   "kebab-case": [value: boolean];
 }>();
 
@@ -22,7 +22,7 @@ const emit3 = defineEmits({
     // Validation - return false to warn
     return typeof value === "string";
   },
-  submit: null,  // No validation
+  submit: null, // No validation
   update: (id: number, data: object) => {
     return typeof id === "number" && data !== null;
   },

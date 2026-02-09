@@ -1,7 +1,7 @@
 <script setup>
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const disableDrag = ref(false)
+const disableDrag = ref(false);
 </script>
 
 <template>

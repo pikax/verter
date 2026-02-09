@@ -66,10 +66,8 @@ const componentName = ref<"ComponentA" | "ComponentB">("ComponentA");
 
 const AsyncDynamic = computed(() =>
   defineAsyncComponent(() =>
-    componentName.value === "ComponentA"
-      ? import("./ComponentA.vue")
-      : import("./ComponentB.vue")
-  )
+    componentName.value === "ComponentA" ? import("./ComponentA.vue") : import("./ComponentB.vue"),
+  ),
 );
 
 // Lazy loaded components map
@@ -88,9 +86,7 @@ interface UserProfileProps {
 }
 
 // Props type is for documentation - actual component uses its own props
-const AsyncUserProfile = defineAsyncComponent(
-  () => import("./UserProfile.vue")
-);
+const AsyncUserProfile = defineAsyncComponent(() => import("./UserProfile.vue"));
 
 // Preload component manually
 const preloadedComponent = shallowRef<Component | null>(null);
@@ -103,7 +99,7 @@ async function preloadComponent() {
 // Factory function for async components
 function createAsyncComponent(
   loader: () => Promise<typeof import("*.vue")>,
-  options: { delay?: number; timeout?: number } = {}
+  options: { delay?: number; timeout?: number } = {},
 ) {
   return defineAsyncComponent({
     loader,
@@ -118,10 +114,10 @@ function createAsyncComponent(
   });
 }
 
-const CustomAsyncComponent = createAsyncComponent(
-  () => import("./CustomComponent.vue"),
-  { delay: 100, timeout: 5000 }
-);
+const CustomAsyncComponent = createAsyncComponent(() => import("./CustomComponent.vue"), {
+  delay: 100,
+  timeout: 5000,
+});
 
 // State
 const showAsync = ref(false);
@@ -137,8 +133,7 @@ function toggleDynamic() {
 }
 
 function switchComponent() {
-  componentName.value =
-    componentName.value === "ComponentA" ? "ComponentB" : "ComponentA";
+  componentName.value = componentName.value === "ComponentA" ? "ComponentB" : "ComponentA";
 }
 
 function setRoute(route: "dashboard" | "settings" | "profile") {

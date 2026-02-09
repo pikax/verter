@@ -1,10 +1,5 @@
 import { NOOP } from "@vue/shared";
-import {
-  ExpressionStatement,
-  IdentifierName,
-  VerterAST,
-  VerterASTNode,
-} from "../../ast";
+import { ExpressionStatement, IdentifierName, VerterAST, VerterASTNode } from "../../ast";
 import { TemplateBinding, TemplateTypes } from "../../template/types";
 import { getASTBindings, retrieveBindings } from "../../template/utils";
 import { VerterNode } from "../../walk";
@@ -14,7 +9,7 @@ import { walk } from "@vue/compiler-sfc";
 export function handleSetupNode(
   pnode: VerterASTNode | VerterAST,
   shallowCb?: (node: VerterASTNode) => any,
-  isOptions = false
+  isOptions = false,
 ): {
   items: ScriptItem[];
   isAsync: boolean;
@@ -56,8 +51,8 @@ export function handleSetupNode(
               node.callee.type === "Identifier"
                 ? node.callee.name
                 : node.callee.type === "MemberExpression"
-                ? (node.callee.property as IdentifierName)?.name
-                : "",
+                  ? (node.callee.property as IdentifierName)?.name
+                  : "",
           });
           this.skip();
           break;
@@ -107,11 +102,7 @@ export function handleSetupNode(
             }
 
             return bindings
-              .filter(
-                (x) =>
-                  x.type === TemplateTypes.Binding &&
-                  !x.parent?.type.startsWith("TS")
-              )
+              .filter((x) => x.type === TemplateTypes.Binding && !x.parent?.type.startsWith("TS"))
               .map((b) => {
                 return {
                   type: ScriptTypes.Declaration,
@@ -197,9 +188,7 @@ export function handleSetupNode(
   };
 }
 
-export function createSetupContext(opts: {
-  lang: string | "ts" | "tsx" | "js" | "jsx";
-}) {
+export function createSetupContext(opts: { lang: string | "ts" | "tsx" | "js" | "jsx" }) {
   let trackDeclarations = true;
   let isAsync = false;
 
@@ -219,7 +208,7 @@ export function createSetupContext(opts: {
     node: VerterASTNode,
     parent: VerterASTNode | null,
     key?: string,
-    context: { skip: () => void } = { skip: NOOP }
+    context: { skip: () => void } = { skip: NOOP },
   ): void | ScriptItem | ScriptItem[] {
     if (ignore) {
       return;
@@ -248,10 +237,10 @@ export function createSetupContext(opts: {
             node.callee.type === "Identifier"
               ? node.callee.name
               : node.callee.type === "MemberExpression"
-              ? node.callee.property.type === "Identifier"
-                ? node.callee.property.name
-                : ""
-              : "",
+                ? node.callee.property.type === "Identifier"
+                  ? node.callee.property.name
+                  : ""
+                : "",
         };
       }
 
@@ -286,11 +275,7 @@ export function createSetupContext(opts: {
           });
 
           const items: ScriptItem[] = bindings
-            .filter(
-              (x) =>
-                x.type === TemplateTypes.Binding &&
-                !x.parent?.type.startsWith("TS")
-            )
+            .filter((x) => x.type === TemplateTypes.Binding && !x.parent?.type.startsWith("TS"))
             .map((b) => {
               return {
                 type: ScriptTypes.Declaration,
@@ -358,11 +343,7 @@ export function createSetupContext(opts: {
     }
   }
 
-  function leave(
-    node: VerterASTNode,
-    parent: VerterASTNode | null,
-    key?: string
-  ) {
+  function leave(node: VerterASTNode, parent: VerterASTNode | null, key?: string) {
     if (ignoreNodeTypes.has(node.type)) {
       ignore = false;
     }

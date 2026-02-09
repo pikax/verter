@@ -8,10 +8,7 @@
  */
 import { MagicString } from "@vue/compiler-sfc";
 import { parser, TemplateTypes } from "../../../../parser";
-import {
-  ParsedBlockScript,
-  ParsedBlockTemplate,
-} from "../../../../parser/types";
+import { ParsedBlockScript, ParsedBlockTemplate } from "../../../../parser/types";
 import { processScript } from "../../script";
 
 import { MacrosPlugin } from "../macros";
@@ -26,7 +23,7 @@ describe("process InferFunctionPlugin", () => {
     lang = "js",
     attributes = "",
     pre = "",
-    post = ""
+    post = "",
   ) {
     const prepend = `${pre}<script ${
       wrapper === false ? "setup" : ""
@@ -36,13 +33,9 @@ describe("process InferFunctionPlugin", () => {
 
     const s = new MagicString(source);
 
-    const scriptBlock = parsed.blocks.find(
-      (x) => x.type === "script"
-    ) as ParsedBlockScript;
+    const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
 
-    const template = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const template = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processScript(
       scriptBlock.result.items,
@@ -57,10 +50,8 @@ describe("process InferFunctionPlugin", () => {
         isAsync: parsed.isAsync,
         blockNameResolver: (name) => name,
         templateBindings:
-          template?.result?.items.filter(
-            (x) => x.type === TemplateTypes.Binding
-          ) ?? [],
-      }
+          template?.result?.items.filter((x) => x.type === TemplateTypes.Binding) ?? [],
+      },
     );
 
     return r;
@@ -74,10 +65,10 @@ describe("process InferFunctionPlugin", () => {
           false,
           "ts",
           "",
-          '<template><button @click="handleClick"></button></template>'
+          '<template><button @click="handleClick"></button></template>',
         );
         expect(result).toContain(
-          `function handleClick(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["button"]["onClick"]>>) { return e }`
+          `function handleClick(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["button"]["onClick"]>>) { return e }`,
         );
       });
 
@@ -87,10 +78,10 @@ describe("process InferFunctionPlugin", () => {
           false,
           "ts",
           "",
-          '<template><input @input="handleInput" /></template>'
+          '<template><input @input="handleInput" /></template>',
         );
         expect(result).toContain(
-          `function handleInput(...[event]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["input"]["onInput"]>>)`
+          `function handleInput(...[event]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["input"]["onInput"]>>)`,
         );
       });
 
@@ -100,10 +91,10 @@ describe("process InferFunctionPlugin", () => {
           false,
           "ts",
           "",
-          '<template><select @change="onChange"></select></template>'
+          '<template><select @change="onChange"></select></template>',
         );
         expect(result).toContain(
-          `function onChange(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["select"]["onChange"]>>)`
+          `function onChange(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["select"]["onChange"]>>)`,
         );
       });
 
@@ -113,10 +104,10 @@ describe("process InferFunctionPlugin", () => {
           false,
           "ts",
           "",
-          '<template><form @submit="onSubmit"></form></template>'
+          '<template><form @submit="onSubmit"></form></template>',
         );
         expect(result).toContain(
-          `function onSubmit(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["form"]["onSubmit"]>>)`
+          `function onSubmit(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["form"]["onSubmit"]>>)`,
         );
       });
 
@@ -126,10 +117,10 @@ describe("process InferFunctionPlugin", () => {
           false,
           "ts",
           "",
-          '<template><input @keydown="handleKey" /></template>'
+          '<template><input @keydown="handleKey" /></template>',
         );
         expect(result).toContain(
-          `function handleKey(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["input"]["onKeydown"]>>)`
+          `function handleKey(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["input"]["onKeydown"]>>)`,
         );
       });
 
@@ -139,10 +130,10 @@ describe("process InferFunctionPlugin", () => {
           false,
           "ts",
           "",
-          '<template><input @focus="handleFocus" /></template>'
+          '<template><input @focus="handleFocus" /></template>',
         );
         expect(result).toContain(
-          `function handleFocus(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["input"]["onFocus"]>>)`
+          `function handleFocus(...[e]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["input"]["onFocus"]>>)`,
         );
       });
     });
@@ -158,10 +149,10 @@ describe("process InferFunctionPlugin", () => {
           false,
           "ts",
           "",
-          '<template><div @click="handler"></div></template>'
+          '<template><div @click="handler"></div></template>',
         );
         expect(result).toContain(
-          `function handler(...[a, b, c]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["div"]["onClick"]>>)`
+          `function handler(...[a, b, c]:Parameters<NonNullable<import('vue').IntrinsicElementAttributes["div"]["onClick"]>>)`,
         );
       });
     });
@@ -173,7 +164,7 @@ describe("process InferFunctionPlugin", () => {
           false,
           "ts",
           "",
-          "<template><div></div></template>"
+          "<template><div></div></template>",
         );
         // Function should remain unchanged
         expect(result).toContain("function unusedFn(x) { return x }");
@@ -192,11 +183,11 @@ describe("process InferFunctionPlugin", () => {
           false,
           "ts",
           "",
-          '<template><div @click="handler"></div></template>'
+          '<template><div @click="handler"></div></template>',
         );
         // Currently the plugin still transforms typed parameters
         expect(result).not.toContain("...[e: MouseEvent]:");
-        expect(result).toContain('e: MouseEvent');
+        expect(result).toContain("e: MouseEvent");
       });
     });
 
@@ -207,7 +198,7 @@ describe("process InferFunctionPlugin", () => {
           false,
           "ts",
           "",
-          '<template><div @click="handler"></div></template>'
+          '<template><div @click="handler"></div></template>',
         );
         // Arrow functions are not FunctionDeclarations, so they're not transformed
         expect(result).toContain("const handler = (e) => e");
@@ -222,7 +213,7 @@ describe("process InferFunctionPlugin", () => {
         false,
         "js",
         "",
-        '<template><button @click="handleClick"></button></template>'
+        '<template><button @click="handleClick"></button></template>',
       );
       // JS files should not have type inference
       expect(result).toContain("function handleClick(e) { return e }");
@@ -237,7 +228,7 @@ describe("process InferFunctionPlugin", () => {
         true, // non-setup
         "ts",
         "",
-        '<template><button @click="handleClick"></button></template>'
+        '<template><button @click="handleClick"></button></template>',
       );
       // Non-setup scripts should still work with template bindings
       expect(result).toBeDefined();
@@ -252,7 +243,7 @@ describe("process InferFunctionPlugin", () => {
         false,
         "ts",
         "",
-        '<template><MyComp @change="handleChange" /></template>'
+        '<template><MyComp @change="handleChange" /></template>',
       );
       // Should infer from component's props type (using Parameters<>)
       expect(result).toContain("Parameters<");
@@ -266,7 +257,7 @@ describe("process InferFunctionPlugin", () => {
         false,
         "ts",
         "",
-        '<template><MyButton @click="onClick" /></template>'
+        '<template><MyButton @click="onClick" /></template>',
       );
       // Component events should be capitalized (onClick, not click)
       expect(result).toContain("Parameters<");
@@ -279,7 +270,7 @@ describe("process InferFunctionPlugin", () => {
         false,
         "ts",
         "",
-        '<template><CustomSelect @select="onSelect" /></template>'
+        '<template><CustomSelect @select="onSelect" /></template>',
       );
       // Should work with locally registered components
       expect(result).toContain("Parameters<");

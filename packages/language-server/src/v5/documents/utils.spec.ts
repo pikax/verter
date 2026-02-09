@@ -18,20 +18,10 @@ import {
 
 // Create a subclass to access protected constructor
 class TestVerterDocument extends VerterDocument {
-  static create(
-    uri: string,
-    languageId: string,
-    content: string,
-    version?: number
-  ) {
+  static create(uri: string, languageId: string, content: string, version?: number) {
     return new VerterDocument(uri, languageId, version ?? -1, content);
   }
-  constructor(
-    uri: string,
-    languageId: string,
-    version: number,
-    content: string
-  ) {
+  constructor(uri: string, languageId: string, version: number, content: string) {
     super(uri, languageId, version, content);
   }
 }
@@ -39,19 +29,12 @@ class TestVerterDocument extends VerterDocument {
 describe("document utils", () => {
   describe("isVueDocument", () => {
     it("should return true if the document is an instance of VueDocument", () => {
-      const doc = VueDocument.create(
-        "file:///some/path.vue",
-        "<template></template>"
-      );
+      const doc = VueDocument.create("file:///some/path.vue", "<template></template>");
       expect(isVueDocument(doc)).toBe(true);
     });
 
     it("should return false if the document is not a VueDocument", () => {
-      const doc = TestVerterDocument.create(
-        "file:///some/other.txt",
-        "plaintext",
-        "just text"
-      );
+      const doc = TestVerterDocument.create("file:///some/other.txt", "plaintext", "just text");
       expect(isVueDocument(doc)).toBe(false);
     });
 
@@ -59,7 +42,7 @@ describe("document utils", () => {
       const doc = TestVerterDocument.create(
         "file:///some/fake.vue",
         "vue",
-        "<template></template>"
+        "<template></template>",
       );
       expect(isVueDocument(doc)).toBe(false);
     });
@@ -210,9 +193,7 @@ describe("document utils", () => {
       const converted = uriToVerterVirtual(uri);
       const parsed = URI.parse(converted);
       expect(parsed.scheme).toBe("verter-virtual");
-      expect(parsed.fsPath.replace(/\\/g, "/")).toBe(
-        "/some/path.vue._VERTER_.template.js"
-      );
+      expect(parsed.fsPath.replace(/\\/g, "/")).toBe("/some/path.vue._VERTER_.template.js");
     });
 
     it("returns same uri if not vue or sub-document", () => {
@@ -294,11 +275,7 @@ describe("document utils", () => {
     });
 
     it("createSubDocument should be compatible with isVueSubDocument", () => {
-      expect(
-        isVueSubDocument(
-          createSubDocumentUri("file:///some/path.vue", "bundle.ts")
-        )
-      );
+      expect(isVueSubDocument(createSubDocumentUri("file:///some/path.vue", "bundle.ts")));
     });
   });
 });

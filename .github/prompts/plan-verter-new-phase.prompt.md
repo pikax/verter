@@ -6,16 +6,16 @@ After thorough exploration, **many items in the original plan are already correc
 
 ### Already Working (Original Plan Was Incorrect)
 
-| Feature | Status | Evidence |
-|---------|--------|----------|
-| Multi-root Fragment wrapping | ✅ Working | `element.rs:1072-1183` |
-| Block root tracking (openBlock) | ✅ Working | `element.rs:174-183` |
-| Key props for v-if/v-else | ✅ Working | `element.rs:137-172` |
-| Patch flags with comments | ✅ Working | `element.rs:1656-1706` |
-| Async context __temp/__restore | ✅ Working | `script.rs:245-259` |
-| Component name from filename | ✅ Working | `codegen.rs:66-87` |
-| Event modifiers | ✅ Working | All modifiers work |
-| Key modifiers | ✅ Working | `_withKeys()` correct |
+| Feature                         | Status     | Evidence               |
+| ------------------------------- | ---------- | ---------------------- |
+| Multi-root Fragment wrapping    | ✅ Working | `element.rs:1072-1183` |
+| Block root tracking (openBlock) | ✅ Working | `element.rs:174-183`   |
+| Key props for v-if/v-else       | ✅ Working | `element.rs:137-172`   |
+| Patch flags with comments       | ✅ Working | `element.rs:1656-1706` |
+| Async context **temp/**restore  | ✅ Working | `script.rs:245-259`    |
+| Component name from filename    | ✅ Working | `codegen.rs:66-87`     |
+| Event modifiers                 | ✅ Working | All modifiers work     |
+| Key modifiers                   | ✅ Working | `_withKeys()` correct  |
 
 ---
 
@@ -26,79 +26,87 @@ After thorough exploration, **many items in the original plan are already correc
 ## Complete Syntax Error Inventory
 
 ### builtin-components.js
-| Line | Error | Invalid Code |
-|------|-------|--------------|
-| 54 | Negation in wrong place | `disabled: _ctx.!showModal` |
-| 56 | Bracket mismatch | `"Conditional teleport"])` |
-| 64, 77 | Bracket mismatch | `"Fade transition"])` |
-| 69 | Bracket in wrong place | `_toDisplayString(_ctx.currentView)])}` |
-| 75 | Unquoted hyphenated props | `onBefore-enter:`, `onAfter-enter:` |
-| 85 | Bracket mismatch | `_toDisplayString(item.name)])}` |
-| 96 | Invalid array/number syntax | `include: _ctx.['CompA', 'CompB'], max: _ctx.10` |
-| 111-112 | Dangling null | `null))` random appearance |
+
+| Line    | Error                       | Invalid Code                                     |
+| ------- | --------------------------- | ------------------------------------------------ |
+| 54      | Negation in wrong place     | `disabled: _ctx.!showModal`                      |
+| 56      | Bracket mismatch            | `"Conditional teleport"])`                       |
+| 64, 77  | Bracket mismatch            | `"Fade transition"])`                            |
+| 69      | Bracket in wrong place      | `_toDisplayString(_ctx.currentView)])}`          |
+| 75      | Unquoted hyphenated props   | `onBefore-enter:`, `onAfter-enter:`              |
+| 85      | Bracket mismatch            | `_toDisplayString(item.name)])}`                 |
+| 96      | Invalid array/number syntax | `include: _ctx.['CompA', 'CompB'], max: _ctx.10` |
+| 111-112 | Dangling null               | `null))` random appearance                       |
 
 ### dynamic-component.js
-| Line | Error | Invalid Code |
-|------|-------|--------------|
-| 48-50 | Missing closing paren | Unclosed `_createBlock(...)` |
-| 63 | Double comma, empty arg | `null, , [` |
-| 67, 86 | Dangling null | `null))` |
-| 76 | Unquoted hyphenated prop | `shared-prop:` |
+
+| Line   | Error                    | Invalid Code                 |
+| ------ | ------------------------ | ---------------------------- |
+| 48-50  | Missing closing paren    | Unclosed `_createBlock(...)` |
+| 63     | Double comma, empty arg  | `null, , [`                  |
+| 67, 86 | Dangling null            | `null))`                     |
+| 76     | Unquoted hyphenated prop | `shared-prop:`               |
 
 ### patch-flags.js
-| Line | Error | Invalid Code |
-|------|-------|--------------|
-| 62 | Missing string concat | `" Static prefix: "_toDisplayString(...)` |
-| 69 | Object after _ctx. | `class: _ctx.{ active: isActive }` |
-| 71 | Array after _ctx. | `class: _ctx.[baseClass, conditionalClass]` |
-| 78 | Object after _ctx. | `style: _ctx.{ color: textColor, ... }` |
-| 80 | Array after _ctx. | `style: _ctx.[baseStyle, overrideStyle]` |
-| 87 | Unquoted hyphenated prop | `data-value: _ctx.dataValue` |
-| 93 | Empty property name | `{ : _ctx.allProps }` |
-| 95 | Double brackets | `[[dynamicPropName]]:` |
+
+| Line | Error                    | Invalid Code                                |
+| ---- | ------------------------ | ------------------------------------------- |
+| 62   | Missing string concat    | `" Static prefix: "_toDisplayString(...)`   |
+| 69   | Object after \_ctx.      | `class: _ctx.{ active: isActive }`          |
+| 71   | Array after \_ctx.       | `class: _ctx.[baseClass, conditionalClass]` |
+| 78   | Object after \_ctx.      | `style: _ctx.{ color: textColor, ... }`     |
+| 80   | Array after \_ctx.       | `style: _ctx.[baseStyle, overrideStyle]`    |
+| 87   | Unquoted hyphenated prop | `data-value: _ctx.dataValue`                |
+| 93   | Empty property name      | `{ : _ctx.allProps }`                       |
+| 95   | Double brackets          | `[[dynamicPropName]]:`                      |
 
 ### custom-directives.js
-| Line | Error | Invalid Code |
-|------|-------|--------------|
+
+| Line  | Error                 | Invalid Code                              |
+| ----- | --------------------- | ----------------------------------------- |
 | 18-26 | Hyphenated prop names | `{ v-focus: "" }`, `{ v-tooltip: "..." }` |
 
 ### v-bind-spread.js
-| Line | Error | Invalid Code |
-|------|-------|--------------|
-| 56, 61, 66, 68, 81, 86, 91, 96 | Empty property name | `{ : _ctx.attrs }` |
-| 73 | Object after _ctx. | `{ : _ctx.{ type: 'text', ... } }` |
+
+| Line                           | Error               | Invalid Code                       |
+| ------------------------------ | ------------------- | ---------------------------------- |
+| 56, 61, 66, 68, 81, 86, 91, 96 | Empty property name | `{ : _ctx.attrs }`                 |
+| 73                             | Object after \_ctx. | `{ : _ctx.{ type: 'text', ... } }` |
 
 ### v-once.js
-| Line | Error | Invalid Code |
-|------|-------|--------------|
-| 28, 33, 42, 46 | Broken on prop | `{ on:  }` |
-| 28, 46 | Missing string concat | `" Static: "_toDisplayString(...)` |
+
+| Line           | Error                 | Invalid Code                       |
+| -------------- | --------------------- | ---------------------------------- |
+| 28, 33, 42, 46 | Broken on prop        | `{ on:  }`                         |
+| 28, 46         | Missing string concat | `" Static: "_toDisplayString(...)` |
 
 ### key-modifiers.js (Minor)
-| Line | Error | Invalid Code |
-|------|-------|--------------|
+
+| Line         | Error          | Invalid Code                                |
+| ------------ | -------------- | ------------------------------------------- |
 | 33-37, 41-44 | Missing commas | Between sibling `_createElementVNode` calls |
 
 ### v-model-modifiers.js (Minor)
-| Line | Error | Invalid Code |
-|------|-------|--------------|
+
+| Line  | Error          | Invalid Code             |
+| ----- | -------------- | ------------------------ |
 | 31-48 | Missing commas | Between sibling elements |
 
 ---
 
 ## Root Cause Categories
 
-| Category | Description | Files Affected |
-|----------|-------------|----------------|
-| **Missing commas** | Sibling elements not separated | All files |
-| **Empty prop names** | `v-bind="obj"` → `{ : value }` | v-bind-spread, patch-flags |
-| **Object/array literal after _ctx.** | `:class="{...}"` → `_ctx.{...}` | patch-flags |
-| **Unquoted hyphenated props** | `data-value:` instead of `"data-value":` | patch-flags, builtin, dynamic |
-| **Missing string concat** | `"text"_toDisplayString()` | patch-flags, v-once |
-| **Directive as prop** | `v-focus: ""` | custom-directives |
-| **v-once broken** | `{ on: }` | v-once |
-| **Bracket mismatches** | Unclosed/misplaced brackets | builtin, dynamic |
-| **Negation placement** | `_ctx.!value` | builtin |
+| Category                              | Description                              | Files Affected                |
+| ------------------------------------- | ---------------------------------------- | ----------------------------- |
+| **Missing commas**                    | Sibling elements not separated           | All files                     |
+| **Empty prop names**                  | `v-bind="obj"` → `{ : value }`           | v-bind-spread, patch-flags    |
+| **Object/array literal after \_ctx.** | `:class="{...}"` → `_ctx.{...}`          | patch-flags                   |
+| **Unquoted hyphenated props**         | `data-value:` instead of `"data-value":` | patch-flags, builtin, dynamic |
+| **Missing string concat**             | `"text"_toDisplayString()`               | patch-flags, v-once           |
+| **Directive as prop**                 | `v-focus: ""`                            | custom-directives             |
+| **v-once broken**                     | `{ on: }`                                | v-once                        |
+| **Bracket mismatches**                | Unclosed/misplaced brackets              | builtin, dynamic              |
+| **Negation placement**                | `_ctx.!value`                            | builtin                       |
 
 ---
 
@@ -107,6 +115,7 @@ After thorough exploration, **many items in the original plan are already correc
 **Symptom:** Outputs `{ : _ctx.attrs }` - empty property name is invalid JS.
 
 **Root Cause Analysis:**
+
 - **Detection:** [directives.rs:253-257](crates/verter_core/src/codegen/vue/template/directives.rs#L253-L257) - When `v-bind="obj"` has no argument, `event.arg` is `None`, creating `Span::new(0, 0)`
 - **Output:** [element.rs:1228-1241](crates/verter_core/src/codegen/vue/template/element.rs#L1228-L241) - `write_props()` writes empty string + ": " for `PropKind::Bind`
 - **Missing helpers:** `NORMALIZE_PROPS` and `MERGE_PROPS` defined in types.rs:339-340 but never used
@@ -114,6 +123,7 @@ After thorough exploration, **many items in the original plan are already correc
 **Fix Steps:**
 
 1. **Add `PropKind::BindSpread` variant** in [types.rs](crates/verter_core/src/codegen/vue/template/types.rs):
+
    ```rust
    pub enum PropKind {
        Static,
@@ -126,6 +136,7 @@ After thorough exploration, **many items in the original plan are already correc
    ```
 
 2. **Detect spread in** [directives.rs:249-271](crates/verter_core/src/codegen/vue/template/directives.rs#L249-L271):
+
    ```rust
    if prop_name.starts_with(':') || prop_name.starts_with("v-bind") {
        if event.arg.is_none() {
@@ -144,6 +155,7 @@ After thorough exploration, **many items in the original plan are already correc
    - Set `NORMALIZE_PROPS`, `GUARD_REACTIVE_PROPS`, and/or `MERGE_PROPS` helper flags
 
 4. **Add helper imports** to [types.rs](crates/verter_core/src/codegen/vue/template/types.rs):
+
    ```rust
    pub const GUARD_REACTIVE_PROPS: u32 = 1 << 15;  // Add if missing
 
@@ -160,6 +172,7 @@ After thorough exploration, **many items in the original plan are already correc
 **Symptom:** Outputs `{ v-focus: "" }` - hyphenated unquoted property names are invalid JS.
 
 **Root Cause Analysis:**
+
 - **Detection:** [directives.rs:291-295](crates/verter_core/src/codegen/vue/template/directives.rs#L291-L295) - Custom directives (`v-focus`, `v-tooltip`) fall through to `else` clause and become `PropKind::Static`
 - **Output:** [element.rs:1219-1226](crates/verter_core/src/codegen/vue/template/element.rs#L1219-L226) - Static props output literally: `v-focus: ""`
 - **Missing infrastructure:** `WITH_DIRECTIVES` helper exists but is never set; `RESOLVE_DIRECTIVE` helper missing
@@ -167,6 +180,7 @@ After thorough exploration, **many items in the original plan are already correc
 **Fix Steps:**
 
 1. **Add `PropKind::CustomDirective` variant** in [types.rs](crates/verter_core/src/codegen/vue/template/types.rs):
+
    ```rust
    pub enum PropKind {
        // ...existing...
@@ -175,6 +189,7 @@ After thorough exploration, **many items in the original plan are already correc
    ```
 
 2. **Add directive tracking** to `CurrentElement` in [types.rs:209-231](crates/verter_core/src/codegen/vue/template/types.rs#L209-L231):
+
    ```rust
    pub struct CurrentElement {
        // ...existing...
@@ -190,6 +205,7 @@ After thorough exploration, **many items in the original plan are already correc
    ```
 
 3. **Add `RESOLVE_DIRECTIVE` helper** in [types.rs:320-348](crates/verter_core/src/codegen/vue/template/types.rs#L320-L348):
+
    ```rust
    pub const RESOLVE_DIRECTIVE: u32 = 1 << 16;
 
@@ -200,6 +216,7 @@ After thorough exploration, **many items in the original plan are already correc
    ```
 
 4. **Detect custom directives** in [directives.rs:291](crates/verter_core/src/codegen/vue/template/directives.rs#L291) (before `else`):
+
    ```rust
    } else if prop_name.starts_with("v-") && !is_builtin_directive(prop_name) {
        // Custom directive
@@ -223,6 +240,7 @@ After thorough exploration, **many items in the original plan are already correc
 **Symptom:** Outputs `{ on: }` - malformed property.
 
 **Root Cause Analysis:**
+
 - **Detection:** [directives.rs:1256](crates/verter_core/src/codegen/vue/template/directives.rs#L1256) - v-once is only recognized as event modifier (like `.once` on `@click`), not as standalone directive
 - **Hoisting bug:** [element.rs:1721-1751](crates/verter_core/src/codegen/vue/template/element.rs#L1721-L751) - `generate_props_code()` doesn't handle `PropKind::On`, outputs `on: ""`
 - **Missing v-once handling:** No code path for `v-once` as standalone directive on elements
@@ -230,6 +248,7 @@ After thorough exploration, **many items in the original plan are already correc
 **Fix Steps:**
 
 1. **Detect v-once as directive** in [directives.rs](crates/verter_core/src/codegen/vue/template/directives.rs) prop detection:
+
    ```rust
    if prop_name == "v-once" {
        // Mark element for caching, don't add to props
@@ -238,6 +257,7 @@ After thorough exploration, **many items in the original plan are already correc
    ```
 
 2. **Add v_once flag** to `CurrentElement` in [types.rs](crates/verter_core/src/codegen/vue/template/types.rs):
+
    ```rust
    pub struct CurrentElement {
        // ...existing...
@@ -246,6 +266,7 @@ After thorough exploration, **many items in the original plan are already correc
    ```
 
 3. **Generate cache wrapper** in [element.rs](crates/verter_core/src/codegen/vue/template/element.rs):
+
    ```rust
    if elem.v_once {
        let cache_idx = state.cache_index;
@@ -262,11 +283,11 @@ After thorough exploration, **many items in the original plan are already correc
 
 ## Implementation Order
 
-| Priority | Bug | Impact | Complexity |
-|----------|-----|--------|------------|
-| 1 | v-bind spread | Breaks any `v-bind="obj"` usage | Medium |
-| 2 | Custom directives | Breaks all custom directives | High |
-| 3 | v-once | Breaks v-once elements | Medium |
+| Priority | Bug               | Impact                          | Complexity |
+| -------- | ----------------- | ------------------------------- | ---------- |
+| 1        | v-bind spread     | Breaks any `v-bind="obj"` usage | Medium     |
+| 2        | Custom directives | Breaks all custom directives    | High       |
+| 3        | v-once            | Breaks v-once elements          | Medium     |
 
 ---
 
@@ -278,17 +299,17 @@ The existing tests only check for **presence of strings** (e.g., `code.contains(
 
 **Examples of invalid JS that passes tests:**
 
-| File | Invalid Syntax | Line |
-|------|----------------|------|
-| patch-flags.js | `class: _ctx.{ active: isActive }` | 69 |
-| patch-flags.js | `" Static prefix: "_toDisplayString(...)` (missing `+`) | 62 |
-| patch-flags.js | `data-value: _ctx.dataValue` (unquoted hyphen) | 87 |
-| builtin-components.js | `disabled: _ctx.!showModal` | 54 |
-| builtin-components.js | `onBefore-enter:` (hyphen without quotes) | 75 |
-| builtin-components.js | `include: _ctx.['CompA', 'CompB']` | 96 |
-| dynamic-component.js | `null, , [` (double comma) | 63 |
-| custom-directives.js | `{ v-focus: "" }` (hyphenated unquoted prop) | 18 |
-| v-bind-spread.js | `{ : _ctx.attrs }` (empty property name) | 56 |
+| File                  | Invalid Syntax                                          | Line |
+| --------------------- | ------------------------------------------------------- | ---- |
+| patch-flags.js        | `class: _ctx.{ active: isActive }`                      | 69   |
+| patch-flags.js        | `" Static prefix: "_toDisplayString(...)` (missing `+`) | 62   |
+| patch-flags.js        | `data-value: _ctx.dataValue` (unquoted hyphen)          | 87   |
+| builtin-components.js | `disabled: _ctx.!showModal`                             | 54   |
+| builtin-components.js | `onBefore-enter:` (hyphen without quotes)               | 75   |
+| builtin-components.js | `include: _ctx.['CompA', 'CompB']`                      | 96   |
+| dynamic-component.js  | `null, , [` (double comma)                              | 63   |
+| custom-directives.js  | `{ v-focus: "" }` (hyphenated unquoted prop)            | 18   |
+| v-bind-spread.js      | `{ : _ctx.attrs }` (empty property name)                | 56   |
 
 ### New Testing Approach
 
@@ -375,6 +396,7 @@ fn test_no_invalid_patterns() {
 **This is the safest way to ensure correctness** - generate the source of truth at test time using Vue's official compiler, then compare ASTs.
 
 **Workflow for Each Test:**
+
 1. Create a temp `.vue` file: `examples/codegen/source/TEMP_FILE.vue`
 2. Run `node codegen.js` to compile with Vue's official compiler
 3. Copy the generated content (`TEMP_FILE.vue.js`) to the test as a **static string** - this is the SOURCE OF TRUTH
@@ -384,6 +406,7 @@ fn test_no_invalid_patterns() {
 7. Compare the ASTs structurally (ignoring offsets/spans due to indentation)
 
 **What to Compare:**
+
 - ✅ Node types (CallExpression, Identifier, etc.)
 - ✅ Property names and values
 - ✅ Function call names (`_createElementVNode`, `_withDirectives`, etc.)
@@ -392,6 +415,7 @@ fn test_no_invalid_patterns() {
 - ✅ Conditional structure (ternary nesting)
 
 **What to Ignore:**
+
 - ❌ Span/offset positions (will differ due to indentation)
 - ❌ Whitespace and formatting
 - ❌ Comment content
@@ -439,6 +463,7 @@ export default {
 ```
 
 **How to Generate Vue Source of Truth:**
+
 ```bash
 # 1. Create temp Vue file
 echo '<template><div>Test</div></template><script setup></script>' > examples/codegen/source/TEMP_FILE.vue
@@ -507,17 +532,18 @@ fn test_custom_directive_produces_valid_js() {
 **Note: CLAUDE_IMPLEMENTATION_GUIDE.md has been updated with mandatory JS validation and AST comparison requirements.**
 
 **Step 0.1: JS Syntax Validation Helpers**
+
 1. Add `assert_valid_js()` helper using oxc parser
 2. Add `gen_and_validate()` helper
 3. Add `INVALID_PATTERNS` constant
 4. Add `assert_no_invalid_patterns()` helper
 
-**Step 0.2: AST Comparison Infrastructure (PRIMARY METHOD)**
-5. Add `compare_ast_structure()` helper that:
-   - Takes our generated code and Vue's official output as strings
-   - Parses both with oxc
-   - Compares AST structure (ignoring spans/offsets/indentation)
-   - Returns list of structural differences
+**Step 0.2: AST Comparison Infrastructure (PRIMARY METHOD)** 5. Add `compare_ast_structure()` helper that:
+
+- Takes our generated code and Vue's official output as strings
+- Parses both with oxc
+- Compares AST structure (ignoring spans/offsets/indentation)
+- Returns list of structural differences
 
 6. Create initial AST comparison tests using this workflow:
    - Create `examples/codegen/source/TEMP_FILE.vue` with test template
@@ -529,6 +555,7 @@ fn test_custom_directive_produces_valid_js() {
 7. **Run tests - some WILL fail** (confirms structural differences exist)
 
 8. **Mark failing tests with `#[ignore]`** - Initially, some tests will fail due to existing bugs. Use `#[ignore]` attribute to skip them temporarily:
+
    ```rust
    #[test]
    #[ignore] // TODO: Fix v-bind spread codegen
@@ -541,6 +568,7 @@ fn test_custom_directive_produces_valid_js() {
 11. Run `cargo test --ignored` - shows what's left to fix
 
 **Why AST Comparison (with this workflow)?**
+
 - String comparison is fragile (formatting differences cause false failures)
 - Syntax validation only checks if code parses, not if it's correct
 - AST comparison verifies structural correctness
@@ -551,6 +579,7 @@ fn test_custom_directive_produces_valid_js() {
 ### Phase 1: Fix Critical Syntax Bugs
 
 For each bug, the workflow is:
+
 1. Find the ignored test for this bug
 2. Remove `#[ignore]` attribute
 3. Run the test - it should fail
@@ -571,6 +600,7 @@ Fix bugs in this order:
 ### Phase 2: Verify All Tests Pass
 
 After all bugs are fixed:
+
 1. Run `cargo test` - all tests should pass
 2. Run `cargo test --ignored` - should show 0 tests (all fixed)
 3. AST comparison tests verify structural correctness against Vue's compiler
@@ -582,6 +612,7 @@ After all bugs are fixed:
 For each bug fix:
 
 ### Step 1: Write Failing Test (with validation)
+
 ```rust
 #[test]
 fn test_feature_name() {
@@ -594,6 +625,7 @@ fn test_feature_name() {
 ```
 
 ### Step 2: Verify Test Fails
+
 ```bash
 cargo test --package verter_core test_feature_name 2>&1 | tail -30
 ```
@@ -601,6 +633,7 @@ cargo test --package verter_core test_feature_name 2>&1 | tail -30
 ### Step 3: Implement Fix
 
 ### Step 4: Verify Test Passes + Full Suite
+
 ```bash
 cargo test --package verter_core 2>&1 | tail -60
 ```
@@ -609,10 +642,10 @@ cargo test --package verter_core 2>&1 | tail -60
 
 ## Files to Modify
 
-| File | Changes |
-|------|---------|
-| [codegen.rs](crates/verter_core/src/builder/codegen.rs) | Add `assert_valid_js()`, validation tests |
-| [types.rs](crates/verter_core/src/codegen/vue/template/types.rs) | Add `PropKind` variants, helper flags |
-| [directives.rs](crates/verter_core/src/codegen/vue/template/directives.rs) | Fix detection logic |
-| [element.rs](crates/verter_core/src/codegen/vue/template/element.rs) | Fix code generation |
-| [interpolation.rs](crates/verter_core/src/codegen/vue/template/interpolation.rs) | Fix string concatenation |
+| File                                                                             | Changes                                   |
+| -------------------------------------------------------------------------------- | ----------------------------------------- |
+| [codegen.rs](crates/verter_core/src/builder/codegen.rs)                          | Add `assert_valid_js()`, validation tests |
+| [types.rs](crates/verter_core/src/codegen/vue/template/types.rs)                 | Add `PropKind` variants, helper flags     |
+| [directives.rs](crates/verter_core/src/codegen/vue/template/directives.rs)       | Fix detection logic                       |
+| [element.rs](crates/verter_core/src/codegen/vue/template/element.rs)             | Fix code generation                       |
+| [interpolation.rs](crates/verter_core/src/codegen/vue/template/interpolation.rs) | Fix string concatenation                  |

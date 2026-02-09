@@ -52,16 +52,13 @@ describe("parser", () => {
     });
 
     // TODO - NOTE this is a quite an edge case, but it should be handled
-    it.todo(
-      "should not interpret a script inside template as a valid script",
-      () => {
-        const source = `<template> <script test></script></template>`;
-        const parsed = parser(source);
+    it.todo("should not interpret a script inside template as a valid script", () => {
+      const source = `<template> <script test></script></template>`;
+      const parsed = parser(source);
 
-        expect(parsed.s.toString()).toContain(source);
-        expect(parsed.s.toString()).toContain("<script></script>");
-      }
-    );
+      expect(parsed.s.toString()).toContain(source);
+      expect(parsed.s.toString()).toContain("<script></script>");
+    });
   });
 
   describe("generic", () => {

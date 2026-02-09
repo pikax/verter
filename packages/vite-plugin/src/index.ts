@@ -1,12 +1,12 @@
-import type { Plugin, ResolvedConfig } from 'vite';
-import { transformWithEsbuild } from 'vite';
-import type { ViteCodegenOptions, ViteCodegenResult } from '@verter/native';
-import { createHash } from 'crypto';
-import { createRequire } from 'module';
-import { generateMainModule } from './main';
-import { parseVueRequest, setDescriptor, getDescriptor, deleteDescriptor } from './utils';
+import type { Plugin, ResolvedConfig } from "vite";
+import { transformWithEsbuild } from "vite";
+import type { ViteCodegenOptions, ViteCodegenResult } from "@verter/native";
+import { createHash } from "crypto";
+import { createRequire } from "module";
+import { generateMainModule } from "./main";
+import { parseVueRequest, setDescriptor, getDescriptor, deleteDescriptor } from "./utils";
 
-const EXPORT_HELPER_ID = '\0plugin-vue:export-helper';
+const EXPORT_HELPER_ID = "\0plugin-vue:export-helper";
 
 /**
  * The export helper function matches @vitejs/plugin-vue's _export_sfc.
@@ -38,18 +38,14 @@ interface Compiler {
  * Generate a short hash for component ID
  */
 function getHash(text: string): string {
-  return createHash('sha256').update(text).digest('hex').substring(0, 8);
+  return createHash("sha256").update(text).digest("hex").substring(0, 8);
 }
 
 /**
  * Generate component ID from filename and source
  */
-function generateComponentId(
-  filename: string,
-  source: string,
-  isProd: boolean
-): string {
-  const normalized = filename.replace(/\\/g, '/');
+function generateComponentId(filename: string, source: string, isProd: boolean): string {
+  const normalized = filename.replace(/\\/g, "/");
   return isProd ? getHash(normalized) : getHash(normalized + source);
 }
 
@@ -75,7 +71,7 @@ export function verter(options: VerterPluginOptions = {}): Plugin {
     if (compiler) return compiler;
 
     // Load native bindings (Node.js only for now)
-    const native = require('@verter/native') as typeof import('@verter/native');
+    const native = require("@verter/native") as typeof import("@verter/native");
     compiler = {
       compileForVite: (input, opts) => native.compileForVite(input, opts),
     };
@@ -83,7 +79,7 @@ export function verter(options: VerterPluginOptions = {}): Plugin {
   };
 
   return {
-    name: 'vite-plugin-verter',
+    name: "vite-plugin-verter",
 
     configResolved(resolvedConfig) {
       config = resolvedConfig;
@@ -112,7 +108,7 @@ export function verter(options: VerterPluginOptions = {}): Plugin {
       const descriptor = getDescriptor(filename);
       if (!descriptor) return;
 
-      if (query.type === 'style' && query.index != null) {
+      if (query.type === "style" && query.index != null) {
         const style = descriptor.styles[query.index];
         if (!style) return;
         return {
@@ -129,10 +125,10 @@ export function verter(options: VerterPluginOptions = {}): Plugin {
       if (query.vue) return;
 
       // Only process .vue files
-      if (!filename.endsWith('.vue')) return null;
+      if (!filename.endsWith(".vue")) return null;
 
       const compiler = loadCompiler();
-      const isProd = config.command === 'build' && !config.build?.ssr;
+      const isProd = config.command === "build" && !config.build?.ssr;
       const ssr = Boolean(config.build?.ssr);
 
       const componentIdFn = options.componentId || generateComponentId;
@@ -161,8 +157,8 @@ export function verter(options: VerterPluginOptions = {}): Plugin {
         });
 
         // Transform TypeScript imports/syntax through esbuild
-        const stripped = await transformWithEsbuild(output, filename + '.ts', {
-          loader: 'ts',
+        const stripped = await transformWithEsbuild(output, filename + ".ts", {
+          loader: "ts",
           sourcemap: true,
           sourcefile: filename,
         });
@@ -177,7 +173,7 @@ export function verter(options: VerterPluginOptions = {}): Plugin {
     },
 
     handleHotUpdate({ file, server, modules }) {
-      if (!file.endsWith('.vue')) return;
+      if (!file.endsWith(".vue")) return;
 
       // Clear cached descriptor
       deleteDescriptor(file);
@@ -186,7 +182,7 @@ export function verter(options: VerterPluginOptions = {}): Plugin {
       const affectedModules = modules.filter((m) => m.file === file);
       if (affectedModules.length > 0) {
         server.ws.send({
-          type: 'full-reload',
+          type: "full-reload",
           path: file,
         });
       }

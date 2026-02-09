@@ -1,1 +1,1 @@
-export * from './VueRenderDocument.js'
+export * from "./VueRenderDocument.js";

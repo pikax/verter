@@ -14,9 +14,7 @@ export const ContextPlugin = {
   name: "VerterContext",
   pre(s, ctx) {
     const isSetup =
-      ctx.blocks.find(
-        (x) => x.type === "script" && x.block.tag.attributes.setup
-      ) !== undefined;
+      ctx.blocks.find((x) => x.type === "script" && x.block.tag.attributes.setup) !== undefined;
 
     const options = ResolveOptionsFilename(ctx);
 
@@ -72,8 +70,7 @@ export const ContextPlugin = {
       }`,
       // `...${macros.map(([name, prop]) => `${name}(${prop})`).join(",")}`,
       ...macros.map(
-        ([name, prop]) =>
-          `${prop}: ${ctx.isTS ? `{} as ${name}${generic} & {}` : name}`
+        ([name, prop]) => `${prop}: ${ctx.isTS ? `{} as ${name}${generic} & {}` : name}`,
       ),
       ...ctxItems,
     ].join(",")}};`;
@@ -93,7 +90,7 @@ export const ContextPlugin = {
       : "";
     s.prependLeft(
       ctx.block.block.block.loc.start.offset,
-      [instanceStr, ctxStr, slotsCtx, debuggers].join("\n")
+      [instanceStr, ctxStr, slotsCtx, debuggers].join("\n"),
     );
 
     // add slots Helper
@@ -101,7 +98,7 @@ export const ContextPlugin = {
 
     s.append(`
       declare function ${ctx.prefix(
-        "slotRender"
+        "slotRender",
       )}<T extends (...args: any[]) => any>(slot: T): (cb: T)=>any;
 export declare function ${ctx.prefix("StrictRenderSlot")}<
   T extends (...args: any[]) => any,

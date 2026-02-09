@@ -1,6 +1,6 @@
 <script>
 // defineOptions patterns for parser testing - Options API + JavaScript
-// Note: defineOptions is primarily for script setup. In Options API, 
+// Note: defineOptions is primarily for script setup. In Options API,
 // these options are set directly in the component definition.
 
 import { defineComponent } from "vue";

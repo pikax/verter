@@ -440,64 +440,63 @@ Total: O(source_len × chunks)
 
 ## 10. Prioritized Issues & Recommendations
 
-| # | Priority | Symptom | Root Cause | File:Line | Fix | Test | Perf Impact |
-|---|----------|---------|------------|-----------|-----|------|------------|
-| 1 | P0-Critical | Scoped styles apply to all ancestor elements, not just target | add_scope_to_selector scopes every segment in descendant chain | transformer.rs:278-308 | Only scope the last simple selector in each compound selector | `.parent .child → .parent .child[data-v-xxx]` not `.parent[data-v-xxx] .child[data-v-xxx]` | Low |
-| 2 | P0-Critical | Template data-v-xxx ≠ CSS [data-v-xxx] in some configs | has_scoped_style hashes component_name but generate_component_id hashes filepath | codegen.rs:518-528 | Use generate_component_id() result for scope ID too, or pass filepath to pre-scan | Add E2E test comparing template attr ID vs CSS selector ID | None |
-| 3 | P1-High | defineEmits return var gets _ctx. prefix in templates | extract_binding_metadata ignores DefineEmits case | script.rs:231-265 | Add DefineEmits binding as BindingType::Setup | Test `{{ emit('change') }}` in template | None |
-| 4 | P1-High | Source map columns wrong after emoji/supplementary chars | calculate_line_column counts char not UTF-16 code units | source_map.rs:284-305 | Count `ch.len_utf16()` instead of 1 for each char | Test SFC with emoji in template expression | None |
-| 5 | P1-High | LSP memory grows without bound | Box::leak(SyntaxPluginOptions) per compilation | codegen.rs:495-496 | Scoped reference, OnceCell, or stack allocation | Monitor RSS in watch mode | +48 bytes/call saved |
-| 6 | P1-High | _ctx.async or _ctx.class in expressions | is_reserved_word() missing ~50 JS keywords | interpolation.rs:280-322 | Add all ES2024 keywords and standard global objects | Test `{{ typeof x }}`, `{{ async () => {} }}` | None |
-| 7 | P2-Medium | Crash on malformed template expressions | 60+ panic!() in non-test OXC parser code | oxc_parser.rs | Replace with Result/graceful fallback | Fuzz with malformed expressions | None |
-| 8 | P2-Medium | Slow compilation on large templates | calculate_line_column() O(n²) | source_map.rs:284-305 | Pre-compute line offset index | Benchmark 1000-element template | Significant |
-| 9 | P2-Medium | Slow compilation on large templates | ensure_split_at() O(n) per operation | code_transform.rs | Use BTreeMap or sorted index for chunks | Benchmark 1000-element template | Significant |
-| 10 | P2-Medium | CSS v-bind source positions lost | var_name_start/end hardcoded to 0 | transformer.rs:217-218 | Compute actual output positions | Test v-bind mapping spans | None |
-| 11 | P2-Medium | Expression prefixing wrong on complex strings | Escape handling only checks 1 char back | interpolation.rs:196 | Track escape state properly or use OXC AST | Test `{{ "\\""` }}` in template | None |
-| 12 | P3-Low | Stack overflow on deeply nested template literals | No recursion depth limit in transform_expr_with_ctx | interpolation.rs:219 | Add depth counter, bail at reasonable limit | Craft 100-level nested template literal | None |
-| 13 | P3-Low | Nested CSS selectors not scoped correctly | Hand-rolled CSS parser doesn't support CSS Nesting | transformer.rs | Use LightningCSS AST for selector transformation | Test `.parent { .child { } }` | None |
-| 14 | P3-Low | Code duplication in close paths | process_close_tag and process_close_scopes duplicate directive emission | element.rs:1138-1798 | Extract shared emit_close_directives() helper | N/A | None |
+| #   | Priority    | Symptom                                                       | Root Cause                                                                       | File:Line                | Fix                                                                               | Test                                                                                       | Perf Impact          |
+| --- | ----------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------- | ------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------- |
+| 1   | P0-Critical | Scoped styles apply to all ancestor elements, not just target | add_scope_to_selector scopes every segment in descendant chain                   | transformer.rs:278-308   | Only scope the last simple selector in each compound selector                     | `.parent .child → .parent .child[data-v-xxx]` not `.parent[data-v-xxx] .child[data-v-xxx]` | Low                  |
+| 2   | P0-Critical | Template data-v-xxx ≠ CSS [data-v-xxx] in some configs        | has_scoped_style hashes component_name but generate_component_id hashes filepath | codegen.rs:518-528       | Use generate_component_id() result for scope ID too, or pass filepath to pre-scan | Add E2E test comparing template attr ID vs CSS selector ID                                 | None                 |
+| 3   | P1-High     | defineEmits return var gets \_ctx. prefix in templates        | extract_binding_metadata ignores DefineEmits case                                | script.rs:231-265        | Add DefineEmits binding as BindingType::Setup                                     | Test `{{ emit('change') }}` in template                                                    | None                 |
+| 4   | P1-High     | Source map columns wrong after emoji/supplementary chars      | calculate_line_column counts char not UTF-16 code units                          | source_map.rs:284-305    | Count `ch.len_utf16()` instead of 1 for each char                                 | Test SFC with emoji in template expression                                                 | None                 |
+| 5   | P1-High     | LSP memory grows without bound                                | Box::leak(SyntaxPluginOptions) per compilation                                   | codegen.rs:495-496       | Scoped reference, OnceCell, or stack allocation                                   | Monitor RSS in watch mode                                                                  | +48 bytes/call saved |
+| 6   | P1-High     | \_ctx.async or \_ctx.class in expressions                     | is_reserved_word() missing ~50 JS keywords                                       | interpolation.rs:280-322 | Add all ES2024 keywords and standard global objects                               | Test `{{ typeof x }}`, `{{ async () => {} }}`                                              | None                 |
+| 7   | P2-Medium   | Crash on malformed template expressions                       | 60+ panic!() in non-test OXC parser code                                         | oxc_parser.rs            | Replace with Result/graceful fallback                                             | Fuzz with malformed expressions                                                            | None                 |
+| 8   | P2-Medium   | Slow compilation on large templates                           | calculate_line_column() O(n²)                                                    | source_map.rs:284-305    | Pre-compute line offset index                                                     | Benchmark 1000-element template                                                            | Significant          |
+| 9   | P2-Medium   | Slow compilation on large templates                           | ensure_split_at() O(n) per operation                                             | code_transform.rs        | Use BTreeMap or sorted index for chunks                                           | Benchmark 1000-element template                                                            | Significant          |
+| 10  | P2-Medium   | CSS v-bind source positions lost                              | var_name_start/end hardcoded to 0                                                | transformer.rs:217-218   | Compute actual output positions                                                   | Test v-bind mapping spans                                                                  | None                 |
+| 11  | P2-Medium   | Expression prefixing wrong on complex strings                 | Escape handling only checks 1 char back                                          | interpolation.rs:196     | Track escape state properly or use OXC AST                                        | Test `{{ "\\""` }}` in template                                                            | None                 |
+| 12  | P3-Low      | Stack overflow on deeply nested template literals             | No recursion depth limit in transform_expr_with_ctx                              | interpolation.rs:219     | Add depth counter, bail at reasonable limit                                       | Craft 100-level nested template literal                                                    | None                 |
+| 13  | P3-Low      | Nested CSS selectors not scoped correctly                     | Hand-rolled CSS parser doesn't support CSS Nesting                               | transformer.rs           | Use LightningCSS AST for selector transformation                                  | Test `.parent { .child { } }`                                                              | None                 |
+| 14  | P3-Low      | Code duplication in close paths                               | process_close_tag and process_close_scopes duplicate directive emission          | element.rs:1138-1798     | Extract shared emit_close_directives() helper                                     | N/A                                                                                        | None                 |
 
 ---
 
 ## 11. Suggested Test Matrix
 
-| # | SFC Description | Tests | Coverage Gap |
-|---|-----------------|-------|--------------|
-| 1 | Single root `<div>{{ msg }}</div>` with `<script setup>` | Basic render function, `_ctx.msg` prefix | Baseline |
-| 2 | Multi-root template (div + span + comment) | Fragment wrapping, STABLE_FRAGMENT flag, cache indices | Multi-root |
-| 3 | `v-for="item in items"` with `:key="item.id"` | `_renderList`, KEYED_FRAGMENT, iterator locals not prefixed | v-for keying |
-| 4 | Nested v-for (outer + inner loop) | vfor_locals_stack correct shadowing | Scope nesting |
-| 5 | v-if/v-else-if/v-else chain | Ternary generation, comment vnode fallback | Conditionals |
-| 6 | Component with named slots `<Comp><template #header>...</template></Comp>` | `_withCtx`, slot function, `_: 1 /* STABLE */` | Slots |
-| 7 | `<style scoped>` with `.parent .child` selector | Scope attr only on last selector | CSS scoping bug |
-| 8 | `<style scoped>` with `:deep()`, `:slotted()`, `:global()` | Correct transformations | Special selectors |
-| 9 | Template with emoji `<div>{{ "🎉" + msg }}</div>` | UTF-16 column accuracy | Source map bug |
-| 10 | `<script setup>` with `const emit = defineEmits(...)` + `{{ emit }}` | `$setup.emit` in prod, not `_ctx.emit` | Binding bug |
-| 11 | v-model on input/select/textarea/component | Correct vModel variants | v-model variants |
-| 12 | Dynamic component `<component :is="currentTab">` | `_resolveDynamicComponent` | Dynamic components |
-| 13 | v-once on static element | Cache wrapper `_cache[N]` | Caching |
-| 14 | CSS modules `<style module>` + `<style module="custom">` | hashing + `$style` binding | CSS modules |
-| 15 | v-bind() in `<style scoped>` with `v-bind(theme.color)` | var replacement + extraction | CSS v-bind |
-| 16 | Event handler variants | caching/hydration correctness | Event handling |
-| 17 | Spread props `v-bind="obj"` | FULL_PROPS flag, spread emission | Spread |
-| 18 | Custom directive `v-tooltip="msg"` | `_withDirectives`, `_resolveDirective` | Custom directives |
-| 19 | TS setup lang + defineProps type param | type-only imports skipped | TypeScript |
-| 20 | Expression edge cases | typeof, optional chaining, literals | Expression cases |
-| 21 | Large template (100+ elements) | no panics, reasonable perf | Stress |
-| 22 | Vite mode split correctness | block-level maps/imports | Vite output |
+| #   | SFC Description                                                            | Tests                                                       | Coverage Gap       |
+| --- | -------------------------------------------------------------------------- | ----------------------------------------------------------- | ------------------ |
+| 1   | Single root `<div>{{ msg }}</div>` with `<script setup>`                   | Basic render function, `_ctx.msg` prefix                    | Baseline           |
+| 2   | Multi-root template (div + span + comment)                                 | Fragment wrapping, STABLE_FRAGMENT flag, cache indices      | Multi-root         |
+| 3   | `v-for="item in items"` with `:key="item.id"`                              | `_renderList`, KEYED_FRAGMENT, iterator locals not prefixed | v-for keying       |
+| 4   | Nested v-for (outer + inner loop)                                          | vfor_locals_stack correct shadowing                         | Scope nesting      |
+| 5   | v-if/v-else-if/v-else chain                                                | Ternary generation, comment vnode fallback                  | Conditionals       |
+| 6   | Component with named slots `<Comp><template #header>...</template></Comp>` | `_withCtx`, slot function, `_: 1 /* STABLE */`              | Slots              |
+| 7   | `<style scoped>` with `.parent .child` selector                            | Scope attr only on last selector                            | CSS scoping bug    |
+| 8   | `<style scoped>` with `:deep()`, `:slotted()`, `:global()`                 | Correct transformations                                     | Special selectors  |
+| 9   | Template with emoji `<div>{{ "🎉" + msg }}</div>`                          | UTF-16 column accuracy                                      | Source map bug     |
+| 10  | `<script setup>` with `const emit = defineEmits(...)` + `{{ emit }}`       | `$setup.emit` in prod, not `_ctx.emit`                      | Binding bug        |
+| 11  | v-model on input/select/textarea/component                                 | Correct vModel variants                                     | v-model variants   |
+| 12  | Dynamic component `<component :is="currentTab">`                           | `_resolveDynamicComponent`                                  | Dynamic components |
+| 13  | v-once on static element                                                   | Cache wrapper `_cache[N]`                                   | Caching            |
+| 14  | CSS modules `<style module>` + `<style module="custom">`                   | hashing + `$style` binding                                  | CSS modules        |
+| 15  | v-bind() in `<style scoped>` with `v-bind(theme.color)`                    | var replacement + extraction                                | CSS v-bind         |
+| 16  | Event handler variants                                                     | caching/hydration correctness                               | Event handling     |
+| 17  | Spread props `v-bind="obj"`                                                | FULL_PROPS flag, spread emission                            | Spread             |
+| 18  | Custom directive `v-tooltip="msg"`                                         | `_withDirectives`, `_resolveDirective`                      | Custom directives  |
+| 19  | TS setup lang + defineProps type param                                     | type-only imports skipped                                   | TypeScript         |
+| 20  | Expression edge cases                                                      | typeof, optional chaining, literals                         | Expression cases   |
+| 21  | Large template (100+ elements)                                             | no panics, reasonable perf                                  | Stress             |
+| 22  | Vite mode split correctness                                                | block-level maps/imports                                    | Vite output        |
 
 ---
 
 ## 12. Suggested Benchmark Matrix
 
-| # | Benchmark | Purpose | Key Metric |
-|---|----------|---------|------------|
-| 1 | 10-element template, 100 iterations | Baseline throughput | ops/sec |
-| 2 | 100-element template with v-for/v-if | Codegen scaling | ms/compile |
-| 3 | 500-element template (stress test) | ensure_split_at + source map scaling | ms/compile, O(n) verification |
-| 4 | Template with 50 interpolations | Expression prefixer throughput | ms/compile |
-| 5 | Large `<style scoped>` (200 rules) | CSS transformer throughput | ms/compile |
-| 6 | generate() vs generate_for_vite() | Vite overhead | ms delta |
-| 7 | Memory: 1000 sequential compilations | Box::leak growth measurement | RSS delta |
-| 8 | Source map: 200-line template | calculate_line_column() hot path | ms for map vs code |
-
+| #   | Benchmark                            | Purpose                              | Key Metric                    |
+| --- | ------------------------------------ | ------------------------------------ | ----------------------------- |
+| 1   | 10-element template, 100 iterations  | Baseline throughput                  | ops/sec                       |
+| 2   | 100-element template with v-for/v-if | Codegen scaling                      | ms/compile                    |
+| 3   | 500-element template (stress test)   | ensure_split_at + source map scaling | ms/compile, O(n) verification |
+| 4   | Template with 50 interpolations      | Expression prefixer throughput       | ms/compile                    |
+| 5   | Large `<style scoped>` (200 rules)   | CSS transformer throughput           | ms/compile                    |
+| 6   | generate() vs generate_for_vite()    | Vite overhead                        | ms delta                      |
+| 7   | Memory: 1000 sequential compilations | Box::leak growth measurement         | RSS delta                     |
+| 8   | Source map: 200-line template        | calculate_line_column() hot path     | ms for map vs code            |

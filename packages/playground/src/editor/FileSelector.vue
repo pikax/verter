@@ -1,34 +1,34 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { IMPORT_MAP_FILENAME, type Store } from '../core/store'
+import { ref } from "vue";
+import { IMPORT_MAP_FILENAME, type Store } from "../core/store";
 
 const props = defineProps<{
-  store: Store
-}>()
+  store: Store;
+}>();
 
-const showNewFileInput = ref(false)
-const newFilename = ref('')
+const showNewFileInput = ref(false);
+const newFilename = ref("");
 
 function handleAddFile() {
   if (showNewFileInput.value && newFilename.value.trim()) {
-    let filename = newFilename.value.trim()
-    if (!filename.includes('.')) {
-      filename += '.vue'
+    let filename = newFilename.value.trim();
+    if (!filename.includes(".")) {
+      filename += ".vue";
     }
-    props.store.addFile(filename)
-    newFilename.value = ''
-    showNewFileInput.value = false
+    props.store.addFile(filename);
+    newFilename.value = "";
+    showNewFileInput.value = false;
   } else {
-    showNewFileInput.value = true
+    showNewFileInput.value = true;
   }
 }
 
 function handleKeydown(e: KeyboardEvent) {
-  if (e.key === 'Enter') {
-    handleAddFile()
-  } else if (e.key === 'Escape') {
-    showNewFileInput.value = false
-    newFilename.value = ''
+  if (e.key === "Enter") {
+    handleAddFile();
+  } else if (e.key === "Escape") {
+    showNewFileInput.value = false;
+    newFilename.value = "";
   }
 }
 </script>

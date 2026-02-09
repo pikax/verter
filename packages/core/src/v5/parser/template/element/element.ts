@@ -18,11 +18,7 @@ export type ElementContext = {
   inFor: boolean;
 };
 
-export function handleElement(
-  node: VerterNode,
-  parent: VerterNode,
-  parentContext: ElementContext
-) {
+export function handleElement(node: VerterNode, parent: VerterNode, parentContext: ElementContext) {
   if (node.type !== NodeTypes.ELEMENT) {
     return null;
   }
@@ -41,9 +37,8 @@ export function handleElement(
 
   const propBindings = handleProps(node, context);
   const props =
-    (propBindings?.filter(
-      (x) => x.type === TemplateTypes.Prop
-    ) as TemplateProp[]) ?? ([] as TemplateProp[]);
+    (propBindings?.filter((x) => x.type === TemplateTypes.Prop) as TemplateProp[]) ??
+    ([] as TemplateProp[]);
   const slot = handleSlotDeclaration(node, parent as ElementNode, context);
 
   const propSlot = handleSlotProp(node, parent, context, conditions?.condition);

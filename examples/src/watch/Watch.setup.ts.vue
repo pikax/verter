@@ -15,7 +15,7 @@ watch(
   (newVal) => {
     console.log(`Name changed to: ${newVal}`);
   },
-  { immediate: true, deep: true }
+  { immediate: true, deep: true },
 );
 
 // Watch multiple sources

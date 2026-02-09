@@ -1,10 +1,6 @@
 import { MagicString } from "@vue/compiler-sfc";
 import { ParsedBlockTemplate } from "../../../../parser/types.js";
-import {
-  DefaultPlugins,
-  processTemplate,
-  TemplateContext,
-} from "../../index.js";
+import { DefaultPlugins, processTemplate, TemplateContext } from "../../index.js";
 import { LoopPlugin } from "./index.js";
 import { parser } from "../../../../parser/parser.js";
 
@@ -15,9 +11,7 @@ describe("process template plugins loop", () => {
 
     const s = new MagicString(source);
 
-    const templateBlock = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processTemplate(
       templateBlock.result.items,
@@ -29,7 +23,7 @@ describe("process template plugins loop", () => {
         blocks: parsed.blocks,
         block: templateBlock,
         blockNameResolver: (name) => name,
-      }
+      },
     );
 
     return r;
@@ -39,7 +33,7 @@ describe("process template plugins loop", () => {
     const { result } = parse(`<div v-for="item in items"/>`);
 
     expect(result).toContain(
-      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div />})}}`
+      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div />})}}`,
     );
   });
 
@@ -47,7 +41,7 @@ describe("process template plugins loop", () => {
     const { result } = parse(`<div v-for="item in items">{{ item }}</div>`);
 
     expect(result).toContain(
-      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div >{ item }</div>})}}`
+      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div >{ item }</div>})}}`,
     );
   });
 
@@ -55,67 +49,59 @@ describe("process template plugins loop", () => {
     const { result } = parse(`<div v-for="item in items">{{ item + 1 }}</div>`);
 
     expect(result).toContain(
-      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div >{ item + 1 }</div>})}}`
+      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div >{ item + 1 }</div>})}}`,
     );
   });
 
   it('<div v-for="item of items">{{ item + 1 }}</div>', () => {
     const { result } = parse(`<div v-for="item of items">{{ item + 1 }}</div>`);
     expect(result).toContain(
-      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div >{ item + 1 }</div>})}}`
+      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <div >{ item + 1 }</div>})}}`,
     );
   });
 
   it('<div v-for="(item, index) in items">{{ item + index }}</div>', () => {
-    const { result } = parse(
-      `<div v-for="(item, index) in items">{{ item + index }}</div>`
-    );
+    const { result } = parse(`<div v-for="(item, index) in items">{{ item + index }}</div>`);
     expect(result).toContain(
-      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item, index)=>{  <div >{ item + index }</div>})}}`
+      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item, index)=>{  <div >{ item + index }</div>})}}`,
     );
   });
 
   it('<div v-for="(item, index) of items">{{ item + index }}</div>', () => {
-    const { result } = parse(
-      `<div v-for="(item, index) of items">{{ item + index }}</div>`
-    );
+    const { result } = parse(`<div v-for="(item, index) of items">{{ item + index }}</div>`);
     expect(result).toContain(
-      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item, index)=>{  <div >{ item + index }</div>})}}`
+      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item, index)=>{  <div >{ item + index }</div>})}}`,
     );
   });
 
   it('<div v-for="{obj} in items">{{ test + obj }}</div>', () => {
-    const { result } = parse(
-      `<div v-for="{obj} in items">{{ test + obj }}</div>`
-    );
+    const { result } = parse(`<div v-for="{obj} in items">{{ test + obj }}</div>`);
     expect(result).toContain(
-      `{()=>{___VERTER___renderList(___VERTER___ctx.items,({obj})=>{  <div >{ ___VERTER___ctx.test + obj }</div>})}}`
+      `{()=>{___VERTER___renderList(___VERTER___ctx.items,({obj})=>{  <div >{ ___VERTER___ctx.test + obj }</div>})}}`,
     );
   });
 
   it('<div v-for="{obj} of items">{{ test + obj }}</div>', () => {
-    const { result } = parse(
-      `<div v-for="{obj} of items">{{ test + obj}}</div>`
-    );
+    const { result } = parse(`<div v-for="{obj} of items">{{ test + obj}}</div>`);
     expect(result).toContain(
-      `{()=>{___VERTER___renderList(___VERTER___ctx.items,({obj})=>{  <div >{ ___VERTER___ctx.test + obj}</div>})}}`
+      `{()=>{___VERTER___renderList(___VERTER___ctx.items,({obj})=>{  <div >{ ___VERTER___ctx.test + obj}</div>})}}`,
     );
   });
 
   it('<div v-for="(item, key, index) of items">{{ item + key + index }}</div>', () => {
     const { result } = parse(
-      `<div v-for="(item, key, index) of items">{{ item + key + index }}</div>`
+      `<div v-for="(item, key, index) of items">{{ item + key + index }}</div>`,
     );
     expect(result).toContain(
-      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item, key, index)=>{  <div >{ item + key + index }</div>})}}`
+      `{()=>{___VERTER___renderList(___VERTER___ctx.items,(item, key, index)=>{  <div >{ item + key + index }</div>})}}`,
     );
   });
   it('<div v-for="({obj}, key, index) in items">{{ item + obj + key + index }}</div>', () => {
     const { result } = parse(
-      `<div v-for="({obj}, key, index) in items">{{ item + obj + key + index }}</div>`
+      `<div v-for="({obj}, key, index) in items">{{ item + obj + key + index }}</div>`,
     );
     expect(result).toContain(
-      `{()=>{___VERTER___renderList(___VERTER___ctx.items,({obj}, key, index)=>{  <div >{ ___VERTER___ctx.item + obj + key + index }</div>})}}`
+      `{()=>{___VERTER___renderList(___VERTER___ctx.items,({obj}, key, index)=>{  <div >{ ___VERTER___ctx.item + obj + key + index }</div>})}}`,
     );
   });
 
@@ -125,8 +111,7 @@ describe("process template plugins loop", () => {
     {{ item.message }} {{ childItem }}
   </span>
 </li>`);
-    expect(result)
-      .toContain(`{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <li >
+    expect(result).toContain(`{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <li >
   {()=>{___VERTER___renderList(item.children,(childItem)=>{  <span >
     { item.message } { childItem }
   </span>})}}
@@ -135,12 +120,10 @@ describe("process template plugins loop", () => {
 
   it("with v-if", () => {
     // note item should be from binding, because v-if has priority
-    const { result } = parse(
-      `<li v-for="item in items" v-if="item.active"></li>`
-    );
+    const { result } = parse(`<li v-for="item in items" v-if="item.active"></li>`);
 
     expect(result).toContain(
-      `{()=>{if(___VERTER___ctx.item.active){___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.item.active))) return;<li  ></li>})}}}`
+      `{()=>{if(___VERTER___ctx.item.active){___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.item.active))) return;<li  ></li>})}}}`,
     );
 
     expect(result).toContain("export function template(){\n<>");
@@ -161,21 +144,19 @@ describe("process template plugins loop", () => {
   });
 
   it("parent v-if", () => {
-    const { result } = parse(
-      `<div v-if="show"><div v-for="item in items">{{ item }}</div></div>`
-    );
+    const { result } = parse(`<div v-if="show"><div v-for="item in items">{{ item }}</div></div>`);
     expect(result).toContain(
-      `{()=>{if(___VERTER___ctx.show){<div >{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.show))) return;<div >{ item }</div>})}}</div>}}}`
+      `{()=>{if(___VERTER___ctx.show){<div >{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.show))) return;<div >{ item }</div>})}}</div>}}}`,
     );
     expect(result).toContain("export function template(){\n<>");
   });
 
   it("parent to narrow type", () => {
     const { result } = parse(
-      `<div v-if="items === undefined"><div v-for="item in items">{{ item }}</div></div>`
+      `<div v-if="items === undefined"><div v-for="item in items">{{ item }}</div></div>`,
     );
     expect(result).toContain(
-      `{()=>{if(___VERTER___ctx.items === undefined){<div >{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.items === undefined))) return;<div >{ item }</div>})}}</div>}}}`
+      `{()=>{if(___VERTER___ctx.items === undefined){<div >{()=>{___VERTER___renderList(___VERTER___ctx.items,(item)=>{  if(!((___VERTER___ctx.items === undefined))) return;<div >{ item }</div>})}}</div>}}}`,
     );
 
     expect(result).toContain("export function template(){\n<>");
@@ -183,14 +164,10 @@ describe("process template plugins loop", () => {
 
   it("v-for with slots dynamic", () => {
     const { result } = parse(`<Comp v-for="item in items" #[item]></Comp>`);
+    expect(result).toContain(`___VERTER___renderList(___VERTER___ctx.items,(item)=>{`);
+    expect(result).toContain(`<___VERTER___components.Comp`);
     expect(result).toContain(
-      `___VERTER___renderList(___VERTER___ctx.items,(item)=>{`
-    );
-    expect(result).toContain(
-      `<___VERTER___components.Comp`
-    );
-    expect(result).toContain(
-      `v-slot={(___VERTER___slotInstance)=>{___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[item])`
+      `v-slot={(___VERTER___slotInstance)=>{___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[item])`,
     );
   });
 
@@ -201,6 +178,8 @@ describe("process template plugins loop", () => {
     </slot>
 </div>`);
     expect(result).toContain(`___VERTER___renderList(___VERTER___ctx.items,(item)=>{`);
-    expect(result).toMatch(/const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\[item\]\)/);
+    expect(result).toMatch(
+      /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\[item\]\)/,
+    );
   });
 });

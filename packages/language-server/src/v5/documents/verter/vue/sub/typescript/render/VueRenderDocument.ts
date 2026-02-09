@@ -1,20 +1,12 @@
 import { buildTemplate, TemplateItem } from "@verter/core";
 import { SubDocumentProcessContext } from "../../sub";
 import { LanguageTypescript, VueTypescriptDocument } from "../typescript.js";
-import {
-  ParsedBlockScript,
-  ParsedBlockTemplate,
-} from "@verter/core/dist/v5/parser/types.js";
+import { ParsedBlockScript, ParsedBlockTemplate } from "@verter/core/dist/v5/parser/types.js";
 import { createSubDocumentUri, uriToPath } from "../../../../../utils.js";
 import type { VueDocument } from "../../../vue.js";
 
 export class VueRenderDocument extends VueTypescriptDocument {
-  static create(
-    uri: string,
-    parent: VueDocument,
-    languageId: LanguageTypescript,
-    version: number
-  ) {
+  static create(uri: string, parent: VueDocument, languageId: LanguageTypescript, version: number) {
     return new VueRenderDocument(uri, parent, languageId, version);
   }
 

@@ -463,9 +463,7 @@ foo
 
       const script = result[0];
 
-      expect(
-        source.slice(script.tag.pos.open.start, script.tag.pos.open.end)
-      ).toBe(`<script>`);
+      expect(source.slice(script.tag.pos.open.start, script.tag.pos.open.end)).toBe(`<script>`);
 
       // expect(result).toBe(1);
     });
@@ -508,8 +506,7 @@ foo
           },
           tag: {
             type: "script",
-            content:
-              ' lang="ts" generic="T extends string & { supa?: () => number } = \'foo\'"',
+            content: ' lang="ts" generic="T extends string & { supa?: () => number } = \'foo\'"',
 
             attributes: {
               generic: {
@@ -555,15 +552,13 @@ foo
       const script = result[0];
       const template = result[1];
 
-      expect(
-        source.slice(script.tag.pos.open.start, script.tag.pos.open.end)
-      ).toBe(
-        `<script lang="ts" generic="T extends string & { supa?: () => number } = 'foo'">`
+      expect(source.slice(script.tag.pos.open.start, script.tag.pos.open.end)).toBe(
+        `<script lang="ts" generic="T extends string & { supa?: () => number } = 'foo'">`,
       );
 
-      expect(
-        source.slice(template.tag.pos.open.start, template.tag.pos.open.end)
-      ).toBe(`<template>`);
+      expect(source.slice(template.tag.pos.open.start, template.tag.pos.open.end)).toBe(
+        `<template>`,
+      );
     });
 
     it("multiple empty blocks", () => {
@@ -574,22 +569,14 @@ foo
     `;
       const result = doExtract(source);
 
-      expect(result.map((x) => x.tag.type)).toEqual([
-        "script",
-        "template",
-        "style",
-      ]);
+      expect(result.map((x) => x.tag.type)).toEqual(["script", "template", "style"]);
     });
 
     it("should catch multiple consecutive empty blocks", () => {
       const source = `<script></script><script setup></script><template></template>`;
       const result = doExtract(source); // catchEmptyBlocks
 
-      expect(result.map((x) => x.tag.type)).toEqual([
-        "script",
-        "script",
-        "template",
-      ]);
+      expect(result.map((x) => x.tag.type)).toEqual(["script", "script", "template"]);
     });
     it("should parse blocks back-to-back with no whitespace", () => {
       const source = `<script>foo</script><template><div>bar</div></template>`;
@@ -625,9 +612,7 @@ foo
     });
 
     it("should return the specific lang for a <script lang='ts'>", () => {
-      const block = getFirstBlock(
-        `<script lang="ts">console.log('test')</script>`
-      );
+      const block = getFirstBlock(`<script lang="ts">console.log('test')</script>`);
       const lang = findBlockLanguage(block);
       expect(lang).toBe("ts");
     });
@@ -651,9 +636,7 @@ foo
     });
 
     it("should return 'scss' for <style lang='scss'>", () => {
-      const block = getFirstBlock(
-        `<style lang="scss">$red: red; .foo {color: $red;}</style>`
-      );
+      const block = getFirstBlock(`<style lang="scss">$red: red; .foo {color: $red;}</style>`);
       const lang = findBlockLanguage(block);
       expect(lang).toBe("scss");
     });
@@ -671,17 +654,13 @@ foo
     });
 
     it("should return 'gql' for a <graphql lang='gql'>", () => {
-      const block = getFirstBlock(
-        `<graphql lang="gql">query { hello }</graphql>`
-      );
+      const block = getFirstBlock(`<graphql lang="gql">query { hello }</graphql>`);
       const lang = findBlockLanguage(block);
       expect(lang).toBe("gql");
     });
 
     it("should fall back to the block type for an empty lang", () => {
-      const block = getFirstBlock(
-        `<script lang="">console.log('test')</script>`
-      );
+      const block = getFirstBlock(`<script lang="">console.log('test')</script>`);
       const lang = findBlockLanguage(block);
       // Decide how your code handles this; maybe you want to fallback to "js" or an empty string
       expect(lang).toBe("js");
@@ -739,20 +718,14 @@ foo
       const keptBlocks = keepBlocks(blocks, ["script", "template"], s);
 
       expect(keptBlocks).toHaveLength(3); // script + script setup + template
-      expect(keptBlocks.map((b) => b.tag.type)).toEqual([
-        "script",
-        "script",
-        "template",
-      ]);
+      expect(keptBlocks.map((b) => b.tag.type)).toEqual(["script", "script", "template"]);
 
       const transformed = s.toString();
       // style should be removed
       expect(transformed).not.toContain("<style scoped>");
       // But scripts and template remain
       expect(transformed).toContain("<script>console.log('script')</script>");
-      expect(transformed).toContain(
-        "<script setup>console.log('setup')</script>"
-      );
+      expect(transformed).toContain("<script setup>console.log('setup')</script>");
       expect(transformed).toContain("<template><div>template</div></template>");
     });
 
@@ -840,7 +813,7 @@ foo
       expect(transformed).toBe(
         `
   <div>Hello</div>
-  `.trim()
+  `.trim(),
       );
     });
 
@@ -899,11 +872,7 @@ foo
       const blocks = extractBlocksFromDescriptor(descriptor);
       const block = blocks.find((x) => x.tag.type === "script")!;
 
-      return retrieveAttributes(
-        block.tag.content,
-        block.block.attrs,
-        block.tag.pos.content.start
-      );
+      return retrieveAttributes(block.tag.content, block.block.attrs, block.tag.pos.content.start);
     }
 
     it("should parse attributes", () => {
@@ -949,14 +918,10 @@ foo
       const lang = attributes.lang;
       expect(source.slice(lang.start, lang.end)).toBe(lang.content);
       expect(source.slice(lang.key.start, lang.key.end)).toBe(lang.key.content);
-      expect(source.slice(lang.value!.start, lang.value!.end)).toBe(
-        lang.value!.content
-      );
+      expect(source.slice(lang.value!.start, lang.value!.end)).toBe(lang.value!.content);
       const setup = attributes.setup;
       expect(source.slice(setup.start, setup.end)).toBe(setup.content);
-      expect(source.slice(setup.key.start, setup.key.end)).toBe(
-        setup.key.content
-      );
+      expect(source.slice(setup.key.start, setup.key.end)).toBe(setup.key.content);
       expect(setup.value).toBeUndefined();
     });
 

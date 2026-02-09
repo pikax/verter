@@ -27,7 +27,7 @@ describe("process ComponentInstancePlugin", () => {
     lang = "ts",
     pre = "",
     post = "",
-    attrs = ""
+    attrs = "",
   ) {
     const prepend = `${pre}<script ${
       wrapper === false ? "setup" : ""
@@ -37,9 +37,7 @@ describe("process ComponentInstancePlugin", () => {
 
     const s = new MagicString(source);
 
-    const scriptBlock = parsed.blocks.find(
-      (x) => x.type === "script"
-    ) as ParsedBlockScript;
+    const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
 
     const r = processScript(
       scriptBlock.result.items,
@@ -61,7 +59,7 @@ describe("process ComponentInstancePlugin", () => {
         block: scriptBlock,
         generic: parsed.generic, // Pass generic info from parser
         blockNameResolver: (name) => name,
-      }
+      },
     );
 
     return r;
@@ -92,7 +90,9 @@ describe("process ComponentInstancePlugin", () => {
       expect(result).toContain(`export declare const ___VERTER___Component:`);
 
       // Should have constructor type with optional props parameter that references Instance['$props']
-      expect(result).toMatch(/\{\s*new\(props\?:\s*___VERTER___Instance\['\$props'\]\):\s*___VERTER___Prettify<___VERTER___Instance>\s*\}/);
+      expect(result).toMatch(
+        /\{\s*new\(props\?:\s*___VERTER___Instance\['\$props'\]\):\s*___VERTER___Prettify<___VERTER___Instance>\s*\}/,
+      );
     });
 
     // @ai-generated - Tests the constructor accepts props for proper type inference
@@ -101,7 +101,7 @@ describe("process ComponentInstancePlugin", () => {
 
       // Constructor should accept props? parameter
       expect(result).toMatch(/new\(props\?: ___VERTER___Instance\['\$props'\]\)/);
-      
+
       // Should return the correct Instance type wrapped in Prettify
       expect(result).toMatch(/\):\s*___VERTER___Prettify<___VERTER___Instance>\s*\}/);
     });
@@ -114,7 +114,7 @@ describe("process ComponentInstancePlugin", () => {
 
       // Should also include InstanceType<typeof default_Component> in TEST type
       expect(result).toContain(
-        `export type ___VERTER___Instance_TEST = Omit<InstanceType<typeof ___VERTER___default_Component>,"$"|"$data"|"$props"|"$attrs"|"$refs"|"$options"|"$emit"|"$el"|"$slots">`
+        `export type ___VERTER___Instance_TEST = Omit<InstanceType<typeof ___VERTER___default_Component>,"$"|"$data"|"$props"|"$attrs"|"$refs"|"$options"|"$emit"|"$el"|"$slots">`,
       );
     });
 
@@ -130,7 +130,7 @@ describe("process ComponentInstancePlugin", () => {
               expect.objectContaining({ name: "PublicInstanceFromMacro" }),
             ]),
           }),
-        ])
+        ]),
       );
     });
 
@@ -148,15 +148,17 @@ describe("process ComponentInstancePlugin", () => {
 
     it("merges defineOptions with instance type", () => {
       const { result } = parse(`defineOptions({ name: 'TestComp' }); const foo = 1`);
-      
+
       // Should include InstanceType from the defineComponent export
       expect(result).toContain(`InstanceType<typeof ___VERTER___default_Component>`);
-      
-      // Should include PublicInstanceFromMacro helper  
+
+      // Should include PublicInstanceFromMacro helper
       expect(result).toContain(`___VERTER___PublicInstanceFromMacro<`);
-      
+
       // Instance type should be an intersection of Omit<InstanceType<...>> and PublicInstanceFromMacro
-      expect(result).toMatch(/Omit<InstanceType<[^>]+>[^>]+>\s*&\s*___VERTER___PublicInstanceFromMacro/);
+      expect(result).toMatch(
+        /Omit<InstanceType<[^>]+>[^>]+>\s*&\s*___VERTER___PublicInstanceFromMacro/,
+      );
     });
   });
 
@@ -173,7 +175,7 @@ describe("process ComponentInstancePlugin", () => {
 
       // Should include generic in Component constructor with props parameter
       expect(result).toMatch(
-        /new<__VERTER__TS__T = any>\(props\?:\s*___VERTER___Instance<__VERTER__TS__T>\['\$props'\]\):\s*___VERTER___Prettify<___VERTER___Instance<__VERTER__TS__T>>/
+        /new<__VERTER__TS__T = any>\(props\?:\s*___VERTER___Instance<__VERTER__TS__T>\['\$props'\]\):\s*___VERTER___Prettify<___VERTER___Instance<__VERTER__TS__T>>/,
       );
     });
 
@@ -183,29 +185,23 @@ describe("process ComponentInstancePlugin", () => {
 
       // Constructor should have generic parameter
       expect(result).toMatch(/new<[^>]+>/);
-      
+
       // Constructor should accept props? parameter with generic Instance
       expect(result).toMatch(/new<[^>]+>\(props\?: ___VERTER___Instance<[^>]+>\['\$props'\]\)/);
-      
+
       // Constructor should return generic Instance wrapped in Prettify
       expect(result).toMatch(/\):\s*___VERTER___Prettify<___VERTER___Instance<[^>]+>>\s*\}/);
     });
 
     it("handles generic with extends constraint", () => {
-      const { result } = parse(
-        `defineProps<{ name: T }>()`,
-        "T extends string"
-      );
+      const { result } = parse(`defineProps<{ name: T }>()`, "T extends string");
 
       // Should include full generic declaration with constraint
       expect(result).toContain(`<__VERTER__TS__T extends string = any>`);
     });
 
     it("handles multiple generics", () => {
-      const { result } = parse(
-        `defineProps<{ key: K; value: V }>()`,
-        "K extends string, V"
-      );
+      const { result } = parse(`defineProps<{ key: K; value: V }>()`, "K extends string, V");
 
       // Should include multiple generics in declaration
       expect(result).toContain(`<__VERTER__TS__K extends string = any, __VERTER__TS__V = any>`);
@@ -229,7 +225,7 @@ describe("process ComponentInstancePlugin", () => {
 
       // TEST type should also include InstanceType<typeof default_Component>
       expect(result).toContain(
-        `export type ___VERTER___Instance_TEST<__VERTER__TS__T = any> = Omit<InstanceType<typeof ___VERTER___default_Component>,"$"|"$data"|"$props"|"$attrs"|"$refs"|"$options"|"$emit"|"$el"|"$slots">`
+        `export type ___VERTER___Instance_TEST<__VERTER__TS__T = any> = Omit<InstanceType<typeof ___VERTER___default_Component>,"$"|"$data"|"$props"|"$attrs"|"$refs"|"$options"|"$emit"|"$el"|"$slots">`,
       );
     });
   });
@@ -246,7 +242,7 @@ describe("process ComponentInstancePlugin", () => {
       parse(`export default { props: { foo: String } }`);
 
       expect(warnSpy).toHaveBeenCalledWith(
-        "Setup is not supported yet for ComponentInstancePlugin"
+        "Setup is not supported yet for ComponentInstancePlugin",
       );
 
       warnSpy.mockRestore();

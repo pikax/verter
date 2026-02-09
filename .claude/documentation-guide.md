@@ -32,19 +32,19 @@ Every package and crate README must follow this structure. Sections marked "if a
 ## Overview
 
 {2-3 paragraphs: what it does, why it exists, how it fits in the Verter ecosystem.
- Mention Rust migration plans if relevant.}
+Mention Rust migration plans if relevant.}
 
-## Installation                    <!-- if publishable to npm/crates.io -->
+## Installation <!-- if publishable to npm/crates.io -->
 
-## Architecture                    <!-- include Mermaid diagram -->
+## Architecture <!-- include Mermaid diagram -->
 
 ## API / Usage
 
-## Configuration                   <!-- if applicable -->
+## Configuration <!-- if applicable -->
 
 ## Development / Build
 
-## Testing                         <!-- if applicable -->
+## Testing <!-- if applicable -->
 
 ## Dependencies
 
@@ -69,15 +69,16 @@ Every package and crate README must follow this structure. Sections marked "if a
 
 Use Mermaid diagrams for architecture and flow visualizations. GitHub renders Mermaid natively in markdown code blocks.
 
-```markdown
-​```mermaid
+````markdown
+​`mermaid
 graph TD
     A[Input] --> B[Processing]
     B --> C[Output]
-​```
-```
+​`
+````
 
 **Guidelines:**
+
 - Use `graph TD` (top-down) for hierarchies and dependency graphs
 - Use `graph LR` (left-right) for pipelines and data flows
 - Use `flowchart` for complex flows with decisions

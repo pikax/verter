@@ -26,10 +26,7 @@ defineProps<{
 
 defineSlots<{ header: (a: { foo: string }) => any }>();
 
-const vFoo = (
-  el: HTMLInputElement,
-  binding: { value: string; oldValue: string }
-) => {
+const vFoo = (el: HTMLInputElement, binding: { value: string; oldValue: string }) => {
   el.value = binding.value + binding.oldValue;
 };
 </script>

@@ -14,7 +14,7 @@ interface FunctionalButtonProps {
 // Standalone functional component
 export const StandaloneFunctional: FunctionalComponent<FunctionalButtonProps> = (
   props,
-  { slots, attrs }
+  { slots, attrs },
 ) => {
   return h(
     "button",
@@ -23,7 +23,7 @@ export const StandaloneFunctional: FunctionalComponent<FunctionalButtonProps> = 
       onClick: props.onClick,
       ...attrs,
     },
-    [props.title, props.count !== undefined ? ` (${props.count})` : "", slots.default?.()]
+    [props.title, props.count !== undefined ? ` (${props.count})` : "", slots.default?.()],
   );
 };
 
@@ -107,7 +107,7 @@ export default defineComponent({
           onClick: () => this.handleItemClick(item),
           onMouseenter: () => this.handleItemHover(item.id),
         },
-        item.label
+        item.label,
       );
     },
   },
@@ -154,9 +154,7 @@ export default defineComponent({
     </ul>
 
     <!-- Conditional rendering based on props only -->
-    <button :class="buttonClasses" :disabled="disabled">
-      {{ variant }} button
-    </button>
+    <button :class="buttonClasses" :disabled="disabled">{{ variant }} button</button>
 
     <!-- Slot for composition -->
     <slot name="footer" :count="itemCount" />

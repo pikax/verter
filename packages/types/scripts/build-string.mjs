@@ -12,12 +12,7 @@ const distDir = path.join(__dirname, "../dist");
 // Parse exports from index.ts to discover source files
 function getSourceFilesFromIndex(indexPath) {
   const indexSource = fs.readFileSync(indexPath, "utf-8");
-  const indexFile = ts.createSourceFile(
-    "index.ts",
-    indexSource,
-    ts.ScriptTarget.Latest,
-    true
-  );
+  const indexFile = ts.createSourceFile("index.ts", indexSource, ts.ScriptTarget.Latest, true);
 
   const sourceFiles = [];
 
@@ -54,18 +49,15 @@ function getSourceFilesFromIndex(indexPath) {
 function resolveImportPath(importPath, fromFile) {
   const fromDir = path.dirname(fromFile);
   const resolved = path.resolve(fromDir, importPath);
-  
+
   // Try with .ts extension first, then as-is if it's a file, then index.ts
-  const possiblePaths = [
-    resolved + ".ts",
-    path.join(resolved, "index.ts"),
-  ];
-  
+  const possiblePaths = [resolved + ".ts", path.join(resolved, "index.ts")];
+
   // Only add resolved if it exists and is a file (not directory)
   if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
     possiblePaths.unshift(resolved);
   }
-  
+
   for (const p of possiblePaths) {
     if (fs.existsSync(p) && fs.statSync(p).isFile()) {
       return p;
@@ -77,7 +69,7 @@ function resolveImportPath(importPath, fromFile) {
 // Collect local imports from a source file
 function collectLocalImports(sourceFile, filePath) {
   const imports = [];
-  
+
   ts.forEachChild(sourceFile, (node) => {
     if (ts.isImportDeclaration(node) && node.moduleSpecifier) {
       if (ts.isStringLiteral(node.moduleSpecifier)) {
@@ -96,7 +88,7 @@ function collectLocalImports(sourceFile, filePath) {
       }
     }
   });
-  
+
   return imports;
 }
 
@@ -105,33 +97,33 @@ function collectAllSourceFiles(initialFiles) {
   const allFiles = new Set();
   const fileOrder = []; // Maintain order: dependencies first
   const pending = [...initialFiles];
-  
+
   while (pending.length > 0) {
     const filePath = pending.shift();
     if (allFiles.has(filePath)) continue;
-    
+
     const source = fs.readFileSync(filePath, "utf-8");
     const sourceFile = ts.createSourceFile(
       path.basename(filePath),
       source,
       ts.ScriptTarget.Latest,
-      true
+      true,
     );
-    
+
     // Collect local imports from this file
     const imports = collectLocalImports(sourceFile, filePath);
-    
+
     // Add imported files to pending (they should be processed before this file)
     for (const imp of imports) {
       if (!allFiles.has(imp.resolvedPath)) {
         pending.unshift(imp.resolvedPath); // Add to front to process dependencies first
       }
     }
-    
+
     allFiles.add(filePath);
     fileOrder.push(filePath);
   }
-  
+
   return fileOrder;
 }
 
@@ -176,12 +168,7 @@ function collectDeclarations(sourceFiles) {
   return { allTypes, exportedTypesOrInterfaces };
 }
 
-function transformSourceFile(
-  sourceFile,
-  allTypes,
-  prefix = "$V_",
-  keepComments = false
-) {
+function transformSourceFile(sourceFile, allTypes, prefix = "$V_", keepComments = false) {
   const rewriteIdentifier = (ident) => {
     if (allTypes.has(ident.text) && !ident.text.startsWith(prefix)) {
       return ts.factory.createIdentifier(prefix + ident.text);
@@ -211,7 +198,7 @@ function transformSourceFile(
             name,
             node.typeParameters?.map((tp) => ts.visitNode(tp, visit)),
             node.heritageClauses?.map((hc) => ts.visitNode(hc, visit)),
-            node.members.map((m) => ts.visitNode(m, visit))
+            node.members.map((m) => ts.visitNode(m, visit)),
           );
         }
 
@@ -223,18 +210,13 @@ function transformSourceFile(
             name,
             node.typeParameters?.map((tp) => ts.visitNode(tp, visit)),
             node.heritageClauses?.map((hc) => ts.visitNode(hc, visit)),
-            node.members.map((m) => ts.visitNode(m, visit))
+            node.members.map((m) => ts.visitNode(m, visit)),
           );
         }
 
         if (ts.isEnumDeclaration(node)) {
           const name = rewriteIdentifier(node.name);
-          return ts.factory.updateEnumDeclaration(
-            node,
-            node.modifiers,
-            name,
-            node.members
-          );
+          return ts.factory.updateEnumDeclaration(node, node.modifiers, name, node.members);
         }
 
         if (ts.isFunctionDeclaration(node)) {
@@ -247,18 +229,13 @@ function transformSourceFile(
             node.typeParameters?.map((tp) => ts.visitNode(tp, visit)),
             node.parameters.map((p) => ts.visitNode(p, visit)),
             node.type ? ts.visitNode(node.type, visit) : node.type,
-            node.body ? ts.visitNode(node.body, visit) : node.body
+            node.body ? ts.visitNode(node.body, visit) : node.body,
           );
         }
 
         if (ts.isModuleDeclaration(node)) {
           const name = rewriteIdentifier(node.name);
-          return ts.factory.updateModuleDeclaration(
-            node,
-            node.modifiers,
-            name,
-            node.body
-          );
+          return ts.factory.updateModuleDeclaration(node, node.modifiers, name, node.body);
         }
 
         // Prefix all type alias declarations (exported and non-exported)
@@ -273,7 +250,7 @@ function transformSourceFile(
             node.modifiers,
             name,
             node.typeParameters?.map((tp) => ts.visitNode(tp, visit)),
-            ts.visitNode(node.type, visit)
+            ts.visitNode(node.type, visit),
           );
         }
 
@@ -287,7 +264,7 @@ function transformSourceFile(
                 name,
                 decl.exclamationToken,
                 decl.type,
-                decl.initializer
+                decl.initializer,
               );
             }
             return decl;
@@ -295,10 +272,7 @@ function transformSourceFile(
           return ts.factory.updateVariableStatement(
             node,
             node.modifiers,
-            ts.factory.updateVariableDeclarationList(
-              node.declarationList,
-              newDecls
-            )
+            ts.factory.updateVariableDeclarationList(node.declarationList, newDecls),
           );
         }
 
@@ -306,11 +280,7 @@ function transformSourceFile(
         if (ts.isTypeReferenceNode(node)) {
           const newName = rewriteEntityName(node.typeName);
           const newTypeArgs = node.typeArguments?.map((t) => ts.visitNode(t, visit));
-          return ts.factory.updateTypeReferenceNode(
-            node,
-            newName,
-            newTypeArgs
-          );
+          return ts.factory.updateTypeReferenceNode(node, newName, newTypeArgs);
         }
 
         // Prefix typeof references (TypeQueryNode)
@@ -325,10 +295,7 @@ function transformSourceFile(
         if (ts.isComputedPropertyName(node)) {
           const expr = node.expression;
           if (ts.isIdentifier(expr) && allTypes.has(expr.text)) {
-            return ts.factory.updateComputedPropertyName(
-              node,
-              rewriteIdentifier(expr)
-            );
+            return ts.factory.updateComputedPropertyName(node, rewriteIdentifier(expr));
           }
         }
 
@@ -358,18 +325,13 @@ function build() {
 
   console.log(
     "Found source files:",
-    sourceFilePaths.map((p) => path.relative(srcDir, p)).join(", ")
+    sourceFilePaths.map((p) => path.relative(srcDir, p)).join(", "),
   );
 
   // Read and parse all source files
   const sourceFiles = sourceFilePaths.map((filePath) => {
     const source = fs.readFileSync(filePath, "utf-8");
-    return ts.createSourceFile(
-      path.basename(filePath),
-      source,
-      ts.ScriptTarget.Latest,
-      true
-    );
+    return ts.createSourceFile(path.basename(filePath), source, ts.ScriptTarget.Latest, true);
   });
 
   // CLI flag: keep comments in the output string
@@ -380,29 +342,21 @@ function build() {
 
   // Transform all files
   const transformedSources = sourceFiles.map((sourceFile, index) => {
-    let transformed = transformSourceFile(
-      sourceFile,
-      allTypes,
-      "$V_",
-      keepComments
-    );
+    let transformed = transformSourceFile(sourceFile, allTypes, "$V_", keepComments);
 
     // Remove all local relative imports (they are inlined)
     transformed = transformed.replace(
       /import\s+(?:type\s+)?{[^}]+}\s*from\s*["']\.\.?\/[^"']+["'];?\s*/g,
-      ""
+      "",
     );
 
     // Remove all export * from statements (content is inlined)
-    transformed = transformed.replace(
-      /export\s+\*\s+from\s*["'][^"']+["'];?\s*/g,
-      ""
-    );
+    transformed = transformed.replace(/export\s+\*\s+from\s*["'][^"']+["'];?\s*/g, "");
 
     // Remove all export { } from statements (content is inlined)
     transformed = transformed.replace(
       /export\s+(?:type\s+)?{[^}]+}\s*from\s*["'][^"']+["'];?\s*/g,
-      ""
+      "",
     );
 
     return transformed;
@@ -415,9 +369,7 @@ function build() {
   const available = Array.from(allTypes);
   if (available.length) {
     combined +=
-      "\n\nexport type AvailableTypes = " +
-      available.map((n) => `"${n}"`).join(" | ") +
-      ";\n";
+      "\n\nexport type AvailableTypes = " + available.map((n) => `"${n}"`).join(" | ") + ";\n";
   }
 
   // Create output
@@ -430,7 +382,9 @@ export function prefixWith(prefix) {
   return typeHelpersSource
     .replaceAll("$V_", prefix);
 }
-export const ExportedTypes = new Set([${Array.from(exportedTypesOrInterfaces).map((n) => `"${n}"`).join(", ")}]);
+export const ExportedTypes = new Set([${Array.from(exportedTypesOrInterfaces)
+    .map((n) => `"${n}"`)
+    .join(", ")}]);
 `;
 
   // Ensure dist exists
@@ -444,7 +398,7 @@ export const ExportedTypes = new Set([${Array.from(exportedTypesOrInterfaces).ma
     path.join(distDir, "string-export.d.ts"),
     `declare const typeHelpersSource: string;\nexport default typeHelpersSource;\nexport type AvailableExports = ${
       available.map((n) => `"${n}"`).join(" | ") || "never"
-    };\nexport function prefixWith(prefix: string): string;\nexport const ExportedTypes: Set<string>;\n`
+    };\nexport function prefixWith(prefix: string): string;\nexport const ExportedTypes: Set<string>;\n`,
   );
 
   console.log("✓ Built string export successfully");

@@ -48,17 +48,19 @@ const emit = defineEmits<{
 }>();
 
 // Destructuring with complex defaults
-const { 
-  value = "default", 
-  config: { name: configName = "unnamed" } = { name: "unnamed", id: 0 },
-} = props;
+const { value = "default", config: { name: configName = "unnamed" } = { name: "unnamed", id: 0 } } =
+  props;
 
 // Multiple defineModel calls
 const basicModel = defineModel<string>();
 const namedModel = defineModel<number>("count", { required: true });
 const modelWithTransform = defineModel<string>("search", {
-  get(v) { return v?.toUpperCase() ?? ""; },
-  set(v) { return v?.toLowerCase() ?? ""; },
+  get(v) {
+    return v?.toUpperCase() ?? "";
+  },
+  set(v) {
+    return v?.toLowerCase() ?? "";
+  },
 });
 
 // Complex computed with type assertion
@@ -67,28 +69,28 @@ const complexComputed = computed(() => {
     ...item,
     processed: true as const,
   }));
-  return result as ReadonlyArray<typeof result[number]>;
+  return result as ReadonlyArray<(typeof result)[number]>;
 });
 
 // Ref with explicit generic
 const explicitRef: Ref<Map<string, Set<number>>> = ref(new Map());
 
 // ComputedRef with explicit type
-const explicitComputed: ComputedRef<readonly string[]> = computed(() => 
-  props.items.map((i) => String(i.id))
+const explicitComputed: ComputedRef<readonly string[]> = computed(() =>
+  props.items.map((i) => String(i.id)),
 );
 
 // Function with complex generic signature
 function processItems<T extends { id: string | number }>(
   items: T[],
-  transformer: <U extends T>(item: U) => U & { transformed: true }
+  transformer: <U extends T>(item: U) => U & { transformed: true },
 ): Array<ReturnType<typeof transformer>> {
   return items.map(transformer);
 }
 
 // Async function with complex return type
 async function fetchData<T extends object>(
-  endpoint: string
+  endpoint: string,
 ): Promise<{ data: T; metadata: { timestamp: number } }> {
   return { data: {} as T, metadata: { timestamp: Date.now() } };
 }
@@ -106,7 +108,7 @@ watch(
       console.log("Changed:", { newValue, newConfig, oldValue, oldConfig });
     }
   },
-  { deep: true, immediate: true }
+  { deep: true, immediate: true },
 );
 
 // Complex slots definition
@@ -143,7 +145,9 @@ const objectWithDynamicKey = {
   staticKey: 1,
   [dynamicKey]: 2,
   [`${dynamicKey}2`]: 3,
-  [Symbol.iterator]: function* () { yield 1; },
+  [Symbol.iterator]: function* () {
+    yield 1;
+  },
 };
 
 // Destructuring in parameters
@@ -171,53 +175,50 @@ function narrowType(value: string | number | boolean): string {
 <template>
   <div>
     <!-- Complex template expressions -->
-    <div>{{ typeof props.value === 'string' ? props.value.toUpperCase() : props.value }}</div>
-    
+    <div>{{ typeof props.value === "string" ? props.value.toUpperCase() : props.value }}</div>
+
     <!-- Optional chaining in template -->
     <span>{{ props.nested?.level1?.level2?.level3?.value }}</span>
-    
+
     <!-- Nullish coalescing in template -->
-    <span>{{ basicModel ?? 'No model value' }}</span>
-    
+    <span>{{ basicModel ?? "No model value" }}</span>
+
     <!-- Complex ternary -->
-    <div :class="props.value === 'active' 
-      ? 'active-class' 
-      : props.value === 'inactive' 
-        ? 'inactive-class' 
-        : 'default-class'"
+    <div
+      :class="
+        props.value === 'active'
+          ? 'active-class'
+          : props.value === 'inactive'
+            ? 'inactive-class'
+            : 'default-class'
+      "
     >
       Nested ternary
     </div>
-    
+
     <!-- Template literal in binding -->
-    <div :data-info="`Value: ${props.value}, Name: ${configName}`">
-      Template literal attribute
-    </div>
-    
+    <div :data-info="`Value: ${props.value}, Name: ${configName}`">Template literal attribute</div>
+
     <!-- Destructuring in v-for -->
     <div v-for="{ id, ...rest } in props.items" :key="id">
       {{ id }} - {{ JSON.stringify(rest) }}
     </div>
-    
+
     <!-- Index signature slot usage -->
     <slot name="item-0" :data="props.items[0]" />
     <slot name="item-1" :data="props.items[1]" />
-    
+
     <!-- Complex computed in template -->
     <ul>
       <li v-for="item in complexComputed" :key="item.id">
         {{ item.processed }}
       </li>
     </ul>
-    
+
     <!-- Arrow function in event handler -->
-    <button @click="(e) => handleEvent({ target: { value: 'clicked' } })">
-      Arrow in handler
-    </button>
-    
+    <button @click="(e) => handleEvent({ target: { value: 'clicked' } })">Arrow in handler</button>
+
     <!-- Object spread in binding -->
-    <div v-bind="{ ...spreadObject, 'data-spread': true }">
-      Spread in v-bind
-    </div>
+    <div v-bind="{ ...spreadObject, 'data-spread': true }">Spread in v-bind</div>
   </div>
 </template>

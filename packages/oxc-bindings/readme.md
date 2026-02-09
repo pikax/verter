@@ -91,13 +91,13 @@ try {
 
 ## Platform Support
 
-| Platform | Architecture | Binary Target |
-|----------|-------------|---------------|
-| macOS | x64 | `darwin-x64` |
-| macOS | arm64 (Apple Silicon) | `darwin-arm64` |
-| Windows | x64 | `win32-x64` |
-| Linux | x64 (glibc) | `linux-x64-gnu` |
-| Linux | arm64 (glibc) | `linux-arm64-gnu` |
+| Platform | Architecture          | Binary Target     |
+| -------- | --------------------- | ----------------- |
+| macOS    | x64                   | `darwin-x64`      |
+| macOS    | arm64 (Apple Silicon) | `darwin-arm64`    |
+| Windows  | x64                   | `win32-x64`       |
+| Linux    | x64 (glibc)           | `linux-x64-gnu`   |
+| Linux    | arm64 (glibc)         | `linux-arm64-gnu` |
 
 ## Usage in Verter
 
@@ -137,13 +137,13 @@ pnpm --filter @verter/oxc-bindings test
 
 This package has **no production dependencies**. It relies solely on Node.js built-in modules:
 
-| Module | Purpose |
-|--------|---------|
-| `node:fs` / `node:fs/promises` | File system operations |
-| `node:path` | Path resolution |
-| `node:os` | Platform and architecture detection |
-| `node:https` | Binary download over HTTPS |
-| `node:child_process` | Binary verification |
+| Module                         | Purpose                             |
+| ------------------------------ | ----------------------------------- |
+| `node:fs` / `node:fs/promises` | File system operations              |
+| `node:path`                    | Path resolution                     |
+| `node:os`                      | Platform and architecture detection |
+| `node:https`                   | Binary download over HTTPS          |
+| `node:child_process`           | Binary verification                 |
 
 ## License
 

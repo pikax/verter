@@ -7,7 +7,7 @@
 </template>
 
 <script setup lang="ts">
-import ChildComponent from './ChildComponent.vue'
+import ChildComponent from "./ChildComponent.vue";
 </script>
 
 <style scoped>

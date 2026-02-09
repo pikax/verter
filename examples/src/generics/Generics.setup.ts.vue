@@ -60,9 +60,7 @@ function selectOption(value: U) {
 
 // Generic computed (computed imported at top)
 const itemCount = computed(() => props.items.length);
-const selectedLabel = computed(() =>
-  props.selected ? getLabel(props.selected) : ""
-);
+const selectedLabel = computed(() => (props.selected ? getLabel(props.selected) : ""));
 </script>
 
 <template>

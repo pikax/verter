@@ -6,7 +6,7 @@ import { TemplateTypes } from "../../types.js";
 describe("parser template element loops", () => {
   function parse(
     content: string,
-    context: LoopsContext = { ignoredIdentifiers: [], inFor: false }
+    context: LoopsContext = { ignoredIdentifiers: [], inFor: false },
   ) {
     const source = `<template>${content}</template>`;
 

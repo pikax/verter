@@ -1,10 +1,5 @@
 <script>
-import {
-  defineComponent,
-  defineAsyncComponent,
-  shallowRef,
-  markRaw,
-} from "vue";
+import { defineComponent, defineAsyncComponent, shallowRef, markRaw } from "vue";
 
 const AsyncBasic = defineAsyncComponent(() => import("./AsyncChild.vue"));
 
@@ -82,7 +77,7 @@ export default defineComponent({
       return defineAsyncComponent(() =>
         this.componentName === "ComponentA"
           ? import("./ComponentA.vue")
-          : import("./ComponentB.vue")
+          : import("./ComponentB.vue"),
       );
     },
     currentLazyComponent() {
@@ -97,8 +92,7 @@ export default defineComponent({
       this.showDynamic = !this.showDynamic;
     },
     switchComponent() {
-      this.componentName =
-        this.componentName === "ComponentA" ? "ComponentB" : "ComponentA";
+      this.componentName = this.componentName === "ComponentA" ? "ComponentB" : "ComponentA";
     },
     setRoute(route) {
       this.currentRoute = route;

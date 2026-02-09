@@ -9,7 +9,7 @@ export function isVueDocument(doc: TextDocument): doc is VueDocument {
 }
 
 export function isVerterVirtual(
-  uri: string
+  uri: string,
 ): uri is `${typeof VerterVirtualFileScheme}://${string}` {
   return uri.startsWith(VerterVirtualFileScheme);
 }
@@ -49,13 +49,9 @@ export function createSubDocumentUri(uri: string, ending: string) {
 export function uriToVerterVirtual(uri: string) {
   if (isVueFile(uri) || isVueSubDocument(uri)) {
     if (!isVerterVirtual(uri)) {
-      const parsed = uri.startsWith("file:///")
-        ? URI.parse(uri)
-        : URI.file(uri);
+      const parsed = uri.startsWith("file:///") ? URI.parse(uri) : URI.file(uri);
       // uri = `${VerterVirtualFileScheme}://${parsed.path}`;
-      uri = `${VerterVirtualFileScheme}${parsed
-        .toString()
-        .slice(parsed.scheme.length)}`;
+      uri = `${VerterVirtualFileScheme}${parsed.toString().slice(parsed.scheme.length)}`;
     }
     return uri;
   }
@@ -68,9 +64,7 @@ export function uriToPath(uri: string) {
     const match = uri.match(VueSubDocRegex);
     if (match && match[0].endsWith("bundler.ts")) {
       // url = URI.parse(uri.replace(match[1], ""));
-      url = URI.parse(
-        uri.replace(match[1], "").replace(VerterVirtualFileScheme, "file")
-      );
+      url = URI.parse(uri.replace(match[1], "").replace(VerterVirtualFileScheme, "file"));
     }
   } else if (url.scheme !== "file" && url.scheme !== VerterVirtualFileScheme) {
     return uri;

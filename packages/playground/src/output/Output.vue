@@ -1,68 +1,68 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import type { Store } from '../core/store'
-import type { OutputMode } from '../core/types'
-import Preview from './Preview.vue'
-import CodeOutput from './CodeOutput.vue'
+import { computed } from "vue";
+import type { Store } from "../core/store";
+import type { OutputMode } from "../core/types";
+import Preview from "./Preview.vue";
+import CodeOutput from "./CodeOutput.vue";
 
 const props = defineProps<{
-  store: Store
-}>()
+  store: Store;
+}>();
 
 const allTabs: { mode: OutputMode; label: string }[] = [
-  { mode: 'preview', label: 'Preview' },
-  { mode: 'ts', label: 'TS' },
-  { mode: 'js', label: 'JS' },
-  { mode: 'css', label: 'CSS' },
-]
+  { mode: "preview", label: "Preview" },
+  { mode: "ts", label: "TS" },
+  { mode: "js", label: "JS" },
+  { mode: "css", label: "CSS" },
+];
 
 /** Only show the TS tab when the active file contains TypeScript */
 const tabs = computed(() => {
-  const file = props.store.activeFile
-  const isTS = file?.isTS ?? false
-  return allTabs.filter((tab) => tab.mode !== 'ts' || isTS)
-})
+  const file = props.store.activeFile;
+  const isTS = file?.isTS ?? false;
+  return allTabs.filter((tab) => tab.mode !== "ts" || isTS);
+});
 
 function openSourceMapVisualization() {
-  const file = props.store.activeFile
-  if (!file?.compiled.sourceMap) return
-  const code = file.compiled.ts || file.compiled.js
-  const map = file.compiled.sourceMap
+  const file = props.store.activeFile;
+  if (!file?.compiled.sourceMap) return;
+  const code = file.compiled.ts || file.compiled.js;
+  const map = file.compiled.sourceMap;
   // evanw's source-map-visualization uses length-prefixed format:
   // btoa(`${utf8CodeLen}\0${utf8Code}${utf8MapLen}\0${utf8Map}`)
-  const enc = new TextEncoder()
-  const codeBytes = enc.encode(code)
-  const mapBytes = enc.encode(map)
+  const enc = new TextEncoder();
+  const codeBytes = enc.encode(code);
+  const mapBytes = enc.encode(map);
   // Build binary string from UTF-8 bytes (latin1 decoding preserves raw bytes)
-  let binary = ''
-  const codeLenStr = String(codeBytes.length)
-  binary += codeLenStr + '\0'
-  for (const b of codeBytes) binary += String.fromCharCode(b)
-  const mapLenStr = String(mapBytes.length)
-  binary += mapLenStr + '\0'
-  for (const b of mapBytes) binary += String.fromCharCode(b)
-  const encoded = btoa(binary)
-  window.open(`https://evanw.github.io/source-map-visualization/#${encoded}`, '_blank')
+  let binary = "";
+  const codeLenStr = String(codeBytes.length);
+  binary += codeLenStr + "\0";
+  for (const b of codeBytes) binary += String.fromCharCode(b);
+  const mapLenStr = String(mapBytes.length);
+  binary += mapLenStr + "\0";
+  for (const b of mapBytes) binary += String.fromCharCode(b);
+  const encoded = btoa(binary);
+  window.open(`https://evanw.github.io/source-map-visualization/#${encoded}`, "_blank");
 }
 
 function getTabTiming(mode: OutputMode): string | null {
-  const { verter, oxc } = props.store.compileTiming
-  const isTS = props.store.activeFile?.isTS ?? false
+  const { verter, oxc } = props.store.compileTiming;
+  const isTS = props.store.activeFile?.isTS ?? false;
   switch (mode) {
-    case 'preview': {
-      const total = (verter ?? 0) + (oxc ?? 0)
-      return total > 0 ? `${total.toFixed(1)}ms` : null
+    case "preview": {
+      const total = (verter ?? 0) + (oxc ?? 0);
+      return total > 0 ? `${total.toFixed(1)}ms` : null;
     }
-    case 'ts':
-      return verter !== null ? `${verter.toFixed(1)}ms` : null
-    case 'js':
+    case "ts":
+      return verter !== null ? `${verter.toFixed(1)}ms` : null;
+    case "js":
       // When file is TS, JS tab shows OXC timing; otherwise it shows Verter timing
       if (isTS) {
-        return oxc !== null ? `${oxc.toFixed(1)}ms` : null
+        return oxc !== null ? `${oxc.toFixed(1)}ms` : null;
       }
-      return verter !== null ? `${verter.toFixed(1)}ms` : null
-    case 'css':
-      return null
+      return verter !== null ? `${verter.toFixed(1)}ms` : null;
+    case "css":
+      return null;
   }
 }
 </script>

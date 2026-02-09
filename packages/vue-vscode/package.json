@@ -3,24 +3,28 @@
   "displayName": "Verter VSCode",
   "version": "0.0.1-alpha.1",
   "description": "Verter VSCode Extension",
-  "main": "dist/extension.js",
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "verter",
+    "vetur",
+    "vue"
+  ],
+  "license": "MIT",
+  "author": "Carlos Rodrigues <pikax>",
+  "repository": {
+    "url": "https://github.com/pikax/verter"
+  },
+  "publisher": "pikax",
   "type": "commonjs",
+  "main": "dist/extension.js",
   "scripts": {
     "build": "tsc -b",
     "watch": "pnpm build --watch",
     "test": "echo \"Error: no test specified\" && exit 1",
     "package": "vsce package"
   },
-  "keywords": [
-    "vue",
-    "verter",
-    "vetur"
-  ],
-  "repository": {
-    "url": "https://github.com/pikax/verter"
-  },
-  "author": "Carlos Rodrigues <pikax>",
-  "license": "MIT",
   "dependencies": {
     "@types/lodash": "^4.17.23",
     "@types/vscode": "^1.109.0",
@@ -41,26 +45,6 @@
     "typescript": "^5.9.3",
     "vite": "^7.3.1"
   },
-  "vsce": {
-    "dependencies": true,
-    "yarn": false
-  },
-  "engines": {
-    "vscode": "^1.90.0"
-  },
-  "categories": [
-    "Programming Languages"
-  ],
-  "activationEvents": [
-    "onLanguage:vue",
-    "onCommand:verter.restartLanguageServer",
-    "onCommand:verter.showStatistics",
-    "onLanguage:javascript",
-    "onLanguage:typescript",
-    "onLanguage:typescriptreact",
-    "onLanguage:javascriptreact"
-  ],
-  "publisher": "pikax",
   "contributes": {
     "configuration": {
       "type": "object",
@@ -233,5 +217,21 @@
         "title": "Verter: Show Processing Statistics"
       }
     ]
+  },
+  "activationEvents": [
+    "onCommand:verter.restartLanguageServer",
+    "onCommand:verter.showStatistics",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:vue"
+  ],
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "vsce": {
+    "dependencies": true,
+    "yarn": false
   }
 }

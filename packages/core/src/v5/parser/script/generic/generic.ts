@@ -69,7 +69,7 @@ export type GenericInfo = {
 export function parseGeneric(
   genericStr: string,
   offset: number = 0,
-  prefix: string = "__VERTER__TS__"
+  prefix: string = "__VERTER__TS__",
 ): GenericInfo | null {
   if (!genericStr) return null;
   const genericCode = `type __GENERIC__<${genericStr}> = {};`;
@@ -90,9 +90,7 @@ export function parseGeneric(
     constraint: param.constraint
       ? genericCode.slice(param.constraint.start, param.constraint.end)
       : undefined,
-    default: param.default
-      ? genericCode.slice(param.default.start, param.default.end)
-      : undefined,
+    default: param.default ? genericCode.slice(param.default.start, param.default.end) : undefined,
     index,
   }));
 
@@ -122,11 +120,7 @@ export function parseGeneric(
       const constraint = sanitiseGenericNames(x.constraint);
       const defaultType = sanitiseGenericNames(x.default);
 
-      return [
-        name,
-        constraint ? `extends ${constraint}` : undefined,
-        `= ${defaultType || "any"}`,
-      ]
+      return [name, constraint ? `extends ${constraint}` : undefined, `= ${defaultType || "any"}`]
         .filter(Boolean)
         .join(" ");
     })

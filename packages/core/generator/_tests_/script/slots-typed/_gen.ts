@@ -1,7 +1,6 @@
 type __COMP__ = {};
 declare const Comp: __COMP__;
 
-
 const slots = getComponentSlots(Comp);
 expectType<{
   foo: () => any;

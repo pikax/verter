@@ -1,18 +1,18 @@
 <script setup lang="ts">
-import type { Store } from '../core/store'
-import VersionSelect from './VersionSelect.vue'
+import type { Store } from "../core/store";
+import VersionSelect from "./VersionSelect.vue";
 
 const props = defineProps<{
-  store: Store
-}>()
+  store: Store;
+}>();
 
 function verterTimingTitle(): string {
-  const { verter, verterNative } = props.store.compileTiming
-  let title = 'Verter: Vue SFC → TypeScript'
+  const { verter, verterNative } = props.store.compileTiming;
+  let title = "Verter: Vue SFC → TypeScript";
   if (verterNative !== null) {
-    title += ` (native: ${verterNative.toFixed(1)}ms)`
+    title += ` (native: ${verterNative.toFixed(1)}ms)`;
   }
-  return title
+  return title;
 }
 </script>
 
@@ -30,7 +30,7 @@ function verterTimingTitle(): string {
         @click="store.toggleProduction"
         title="Toggle Production mode"
       >
-        {{ store.compilerOptions.isProduction ? 'PROD' : 'DEV' }}
+        {{ store.compilerOptions.isProduction ? "PROD" : "DEV" }}
       </button>
       <button
         class="toggle-btn"
@@ -38,7 +38,7 @@ function verterTimingTitle(): string {
         @click="store.toggleSSR"
         title="Toggle SSR mode"
       >
-        SSR {{ store.compilerOptions.ssr ? 'ON' : 'OFF' }}
+        SSR {{ store.compilerOptions.ssr ? "ON" : "OFF" }}
       </button>
       <button
         class="toggle-btn"
@@ -46,17 +46,32 @@ function verterTimingTitle(): string {
         @click="store.toggleAutoSave"
         :title="store.autoSave ? 'Auto-save enabled' : 'Manual save (Ctrl+S)'"
       >
-        Auto {{ store.autoSave ? 'ON' : 'OFF' }}
+        Auto {{ store.autoSave ? "ON" : "OFF" }}
       </button>
-      <div class="timing" v-if="store.compileTiming.verter !== null || store.compileTiming.oxc !== null">
-        <span v-if="store.compileTiming.verter !== null" class="timing-item" :title="verterTimingTitle()">
+      <div
+        class="timing"
+        v-if="store.compileTiming.verter !== null || store.compileTiming.oxc !== null"
+      >
+        <span
+          v-if="store.compileTiming.verter !== null"
+          class="timing-item"
+          :title="verterTimingTitle()"
+        >
           V: {{ store.compileTiming.verter.toFixed(1) }}ms
         </span>
-        <span v-if="store.compileTiming.oxc !== null" class="timing-item" title="OXC: TypeScript → JavaScript">
+        <span
+          v-if="store.compileTiming.oxc !== null"
+          class="timing-item"
+          title="OXC: TypeScript → JavaScript"
+        >
           O: {{ store.compileTiming.oxc.toFixed(1) }}ms
         </span>
       </div>
-      <button class="theme-toggle" @click="store.toggleDarkMode" :title="store.darkMode ? 'Light mode' : 'Dark mode'">
+      <button
+        class="theme-toggle"
+        @click="store.toggleDarkMode"
+        :title="store.darkMode ? 'Light mode' : 'Dark mode'"
+      >
         <span v-if="store.darkMode">☀️</span>
         <span v-else>🌙</span>
       </button>

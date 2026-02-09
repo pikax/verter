@@ -10,24 +10,15 @@ export class StyleDocument extends VerterDocument {
     uri: string,
     languageId: LanguageStyle,
     version: number,
-    content: string
+    content: string,
   ) {
-    return new StyleDocument(
-      languageService,
-      uri,
-      languageId,
-      version,
-      content
-    );
+    return new StyleDocument(languageService, uri, languageId, version, content);
   }
 
   private _stylesheet: Stylesheet | null = null;
 
   get stylesheet() {
-    return (
-      this._stylesheet ??
-      (this._stylesheet = this._languageService.parseStylesheet(this))
-    );
+    return this._stylesheet ?? (this._stylesheet = this._languageService.parseStylesheet(this));
   }
 
   protected constructor(
@@ -35,7 +26,7 @@ export class StyleDocument extends VerterDocument {
     uri: string,
     languageId: LanguageStyle,
     version: number,
-    content: string
+    content: string,
   ) {
     super(uri, languageId, version, content);
   }

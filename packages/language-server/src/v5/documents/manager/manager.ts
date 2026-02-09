@@ -1,15 +1,6 @@
-import {
-  Connection,
-  Disposable,
-  TextDocuments,
-  TextEdit,
-} from "vscode-languageserver/node";
+import { Connection, Disposable, TextDocuments, TextEdit } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
-import {
-  TypescriptDocument,
-  VerterDocument,
-  VueDocument,
-} from "../verter/index.js";
+import { TypescriptDocument, VerterDocument, VueDocument } from "../verter/index.js";
 import type { IScriptSnapshot } from "typescript";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -48,7 +39,7 @@ export class DocumentManager implements Disposable {
 
   constructor(
     private readonly statistics?: StatisticsManager,
-    private readonly isSingleFile = false
+    private readonly isSingleFile = false,
   ) {
     this.textDocuments = new TextDocuments({
       create: (uri, languageId, version, content): VerterDocument => {
@@ -89,12 +80,7 @@ export class DocumentManager implements Disposable {
     return this._dispose;
   }
 
-  protected createDocument(
-    uri: string,
-    languageId: string,
-    content: string,
-    version: number = 1
-  ) {
+  protected createDocument(uri: string, languageId: string, content: string, version: number = 1) {
     console.log("createDocument doc", uri);
     const filepath = uriToPath(uri);
     if (isVueFile(uri)) {
@@ -106,12 +92,7 @@ export class DocumentManager implements Disposable {
       this._fileExistsMap.set(filepath, true);
       return doc;
     } else {
-      const doc = TypescriptDocument.create(
-        uri,
-        languageId as any,
-        version,
-        content
-      );
+      const doc = TypescriptDocument.create(uri, languageId as any, version, content);
       this._files.set(uri, doc);
       this._files.set(filepath, doc);
       this._fileExistsMap.set(filepath, true);
@@ -128,10 +109,7 @@ export class DocumentManager implements Disposable {
     }
 
     // Virtual verter modules always exist
-    if (
-      filepath.indexOf("$verter/types$") >= 0 ||
-      filepath.indexOf("$verter/tsx$") >= 0
-    ) {
+    if (filepath.indexOf("$verter/types$") >= 0 || filepath.indexOf("$verter/tsx$") >= 0) {
       return true;
     }
 
@@ -162,8 +140,8 @@ export class DocumentManager implements Disposable {
       filepath.indexOf("$verter/types$") >= 0
         ? "$verter/types$"
         : filepath.indexOf("$verter/tsx$") >= 0
-        ? "$verter/tsx$"
-        : uriToPath(filepath);
+          ? "$verter/tsx$"
+          : uriToPath(filepath);
 
     // }
     let d = this._files.get(filepath);
@@ -199,16 +177,9 @@ export class DocumentManager implements Disposable {
       const uri = pathToUri(filepath);
 
       if (isVueFile(filepath)) {
-        d = this.isSingleFile
-          ? VueDocument.createSingle(uri, c, 0)
-          : VueDocument.create(uri, c, 0);
+        d = this.isSingleFile ? VueDocument.createSingle(uri, c, 0) : VueDocument.create(uri, c, 0);
       } else {
-        d = TypescriptDocument.create(
-          uri,
-          filepath.split(".").pop() ?? ("ts" as any),
-          0,
-          c
-        );
+        d = TypescriptDocument.create(uri, filepath.split(".").pop() ?? ("ts" as any), 0, c);
       }
 
       this._files.set(filepath, d);
@@ -308,7 +279,7 @@ export class DocumentManager implements Disposable {
           character: number;
         };
       };
-    }>
+    }>,
   ) {
     const path = normalisePath(uri);
     uri = pathToUri(path);

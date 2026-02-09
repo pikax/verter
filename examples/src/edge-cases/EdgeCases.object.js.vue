@@ -46,16 +46,16 @@ export default defineComponent({
     return {
       // Complex data types
       complexMap: new Map(),
-      
+
       // Dynamic key object
       dynamicKey: "computed",
-      
+
       // Template literal in data
       templateLiteral: `
         Multi-line
         string
       `,
-      
+
       // Regex patterns
       regexPattern: /\d+(?:\.\d+)?/g,
     };
@@ -151,48 +151,43 @@ export default defineComponent({
 <template>
   <div>
     <!-- Complex template expressions -->
-    <div>{{ typeof value === 'string' ? value.toUpperCase() : value }}</div>
-    
+    <div>{{ typeof value === "string" ? value.toUpperCase() : value }}</div>
+
     <!-- Optional chaining in template -->
     <span>{{ nested?.level1?.level2?.level3?.value }}</span>
-    
+
     <!-- Complex ternary -->
-    <div :class="value === 'active' 
-      ? 'active-class' 
-      : value === 'inactive' 
-        ? 'inactive-class' 
-        : 'default-class'"
+    <div
+      :class="
+        value === 'active'
+          ? 'active-class'
+          : value === 'inactive'
+            ? 'inactive-class'
+            : 'default-class'
+      "
     >
       Nested ternary
     </div>
-    
+
     <!-- Template literal in binding -->
-    <div :data-info="`Value: ${value}, Name: ${configName}`">
-      Template literal attribute
-    </div>
-    
+    <div :data-info="`Value: ${value}, Name: ${configName}`">Template literal attribute</div>
+
     <!-- Destructuring in v-for -->
-    <div v-for="{ id, ...rest } in items" :key="id">
-      {{ id }} - {{ JSON.stringify(rest) }}
-    </div>
-    
+    <div v-for="{ id, ...rest } in items" :key="id">{{ id }} - {{ JSON.stringify(rest) }}</div>
+
     <!-- Complex computed in template -->
     <ul>
       <li v-for="item in processedItems" :key="item.id">
         {{ item.processed }}
       </li>
     </ul>
-    
+
     <!-- Arrow function in event handler -->
-    <button @click="(e) => handleEvent({ target: { value: 'clicked' } })">
-      Arrow in handler
-    </button>
-    
+    <button @click="(e) => handleEvent({ target: { value: 'clicked' } })">Arrow in handler</button>
+
     <!-- Object spread in binding -->
-    <div v-bind="{ ...getSpreadObject(), 'data-spread': true }">
-      Spread in v-bind
-    </div>
-    
+    <div v-bind="{ ...getSpreadObject(), 'data-spread': true }">Spread in v-bind</div>
+
     <!-- Dynamic property access -->
     <span>{{ objectWithDynamicKey[dynamicKey] }}</span>
   </div>

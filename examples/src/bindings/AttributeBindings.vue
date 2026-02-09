@@ -97,9 +97,7 @@ const height = computed(() => 200);
       <div :style="{ '--custom-color': 'purple' }">CSS variable</div>
 
       <!-- Auto-prefixing (comment: array syntax for fallback values) -->
-      <div :style="{ display: 'flex' }">
-        Auto-prefix array
-      </div>
+      <div :style="{ display: 'flex' }">Auto-prefix array</div>
     </section>
 
     <!-- Dynamic attribute names -->
@@ -112,9 +110,7 @@ const height = computed(() => 200);
     <section>
       <h3>v-bind Object</h3>
       <input v-bind="{ type: 'text', placeholder: 'Enter value', disabled: isDisabled }" />
-      <div v-bind="{ id: dynamicId, class: classObject, style: styleObject }">
-        All bindings
-      </div>
+      <div v-bind="{ id: dynamicId, class: classObject, style: styleObject }">All bindings</div>
     </section>
 
     <!-- Aria attributes -->
@@ -149,8 +145,15 @@ const height = computed(() => 200);
       <h3>SVG Attributes</h3>
       <svg :width="width" :height="height" :viewBox="`0 0 ${width} ${height}`">
         <circle :cx="width / 2" :cy="height / 2" :r="50" fill="blue" />
-        <rect :x="10" :y="10" :width="width - 20" :height="height - 20" 
-              fill="none" stroke="red" :stroke-width="2" />
+        <rect
+          :x="10"
+          :y="10"
+          :width="width - 20"
+          :height="height - 20"
+          fill="none"
+          stroke="red"
+          :stroke-width="2"
+        />
       </svg>
     </section>
 

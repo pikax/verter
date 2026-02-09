@@ -89,7 +89,7 @@ pnpm add @verter/wasm
 Loads the WASM module. Must be called before `compileSync()`. Safe to call multiple times -- only initializes once. Subsequent calls return immediately.
 
 ```typescript
-import { initialize } from '@verter/wasm';
+import { initialize } from "@verter/wasm";
 
 await initialize();
 ```
@@ -99,15 +99,15 @@ await initialize();
 Async compilation. Accepts `string` or `Uint8Array` input. Automatically calls `initialize()` if the module has not been loaded yet, so it is safe to call without explicit initialization.
 
 ```typescript
-import { compile } from '@verter/wasm';
+import { compile } from "@verter/wasm";
 
-const result = await compile('<template><div>{{ msg }}</div></template>', {
-  filename: 'App.vue',
+const result = await compile("<template><div>{{ msg }}</div></template>", {
+  filename: "App.vue",
   isProduction: false,
 });
 
-const bytes = new TextEncoder().encode('<template><div>{{ msg }}</div></template>');
-const bytesResult = await compile(bytes, { filename: 'App.vue' });
+const bytes = new TextEncoder().encode("<template><div>{{ msg }}</div></template>");
+const bytesResult = await compile(bytes, { filename: "App.vue" });
 
 console.log(result.code);
 console.log(result.sourceMap);
@@ -119,11 +119,11 @@ console.log(result.codeWithSourceMap);
 Synchronous compilation. Accepts `string` or `Uint8Array`. Requires `initialize()` to have been called and completed beforehand. Throws if the WASM module is not yet loaded.
 
 ```typescript
-import { initialize, compileSync } from '@verter/wasm';
+import { initialize, compileSync } from "@verter/wasm";
 
 await initialize();
 
-const result = compileSync('<template><div>Hello</div></template>');
+const result = compileSync("<template><div>Hello</div></template>");
 ```
 
 ### `isInitialized(): boolean`
@@ -131,7 +131,7 @@ const result = compileSync('<template><div>Hello</div></template>');
 Returns whether the WASM module has been loaded and is ready for synchronous compilation.
 
 ```typescript
-import { isInitialized, initialize } from '@verter/wasm';
+import { isInitialized, initialize } from "@verter/wasm";
 
 if (!isInitialized()) {
   await initialize();
@@ -153,7 +153,7 @@ interface CodegenOptions {
 }
 
 interface FeatureFlags {
-  optionsApi?: boolean;       // default: true
+  optionsApi?: boolean; // default: true
   propsDestructure?: boolean; // default: true
 }
 
@@ -229,14 +229,14 @@ pnpm test    # runs: vitest run
 
 ## Dependencies
 
-| Dependency | Purpose |
-|------------|---------|
-| `verter_core` (Rust) | Core Vue template compiler |
-| `wasm-bindgen` (Rust) | Rust/WASM interop layer |
+| Dependency                            | Purpose                                           |
+| ------------------------------------- | ------------------------------------------------- |
+| `verter_core` (Rust)                  | Core Vue template compiler                        |
+| `wasm-bindgen` (Rust)                 | Rust/WASM interop layer                           |
 | `serde` / `serde-wasm-bindgen` (Rust) | Serialization between Rust structs and JS objects |
-| `console_error_panic_hook` (Rust) | Better panic messages in browser console |
-| `oxc_allocator` (Rust) | Memory allocator for OXC AST nodes |
-| `tsdown` (dev) | TypeScript bundler for the JS wrapper |
+| `console_error_panic_hook` (Rust)     | Better panic messages in browser console          |
+| `oxc_allocator` (Rust)                | Memory allocator for OXC AST nodes                |
+| `tsdown` (dev)                        | TypeScript bundler for the JS wrapper             |
 
 ## License
 

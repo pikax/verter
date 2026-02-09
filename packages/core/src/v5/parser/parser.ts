@@ -47,7 +47,7 @@ const JS_AST_LANGUAGES = new Set(["ts", "tsx", "js", "jsx"]);
 export function parser(
   source: string,
   filename: string = "temp.vue",
-  options: Partial<VerterParserOptions> = {}
+  options: Partial<VerterParserOptions> = {},
 ): ParserResult {
   {
     // add empty script at the end if no valid script available
@@ -93,7 +93,7 @@ export function parser(
           const ast = parseTemplate(
             (x.block as SFCTemplateBlock).ast!,
             x.block.content,
-            generic?.names
+            generic?.names,
           );
 
           return {
@@ -108,7 +108,7 @@ export function parser(
           if (x.tag.attributes.generic && x.tag.attributes.generic.value) {
             generic = parseGeneric(
               x.tag.attributes.generic.value.content,
-              x.tag.attributes.generic.value.start
+              x.tag.attributes.generic.value.start,
             );
           }
         }
@@ -129,9 +129,7 @@ export function parser(
             lang: languageId,
             block: x,
             result: r,
-            isMain:
-              x.block ===
-              (sfcParse.descriptor.scriptSetup || sfcParse.descriptor.script),
+            isMain: x.block === (sfcParse.descriptor.scriptSetup || sfcParse.descriptor.script),
           } as ParsedBlockScript;
         }
         default:

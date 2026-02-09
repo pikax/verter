@@ -6,22 +6,14 @@ import { ImportsPlugin } from "./imports.js";
 import { MacrosPlugin } from "../macros";
 
 describe("process script plugins imports", () => {
-  function parse(
-    content: string,
-    wrapper: string | false = false,
-    lang = "js"
-  ) {
-    const prepend = `<script ${
-      wrapper === false ? "setup" : ""
-    } lang="${lang}">`;
+  function parse(content: string, wrapper: string | false = false, lang = "js") {
+    const prepend = `<script ${wrapper === false ? "setup" : ""} lang="${lang}">`;
     const source = `${prepend}${content}</script>`;
     const parsed = parser(source);
 
     const s = new MagicString(source);
 
-    const scriptBlock = parsed.blocks.find(
-      (x) => x.type === "script"
-    ) as ParsedBlockScript;
+    const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
 
     const r = processScript(
       scriptBlock.result.items,
@@ -42,7 +34,7 @@ describe("process script plugins imports", () => {
         blocks: parsed.blocks,
         block: scriptBlock,
         blockNameResolver: (name) => name,
-      }
+      },
     );
 
     return r;
@@ -57,19 +49,15 @@ describe("process script plugins imports", () => {
     const { s } = parse(`let a = defineModel();`, false, "ts");
     // The import path has changed to $verter/types$
     expect(s.toString()).toContain(
-      `import { type Prettify as ___VERTER___Prettify } from "$verter/types$"`
+      `import { type Prettify as ___VERTER___Prettify } from "$verter/types$"`,
     );
     expect(s.toString()).toContain(`let a = defineModel();`);
   });
   it("should only generate 1 import", () => {
-    const { s } = parse(
-      `defineModel(); defineModel('foo'); defineEmits()`,
-      false,
-      "ts"
-    );
+    const { s } = parse(`defineModel(); defineModel('foo'); defineEmits()`, false, "ts");
     // The import path has changed to $verter/types$
     expect(s.toString()).toContain(
-      `import { type Prettify as ___VERTER___Prettify } from "$verter/types$"`
+      `import { type Prettify as ___VERTER___Prettify } from "$verter/types$"`,
     );
     expect(s.toString()).toContain(`defineModel(); defineModel('foo'); defineEmits()`);
   });
@@ -78,12 +66,12 @@ describe("process script plugins imports", () => {
     const { s } = parse(
       `import { a } from "b"\nimport { a } from "c";import { a } from "d"`,
       false,
-      "ts"
+      "ts",
     );
 
     expect(s.toString()).toContain(
       `import { a } from "b"
-import { a } from "c";import { a } from "d"`
+import { a } from "c";import { a } from "d"`,
     );
   });
 });

@@ -31,9 +31,7 @@ export const ScriptDefaultPlugin = definePlugin({
         ],
       });
 
-      const optionsMacro = ctx.items.find(
-        (x) => x.type === ProcessItemType.Options
-      );
+      const optionsMacro = ctx.items.find((x) => x.type === ProcessItemType.Options);
 
       let options = "{}";
       if (optionsMacro) {
@@ -43,7 +41,7 @@ export const ScriptDefaultPlugin = definePlugin({
       s.append(`\n;${exportStr} const ${name}=${defineComponent}(${options});`);
     } else {
       const componentExport = ctx.block.result?.items.find(
-        (x) => x.type === ScriptTypes.DefaultExport
+        (x) => x.type === ScriptTypes.DefaultExport,
       );
 
       if (!componentExport) {
@@ -80,10 +78,7 @@ export const ScriptDefaultPlugin = definePlugin({
             ],
           });
 
-          s.appendRight(
-            componentExport.node.declaration.start,
-            `${defineComponent}(`
-          );
+          s.appendRight(componentExport.node.declaration.start, `${defineComponent}(`);
           s.appendLeft(componentExport.node.declaration.end, ");");
           return;
         }

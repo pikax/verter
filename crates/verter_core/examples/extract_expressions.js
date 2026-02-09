@@ -1,23 +1,72 @@
-const fs = require('fs');
-const path = require('path');
-const { glob } = require('glob');
-const { parse } = require('@vue/compiler-sfc');
-const { baseParse } = require('@vue/compiler-core');
+const fs = require("fs");
+const path = require("path");
+const { glob } = require("glob");
+const { parse } = require("@vue/compiler-sfc");
+const { baseParse } = require("@vue/compiler-core");
 
 // Built-in Vue directives
 const BUILT_IN_DIRECTIVES = new Set([
-  'if', 'else', 'else-if', 'for', 'show', 'bind', 'on', 'model',
-  'slot', 'pre', 'cloak', 'once', 'memo', 'html', 'text'
+  "if",
+  "else",
+  "else-if",
+  "for",
+  "show",
+  "bind",
+  "on",
+  "model",
+  "slot",
+  "pre",
+  "cloak",
+  "once",
+  "memo",
+  "html",
+  "text",
 ]);
 
 // JavaScript reserved words to exclude from identifiers
 const JS_RESERVED = new Set([
-  'true', 'false', 'null', 'undefined', 'NaN', 'Infinity',
-  'if', 'else', 'for', 'while', 'do', 'switch', 'case', 'default',
-  'break', 'continue', 'return', 'throw', 'try', 'catch', 'finally',
-  'function', 'class', 'const', 'let', 'var', 'new', 'delete', 'typeof',
-  'instanceof', 'in', 'of', 'void', 'this', 'super', 'import', 'export',
-  'async', 'await', 'yield', 'with', 'debugger'
+  "true",
+  "false",
+  "null",
+  "undefined",
+  "NaN",
+  "Infinity",
+  "if",
+  "else",
+  "for",
+  "while",
+  "do",
+  "switch",
+  "case",
+  "default",
+  "break",
+  "continue",
+  "return",
+  "throw",
+  "try",
+  "catch",
+  "finally",
+  "function",
+  "class",
+  "const",
+  "let",
+  "var",
+  "new",
+  "delete",
+  "typeof",
+  "instanceof",
+  "in",
+  "of",
+  "void",
+  "this",
+  "super",
+  "import",
+  "export",
+  "async",
+  "await",
+  "yield",
+  "with",
+  "debugger",
 ]);
 
 /**
@@ -29,7 +78,7 @@ const JS_RESERVED = new Set([
 function utf16ToUtf8Offset(content, utf16Offset) {
   if (utf16Offset <= 0) return 0;
   const substring = content.slice(0, utf16Offset);
-  return Buffer.byteLength(substring, 'utf8');
+  return Buffer.byteLength(substring, "utf8");
 }
 
 /**
@@ -41,7 +90,7 @@ function utf16ToUtf8Offset(content, utf16Offset) {
 function convertLocToUtf8(content, loc) {
   return {
     start: utf16ToUtf8Offset(content, loc.start),
-    end: utf16ToUtf8Offset(content, loc.end)
+    end: utf16ToUtf8Offset(content, loc.end),
   };
 }
 
@@ -54,7 +103,7 @@ function convertLocToUtf8(content, loc) {
 function findOpeningTag(content, contentOffset) {
   // Search backwards from content offset to find the opening tag
   let pos = contentOffset - 1;
-  while (pos >= 0 && content[pos] !== '<') {
+  while (pos >= 0 && content[pos] !== "<") {
     pos--;
   }
 
@@ -88,17 +137,20 @@ function extractBlockAttributes(content, block) {
 
     if (value === true) {
       // Boolean attribute (no value) - match the attribute name followed by space or >
-      attrRegex = new RegExp(`\\s(${escapeRegex(name)})(?=[\\s>/])`, 'g');
+      attrRegex = new RegExp(`\\s(${escapeRegex(name)})(?=[\\s>/])`, "g");
     } else {
       // Attribute with value - match name="value" or name='value'
-      attrRegex = new RegExp(`\\s(${escapeRegex(name)}\\s*=\\s*["']${escapeRegex(String(value))}["'])`, 'g');
+      attrRegex = new RegExp(
+        `\\s(${escapeRegex(name)}\\s*=\\s*["']${escapeRegex(String(value))}["'])`,
+        "g",
+      );
     }
 
     attrMatch = attrRegex.exec(tagContent);
 
     const attr = {
       name,
-      loc: { start: 0, end: 0 }
+      loc: { start: 0, end: 0 },
     };
 
     if (value !== true) {
@@ -118,7 +170,7 @@ function extractBlockAttributes(content, block) {
 }
 
 function escapeRegex(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -129,7 +181,7 @@ function escapeRegex(str) {
  * @returns {string} The type name
  */
 function getExpressionType(directiveName, argName, isArg) {
-  if (isArg) return 'arg';
+  if (isArg) return "arg";
   if (BUILT_IN_DIRECTIVES.has(directiveName)) {
     return directiveName;
   }
@@ -149,7 +201,7 @@ function extractExpressionsFromTemplate(ast, content, templateOffset) {
   function getAbsoluteLoc(loc) {
     return {
       start: templateOffset + loc.start.offset,
-      end: templateOffset + loc.end.offset
+      end: templateOffset + loc.end.offset,
     };
   }
 
@@ -193,7 +245,8 @@ function extractExpressionsFromTemplate(ast, content, templateOffset) {
   function processProp(prop, parentId) {
     const propId = templateOffset + prop.loc.start.offset;
 
-    if (prop.type === 7) { // DIRECTIVE
+    if (prop.type === 7) {
+      // DIRECTIVE
       const directiveName = prop.name;
       const type = getExpressionType(directiveName, prop.arg?.content, false);
 
@@ -202,14 +255,14 @@ function extractExpressionsFromTemplate(ast, content, templateOffset) {
         const argLoc = getAbsoluteLoc(prop.arg.loc);
         const argExpr = {
           id: utf16ToUtf8Offset(content, argLoc.start),
-          type: 'arg',
+          type: "arg",
           loc: convertLocToUtf8(content, argLoc),
           parentId: utf16ToUtf8Offset(content, propId),
           expression: {
             content: prop.arg.content,
             loc: convertLocToUtf8(content, argLoc),
-            identifiers: safeExtractIdentifiers(prop.arg)
-          }
+            identifiers: safeExtractIdentifiers(prop.arg),
+          },
         };
         expressions.push(argExpr);
       }
@@ -225,12 +278,13 @@ function extractExpressionsFromTemplate(ast, content, templateOffset) {
           expression: {
             content: prop.exp.content,
             loc: convertLocToUtf8(content, expLoc),
-            identifiers: safeExtractIdentifiers(prop.exp)
-          }
+            identifiers: safeExtractIdentifiers(prop.exp),
+          },
         };
         expressions.push(expr);
       }
-    } else if (prop.type === 6) { // ATTRIBUTE
+    } else if (prop.type === 6) {
+      // ATTRIBUTE
       // Regular attributes with potential binding expressions
       if (prop.value && prop.value.content) {
         // Only process if it looks like an expression (for v-bind shorthand that wasn't caught)
@@ -247,14 +301,14 @@ function extractExpressionsFromTemplate(ast, content, templateOffset) {
 
     const expr = {
       id: utf16ToUtf8Offset(content, interpLoc.start),
-      type: 'interpolation',
+      type: "interpolation",
       loc: convertLocToUtf8(content, interpLoc),
       parentId: utf16ToUtf8Offset(content, parentId),
       expression: {
         content: node.content.content,
         loc: convertLocToUtf8(content, contentLoc),
-        identifiers: safeExtractIdentifiers(node.content)
-      }
+        identifiers: safeExtractIdentifiers(node.content),
+      },
     };
     expressions.push(expr);
   }
@@ -267,14 +321,14 @@ function extractExpressionsFromTemplate(ast, content, templateOffset) {
 
       const expr = {
         id: utf16ToUtf8Offset(content, forLoc.start),
-        type: 'for',
+        type: "for",
         loc: convertLocToUtf8(content, forLoc),
         parentId: utf16ToUtf8Offset(content, parentId),
         expression: {
           content: node.source.content,
           loc: convertLocToUtf8(content, sourceLoc),
-          identifiers: safeExtractIdentifiers(node.source)
-        }
+          identifiers: safeExtractIdentifiers(node.source),
+        },
       };
       expressions.push(expr);
     }
@@ -294,7 +348,15 @@ function extractExpressionsFromTemplate(ast, content, templateOffset) {
         if (branch.condition) {
           const ifLoc = getAbsoluteLoc(branch.loc);
           const condLoc = getAbsoluteLoc(branch.condition.loc);
-          const type = branch.isElse ? 'else' : (branch.condition ? (expressions.some(e => e.type === 'if' && e.parentId === utf16ToUtf8Offset(content, parentId)) ? 'else-if' : 'if') : 'else');
+          const type = branch.isElse
+            ? "else"
+            : branch.condition
+              ? expressions.some(
+                  (e) => e.type === "if" && e.parentId === utf16ToUtf8Offset(content, parentId),
+                )
+                ? "else-if"
+                : "if"
+              : "else";
 
           const expr = {
             id: utf16ToUtf8Offset(content, ifLoc.start),
@@ -304,8 +366,8 @@ function extractExpressionsFromTemplate(ast, content, templateOffset) {
             expression: {
               content: branch.condition.content,
               loc: convertLocToUtf8(content, condLoc),
-              identifiers: safeExtractIdentifiers(branch.condition)
-            }
+              identifiers: safeExtractIdentifiers(branch.condition),
+            },
           };
           expressions.push(expr);
         }
@@ -338,8 +400,8 @@ function extractExpressionsFromTemplate(ast, content, templateOffset) {
 function removeStringLiterals(expression) {
   // Remove template literals, double-quoted, and single-quoted strings
   return expression
-    .replace(/`(?:[^`\\]|\\.)*`/g, '""')  // Template literals
-    .replace(/"(?:[^"\\]|\\.)*"/g, '""')  // Double quotes
+    .replace(/`(?:[^`\\]|\\.)*`/g, '""') // Template literals
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""') // Double quotes
     .replace(/'(?:[^'\\]|\\.)*'/g, '""'); // Single quotes
 }
 
@@ -350,7 +412,7 @@ function removeStringLiterals(expression) {
  * @returns {Array} Array of identifier strings
  */
 function extractIdentifiersFromExpression(expression) {
-  if (!expression || typeof expression !== 'string') return [];
+  if (!expression || typeof expression !== "string") return [];
 
   // First remove string literals to avoid extracting identifiers from them
   const cleanedExpr = removeStringLiterals(expression);
@@ -381,7 +443,7 @@ function extractIdentifiersFromExpression(expression) {
 function safeExtractIdentifiers(node) {
   try {
     if (!node) return [];
-    const content = node.content || '';
+    const content = node.content || "";
     return extractIdentifiersFromExpression(content);
   } catch (e) {
     // If extraction fails, return empty array
@@ -395,7 +457,7 @@ function safeExtractIdentifiers(node) {
  * @returns {{ script: object|null, expressions: object|null }}
  */
 function processVueFile(filePath) {
-  const content = fs.readFileSync(filePath, 'utf8');
+  const content = fs.readFileSync(filePath, "utf8");
   const { descriptor, errors } = parse(content, { filename: filePath });
 
   if (errors.length > 0) {
@@ -408,10 +470,10 @@ function processVueFile(filePath) {
   // Process script block (prefer setup script)
   const scriptBlock = descriptor.scriptSetup || descriptor.script;
   if (scriptBlock) {
-    const lang = scriptBlock.lang || 'js';
+    const lang = scriptBlock.lang || "js";
     const loc = {
       start: scriptBlock.loc.start.offset,
-      end: scriptBlock.loc.end.offset
+      end: scriptBlock.loc.end.offset,
     };
 
     scriptResult = {
@@ -419,7 +481,7 @@ function processVueFile(filePath) {
       lang,
       loc: convertLocToUtf8(content, loc),
       attributes: extractBlockAttributes(content, scriptBlock),
-      content: scriptBlock.content
+      content: scriptBlock.content,
     };
   }
 
@@ -435,14 +497,30 @@ function processVueFile(filePath) {
     // Parse template with compiler-core for detailed AST
     const templateAst = baseParse(templateContent, {
       getTextMode: () => 0,
-      isVoidTag: (tag) => ['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link', 'meta', 'param', 'source', 'track', 'wbr'].includes(tag),
-      isPreTag: (tag) => tag === 'pre',
+      isVoidTag: (tag) =>
+        [
+          "area",
+          "base",
+          "br",
+          "col",
+          "embed",
+          "hr",
+          "img",
+          "input",
+          "link",
+          "meta",
+          "param",
+          "source",
+          "track",
+          "wbr",
+        ].includes(tag),
+      isPreTag: (tag) => tag === "pre",
     });
 
-    const lang = descriptor.template.lang || 'html';
+    const lang = descriptor.template.lang || "html";
     const loc = {
       start: descriptor.template.loc.start.offset,
-      end: descriptor.template.loc.end.offset
+      end: descriptor.template.loc.end.offset,
     };
 
     const expressions = extractExpressionsFromTemplate(templateAst, content, contentOffset);
@@ -452,7 +530,7 @@ function processVueFile(filePath) {
       lang,
       loc: convertLocToUtf8(content, loc),
       attributes: extractBlockAttributes(content, descriptor.template),
-      expressions
+      expressions,
     };
   }
 
@@ -469,7 +547,7 @@ async function main(inputGlob, outputDir) {
 
   const files = await glob(inputGlob, {
     nodir: true,
-    windowsPathsNoEscape: true
+    windowsPathsNoEscape: true,
   });
 
   console.log(`Found ${files.length} Vue files`);
@@ -496,12 +574,12 @@ async function main(inputGlob, outputDir) {
   fs.mkdirSync(outputDir, { recursive: true });
 
   // Write script.json
-  const scriptPath = path.join(outputDir, 'script.json');
+  const scriptPath = path.join(outputDir, "script.json");
   fs.writeFileSync(scriptPath, JSON.stringify(scripts, null, 2));
   console.log(`Wrote ${scripts.length} script entries to ${scriptPath}`);
 
   // Write expressions.json
-  const expressionsPath = path.join(outputDir, 'expressions.json');
+  const expressionsPath = path.join(outputDir, "expressions.json");
   fs.writeFileSync(expressionsPath, JSON.stringify(expressions, null, 2));
   console.log(`Wrote ${expressions.length} expression entries to ${expressionsPath}`);
 }
@@ -509,15 +587,15 @@ async function main(inputGlob, outputDir) {
 // CLI usage
 const args = process.argv.slice(2);
 if (args.length < 1) {
-  console.log('Usage: node extract_expressions.js <input-glob> [output-dir]');
+  console.log("Usage: node extract_expressions.js <input-glob> [output-dir]");
   console.log('Example: node extract_expressions.js "D:/dev/**/*.vue" ./expressions/source');
   process.exit(1);
 }
 
 const inputGlob = args[0];
-const outputDir = args[1] || path.join(__dirname, 'expressions', 'source');
+const outputDir = args[1] || path.join(__dirname, "expressions", "source");
 
-main(inputGlob, outputDir).catch(e => {
-  console.error('Fatal error:', e);
+main(inputGlob, outputDir).catch((e) => {
+  console.error("Fatal error:", e);
   process.exit(1);
 });

@@ -4,14 +4,10 @@
   </div>
 </template>
 
-<script setup lang="ts">
-</script>
+<script setup lang="ts"></script>
 
-<script lang="ts">
-</script>
+<script lang="ts"></script>
 
-<style>
-</style>
+<style></style>
 
-<style scoped>
-</style>
+<style scoped></style>

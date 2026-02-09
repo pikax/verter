@@ -344,9 +344,7 @@ describe("SlotsToRender", () => {
     describe("literal types", () => {
       const Component = new (defineComponent({
         slots: {} as SlotsType<{
-          default: (props: {
-            status: "active" | "inactive" | "pending";
-          }) => any;
+          default: (props: { status: "active" | "inactive" | "pending" }) => any;
         }>,
       }))();
 
@@ -467,10 +465,7 @@ describe("SlotsToRender", () => {
     describe("generic-like patterns", () => {
       const Component = new (defineComponent({
         slots: {} as SlotsType<{
-          default: (props: {
-            data: unknown;
-            render: (item: unknown) => any;
-          }) => any;
+          default: (props: { data: unknown; render: (item: unknown) => any }) => any;
         }>,
       }))();
 
@@ -480,10 +475,7 @@ describe("SlotsToRender", () => {
         <>
           <RenderSlots.default data="string" render={(item) => item} />
           <RenderSlots.default data={123} render={(item) => item} />
-          <RenderSlots.default
-            data={{ complex: true }}
-            render={(item) => item}
-          />
+          <RenderSlots.default data={{ complex: true }} render={(item) => item} />
         </>;
       });
     });
@@ -646,11 +638,7 @@ describe("SlotsToRender", () => {
 
       const DataTable = new (defineComponent({
         slots: {} as SlotsType<{
-          default: (props: {
-            item: TableItem;
-            index: number;
-            column: Column<TableItem>;
-          }) => any;
+          default: (props: { item: TableItem; index: number; column: Column<TableItem> }) => any;
           header: (props: { columns: Column<TableItem>[] }) => any;
           empty: () => any;
           loading: (props: { progress: number }) => any;
@@ -683,11 +671,7 @@ describe("SlotsToRender", () => {
         slots: {} as SlotsType<{
           default: (props: { close: () => void }) => any;
           title: (props: { text: string }) => any;
-          footer: (props: {
-            confirm: () => void;
-            cancel: () => void;
-            isLoading: boolean;
-          }) => any;
+          footer: (props: { confirm: () => void; cancel: () => void; isLoading: boolean }) => any;
         }>,
       }))();
 
@@ -697,11 +681,7 @@ describe("SlotsToRender", () => {
         <>
           <RenderSlots.default close={() => {}} />
           <RenderSlots.title text="Confirm Action" />
-          <RenderSlots.footer
-            confirm={() => {}}
-            cancel={() => {}}
-            isLoading={false}
-          />
+          <RenderSlots.footer confirm={() => {}} cancel={() => {}} isLoading={false} />
         </>;
       });
     });
@@ -778,9 +758,7 @@ describe("SlotsToRender", () => {
       type Slots = SlotsToRender<typeof Component.$slots>;
 
       // Assert the structure of the resulting type
-      assertType<Slots["default"]>(
-        {} as { new (): { $props: { msg: string } } }
-      );
+      assertType<Slots["default"]>({} as { new (): { $props: { msg: string } } });
     });
 
     it("preserves optional props in $props", () => {

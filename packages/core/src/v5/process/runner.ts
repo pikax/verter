@@ -1,14 +1,10 @@
-import {
-  TemplateItem,
-  TemplateItemByType,
-  TemplateTypes,
-} from "../parser/template/types";
+import { TemplateItem, TemplateItemByType, TemplateTypes } from "../parser/template/types";
 import { ProcessContext, ProcessPlugin } from "./types";
 
 export function runPlugins<T, C extends ProcessContext>(
   items: TemplateItem[],
   plugins: ProcessPlugin<T, C>[],
-  context: ProcessContext
+  context: ProcessContext,
 ) {
   const pluginsByType = {
     [TemplateTypes.Condition]: [],
@@ -26,9 +22,7 @@ export function runPlugins<T, C extends ProcessContext>(
     [TemplateTypes.Literal]: [],
     [TemplateTypes.BrokenExpression]: [],
   } as {
-    [K in TemplateTypes]: Array<
-      (item: TemplateItemByType[K], context: ProcessContext) => void
-    >;
+    [K in TemplateTypes]: Array<(item: TemplateItemByType[K], context: ProcessContext) => void>;
   };
   const PLUGIN_TYPES = Object.keys(pluginsByType) as readonly TemplateTypes[];
 

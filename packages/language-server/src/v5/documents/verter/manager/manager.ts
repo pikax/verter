@@ -36,13 +36,7 @@ const ConfigHost: ts.ParseConfigHost = {
   ...ts.sys,
 
   readDirectory(rootDir, extensions, excludes, includes, depth) {
-    return ts.sys.readDirectory(
-      rootDir,
-      [...extensions, ".vue"],
-      excludes,
-      includes,
-      depth
-    );
+    return ts.sys.readDirectory(rootDir, [...extensions, ".vue"], excludes, includes, depth);
   },
 
   useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
@@ -58,9 +52,7 @@ export class VerterManager {
 
   readonly newTsServices = new Map<string, ts.LanguageService>();
 
-  readonly documentRegistry = ts.createDocumentRegistry(
-    ts.sys.useCaseSensitiveFileNames
-  );
+  readonly documentRegistry = ts.createDocumentRegistry(ts.sys.useCaseSensitiveFileNames);
 
   /**
    * A map of tsconfig filepaths to ts.ParsedCommandLine instances.
@@ -142,36 +134,28 @@ export class VerterManager {
       if (!tsconfig) continue;
 
       if (tsconfig.projectReferences && tsconfig.projectReferences.length) {
-        const referencedTsConfigs = tsconfig.projectReferences.map((x) =>
-          resolveTSConfig(x.path)
-        );
+        const referencedTsConfigs = tsconfig.projectReferences.map((x) => resolveTSConfig(x.path));
 
         for (const c of referencedTsConfigs) {
-          if (
-            c?.raw?.include &&
-            c.raw.include.some((x: string) => x.endsWith(".vue"))
-          ) {
+          if (c?.raw?.include && c.raw.include.some((x: string) => x.endsWith(".vue"))) {
             if (!c.wildcardDirectories) continue;
             Object.entries(c.wildcardDirectories).map(([dir, recursive]) => {
               const d = normalisePath(dir);
               this.newTsServices.set(
                 `${d}${recursive ? "/**" : ""}`,
-                createService(d, c, this.documentManager)
+                createService(d, c, this.documentManager),
               );
             });
           }
         }
       }
-      if (
-        tsconfig?.raw?.include &&
-        tsconfig.raw.include.some((x: string) => x.endsWith(".vue"))
-      ) {
+      if (tsconfig?.raw?.include && tsconfig.raw.include.some((x: string) => x.endsWith(".vue"))) {
         if (!tsconfig.wildcardDirectories) continue;
         Object.entries(tsconfig.wildcardDirectories).map(([dir, recursive]) => {
           const d = normalisePath(dir);
           this.newTsServices.set(
             `${d}${recursive ? "/**" : ""}`,
-            createService(d, tsconfig, this.documentManager)
+            createService(d, tsconfig, this.documentManager),
           );
         });
       }
@@ -188,11 +172,7 @@ function resolveTSConfig(fp: string, host: ts.ParseConfigHost = ConfigHost) {
     throw error;
   }
 
-  const parsed = ts.parseJsonConfigFileContent(
-    config,
-    host,
-    fsPath.dirname(fp)
-  );
+  const parsed = ts.parseJsonConfigFileContent(config, host, fsPath.dirname(fp));
   return parsed;
 }
 
@@ -200,7 +180,7 @@ function createService(
   tsconfigPath: string,
   config: ts.ParsedCommandLine,
   documentManager: DocumentManager,
-  tsSystem = ts.sys
+  tsSystem = ts.sys,
 ) {
   const options: ts.CompilerOptions = {
     strict: true,
@@ -217,7 +197,7 @@ function createService(
     (e) => {
       return tsSystem.resolvePath(e);
     },
-    options
+    options,
   );
 
   const host: ts.LanguageServiceHost = {
@@ -227,10 +207,7 @@ function createService(
     getDefaultLibFileName: ts.getDefaultLibFilePath,
 
     readFile: (filepath, encoding) => {
-      return documentManager.readFile(
-        normalisePath(filepath),
-        encoding as BufferEncoding
-      );
+      return documentManager.readFile(normalisePath(filepath), encoding as BufferEncoding);
     },
     fileExists: (filepath) => {
       if (filepath.endsWith("/react/index.d.ts")) return false;
@@ -246,13 +223,7 @@ function createService(
 
     readDirectory(path, extensions, exclude, include, depth) {
       console.log("reading dir", path);
-      return tsSystem.readDirectory(
-        path,
-        [...(extensions ?? []), ".vue"],
-        exclude,
-        include,
-        depth
-      );
+      return tsSystem.readDirectory(path, [...(extensions ?? []), ".vue"], exclude, include, depth);
     },
     getScriptKind: (fileName: string) => {
       let ext = fileName.slice(fileName.lastIndexOf("."));
@@ -323,7 +294,7 @@ function createService(
       redirectedReference,
       options,
       containingSourceFile,
-      reusedNames
+      reusedNames,
     ) {
       if (isVueFile(containingFile)) {
         containingFile = createSubDocumentUri(containingFile, "bundle.ts");
@@ -348,7 +319,7 @@ function createService(
               options,
               h,
               moduleCache,
-              redirectedReference
+              redirectedReference,
             );
           }
           case ts.ModuleResolutionKind.NodeJs:
@@ -361,7 +332,7 @@ function createService(
               options,
               h,
               moduleCache,
-              redirectedReference
+              redirectedReference,
             );
           }
           case ts.ModuleResolutionKind.Bundler:
@@ -372,23 +343,21 @@ function createService(
               options,
               h,
               moduleCache,
-              redirectedReference
+              redirectedReference,
             );
 
             if (isVueFile(x.text)) {
               if (r.resolvedModule) {
                 if (
                   r.resolvedModule.resolvedFileName.endsWith(
-                    createSubDocumentUri(".vue", "bundle.ts")
+                    createSubDocumentUri(".vue", "bundle.ts"),
                   )
                 ) {
-                  const originalPath = toVueParentDocument(
-                    r.resolvedModule.resolvedFileName
-                  );
+                  const originalPath = toVueParentDocument(r.resolvedModule.resolvedFileName);
                   // @ts-expect-error not part of the object
                   r.resolvedModule.originalPath = originalPath;
                   r.resolvedModule.resolvedFileName = uriToVerterVirtual(
-                    r.resolvedModule.resolvedFileName
+                    r.resolvedModule.resolvedFileName,
                   );
                   r.resolvedModule.resolvedUsingTsExtension = false;
                 }
@@ -401,9 +370,7 @@ function createService(
                 isVerterVirtual(r.resolvedModule.resolvedFileName) &&
                 !isVueSubDocument(r.resolvedModule.resolvedFileName)
               ) {
-                r.resolvedModule.resolvedFileName = uriToPath(
-                  r.resolvedModule.resolvedFileName
-                );
+                r.resolvedModule.resolvedFileName = uriToPath(r.resolvedModule.resolvedFileName);
               }
             }
 
@@ -436,7 +403,7 @@ function createService(
 
   const service = ts.createLanguageService(
     host,
-    ts.createDocumentRegistry(tsSystem.useCaseSensitiveFileNames)
+    ts.createDocumentRegistry(tsSystem.useCaseSensitiveFileNames),
   );
 
   // @ts-expect-error to debug
@@ -450,7 +417,7 @@ function createService(
 function getTypescriptServiceOld(
   workspacePath: string,
   documentManager: DocumentManager,
-  absolute = false
+  absolute = false,
 ): ts.LanguageService | ts.LanguageService[] {
   let tsconfigOptions: ts.CompilerOptions = {
     // allowJs: true,
@@ -474,9 +441,7 @@ function getTypescriptServiceOld(
   };
 
   let parsedConfig: ts.ParsedCommandLine | null = null;
-  const configFile = absolute
-    ? workspacePath
-    : fsPath.resolve(workspacePath, "./tsconfig.json");
+  const configFile = absolute ? workspacePath : fsPath.resolve(workspacePath, "./tsconfig.json");
   const tsconfigFileExists = ts.sys.fileExists(configFile);
 
   if (tsconfigFileExists) {
@@ -490,13 +455,7 @@ function getTypescriptServiceOld(
       ...ts.sys,
 
       readDirectory(rootDir, extensions, excludes, includes, depth) {
-        return ts.sys.readDirectory(
-          rootDir,
-          [...extensions, ".vue"],
-          excludes,
-          includes,
-          depth
-        );
+        return ts.sys.readDirectory(rootDir, [...extensions, ".vue"], excludes, includes, depth);
       },
 
       useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
@@ -548,7 +507,7 @@ function getTypescriptServiceOld(
     parsedConfig = ts.parseJsonConfigFileContent(
       config,
       parseConfigHost,
-      absolute ? fsPath.dirname(workspacePath) : workspacePath
+      absolute ? fsPath.dirname(workspacePath) : workspacePath,
     );
 
     tsconfigOptions = {
@@ -592,7 +551,7 @@ function getTypescriptServiceOld(
       // console.log("pp", tsSystem.resolvePath(e));
       return tsSystem.resolvePath(e);
     },
-    compilerOptions
+    compilerOptions,
   );
 
   const host: ts.LanguageServiceHost = {
@@ -602,10 +561,7 @@ function getTypescriptServiceOld(
     getDefaultLibFileName: ts.getDefaultLibFilePath,
 
     readFile: (filepath, encoding) => {
-      return documentManager.readFile(
-        normalisePath(filepath),
-        encoding as BufferEncoding
-      );
+      return documentManager.readFile(normalisePath(filepath), encoding as BufferEncoding);
     },
     fileExists: (filepath) => {
       return documentManager.fileExists(normalisePath(filepath));
@@ -616,13 +572,7 @@ function getTypescriptServiceOld(
 
     readDirectory(path, extensions, exclude, include, depth) {
       console.log("reading dir", path);
-      return tsSystem.readDirectory(
-        path,
-        [...(extensions ?? []), ".vue"],
-        exclude,
-        include,
-        depth
-      );
+      return tsSystem.readDirectory(path, [...(extensions ?? []), ".vue"], exclude, include, depth);
     },
     getScriptKind: (fileName: string) => {
       let ext = fileName.slice(fileName.lastIndexOf("."));
@@ -674,7 +624,7 @@ function getTypescriptServiceOld(
 
     getScriptFileNames() {
       const files = tsconfigFileExists
-        ? parsedConfig?.fileNames ?? []
+        ? (parsedConfig?.fileNames ?? [])
         : documentManager.textDocuments.keys();
 
       return files.flatMap((x) => {
@@ -695,7 +645,7 @@ function getTypescriptServiceOld(
       redirectedReference,
       options,
       containingSourceFile,
-      reusedNames
+      reusedNames,
     ) {
       if (isVueFile(containingFile)) {
         containingFile = createSubDocumentUri(containingFile, "bundle.ts");
@@ -720,7 +670,7 @@ function getTypescriptServiceOld(
               options,
               h,
               moduleCache,
-              redirectedReference
+              redirectedReference,
             );
           }
           case ts.ModuleResolutionKind.NodeJs:
@@ -733,7 +683,7 @@ function getTypescriptServiceOld(
               options,
               h,
               moduleCache,
-              redirectedReference
+              redirectedReference,
             );
           }
           case ts.ModuleResolutionKind.Bundler:
@@ -744,23 +694,21 @@ function getTypescriptServiceOld(
               options,
               h,
               moduleCache,
-              redirectedReference
+              redirectedReference,
             );
 
             if (isVueFile(x.text)) {
               if (r.resolvedModule) {
                 if (
                   r.resolvedModule.resolvedFileName.endsWith(
-                    createSubDocumentUri(".vue", "bundle.ts")
+                    createSubDocumentUri(".vue", "bundle.ts"),
                   )
                 ) {
-                  const originalPath = toVueParentDocument(
-                    r.resolvedModule.resolvedFileName
-                  );
+                  const originalPath = toVueParentDocument(r.resolvedModule.resolvedFileName);
                   // @ts-expect-error not part of the object
                   r.resolvedModule.originalPath = originalPath;
                   r.resolvedModule.resolvedFileName = uriToVerterVirtual(
-                    r.resolvedModule.resolvedFileName
+                    r.resolvedModule.resolvedFileName,
                   );
                   r.resolvedModule.resolvedUsingTsExtension = false;
                 }
@@ -773,9 +721,7 @@ function getTypescriptServiceOld(
                 isVerterVirtual(r.resolvedModule.resolvedFileName) &&
                 !isVueSubDocument(r.resolvedModule.resolvedFileName)
               ) {
-                r.resolvedModule.resolvedFileName = uriToPath(
-                  r.resolvedModule.resolvedFileName
-                );
+                r.resolvedModule.resolvedFileName = uriToPath(r.resolvedModule.resolvedFileName);
               }
             }
 
@@ -807,7 +753,7 @@ function getTypescriptServiceOld(
   };
   const languageService = ts.createLanguageService(
     host,
-    ts.createDocumentRegistry(tsSystem.useCaseSensitiveFileNames)
+    ts.createDocumentRegistry(tsSystem.useCaseSensitiveFileNames),
   );
 
   return languageService;

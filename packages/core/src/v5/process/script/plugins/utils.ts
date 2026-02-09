@@ -4,7 +4,7 @@ export function generateTypeDeclaration(
   name: string,
   content: string,
   generic: string | undefined,
-  typescript: boolean
+  typescript: boolean,
 ) {
   return typescript
     ? `;export type ${name}${generic ? `<${generic}>` : ""}=${content};`
@@ -19,7 +19,7 @@ export function generateTypeString(
     isFunction?: boolean;
     isType?: boolean;
   },
-  ctx: ScriptContext
+  ctx: ScriptContext,
 ) {
   const isTS = ctx.block.lang.startsWith("ts");
   const isAsync = ctx.isAsync;
@@ -27,9 +27,7 @@ export function generateTypeString(
 
   const content = `${info.isFunction ? "ReturnType<" : ""}${
     info.isType ? "" : "typeof "
-  }${info.from}${generic ? `<${generic.names.join(',')}>` : ""}${
-    info.isFunction ? ">" : ""
-  }${
+  }${info.from}${generic ? `<${generic.names.join(",")}>` : ""}${info.isFunction ? ">" : ""}${
     (isAsync && info.isFunction) || info.key
       ? ` ${isAsync && info.isFunction ? "extends Promise<infer R" : ""}${
           info.key ? ` extends { ${info.key}: infer K }` : ""

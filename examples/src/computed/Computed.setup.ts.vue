@@ -121,7 +121,8 @@ function cycleStatus() {
     <section>
       <h3>Name Computed</h3>
       <p>Full Name (readonly): {{ fullName }}</p>
-      <p>Full Name (writable): 
+      <p>
+        Full Name (writable):
         <input v-model="fullNameWritable" />
       </p>
       <p>First: {{ firstName }}, Last: {{ lastName }}</p>
@@ -146,9 +147,7 @@ function cycleStatus() {
 
     <section>
       <h3>Price Calculator</h3>
-      <p>
-        Price: <input v-model="formattedPrice" />
-      </p>
+      <p>Price: <input v-model="formattedPrice" /></p>
       <p>Quantity: <input type="number" v-model.number="quantity" /></p>
       <p>Subtotal: ${{ total.toFixed(2) }}</p>
       <p>Total (with tax): ${{ totalWithTax.toFixed(2) }}</p>

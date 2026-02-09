@@ -18,7 +18,7 @@ describe("generateConditionText", () => {
   function createConditionAtOffset(
     startOffset: number,
     endOffset: number,
-    siblings: TemplateCondition[] = []
+    siblings: TemplateCondition[] = [],
   ): TemplateCondition {
     return {
       type: TemplateTypes.Condition,
@@ -44,13 +44,14 @@ describe("generateConditionText", () => {
    * Creates a MagicString with all condition texts concatenated, and returns
    * conditions with proper offsets and sibling references.
    */
-  function createConditionChain(
-    conditionTexts: string[]
-  ): { conditions: TemplateCondition[]; s: MagicString } {
+  function createConditionChain(conditionTexts: string[]): {
+    conditions: TemplateCondition[];
+    s: MagicString;
+  } {
     // Build the source string with all conditions
     const source = conditionTexts.join("");
     const s = new MagicString(source);
-    
+
     const conditions: TemplateCondition[] = [];
     let offset = 0;
 
@@ -58,12 +59,12 @@ describe("generateConditionText", () => {
       const text = conditionTexts[i];
       const startOffset = offset;
       const endOffset = offset + text.length;
-      
+
       // Each condition's siblings are all previous conditions
       const siblings = conditions.slice();
       const condition = createConditionAtOffset(startOffset, endOffset, siblings);
       conditions.push(condition);
-      
+
       offset = endOffset;
     }
 
@@ -104,10 +105,7 @@ describe("generateConditionText", () => {
 
   describe("v-if with v-else-if", () => {
     it("should negate the v-if condition for v-else-if", () => {
-      const { conditions, s } = createConditionChain([
-        "(isTypeA)",
-        "(isTypeB)",
-      ]);
+      const { conditions, s } = createConditionChain(["(isTypeA)", "(isTypeB)"]);
 
       // When generating text for the v-else-if condition (index 1),
       // we pass only that condition but it has siblings
@@ -146,11 +144,7 @@ describe("generateConditionText", () => {
 
   describe("v-if with multiple v-else-if", () => {
     it("should correctly chain two v-else-if conditions", () => {
-      const { conditions, s } = createConditionChain([
-        "(isTypeA)",
-        "(isTypeB)",
-        "(isTypeC)",
-      ]);
+      const { conditions, s } = createConditionChain(["(isTypeA)", "(isTypeB)", "(isTypeC)"]);
 
       // For the third condition (second v-else-if)
       const result = generateConditionText([conditions[2]], s);
@@ -158,16 +152,16 @@ describe("generateConditionText", () => {
       // Bug: Currently this produces duplicate conditions
       // Expected: !(isTypeA) && !(isTypeB) && (isTypeC)
       // Or equivalently: !((isTypeA) || (isTypeB)) && (isTypeC)
-      
-      // The condition should mean: 
+
+      // The condition should mean:
       // "NOT first condition AND NOT second condition AND this condition"
       expect(result).toContain("(isTypeC)");
-      
+
       // Should NOT contain duplicate (isTypeA) checks
       const matchesA = result.match(/isTypeA/g) || [];
       expect(matchesA.length).toBe(1);
-      
-      // Should NOT contain duplicate (isTypeB) checks  
+
+      // Should NOT contain duplicate (isTypeB) checks
       const matchesB = result.match(/isTypeB/g) || [];
       expect(matchesB.length).toBe(1);
     });
@@ -210,7 +204,7 @@ describe("generateConditionText", () => {
 
       // v-else should negate all previous conditions
       // Expected: !(isTypeA) && !(isTypeB) && !(isTypeC)
-      
+
       // Should contain each condition exactly once
       const matchesA = result.match(/isTypeA/g) || [];
       const matchesB = result.match(/isTypeB/g) || [];
@@ -226,10 +220,10 @@ describe("generateConditionText", () => {
     it("should handle nested v-if inside v-if", () => {
       const source = "(isOuter)(isInner)";
       const s = new MagicString(source);
-      
+
       // Outer v-if
       const outerCondition = createConditionAtOffset(0, 9, []);
-      
+
       // Inner v-if (no siblings, but has parent context)
       const innerCondition = createConditionAtOffset(9, 18, []);
 
@@ -242,13 +236,13 @@ describe("generateConditionText", () => {
     it("should handle nested v-else-if inside v-if", () => {
       const source = "(isOuter)(isInnerA)(isInnerB)";
       const s = new MagicString(source);
-      
+
       // Outer v-if
       const outerCondition = createConditionAtOffset(0, 9, []);
-      
+
       // Inner v-if
       const innerIf = createConditionAtOffset(9, 19, []);
-      
+
       // Inner v-else-if (has innerIf as sibling)
       const innerElseIf = createConditionAtOffset(19, 29, [innerIf]);
 
@@ -281,10 +275,7 @@ describe("generateConditionText", () => {
 
     // @ai-generated - Tests compound || conditions are wrapped in parentheses
     it("should wrap compound || conditions in parentheses", () => {
-      const { conditions, s } = createConditionChain([
-        "isAdmin || isModerator",
-        "isUser",
-      ]);
+      const { conditions, s } = createConditionChain(["isAdmin || isModerator", "isUser"]);
 
       const result = generateConditionText([conditions[1]], s);
 
@@ -306,7 +297,7 @@ describe("generateConditionText", () => {
       // Expected: !((isLoggedIn && hasPermission)) && !((isLoggedIn && !hasPermission))
       expect(result).toContain("(isLoggedIn && hasPermission)");
       expect(result).toContain("(isLoggedIn && !hasPermission)");
-      
+
       // Both should be negated with pattern "!(("
       const negationMatches = result.match(/!\(/g) || [];
       expect(negationMatches.length).toBe(2);
@@ -314,10 +305,7 @@ describe("generateConditionText", () => {
 
     // @ai-generated - Tests that simple conditions without && or || are not double-wrapped
     it("should not double-wrap conditions already in parentheses without && or ||", () => {
-      const { conditions, s } = createConditionChain([
-        "(isTypeA)",
-        "(isTypeB)",
-      ]);
+      const { conditions, s } = createConditionChain(["(isTypeA)", "(isTypeB)"]);
 
       const result = generateConditionText([conditions[1]], s);
 
@@ -332,11 +320,11 @@ describe("generateConditionText", () => {
     it("should strip 'if' prefix from condition", () => {
       const source = "if(isVisible){";
       const s = new MagicString(source);
-      
+
       const condition = createConditionAtOffset(0, source.length, []);
 
       const result = generateConditionText([condition], s);
-      
+
       expect(result).toBe("(isVisible)");
       expect(result).not.toContain("if");
     });
@@ -344,11 +332,11 @@ describe("generateConditionText", () => {
     it("should strip 'else if' prefix from condition", () => {
       const source = "else if(isVisible){";
       const s = new MagicString(source);
-      
+
       const condition = createConditionAtOffset(0, source.length, []);
 
       const result = generateConditionText([condition], s);
-      
+
       expect(result).toBe("(isVisible)");
       expect(result).not.toContain("else");
     });
@@ -356,14 +344,13 @@ describe("generateConditionText", () => {
     it("should strip 'else' prefix from condition", () => {
       const source = "else{";
       const s = new MagicString(source);
-      
+
       const condition = createConditionAtOffset(0, source.length, []);
 
       const result = generateConditionText([condition], s);
-      
+
       // v-else has no expression, should return empty or just the negation of siblings
       expect(result).toBe("");
     });
   });
 });
-

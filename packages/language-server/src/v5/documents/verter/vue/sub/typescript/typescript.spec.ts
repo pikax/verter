@@ -5,12 +5,7 @@ import { SubDocumentProcessContext } from "../sub.js";
 import { VueTypescriptDocument, LanguageTypescript } from "./typescript.js";
 
 class MockTypeScriptElement extends VueTypescriptDocument {
-  static create(
-    uri: string,
-    parent: VueDocument,
-    languageId: LanguageTypescript,
-    version: number
-  ) {
+  static create(uri: string, parent: VueDocument, languageId: LanguageTypescript, version: number) {
     return new MockTypeScriptElement(uri, parent, languageId, version);
   }
 
@@ -18,14 +13,8 @@ class MockTypeScriptElement extends VueTypescriptDocument {
     // nothing
 
     for (const block of context.blocks) {
-      context.s.remove(
-        block.block.tag.pos.open.start,
-        block.block.tag.pos.open.end
-      );
-      context.s.remove(
-        block.block.tag.pos.close.start,
-        block.block.tag.pos.close.end
-      );
+      context.s.remove(block.block.tag.pos.open.start, block.block.tag.pos.open.end);
+      context.s.remove(block.block.tag.pos.close.start, block.block.tag.pos.close.end);
     }
   }
 }
@@ -42,10 +31,7 @@ describe("TypescriptDocument", () => {
   let doc: MockTypeScriptElement;
   let parentDocument: VueDocument;
   beforeEach(() => {
-    parentDocument = VueDocument.create(
-      parentUri,
-      `<script>${initialContent}</script>`
-    );
+    parentDocument = VueDocument.create(parentUri, `<script>${initialContent}</script>`);
 
     doc = MockTypeScriptElement.create(uri, parentDocument, "tsx", version);
   });
@@ -124,9 +110,7 @@ describe("TypescriptDocument", () => {
 
       parentDocument.update("<script>let a = 1;\nlet b = 2;</script>");
       snapshot = doc.snapshot;
-      expect(snapshot.getText(0, snapshot.getLength())).toBe(
-        "let a = 1;\nlet b = 2;"
-      );
+      expect(snapshot.getText(0, snapshot.getLength())).toBe("let a = 1;\nlet b = 2;");
       expect(doc.lineCount).toBe(2);
     });
   });

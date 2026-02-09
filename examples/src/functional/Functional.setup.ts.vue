@@ -62,11 +62,7 @@ export const FunctionalButton: FC<FunctionalProps> = (props, { slots, emit, attr
       onClick: props.onClick,
       ...attrs,
     },
-    [
-      props.title,
-      props.count !== undefined ? ` (${props.count})` : "",
-      slots.default?.(),
-    ]
+    [props.title, props.count !== undefined ? ` (${props.count})` : "", slots.default?.()],
   );
 };
 
@@ -94,16 +90,12 @@ interface RenderProps {
 }
 
 export const RenderList: FC<RenderProps> = (props, { slots }) => {
-  const defaultRenderItem = (item: typeof props.items[number]) =>
+  const defaultRenderItem = (item: (typeof props.items)[number]) =>
     h("li", { key: item.id, class: { active: item.active } }, item.name);
 
   const renderFn = props.renderItem ?? defaultRenderItem;
 
-  return h(
-    "ul",
-    { class: "render-list" },
-    props.items.map(renderFn)
-  );
+  return h("ul", { class: "render-list" }, props.items.map(renderFn));
 };
 
 RenderList.props = {
@@ -154,9 +146,7 @@ export function createTypedList<T extends { id: string | number }>(): FC<{
     </ul>
 
     <!-- Conditional rendering based on props only -->
-    <button :class="buttonClasses" :disabled="disabled">
-      {{ variant ?? "primary" }} button
-    </button>
+    <button :class="buttonClasses" :disabled="disabled">{{ variant ?? "primary" }} button</button>
 
     <!-- Slot for composition -->
     <slot name="footer" :count="itemCount" />

@@ -15,9 +15,7 @@ describe("process template plugins binding", () => {
 
     const s = new MagicString(source);
 
-    const templateBlock = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processTemplate(
       templateBlock.result.items,
@@ -38,7 +36,7 @@ describe("process template plugins binding", () => {
         blocks: parsed.blocks,
         block: templateBlock,
         blockNameResolver: (name) => name,
-      }
+      },
     );
 
     return r;
@@ -51,91 +49,72 @@ describe("process template plugins binding", () => {
 
   test("directive", () => {
     const { result } = parse(`<div :test="test" />`);
-    expect(result).toMatchInlineSnapshot(
-      `"<div :test="___VERTER___ctx.test" />"`
-    );
+    expect(result).toMatchInlineSnapshot(`"<div :test="___VERTER___ctx.test" />"`);
   });
 
   test("function", () => {
     const { result } = parse(`<div @click="test" />`);
-    expect(result).toMatchInlineSnapshot(
-      `"<div @click="___VERTER___ctx.test" />"`
-    );
+    expect(result).toMatchInlineSnapshot(`"<div @click="___VERTER___ctx.test" />"`);
   });
 
   test("for", () => {
-    const { result } = parse(
-      `<div v-for="item in items"> {{ item + items.length}} </div>`
-    );
+    const { result } = parse(`<div v-for="item in items"> {{ item + items.length}} </div>`);
     expect(result).toMatchInlineSnapshot(
-      `"<div v-for="item in ___VERTER___ctx.items"> {{ item + ___VERTER___ctx.items.length}} </div>"`
+      `"<div v-for="item in ___VERTER___ctx.items"> {{ item + ___VERTER___ctx.items.length}} </div>"`,
     );
   });
 
   test("if", () => {
     const { result } = parse(`<div v-if="test"> test </div>`);
-    expect(result).toMatchInlineSnapshot(
-      `"<div v-if=\"___VERTER___ctx.test\"> test </div>"`
-    );
+    expect(result).toMatchInlineSnapshot(`"<div v-if=\"___VERTER___ctx.test\"> test </div>"`);
   });
 
   test("args", () => {
     const { result } = parse(`<div :test="(e: Argument)=> e + test" />`);
     expect(result).toMatchInlineSnapshot(
-      `"<div :test="(e: Argument)=> e + ___VERTER___ctx.test" />"`
+      `"<div :test="(e: Argument)=> e + ___VERTER___ctx.test" />"`,
     );
   });
   test(':[msg]="msg"', () => {
     const { result } = parse(`<div :[msg]="msg" />`);
-    expect(result).toMatchInlineSnapshot(
-      `"<div :[___VERTER___ctx.msg]="___VERTER___ctx.msg" />"`
-    );
+    expect(result).toMatchInlineSnapshot(`"<div :[___VERTER___ctx.msg]="___VERTER___ctx.msg" />"`);
   });
 
   test(':[msg]="msg"', () => {
     const { result } = parse(`<div v-bind:[msg]="msg" />`);
     expect(result).toMatchInlineSnapshot(
-      `"<div v-bind:[___VERTER___ctx.msg]="___VERTER___ctx.msg" />"`
+      `"<div v-bind:[___VERTER___ctx.msg]="___VERTER___ctx.msg" />"`,
     );
   });
 
   test("v-slot:[msg]", () => {
     const { result } = parse(`<div v-slot:[msg] />`);
-    expect(result).toMatchInlineSnapshot(
-      `"<div v-slot:[___VERTER___ctx.msg] />"`
-    );
+    expect(result).toMatchInlineSnapshot(`"<div v-slot:[___VERTER___ctx.msg] />"`);
   });
 
   test('a href="`mailto:value`"', () => {
     const { result } = parse(`<a :href="\`mailto:\${value}\`" />`);
-    expect(result).toMatchInlineSnapshot(
-      `"<a :href="\`mailto:\${___VERTER___ctx.value}\`" />"`
-    );
+    expect(result).toMatchInlineSnapshot(`"<a :href="\`mailto:\${___VERTER___ctx.value}\`" />"`);
   });
 
   test("dynamic binding", () => {
     const { result } = parse('<Comp v-model:[`${msg}ss`]="msg" />');
     expect(result).toMatchInlineSnapshot(
-      `"<Comp v-model:[\`\${___VERTER___ctx.msg}ss\`]="___VERTER___ctx.msg" />"`
+      `"<Comp v-model:[\`\${___VERTER___ctx.msg}ss\`]="___VERTER___ctx.msg" />"`,
     );
   });
 
   test("v-if + :class", () => {
-    const { result } = parse('<i v-if="icon" :class="icon" />', [
-      ConditionalPlugin,
-      PropPlugin,
-    ]);
+    const { result } = parse('<i v-if="icon" :class="icon" />', [ConditionalPlugin, PropPlugin]);
     expect(result).toMatchInlineSnapshot(
-      `"import { normalizeClass as ___VERTER___normalizeClass } from "vue";if(___VERTER___ctx.icon){<i  class={___VERTER___normalizeClass([___VERTER___ctx.icon])} />}"`
+      `"import { normalizeClass as ___VERTER___normalizeClass } from "vue";if(___VERTER___ctx.icon){<i  class={___VERTER___normalizeClass([___VERTER___ctx.icon])} />}"`,
     );
   });
 
   describe("nested", () => {
     test("{{ { test } }}", () => {
       const { result } = parse(`{{ { test } }}`);
-      expect(result).toMatchInlineSnapshot(
-        `"{{ { test: ___VERTER___ctx.test } }}"`
-      );
+      expect(result).toMatchInlineSnapshot(`"{{ { test: ___VERTER___ctx.test } }}"`);
     });
 
     test("{{ [ test ] }}", () => {
@@ -150,10 +129,10 @@ describe("process template plugins binding", () => {
 
     test(`{{  const c = new Comp<'foo'>().$props['___VERTER___v-slot'];c.$props; }}`, () => {
       const { result } = parse(
-        `{{  const c = new Comp<'foo'>().$props['___VERTER___v-slot']; c.$props; }}`
+        `{{  const c = new Comp<'foo'>().$props['___VERTER___v-slot']; c.$props; }}`,
       );
       expect(result).toMatchInlineSnapshot(
-        `"{{  const c = new ___VERTER___ctx.Comp<'foo'>().$props['___VERTER___v-slot']; c.$props; }}"`
+        `"{{  const c = new ___VERTER___ctx.Comp<'foo'>().$props['___VERTER___v-slot']; c.$props; }}"`,
       );
     });
   });
@@ -167,14 +146,14 @@ describe("process template plugins binding", () => {
     test("array with object", () => {
       const { result } = parse(`{{ [test, { test }] }}`);
       expect(result).toMatchInlineSnapshot(
-        `"{{ [___VERTER___ctx.test, { test: ___VERTER___ctx.test }] }}"`
+        `"{{ [___VERTER___ctx.test, { test: ___VERTER___ctx.test }] }}"`,
       );
     });
 
     test("array with object and array", () => {
       const { result } = parse(`{{ [test, { test }, [test]] }}`);
       expect(result).toMatchInlineSnapshot(
-        `"{{ [___VERTER___ctx.test, { test: ___VERTER___ctx.test }, [___VERTER___ctx.test]] }}"`
+        `"{{ [___VERTER___ctx.test, { test: ___VERTER___ctx.test }, [___VERTER___ctx.test]] }}"`,
       );
     });
   });
@@ -205,8 +184,8 @@ describe("process template plugins binding", () => {
       }}`);
       // 'foo' inside the arrow function body should NOT be prefixed
       // Only the first 'foo' (the parameter) might appear in output, but not prefixed
-      const lines = result.split('\n');
-      const bodyLine = lines.find(line => line.includes('toLowerCase'));
+      const lines = result.split("\n");
+      const bodyLine = lines.find((line) => line.includes("toLowerCase"));
       if (bodyLine) {
         expect(bodyLine).not.toContain("___VERTER___ctx.foo");
       }

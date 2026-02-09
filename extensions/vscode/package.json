@@ -3,8 +3,29 @@
   "displayName": "Verter VSCode",
   "version": "0.0.1",
   "description": "Verter VSCode Extension",
-  "main": "dist/extension.js",
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "verter",
+    "vetur",
+    "vue"
+  ],
+  "license": "MIT",
+  "author": "Carlos Rodrigues <pikax>",
+  "repository": {
+    "url": "https://github.com/pikax/verter"
+  },
+  "publisher": "pikax",
+  "files": [
+    "dist",
+    "languages",
+    "syntaxes",
+    "node_modules/**",
+    "LICENSE"
+  ],
   "type": "commonjs",
+  "main": "dist/extension.js",
   "scripts": {
     "prepackage": "node ./scripts/prepackage-package.js",
     "build": "tsc -b",
@@ -13,50 +34,13 @@
     "package": "vsce package",
     "update-all": "npx npm-check-updates -i"
   },
-  "keywords": [
-    "vue",
-    "verter",
-    "vetur"
-  ],
-  "repository": {
-    "url": "https://github.com/pikax/verter"
-  },
-  "author": "Carlos Rodrigues <pikax>",
-  "license": "MIT",
   "dependencies": {
     "@vue/compiler-core": "^3.5.17",
     "@vue/compiler-sfc": "^3.5.17",
     "@vue/shared": "^3.5.17",
-    "vue": "^3.5.17",
-    "oxc-parser": "^0.98.0"
+    "oxc-parser": "^0.98.0",
+    "vue": "^3.5.17"
   },
-  "files": [
-    "dist",
-    "languages",
-    "syntaxes",
-    "node_modules/**",
-    "LICENSE"
-  ],
-  "vsce": {
-    "dependencies": true,
-    "yarn": false
-  },
-  "engines": {
-    "vscode": "^1.90.0"
-  },
-  "categories": [
-    "Programming Languages"
-  ],
-  "activationEvents": [
-    "onLanguage:vue",
-    "onCommand:verter.restartLanguageServer",
-    "onCommand:verter.showStatistics",
-    "onLanguage:javascript",
-    "onLanguage:typescript",
-    "onLanguage:typescriptreact",
-    "onLanguage:javascriptreact"
-  ],
-  "publisher": "pikax",
   "contributes": {
     "configuration": {
       "type": "object",
@@ -229,5 +213,21 @@
         "title": "Verter: Show Processing Statistics"
       }
     ]
+  },
+  "activationEvents": [
+    "onCommand:verter.restartLanguageServer",
+    "onCommand:verter.showStatistics",
+    "onLanguage:javascript",
+    "onLanguage:javascriptreact",
+    "onLanguage:typescript",
+    "onLanguage:typescriptreact",
+    "onLanguage:vue"
+  ],
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "vsce": {
+    "dependencies": true,
+    "yarn": false
   }
 }

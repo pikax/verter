@@ -11,8 +11,12 @@ fn with_input_str<T>(input: Either<String, Buffer>, f: impl FnOnce(&str) -> T) -
     match input {
         Either::A(input) => Ok(f(&input)),
         Either::B(buf) => {
-            let input_str = std::str::from_utf8(buf.as_ref())
-                .map_err(|e| Error::new(Status::InvalidArg, format!("input must be valid UTF-8: {}", e)))?;
+            let input_str = std::str::from_utf8(buf.as_ref()).map_err(|e| {
+                Error::new(
+                    Status::InvalidArg,
+                    format!("input must be valid UTF-8: {}", e),
+                )
+            })?;
             Ok(f(input_str))
         }
     }
@@ -62,7 +66,10 @@ pub struct CodegenResult {
 /// @param options - Optional compilation options
 /// @returns The compiled result with code, source map, and code with inline source map
 #[napi]
-pub fn compile(input: Either<String, Buffer>, options: Option<CodegenOptions>) -> Result<CodegenResult> {
+pub fn compile(
+    input: Either<String, Buffer>,
+    options: Option<CodegenOptions>,
+) -> Result<CodegenResult> {
     // Create allocator internally - this is critical for memory safety
     // The allocator manages memory for the OXC AST and cannot cross the FFI boundary
     let allocator = oxc_allocator::Allocator::new();
@@ -82,7 +89,9 @@ pub fn compile(input: Either<String, Buffer>, options: Option<CodegenOptions>) -
         },
     };
 
-    let result = with_input_str(input, |input| core_generate(input, &core_options, &allocator))?;
+    let result = with_input_str(input, |input| {
+        core_generate(input, &core_options, &allocator)
+    })?;
 
     Ok(CodegenResult {
         code: result.code,
@@ -94,7 +103,10 @@ pub fn compile(input: Either<String, Buffer>, options: Option<CodegenOptions>) -
 
 /// Synchronous version of compile (same as compile, kept for API compatibility)
 #[napi]
-pub fn compile_sync(input: Either<String, Buffer>, options: Option<CodegenOptions>) -> Result<CodegenResult> {
+pub fn compile_sync(
+    input: Either<String, Buffer>,
+    options: Option<CodegenOptions>,
+) -> Result<CodegenResult> {
     compile(input, options)
 }
 
@@ -200,7 +212,9 @@ pub fn compile_for_vite(
         sourcemap: opts.sourcemap.unwrap_or(true),
     };
 
-    let result = with_input_str(input, |input| core_generate_for_vite(input, &core_options, &allocator))?;
+    let result = with_input_str(input, |input| {
+        core_generate_for_vite(input, &core_options, &allocator)
+    })?;
 
     // Convert BlockOutput to JsBlockOutput with UTF-16 offsets
     let convert_block = |block: verter_core::builder::codegen::BlockOutput| -> JsBlockOutput {

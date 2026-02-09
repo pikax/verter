@@ -8,7 +8,7 @@ const props = withDefaults(defineProps<MyProps>(), {});
   <div>{{ $props }}</div>
   <div>{{ $ }}</div>
   <div>{{ bar }}</div>
-  <div>{{props}}</div>
+  <div>{{ props }}</div>
 
   <span> {{ ___DEBUG_Verter }} </span>
   <span> {{ ___DEBUG_ComponentInstance }} </span>

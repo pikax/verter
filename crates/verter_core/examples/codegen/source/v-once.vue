@@ -18,12 +18,12 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
-import MyComponent from './MyComponent.vue'
+import { ref } from "vue";
+import MyComponent from "./MyComponent.vue";
 
-const staticContent = ref('This will not update')
-const title = ref('Static Title')
-const description = ref('Static Description')
-const value = ref('static prop')
-const reactiveContent = ref('This will update')
+const staticContent = ref("This will not update");
+const title = ref("Static Title");
+const description = ref("Static Description");
+const value = ref("static prop");
+const reactiveContent = ref("This will update");
 </script>

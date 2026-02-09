@@ -127,8 +127,8 @@ function handleScroll(event: Event): void {
     <a href="#" @click.prevent="handleClick">Prevent link</a>
 
     <!-- Passive modifier (for scroll performance) -->
-    <div @scroll.passive="handleScroll" style="overflow: auto; height: 100px;">
-      <div style="height: 200px;">Scroll content</div>
+    <div @scroll.passive="handleScroll" style="overflow: auto; height: 100px">
+      <div style="height: 200px">Scroll content</div>
     </div>
 
     <!-- Key modifiers -->
@@ -166,7 +166,7 @@ function handleScroll(event: Event): void {
       @mousemove="handleMouseMove"
       @mouseenter="handleMouseEnter"
       @mouseleave="handleMouseLeave"
-      style="width: 200px; height: 100px; background: #eee;"
+      style="width: 200px; height: 100px; background: #eee"
     >
       Mouse: {{ mousePosition.x }}, {{ mousePosition.y }}
     </div>

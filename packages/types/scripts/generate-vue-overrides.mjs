@@ -129,7 +129,7 @@ function resolveVueTypeFiles() {
           if (
             e.name === "runtime-core.d.ts" &&
             p.includes(
-              `${path.sep}@vue${path.sep}runtime-core${path.sep}dist${path.sep}runtime-core.d.ts`
+              `${path.sep}@vue${path.sep}runtime-core${path.sep}dist${path.sep}runtime-core.d.ts`,
             )
           ) {
             files.push(p);
@@ -137,16 +137,14 @@ function resolveVueTypeFiles() {
           if (
             e.name === "runtime-dom.d.ts" &&
             p.includes(
-              `${path.sep}@vue${path.sep}runtime-dom${path.sep}dist${path.sep}runtime-dom.d.ts`
+              `${path.sep}@vue${path.sep}runtime-dom${path.sep}dist${path.sep}runtime-dom.d.ts`,
             )
           ) {
             files.push(p);
           }
           if (
             e.name === "shared.d.ts" &&
-            p.includes(
-              `${path.sep}@vue${path.sep}shared${path.sep}dist${path.sep}shared.d.ts`
-            )
+            p.includes(`${path.sep}@vue${path.sep}shared${path.sep}dist${path.sep}shared.d.ts`)
           ) {
             files.push(p);
           }
@@ -167,18 +165,9 @@ function extractFunctionDeclarations(files, names) {
 
   for (const filePath of files) {
     const source = fs.readFileSync(filePath, "utf-8");
-    const sf = ts.createSourceFile(
-      filePath,
-      source,
-      ts.ScriptTarget.Latest,
-      true
-    );
+    const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
     const visit = (node) => {
-      if (
-        ts.isFunctionDeclaration(node) &&
-        node.name &&
-        names.includes(node.name.text)
-      ) {
+      if (ts.isFunctionDeclaration(node) && node.name && names.includes(node.name.text)) {
         // Get JSDoc comments if they exist
         const jsDocComments = ts.getJSDocCommentsAndTags(node);
         let jsDocText = "";
@@ -189,9 +178,7 @@ function extractFunctionDeclarations(files, names) {
           jsDocText = source.substring(start, end).trim();
         }
 
-        const text = printer
-          .printNode(ts.EmitHint.Unspecified, node, sf)
-          .trim();
+        const text = printer.printNode(ts.EmitHint.Unspecified, node, sf).trim();
         out.get(node.name.text).push({ text, node, sf, jsDocText });
       }
       ts.forEachChild(node, visit);
@@ -213,12 +200,7 @@ function collectVueTypeNames(files, explicitTypesToCollect = []) {
 
   for (const filePath of files) {
     const source = fs.readFileSync(filePath, "utf-8");
-    const sf = ts.createSourceFile(
-      filePath,
-      source,
-      ts.ScriptTarget.Latest,
-      true
-    );
+    const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
 
     // Determine package from file path
     let pkg = "vue";
@@ -241,15 +223,13 @@ function collectVueTypeNames(files, explicitTypesToCollect = []) {
       // Collect type names (interfaces, type aliases, etc.)
       if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
         const name = node.name.text;
-        
+
         // Store all types for later retrieval
         if (!allTypesByName.has(name)) {
           allTypesByName.set(name, { node, sf, filePath });
         }
-        
-        const isExported = node.modifiers?.some(
-          (m) => m.kind === ts.SyntaxKind.ExportKeyword
-        );
+
+        const isExported = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
         if (isExported) {
           const existing = exportedTypes.get(name);
           // Only set if not already set or if current package has higher priority
@@ -278,7 +258,7 @@ function collectUsedInternalTypes(
   exportedTypes,
   exportedInVue,
   helpersToImport,
-  allTypesByName
+  allTypesByName,
 ) {
   const usedInternal = new Set();
   const neededLocalExternal = new Set();
@@ -296,10 +276,7 @@ function collectUsedInternalTypes(
         for (const param of node.parameters) {
           if (param.type) {
             const visit = (node) => {
-              if (
-                ts.isTypeReferenceNode(node) &&
-                ts.isIdentifier(node.typeName)
-              ) {
+              if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName)) {
                 const name = node.typeName.text;
                 if (internalTypes.has(name)) {
                   usedInternal.add(name);
@@ -319,10 +296,7 @@ function collectUsedInternalTypes(
         for (const typeParam of node.typeParameters) {
           if (typeParam.constraint) {
             const visit = (node) => {
-              if (
-                ts.isTypeReferenceNode(node) &&
-                ts.isIdentifier(node.typeName)
-              ) {
+              if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName)) {
                 const name = node.typeName.text;
                 if (internalTypes.has(name)) {
                   usedInternal.add(name);
@@ -363,12 +337,7 @@ function collectUsedInternalTypes(
 
   for (const filePath of files) {
     const source = fs.readFileSync(filePath, "utf-8");
-    const sf = ts.createSourceFile(
-      filePath,
-      source,
-      ts.ScriptTarget.Latest,
-      true
-    );
+    const sf = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true);
 
     const visit = (node) => {
       if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) {
@@ -425,16 +394,20 @@ function collectUsedInternalTypes(
   for (const name of neededLocalExternal) {
     const typeInfo = typeNodes.get(name);
     const constInfo = constNodes.get(name);
-    
+
     if (typeInfo) {
       localExternalDefinitions.set(name, typeInfo.text);
-      
+
       // Also process dependencies of explicitly requested types
       const visit = (node) => {
         if (ts.isTypeReferenceNode(node) && ts.isIdentifier(node.typeName)) {
           const depName = node.typeName.text;
           // Add any internal type dependencies
-          if (internalTypes.has(depName) && !localExternalDefinitions.has(depName) && !processed.has(depName)) {
+          if (
+            internalTypes.has(depName) &&
+            !localExternalDefinitions.has(depName) &&
+            !processed.has(depName)
+          ) {
             const depTypeInfo = typeNodes.get(depName);
             if (depTypeInfo) {
               localExternalDefinitions.set(depName, depTypeInfo.text);
@@ -466,7 +439,7 @@ function transformSignatureReturnToArgTypeAppendUniqueKey(
   item,
   exportedTypes,
   exportedInVue,
-  helperTypes
+  helperTypes,
 ) {
   const { node, sf } = item;
   const printer = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed });
@@ -484,20 +457,18 @@ function transformSignatureReturnToArgTypeAppendUniqueKey(
         if (exportedTypes.has(name)) {
           // Qualify all exported Vue types to import('vue')
           return ts.factory.createImportTypeNode(
-            ts.factory.createLiteralTypeNode(
-              ts.factory.createStringLiteral("vue")
-            ),
+            ts.factory.createLiteralTypeNode(ts.factory.createStringLiteral("vue")),
             undefined,
             ts.factory.createIdentifier(name),
             node.typeArguments,
-            false
+            false,
           );
         } else {
           // Leave as identifier; expect local/internal definition
           return ts.factory.updateTypeReferenceNode(
             node,
             ts.factory.createIdentifier(name),
-            node.typeArguments
+            node.typeArguments,
           );
         }
       }
@@ -533,14 +504,10 @@ function transformSignatureReturnToArgTypeAppendUniqueKey(
     }
   }
 
-  if (
-    !baseTypeNode &&
-    qualifiedNode.typeParameters &&
-    qualifiedNode.typeParameters.length > 0
-  ) {
+  if (!baseTypeNode && qualifiedNode.typeParameters && qualifiedNode.typeParameters.length > 0) {
     // Get type parameter references
     const typeParamRefs = qualifiedNode.typeParameters.map((tp) =>
-      ts.factory.createTypeReferenceNode(tp.name)
+      ts.factory.createTypeReferenceNode(tp.name),
     );
 
     if (typeParamRefs.length === 1) {
@@ -560,9 +527,7 @@ function transformSignatureReturnToArgTypeAppendUniqueKey(
 
   // Clone function declaration with new return type and append _Box to the name
   const originalName = qualifiedNode.name?.text || "";
-  const newName = ts.factory.createIdentifier(
-    NAME_PREPEND + originalName + NAME_APPEND
-  );
+  const newName = ts.factory.createIdentifier(NAME_PREPEND + originalName + NAME_APPEND);
 
   const newFunc = ts.factory.createFunctionDeclaration(
     qualifiedNode.modifiers,
@@ -571,33 +536,17 @@ function transformSignatureReturnToArgTypeAppendUniqueKey(
     qualifiedNode.typeParameters,
     qualifiedNode.parameters,
     newReturnType,
-    qualifiedNode.body
+    qualifiedNode.body,
   );
 
   // Create a temporary source file for printing the new node
-  const tempSf = ts.createSourceFile(
-    "temp.ts",
-    "",
-    ts.ScriptTarget.Latest,
-    false
-  );
+  const tempSf = ts.createSourceFile("temp.ts", "", ts.ScriptTarget.Latest, false);
   return printer.printNode(ts.EmitHint.Unspecified, newFunc, tempSf);
 }
 
-function qualifyExportedTypesInText(
-  text,
-  sf,
-  exportedTypes,
-  exportedInVue,
-  helperTypes
-) {
+function qualifyExportedTypesInText(text, sf, exportedTypes, exportedInVue, helperTypes) {
   // Parse the type definition and qualify exported Vue types
-  const tempSource = ts.createSourceFile(
-    "temp.ts",
-    text,
-    ts.ScriptTarget.Latest,
-    true
-  );
+  const tempSource = ts.createSourceFile("temp.ts", text, ts.ScriptTarget.Latest, true);
   const printer = ts.createPrinter({ newLine: ts.NewLineKind.LineFeed });
 
   // Use only dynamically detected helper types
@@ -613,20 +562,18 @@ function qualifyExportedTypesInText(
         if (exportedTypes.has(name)) {
           // Qualify all exported Vue types to import('vue')
           return ts.factory.createImportTypeNode(
-            ts.factory.createLiteralTypeNode(
-              ts.factory.createStringLiteral("vue")
-            ),
+            ts.factory.createLiteralTypeNode(ts.factory.createStringLiteral("vue")),
             undefined,
             ts.factory.createIdentifier(name),
             node.typeArguments,
-            false
+            false,
           );
         } else {
           // Leave identifier as-is to resolve to local definition if provided
           return ts.factory.updateTypeReferenceNode(
             node,
             ts.factory.createIdentifier(name),
-            node.typeArguments
+            node.typeArguments,
           );
         }
       }
@@ -651,7 +598,7 @@ function generateOverrideFileFromDeclarations(
   localExternalDefinitions,
   helperTypes,
   usesUnionToIntersection,
-  usesIfAny
+  usesIfAny,
 ) {
   // Build import statement conditionally (removed UniqueKey)
   let imports = [];
@@ -662,9 +609,7 @@ function generateOverrideFileFromDeclarations(
 
   // Only add import if we have imports
   if (imports.length > 0) {
-    header += `import type { ${imports.join(
-      ", "
-    )} } from '../helpers/helpers';\n`;
+    header += `import type { ${imports.join(", ")} } from '../helpers/helpers';\n`;
   }
 
   // Merge all type definitions into a single set to avoid duplication
@@ -685,10 +630,7 @@ function generateOverrideFileFromDeclarations(
   // Generate all type definitions in a single pass
   if (allTypeDefinitions.size > 0) {
     // Include all type definitions in helper types so they don't get qualified
-    const allHelperTypes = new Set([
-      ...helperTypes,
-      ...allTypeDefinitions.keys(),
-    ]);
+    const allHelperTypes = new Set([...helperTypes, ...allTypeDefinitions.keys()]);
 
     // Sort keys to ensure consistent output
     const sortedTypes = Array.from(allTypeDefinitions.keys()).sort();
@@ -696,18 +638,13 @@ function generateOverrideFileFromDeclarations(
     header += `\n// Local copies of Vue utility types\n`;
     for (const typeName of sortedTypes) {
       const { def, isExported } = allTypeDefinitions.get(typeName);
-      const sf = ts.createSourceFile(
-        "temp.ts",
-        def,
-        ts.ScriptTarget.Latest,
-        true
-      );
+      const sf = ts.createSourceFile("temp.ts", def, ts.ScriptTarget.Latest, true);
       const qualifiedDef = qualifyExportedTypesInText(
         def,
         sf,
         exportedTypes,
         exportedInVue,
-        allHelperTypes
+        allHelperTypes,
       );
 
       // Add export keyword only for types in localExternalDefinitions
@@ -740,7 +677,7 @@ function generateOverrideFileFromDeclarations(
         d,
         exportedTypes,
         exportedInVue,
-        helperTypes
+        helperTypes,
       );
       if (seen.has(text)) continue;
       seen.add(text);
@@ -770,14 +707,12 @@ function main() {
     console.error("❌ Could not locate Vue type declaration files.");
     process.exit(1);
   }
-  console.log(
-    "📄 Using type files:\n" + files.map((f) => "  - " + f).join("\n")
-  );
+  console.log("📄 Using type files:\n" + files.map((f) => "  - " + f).join("\n"));
 
   const { exportedTypes, internalTypes, exportedInVue, allTypesByName } =
     collectVueTypeNames(files);
   console.log(
-    `📦 Collected ${exportedTypes.size} exported and ${internalTypes.size} internal Vue type names`
+    `📦 Collected ${exportedTypes.size} exported and ${internalTypes.size} internal Vue type names`,
   );
 
   const decls = extractFunctionDeclarations(files, FUNCTIONS_TO_OVERRIDE);
@@ -787,30 +722,25 @@ function main() {
     else console.log(`✅ ${name}: ${count} overload(s)`);
   }
 
-  const { typeDefinitions, localExternalDefinitions } =
-    collectUsedInternalTypes(
-      files,
-      decls,
-      internalTypes,
-      exportedTypes,
-      exportedInVue,
-      HELPERS_TO_IMPORT,
-      allTypesByName
-    );
+  const { typeDefinitions, localExternalDefinitions } = collectUsedInternalTypes(
+    files,
+    decls,
+    internalTypes,
+    exportedTypes,
+    exportedInVue,
+    HELPERS_TO_IMPORT,
+    allTypesByName,
+  );
   console.log(
-    `🔍 Found ${
-      typeDefinitions.size
-    } internal types used in signatures: ${Array.from(
-      typeDefinitions.keys()
-    ).join(", ")}`
+    `🔍 Found ${typeDefinitions.size} internal types used in signatures: ${Array.from(
+      typeDefinitions.keys(),
+    ).join(", ")}`,
   );
   if (localExternalDefinitions.size) {
     console.log(
-      `🔧 Including ${
-        localExternalDefinitions.size
-      } local copies of external types: ${Array.from(
-        localExternalDefinitions.keys()
-      ).join(", ")}`
+      `🔧 Including ${localExternalDefinitions.size} local copies of external types: ${Array.from(
+        localExternalDefinitions.keys(),
+      ).join(", ")}`,
     );
   }
 
@@ -832,8 +762,7 @@ function main() {
     for (const { node } of declList) {
       const checkNode = (n) => {
         if (ts.isTypeReferenceNode(n) && ts.isIdentifier(n.typeName)) {
-          if (n.typeName.text === "UnionToIntersection")
-            usesUnionToIntersection = true;
+          if (n.typeName.text === "UnionToIntersection") usesUnionToIntersection = true;
           if (n.typeName.text === "IfAny") usesIfAny = true;
         }
         ts.forEachChild(n, checkNode);
@@ -844,15 +773,13 @@ function main() {
 
   // Check in internal type definitions
   for (const [typeName, typeText] of typeDefinitions.entries()) {
-    if (typeText.includes("UnionToIntersection"))
-      usesUnionToIntersection = true;
+    if (typeText.includes("UnionToIntersection")) usesUnionToIntersection = true;
     if (typeText.includes("IfAny")) usesIfAny = true;
   }
 
   // Check in local external definitions
   for (const [typeName, typeText] of localExternalDefinitions.entries()) {
-    if (typeText.includes("UnionToIntersection"))
-      usesUnionToIntersection = true;
+    if (typeText.includes("UnionToIntersection")) usesUnionToIntersection = true;
     if (typeText.includes("IfAny")) usesIfAny = true;
   }
 
@@ -864,7 +791,7 @@ function main() {
     localExternalDefinitions,
     helperTypes,
     usesUnionToIntersection,
-    usesIfAny
+    usesIfAny,
   );
 
   const outDir = path.dirname(OUTPUT_FILE);

@@ -6,11 +6,11 @@
 </template>
 <script setup lang="ts">
 interface Props {
-  isTimeFilter?: boolean
-  describeText?: string
+  isTimeFilter?: boolean;
+  describeText?: string;
 }
 const props = withDefaults(defineProps<Props>(), {
   isTimeFilter: false,
-  describeText: '...',
-})
+  describeText: "...",
+});
 </script>

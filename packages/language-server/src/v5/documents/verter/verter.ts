@@ -7,12 +7,7 @@ import {
 } from "vscode-languageserver-textdocument";
 
 export class VerterDocument implements TextDocument {
-  static createDoc(
-    uri: string,
-    languageId: string,
-    version: number,
-    content: string
-  ) {
+  static createDoc(uri: string, languageId: string, version: number, content: string) {
     return new VerterDocument(uri, languageId, version, content);
   }
   get uri() {
@@ -33,12 +28,7 @@ export class VerterDocument implements TextDocument {
     return this._doc;
   }
 
-  protected constructor(
-    _uri: string,
-    _languageId: string,
-    _version: number,
-    _content: string
-  ) {
+  protected constructor(_uri: string, _languageId: string, _version: number, _content: string) {
     this._doc = TextDocument.create(_uri, _languageId, _version, _content);
   }
 
@@ -67,7 +57,7 @@ export class VerterDocument implements TextDocument {
             },
           ]
         : content,
-      version ?? d.version + 1
+      version ?? d.version + 1,
     );
     return this;
   }

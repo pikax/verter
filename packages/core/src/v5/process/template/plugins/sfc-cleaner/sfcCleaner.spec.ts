@@ -19,16 +19,14 @@ describe("process template plugin sfc-cleaner", () => {
     content: string,
     options: Partial<TemplateContext> = {},
     pre: string = "",
-    post: string = ""
+    post: string = "",
   ) {
     const source = `${pre}<template>${content}</template>${post}`;
     const parsed = parser(source);
 
     const s = new MagicString(source);
 
-    const templateBlock = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processTemplate(templateBlock.result.items, [SFCCleanerPlugin], {
       ...options,
@@ -43,21 +41,12 @@ describe("process template plugin sfc-cleaner", () => {
   }
 
   it("comments out script block (single line)", () => {
-    const { result } = parse(
-      `<div>hi</div>`,
-      {},
-      "<script>let a = 0;</script>"
-    );
+    const { result } = parse(`<div>hi</div>`, {}, "<script>let a = 0;</script>");
     expect(result).toContain("// <script>let a = 0;</script>");
   });
 
   it("comments out style block (single line)", () => {
-    const { result } = parse(
-      `<div>hi</div>`,
-      {},
-      "",
-      "<style>.a { color: red }</style>"
-    );
+    const { result } = parse(`<div>hi</div>`, {}, "", "<style>.a { color: red }</style>");
     expect(result).toContain("// <style>.a { color: red }</style>");
   });
 

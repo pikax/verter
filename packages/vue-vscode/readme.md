@@ -125,24 +125,24 @@ sequenceDiagram
 
 ### Commands
 
-| Command | ID | Description |
-|---------|----|-------------|
-| Restart Language Server | `verter.restartLanguageServer` | Restart the Verter LSP server |
+| Command                    | ID                              | Description                                                    |
+| -------------------------- | ------------------------------- | -------------------------------------------------------------- |
+| Restart Language Server    | `verter.restartLanguageServer`  | Restart the Verter LSP server                                  |
 | Show Compiled Code to Side | `verter.showCompiledCodeToSide` | View generated TSX for the current `.vue` file in a side panel |
-| Write Virtual Files | `verter.writeVirtualFiles` | Write virtual files to disk for debugging |
-| Show Statistics | `verter.showStatistics` | Display compilation statistics |
+| Write Virtual Files        | `verter.writeVirtualFiles`      | Write virtual files to disk for debugging                      |
+| Show Statistics            | `verter.showStatistics`         | Display compilation statistics                                 |
 
 ### Settings
 
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `verter.enable` | `boolean` | `true` | Enable or disable the Verter extension |
-| `verter.statistics.enabled` | `boolean` | `false` | Enable compilation statistics collection |
-| `verter.statistics.persistToFile` | `boolean` | `false` | Persist statistics to a file on disk |
-| `verter.statistics.maxSnapshots` | `number` | — | Maximum number of statistics snapshots to retain |
-| `verter.statistics.retentionDays` | `number` | — | Number of days to keep statistics snapshots |
-| `verter.language-server.port` | `number` | `-1` | Language server debug port (`-1` for automatic) |
-| `verter.trace.server` | `string` | `"off"` | LSP message trace level: `"off"`, `"messages"`, or `"verbose"` |
+| Setting                           | Type      | Default | Description                                                    |
+| --------------------------------- | --------- | ------- | -------------------------------------------------------------- |
+| `verter.enable`                   | `boolean` | `true`  | Enable or disable the Verter extension                         |
+| `verter.statistics.enabled`       | `boolean` | `false` | Enable compilation statistics collection                       |
+| `verter.statistics.persistToFile` | `boolean` | `false` | Persist statistics to a file on disk                           |
+| `verter.statistics.maxSnapshots`  | `number`  | —       | Maximum number of statistics snapshots to retain               |
+| `verter.statistics.retentionDays` | `number`  | —       | Number of days to keep statistics snapshots                    |
+| `verter.language-server.port`     | `number`  | `-1`    | Language server debug port (`-1` for automatic)                |
+| `verter.trace.server`             | `string`  | `"off"` | LSP message trace level: `"off"`, `"messages"`, or `"verbose"` |
 
 ### Compiled Code View
 
@@ -187,21 +187,21 @@ pnpm --filter verter-vscode package
 
 ### Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| Extension not activating | Check the Output panel for "Verter Language Server"; ensure a `.vue` file is open; try reloading the window |
-| Type errors not showing | Verify `tsconfig.json` exists; check that `@verter/typescript-plugin` is in the plugins array; restart the TS server |
-| Performance issues | Check for very large `.vue` files; ensure `node_modules` is excluded from file watching |
+| Problem                  | Solution                                                                                                             |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| Extension not activating | Check the Output panel for "Verter Language Server"; ensure a `.vue` file is open; try reloading the window          |
+| Type errors not showing  | Verify `tsconfig.json` exists; check that `@verter/typescript-plugin` is in the plugins array; restart the TS server |
+| Performance issues       | Check for very large `.vue` files; ensure `node_modules` is excluded from file watching                              |
 
 ## Dependencies
 
-| Dependency | Purpose |
-|------------|---------|
-| `@verter/language-server` | LSP server providing completions, diagnostics, hover, go-to-definition |
-| `@verter/language-shared` | Shared protocol types between extension client and language server |
-| `@verter/typescript-plugin` | TypeScript plugin for `.vue` import resolution in TS/JS files |
-| `@verter/oxc-bindings` | Platform-specific OXC parser binary management |
-| `vscode-languageclient` | VS Code LSP client library |
+| Dependency                  | Purpose                                                                |
+| --------------------------- | ---------------------------------------------------------------------- |
+| `@verter/language-server`   | LSP server providing completions, diagnostics, hover, go-to-definition |
+| `@verter/language-shared`   | Shared protocol types between extension client and language server     |
+| `@verter/typescript-plugin` | TypeScript plugin for `.vue` import resolution in TS/JS files          |
+| `@verter/oxc-bindings`      | Platform-specific OXC parser binary management                         |
+| `vscode-languageclient`     | VS Code LSP client library                                             |
 
 ## License
 

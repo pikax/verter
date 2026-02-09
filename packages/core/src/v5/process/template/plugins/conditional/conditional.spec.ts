@@ -12,9 +12,7 @@ describe("process template plugins conditional", () => {
 
     const s = new MagicString(source);
 
-    const templateBlock = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processTemplate(
       templateBlock.result.items,
@@ -37,7 +35,7 @@ describe("process template plugins conditional", () => {
         narrow: true,
         block: templateBlock,
         blockNameResolver: (name) => name,
-      }
+      },
     );
 
     return r;
@@ -45,15 +43,13 @@ describe("process template plugins conditional", () => {
 
   it("v-if", () => {
     const { result } = parse(`<div v-if="typeof test === 'string'" />`);
-    expect(result).toMatchInlineSnapshot(
-      `"{()=>{if(typeof test === 'string'){<div  />}}}"`
-    );
+    expect(result).toMatchInlineSnapshot(`"{()=>{if(typeof test === 'string'){<div  />}}}"`);
   });
 
   it("v-if v-else-if", () => {
     const { result } = parse(
       `<div v-if="typeof test === 'string'" />
-        <div v-else-if="typeof test === number" />`
+        <div v-else-if="typeof test === number" />`,
     );
     expect(result).toMatchInlineSnapshot(`
       "{()=>{if(typeof test === 'string'){<div  />}
@@ -64,7 +60,7 @@ describe("process template plugins conditional", () => {
   it("v-if v-else", () => {
     const { result } = parse(
       `<div v-if="typeof test === 'string'" />
-        <div v-else />`
+        <div v-else />`,
     );
     expect(result).toMatchInlineSnapshot(`
       "{()=>{if(typeof test === 'string'){<div  />}
@@ -74,29 +70,27 @@ describe("process template plugins conditional", () => {
 
   describe("narrow", () => {
     it("v-if narrow prop", () => {
-      const { result } = parse(
-        `<div v-if="typeof test === 'string'" :test="()=>test" />`
-      );
+      const { result } = parse(`<div v-if="typeof test === 'string'" :test="()=>test" />`);
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{if(typeof test === 'string'){<div  :test="()=>!((typeof test === 'string'))? undefined :test" />}}}"`
+        `"{()=>{if(typeof test === 'string'){<div  :test="()=>!((typeof test === 'string'))? undefined :test" />}}}"`,
       );
     });
 
     it("v-else-if", () => {
       const { result } = parse(
-        `<div v-if="typeof test === 'object'"></div><div v-else-if="typeof test === 'string'" :test="()=>test" />`
+        `<div v-if="typeof test === 'object'"></div><div v-else-if="typeof test === 'string'" :test="()=>test" />`,
       );
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{if(typeof test === 'object'){<div ></div>}else if(typeof test === 'string'){<div  :test="()=>!(!((typeof test === 'object')) && (typeof test === 'string'))? undefined :test" />}}}"`
+        `"{()=>{if(typeof test === 'object'){<div ></div>}else if(typeof test === 'string'){<div  :test="()=>!(!((typeof test === 'object')) && (typeof test === 'string'))? undefined :test" />}}}"`,
       );
     });
 
     it("v-else", () => {
       const { result } = parse(
-        `<div v-if="typeof test === 'object'"></div><div v-else :test="()=>test" />`
+        `<div v-if="typeof test === 'object'"></div><div v-else :test="()=>test" />`,
       );
       expect(result).toMatchInlineSnapshot(
-        `"{()=>{if(typeof test === 'object'){<div ></div>}else{<div  :test="()=>!(!((typeof test === 'object')))? undefined :test" />}}}"`
+        `"{()=>{if(typeof test === 'object'){<div ></div>}else{<div  :test="()=>!(!((typeof test === 'object')))? undefined :test" />}}}"`,
       );
     });
 
@@ -106,7 +100,7 @@ describe("process template plugins conditional", () => {
 
         <div v-else-if="typeof test === 'number'" :test="()=>test" />
 
-        <div v-else :test="()=>test" />`
+        <div v-else :test="()=>test" />`,
       );
       expect(result).toMatchInlineSnapshot(`
         "{()=>{if(typeof test === 'string'){<div  :test="()=>!((typeof test === 'string'))? undefined :test" />}
@@ -124,7 +118,7 @@ describe("process template plugins conditional", () => {
           <div v-if="test === 'app'" :test="()=> test">app</div>
         </div>
         <div v-else-if="typeof test === 'number'"/>
-        <div v-else :test="()=>test" />`
+        <div v-else :test="()=>test" />`,
     );
     expect(result).toMatchInlineSnapshot(`
       "{()=>{if(typeof test === 'string'){<div >

@@ -27,64 +27,64 @@ class EventRecorder {
   events: TokenEvent[] = [];
 
   ontext(start: number, endIndex: number): void {
-    this.events.push({ type: 'Text', args: [start, endIndex] });
+    this.events.push({ type: "Text", args: [start, endIndex] });
   }
   ontextentity(char: string, start: number, endIndex: number): void {
-    this.events.push({ type: 'TextEntity', args: [char, start, endIndex] });
+    this.events.push({ type: "TextEntity", args: [char, start, endIndex] });
   }
   oninterpolation(start: number, endIndex: number): void {
-    this.events.push({ type: 'Interpolation', args: [start, endIndex] });
+    this.events.push({ type: "Interpolation", args: [start, endIndex] });
   }
   onopentagname(start: number, endIndex: number): void {
-    this.events.push({ type: 'OpenTagName', args: [start, endIndex] });
+    this.events.push({ type: "OpenTagName", args: [start, endIndex] });
   }
   onopentagend(endIndex: number): void {
-    this.events.push({ type: 'OpenTagEnd', args: [endIndex] });
+    this.events.push({ type: "OpenTagEnd", args: [endIndex] });
   }
   onselfclosingtag(endIndex: number): void {
-    this.events.push({ type: 'SelfClosingTag', args: [endIndex] });
+    this.events.push({ type: "SelfClosingTag", args: [endIndex] });
   }
   onclosetag(start: number, endIndex: number): void {
-    this.events.push({ type: 'CloseTag', args: [start, endIndex] });
+    this.events.push({ type: "CloseTag", args: [start, endIndex] });
   }
   onattribdata(start: number, endIndex: number): void {
-    this.events.push({ type: 'AttribData', args: [start, endIndex] });
+    this.events.push({ type: "AttribData", args: [start, endIndex] });
   }
   onattribentity(char: string, start: number, end: number): void {
-    this.events.push({ type: 'AttribEntity', args: [char, start, end] });
+    this.events.push({ type: "AttribEntity", args: [char, start, end] });
   }
   onattribend(quote: QuoteType, endIndex: number): void {
-    this.events.push({ type: 'AttribEnd', args: [quote, endIndex] });
+    this.events.push({ type: "AttribEnd", args: [quote, endIndex] });
   }
   onattribname(start: number, endIndex: number): void {
-    this.events.push({ type: 'AttribName', args: [start, endIndex] });
+    this.events.push({ type: "AttribName", args: [start, endIndex] });
   }
   onattribnameend(endIndex: number): void {
-    this.events.push({ type: 'AttribNameEnd', args: [endIndex] });
+    this.events.push({ type: "AttribNameEnd", args: [endIndex] });
   }
   ondirname(start: number, endIndex: number): void {
-    this.events.push({ type: 'DirName', args: [start, endIndex] });
+    this.events.push({ type: "DirName", args: [start, endIndex] });
   }
   ondirarg(start: number, endIndex: number): void {
-    this.events.push({ type: 'DirArg', args: [start, endIndex] });
+    this.events.push({ type: "DirArg", args: [start, endIndex] });
   }
   ondirmodifier(start: number, endIndex: number): void {
-    this.events.push({ type: 'DirModifier', args: [start, endIndex] });
+    this.events.push({ type: "DirModifier", args: [start, endIndex] });
   }
   oncomment(start: number, endIndex: number): void {
-    this.events.push({ type: 'Comment', args: [start, endIndex] });
+    this.events.push({ type: "Comment", args: [start, endIndex] });
   }
   oncdata(start: number, endIndex: number): void {
-    this.events.push({ type: 'Cdata', args: [start, endIndex] });
+    this.events.push({ type: "Cdata", args: [start, endIndex] });
   }
   onprocessinginstruction(start: number, endIndex: number): void {
-    this.events.push({ type: 'ProcessingInstruction', args: [start, endIndex] });
+    this.events.push({ type: "ProcessingInstruction", args: [start, endIndex] });
   }
   onend(): void {
-    this.events.push({ type: 'End', args: [] });
+    this.events.push({ type: "End", args: [] });
   }
   onerr(code: number, index: number): void {
-    this.events.push({ type: 'Error', args: [code, index] });
+    this.events.push({ type: "Error", args: [code, index] });
   }
 }
 
@@ -200,7 +200,7 @@ const Sequences = {
 
 class Tokenizer {
   state: State = State.Text;
-  private buffer = '';
+  private buffer = "";
   sectionStart = 0;
   private index = 0;
   private baseState = State.Text;
@@ -223,7 +223,7 @@ class Tokenizer {
 
   reset(): void {
     this.state = State.Text;
-    this.buffer = '';
+    this.buffer = "";
     this.sectionStart = 0;
     this.index = 0;
     this.baseState = State.Text;
@@ -447,9 +447,7 @@ class Tokenizer {
       this.state = State.Text;
       this.sectionStart = this.index + 1;
     } else {
-      this.state = isTagStartChar(c)
-        ? State.InClosingTagName
-        : State.InSpecialComment;
+      this.state = isTagStartChar(c) ? State.InClosingTagName : State.InSpecialComment;
       this.sectionStart = this.index;
     }
   }
@@ -531,11 +529,7 @@ class Tokenizer {
     if (c === CharCodes.Eq || isEndOfTagSection(c)) {
       this.cbs.onattribname(this.sectionStart, this.index);
       this.handleAttrNameEnd(c);
-    } else if (
-      c === CharCodes.DoubleQuote ||
-      c === CharCodes.SingleQuote ||
-      c === CharCodes.Lt
-    ) {
+    } else if (c === CharCodes.DoubleQuote || c === CharCodes.SingleQuote || c === CharCodes.Lt) {
       this.cbs.onerr(17, this.index); // UNEXPECTED_CHARACTER_IN_ATTRIBUTE_NAME
     }
   }
@@ -624,7 +618,7 @@ class Tokenizer {
   }
 
   private handleInAttrValue(c: number, quote: number) {
-    if (c === quote || (this.fastForwardTo(quote))) {
+    if (c === quote || this.fastForwardTo(quote)) {
       this.cbs.onattribdata(this.sectionStart, this.index);
       this.sectionStart = -1;
       this.cbs.onattribend(
@@ -666,8 +660,7 @@ class Tokenizer {
       this.state = State.CDATASequence;
       this.sequenceIndex = 0;
     } else {
-      this.state =
-        c === CharCodes.Dash ? State.BeforeComment : State.InDeclaration;
+      this.state = c === CharCodes.Dash ? State.BeforeComment : State.InDeclaration;
     }
   }
 
@@ -903,36 +896,40 @@ function tokenize(input: string): TokenEvent[] {
 }
 
 function formatEvents(events: TokenEvent[], input: string): string {
-  return events.map(e => {
-    const args = e.args.map(a => {
-      if (typeof a === 'number') return a;
-      return `'${a}'`;
-    }).join(', ');
+  return events
+    .map((e) => {
+      const args = e.args
+        .map((a) => {
+          if (typeof a === "number") return a;
+          return `'${a}'`;
+        })
+        .join(", ");
 
-    // Show the span content for position-based events
-    if (e.args.length === 2 && typeof e.args[0] === 'number' && typeof e.args[1] === 'number') {
-      const content = input.slice(e.args[0] as number, e.args[1] as number);
-      return `${e.type}(${args}) -> "${content}"`;
-    }
-    return `${e.type}(${args})`;
-  }).join('\n');
+      // Show the span content for position-based events
+      if (e.args.length === 2 && typeof e.args[0] === "number" && typeof e.args[1] === "number") {
+        const content = input.slice(e.args[0] as number, e.args[1] as number);
+        return `${e.type}(${args}) -> "${content}"`;
+      }
+      return `${e.type}(${args})`;
+    })
+    .join("\n");
 }
 
 // Test cases
 const testCases = [
-  '<div></div>',
-  '<div>hello</div>',
-  '{{ msg }}',
-  '<div>{{ msg }}</div>',
-  'before {{ msg }} after',
+  "<div></div>",
+  "<div>hello</div>",
+  "{{ msg }}",
+  "<div>{{ msg }}</div>",
+  "before {{ msg }} after",
   '<div class="foo"></div>',
   "<div class='foo'></div>",
-  '<div class=foo></div>',
-  '<input disabled>',
-  '<br/>',
-  '<!-- comment -->',
+  "<div class=foo></div>",
+  "<input disabled>",
+  "<br/>",
+  "<!-- comment -->",
   '<div v-if="show"></div>',
-  '<div v-else></div>',
+  "<div v-else></div>",
   '<div :class="cls"></div>',
   '<div @click="handler"></div>',
   '<div @click.stop="handler"></div>',
@@ -940,10 +937,10 @@ const testCases = [
   '<div :[prop]="value"></div>',
   '<input type="text" disabled />',
   '<?xml version="1.0"?>',
-  '<!DOCTYPE html><html></html>',
+  "<!DOCTYPE html><html></html>",
   '<div   class = "foo"   ></div>',
   '<div class=""></div>',
-  '<!-- comment -- with dashes -->',
+  "<!-- comment -- with dashes -->",
   `<template>
   <div v-if="show">
     <span>{{ message }}</span>
@@ -952,8 +949,8 @@ const testCases = [
 ];
 
 // Output format suitable for Rust tests
-console.log('// Vue Tokenizer Event Reference');
-console.log('// Generated from Vue tokenizer source of truth\n');
+console.log("// Vue Tokenizer Event Reference");
+console.log("// Generated from Vue tokenizer source of truth\n");
 
 for (const input of testCases) {
   const events = tokenize(input);
@@ -963,12 +960,15 @@ for (const input of testCases) {
 }
 
 // Also output as JSON for programmatic use
-console.log('\n// JSON format for programmatic comparison:');
-console.log('const EXPECTED_EVENTS = ' + JSON.stringify(
-  testCases.map(input => ({
-    input,
-    events: tokenize(input)
-  })),
-  null,
-  2
-));
+console.log("\n// JSON format for programmatic comparison:");
+console.log(
+  "const EXPECTED_EVENTS = " +
+    JSON.stringify(
+      testCases.map((input) => ({
+        input,
+        events: tokenize(input),
+      })),
+      null,
+      2,
+    ),
+);

@@ -60,22 +60,26 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
-import AsyncComponent from './AsyncComponent.vue'
+import { ref } from "vue";
+import AsyncComponent from "./AsyncComponent.vue";
 
-const showModal = ref(false)
-const show = ref(true)
-const visible = ref(true)
-const currentView = ref('home')
+const showModal = ref(false);
+const show = ref(true);
+const visible = ref(true);
+const currentView = ref("home");
 const items = ref([
-  { id: 1, name: 'Item 1' },
-  { id: 2, name: 'Item 2' },
-])
-const currentComponent = ref('CompA')
-const activeComp = ref('CompA')
+  { id: 1, name: "Item 1" },
+  { id: 2, name: "Item 2" },
+]);
+const currentComponent = ref("CompA");
+const activeComp = ref("CompA");
 
-const onBeforeEnter = (el) => {}
-const onEnter = (el, done) => { done() }
-const onAfterEnter = (el) => {}
-const onLeave = (el, done) => { done() }
+const onBeforeEnter = (el) => {};
+const onEnter = (el, done) => {
+  done();
+};
+const onAfterEnter = (el) => {};
+const onLeave = (el, done) => {
+  done();
+};
 </script>

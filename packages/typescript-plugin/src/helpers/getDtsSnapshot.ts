@@ -47,19 +47,13 @@ export function getPackage(packageName: string, path: string) {
   };
 }
 
-export function importVueCompiler(
-  fromPath: string
-): typeof import("vue/compiler-sfc") {
+export function importVueCompiler(fromPath: string): typeof import("vue/compiler-sfc") {
   const pkg = getPackage("vue", fromPath);
   const main = resolve(pkg.path, "compiler-sfc");
   return getRequire(main);
 }
 
-export const parseFile = (
-  fileName: string,
-  content: string,
-  logger: tsModule.server.Logger
-) => {
+export const parseFile = (fileName: string, content: string, logger: tsModule.server.Logger) => {
   logger.info(`[Verter] parsing ${fileName}`);
 
   const context = parser(content, basename(fileName), {

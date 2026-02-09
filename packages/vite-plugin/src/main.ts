@@ -1,7 +1,7 @@
-import type { ViteCodegenResult } from '@verter/native';
-import { basename } from 'path';
+import type { ViteCodegenResult } from "@verter/native";
+import { basename } from "path";
 
-const EXPORT_HELPER_ID = '\0plugin-vue:export-helper';
+const EXPORT_HELPER_ID = "\0plugin-vue:export-helper";
 
 /**
  * Extract component name from filename and sanitize to a valid JS identifier.
@@ -9,12 +9,12 @@ const EXPORT_HELPER_ID = '\0plugin-vue:export-helper';
  * "404.vue" → "_404"
  */
 function extractComponentName(filename: string): string {
-  let name = basename(filename).replace(/\.vue$/, '');
+  let name = basename(filename).replace(/\.vue$/, "");
   // Replace any character that isn't a valid JS identifier char with underscore
-  name = name.replace(/[^a-zA-Z0-9_$]/g, '_');
+  name = name.replace(/[^a-zA-Z0-9_$]/g, "_");
   // Prefix with underscore if starts with a digit
   if (/^[0-9]/.test(name)) {
-    name = '_' + name;
+    name = "_" + name;
   }
   return name;
 }
@@ -41,10 +41,7 @@ export interface MainModuleOptions {
  * 6. HMR setup in development
  * 7. Export _sfc_main
  */
-export function generateMainModule(
-  result: ViteCodegenResult,
-  options: MainModuleOptions
-): string {
+export function generateMainModule(result: ViteCodegenResult, options: MainModuleOptions): string {
   const { filename, scopeId, ssr, isProd } = options;
 
   const lines: string[] = [];
@@ -52,20 +49,20 @@ export function generateMainModule(
   // 1. Import styles as virtual modules (Vite processes these through CSS pipeline)
   result.styles.forEach((style, index) => {
     const query = new URLSearchParams();
-    query.set('vue', '');
-    query.set('type', 'style');
-    query.set('index', String(index));
-    if (style.lang) query.set('lang', style.lang);
-    if (style.scoped) query.set('scoped', 'true');
-    if (style.isModule) query.set('module', 'true');
+    query.set("vue", "");
+    query.set("type", "style");
+    query.set("index", String(index));
+    if (style.lang) query.set("lang", style.lang);
+    if (style.scoped) query.set("scoped", "true");
+    if (style.isModule) query.set("module", "true");
 
     // Append &lang.css (or &lang.scss etc.) so Vite routes this through the CSS pipeline
-    const lang = style.lang || 'css';
+    const lang = style.lang || "css";
     lines.push(`import "${filename}?${query.toString()}&lang.${lang}"`);
   });
 
   if (result.styles.length > 0) {
-    lines.push('');
+    lines.push("");
   }
 
   // 2. Add script code (component definition)
@@ -74,24 +71,24 @@ export function generateMainModule(
     let scriptCode = result.script.code;
 
     // Replace "export default" with a variable assignment so we can add HMR/render
-    hasDefaultExport = scriptCode.includes('export default');
+    hasDefaultExport = scriptCode.includes("export default");
     if (hasDefaultExport) {
-      scriptCode = scriptCode.replace(/export default\s+/, 'const _sfc_main = ');
+      scriptCode = scriptCode.replace(/export default\s+/, "const _sfc_main = ");
     }
 
     lines.push(scriptCode);
-    lines.push('');
+    lines.push("");
   }
 
   // 3. Add template code (render function)
   if (result.template) {
     lines.push(result.template.code);
-    lines.push('');
+    lines.push("");
   }
 
   // 4. Attach render function to component
   if (result.template && hasDefaultExport) {
-    lines.push('_sfc_main.render = render');
+    lines.push("_sfc_main.render = render");
   }
 
   // 5. Apply metadata and export
@@ -111,13 +108,13 @@ export function generateMainModule(
     lines.push(`import _export_sfc from "${EXPORT_HELPER_ID}"`);
     const componentName = extractComponentName(filename);
     lines.push(
-      `const ${componentName} = /* @__PURE__ */ _export_sfc(_sfc_main, [${metadataProps.join(', ')}])`
+      `const ${componentName} = /* @__PURE__ */ _export_sfc(_sfc_main, [${metadataProps.join(", ")}])`,
     );
   }
 
   // 6. HMR setup (development only)
   if (!isProd && !ssr && hasDefaultExport) {
-    lines.push('');
+    lines.push("");
     lines.push(`/* Hot Module Replacement */`);
     lines.push(`if (import.meta.hot) {`);
     lines.push(`  _sfc_main.__hmrId = "${scopeId}"`);
@@ -141,7 +138,7 @@ export function generateMainModule(
 
   // 7. Export the component
   if (hasDefaultExport) {
-    lines.push('');
+    lines.push("");
     if (metadataProps.length > 0) {
       // Export with named component (matches @vitejs/plugin-vue behavior)
       const componentName = extractComponentName(filename);
@@ -151,5 +148,5 @@ export function generateMainModule(
     }
   }
 
-  return lines.join('\n');
+  return lines.join("\n");
 }

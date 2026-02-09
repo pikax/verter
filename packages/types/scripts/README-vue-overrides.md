@@ -34,11 +34,15 @@ node scripts/generate-vue-overrides.mjs
 For each function overload, the base type used in the intersection is computed as:
 
 1. If the macro has parameters:
-  - Single parameter: use its type directly.
-  - Multiple parameters: use a tuple of all parameter types.
+
+- Single parameter: use its type directly.
+- Multiple parameters: use a tuple of all parameter types.
+
 2. Else, if it has type parameters:
-  - Single type parameter: use that type.
-  - Multiple type parameters: use a tuple of those types.
+
+- Single type parameter: use that type.
+- Multiple type parameters: use a tuple of those types.
+
 3. If neither applies: fallback to `any` (rare / defensive).
 
 The UniqueKey value (`[UniqueKey]?: ...`) is:
@@ -49,13 +53,13 @@ The UniqueKey value (`[UniqueKey]?: ...`) is:
 
 ## Example Transformations
 
-| Original Vue Macro | Override Name | Original Return | Derived Intersection |
-|--------------------|---------------|-----------------|----------------------|
-| `defineEmits<EE>(emitOptions: EE[])` | `defineEmits_Box` | `EE[]` | `EE[] & { [UniqueKey]?: EE[] & [EE[]] }` |
-| `defineEmits<E extends EmitsOptions>(emitOptions: E)` | `defineEmits_Box` | `E` | `E & { [UniqueKey]?: E }` |
-| `defineEmits<T extends ComponentTypeEmits>()` | `defineEmits_Box` | `T` | `T & { [UniqueKey]?: T }` |
-| `withDefaults(props, defaults)` | `withDefaults_Box` | `[DefineProps, Defaults]` | `[DefineProps, Defaults] & { [UniqueKey]?: [DefineProps, Defaults] }` |
-| `defineProps<PropNames extends string>(props: PropNames[])` | `defineProps_Box` | `PropNames[]` | `PropNames[] & { [UniqueKey]?: PropNames[] & [PropNames[]] }` |
+| Original Vue Macro                                          | Override Name      | Original Return           | Derived Intersection                                                  |
+| ----------------------------------------------------------- | ------------------ | ------------------------- | --------------------------------------------------------------------- |
+| `defineEmits<EE>(emitOptions: EE[])`                        | `defineEmits_Box`  | `EE[]`                    | `EE[] & { [UniqueKey]?: EE[] & [EE[]] }`                              |
+| `defineEmits<E extends EmitsOptions>(emitOptions: E)`       | `defineEmits_Box`  | `E`                       | `E & { [UniqueKey]?: E }`                                             |
+| `defineEmits<T extends ComponentTypeEmits>()`               | `defineEmits_Box`  | `T`                       | `T & { [UniqueKey]?: T }`                                             |
+| `withDefaults(props, defaults)`                             | `withDefaults_Box` | `[DefineProps, Defaults]` | `[DefineProps, Defaults] & { [UniqueKey]?: [DefineProps, Defaults] }` |
+| `defineProps<PropNames extends string>(props: PropNames[])` | `defineProps_Box`  | `PropNames[]`             | `PropNames[] & { [UniqueKey]?: PropNames[] & [PropNames[]] }`         |
 
 ## Helper Type Handling
 
@@ -73,7 +77,7 @@ Edit in `generate-vue-overrides.mjs`:
 
 ```ts
 const NAME_APPEND = "_Box"; // suffix
-const NAME_PREPEND = "";    // prefix
+const NAME_PREPEND = ""; // prefix
 ```
 
 Both are applied when constructing the new macro name: `NAME_PREPEND + original + NAME_APPEND`.
@@ -105,4 +109,3 @@ Embedding `UniqueKey` allows downstream tooling to carry opaque metadata alongsi
 ## License
 
 Auto-generated output and this script follow the repository's root license.
-

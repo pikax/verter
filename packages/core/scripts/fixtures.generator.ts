@@ -40,9 +40,7 @@ interface FixtureConfig {
  * Format code for better readability
  */
 function formatForReadability(code: string): string {
-  return code
-    .replace(/(}|>|\)|;)\s*;(const|let|type)/g, "$1;\n$2")
-    .replace(/\n\n+/g, "\n");
+  return code.replace(/(}|>|\)|;)\s*;(const|let|type)/g, "$1;\n$2").replace(/\n\n+/g, "\n");
 }
 
 /**
@@ -59,7 +57,7 @@ function addTwoslashAnnotations(code: string, prefix: string): string {
 
     // Check for variable declaration with macro call: const varName = defineMacro...
     const varWithMacroMatch = line.match(
-      /(const|let)\s+(\w+)\s*=\s*(defineProps|defineEmits|defineModel|defineSlots|defineExpose|withDefaults)/
+      /(const|let)\s+(\w+)\s*=\s*(defineProps|defineEmits|defineModel|defineSlots|defineExpose|withDefaults)/,
     );
 
     if (varWithMacroMatch) {
@@ -87,7 +85,7 @@ function addTwoslashAnnotations(code: string, prefix: string): string {
 
     // Check for standalone macro calls (like defineExpose without assignment)
     const standaloneMacroMatch = line.match(
-      /^\s*(defineProps|defineEmits|defineModel|defineSlots|defineExpose|withDefaults)\s*[<(]/
+      /^\s*(defineProps|defineEmits|defineModel|defineSlots|defineExpose|withDefaults)\s*[<(]/,
     );
     if (standaloneMacroMatch && !line.includes("=")) {
       const macroName = standaloneMacroMatch[1];
@@ -130,16 +128,14 @@ function generateFixtureBlock(
   output: string,
   prefix: string,
   sourcemap?: string,
-  includeAnnotations: boolean = true
+  includeAnnotations: boolean = true,
 ): string {
   const annotatedOutput = includeAnnotations
     ? addTwoslashAnnotations(output, prefix)
     : formatForReadability(output);
   const lang = fixture.lang || "ts";
   const genericAttr = fixture.generic ? ` generic="${fixture.generic}"` : "";
-  const sourcemapComment = sourcemap
-    ? `\n//# sourceMappingURL=${sourcemap}`
-    : "";
+  const sourcemapComment = sourcemap ? `\n//# sourceMappingURL=${sourcemap}` : "";
 
   return `
 // ============================================================================
@@ -205,7 +201,7 @@ async function processFixtureFile(fixtureFilePath: string): Promise<void> {
           result,
           prefix,
           sourcemap,
-          SHOULD_INCLUDE_ANNOTATIONS
+          SHOULD_INCLUDE_ANNOTATIONS,
         );
         sections.push(block);
 
@@ -247,7 +243,7 @@ async function processFixtureFile(fixtureFilePath: string): Promise<void> {
         include: ["./*.ts"],
       },
       null,
-      2
+      2,
     );
     writeFileSync(tsconfigFile, tsconfigContent);
     console.log(`  Generated: tsconfig.json`);

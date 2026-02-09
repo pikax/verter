@@ -19,16 +19,11 @@ export const ScriptResolversPlugin = definePlugin({
     const isTS = ctx.isTS;
     const genericNames = ctx.generic ? `<${ctx.generic.names.join(",")}>` : "";
 
-    const hasModel = ctx.items.some(
-      (x) => x.type === ProcessItemType.DefineModel
-    );
+    const hasModel = ctx.items.some((x) => x.type === ProcessItemType.DefineModel);
 
     const hasEmit =
       true ||
-      ctx.items.some(
-        (x) =>
-          x.type === ProcessItemType.MacroBinding && x.macro === "defineEmits"
-      );
+      ctx.items.some((x) => x.type === ProcessItemType.MacroBinding && x.macro === "defineEmits");
 
     const definePropsName = ctx.prefix("defineProps");
     const defineEmitsName = ctx.prefix("defineEmits");
@@ -57,32 +52,19 @@ export const ScriptResolversPlugin = definePlugin({
     ]
       .filter(Boolean)
       .join(" & ");
-    const resolveEmits = [
-      `${defineEmitsName}${genericNames}`,
-      hasModel && modelToEmits,
-    ]
+    const resolveEmits = [`${defineEmitsName}${genericNames}`, hasModel && modelToEmits]
       .filter(Boolean)
       .join(" & ");
 
     s.append(
       [
-        generateTypeDeclaration(
-          resolvePropsName,
-          resolveProps,
-          ctx.generic?.source,
-          ctx.isTS
-        ),
+        generateTypeDeclaration(resolvePropsName, resolveProps, ctx.generic?.source, ctx.isTS),
         hasEmit &&
-          generateTypeDeclaration(
-            resolveEmitsName,
-            resolveEmits,
-            ctx.generic?.source,
-            ctx.isTS
-          ),
+          generateTypeDeclaration(resolveEmitsName, resolveEmits, ctx.generic?.source, ctx.isTS),
         ,
       ]
         .filter(Boolean)
-        .join(";")
+        .join(";"),
     );
   },
 });

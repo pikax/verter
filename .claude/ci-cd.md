@@ -4,11 +4,11 @@
 
 Verter uses three GitHub Actions workflows:
 
-| Workflow | Trigger | Purpose |
-|----------|---------|---------|
-| **CI** (`ci.yml`) | Push to `main`, PRs | Lint, test, build verification |
-| **Nightly** (`nightly.yml`) | Push to `main` (crates/wasm changes) | Build WASM, upload to GH Release |
-| **Release** (`release.yml`) | Push tag `v*` | Build all platforms, publish to npm/crates.io, deploy playground, create GH Release |
+| Workflow                    | Trigger                              | Purpose                                                                             |
+| --------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------- |
+| **CI** (`ci.yml`)           | Push to `main`, PRs                  | Lint, test, build verification                                                      |
+| **Nightly** (`nightly.yml`) | Push to `main` (crates/wasm changes) | Build WASM, upload to GH Release                                                    |
+| **Release** (`release.yml`) | Push tag `v*`                        | Build all platforms, publish to npm/crates.io, deploy playground, create GH Release |
 
 ## CI Workflow
 
@@ -80,15 +80,15 @@ validate
 
 ### Native Build Matrix
 
-| Target | Runner | Method |
-|--------|--------|--------|
-| `x86_64-unknown-linux-gnu` | ubuntu-latest | Direct |
-| `x86_64-unknown-linux-musl` | ubuntu-latest | Cross-compile |
-| `aarch64-unknown-linux-gnu` | ubuntu-latest | Cross-compile |
-| `aarch64-unknown-linux-musl` | ubuntu-latest | Cross-compile |
-| `x86_64-apple-darwin` | macos-13 | Direct |
-| `aarch64-apple-darwin` | macos-latest | Direct |
-| `x86_64-pc-windows-msvc` | windows-latest | Direct |
+| Target                       | Runner         | Method        |
+| ---------------------------- | -------------- | ------------- |
+| `x86_64-unknown-linux-gnu`   | ubuntu-latest  | Direct        |
+| `x86_64-unknown-linux-musl`  | ubuntu-latest  | Cross-compile |
+| `aarch64-unknown-linux-gnu`  | ubuntu-latest  | Cross-compile |
+| `aarch64-unknown-linux-musl` | ubuntu-latest  | Cross-compile |
+| `x86_64-apple-darwin`        | macos-13       | Direct        |
+| `aarch64-apple-darwin`       | macos-latest   | Direct        |
+| `x86_64-pc-windows-msvc`     | windows-latest | Direct        |
 
 ### Publishing Process
 
@@ -102,6 +102,7 @@ validate
 Uses [git-cliff](https://git-cliff.org/) configured in `cliff.toml`. Generates changelogs from conventional commits (see commit convention in CLAUDE.md).
 
 The release workflow:
+
 1. Runs `git-cliff --latest --strip header` for release notes
 2. Creates the GitHub Release with the generated notes
 3. Pre-release tags (`-alpha`, `-beta`, `-rc`) are marked as prerelease
@@ -110,12 +111,12 @@ The release workflow:
 
 ### Pre-release Support
 
-| Version Pattern | npm dist-tag | GitHub Release | Example |
-|----------------|-------------|----------------|---------|
-| `X.Y.Z-alpha.N` | `alpha` | prerelease | `0.0.1-alpha.1` |
-| `X.Y.Z-beta.N` | `beta` | prerelease | `0.0.1-beta.1` |
-| `X.Y.Z-rc.N` | `rc` | prerelease | `0.0.1-rc.1` |
-| `X.Y.Z` | `latest` | release | `1.0.0` |
+| Version Pattern | npm dist-tag | GitHub Release | Example         |
+| --------------- | ------------ | -------------- | --------------- |
+| `X.Y.Z-alpha.N` | `alpha`      | prerelease     | `0.0.1-alpha.1` |
+| `X.Y.Z-beta.N`  | `beta`       | prerelease     | `0.0.1-beta.1`  |
+| `X.Y.Z-rc.N`    | `rc`         | prerelease     | `0.0.1-rc.1`    |
+| `X.Y.Z`         | `latest`     | release        | `1.0.0`         |
 
 Pre-releases are published with `--tag <channel>` to avoid polluting the `latest` dist-tag:
 
@@ -155,6 +156,7 @@ node scripts/check-versions.mjs --json   # JSON for CI consumption
 ```
 
 It:
+
 - Reads all non-private package.json files
 - Queries npm registry for published versions
 - Detects pre-release channels from version strings
@@ -167,14 +169,15 @@ Uses `workspace:^` and `workspace:*` protocol. `pnpm publish` (not `npm publish`
 
 ## Required GitHub Secrets
 
-| Secret | Purpose |
-|--------|---------|
-| `NETLIFY_AUTH_TOKEN` | Netlify playground deployment |
-| `NETLIFY_SITE_ID` | Netlify site identification |
-| `CARGO_REGISTRY_TOKEN` | crates.io publishing |
-| `NPM_TOKEN` | npm publishing (with `--provenance`) |
+| Secret                 | Purpose                              |
+| ---------------------- | ------------------------------------ |
+| `NETLIFY_AUTH_TOKEN`   | Netlify playground deployment        |
+| `NETLIFY_SITE_ID`      | Netlify site identification          |
+| `CARGO_REGISTRY_TOKEN` | crates.io publishing                 |
+| `NPM_TOKEN`            | npm publishing (with `--provenance`) |
 
 The `GITHUB_TOKEN` is automatically provided and used for:
+
 - GitHub Release creation/upload
 - Nightly asset management
 - Pull request comments (preview deploys)

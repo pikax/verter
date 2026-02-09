@@ -1,92 +1,95 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, shallowRef } from 'vue'
-import * as monaco from 'monaco-editor-core'
-import type { Store } from '../core/store'
-import type { OutputMode } from '../core/types'
+import { ref, computed, watch, onMounted, onUnmounted, shallowRef } from "vue";
+import * as monaco from "monaco-editor-core";
+import type { Store } from "../core/store";
+import type { OutputMode } from "../core/types";
 
 const props = defineProps<{
-  store: Store
-  mode: OutputMode
-}>()
+  store: Store;
+  mode: OutputMode;
+}>();
 
-const editorContainer = ref<HTMLElement>()
-const editor = shallowRef<monaco.editor.IStandaloneCodeEditor>()
+const editorContainer = ref<HTMLElement>();
+const editor = shallowRef<monaco.editor.IStandaloneCodeEditor>();
 
 const code = computed(() => {
-  const file = props.store.activeFile
-  if (!file) return ''
+  const file = props.store.activeFile;
+  if (!file) return "";
 
   switch (props.mode) {
-    case 'ts':
-      return file.compiled.ts
-    case 'js':
-      return file.compiled.js
-    case 'css':
-      return file.compiled.css
+    case "ts":
+      return file.compiled.ts;
+    case "js":
+      return file.compiled.js;
+    case "css":
+      return file.compiled.css;
     default:
-      return ''
+      return "";
   }
-})
+});
 
 const language = computed(() => {
   switch (props.mode) {
-    case 'ts':
-      return 'typescript'
-    case 'js':
-      return 'javascript'
-    case 'css':
-      return 'css'
+    case "ts":
+      return "typescript";
+    case "js":
+      return "javascript";
+    case "css":
+      return "css";
     default:
-      return 'plaintext'
+      return "plaintext";
   }
-})
+});
 
 onMounted(() => {
-  if (!editorContainer.value) return
+  if (!editorContainer.value) return;
 
   editor.value = monaco.editor.create(editorContainer.value, {
-    value: code.value || '// No output',
+    value: code.value || "// No output",
     language: language.value,
-    theme: props.store.darkMode ? 'vs-dark' : 'vs',
+    theme: props.store.darkMode ? "vs-dark" : "vs",
     readOnly: true,
     minimap: { enabled: false },
     fontSize: 13,
-    lineNumbers: 'on',
-    renderLineHighlight: 'none',
+    lineNumbers: "on",
+    renderLineHighlight: "none",
     scrollBeyondLastLine: false,
     automaticLayout: true,
     folding: true,
-    wordWrap: 'on',
+    wordWrap: "on",
     domReadOnly: true,
     contextmenu: false,
-  })
-})
+  });
+});
 
 // Watch for code changes
 watch(code, (newCode) => {
   if (editor.value) {
-    editor.value.setValue(newCode || '// No output')
+    editor.value.setValue(newCode || "// No output");
   }
-})
+});
 
 // Watch for language changes
 watch(language, (newLang) => {
   if (editor.value) {
-    const model = editor.value.getModel()
+    const model = editor.value.getModel();
     if (model) {
-      monaco.editor.setModelLanguage(model, newLang)
+      monaco.editor.setModelLanguage(model, newLang);
     }
   }
-})
+});
 
 // Watch for dark mode changes
-watch(() => props.store.darkMode, (dark) => {
-  monaco.editor.setTheme(dark ? 'vs-dark' : 'vs')
-})
+watch(
+  () => props.store.darkMode,
+  (dark) => {
+    monaco.editor.setTheme(dark ? "vs-dark" : "vs");
+  },
+);
 
 onUnmounted(() => {
-  editor.value?.dispose()
-})
+  editor.value?.dispose();
+});
 </script>
 
 <template>

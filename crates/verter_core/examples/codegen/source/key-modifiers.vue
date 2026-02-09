@@ -26,19 +26,19 @@
 </template>
 
 <script setup>
-const submitEnter = () => console.log('enter')
-const handleTab = () => console.log('tab')
-const handleDelete = () => console.log('delete')
-const handleEsc = () => console.log('esc')
-const handleSpace = () => console.log('space')
-const handleUp = () => console.log('up')
-const handleDown = () => console.log('down')
-const handleLeft = () => console.log('left')
-const handleRight = () => console.log('right')
-const submitCtrlEnter = () => console.log('ctrl+enter')
-const saveAltS = () => console.log('alt+s')
-const prevShiftTab = () => console.log('shift+tab')
-const searchMetaK = () => console.log('meta+k')
-const onCtrlClick = () => console.log('ctrl+click exact')
-const onExactClick = () => console.log('exact click')
+const submitEnter = () => console.log("enter");
+const handleTab = () => console.log("tab");
+const handleDelete = () => console.log("delete");
+const handleEsc = () => console.log("esc");
+const handleSpace = () => console.log("space");
+const handleUp = () => console.log("up");
+const handleDown = () => console.log("down");
+const handleLeft = () => console.log("left");
+const handleRight = () => console.log("right");
+const submitCtrlEnter = () => console.log("ctrl+enter");
+const saveAltS = () => console.log("alt+s");
+const prevShiftTab = () => console.log("shift+tab");
+const searchMetaK = () => console.log("meta+k");
+const onCtrlClick = () => console.log("ctrl+click exact");
+const onExactClick = () => console.log("exact click");
 </script>

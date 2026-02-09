@@ -88,9 +88,7 @@ describe("TypescriptDocument", () => {
 
       doc.update("let a = 1;\nlet b = 2;");
       snapshot = doc.snapshot;
-      expect(snapshot.getText(0, snapshot.getLength())).toBe(
-        "let a = 1;\nlet b = 2;"
-      );
+      expect(snapshot.getText(0, snapshot.getLength())).toBe("let a = 1;\nlet b = 2;");
       expect(doc.lineCount).toBe(2);
     });
   });

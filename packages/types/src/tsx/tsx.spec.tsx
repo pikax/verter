@@ -235,9 +235,7 @@ describe("TSX type augmentations", () => {
         <Container
           v-slot={(instance) => {
             assertType<string>(instance.containerId);
-            assertType<(props: { value: number }) => any>(
-              instance.$slots.content
-            );
+            assertType<(props: { value: number }) => any>(instance.$slots.content);
 
             instance.$slots.content({ value: 42 });
             // @ts-expect-error missing property
@@ -302,10 +300,7 @@ describe("TSX type augmentations", () => {
       it("properly types scoped slot parameters", () => {
         const DataTable = defineComponent({
           slots: {} as SlotsType<{
-            item: (props: {
-              item: { id: number; name: string };
-              index: number;
-            }) => any;
+            item: (props: { item: { id: number; name: string }; index: number }) => any;
             empty: () => any;
           }>,
         });

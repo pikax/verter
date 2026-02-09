@@ -62,15 +62,11 @@ function loadTsConfig(): ts.CompilerOptions {
   const configFile = ts.readConfigFile(TSCONFIG_TEST_PATH, ts.sys.readFile);
   if (configFile.error) {
     throw new Error(
-      `Failed to read tsconfig.test.json: ${ts.flattenDiagnosticMessageText(configFile.error.messageText, "\n")}`
+      `Failed to read tsconfig.test.json: ${ts.flattenDiagnosticMessageText(configFile.error.messageText, "\n")}`,
     );
   }
 
-  const parsedConfig = ts.parseJsonConfigFileContent(
-    configFile.config,
-    ts.sys,
-    CORE_PACKAGE_DIR
-  );
+  const parsedConfig = ts.parseJsonConfigFileContent(configFile.config, ts.sys, CORE_PACKAGE_DIR);
 
   if (parsedConfig.errors.length > 0) {
     const errors = parsedConfig.errors
@@ -134,10 +130,10 @@ function getLanguageServiceHost(): typeof cachedServiceHost {
 
   const compilerOptions = loadTsConfig();
   const globalDtsContent = ts.sys.readFile(GLOBAL_DTS_PATH) ?? "";
-  
+
   // Pre-create snapshot for global.d.ts (never changes)
   const globalDtsSnapshot = ts.ScriptSnapshot.fromString(globalDtsContent);
-  
+
   // Mutable state for the test file
   let testFileContent = "";
   let testFileVersion = 0;
@@ -146,9 +142,9 @@ function getLanguageServiceHost(): typeof cachedServiceHost {
   const scriptFileNames = [TEST_FILE_PATH, GLOBAL_DTS_PATH];
 
   // Fast path check function (avoid normalize on every call)
-  const isTestFile = (fileName: string) => 
+  const isTestFile = (fileName: string) =>
     fileName === TEST_FILE_PATH || path.normalize(fileName) === NORMALIZED_TEST_FILE_PATH;
-  const isGlobalDts = (fileName: string) => 
+  const isGlobalDts = (fileName: string) =>
     fileName === GLOBAL_DTS_PATH || path.normalize(fileName) === NORMALIZED_GLOBAL_DTS_PATH;
 
   const host: ts.LanguageServiceHost = {
@@ -167,19 +163,19 @@ function getLanguageServiceHost(): typeof cachedServiceHost {
       if (isGlobalDts(fileName)) {
         return globalDtsSnapshot;
       }
-      
+
       // Check cache first for disk files
       if (scriptSnapshotCache.has(fileName)) {
         return scriptSnapshotCache.get(fileName);
       }
-      
+
       // Read from disk for other files (node_modules, etc.)
       let content = fileContentCache.get(fileName);
       if (content === undefined && !fileContentCache.has(fileName)) {
         content = ts.sys.readFile(fileName);
         fileContentCache.set(fileName, content);
       }
-      
+
       if (content !== undefined) {
         const snapshot = ts.ScriptSnapshot.fromString(content);
         scriptSnapshotCache.set(fileName, snapshot);
@@ -199,12 +195,12 @@ function getLanguageServiceHost(): typeof cachedServiceHost {
       if (isTestFile(fileName) || isGlobalDts(fileName)) {
         return true;
       }
-      
+
       // Check cache
       if (fileExistsCache.has(fileName)) {
         return fileExistsCache.get(fileName)!;
       }
-      
+
       const exists = ts.sys.fileExists(fileName);
       fileExistsCache.set(fileName, exists);
       return exists;
@@ -216,12 +212,12 @@ function getLanguageServiceHost(): typeof cachedServiceHost {
       if (isGlobalDts(fileName)) {
         return globalDtsContent;
       }
-      
+
       // Check cache first
       if (fileContentCache.has(fileName)) {
         return fileContentCache.get(fileName);
       }
-      
+
       const content = ts.sys.readFile(fileName);
       fileContentCache.set(fileName, content);
       return content;
@@ -232,38 +228,39 @@ function getLanguageServiceHost(): typeof cachedServiceHost {
       if (directoryExistsCache.has(directoryName)) {
         return directoryExistsCache.get(directoryName)!;
       }
-      
+
       const exists = ts.sys.directoryExists(directoryName);
       directoryExistsCache.set(directoryName, exists);
       return exists;
     },
     getDirectories: ts.sys.getDirectories,
     realpath: ts.sys.realpath,
-    resolveModuleNames: (moduleNames, containingFile, _reusedNames, _redirectedReference, options) => {
+    resolveModuleNames: (
+      moduleNames,
+      containingFile,
+      _reusedNames,
+      _redirectedReference,
+      options,
+    ) => {
       return moduleNames.map((moduleName) => {
         // Create cache key
         const cacheKey = `${containingFile}|${moduleName}`;
-        
+
         if (moduleResolutionCache.has(cacheKey)) {
           return moduleResolutionCache.get(cacheKey);
         }
-        
+
         // Redirect $verter/types$ to @verter/types
         const actualModuleName = moduleName === "$verter/types$" ? "@verter/types" : moduleName;
-        
-        const result = ts.resolveModuleName(
-          actualModuleName,
-          containingFile,
-          options,
-          {
-            fileExists: host.fileExists!,
-            readFile: host.readFile!,
-            directoryExists: host.directoryExists!,
-            getDirectories: host.getDirectories!,
-            realpath: ts.sys.realpath,
-          }
-        );
-        
+
+        const result = ts.resolveModuleName(actualModuleName, containingFile, options, {
+          fileExists: host.fileExists!,
+          readFile: host.readFile!,
+          directoryExists: host.directoryExists!,
+          getDirectories: host.getDirectories!,
+          realpath: ts.sys.realpath,
+        });
+
         moduleResolutionCache.set(cacheKey, result.resolvedModule);
         return result.resolvedModule;
       });
@@ -293,10 +290,7 @@ function getLanguageService(): ts.LanguageService {
   }
 
   const serviceHost = getLanguageServiceHost()!;
-  cachedLanguageService = ts.createLanguageService(
-    serviceHost.host,
-    ts.createDocumentRegistry()
-  );
+  cachedLanguageService = ts.createLanguageService(serviceHost.host, ts.createDocumentRegistry());
 
   return cachedLanguageService;
 }
@@ -335,7 +329,7 @@ export interface TypeProgramOptions {
  */
 export function createTypeProgram(
   code: string,
-  options: TypeProgramOptions = {}
+  options: TypeProgramOptions = {},
 ): {
   program: ts.Program;
   sourceFile: ts.SourceFile;
@@ -353,14 +347,14 @@ export function createTypeProgram(
   // Get the language service and program
   const languageService = getLanguageService();
   const program = languageService.getProgram();
-  
+
   if (!program) {
     throw new Error("Failed to get program from language service");
   }
 
   const checker = program.getTypeChecker();
   const sourceFile = program.getSourceFile(TEST_FILE_PATH);
-  
+
   if (!sourceFile) {
     throw new Error(`Failed to get test source file from program. Test file: ${TEST_FILE_PATH}`);
   }
@@ -392,7 +386,7 @@ export function createTypeProgram(
 export function getTypeString(
   code: string,
   symbolName: string,
-  kind: "type" | "variable" = "type"
+  kind: "type" | "variable" = "type",
 ): string | null {
   const { sourceFile, checker } = createTypeProgram(code);
 
@@ -405,8 +399,7 @@ export function getTypeString(
         result = checker.typeToString(
           type,
           node,
-          ts.TypeFormatFlags.NoTruncation |
-            ts.TypeFormatFlags.MultilineObjectLiterals
+          ts.TypeFormatFlags.NoTruncation | ts.TypeFormatFlags.MultilineObjectLiterals,
         );
       }
     } else if (kind === "variable" && ts.isVariableDeclaration(node)) {
@@ -415,8 +408,7 @@ export function getTypeString(
         result = checker.typeToString(
           type,
           node,
-          ts.TypeFormatFlags.NoTruncation |
-            ts.TypeFormatFlags.MultilineObjectLiterals
+          ts.TypeFormatFlags.NoTruncation | ts.TypeFormatFlags.MultilineObjectLiterals,
         );
       }
     }
@@ -476,14 +468,16 @@ export function isUnknownType(typeStr: string): boolean {
  * @returns Normalized type string
  */
 export function normalizeTypeString(typeStr: string): string {
-  return typeStr
-    // Normalize whitespace
-    .replace(/\s+/g, " ")
-    // Remove spaces around punctuation
-    .replace(/\s*([<>(),|&:;{}[\]])\s*/g, "$1")
-    // Add space after colons in object types
-    .replace(/:(?=[^:\s])/g, ": ")
-    .trim();
+  return (
+    typeStr
+      // Normalize whitespace
+      .replace(/\s+/g, " ")
+      // Remove spaces around punctuation
+      .replace(/\s*([<>(),|&:;{}[\]])\s*/g, "$1")
+      // Add space after colons in object types
+      .replace(/:(?=[^:\s])/g, ": ")
+      .trim()
+  );
 }
 
 // ============================================================================
@@ -531,11 +525,7 @@ export interface TypeTestResult {
  * );
  * ```
  */
-export function runTypeTest(
-  code: string,
-  test: TypeTest,
-  prefix: string
-): TypeTestResult {
+export function runTypeTest(code: string, test: TypeTest, prefix: string): TypeTestResult {
   const targetName = resolveWithPrefix(test.target, prefix);
   const kind = test.kind || "type";
 
@@ -622,9 +612,7 @@ export function runTypeTest(
  * @param code - The TypeScript code to check
  * @returns Array of TypeScript diagnostics
  */
-export function getSemanticErrors(
-  code: string
-): ts.Diagnostic[] {
+export function getSemanticErrors(code: string): ts.Diagnostic[] {
   const { program, sourceFile } = createTypeProgram(code);
 
   // Get all diagnostics (semantic + syntactic)
@@ -647,9 +635,7 @@ export function formatDiagnostics(diagnostics: ts.Diagnostic[]): string {
     .map((d) => {
       const message = ts.flattenDiagnosticMessageText(d.messageText, "\n");
       if (d.file && d.start !== undefined) {
-        const { line, character } = d.file.getLineAndCharacterOfPosition(
-          d.start
-        );
+        const { line, character } = d.file.getLineAndCharacterOfPosition(d.start);
         return `  Line ${line + 1}, Col ${character + 1}: ${message}`;
       }
       return `  ${message}`;
@@ -666,17 +652,14 @@ export function formatDiagnostics(diagnostics: ts.Diagnostic[]): string {
  * @param testName - Optional test name for error context
  * @throws Error if TypeScript errors are found
  */
-export function assertNoTypeErrors(
-  code: string,
-  testName?: string
-): void {
+export function assertNoTypeErrors(code: string, testName?: string): void {
   const errors = getSemanticErrors(code);
 
   if (errors.length > 0) {
     const errorMessages = formatDiagnostics(errors);
     const context = testName ? ` in test "${testName}"` : "";
     throw new Error(
-      `TypeScript errors found${context}:\n${errorMessages}\n\nGenerated code:\n${code}`
+      `TypeScript errors found${context}:\n${errorMessages}\n\nGenerated code:\n${code}`,
     );
   }
 }

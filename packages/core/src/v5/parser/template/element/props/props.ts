@@ -1,9 +1,5 @@
 import { NodeTypes } from "@vue/compiler-core";
-import type {
-  AttributeNode,
-  DirectiveNode,
-  ElementNode,
-} from "@vue/compiler-core";
+import type { AttributeNode, DirectiveNode, ElementNode } from "@vue/compiler-core";
 import { VerterNode } from "../../../walk";
 import {
   TemplateBinding,
@@ -81,11 +77,7 @@ export function handleProps(node: VerterNode, context: PropsContext) {
     const bindings = [];
 
     for (let i = 0; i < toNormalise.classes.length; i++) {
-      const [p, ...b] = propToTemplateProp(
-        toNormalise.classes[i],
-        node,
-        context
-      );
+      const [p, ...b] = propToTemplateProp(toNormalise.classes[i], node, context);
 
       props.push(p);
       bindings.push(...b);
@@ -106,11 +98,7 @@ export function handleProps(node: VerterNode, context: PropsContext) {
     const bindings = [];
 
     for (let i = 0; i < toNormalise.styles.length; i++) {
-      const [p, ...b] = propToTemplateProp(
-        toNormalise.styles[i],
-        node,
-        context
-      );
+      const [p, ...b] = propToTemplateProp(toNormalise.styles[i], node, context);
 
       props.push(p);
       bindings.push(...b);
@@ -130,8 +118,8 @@ export function handleProps(node: VerterNode, context: PropsContext) {
     (node.isSelfClosing
       ? node.loc.end.offset
       : node.children.length > 0
-      ? node.children[node.children.length - 1].loc.end.offset
-      : node.loc.end.offset) - node.loc.start.offset;
+        ? node.children[node.children.length - 1].loc.end.offset
+        : node.loc.end.offset) - node.loc.start.offset;
 
   const hasPre = node.loc.source.slice(0, tagEnd).indexOf("v-pre");
   if (hasPre !== -1) {
@@ -169,15 +157,10 @@ const BuiltInDirectivesAsProps = new Set([
 export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
   prop: T,
   element: ElementNode,
-  context: PropsContext
+  context: PropsContext,
 ): [
   TemplateProp | TemplateDirective,
-  ...Array<
-    | TemplateBinding
-    | TemplateFunction
-    | TemplateLiteral
-    | TemplateBrokenExpression
-  >
+  ...Array<TemplateBinding | TemplateFunction | TemplateLiteral | TemplateBrokenExpression>,
 ] {
   if (prop.type === NodeTypes.ATTRIBUTE) {
     if (prop.name === "v-" && prop.loc.source === "v-") {
@@ -186,7 +169,7 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
         {
           type: TemplateTypes.Directive,
           node: prop as unknown as DirectiveNode,
-          name: '',
+          name: "",
 
           arg: null,
           exp: null,
@@ -217,9 +200,7 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
       context.ignoredIdentifiers.push("$event");
     }
 
-    const nameBinding = prop.arg
-      ? retrieveBindings(prop.arg, context, prop)
-      : [];
+    const nameBinding = prop.arg ? retrieveBindings(prop.arg, context, prop) : [];
     const valueBinding = prop.exp ? retrieveBindings(prop.exp, context) : [];
 
     if (!prop.exp) {
@@ -235,12 +216,8 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
       {
         type: TemplateTypes.Prop,
         node: prop,
-        arg: prop.arg
-          ? nameBinding.filter((x) => x.type === TemplateTypes.Binding)
-          : null,
-        exp: prop.exp
-          ? valueBinding.filter((x) => x.type === TemplateTypes.Binding)
-          : null,
+        arg: prop.arg ? nameBinding.filter((x) => x.type === TemplateTypes.Binding) : null,
+        exp: prop.exp ? valueBinding.filter((x) => x.type === TemplateTypes.Binding) : null,
         static: false,
 
         event: prop.name === "on",
@@ -261,12 +238,8 @@ export function propToTemplateProp<T extends AttributeNode | DirectiveNode>(
         type: TemplateTypes.Directive,
         node: prop,
         name: prop.name,
-        arg: prop.arg
-          ? nameBinding.filter((x) => x.type === TemplateTypes.Binding)
-          : null,
-        exp: prop.exp
-          ? valueBinding.filter((x) => x.type === TemplateTypes.Binding)
-          : null,
+        arg: prop.arg ? nameBinding.filter((x) => x.type === TemplateTypes.Binding) : null,
+        exp: prop.exp ? valueBinding.filter((x) => x.type === TemplateTypes.Binding) : null,
         static: false,
         context,
         element,

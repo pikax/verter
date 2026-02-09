@@ -53,8 +53,11 @@ export const ValidFiles = Object.entries(
     query: "?raw",
     eager: true,
     import: "default",
-  }) as Record<string, string>
-).reduce((c, [k, v]) => {
-  c[basename(k)] = v;
-  return c;
-}, {} as Record<string, string>);
+  }) as Record<string, string>,
+).reduce(
+  (c, [k, v]) => {
+    c[basename(k)] = v;
+    return c;
+  },
+  {} as Record<string, string>,
+);

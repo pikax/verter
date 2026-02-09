@@ -3,9 +3,13 @@
   "version": "0.0.1-alpha.1",
   "private": true,
   "description": "",
+  "keywords": [],
+  "license": "MIT",
+  "author": "",
   "main": "index.js",
   "scripts": {
     "test": "pnpm --filter @verter/types --filter @verter/language-server --filter @verter/core test",
+    "fmt": "oxfmt",
     "build": "pnpm run build:native && pnpm run build:wasm && pnpm run build:ts",
     "build:native": "pnpm --filter @verter/native build",
     "build:wasm": "pnpm --filter @verter/wasm build",
@@ -19,9 +23,11 @@
     "copy-plugin": "npx shx mkdir -p extensions/vue-vscode/node_modules/@verter && npx shx cp -r extensions/typescript-plugin extensions/vue-vscode/node_modules/@verter/typescript-plugin",
     "clean": "pnpm -r exec npx shx rm -rf .turbo dist tsconfig.tsbuildinfo && npx shx rm -rf .turbo dist tsconfig.tsbuildinfo"
   },
-  "keywords": [],
-  "author": "",
-  "license": "MIT",
+  "dependencies": {
+    "@vue/compiler-core": "^3.5.27",
+    "@vue/compiler-sfc": "^3.5.27",
+    "oxfmt": "^0.28.0"
+  },
   "devDependencies": {
     "@hyrious/esbuild-plugin-commonjs": "^0.2.6",
     "@rollup/plugin-commonjs": "^29.0.0",
@@ -36,6 +42,7 @@
     "rollup-plugin-esbuild": "^6.2.1",
     "vitest": "^4.0.18"
   },
+  "packageManager": "pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c",
   "pnpm": {
     "onlyBuiltDependencies": [
       "@swc/core",
@@ -43,11 +50,5 @@
       "esbuild",
       "keytar"
     ]
-  },
-  "packageManager": "pnpm@10.22.0+sha512.bf049efe995b28f527fd2b41ae0474ce29186f7edcb3bf545087bd61fbbebb2bf75362d1307fda09c2d288e1e499787ac12d4fcb617a974718a6051f2eee741c",
-  "dependencies": {
-    "@vue/compiler-core": "^3.5.27",
-    "@vue/compiler-sfc": "^3.5.27",
-    "oxfmt": "^0.28.0"
   }
 }

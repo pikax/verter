@@ -1,16 +1,17 @@
 <script lang="ts">
 import { defineComponent, defineAsyncComponent, type PropType, type Component } from "vue";
 
-const AsyncComponent = defineAsyncComponent(() =>
-  new Promise<{ default: Component }>((resolve) => {
-    setTimeout(() => {
-      resolve({
-        default: {
-          template: "<div>Async content loaded!</div>",
-        },
-      });
-    }, 1000);
-  })
+const AsyncComponent = defineAsyncComponent(
+  () =>
+    new Promise<{ default: Component }>((resolve) => {
+      setTimeout(() => {
+        resolve({
+          default: {
+            template: "<div>Async content loaded!</div>",
+          },
+        });
+      }, 1000);
+    }),
 );
 
 interface ListItem {
@@ -30,21 +31,21 @@ export default defineComponent({
       showModal: false,
       showTooltip: false,
       tooltipDisabled: false,
-      
+
       // KeepAlive
       currentTab: "tab1" as "tab1" | "tab2" | "tab3",
       cachedComponents: ["Tab1", "Tab2"] as string[],
       maxCached: 10,
-      
+
       // Suspense
       showAsync: true,
       suspenseKey: 0,
-      
+
       // Transition
       transitionShow: true,
       transitionName: "fade" as "fade" | "slide" | "zoom",
       transitionMode: "out-in" as "out-in" | "in-out" | "default",
-      
+
       // TransitionGroup
       items: [
         { id: 1, text: "Item 1" },
@@ -62,17 +63,17 @@ export default defineComponent({
     toggleTooltip(): void {
       this.showTooltip = !this.showTooltip;
     },
-    
+
     // KeepAlive methods
     setTab(tab: "tab1" | "tab2" | "tab3"): void {
       this.currentTab = tab;
     },
-    
+
     // Suspense methods
     reloadAsync(): void {
       this.suspenseKey++;
     },
-    
+
     // Transition methods
     toggleTransition(): void {
       this.transitionShow = !this.transitionShow;
@@ -80,7 +81,7 @@ export default defineComponent({
     setTransitionName(name: "fade" | "slide" | "zoom"): void {
       this.transitionName = name;
     },
-    
+
     // TransitionGroup methods
     addItem(): void {
       this.items.push({ id: this.nextId++, text: `Item ${this.nextId - 1}` });
@@ -94,7 +95,7 @@ export default defineComponent({
     shuffleItems(): void {
       this.items = [...this.items].sort(() => Math.random() - 0.5);
     },
-    
+
     // Transition hooks
     onBeforeEnter(el: Element): void {
       console.log("before-enter", el);
@@ -116,7 +117,7 @@ export default defineComponent({
     onAfterLeave(el: Element): void {
       console.log("after-leave", el);
     },
-    
+
     // KeepAlive hooks
     onActivated(): void {
       console.log("Component activated");
@@ -124,7 +125,7 @@ export default defineComponent({
     onDeactivated(): void {
       console.log("Component deactivated");
     },
-    
+
     // Suspense events
     onPending(): void {
       console.log("Suspense pending");
@@ -151,11 +152,9 @@ export default defineComponent({
           <button @click="toggleModal">Close</button>
         </div>
       </Teleport>
-      
+
       <Teleport to="body" :disabled="tooltipDisabled">
-        <div v-if="showTooltip" class="tooltip">
-          Tooltip content
-        </div>
+        <div v-if="showTooltip" class="tooltip">Tooltip content</div>
       </Teleport>
       <button @click="toggleTooltip">Toggle Tooltip</button>
       <label>
@@ -169,7 +168,7 @@ export default defineComponent({
       <h3>KeepAlive</h3>
       <div class="tabs">
         <button
-          v-for="tab in (['tab1', 'tab2', 'tab3'] as const)"
+          v-for="tab in ['tab1', 'tab2', 'tab3'] as const"
           :key="tab"
           :class="{ active: currentTab === tab }"
           @click="setTab(tab)"
@@ -190,12 +189,7 @@ export default defineComponent({
       <h3>Suspense</h3>
       <button @click="reloadAsync">Reload</button>
       <button @click="showAsync = !showAsync">Toggle</button>
-      <Suspense
-        :key="suspenseKey"
-        @pending="onPending"
-        @resolve="onResolve"
-        @fallback="onFallback"
-      >
+      <Suspense :key="suspenseKey" @pending="onPending" @resolve="onResolve" @fallback="onFallback">
         <template #default>
           <AsyncComponent v-if="showAsync" />
         </template>
@@ -233,9 +227,7 @@ export default defineComponent({
         @leave="onLeave"
         @after-leave="onAfterLeave"
       >
-        <div v-if="transitionShow" class="box">
-          Transitioning content
-        </div>
+        <div v-if="transitionShow" class="box">Transitioning content</div>
       </Transition>
     </section>
 
@@ -247,11 +239,7 @@ export default defineComponent({
         <button @click="shuffleItems">Shuffle</button>
       </div>
       <TransitionGroup name="list" tag="ul" class="list">
-        <li
-          v-for="item in items"
-          :key="item.id"
-          class="list-item"
-        >
+        <li v-for="item in items" :key="item.id" class="list-item">
           {{ item.text }}
           <button @click="removeItem(item.id)">×</button>
         </li>

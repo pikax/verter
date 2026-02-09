@@ -121,6 +121,7 @@ But `param.constraint` is `&TSType` from the generic's parse — its AST is in t
 ### Step 1.3: Update call sites of `parse_script()`
 
 **File**: [codegen.rs:417](crates/verter_core/src/builder/codegen.rs#L417) (pre_scan):
+
 ```rust
 let parsed = parse_script(
     &ret.program,
@@ -133,6 +134,7 @@ let parsed = parse_script(
 ```
 
 **File**: [analysis.rs:508](crates/verter_core/src/syntax/plugins/analysis/analysis.rs#L508) (Analysis plugin):
+
 ```rust
 let generic_type_params = e.generic.as_ref().and_then(|g| g.type_parameters());
 let result = parse_script(
@@ -153,14 +155,14 @@ let result = parse_script(
 
 Add `type_ctx: Option<&TypeResolutionContext<'a>>` parameter to:
 
-| Function | Line | Passes to |
-|----------|------|-----------|
-| `process_setup_statements` | 82 | `process_setup_statement` |
-| `process_setup_statement` | 95 | `process_variable_declaration`, `process_expression_statement` |
-| `process_variable_declaration` | ~330 | `try_parse_macro_from_expression` |
-| `process_expression_statement` | ~395 | `try_parse_macro_from_expression` |
-| `try_parse_macro_from_expression` | 519 | `parse_macro_call` |
-| `parse_macro_call` | 531 | `extract_type_params` |
+| Function                          | Line | Passes to                                                      |
+| --------------------------------- | ---- | -------------------------------------------------------------- |
+| `process_setup_statements`        | 82   | `process_setup_statement`                                      |
+| `process_setup_statement`         | 95   | `process_variable_declaration`, `process_expression_statement` |
+| `process_variable_declaration`    | ~330 | `try_parse_macro_from_expression`                              |
+| `process_expression_statement`    | ~395 | `try_parse_macro_from_expression`                              |
+| `try_parse_macro_from_expression` | 519  | `parse_macro_call`                                             |
+| `parse_macro_call`                | 531  | `extract_type_params`                                          |
 
 Recursive calls at lines 139, 207, 212, 218 also pass `type_ctx` through.
 
@@ -274,6 +276,7 @@ lazy_static! {
 ```
 
 **`ingest()`** method:
+
 1. Create temporary `Allocator`
 2. Parse content as TS with `oxc_parser::Parser`
 3. Call `build_type_context(&program, content.as_bytes(), 0)` — base_offset=0 since standalone file
@@ -307,6 +310,7 @@ pub struct TypeResolutionContext<'a> {
 ```
 
 Extend `build_type_context` to collect import declarations:
+
 ```rust
 Statement::ImportDeclaration(import) => {
     if let Some(specifiers) = &import.specifiers {
@@ -376,13 +380,13 @@ if let Some(import) = ctx.imported_types.iter().find(|i|
 
 Add `need_files: Vec<NeedFileRequest>` and `deps: Vec<String>` fields to:
 
-| Struct | File |
-|--------|------|
-| `ScriptParseResult` | `utils/oxc/vue/script/types.rs` |
-| `AnalysisScriptInfo` (pass through) | `syntax/types.rs` |
-| `TemplateCodegenState` | `codegen/vue/template/types.rs` |
-| `ViteCodegenResult` (core) | `builder/codegen.rs` |
-| `ViteCodegenResult` (NAPI) | `verter_napi/src/lib.rs` |
+| Struct                              | File                            |
+| ----------------------------------- | ------------------------------- |
+| `ScriptParseResult`                 | `utils/oxc/vue/script/types.rs` |
+| `AnalysisScriptInfo` (pass through) | `syntax/types.rs`               |
+| `TemplateCodegenState`              | `codegen/vue/template/types.rs` |
+| `ViteCodegenResult` (core)          | `builder/codegen.rs`            |
+| `ViteCodegenResult` (NAPI)          | `verter_napi/src/lib.rs`        |
 
 In `generate_for_vite()`: after pipeline runs, read `need_files` and `deps` from the plugin state and include in result.
 
@@ -480,6 +484,7 @@ Replace direct `compileForVite` call with `compileWithHost`. Feature-detect: `ty
 **File**: [packages/vite-plugin/src/index.ts](packages/vite-plugin/src/index.ts) — `handleHotUpdate`
 
 When `.ts`/`.d.ts` changes:
+
 1. `compiler.invalidateFile(canonical)`
 2. Find parent `.vue` files via reverse dep map
 3. `deleteDescriptor(vueFile)` for each parent
@@ -496,6 +501,7 @@ When `.ts`/`.d.ts` changes:
 ### Tests
 
 **Rust E2E** (codegen.rs):
+
 1. Local interface → runtime props
 2. Local type alias → runtime props
 3. Intersection types
@@ -506,10 +512,12 @@ When `.ts`/`.d.ts` changes:
 8. Cross-file: empty cache → need_files returned
 
 **Rust unit** (resolve_type.rs, cache.rs):
+
 - TypeResolutionContext with imports
 - Cache ingest/lookup/LRU/invalidation
 
 **JS** (host.spec.ts, utils.spec.ts):
+
 - Host loop mock: NeedFiles → Ok
 - Iteration cap
 - canonicalizePath
@@ -520,33 +528,36 @@ When `.ts`/`.d.ts` changes:
 ## Files Modified
 
 ### Rust
-| File | Change |
-|------|--------|
+
+| File                                                   | Change                                                                                                                                                       |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `verter_core/src/utils/oxc/vue/script/resolve_type.rs` | `get_type_reference_name` → `&str`; add `ImportedType`, `NeedFileRequest`; cross-file lookup in TSTypeReference; add `imported_types`/`from_file` to context |
-| `verter_core/src/utils/oxc/vue/script/mod.rs` | Build context in `parse_script()`; add `sfc_source`, `generic_type_params` params; pass context down |
-| `verter_core/src/utils/oxc/vue/script/setup.rs` | Thread `type_ctx` through 6+ functions |
-| `verter_core/src/utils/oxc/vue/script/types.rs` | Add `need_files` to `ScriptParseResult` |
-| `verter_core/src/type_host/mod.rs` | **NEW**: `CachedTypeScope`, `CachedImport` |
-| `verter_core/src/type_host/cache.rs` | **NEW**: `TypeFileCache`, LRU, `lazy_static` |
-| `verter_core/src/lib.rs` | Add `pub mod type_host` |
-| `verter_core/src/builder/codegen.rs` | Pass SFC bytes + `None` generic to pre_scan `parse_script`; extend `ViteCodegenResult` |
-| `verter_core/src/syntax/plugins/analysis/analysis.rs` | Pass SFC bytes + generic params to `parse_script` |
-| `verter_core/src/codegen/vue/plugin.rs` | Collect `need_files` from AnalysedScript |
-| `verter_core/src/codegen/vue/template/types.rs` | Add `need_files`/`deps` to `TemplateCodegenState` |
-| `verter_napi/src/lib.rs` | Add `ingest`, `register_resolution`, `invalidate_file`, `clear_file_cache`; extend result |
+| `verter_core/src/utils/oxc/vue/script/mod.rs`          | Build context in `parse_script()`; add `sfc_source`, `generic_type_params` params; pass context down                                                         |
+| `verter_core/src/utils/oxc/vue/script/setup.rs`        | Thread `type_ctx` through 6+ functions                                                                                                                       |
+| `verter_core/src/utils/oxc/vue/script/types.rs`        | Add `need_files` to `ScriptParseResult`                                                                                                                      |
+| `verter_core/src/type_host/mod.rs`                     | **NEW**: `CachedTypeScope`, `CachedImport`                                                                                                                   |
+| `verter_core/src/type_host/cache.rs`                   | **NEW**: `TypeFileCache`, LRU, `lazy_static`                                                                                                                 |
+| `verter_core/src/lib.rs`                               | Add `pub mod type_host`                                                                                                                                      |
+| `verter_core/src/builder/codegen.rs`                   | Pass SFC bytes + `None` generic to pre_scan `parse_script`; extend `ViteCodegenResult`                                                                       |
+| `verter_core/src/syntax/plugins/analysis/analysis.rs`  | Pass SFC bytes + generic params to `parse_script`                                                                                                            |
+| `verter_core/src/codegen/vue/plugin.rs`                | Collect `need_files` from AnalysedScript                                                                                                                     |
+| `verter_core/src/codegen/vue/template/types.rs`        | Add `need_files`/`deps` to `TemplateCodegenState`                                                                                                            |
+| `verter_napi/src/lib.rs`                               | Add `ingest`, `register_resolution`, `invalidate_file`, `clear_file_cache`; extend result                                                                    |
 
 ### JS
-| File | Change |
-|------|--------|
-| `packages/native/index.ts` | Type declarations for new functions + extended result |
-| `packages/native/index.js` | Re-export 4 new functions |
+
+| File                                | Change                                                 |
+| ----------------------------------- | ------------------------------------------------------ |
+| `packages/native/index.ts`          | Type declarations for new functions + extended result  |
+| `packages/native/index.js`          | Re-export 4 new functions                              |
 | `packages/vite-plugin/src/utils.ts` | `canonicalizePath`, `computeFileVersion`, reverse deps |
-| `packages/vite-plugin/src/host.ts` | **NEW**: iterative compilation loop |
-| `packages/vite-plugin/src/index.ts` | Host loop in transform, enhanced HMR |
+| `packages/vite-plugin/src/host.ts`  | **NEW**: iterative compilation loop                    |
+| `packages/vite-plugin/src/index.ts` | Host loop in transform, enhanced HMR                   |
 
 ### Docs
-| File | Change |
-|------|--------|
+
+| File                             | Change  |
+| -------------------------------- | ------- |
 | `docs/compiler-host-protocol.md` | **NEW** |
 
 ---

@@ -50,9 +50,7 @@ function sortObjectKeys(obj, seen = new WeakSet()) {
 }
 
 // Get all .vue files from source directory
-const vueFiles = fs
-  .readdirSync(SOURCE_DIR)
-  .filter((file) => file.endsWith(".vue"));
+const vueFiles = fs.readdirSync(SOURCE_DIR).filter((file) => file.endsWith(".vue"));
 
 if (vueFiles.length === 0) {
   console.log("No .vue files found in source/ directory");

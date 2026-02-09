@@ -75,10 +75,10 @@ Custom LSP notifications for Verter-specific features:
 import { NotificationType } from "@verter/language-shared";
 ```
 
-| Enum Member | Method String | Payload |
-|-------------|--------------|---------|
+| Enum Member             | Method String             | Payload                                                           |
+| ----------------------- | ------------------------- | ----------------------------------------------------------------- |
 | `OnDidChangeTsOrJsFile` | `$/onDidChangeTsOrJsFile` | `{ uri: string; changes: Array<{ text: string; range: Range }> }` |
-| `OnFileChanged` | `$/onFileChanged` | `{ uri: string; type: "create" \| "update" \| "delete" }` |
+| `OnFileChanged`         | `$/onFileChanged`         | `{ uri: string; type: "create" \| "update" \| "delete" }`         |
 
 ### `RequestType`
 
@@ -88,10 +88,10 @@ Custom LSP request/response pairs:
 import { RequestType } from "@verter/language-shared";
 ```
 
-| Enum Member | Method String | Params | Response |
-|-------------|--------------|--------|----------|
-| `GetCompiledCode` | `$/getCompiledCode` | `string` (document URI) | `{ js, css, wasm }` each with `{ code: string; map: any }` |
-| `GetStatistics` | `$/verter/getStatistics` | `StatisticsRequestParams \| undefined` | `StatisticsSnapshot` |
+| Enum Member       | Method String            | Params                                 | Response                                                   |
+| ----------------- | ------------------------ | -------------------------------------- | ---------------------------------------------------------- |
+| `GetCompiledCode` | `$/getCompiledCode`      | `string` (document URI)                | `{ js, css, wasm }` each with `{ code: string; map: any }` |
+| `GetStatistics`   | `$/verter/getStatistics` | `StatisticsRequestParams \| undefined` | `StatisticsSnapshot`                                       |
 
 ### `VirtualFiles`
 
@@ -101,7 +101,7 @@ Utilities for working with Verter's virtual sub-document URIs:
 import { VirtualFiles } from "@verter/language-shared";
 
 // Check if a URI points to a virtual sub-document
-VirtualFiles.isVirtual(uri);          // boolean
+VirtualFiles.isVirtual(uri); // boolean
 
 // Get the parent .vue file URI from a virtual URI
 VirtualFiles.getParentUri(virtualUri); // string
@@ -124,13 +124,13 @@ import type {
 } from "@verter/language-shared";
 ```
 
-| Type | Description |
-|------|-------------|
-| `StatisticsEventType` | Union of known event kinds: `"diagnostics"`, `"diagnostics:document"`, `"diagnostics:style"`, `"read-file"`, `"parse"`, `"process"` |
-| `StatisticsEvent` | A single recorded event with `id`, `type`, `uri`, `durationMs`, `startedAt`, and optional `meta` |
-| `StatisticsSummary` | Aggregated stats: `count`, `totalMs`, `averageMs`, `minMs`, `maxMs` |
-| `StatisticsSnapshot` | Full snapshot with `session` (events, byType, byFile) and optional `global` (byType, byFile, path, updatedAt) |
-| `StatisticsRequestParams` | Request options: `includeEvents?`, `scope?: "session" \| "global" \| "all"` |
+| Type                      | Description                                                                                                                         |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `StatisticsEventType`     | Union of known event kinds: `"diagnostics"`, `"diagnostics:document"`, `"diagnostics:style"`, `"read-file"`, `"parse"`, `"process"` |
+| `StatisticsEvent`         | A single recorded event with `id`, `type`, `uri`, `durationMs`, `startedAt`, and optional `meta`                                    |
+| `StatisticsSummary`       | Aggregated stats: `count`, `totalMs`, `averageMs`, `minMs`, `maxMs`                                                                 |
+| `StatisticsSnapshot`      | Full snapshot with `session` (events, byType, byFile) and optional `global` (byType, byFile, path, updatedAt)                       |
+| `StatisticsRequestParams` | Request options: `includeEvents?`, `scope?: "session" \| "global" \| "all"`                                                         |
 
 ## Usage
 
@@ -147,8 +147,8 @@ const typed = patchClient(connection);
 typed.onRequest(RequestType.GetCompiledCode, async (uri) => {
   const compiled = await compileVueFile(uri);
   return {
-    js:   { code: compiled.js,   map: compiled.jsMap },
-    css:  { code: compiled.css,  map: compiled.cssMap },
+    js: { code: compiled.js, map: compiled.jsMap },
+    css: { code: compiled.css, map: compiled.cssMap },
     wasm: { code: compiled.wasm, map: compiled.wasmMap },
   };
 });
@@ -207,10 +207,10 @@ The package compiles with `tsc -b` to CommonJS (`dist/`).
 
 **Development only**:
 
-| Package | Purpose |
-|---------|---------|
-| `typescript` | Compilation |
-| `vite` | Build tooling |
+| Package           | Purpose                     |
+| ----------------- | --------------------------- |
+| `typescript`      | Compilation                 |
+| `vite`            | Build tooling               |
 | `vite-plugin-dts` | Declaration file generation |
 
 ## License

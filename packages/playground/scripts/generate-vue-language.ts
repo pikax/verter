@@ -7,116 +7,120 @@
  * from extensions/vscode and generates a Monarch tokenizer for Monaco editor.
  */
 
-import { readFileSync, writeFileSync } from 'fs'
-import { resolve, dirname } from 'path'
-import { fileURLToPath } from 'url'
+import { readFileSync, writeFileSync } from "fs";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const ROOT = resolve(__dirname, '../../..')
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(__dirname, "../../..");
 
 // Paths to source files
-const VUE_TM_GRAMMAR = resolve(ROOT, 'extensions/vscode/syntaxes/vue.tmLanguage.json')
-const VUE_LANG_CONFIG = resolve(ROOT, 'extensions/vscode/languages/vue-language-configuration.json')
-const OUTPUT_FILE = resolve(__dirname, '../src/editor/vueLanguage.ts')
+const VUE_TM_GRAMMAR = resolve(ROOT, "extensions/vscode/syntaxes/vue.tmLanguage.json");
+const VUE_LANG_CONFIG = resolve(
+  ROOT,
+  "extensions/vscode/languages/vue-language-configuration.json",
+);
+const OUTPUT_FILE = resolve(__dirname, "../src/editor/vueLanguage.ts");
 
 interface TmGrammar {
-  name: string
-  scopeName: string
-  patterns: TmPattern[]
-  repository?: Record<string, TmPattern>
+  name: string;
+  scopeName: string;
+  patterns: TmPattern[];
+  repository?: Record<string, TmPattern>;
 }
 
 interface TmPattern {
-  name?: string
-  match?: string
-  begin?: string
-  end?: string
-  patterns?: TmPattern[]
-  captures?: Record<string, { name: string }>
-  beginCaptures?: Record<string, { name: string }>
-  endCaptures?: Record<string, { name: string }>
-  include?: string
-  contentName?: string
+  name?: string;
+  match?: string;
+  begin?: string;
+  end?: string;
+  patterns?: TmPattern[];
+  captures?: Record<string, { name: string }>;
+  beginCaptures?: Record<string, { name: string }>;
+  endCaptures?: Record<string, { name: string }>;
+  include?: string;
+  contentName?: string;
 }
 
 interface LangConfig {
   comments?: {
-    blockComment?: [string, string]
-    lineComment?: string
-  }
-  brackets?: [string, string][]
-  autoClosingPairs?: Array<{ open: string; close: string; notIn?: string[] }>
-  surroundingPairs?: Array<{ open: string; close: string }>
+    blockComment?: [string, string];
+    lineComment?: string;
+  };
+  brackets?: [string, string][];
+  autoClosingPairs?: Array<{ open: string; close: string; notIn?: string[] }>;
+  surroundingPairs?: Array<{ open: string; close: string }>;
   folding?: {
     markers?: {
-      start?: string
-      end?: string
-    }
-  }
+      start?: string;
+      end?: string;
+    };
+  };
 }
 
 // Map TextMate scope names to Monaco token types
 function scopeToToken(scope: string): string {
-  if (!scope) return ''
+  if (!scope) return "";
 
   // Comments
-  if (scope.includes('comment')) return 'comment'
+  if (scope.includes("comment")) return "comment";
 
   // Strings
-  if (scope.includes('string')) return 'string'
+  if (scope.includes("string")) return "string";
 
   // Keywords
-  if (scope.includes('keyword') || scope.includes('storage')) return 'keyword'
+  if (scope.includes("keyword") || scope.includes("storage")) return "keyword";
 
   // Types
-  if (scope.includes('entity.name.type') || scope.includes('support.type')) return 'type'
+  if (scope.includes("entity.name.type") || scope.includes("support.type")) return "type";
 
   // Functions
-  if (scope.includes('entity.name.function') || scope.includes('support.function')) return 'identifier'
+  if (scope.includes("entity.name.function") || scope.includes("support.function"))
+    return "identifier";
 
   // Tags
-  if (scope.includes('entity.name.tag')) return 'tag'
+  if (scope.includes("entity.name.tag")) return "tag";
 
   // Attributes
-  if (scope.includes('entity.other.attribute-name')) return 'attribute.name'
+  if (scope.includes("entity.other.attribute-name")) return "attribute.name";
 
   // Punctuation
-  if (scope.includes('punctuation.definition.tag')) return 'delimiter.html'
-  if (scope.includes('punctuation')) return 'delimiter'
+  if (scope.includes("punctuation.definition.tag")) return "delimiter.html";
+  if (scope.includes("punctuation")) return "delimiter";
 
   // Numbers
-  if (scope.includes('constant.numeric')) return 'number'
+  if (scope.includes("constant.numeric")) return "number";
 
   // Constants
-  if (scope.includes('constant')) return 'constant'
+  if (scope.includes("constant")) return "constant";
 
   // Variables
-  if (scope.includes('variable')) return 'variable'
+  if (scope.includes("variable")) return "variable";
 
   // Operators
-  if (scope.includes('keyword.operator')) return 'operator'
+  if (scope.includes("keyword.operator")) return "operator";
 
-  return ''
+  return "";
 }
 
 function generateMonarchLanguage(): string {
   // Read source files
-  let tmGrammar: TmGrammar
-  let langConfig: LangConfig
+  let tmGrammar: TmGrammar;
+  let langConfig: LangConfig;
 
   try {
-    tmGrammar = JSON.parse(readFileSync(VUE_TM_GRAMMAR, 'utf-8'))
-    langConfig = JSON.parse(readFileSync(VUE_LANG_CONFIG, 'utf-8'))
+    tmGrammar = JSON.parse(readFileSync(VUE_TM_GRAMMAR, "utf-8"));
+    langConfig = JSON.parse(readFileSync(VUE_LANG_CONFIG, "utf-8"));
   } catch (e) {
-    console.error('Error reading source files:', e)
-    process.exit(1)
-    throw e // Never reached, but helps TypeScript understand control flow
+    console.error("Error reading source files:", e);
+    process.exit(1);
+    throw e; // Never reached, but helps TypeScript understand control flow
   }
 
-  console.log(`Read grammar: ${tmGrammar.name} (${tmGrammar.scopeName})`)
-  console.log(`Patterns: ${tmGrammar.patterns.length}`)
+  console.log(`Read grammar: ${tmGrammar.name} (${tmGrammar.scopeName})`);
+  console.log(`Patterns: ${tmGrammar.patterns.length}`);
   if (tmGrammar.repository) {
-    console.log(`Repository entries: ${Object.keys(tmGrammar.repository).length}`)
+    console.log(`Repository entries: ${Object.keys(tmGrammar.repository).length}`);
   }
 
   // Generate the output
@@ -472,25 +476,32 @@ const vueLanguage: monaco.languages.IMonarchLanguage = {
 
 // Language configuration from vue-language-configuration.json
 const vueLanguageConfig: monaco.languages.LanguageConfiguration = {
-  comments: ${JSON.stringify(langConfig.comments || { blockComment: ['<!--', '-->'] })},
-  brackets: ${JSON.stringify(langConfig.brackets || [
-    ['<!--', '-->'],
-    ['{{', '}}'],
-    ['(', ')'],
-    ['{', '}'],
-    ['[', ']'],
-  ])},
-  autoClosingPairs: ${JSON.stringify(langConfig.autoClosingPairs || [
-    { open: '{{', close: '}}' },
-    { open: '{', close: '}' },
-    { open: '[', close: ']' },
-    { open: '(', close: ')' },
-    { open: "'", close: "'" },
-    { open: '"', close: '"' },
-    { open: '<!--', close: '-->' },
-  ])},
+  comments: ${JSON.stringify(langConfig.comments || { blockComment: ["<!--", "-->"] })},
+  brackets: ${JSON.stringify(
+    langConfig.brackets || [
+      ["<!--", "-->"],
+      ["{{", "}}"],
+      ["(", ")"],
+      ["{", "}"],
+      ["[", "]"],
+    ],
+  )},
+  autoClosingPairs: ${JSON.stringify(
+    langConfig.autoClosingPairs || [
+      { open: "{{", close: "}}" },
+      { open: "{", close: "}" },
+      { open: "[", close: "]" },
+      { open: "(", close: ")" },
+      { open: "'", close: "'" },
+      { open: '"', close: '"' },
+      { open: "<!--", close: "-->" },
+    ],
+  )},
   surroundingPairs: ${JSON.stringify(
-    (langConfig.surroundingPairs || []).map(({ open, close }: { open: string; close: string }) => ({ open, close }))
+    (langConfig.surroundingPairs || []).map(({ open, close }: { open: string; close: string }) => ({
+      open,
+      close,
+    })),
   )},
   folding: {
     markers: {
@@ -514,12 +525,12 @@ export function registerVueLanguage() {
   // Set the language configuration
   monaco.languages.setLanguageConfiguration('vue', vueLanguageConfig)
 }
-`
+`;
 
-  return output
+  return output;
 }
 
 // Run generation
-const output = generateMonarchLanguage()
-writeFileSync(OUTPUT_FILE, output)
-console.log(`\nGenerated: ${OUTPUT_FILE}`)
+const output = generateMonarchLanguage();
+writeFileSync(OUTPUT_FILE, output);
+console.log(`\nGenerated: ${OUTPUT_FILE}`);

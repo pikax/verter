@@ -19,7 +19,7 @@ export const FullContextPlugin = definePlugin({
     //   items: [importItem],
     // });
 
-    ctx.items.push(createHelperImport(["Prettify", 'shallowUnwrapRef'], ctx.prefix));
+    ctx.items.push(createHelperImport(["Prettify", "shallowUnwrapRef"], ctx.prefix));
   },
   post(s, ctx) {
     const isTS = ctx.block.lang === "ts";
@@ -33,7 +33,7 @@ export const FullContextPlugin = definePlugin({
     const prettify = ctx.prefix("Prettify");
 
     const bindings = ctx.items.filter(
-      (x) => x.type === ProcessItemType.Binding && x.item.node
+      (x) => x.type === ProcessItemType.Binding && x.item.node,
     ) as ProcessItemBinding[];
 
     const names = new Set<string>();
@@ -73,7 +73,7 @@ export const FullContextPlugin = definePlugin({
         from: `${fullContext}FN`,
         isFunction: true,
       },
-      ctx
+      ctx,
     );
 
     const str = `;${isAsync ? "async " : ""}function ${fullContext}FN${
@@ -86,7 +86,7 @@ export const FullContextPlugin = definePlugin({
               ? // ? `: {} as ${prettify}<${unwrapRef}<typeof ${x}>>`
                 `: {} as typeof ${x}`
               : `: ${x}"`
-          }`
+          }`,
       )
       .join(",")}})};${typeStr}`;
 

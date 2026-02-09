@@ -39,10 +39,7 @@ declare module "vue/jsx-runtime" {
       "onVue:unmounted"?: (vnode: VNode<T>) => void;
       "onVue:error-captured"?: (vnode: VNode<T>) => void;
       "onVue:render-tracked"?: (vnode: VNode<T>, old: VNode<T> | null) => void;
-      "onVue:render-triggered"?: (
-        vnode: VNode<T>,
-        old: VNode<T> | null
-      ) => void;
+      "onVue:render-triggered"?: (vnode: VNode<T>, old: VNode<T> | null) => void;
       "onVue:activated"?: (vnode: VNode<T>, old: VNode<T> | null) => void;
       "onVue:deactivated"?: (vnode: VNode<T>, old: VNode<T> | null) => void;
       "onVue:server-prefetch"?: (vnode: VNode<T>, old: VNode<T> | null) => void;
@@ -77,10 +74,7 @@ declare global {
       "onVue:unmounted"?: (vnode: VNode<T>) => void;
       "onVue:error-captured"?: (vnode: VNode<T>) => void;
       "onVue:render-tracked"?: (vnode: VNode<T>, old: VNode<T> | null) => void;
-      "onVue:render-triggered"?: (
-        vnode: VNode<T>,
-        old: VNode<T> | null
-      ) => void;
+      "onVue:render-triggered"?: (vnode: VNode<T>, old: VNode<T> | null) => void;
       "onVue:activated"?: (vnode: VNode<T>, old: VNode<T> | null) => void;
       "onVue:deactivated"?: (vnode: VNode<T>, old: VNode<T> | null) => void;
       "onVue:server-prefetch"?: (vnode: VNode<T>, old: VNode<T> | null) => void;

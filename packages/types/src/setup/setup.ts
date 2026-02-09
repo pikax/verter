@@ -10,13 +10,7 @@ export type Prettify<T> = T extends { (...args: any[]): any }
 /**
  * Valid macros from vue setup
  */
-export type ReturnMacros =
-  | "props"
-  | "emits"
-  | "slots"
-  | "model"
-  | "withDefaults"
-  | "templateRef";
+export type ReturnMacros = "props" | "emits" | "slots" | "model" | "withDefaults" | "templateRef";
 
 export type NonReturnMacros = "expose" | "options";
 /**
@@ -49,7 +43,7 @@ export declare function createMacroReturn<
     } & {
       templateRef: Record<string, any>;
     } & Record<NonReturnMacros, MacroNonReturn<any>>
-  >
+  >,
 >(o: T): CreateMacroReturn<T>;
 
 export type CreateMacroReturn<T> = { ____VERTER___MACRO_RETURN_KEY____: T };
@@ -89,21 +83,13 @@ export type ExtractMacroReturn<T> = T extends {
  * type Emits = ExtractMacro<Macros, "emits", () => void>; // Returns () => void (fallback)
  * ```
  */
-export type ExtractMacro<
-  T,
-  R extends ReturnMacros | NonReturnMacros,
-  F = never
-> = T extends {
+export type ExtractMacro<T, R extends ReturnMacros | NonReturnMacros, F = never> = T extends {
   [K in R]: infer M;
 }
   ? M
   : F;
 
-export type ExtractNonReturnMacro<
-  T,
-  R extends NonReturnMacros,
-  F = never
-> = T extends {
+export type ExtractNonReturnMacro<T, R extends NonReturnMacros, F = never> = T extends {
   [K in R]: infer M;
 }
   ? M
@@ -148,27 +134,27 @@ export type ExtractPropsFromMacro<T> = T extends {
     ? PropsWithDefaults<PT, keyof DT>
     : PT
   : T extends {
-      props: {
-        object: infer PO;
-      };
-    }
-  ? import("vue").ExtractPropTypes<PO> extends infer PE
-    ? keyof import("vue").ExtractDefaultPropTypes<PO> extends infer PODK extends keyof PE
-      ? PropsWithDefaults<PE, PODK>
-      : PE
-    : PO
-  : T extends {
-      props: {
-        value: infer PT;
-      };
-      defaults: {
-        value: infer DT;
-      };
-    }
-  ? keyof DT extends keyof PT
-    ? PropsWithDefaults<PT, keyof DT>
-    : PT
-  : {};
+        props: {
+          object: infer PO;
+        };
+      }
+    ? import("vue").ExtractPropTypes<PO> extends infer PE
+      ? keyof import("vue").ExtractDefaultPropTypes<PO> extends infer PODK extends keyof PE
+        ? PropsWithDefaults<PE, PODK>
+        : PE
+      : PO
+    : T extends {
+          props: {
+            value: infer PT;
+          };
+          defaults: {
+            value: infer DT;
+          };
+        }
+      ? keyof DT extends keyof PT
+        ? PropsWithDefaults<PT, keyof DT>
+        : PT
+      : {};
 
 /**
  * Extracts the emits macro from macro metadata.
@@ -209,8 +195,8 @@ export type SlotsToSlotType<T> = T extends {
 }
   ? import("vue").SlotsType<ST>
   : T extends { value: infer SV extends Record<string, any> }
-  ? import("vue").SlotsType<SV>
-  : {};
+    ? import("vue").SlotsType<SV>
+    : {};
 
 /**
  * Extracts the options macro from macro metadata.
@@ -233,10 +219,10 @@ export type MacroOptionsToOptions<T> = T extends {
 }
   ? TT
   : T extends { object: infer TV extends Record<string, any> }
-  ? TV
-  : T extends { value: infer TV extends Record<string, any> }
-  ? TV
-  : {};
+    ? TV
+    : T extends { value: infer TV extends Record<string, any> }
+      ? TV
+      : {};
 
 /**
  * Extracts the model macro from macro metadata.
@@ -266,8 +252,8 @@ export type MacroToModelType<T> = T extends {
 }
   ? TT
   : T extends { value: infer TV extends Record<string, any> }
-  ? TV
-  : {};
+    ? TV
+    : {};
 export type MacroToModelRecord<T> = {
   [K in keyof T]: MacroToModelType<T[K]>;
 };
@@ -293,8 +279,8 @@ export type ExposeToVueExposeKey<T> = T extends {
 }
   ? keyof TT
   : T extends { value: infer TV extends Record<string, any> }
-  ? keyof TV
-  : keyof {};
+    ? keyof TV
+    : keyof {};
 
 /**
  * Normalizes a macro return type into a structured object with all macro types.

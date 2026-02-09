@@ -43,11 +43,11 @@ let initialized = false;
 let initPromise: Promise<void> | null = null;
 
 function decodeUtf8(input: Uint8Array): string {
-  if (typeof TextDecoder === 'undefined') {
-    throw new Error('TextDecoder is required to decode Uint8Array input');
+  if (typeof TextDecoder === "undefined") {
+    throw new Error("TextDecoder is required to decode Uint8Array input");
   }
 
-  return new TextDecoder('utf-8', { fatal: true }).decode(input);
+  return new TextDecoder("utf-8", { fatal: true }).decode(input);
 }
 
 /**
@@ -60,7 +60,7 @@ export async function initialize(): Promise<void> {
 
   initPromise = (async () => {
     // Dynamic import to avoid bundler issues
-    const wasm = await import('../wasm/verter_wasm.js');
+    const wasm = await import("../wasm/verter_wasm.js");
     await (wasm.default as WasmInitFn)();
     wasmCompile = wasm.compile as WasmCompileFn;
     wasmCompileBytes = (wasm.compileBytes as WasmCompileBytesFn) ?? null;
@@ -85,17 +85,14 @@ export function isInitialized(): boolean {
  * @returns The compiled result with code, source map, and code with inline source map
  * @throws If the WASM module has not been initialized
  */
-export async function compile(
-  input: WasmInput,
-  options?: CodegenOptions
-): Promise<CodegenResult> {
+export async function compile(input: WasmInput, options?: CodegenOptions): Promise<CodegenResult> {
   await initialize();
 
   if (!wasmCompile) {
-    throw new Error('WASM module not initialized');
+    throw new Error("WASM module not initialized");
   }
 
-  if (typeof input === 'string') {
+  if (typeof input === "string") {
     return wasmCompile(input, options);
   }
 
@@ -114,15 +111,12 @@ export async function compile(
  * @returns The compiled result with code, source map, and code with inline source map
  * @throws If the WASM module has not been initialized
  */
-export function compileSync(
-  input: WasmInput,
-  options?: CodegenOptions
-): CodegenResult {
+export function compileSync(input: WasmInput, options?: CodegenOptions): CodegenResult {
   if (!initialized || !wasmCompile) {
-    throw new Error('WASM module not initialized. Call initialize() first.');
+    throw new Error("WASM module not initialized. Call initialize() first.");
   }
 
-  if (typeof input === 'string') {
+  if (typeof input === "string") {
     return wasmCompile(input, options);
   }
 

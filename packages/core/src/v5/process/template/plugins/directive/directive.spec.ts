@@ -18,9 +18,7 @@ function parse(content: string, options: Partial<TemplateContext> = {}) {
   const source = `<template>${content}</template>`;
   const parsed = parser(source);
   const s = new MagicString(source);
-  const templateBlock = parsed.blocks.find(
-    (x) => x.type === "template"
-  ) as ParsedBlockTemplate;
+  const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
   return processTemplate(
     templateBlock.result.items,
@@ -32,7 +30,7 @@ function parse(content: string, options: Partial<TemplateContext> = {}) {
       blocks: parsed.blocks,
       block: templateBlock,
       blockNameResolver: (name) => name,
-    }
+    },
   );
 }
 
@@ -40,8 +38,7 @@ describe("directive runner", () => {
   const getWarnings = (ctx: TemplateContext) =>
     ctx.items.filter((item) => item.type === ProcessItemType.Warning);
 
-  const warningMessages = (ctx: TemplateContext) =>
-    getWarnings(ctx).map((w) => w.message);
+  const warningMessages = (ctx: TemplateContext) => getWarnings(ctx).map((w) => w.message);
 
   describe("custom directives", () => {
     it("handles partial v- ", () => {
@@ -49,8 +46,8 @@ describe("directive runner", () => {
       const normalized = normalize(result);
       expect(normalized).toContain(
         normalize(
-          'v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["v"])(___VERTER___directiveElement,true,undefined,{});}}'
-        )
+          'v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["v"])(___VERTER___directiveElement,true,undefined,{});}}',
+        ),
       );
     });
 
@@ -59,8 +56,8 @@ describe("directive runner", () => {
       const normalized = normalize(result);
       expect(normalized).toContain(
         normalize(
-          'v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFoo"])(___VERTER___directiveElement,true,undefined,{"":true});}}'
-        )
+          'v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFoo"])(___VERTER___directiveElement,true,undefined,{"":true});}}',
+        ),
       );
     });
 
@@ -70,8 +67,8 @@ describe("directive runner", () => {
 
       expect(normalized).toContain(
         normalize(
-          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFocus"])(___VERTER___directiveElement,true,undefined,{});`
-        )
+          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFocus"])(___VERTER___directiveElement,true,undefined,{});`,
+        ),
       );
     });
 
@@ -81,8 +78,8 @@ describe("directive runner", () => {
 
       expect(normalized).toContain(
         normalize(
-          `v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vTest"])(___VERTER___directiveElement,___VERTER___ctx.baz,"foo",{"bar":true});}}`
-        )
+          `v-directive={(___VERTER___slotInstance)=>{const ___VERTER___directiveElement={} as ___VERTER___ExtractLeafElement<typeof ___VERTER___slotInstance>;___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vTest"])(___VERTER___directiveElement,___VERTER___ctx.baz,"foo",{"bar":true});}}`,
+        ),
       );
     });
 
@@ -92,8 +89,8 @@ describe("directive runner", () => {
 
       expect(normalized).toContain(
         normalize(
-          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFocus"])(___VERTER___directiveElement,___VERTER___ctx.val,undefined,{});`
-        )
+          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFocus"])(___VERTER___directiveElement,___VERTER___ctx.val,undefined,{});`,
+        ),
       );
     });
 
@@ -103,13 +100,13 @@ describe("directive runner", () => {
 
       expect(normalized).toContain(
         normalize(
-          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFoo"])(___VERTER___directiveElement,___VERTER___ctx.a,undefined,{});`
-        )
+          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFoo"])(___VERTER___directiveElement,___VERTER___ctx.a,undefined,{});`,
+        ),
       );
       expect(normalized).toContain(
         normalize(
-          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vBar"])(___VERTER___directiveElement,___VERTER___ctx.b,"arg",{});`
-        )
+          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vBar"])(___VERTER___directiveElement,___VERTER___ctx.b,"arg",{});`,
+        ),
       );
     });
 
@@ -120,8 +117,8 @@ describe("directive runner", () => {
 
       expect(normalized).toContain(
         normalize(
-          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFlag"])(___VERTER___directiveElement,true,undefined,{});`
-        )
+          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFlag"])(___VERTER___directiveElement,true,undefined,{});`,
+        ),
       );
     });
 
@@ -131,8 +128,8 @@ describe("directive runner", () => {
 
       expect(normalize(result)).toContain(
         normalize(
-          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vPin"])(___VERTER___directiveElement,___VERTER___ctx.distance,___VERTER___ctx.side,{"round":true,"exact":true});`
-        )
+          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vPin"])(___VERTER___directiveElement,___VERTER___ctx.distance,___VERTER___ctx.side,{"round":true,"exact":true});`,
+        ),
       );
     });
 
@@ -155,8 +152,8 @@ describe("directive runner", () => {
       const normalized = normalize(result);
       expect(normalized).toContain(
         normalize(
-          '___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vHighlight"])(___VERTER___directiveElement,true,___VERTER___ctx.foo,{});}}'
-        )
+          '___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vHighlight"])(___VERTER___directiveElement,true,___VERTER___ctx.foo,{});}}',
+        ),
       );
     });
 
@@ -167,8 +164,8 @@ describe("directive runner", () => {
 
       expect(normalized).toContain(
         normalize(
-          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFoo"])(___VERTER___directiveElement,___VERTER___ctx.handler,undefined,{});`
-        )
+          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFoo"])(___VERTER___directiveElement,___VERTER___ctx.handler,undefined,{});`,
+        ),
       );
       expect(result).toContain(`onClick={___VERTER___ctx.onClick}`);
     });
@@ -176,61 +173,57 @@ describe("directive runner", () => {
     // @ai-generated - Tests directives inside slot templates with v-slot usage
     it("applies directives within slotted content", () => {
       const { result } = parse(
-        `<MyList><template #default><button v-bar="baz">{{ baz }}</button></template></MyList>`
+        `<MyList><template #default><button v-bar="baz">{{ baz }}</button></template></MyList>`,
       );
       const normalized = normalize(result);
 
       expect(normalized).toContain(
         normalize(
-          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vBar"])(___VERTER___directiveElement,___VERTER___ctx.baz,undefined,{});`
-        )
+          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vBar"])(___VERTER___directiveElement,___VERTER___ctx.baz,undefined,{});`,
+        ),
       );
       expect(result).toContain(
-        `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)`
+        `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)`,
       );
     });
 
     // @ai-generated - Tests directives on components using inline v-slot syntax
     it("runs directives on components with v-slot shorthand", () => {
       const { result } = parse(
-        `<MyList v-foo.bar:arg="value" v-slot="{ value }"><span>{{ value }}</span></MyList>`
+        `<MyList v-foo.bar:arg="value" v-slot="{ value }"><span>{{ value }}</span></MyList>`,
       );
       const normalized = normalize(result);
 
       expect(normalized).toContain(
         normalize(
-          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFoo"])(___VERTER___directiveElement,___VERTER___ctx.value,undefined,{"bar:arg":true});`
-        )
+          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFoo"])(___VERTER___directiveElement,___VERTER___ctx.value,undefined,{"bar:arg":true});`,
+        ),
       );
       expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
       expect(result).toContain(
-        `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)`
+        `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)`,
       );
     });
 
     // @ai-generated - Tests directives with named template slot content
     it("runs directives on components with named template slots", () => {
       const { result } = parse(
-        `<MyList v-foo.bar:arg="value"><template #test><span>{{ value }}</span></template></MyList>`
+        `<MyList v-foo.bar:arg="value"><template #test><span>{{ value }}</span></template></MyList>`,
       );
       const normalized = normalize(result);
 
       expect(normalized).toContain(
         normalize(
-          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFoo"])(___VERTER___directiveElement,___VERTER___ctx.value,undefined,{"bar:arg":true});`
-        )
+          `___VERTER___runCustomDirective(___VERTER___directiveElement,___VERTER___directiveAccessor["vFoo"])(___VERTER___directiveElement,___VERTER___ctx.value,undefined,{"bar:arg":true});`,
+        ),
       );
-      expect(result).toContain(
-        `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)`
-      );
+      expect(result).toContain(`___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)`);
     });
 
     it("camel-cases hyphenated directive names for accessor lookup", () => {
       const { result } = parse(`<div v-click-outside="handler" />`);
 
-      expect(result).toContain(
-        '___VERTER___directiveAccessor["vClickOutside"]'
-      );
+      expect(result).toContain('___VERTER___directiveAccessor["vClickOutside"]');
     });
 
     it("does not emit warnings for custom directives", () => {
@@ -246,7 +239,7 @@ describe("directive runner", () => {
         const { result } = parse(`<div v-model="foo" />`);
 
         expect(result).toContain(
-          "div value={___VERTER___ctx.foo} onInput={($event)=>(___VERTER___ctx.foo=$event.target.value)} />"
+          "div value={___VERTER___ctx.foo} onInput={($event)=>(___VERTER___ctx.foo=$event.target.value)} />",
         );
       });
 
@@ -254,66 +247,66 @@ describe("directive runner", () => {
         const { result } = parse(`<Comp v-model="foo" />`);
 
         expect(result).toContain(
-          `<___VERTER___components.Comp modelValue={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} />`
+          `<___VERTER___components.Comp modelValue={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} />`,
         );
       });
 
       it('Comp v-model="foo" modelValue="bar"', () => {
         const { result } = parse(`<Comp v-model="foo" modelValue="bar" />`);
         expect(result).toContain(
-          `<___VERTER___components.Comp modelValue={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} modelValue={"bar"} />`
+          `<___VERTER___components.Comp modelValue={___VERTER___ctx.foo} onUpdate:modelValue={($event)=>(___VERTER___ctx.foo=$event)} modelValue={"bar"} />`,
         );
       });
 
       it('Comp v-model:msg="foo"', () => {
         const { result } = parse(`<Comp v-model:msg="foo" />`);
         expect(result).toContain(
-          `<___VERTER___components.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} />`
+          `<___VERTER___components.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} />`,
         );
       });
 
       it('Comp v-model:msg="foo" msg="bar"', () => {
         const { result } = parse(`<Comp v-model:msg="foo" msg="bar" />`);
         expect(result).toContain(
-          `<___VERTER___components.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} msg={"bar"} />`
+          `<___VERTER___components.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} msg={"bar"} />`,
         );
       });
 
       it('Comp v-model:msg="foo" v-model="bar"', () => {
         const { result } = parse(`<Comp v-model:msg="foo" v-model="bar" />`);
         expect(result).toContain(
-          `<___VERTER___components.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} modelValue={___VERTER___ctx.bar} onUpdate:modelValue={($event)=>(___VERTER___ctx.bar=$event)} />`
+          `<___VERTER___components.Comp msg={___VERTER___ctx.foo} onUpdate:msg={($event)=>(___VERTER___ctx.foo=$event)} modelValue={___VERTER___ctx.bar} onUpdate:modelValue={($event)=>(___VERTER___ctx.bar=$event)} />`,
         );
       });
 
       it('Comp v-model:[msg]="foo"', () => {
         const { result } = parse(`<Comp v-model:[msg]="foo" />`);
         expect(result).toContain(
-          `<___VERTER___components.Comp {...{[___VERTER___ctx.msg]:___VERTER___ctx.foo,[\`onUpdate:\${___VERTER___ctx.msg}\`]:($event)=>(___VERTER___ctx.foo=$event)}} />`
+          `<___VERTER___components.Comp {...{[___VERTER___ctx.msg]:___VERTER___ctx.foo,[\`onUpdate:\${___VERTER___ctx.msg}\`]:($event)=>(___VERTER___ctx.foo=$event)}} />`,
         );
       });
 
       it('Comp v-model:[`${msg}ss`]="msg"', () => {
         const { result } = parse(`<Comp v-model:[\`\${msg}ss\`]="msg" />`);
         expect(result).toContain(
-          `<___VERTER___components.Comp {...{[\`\${___VERTER___ctx.msg}ss\`]:___VERTER___ctx.msg,[\`onUpdate:\${\`\${___VERTER___ctx.msg}ss\`}\`]:($event)=>(___VERTER___ctx.msg=$event)}} />`
+          `<___VERTER___components.Comp {...{[\`\${___VERTER___ctx.msg}ss\`]:___VERTER___ctx.msg,[\`onUpdate:\${\`\${___VERTER___ctx.msg}ss\`}\`]:($event)=>(___VERTER___ctx.msg=$event)}} />`,
         );
       });
 
       it('v-model.lazy="foo"', () => {
         const { result } = parse(`<input v-model.lazy="foo" />`);
         expect(result).toContain(
-          `v-directive={(___VERTER___slotInstance)=>{({"lazy":true}satisfies ___VERTER___vModelModifiers<typeof ___VERTER___slotInstance,'value'>)}}`
+          `v-directive={(___VERTER___slotInstance)=>{({"lazy":true}satisfies ___VERTER___vModelModifiers<typeof ___VERTER___slotInstance,'value'>)}}`,
         );
         expect(result).toContain(
-          `value={___VERTER___ctx.foo} onChange={($event)=>(___VERTER___ctx.foo=$event.type/*cannot correctly handle lazy modifier*/)}`
+          `value={___VERTER___ctx.foo} onChange={($event)=>(___VERTER___ctx.foo=$event.type/*cannot correctly handle lazy modifier*/)}`,
         );
       });
 
       it('v-model="foo"', () => {
         const { result } = parse(`<input v-model="foo" />`);
         expect(result).toContain(
-          `value={___VERTER___ctx.foo} onInput={($event)=>(___VERTER___ctx.foo=$event.target.value)}`
+          `value={___VERTER___ctx.foo} onInput={($event)=>(___VERTER___ctx.foo=$event.target.value)}`,
         );
       });
 
@@ -325,9 +318,7 @@ describe("directive runner", () => {
 
         it('v-model=""', () => {
           const { result } = parse(`<input v-model="" />`);
-          expect(result).toContain(
-            `<input value={} onInput={($event)=>(=$event.target.value)} />`
-          );
+          expect(result).toContain(`<input value={} onInput={($event)=>(=$event.target.value)} />`);
         });
 
         it.todo("v-model= (invalid syntax) should surface parse error");
@@ -343,7 +334,7 @@ describe("directive runner", () => {
       it('div v-on:click.bar="foo"', () => {
         const { result } = parse(`<div v-on:click.bar="foo" />`);
         expect(result).toContain(
-          `v-directive={(___VERTER___slotInstance)=>{({"bar":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'onClick'>)}}`
+          `v-directive={(___VERTER___slotInstance)=>{({"bar":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'onClick'>)}}`,
         );
         expect(result).toContain(`onClick={___VERTER___ctx.foo}`);
       });
@@ -351,7 +342,7 @@ describe("directive runner", () => {
       it('div v-if="foo" v-on:click.bar="foo"', () => {
         const { result } = parse(`<div v-if="foo" v-on:click.bar="foo" />`);
         expect(result).toContain(
-          `v-directive={(___VERTER___slotInstance)=>{!((___VERTER___ctx.foo))? undefined :({"bar":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'onClick'>)}}`
+          `v-directive={(___VERTER___slotInstance)=>{!((___VERTER___ctx.foo))? undefined :({"bar":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'onClick'>)}}`,
         );
         expect(result).toContain(`onClick={___VERTER___ctx.foo}`);
       });
@@ -361,7 +352,7 @@ describe("directive runner", () => {
       it('div v-bind:click.bar="foo"', () => {
         const { result } = parse(`<div v-bind:click.bar="foo" />`);
         expect(result).toContain(
-          `v-directive={(___VERTER___slotInstance)=>{({"bar":true}satisfies ___VERTER___vBindModifiers<typeof ___VERTER___slotInstance,'click'>)}}`
+          `v-directive={(___VERTER___slotInstance)=>{({"bar":true}satisfies ___VERTER___vBindModifiers<typeof ___VERTER___slotInstance,'click'>)}}`,
         );
         expect(result).toContain(`click={___VERTER___ctx.foo}`);
       });
@@ -369,7 +360,7 @@ describe("directive runner", () => {
       it('div v-if="foo" v-bind:click.bar="foo"', () => {
         const { result } = parse(`<div v-if="foo" v-bind:click.bar="foo" />`);
         expect(result).toContain(
-          `v-directive={(___VERTER___slotInstance)=>{!((___VERTER___ctx.foo))? undefined :({"bar":true}satisfies ___VERTER___vBindModifiers<typeof ___VERTER___slotInstance,'click'>)}}`
+          `v-directive={(___VERTER___slotInstance)=>{!((___VERTER___ctx.foo))? undefined :({"bar":true}satisfies ___VERTER___vBindModifiers<typeof ___VERTER___slotInstance,'click'>)}}`,
         );
         expect(result).toContain(`click={___VERTER___ctx.foo}`);
       });
@@ -418,33 +409,25 @@ describe("directive runner", () => {
       const { context } = parse(`<div v-text.foo="bar" />`);
 
       const warnings = getWarnings(context);
-      expect(
-        warnings.some(
-          (w) => w.message === "UNSUPPORTED_BUILTIN_DIRECTIVE_MODIFIER"
-        )
-      ).toBe(true);
+      expect(warnings.some((w) => w.message === "UNSUPPORTED_BUILTIN_DIRECTIVE_MODIFIER")).toBe(
+        true,
+      );
     });
 
     it("warns when arguments are used on directives that forbid them", () => {
       const { context } = parse(`<div v-show:arg="visible" />`);
 
       const warnings = getWarnings(context);
-      expect(
-        warnings.some(
-          (w) => w.message === "UNSUPPORTED_BUILTIN_DIRECTIVE_ARGUMENT"
-        )
-      ).toBe(true);
+      expect(warnings.some((w) => w.message === "UNSUPPORTED_BUILTIN_DIRECTIVE_ARGUMENT")).toBe(
+        true,
+      );
     });
 
     it("warns when values are provided to value-less directives", () => {
       const { context } = parse(`<div v-cloak="foo" />`);
 
       const warnings = getWarnings(context);
-      expect(
-        warnings.some(
-          (w) => w.message === "UNSUPPORTED_BUILTIN_DIRECTIVE_VALUE"
-        )
-      ).toBe(true);
+      expect(warnings.some((w) => w.message === "UNSUPPORTED_BUILTIN_DIRECTIVE_VALUE")).toBe(true);
     });
 
     it("allows modifiers on directives that support them (v-model)", () => {
@@ -452,9 +435,7 @@ describe("directive runner", () => {
 
       const warnings = getWarnings(context);
       expect(
-        warnings.some((w) =>
-          w.message?.toString().startsWith("UNSUPPORTED_BUILTIN_DIRECTIVE")
-        )
+        warnings.some((w) => w.message?.toString().startsWith("UNSUPPORTED_BUILTIN_DIRECTIVE")),
       ).toBe(false);
     });
 
@@ -463,8 +444,8 @@ describe("directive runner", () => {
 
       expect(normalize(result)).toContain(
         normalize(
-          `({"number":true,"trim":true} satisfies ___VERTER___vModelModifiers<typeof ___VERTER___slotInstance,'value'>)`
-        )
+          `({"number":true,"trim":true} satisfies ___VERTER___vModelModifiers<typeof ___VERTER___slotInstance,'value'>)`,
+        ),
       );
     });
     it("emits v-model modifier guards", () => {
@@ -472,8 +453,8 @@ describe("directive runner", () => {
 
       expect(normalize(result)).toContain(
         normalize(
-          `({"number":true,"trim":true} satisfies ___VERTER___vModelModifiers<typeof ___VERTER___slotInstance,'modelValue'>)`
-        )
+          `({"number":true,"trim":true} satisfies ___VERTER___vModelModifiers<typeof ___VERTER___slotInstance,'modelValue'>)`,
+        ),
       );
     });
 
@@ -486,9 +467,7 @@ describe("directive runner", () => {
 
     // @ai-generated - Tests event option modifiers on native elements (issue #78)
     it("allows v-on event option modifiers on native elements", () => {
-      const { context, result } = parse(
-        `<button @click.capture.passive.once="handler" />`
-      );
+      const { context, result } = parse(`<button @click.capture.passive.once="handler" />`);
 
       expect(warningMessages(context)).toEqual([]);
       expect(result).not.toContain("runCustomDirective");
@@ -512,9 +491,7 @@ describe("directive runner", () => {
     });
 
     it("does not warn for built-ins that allow modifiers (v-on)", () => {
-      const { context, result } = parse(
-        `<button v-on:click.stop="handler" v-foo="bar" />`
-      );
+      const { context, result } = parse(`<button v-on:click.stop="handler" v-foo="bar" />`);
 
       expect(warningMessages(context)).toEqual([]);
       // custom directive should still be emitted
@@ -527,9 +504,7 @@ describe("directive runner", () => {
       const { result, context } = parse(`<div v-text.foo="bar" v-foo="baz" />`);
 
       expect(result).toContain('___VERTER___directiveAccessor["vFoo"]');
-      expect(warningMessages(context)).toContain(
-        "UNSUPPORTED_BUILTIN_DIRECTIVE_MODIFIER"
-      );
+      expect(warningMessages(context)).toContain("UNSUPPORTED_BUILTIN_DIRECTIVE_MODIFIER");
     });
 
     it("injects modifier validators for built-in directives", () => {
@@ -538,8 +513,8 @@ describe("directive runner", () => {
       const normalized = normalize(result);
       expect(normalized).toContain(
         normalize(
-          "({\"once\":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'onClick'>)"
-        )
+          "({\"once\":true}satisfies ___VERTER___vOnModifiers<typeof ___VERTER___slotInstance,'onClick'>)",
+        ),
       );
       expect(normalized).not.toContain("runCustomDirective(");
       expect(normalized).not.toContain("directiveAccessor");
@@ -550,8 +525,8 @@ describe("directive runner", () => {
       const normalized = normalize(result);
       expect(normalized).toContain(
         normalize(
-          "({\"prop\":true}satisfies ___VERTER___vBindModifiers<typeof ___VERTER___slotInstance,'someProperty'>)"
-        )
+          "({\"prop\":true}satisfies ___VERTER___vBindModifiers<typeof ___VERTER___slotInstance,'someProperty'>)",
+        ),
       );
     });
 
@@ -560,8 +535,8 @@ describe("directive runner", () => {
       const normalized = normalize(result);
       expect(normalized).toContain(
         normalize(
-          "({\"prop\":true}satisfies ___VERTER___vBindModifiers<typeof ___VERTER___slotInstance,'someProperty'>)"
-        )
+          "({\"prop\":true}satisfies ___VERTER___vBindModifiers<typeof ___VERTER___slotInstance,'someProperty'>)",
+        ),
       );
     });
   });

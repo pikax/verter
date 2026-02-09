@@ -46,7 +46,7 @@ The transformation system uses a plugin architecture where each plugin handles s
 interface ScriptPlugin {
   name: string;
   enforce?: "pre" | "post";
-  
+
   pre?(s: MagicString, context: ScriptContext): void;
   transform?(item: ScriptItem, s: MagicString, context: ScriptContext): void;
   transformFunctionCall?(item: FunctionCallItem, s: MagicString, context: ScriptContext): void;
@@ -56,6 +56,7 @@ interface ScriptPlugin {
 ```
 
 Plugins are executed in order:
+
 1. **Pre-plugins** (`enforce: "pre"`) - Initialize state, add imports
 2. **Normal plugins** - Process specific patterns
 3. **Post-plugins** (`enforce: "post"`) - Finalize output, generate types
@@ -63,6 +64,7 @@ Plugins are executed in order:
 ### Sourcemap Preservation
 
 Verter uses `MagicString` to preserve sourcemaps throughout transformations. This enables:
+
 - Accurate error locations in the original `.vue` file
 - Go-to-definition pointing to source code
 - Proper debugging with breakpoints
@@ -110,15 +112,15 @@ User's .vue file
 
 ### Package Responsibilities
 
-| Package | Role |
-|---------|------|
-| `@verter/core` | Parse SFC, transform to TSX, preserve sourcemaps |
-| `@verter/types` | Type utilities for Vue component inference |
-| `@verter/language-server` | LSP implementation, document management |
-| `@verter/language-shared` | Protocol types shared between client/server |
-| `@verter/typescript-plugin` | Handle `.vue` imports in TS/JS files |
-| `@verter/oxc-bindings` | Platform-specific OXC parser binaries |
-| `verter-vscode` | VS Code extension, client-side integration |
+| Package                     | Role                                             |
+| --------------------------- | ------------------------------------------------ |
+| `@verter/core`              | Parse SFC, transform to TSX, preserve sourcemaps |
+| `@verter/types`             | Type utilities for Vue component inference       |
+| `@verter/language-server`   | LSP implementation, document management          |
+| `@verter/language-shared`   | Protocol types shared between client/server      |
+| `@verter/typescript-plugin` | Handle `.vue` imports in TS/JS files             |
+| `@verter/oxc-bindings`      | Platform-specific OXC parser binaries            |
+| `verter-vscode`             | VS Code extension, client-side integration       |
 
 ## Core Package Deep Dive
 
@@ -156,20 +158,20 @@ script/
 
 ```typescript
 // Input (TypeScript)
-const props = defineProps<{ msg: string }>()
+const props = defineProps<{ msg: string }>();
 
 // Output (simplified)
-type ___VERTER___defineProps_Type = ___VERTER___Prettify<{ msg: string }>
-const props = defineProps<___VERTER___defineProps_Type>()
+type ___VERTER___defineProps_Type = ___VERTER___Prettify<{ msg: string }>;
+const props = defineProps<___VERTER___defineProps_Type>();
 ```
 
 ```typescript
 // Input (JavaScript with runtime declaration)
-const props = defineProps({ a: String })
+const props = defineProps({ a: String });
 
 // Output (simplified)
-const ___VERTER___defineProps_Boxed = ___VERTER___defineProps_Box({ a: String })
-const props = defineProps(___VERTER___defineProps_Boxed)
+const ___VERTER___defineProps_Boxed = ___VERTER___defineProps_Box({ a: String });
+const props = defineProps(___VERTER___defineProps_Boxed);
 ```
 
 The `___VERTER___` prefixed helpers are type utilities that allow TypeScript to properly infer and validate the component's props, emits, slots, etc.
@@ -188,6 +190,7 @@ type __VERTER_TemplateBindings__ = {
 **Directive Runner Plugin** - Provides fully typed directive support:
 
 Custom directives are transformed into type-safe function calls with:
+
 - **Resolved component "leaf" type**: The exact `$el` type is correctly resolved down the component render tree, ensuring directives operate on the correct element type
 - **Strict modifier validation**: Directives provide valid modifiers based on the event's available methods (e.g., `preventDefault` for click events), mimicking Vue runtime behavior
 
@@ -208,6 +211,7 @@ v-directive={(___VERTER___slotInstance)=>{
 ```
 
 Built-in directives (v-show, v-if, v-model, v-bind, v-on) are validated:
+
 - Modifiers are checked for support and typed based on the directive
 - Arguments are validated per directive specification
 - Values are required/forbidden according to Vue specifications
@@ -285,7 +289,7 @@ type WithHidden = PatchHidden<{ id: number }, { meta: true }>;
 type Meta = ExtractHidden<WithHidden>; // { meta: true }
 
 // Emit function to props conversion
-type Emits = (e: 'update', value: number) => void;
+type Emits = (e: "update", value: number) => void;
 type Props = EmitsToProps<Emits>; // { onUpdate: (value: number) => void }
 
 // Partial for undefined properties

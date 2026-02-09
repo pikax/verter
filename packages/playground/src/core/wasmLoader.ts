@@ -12,13 +12,13 @@
  * and pass the WASM binary as an ArrayBuffer to bypass URL resolution.
  */
 
-const GITHUB_REPO = 'pikax/verter'
-const GITHUB_RELEASE_BASE = `https://github.com/${GITHUB_REPO}/releases/download`
-const JSDELIVR_BASE = 'https://cdn.jsdelivr.net/npm/@verter/wasm'
+const GITHUB_REPO = "pikax/verter";
+const GITHUB_RELEASE_BASE = `https://github.com/${GITHUB_REPO}/releases/download`;
+const JSDELIVR_BASE = "https://cdn.jsdelivr.net/npm/@verter/wasm";
 
 export interface WasmModule {
-  compile: (input: string, options?: unknown) => unknown
-  default: (input?: unknown) => Promise<unknown>
+  compile: (input: string, options?: unknown) => unknown;
+  default: (input?: unknown) => Promise<unknown>;
 }
 
 /**
@@ -27,9 +27,9 @@ export interface WasmModule {
  */
 export async function loadLocalWasm(): Promise<WasmModule> {
   // @ts-ignore - Dynamic import of wasm glue code
-  const mod = await import('verter-wasm-glue')
-  await mod.default({ module_or_path: '/verter_wasm_bg.wasm' })
-  return mod
+  const mod = await import("verter-wasm-glue");
+  await mod.default({ module_or_path: "/verter_wasm_bg.wasm" });
+  return mod;
 }
 
 /**
@@ -38,10 +38,10 @@ export async function loadLocalWasm(): Promise<WasmModule> {
  * @param shortSha - 7-char commit SHA (e.g. "6178ecb")
  */
 export async function loadCommitWasm(shortSha: string): Promise<WasmModule> {
-  const wasmUrl = `${GITHUB_RELEASE_BASE}/nightly/verter_wasm_bg-${shortSha}.wasm`
-  const glueUrl = `${GITHUB_RELEASE_BASE}/nightly/verter_wasm-${shortSha}.js`
+  const wasmUrl = `${GITHUB_RELEASE_BASE}/nightly/verter_wasm_bg-${shortSha}.wasm`;
+  const glueUrl = `${GITHUB_RELEASE_BASE}/nightly/verter_wasm-${shortSha}.js`;
 
-  return loadRemoteWasm(glueUrl, wasmUrl)
+  return loadRemoteWasm(glueUrl, wasmUrl);
 }
 
 /**
@@ -50,10 +50,10 @@ export async function loadCommitWasm(shortSha: string): Promise<WasmModule> {
  * @param version - Semver version (e.g. "0.0.1-alpha.1")
  */
 export async function loadReleaseWasm(version: string): Promise<WasmModule> {
-  const wasmUrl = `${JSDELIVR_BASE}@${version}/wasm/verter_wasm_bg.wasm`
-  const glueUrl = `${JSDELIVR_BASE}@${version}/wasm/verter_wasm.js`
+  const wasmUrl = `${JSDELIVR_BASE}@${version}/wasm/verter_wasm_bg.wasm`;
+  const glueUrl = `${JSDELIVR_BASE}@${version}/wasm/verter_wasm.js`;
 
-  return loadRemoteWasm(glueUrl, wasmUrl)
+  return loadRemoteWasm(glueUrl, wasmUrl);
 }
 
 /**
@@ -68,44 +68,44 @@ export async function loadReleaseWasm(version: string): Promise<WasmModule> {
 async function loadRemoteWasm(glueUrl: string, wasmUrl: string): Promise<WasmModule> {
   // Fetch both in parallel
   const [glueResponse, wasmResponse] = await Promise.all([
-    fetch(glueUrl, { mode: 'cors' }),
-    fetch(wasmUrl, { mode: 'cors' }),
-  ])
+    fetch(glueUrl, { mode: "cors" }),
+    fetch(wasmUrl, { mode: "cors" }),
+  ]);
 
   if (!glueResponse.ok) {
-    throw new Error(`Failed to fetch glue JS: ${glueResponse.status} ${glueResponse.statusText}`)
+    throw new Error(`Failed to fetch glue JS: ${glueResponse.status} ${glueResponse.statusText}`);
   }
   if (!wasmResponse.ok) {
-    throw new Error(`Failed to fetch WASM: ${wasmResponse.status} ${wasmResponse.statusText}`)
+    throw new Error(`Failed to fetch WASM: ${wasmResponse.status} ${wasmResponse.statusText}`);
   }
 
-  let glueText = await glueResponse.text()
-  const wasmBuffer = await wasmResponse.arrayBuffer()
+  let glueText = await glueResponse.text();
+  const wasmBuffer = await wasmResponse.arrayBuffer();
 
   // Patch 1: Remove the singleton guard so we get a fresh instance
   // `if (wasm !== undefined) return wasm;` appears in both initSync and __wbg_init
   glueText = glueText.replace(
     /if\s*\(\s*wasm\s*!==\s*undefined\s*\)\s*return\s+wasm\s*;/g,
-    '/* singleton guard removed */',
-  )
+    "/* singleton guard removed */",
+  );
 
   // Patch 2: Remove the import.meta.url default in __wbg_init
   // This prevents the module from trying to resolve a relative URL
   glueText = glueText.replace(
     /if\s*\(\s*typeof\s+module_or_path\s*===\s*['"]undefined['"]\s*\)/,
-    'if (false)',
-  )
+    "if (false)",
+  );
 
   // Create a Blob URL for a fresh module instance
-  const blob = new Blob([glueText], { type: 'application/javascript' })
-  const blobUrl = URL.createObjectURL(blob)
+  const blob = new Blob([glueText], { type: "application/javascript" });
+  const blobUrl = URL.createObjectURL(blob);
 
   try {
-    const mod = await import(/* @vite-ignore */ blobUrl)
+    const mod = await import(/* @vite-ignore */ blobUrl);
     // Pass ArrayBuffer directly — bypasses all URL/fetch resolution in __wbg_init
-    await mod.default({ module_or_path: wasmBuffer })
-    return mod
+    await mod.default({ module_or_path: wasmBuffer });
+    return mod;
   } finally {
-    URL.revokeObjectURL(blobUrl)
+    URL.revokeObjectURL(blobUrl);
   }
 }

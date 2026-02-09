@@ -2,12 +2,12 @@
 export type NotificationTyped = {
   onNotification: <T extends NotificationType>(
     type: T,
-    cb: (e: NotificationParams[T]) => any
+    cb: (e: NotificationParams[T]) => any,
   ) => Promise<void>;
 
   sendNotification: <T extends NotificationType>(
     type: T,
-    params: NotificationParams[T]
+    params: NotificationParams[T],
   ) => Promise<void>;
 };
 
@@ -20,13 +20,13 @@ export type OmitNotification<T> = Omit<T, keyof NotificationTyped>;
 export type PatchNotification<T> = OmitNotification<T> & NotificationTyped;
 
 export function createNotificationHelper<T extends GenericNotificationHelper>(
-  connection: T
+  connection: T,
 ): PatchNotification<T>;
 export function createNotificationHelper<T extends GenericNotificationHelper>(
-  connection?: T
+  connection?: T,
 ): PatchNotification<T> | undefined;
 export function createNotificationHelper<T extends GenericNotificationHelper>(
-  connection?: T
+  connection?: T,
 ): PatchNotification<T> | undefined {
   return connection;
 }

@@ -19,7 +19,7 @@ export abstract class VueSubDocument extends VerterDocument {
     uri: string,
     private _parent: VueDocument,
     languageId: string,
-    version: number
+    version: number,
   ) {
     super(uri, languageId, version, "");
   }
@@ -33,9 +33,7 @@ export abstract class VueSubDocument extends VerterDocument {
     if (this.version !== this._parent.version) {
       this._sourceMapConsumer = null;
     }
-    return (
-      this._sourceMapConsumer ?? (this._sourceMapConsumer = this.sync(true))
-    );
+    return this._sourceMapConsumer ?? (this._sourceMapConsumer = this.sync(true));
   }
 
   private _map: SourceMap | null = null;
@@ -71,7 +69,7 @@ export abstract class VueSubDocument extends VerterDocument {
 
       this._map = s.generateMap({
         // hires: true,
-        hires: 'boundary',
+        hires: "boundary",
         includeContent: true,
       });
 

@@ -12,9 +12,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // if (key in target || key in languageServiceHost) {
         //   logger.info("[VERTER] Proxying: " + key);
         // }
-        return languageServiceHost[key]
-          ? languageServiceHost[key]
-          : target[key];
+        return languageServiceHost[key] ? languageServiceHost[key] : target[key];
       },
     });
 
@@ -29,30 +27,18 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
     // TypeScript 5.x
     if (info.languageServiceHost.resolveModuleNameLiterals) {
-      const _resolveModuleNameLiterals =
-        info.languageServiceHost.resolveModuleNameLiterals.bind(
-          info.languageServiceHost
-        );
+      const _resolveModuleNameLiterals = info.languageServiceHost.resolveModuleNameLiterals.bind(
+        info.languageServiceHost,
+      );
 
-      languageServiceHost.resolveModuleNameLiterals = (
-        moduleNames,
-        containingFile,
-        ...rest
-      ) => {
-        const resolvedModules = _resolveModuleNameLiterals(
-          moduleNames,
-          containingFile,
-          ...rest
-        );
+      languageServiceHost.resolveModuleNameLiterals = (moduleNames, containingFile, ...rest) => {
+        const resolvedModules = _resolveModuleNameLiterals(moduleNames, containingFile, ...rest);
 
         const moduleResolver = createModuleResolver(containingFile);
 
         return moduleNames.map(({ text: moduleName }, index) => {
           try {
-            const resolvedModule = moduleResolver(
-              moduleName,
-              () => resolvedModules[index] as any
-            );
+            const resolvedModule = moduleResolver(moduleName, () => resolvedModules[index] as any);
             if (resolvedModule) return { resolvedModule };
           } catch (e) {
             // @ts-expect-error
@@ -65,21 +51,12 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     }
     // TypeScript 4.x
     else if (info.languageServiceHost.resolveModuleNames) {
-      const _resolveModuleNames =
-        info.languageServiceHost.resolveModuleNames.bind(
-          info.languageServiceHost
-        );
+      const _resolveModuleNames = info.languageServiceHost.resolveModuleNames.bind(
+        info.languageServiceHost,
+      );
 
-      languageServiceHost.resolveModuleNames = (
-        moduleNames,
-        containingFile,
-        ...rest
-      ) => {
-        const resolvedModules = _resolveModuleNames(
-          moduleNames,
-          containingFile,
-          ...rest
-        );
+      languageServiceHost.resolveModuleNames = (moduleNames, containingFile, ...rest) => {
+        const resolvedModules = _resolveModuleNames(moduleNames, containingFile, ...rest);
 
         const moduleResolver = createModuleResolver(containingFile);
 
@@ -89,8 +66,8 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
               // @ts-expect-error
               languageServiceHost.getResolvedModuleWithFailedLookupLocationsFromCache?.(
                 moduleName,
-                containingFile
-              )
+                containingFile,
+              ),
             );
             if (resolvedModule) return resolvedModule;
           } catch (e) {
@@ -111,22 +88,19 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
           | (tsModule.ResolvedModuleWithFailedLookupLocations & {
               failedLookupLocations: readonly string[];
             })
-          | undefined
+          | undefined,
       ): tsModule.ResolvedModuleFull | undefined => {
         if (isRelativeVue(moduleName)) {
           logger.info(
             "[Verter] createModuleResolver relative vue - " +
               moduleName +
               " -- " +
-              path.resolve(path.dirname(containingFile), moduleName)
+              path.resolve(path.dirname(containingFile), moduleName),
           );
           return {
             extension: ts.Extension.Tsx,
             isExternalLibraryImport: false,
-            resolvedFileName: path.resolve(
-              path.dirname(containingFile),
-              moduleName
-            ),
+            resolvedFileName: path.resolve(path.dirname(containingFile), moduleName),
           };
         }
         if (!isVue(moduleName)) {
@@ -136,10 +110,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         const resolvedModule = resolveModule();
 
         logger.info(
-          "[Verter] createModuleResolver vue - " +
-            resolvedModule +
-            " -- " +
-            resolvedModule
+          "[Verter] createModuleResolver vue - " + resolvedModule + " -- " + resolvedModule,
         );
         if (!resolvedModule) return;
 
@@ -149,18 +120,12 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         const failedLocations = resolvedModule.failedLookupLocations;
         // Filter to only one extension type, and remove that extension. This leaves us with the actual file name.
         // Example: "usr/person/project/src/dir/File.module.css/index.d.ts" > "usr/person/project/src/dir/File.module.css"
-        const normalizedLocations = failedLocations.reduce<string[]>(
-          (locations, location) => {
-            if (
-              (baseUrl ? location.includes(baseUrl) : true) &&
-              location.endsWith(match)
-            ) {
-              return [...locations, location.replace(match, "")];
-            }
-            return locations;
-          },
-          []
-        );
+        const normalizedLocations = failedLocations.reduce<string[]>((locations, location) => {
+          if ((baseUrl ? location.includes(baseUrl) : true) && location.endsWith(match)) {
+            return [...locations, location.replace(match, "")];
+          }
+          return locations;
+        }, []);
 
         // // Find the imported CSS module, if it exists.
         // const vueModulePath = normalizedLocations.find((location) =>
@@ -185,10 +150,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
         // logger.info("--- Vue 3 Plugin NOT found path" + vueModulePath);
 
         const vueModulePath = failedLocations.find(
-          (x) =>
-            (baseUrl ? x.includes(baseUrl) : true) &&
-            x.endsWith(match) &&
-            fs.existsSync(x)
+          (x) => (baseUrl ? x.includes(baseUrl) : true) && x.endsWith(match) && fs.existsSync(x),
         );
 
         if (!vueModulePath) return;
@@ -231,9 +193,7 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
 
   const getExternalFiles = (project: tsModule.server.ConfiguredProject) => {
     const files = project.getFileNames(true, true).filter(isVue);
-    project.projectService.logger.info(
-      "[Verter] Got files\n" + files.join("\n")
-    );
+    project.projectService.logger.info("[Verter] Got files\n" + files.join("\n"));
     return files;
   };
 

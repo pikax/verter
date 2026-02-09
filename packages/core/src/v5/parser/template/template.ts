@@ -1,8 +1,4 @@
-import type {
-  CommentNode,
-  InterpolationNode,
-  RootNode,
-} from "@vue/compiler-core";
+import type { CommentNode, InterpolationNode, RootNode } from "@vue/compiler-core";
 import { NodeTypes } from "@vue/compiler-core";
 import { templateWalk, type TemplateWalkContext } from "../walk/index.js";
 import { handleComment } from "./comment/comment.js";
@@ -41,7 +37,7 @@ export type ParseTemplateContext = {
 export function parseTemplate(
   ast: RootNode,
   source: string,
-  ignoredIdentifiers: string[] = []
+  ignoredIdentifiers: string[] = [],
 ): ParsedTemplateResult {
   const items: TemplateItem[] = [];
 
@@ -99,7 +95,7 @@ export function parseTemplate(
       conditions: [],
       inFor: false,
       ignoredIdentifiers,
-    } as ParseTemplateContext
+    } as ParseTemplateContext,
   );
 
   return {

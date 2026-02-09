@@ -5,20 +5,20 @@
   </div>
 </template>
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref } from "vue";
 
-const count = ref(0)
+const count = ref(0);
 
 function handleClick() {
-  count.value++
-  processData(count.value)
+  count.value++;
+  processData(count.value);
 }
 
 function processData(value: number) {
-  console.log('Processing:', value)
+  console.log("Processing:", value);
 }
 
 async function fetchData() {
-  return await Promise.resolve('data')
+  return await Promise.resolve("data");
 }
 </script>

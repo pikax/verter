@@ -27,10 +27,7 @@ $V_StrictRenderSlot(new Comp().$slots.foo, [{ foo: "foo" }]);
 $V_StrictRenderSlot(new Comp().$slots.single, [new HTMLInputElement()]);
 
 // @ts-expect-error
-$V_StrictRenderSlot(new Comp().$slots.single, [
-  new HTMLInputElement(),
-  new HTMLInputElement(),
-]);
+$V_StrictRenderSlot(new Comp().$slots.single, [new HTMLInputElement(), new HTMLInputElement()]);
 
 // multiple
 $V_StrictRenderSlot(new Comp().$slots.multiple, [new HTMLInputElement()]);
@@ -39,10 +36,7 @@ $V_StrictRenderSlot(new Comp().$slots.multiple, [new HTMLInputElement()]);
 $V_StrictRenderSlot(new Comp().$slots.multiple, [new HTMLElement()]);
 
 // two
-$V_StrictRenderSlot(new Comp().$slots.two, [
-  new HTMLMediaElement(),
-  new HTMLAnchorElement(),
-]);
+$V_StrictRenderSlot(new Comp().$slots.two, [new HTMLMediaElement(), new HTMLAnchorElement()]);
 
 // @ts-expect-error
 $V_StrictRenderSlot(new Comp().$slots.two, [

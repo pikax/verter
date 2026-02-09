@@ -66,9 +66,9 @@ const scriptIdentifier = "_sfc_main";
  */
 function isUseInlineTemplate(descriptor, isProd) {
   return (
-    isProd &&                        // production only (no devServer)
-    !!descriptor.scriptSetup &&      // must have <script setup>
-    !descriptor.template?.src        // template not from external src
+    isProd && // production only (no devServer)
+    !!descriptor.scriptSetup && // must have <script setup>
+    !descriptor.template?.src // template not from external src
   );
 }
 
@@ -199,9 +199,7 @@ async function compileVueSFC(source, filename, filepath, isProd, ssr = false) {
         // Inline template into setup for production <script setup> (like plugin-vue)
         inlineTemplate,
         // Pass template compiler options when inlining (like plugin-vue)
-        templateOptions: resolveTemplateCompilerOptions(
-          descriptor, filename, isProd, ssr, null
-        ),
+        templateOptions: resolveTemplateCompilerOptions(descriptor, filename, isProd, ssr, null),
         // genDefaultAs makes compiler output `const _sfc_main = ...` instead of
         // `export default ...` — matches canInlineMain() in plugin-vue
         genDefaultAs: canInlineMain(descriptor) ? scriptIdentifier : undefined,
@@ -220,7 +218,11 @@ async function compileVueSFC(source, filename, filepath, isProd, ssr = false) {
       // Build template options matching resolveTemplateCompilerOptions()
       // Pass bindingMetadata from the resolved script for correct prefixing
       const templateOpts = resolveTemplateCompilerOptions(
-        descriptor, filename, isProd, ssr, resolvedScript
+        descriptor,
+        filename,
+        isProd,
+        ssr,
+        resolvedScript,
       );
 
       const templateResult = compileTemplate({
@@ -278,10 +280,7 @@ async function compileVueSFC(source, filename, filepath, isProd, ssr = false) {
 function writeBlocks(baseName, blocks, mode) {
   let totalSize = 0;
   for (const [block, content] of Object.entries(blocks)) {
-    const outputPath = path.join(
-      GENERATED_DIR,
-      `${baseName}.${block}.${mode}.vue.js`
-    );
+    const outputPath = path.join(GENERATED_DIR, `${baseName}.${block}.${mode}.vue.js`);
     fs.writeFileSync(outputPath, content);
     totalSize += content.length;
   }

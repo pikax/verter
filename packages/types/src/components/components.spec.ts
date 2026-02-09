@@ -170,9 +170,7 @@ describe("components helpers", () => {
 
   describe("DefineOptions", () => {
     it("signature and return type", () => {
-      type ExpectedSig = <T extends { name?: string; inheritAttrs?: boolean }>(
-        o: T
-      ) => T;
+      type ExpectedSig = <T extends { name?: string; inheritAttrs?: boolean }>(o: T) => T;
       assertType<ExpectedSig>({} as typeof DefineOptions);
       assertType<typeof DefineOptions>({} as ExpectedSig);
     });
@@ -188,9 +186,7 @@ describe("components helpers", () => {
     });
 
     it("preserves inheritAttrs type", () => {
-      type Options = ReturnType<
-        typeof DefineOptions<{ inheritAttrs: false }, never, false>
-      >;
+      type Options = ReturnType<typeof DefineOptions<{ inheritAttrs: false }, never, false>>;
       assertType<Options>({} as { inheritAttrs: false });
 
       // @ts-expect-error - Options is not any/unknown, should not accept unrelated types
@@ -199,11 +195,7 @@ describe("components helpers", () => {
 
     it("preserves both name and inheritAttrs", () => {
       type Options = ReturnType<
-        typeof DefineOptions<
-          { name: "MyComponent"; inheritAttrs: false },
-          "MyComponent",
-          false
-        >
+        typeof DefineOptions<{ name: "MyComponent"; inheritAttrs: false }, "MyComponent", false>
       >;
       assertType<Options>({} as { name: "MyComponent"; inheritAttrs: false });
 
@@ -223,8 +215,8 @@ describe("components helpers", () => {
             props: {
               message: String,
             },
-          })
-        )
+          }),
+        ),
       );
 
       type R = GetVueComponent<typeof component>;
@@ -401,7 +393,7 @@ describe("components helpers", () => {
         assertType<Expected>({} as Result);
 
         // @ts-expect-error - lowercase keys should not be present
-        ({} as Result).fooA;
+        (({}) as Result).fooA;
       });
 
       it("removes lowercase containers even when they hold components", () => {
@@ -425,7 +417,7 @@ describe("components helpers", () => {
         assertType<Expected>({} as Result);
 
         // @ts-expect-error - lowercase container should be removed entirely
-        ({} as Result).container;
+        (({}) as Result).container;
       });
     });
 
@@ -522,10 +514,10 @@ describe("components helpers", () => {
         assertType<Result>({} as { unrelated: true });
 
         // @ts-expect-error - Utils is dropped because nested keys are not capitalized
-        ({} as Result).Utils;
+        (({}) as Result).Utils;
 
         // @ts-expect-error - Constants is dropped because it contains no components
-        ({} as Result).Constants;
+        (({}) as Result).Constants;
       });
 
       it("extracts from component library structure honoring capitalization", () => {
@@ -635,9 +627,7 @@ describe("components helpers", () => {
         // Verify the component type is preserved exactly
         type ExtractedComp = Result["Specific"];
         type Instance = InstanceType<ExtractedComp>;
-        assertType<Instance["$props"]>(
-          {} as { required: string; optional?: number }
-        );
+        assertType<Instance["$props"]>({} as { required: string; optional?: number });
       });
     });
   });
@@ -651,9 +641,7 @@ describe("components helpers", () => {
 
     describe("basic enhancement", () => {
       it("enhances constructor instance with additional props", () => {
-        type Result = ReturnType<
-          typeof enhanceElementWithProps<MockConstructor, AdditionalProps>
-        >;
+        type Result = ReturnType<typeof enhanceElementWithProps<MockConstructor, AdditionalProps>>;
         type Expected = MockInstance & AdditionalProps;
 
         assertType<Result>({} as Expected);
@@ -664,9 +652,7 @@ describe("components helpers", () => {
       });
 
       it("preserves original instance properties", () => {
-        type Result = ReturnType<
-          typeof enhanceElementWithProps<MockConstructor, AdditionalProps>
-        >;
+        type Result = ReturnType<typeof enhanceElementWithProps<MockConstructor, AdditionalProps>>;
 
         // Verify original props are accessible
         const result = {} as Result;
@@ -675,9 +661,7 @@ describe("components helpers", () => {
       });
 
       it("adds new props to instance", () => {
-        type Result = ReturnType<
-          typeof enhanceElementWithProps<MockConstructor, AdditionalProps>
-        >;
+        type Result = ReturnType<typeof enhanceElementWithProps<MockConstructor, AdditionalProps>>;
 
         // Verify additional props are accessible
         const result = {} as Result;
@@ -692,9 +676,7 @@ describe("components helpers", () => {
         type ConstructorWithProps = { new (): InstanceWithProps };
         type Props = { extra: boolean };
 
-        type Result = ReturnType<
-          typeof enhanceElementWithProps<ConstructorWithProps, Props>
-        >;
+        type Result = ReturnType<typeof enhanceElementWithProps<ConstructorWithProps, Props>>;
 
         // When instance already extends P, it should return I directly
         assertType<Result>({} as InstanceWithProps);
@@ -709,9 +691,7 @@ describe("components helpers", () => {
         type FullConstructor = { new (): FullInstance };
         type SubsetProps = { a: string; b: number };
 
-        type Result = ReturnType<
-          typeof enhanceElementWithProps<FullConstructor, SubsetProps>
-        >;
+        type Result = ReturnType<typeof enhanceElementWithProps<FullConstructor, SubsetProps>>;
 
         assertType<Result>({} as FullInstance);
         assertType<FullInstance>({} as Result);
@@ -725,9 +705,7 @@ describe("components helpers", () => {
       it("merges additional props for non-constructor types", () => {
         // For non-constructor types (like string), the function returns T & P
         // This is the fallback behavior for primitive types used with type assertions
-        type Result = ReturnType<
-          typeof enhanceElementWithProps<string, AdditionalProps>
-        >;
+        type Result = ReturnType<typeof enhanceElementWithProps<string, AdditionalProps>>;
 
         assertType<Result>({} as string & AdditionalProps);
         assertType<string & AdditionalProps>({} as Result);
@@ -735,9 +713,7 @@ describe("components helpers", () => {
 
       it("merges additional props with plain object type", () => {
         type PlainObject = { foo: string };
-        type Result = ReturnType<
-          typeof enhanceElementWithProps<PlainObject, AdditionalProps>
-        >;
+        type Result = ReturnType<typeof enhanceElementWithProps<PlainObject, AdditionalProps>>;
 
         assertType<Result>({} as PlainObject & AdditionalProps);
         assertType<PlainObject & AdditionalProps>({} as Result);
@@ -745,9 +721,7 @@ describe("components helpers", () => {
 
       it("merges additional props with function type (non-constructor)", () => {
         type FnType = () => void;
-        type Result = ReturnType<
-          typeof enhanceElementWithProps<FnType, AdditionalProps>
-        >;
+        type Result = ReturnType<typeof enhanceElementWithProps<FnType, AdditionalProps>>;
 
         assertType<Result>({} as FnType & AdditionalProps);
         assertType<FnType & AdditionalProps>({} as Result);
@@ -763,9 +737,7 @@ describe("components helpers", () => {
         type VueConstructor = { new (): VueInstance };
         type ExtraProps = { customProp: number };
 
-        type Result = ReturnType<
-          typeof enhanceElementWithProps<VueConstructor, ExtraProps>
-        >;
+        type Result = ReturnType<typeof enhanceElementWithProps<VueConstructor, ExtraProps>>;
         type Expected = VueInstance & ExtraProps;
 
         assertType<Result>({} as Expected);
@@ -789,9 +761,7 @@ describe("components helpers", () => {
         type ComplexConstructor = { new (): ComplexInstance };
         type MergeProps = { injectedProp: boolean };
 
-        type Result = ReturnType<
-          typeof enhanceElementWithProps<ComplexConstructor, MergeProps>
-        >;
+        type Result = ReturnType<typeof enhanceElementWithProps<ComplexConstructor, MergeProps>>;
 
         // Verify all original properties are accessible
         const result = {} as Result;
@@ -808,9 +778,7 @@ describe("components helpers", () => {
 
     describe("edge cases", () => {
       it("handles empty props", () => {
-        type Result = ReturnType<
-          typeof enhanceElementWithProps<MockConstructor, {}>
-        >;
+        type Result = ReturnType<typeof enhanceElementWithProps<MockConstructor, {}>>;
 
         // With empty props, instance is already compatible, returns I directly
         assertType<Result>({} as MockInstance);
@@ -853,8 +821,7 @@ describe("components helpers", () => {
    */
   describe("ExtractComponentProps", () => {
     // Import the type augmentations for HTML elements
-    type ExtractComponentProps<T> =
-      import("./components").ExtractComponentProps<T>;
+    type ExtractComponentProps<T> = import("./components").ExtractComponentProps<T>;
 
     it("extracts props from component constructor", () => {
       type MockComponent = {
@@ -1029,9 +996,7 @@ describe("components helpers", () => {
       assertType<string | undefined>(result.alt);
       assertType<string | number | undefined>(result.width);
       assertType<string | number | undefined>(result.height);
-      assertType<"" | "anonymous" | "use-credentials" | undefined>(
-        result.crossorigin
-      );
+      assertType<"" | "anonymous" | "use-credentials" | undefined>(result.crossorigin);
       assertType<"async" | "auto" | "sync" | undefined>(result.decoding);
       assertType<"lazy" | "eager" | undefined>(result.loading);
 

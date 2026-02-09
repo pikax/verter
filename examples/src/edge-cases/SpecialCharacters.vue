@@ -3,8 +3,8 @@
 
 // Escape sequences in strings
 const backslash = "\\";
-const quote = "\"";
-const singleQuote = '\'';
+const quote = '"';
+const singleQuote = "'";
 const backtick = `\``;
 const newline = "line1\nline2";
 const tab = "col1\tcol2";
@@ -32,7 +32,7 @@ function tag(strings: TemplateStringsArray, ...values: unknown[]) {
 const tagged = tag`Hello ${"world"}!`;
 
 // String with HTML-like content
-const htmlLike = "<div class=\"test\">Content</div>";
+const htmlLike = '<div class="test">Content</div>';
 const scriptLike = "script-tag-content";
 const styleLike = "style-tag-content";
 
@@ -48,9 +48,11 @@ const regexWithQuotes = /["'`]/g;
 const obj = {
   "kebab-case": 1,
   "with spaces": 2,
-  "with\"quotes": 3,
+  'with"quotes': 3,
   123: 4,
-  [Symbol.iterator]: function* () { yield 1; },
+  [Symbol.iterator]: function* () {
+    yield 1;
+  },
 };
 
 // Comments with special characters (already parsed)

@@ -1,9 +1,6 @@
 import { MagicString } from "@vue/compiler-sfc";
 import { parser } from "../../../../parser";
-import {
-  ParsedBlockScript,
-  ParsedBlockTemplate,
-} from "../../../../parser/types";
+import { ParsedBlockScript, ParsedBlockTemplate } from "../../../../parser/types";
 import { processScript } from "../../script";
 
 import { ScriptBlockPlugin } from "../script-block";
@@ -20,7 +17,7 @@ describe("process script plugin template-ref", () => {
 
     pre = "",
     post = "",
-    attrs = ""
+    attrs = "",
   ) {
     const prepend = `${pre}<script ${
       wrapper === false ? "setup" : ""
@@ -30,12 +27,8 @@ describe("process script plugin template-ref", () => {
 
     const s = new MagicString(source);
 
-    const scriptBlock = parsed.blocks.find(
-      (x) => x.type === "script"
-    ) as ParsedBlockScript;
-    const template = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
+    const template = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processScript(scriptBlock.result.items, [TemplateRefPlugin], {
       s,
@@ -44,9 +37,7 @@ describe("process script plugin template-ref", () => {
       block: scriptBlock,
       isAsync: parsed.isAsync,
       templateBindings:
-        template?.result?.items.filter(
-          (x) => x.type === TemplateTypes.Binding
-        ) ?? [],
+        template?.result?.items.filter((x) => x.type === TemplateTypes.Binding) ?? [],
       blockNameResolver: (name) => name,
     });
     return r;
@@ -56,7 +47,7 @@ describe("process script plugin template-ref", () => {
     test("no ref", () => {
       const { result } = parse(`let a = useTemplateRef()`, false, "ts");
       expect(result).toMatchInlineSnapshot(
-        `"<script setup lang="ts">let a = useTemplateRef()</script>"`
+        `"<script setup lang="ts">let a = useTemplateRef()</script>"`,
       );
     });
 
@@ -65,10 +56,10 @@ describe("process script plugin template-ref", () => {
         `let a = useTemplateRef()`,
         false,
         "ts",
-        '<template><div ref="a"/></template>'
+        '<template><div ref="a"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><div ref="a"/></template><script setup lang="ts">let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"a">()</script>"`
+        `"<template><div ref="a"/></template><script setup lang="ts">let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"a">()</script>"`,
       );
     });
 
@@ -77,10 +68,10 @@ describe("process script plugin template-ref", () => {
         `import Comp from './Comp.vue';let a = useTemplateRef()`,
         false,
         "ts",
-        '<template><Comp :ref="a"/></template>'
+        '<template><Comp :ref="a"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><Comp :ref="a"/></template><script setup lang="ts">import Comp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof a>()</script>"`
+        `"<template><Comp :ref="a"/></template><script setup lang="ts">import Comp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof a>()</script>"`,
       );
     });
 
@@ -89,10 +80,10 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';let a = useTemplateRef();const foo = 'test'`,
         false,
         "ts",
-        '<template><my-comp :ref="foo"/></template>'
+        '<template><my-comp :ref="foo"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo>();const foo = 'test'</script>"`
+        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo>();const foo = 'test'</script>"`,
       );
     });
 
@@ -101,10 +92,10 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';let a = useTemplateRef('test');const foo = 'test'`,
         false,
         "ts",
-        '<template><my-comp :ref="foo"/></template>'
+        '<template><my-comp :ref="foo"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo>('test');const foo = 'test'</script>"`
+        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo>('test');const foo = 'test'</script>"`,
       );
     });
 
@@ -113,10 +104,10 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';let a = useTemplateRef('test');const foo = 'testx'`,
         false,
         "ts",
-        '<template><my-comp :ref="foo"/></template>'
+        '<template><my-comp :ref="foo"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<unknown,typeof foo>('test');const foo = 'testx'</script>"`
+        `"<template><my-comp :ref="foo"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<unknown,typeof foo>('test');const foo = 'testx'</script>"`,
       );
     });
     it("multiple MyComp :ref='foo' with string matching", () => {
@@ -124,10 +115,10 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef('test');const foo = 'test';const foox = 'test'`,
         false,
         "ts",
-        '<template><my-comp :ref="foox"/></template>'
+        '<template><my-comp :ref="foox"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foox"/></template><script setup lang="ts">import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foox>('test');const foo = 'test';const foox = 'test'</script>"`
+        `"<template><my-comp :ref="foox"/></template><script setup lang="ts">import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foox>('test');const foo = 'test';const foox = 'test'</script>"`,
       );
     });
     it("multiple MyComp :ref='foo' with string matching but incorrect", () => {
@@ -135,10 +126,10 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef('test');const foo = 'test';const foox = 'testx'`,
         false,
         "ts",
-        '<template><my-comp :ref="foox"/></template>'
+        '<template><my-comp :ref="foox"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foox"/></template><script setup lang="ts">import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef<unknown,typeof foox>('test');const foo = 'test';const foox = 'testx'</script>"`
+        `"<template><my-comp :ref="foox"/></template><script setup lang="ts">import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef<unknown,typeof foox>('test');const foo = 'test';const foox = 'testx'</script>"`,
       );
     });
 
@@ -147,10 +138,10 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';let a = useTemplateRef();const foo = { bar:'test'}`,
         false,
         "ts",
-        '<template><my-comp :ref="foo.bar"/></template>'
+        '<template><my-comp :ref="foo.bar"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar>();const foo = { bar:'test'}</script>"`
+        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar>();const foo = { bar:'test'}</script>"`,
       );
     });
 
@@ -159,10 +150,10 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';let a = useTemplateRef('test');const foo = { bar:'test' as const}`,
         false,
         "ts",
-        '<template><my-comp :ref="foo.bar"/></template>'
+        '<template><my-comp :ref="foo.bar"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar>('test');const foo = { bar:'test' as const}</script>"`
+        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,typeof foo.bar>('test');const foo = { bar:'test' as const}</script>"`,
       );
     });
 
@@ -171,10 +162,10 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';let a = useTemplateRef();const components = {MyComp}`,
         false,
         "ts",
-        '<template><components.MyComp ref="a"/></template>'
+        '<template><components.MyComp ref="a"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><components.MyComp ref="a"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"a">();const components = {MyComp}</script>"`
+        `"<template><components.MyComp ref="a"/></template><script setup lang="ts">import MyComp from './Comp.vue';let a = useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"a">();const components = {MyComp}</script>"`,
       );
     });
 
@@ -183,10 +174,10 @@ describe("process script plugin template-ref", () => {
         `let a = useTemplateRef()`,
         false,
         "ts",
-        '<template><div :ref="el=> name = el"/></template>'
+        '<template><div :ref="el=> name = el"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><div :ref="el=> name = el"/></template><script setup lang="ts">let a = useTemplateRef()</script>"`
+        `"<template><div :ref="el=> name = el"/></template><script setup lang="ts">let a = useTemplateRef()</script>"`,
       );
     });
 
@@ -195,7 +186,7 @@ describe("process script plugin template-ref", () => {
         `let a = useTemplateRef()`,
         false,
         "ts",
-        '<template><component is="div" ref="a"/></template>'
+        '<template><component is="div" ref="a"/></template>',
       );
       // Note: Changed from HTMLDivElement to unknown - may need review
       expect(result).toContain('let a = useTemplateRef<unknown,"a">');
@@ -205,10 +196,10 @@ describe("process script plugin template-ref", () => {
         `let a = useTemplateRef();let foo = 'div'`,
         false,
         "ts",
-        '<template><component :is="foo" ref="a"/></template>'
+        '<template><component :is="foo" ref="a"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><component :is="foo" ref="a"/></template><script setup lang="ts">let a = useTemplateRef<typeof foo,"a">();let foo = 'div'</script>"`
+        `"<template><component :is="foo" ref="a"/></template><script setup lang="ts">let a = useTemplateRef<typeof foo,"a">();let foo = 'div'</script>"`,
       );
     });
     it('component :is="true ? "div" : "span""', () => {
@@ -216,10 +207,10 @@ describe("process script plugin template-ref", () => {
         `let a = useTemplateRef()`,
         false,
         "ts",
-        "<template><component :is=\"true ? 'div' : 'span'\" ref=\"a\"/></template>"
+        "<template><component :is=\"true ? 'div' : 'span'\" ref=\"a\"/></template>",
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><component :is="true ? 'div' : 'span'" ref="a"/></template><script setup lang="ts">let a = useTemplateRef<HTMLDivElement|HTMLSpanElement,"a">()</script>"`
+        `"<template><component :is="true ? 'div' : 'span'" ref="a"/></template><script setup lang="ts">let a = useTemplateRef<HTMLDivElement|HTMLSpanElement,"a">()</script>"`,
       );
     });
 
@@ -228,10 +219,10 @@ describe("process script plugin template-ref", () => {
         `let a = useTemplateRef<HTMLDivElement>('foo')`,
         false,
         "ts",
-        '<template><div :ref="a"/></template>'
+        '<template><div :ref="a"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><div :ref="a"/></template><script setup lang="ts">let a = useTemplateRef<HTMLDivElement>('foo')</script>"`
+        `"<template><div :ref="a"/></template><script setup lang="ts">let a = useTemplateRef<HTMLDivElement>('foo')</script>"`,
       );
     });
   });
@@ -247,7 +238,7 @@ describe("process script plugin template-ref", () => {
         `let a = useTemplateRef()`,
         false,
         "js",
-        '<template><div ref="a"/></template>'
+        '<template><div ref="a"/></template>',
       );
       // JS no longer uses JSDoc type casting
       expect(result).toContain(`let a = useTemplateRef()`);
@@ -258,7 +249,7 @@ describe("process script plugin template-ref", () => {
         `import Comp from './Comp.vue';let a = useTemplateRef()`,
         false,
         "js",
-        '<template><Comp :ref="a"/></template>'
+        '<template><Comp :ref="a"/></template>',
       );
       // JS no longer uses JSDoc type casting
       expect(result).toContain(`let a = useTemplateRef()`);
@@ -269,7 +260,7 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';let a = useTemplateRef();const foo = 'test'`,
         false,
         "js",
-        '<template><my-comp :ref="foo"/></template>'
+        '<template><my-comp :ref="foo"/></template>',
       );
       // JS no longer uses JSDoc type casting
       expect(result).toContain(`let a = useTemplateRef()`);
@@ -280,7 +271,7 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';let a = useTemplateRef('test');const foo = 'test'`,
         false,
         "js",
-        '<template><my-comp :ref="foo"/></template>'
+        '<template><my-comp :ref="foo"/></template>',
       );
       // JS no longer uses JSDoc type casting
       expect(result).toContain(`let a = useTemplateRef('test')`);
@@ -291,7 +282,7 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';let a = useTemplateRef('test');const foo = 'testx'`,
         false,
         "js",
-        '<template><my-comp :ref="foo"/></template>'
+        '<template><my-comp :ref="foo"/></template>',
       );
       // JS no longer uses JSDoc type casting
       expect(result).toContain(`let a = useTemplateRef('test')`);
@@ -301,7 +292,7 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef('test');const foo = 'test';const foox = 'test'`,
         false,
         "js",
-        '<template><my-comp :ref="foox"/></template>'
+        '<template><my-comp :ref="foox"/></template>',
       );
       // JS no longer uses JSDoc type casting
       expect(result).toContain(`let a = useTemplateRef('test')`);
@@ -311,7 +302,7 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';import Comp from './Comp.vue'; let a = useTemplateRef('test');const foo = 'test';const foox = 'testx'`,
         false,
         "js",
-        '<template><my-comp :ref="foox"/></template>'
+        '<template><my-comp :ref="foox"/></template>',
       );
       // JS no longer uses JSDoc type casting
       expect(result).toContain(`let a = useTemplateRef('test')`);
@@ -322,7 +313,7 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';let a = useTemplateRef();const foo = { bar:'test'}`,
         false,
         "js",
-        '<template><my-comp :ref="foo.bar"/></template>'
+        '<template><my-comp :ref="foo.bar"/></template>',
       );
       // JS no longer uses JSDoc type casting
       expect(result).toContain(`let a = useTemplateRef()`);
@@ -333,10 +324,10 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';let a = useTemplateRef('test');const foo = { bar:'test' as const}`,
         false,
         "js",
-        '<template><my-comp :ref="foo.bar"/></template>'
+        '<template><my-comp :ref="foo.bar"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="js">import MyComp from './Comp.vue';let a = useTemplateRef('test');const foo = { bar:'test' as const}</script>"`
+        `"<template><my-comp :ref="foo.bar"/></template><script setup lang="js">import MyComp from './Comp.vue';let a = useTemplateRef('test');const foo = { bar:'test' as const}</script>"`,
       );
     });
 
@@ -345,7 +336,7 @@ describe("process script plugin template-ref", () => {
         `import MyComp from './Comp.vue';let a = useTemplateRef();const components = {MyComp}`,
         false,
         "js",
-        '<template><components.MyComp ref="a"/></template>'
+        '<template><components.MyComp ref="a"/></template>',
       );
       // JS no longer uses JSDoc type casting
       expect(result).toContain(`let a = useTemplateRef()`);
@@ -356,7 +347,7 @@ describe("process script plugin template-ref", () => {
         `let a = useTemplateRef()`,
         false,
         "js",
-        '<template><div :ref="el=> name = el"/></template>'
+        '<template><div :ref="el=> name = el"/></template>',
       );
       expect(result).toContain(`let a = useTemplateRef()`);
     });
@@ -366,7 +357,7 @@ describe("process script plugin template-ref", () => {
         `let a = useTemplateRef()`,
         false,
         "js",
-        '<template><component is="div" ref="a"/></template>'
+        '<template><component is="div" ref="a"/></template>',
       );
       // JS no longer uses JSDoc type casting
       expect(result).toContain(`let a = useTemplateRef()`);
@@ -376,7 +367,7 @@ describe("process script plugin template-ref", () => {
         `let a = useTemplateRef();let foo = 'div'`,
         false,
         "js",
-        '<template><component :is="foo" ref="a"/></template>'
+        '<template><component :is="foo" ref="a"/></template>',
       );
       // JS no longer uses JSDoc type casting
       expect(result).toContain(`let a = useTemplateRef()`);
@@ -386,7 +377,7 @@ describe("process script plugin template-ref", () => {
         `let a = useTemplateRef()`,
         false,
         "js",
-        "<template><component :is=\"true ? 'div' : 'span'\" ref=\"a\"/></template>"
+        "<template><component :is=\"true ? 'div' : 'span'\" ref=\"a\"/></template>",
       );
       // JS no longer uses JSDoc type casting
       expect(result).toContain(`let a = useTemplateRef()`);
@@ -397,10 +388,10 @@ describe("process script plugin template-ref", () => {
         `let a = useTemplateRef<HTMLDivElement>('foo')`,
         false,
         "js",
-        '<template><div :ref="a"/></template>'
+        '<template><div :ref="a"/></template>',
       );
       expect(result).toMatchInlineSnapshot(
-        `"<template><div :ref="a"/></template><script setup lang="js">let a = useTemplateRef<HTMLDivElement>('foo')</script>"`
+        `"<template><div :ref="a"/></template><script setup lang="js">let a = useTemplateRef<HTMLDivElement>('foo')</script>"`,
       );
     });
   });
@@ -417,7 +408,7 @@ describe("process script plugin template-ref", () => {
           `import { defineComponent, useTemplateRef } from 'vue'; export default defineComponent({ setup() { const myRef = useTemplateRef('myRef'); return { myRef }; } });`,
           "",
           "ts",
-          '<template><div ref="myRef"></div></template>'
+          '<template><div ref="myRef"></div></template>',
         );
 
         // Should add type parameters to useTemplateRef
@@ -430,7 +421,7 @@ describe("process script plugin template-ref", () => {
           `import { defineComponent, useTemplateRef } from 'vue'; import MyComp from './MyComp.vue'; export default defineComponent({ setup() { const compRef = useTemplateRef('compRef'); return { compRef }; } });`,
           "",
           "ts",
-          '<template><MyComp ref="compRef"></MyComp></template>'
+          '<template><MyComp ref="compRef"></MyComp></template>',
         );
 
         expect(result).toContain("useTemplateRef<");
@@ -442,7 +433,7 @@ describe("process script plugin template-ref", () => {
           `import { defineComponent, useTemplateRef } from 'vue'; export default defineComponent({ setup() { const el = useTemplateRef(); return { el }; } });`,
           "",
           "ts",
-          '<template><div :ref="el"></div></template>'
+          '<template><div :ref="el"></div></template>',
         );
 
         expect(result).toContain("useTemplateRef<");
@@ -454,7 +445,7 @@ describe("process script plugin template-ref", () => {
           `import { defineComponent, useTemplateRef } from 'vue'; export default defineComponent({ setup() { const myRef = useTemplateRef<HTMLInputElement>('myRef'); return { myRef }; } });`,
           "",
           "ts",
-          '<template><div ref="myRef"></div></template>'
+          '<template><div ref="myRef"></div></template>',
         );
 
         // Should NOT add additional type parameters since explicit types are provided
@@ -466,7 +457,7 @@ describe("process script plugin template-ref", () => {
           `import { defineComponent, useTemplateRef } from 'vue'; export default defineComponent({ setup: () => { const myRef = useTemplateRef('myRef'); return { myRef }; } });`,
           "",
           "ts",
-          '<template><div ref="myRef"></div></template>'
+          '<template><div ref="myRef"></div></template>',
         );
 
         expect(result).toContain("useTemplateRef<");
@@ -478,7 +469,7 @@ describe("process script plugin template-ref", () => {
           `import { useTemplateRef } from 'vue'; export default { setup() { const myRef = useTemplateRef('myRef'); return { myRef }; } };`,
           "",
           "ts",
-          '<template><div ref="myRef"></div></template>'
+          '<template><div ref="myRef"></div></template>',
         );
 
         expect(result).toContain("useTemplateRef<");
@@ -490,7 +481,7 @@ describe("process script plugin template-ref", () => {
           `import { useTemplateRef } from 'vue'; export default myDefineComponent({ setup() { const myRef = useTemplateRef('myRef'); return { myRef }; } });`,
           "",
           "ts",
-          '<template><div ref="myRef"></div></template>'
+          '<template><div ref="myRef"></div></template>',
         );
 
         expect(result).toContain("useTemplateRef<");
@@ -511,10 +502,12 @@ describe("process script plugin template-ref", () => {
           `let itemRefs = useTemplateRef('itemRef')`,
           false,
           "ts",
-          '<template><div v-for="item in items" :key="item" ref="itemRef"/></template>'
+          '<template><div v-for="item in items" :key="item" ref="itemRef"/></template>',
         );
         // When ref is inside v-for, it should be an array type
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>[],"itemRef">(\'itemRef\')');
+        expect(result).toContain(
+          "useTemplateRef<ReturnType<typeof ___VERTER___Comp10>[],\"itemRef\">('itemRef')",
+        );
       });
 
       it("ref inside v-for with component should be an array", () => {
@@ -522,10 +515,12 @@ describe("process script plugin template-ref", () => {
           `import MyComp from './MyComp.vue'; let itemRefs = useTemplateRef('itemRef')`,
           false,
           "ts",
-          '<template><MyComp v-for="item in items" :key="item" ref="itemRef"/></template>'
+          '<template><MyComp v-for="item in items" :key="item" ref="itemRef"/></template>',
         );
         // Component refs inside v-for should also be arrays
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>[],"itemRef">(\'itemRef\')');
+        expect(result).toContain(
+          "useTemplateRef<ReturnType<typeof ___VERTER___Comp10>[],\"itemRef\">('itemRef')",
+        );
       });
 
       it("ref inside nested v-for should be an array", () => {
@@ -533,10 +528,12 @@ describe("process script plugin template-ref", () => {
           `let cellRefs = useTemplateRef('cellRef')`,
           false,
           "ts",
-          '<template><div v-for="row in rows" :key="row"><span v-for="cell in row.cells" :key="cell" ref="cellRef"/></div></template>'
+          '<template><div v-for="row in rows" :key="row"><span v-for="cell in row.cells" :key="cell" ref="cellRef"/></div></template>',
         );
         // Nested v-for ref should be an array
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp46>[],"cellRef">(\'cellRef\')');
+        expect(result).toContain(
+          "useTemplateRef<ReturnType<typeof ___VERTER___Comp46>[],\"cellRef\">('cellRef')",
+        );
       });
 
       it("ref inside child of v-for element should be an array", () => {
@@ -544,10 +541,12 @@ describe("process script plugin template-ref", () => {
           `let childRefs = useTemplateRef('childRef')`,
           false,
           "ts",
-          '<template><div v-for="item in items" :key="item"><span ref="childRef"/></div></template>'
+          '<template><div v-for="item in items" :key="item"><span ref="childRef"/></div></template>',
         );
         // Ref on child element inside v-for parent should be an array
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp49>[],"childRef">(\'childRef\')');
+        expect(result).toContain(
+          "useTemplateRef<ReturnType<typeof ___VERTER___Comp49>[],\"childRef\">('childRef')",
+        );
       });
 
       it("ref inside grandchild of v-for element should be an array", () => {
@@ -555,10 +554,12 @@ describe("process script plugin template-ref", () => {
           `let grandchildRefs = useTemplateRef('grandchildRef')`,
           false,
           "ts",
-          '<template><div v-for="item in items" :key="item"><div><span ref="grandchildRef"/></div></div></template>'
+          '<template><div v-for="item in items" :key="item"><div><span ref="grandchildRef"/></div></div></template>',
         );
         // Ref on grandchild element inside v-for grandparent should be an array
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp54>[],"grandchildRef">(\'grandchildRef\')');
+        expect(result).toContain(
+          "useTemplateRef<ReturnType<typeof ___VERTER___Comp54>[],\"grandchildRef\">('grandchildRef')",
+        );
       });
 
       it("dynamic ref inside v-for should be an array", () => {
@@ -566,10 +567,12 @@ describe("process script plugin template-ref", () => {
           `let itemRefs = useTemplateRef()`,
           false,
           "ts",
-          '<template><div v-for="item in items" :key="item" :ref="itemRefs"/></template>'
+          '<template><div v-for="item in items" :key="item" :ref="itemRefs"/></template>',
         );
         // Dynamic ref binding inside v-for should also be an array
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>[],typeof itemRefs>()');
+        expect(result).toContain(
+          "useTemplateRef<ReturnType<typeof ___VERTER___Comp10>[],typeof itemRefs>()",
+        );
       });
 
       it("multiple refs with one inside v-for", () => {
@@ -577,23 +580,27 @@ describe("process script plugin template-ref", () => {
           `let singleRef = useTemplateRef('single'); let arrayRefs = useTemplateRef('arrayRef')`,
           false,
           "ts",
-          '<template><div ref="single"/><div v-for="item in items" :key="item" ref="arrayRef"/></template>'
+          '<template><div ref="single"/><div v-for="item in items" :key="item" ref="arrayRef"/></template>',
         );
         // Single ref should not be array, v-for ref should be array, both have union of ref names
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"single"|"arrayRef">(\'single\')');
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp29>[],"single"|"arrayRef">(\'arrayRef\')');
+        expect(result).toContain(
+          'useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"single"|"arrayRef">(\'single\')',
+        );
+        expect(result).toContain(
+          'useTemplateRef<ReturnType<typeof ___VERTER___Comp29>[],"single"|"arrayRef">(\'arrayRef\')',
+        );
       });
     });
 
     describe("js", () => {
-      // Note: JS currently doesn't add type parameters, so array detection 
+      // Note: JS currently doesn't add type parameters, so array detection
       // would only be relevant when JSDoc casting is re-enabled
       it("ref inside v-for - js does not add type parameters", () => {
         const { result } = parse(
           `let itemRefs = useTemplateRef('itemRef')`,
           false,
           "js",
-          '<template><div v-for="item in items" :key="item" ref="itemRef"/></template>'
+          '<template><div v-for="item in items" :key="item" ref="itemRef"/></template>',
         );
         // JS version doesn't add type parameters currently
         expect(result).toContain("useTemplateRef('itemRef')");
@@ -612,11 +619,15 @@ describe("process script plugin template-ref", () => {
           `let inputRef = useTemplateRef('input'); let buttonRef = useTemplateRef('button')`,
           false,
           "ts",
-          '<template><input ref="input"/><button ref="button"/></template>'
+          '<template><input ref="input"/><button ref="button"/></template>',
         );
         // All refs are collected as union types
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"input"|"button">(\'input\')');
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp30>,"input"|"button">(\'button\')');
+        expect(result).toContain(
+          'useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"input"|"button">(\'input\')',
+        );
+        expect(result).toContain(
+          'useTemplateRef<ReturnType<typeof ___VERTER___Comp30>,"input"|"button">(\'button\')',
+        );
       });
 
       it("multiple refs on same element type", () => {
@@ -624,11 +635,15 @@ describe("process script plugin template-ref", () => {
           `let first = useTemplateRef('first'); let second = useTemplateRef('second')`,
           false,
           "ts",
-          '<template><div ref="first"/><div ref="second"/></template>'
+          '<template><div ref="first"/><div ref="second"/></template>',
         );
         // All refs are collected as union types
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"first"|"second">(\'first\')');
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp28>,"first"|"second">(\'second\')');
+        expect(result).toContain(
+          'useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"first"|"second">(\'first\')',
+        );
+        expect(result).toContain(
+          'useTemplateRef<ReturnType<typeof ___VERTER___Comp28>,"first"|"second">(\'second\')',
+        );
       });
 
       it("multiple refs with one unmatched", () => {
@@ -636,7 +651,7 @@ describe("process script plugin template-ref", () => {
           `let matched = useTemplateRef('matched'); let unmatched = useTemplateRef('notInTemplate')`,
           false,
           "ts",
-          '<template><div ref="matched"/></template>'
+          '<template><div ref="matched"/></template>',
         );
         expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"matched">');
         expect(result).toContain('useTemplateRef<unknown,"matched">');
@@ -647,7 +662,7 @@ describe("process script plugin template-ref", () => {
           `let refA = useTemplateRef(); let refB = useTemplateRef()`,
           false,
           "ts",
-          '<template><div :ref="refA"/><span :ref="refB"/></template>'
+          '<template><div :ref="refA"/><span :ref="refB"/></template>',
         );
         expect(result).toContain("typeof refA");
         expect(result).toContain("typeof refB");
@@ -665,9 +680,9 @@ describe("process script plugin template-ref", () => {
           `let nested = useTemplateRef('nested')`,
           false,
           "ts",
-          '<template><div><div><div><span ref="nested"/></div></div></div></template>'
+          '<template><div><div><div><span ref="nested"/></div></div></div></template>',
         );
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp');
+        expect(result).toContain("useTemplateRef<ReturnType<typeof ___VERTER___Comp");
         expect(result).toContain(',"nested">');
       });
 
@@ -676,11 +691,15 @@ describe("process script plugin template-ref", () => {
           `let outer = useTemplateRef('outer'); let inner = useTemplateRef('inner')`,
           false,
           "ts",
-          '<template><div ref="outer"><span ref="inner"/></div></template>'
+          '<template><div ref="outer"><span ref="inner"/></div></template>',
         );
         // All refs are collected as union types
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"outer"|"inner">(\'outer\')');
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp27>,"outer"|"inner">(\'inner\')');
+        expect(result).toContain(
+          'useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"outer"|"inner">(\'outer\')',
+        );
+        expect(result).toContain(
+          'useTemplateRef<ReturnType<typeof ___VERTER___Comp27>,"outer"|"inner">(\'inner\')',
+        );
       });
 
       it("ref inside slot content", () => {
@@ -688,9 +707,9 @@ describe("process script plugin template-ref", () => {
           `import MyComp from './MyComp.vue'; let slotRef = useTemplateRef('slotRef')`,
           false,
           "ts",
-          '<template><MyComp><div ref="slotRef"/></MyComp></template>'
+          '<template><MyComp><div ref="slotRef"/></MyComp></template>',
         );
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp');
+        expect(result).toContain("useTemplateRef<ReturnType<typeof ___VERTER___Comp");
         expect(result).toContain(',"slotRef">');
       });
     });
@@ -706,9 +725,11 @@ describe("process script plugin template-ref", () => {
           `let conditional = useTemplateRef('conditional')`,
           false,
           "ts",
-          '<template><div v-if="show" ref="conditional"/></template>'
+          '<template><div v-if="show" ref="conditional"/></template>',
         );
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"conditional">');
+        expect(result).toContain(
+          'useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"conditional">',
+        );
       });
 
       it("ref on v-else element", () => {
@@ -716,9 +737,9 @@ describe("process script plugin template-ref", () => {
           `let elseRef = useTemplateRef('elseRef')`,
           false,
           "ts",
-          '<template><div v-if="show"/><span v-else ref="elseRef"/></template>'
+          '<template><div v-if="show"/><span v-else ref="elseRef"/></template>',
         );
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp');
+        expect(result).toContain("useTemplateRef<ReturnType<typeof ___VERTER___Comp");
         expect(result).toContain(',"elseRef">');
       });
 
@@ -727,7 +748,7 @@ describe("process script plugin template-ref", () => {
           `let shown = useTemplateRef('shown')`,
           false,
           "ts",
-          '<template><div v-show="visible" ref="shown"/></template>'
+          '<template><div v-show="visible" ref="shown"/></template>',
         );
         expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"shown">');
       });
@@ -737,10 +758,12 @@ describe("process script plugin template-ref", () => {
           `let shared = useTemplateRef('shared')`,
           false,
           "ts",
-          '<template><div v-if="condition" ref="shared"/><span v-else ref="shared"/></template>'
+          '<template><div v-if="condition" ref="shared"/><span v-else ref="shared"/></template>',
         );
         // Should include both possible types with duplicated ref name in union
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>|ReturnType<typeof ___VERTER___Comp46>,"shared"|"shared">(\'shared\')');
+        expect(result).toContain(
+          'useTemplateRef<ReturnType<typeof ___VERTER___Comp10>|ReturnType<typeof ___VERTER___Comp46>,"shared"|"shared">(\'shared\')',
+        );
       });
     });
   });
@@ -755,9 +778,9 @@ describe("process script plugin template-ref", () => {
           `let teleported = useTemplateRef('teleported')`,
           false,
           "ts",
-          '<template><Teleport to="body"><div ref="teleported"/></Teleport></template>'
+          '<template><Teleport to="body"><div ref="teleported"/></Teleport></template>',
         );
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp');
+        expect(result).toContain("useTemplateRef<ReturnType<typeof ___VERTER___Comp");
         expect(result).toContain(',"teleported">');
       });
 
@@ -766,9 +789,9 @@ describe("process script plugin template-ref", () => {
           `let fallback = useTemplateRef('fallback')`,
           false,
           "ts",
-          '<template><Suspense><template #fallback><div ref="fallback"/></template></Suspense></template>'
+          '<template><Suspense><template #fallback><div ref="fallback"/></template></Suspense></template>',
         );
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp');
+        expect(result).toContain("useTemplateRef<ReturnType<typeof ___VERTER___Comp");
         expect(result).toContain(',"fallback">');
       });
 
@@ -777,9 +800,9 @@ describe("process script plugin template-ref", () => {
           `import MyComp from './MyComp.vue'; let kept = useTemplateRef('kept')`,
           false,
           "ts",
-          '<template><KeepAlive><MyComp ref="kept"/></KeepAlive></template>'
+          '<template><KeepAlive><MyComp ref="kept"/></KeepAlive></template>',
         );
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp');
+        expect(result).toContain("useTemplateRef<ReturnType<typeof ___VERTER___Comp");
         expect(result).toContain(',"kept">');
       });
     });
@@ -795,7 +818,7 @@ describe("process script plugin template-ref", () => {
           `let empty = useTemplateRef('')`,
           false,
           "ts",
-          '<template><div ref="test"/></template>'
+          '<template><div ref="test"/></template>',
         );
         // Empty string should not match any ref
         expect(result).toContain("useTemplateRef<");
@@ -806,7 +829,7 @@ describe("process script plugin template-ref", () => {
           `let numRef = useTemplateRef('123')`,
           false,
           "ts",
-          '<template><div ref="123"/></template>'
+          '<template><div ref="123"/></template>',
         );
         expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"123">');
       });
@@ -816,7 +839,7 @@ describe("process script plugin template-ref", () => {
           `let special = useTemplateRef('my-ref')`,
           false,
           "ts",
-          '<template><div ref="my-ref"/></template>'
+          '<template><div ref="my-ref"/></template>',
         );
         expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"my-ref">');
       });
@@ -826,10 +849,12 @@ describe("process script plugin template-ref", () => {
           `let duplicate = useTemplateRef('dup')`,
           false,
           "ts",
-          '<template><div ref="dup"/><span ref="dup"/></template>'
+          '<template><div ref="dup"/><span ref="dup"/></template>',
         );
         // Should include all possible types with duplicated ref name in union
-        expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>|ReturnType<typeof ___VERTER___Comp26>,"dup"|"dup">(\'dup\')');
+        expect(result).toContain(
+          'useTemplateRef<ReturnType<typeof ___VERTER___Comp10>|ReturnType<typeof ___VERTER___Comp26>,"dup"|"dup">(\'dup\')',
+        );
       });
 
       it("ref on root element", () => {
@@ -837,7 +862,7 @@ describe("process script plugin template-ref", () => {
           `let root = useTemplateRef('root')`,
           false,
           "ts",
-          '<template><div ref="root"/></template>'
+          '<template><div ref="root"/></template>',
         );
         expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"root">');
       });
@@ -847,7 +872,7 @@ describe("process script plugin template-ref", () => {
           `const refName = 'myDiv'; let myRef = useTemplateRef(refName)`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         // Should handle variable reference
         expect(result).toContain("useTemplateRef<");
@@ -865,7 +890,7 @@ describe("process script plugin template-ref", () => {
           `import MyComponent from './MyComponent.vue'; let ref = useTemplateRef('ref')`,
           false,
           "ts",
-          '<template><MyComponent ref="ref"/></template>'
+          '<template><MyComponent ref="ref"/></template>',
         );
         expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"ref">');
       });
@@ -875,7 +900,7 @@ describe("process script plugin template-ref", () => {
           `import MyComponent from './MyComponent.vue'; let ref = useTemplateRef('ref')`,
           false,
           "ts",
-          '<template><my-component ref="ref"/></template>'
+          '<template><my-component ref="ref"/></template>',
         );
         expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"ref">');
       });
@@ -885,7 +910,7 @@ describe("process script plugin template-ref", () => {
           `import myComponent from './MyComponent.vue'; let ref = useTemplateRef('ref')`,
           false,
           "ts",
-          '<template><my-component ref="ref"/></template>'
+          '<template><my-component ref="ref"/></template>',
         );
         expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"ref">');
       });
@@ -895,7 +920,7 @@ describe("process script plugin template-ref", () => {
           `const LocalComp = { template: '<div/>' }; let ref = useTemplateRef('ref')`,
           false,
           "ts",
-          '<template><LocalComp ref="ref"/></template>'
+          '<template><LocalComp ref="ref"/></template>',
         );
         expect(result).toContain('useTemplateRef<ReturnType<typeof ___VERTER___Comp10>,"ref">');
       });
@@ -914,7 +939,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("ref<ReturnType<typeof ___VERTER___Comp10>|null>()");
       });
@@ -924,7 +949,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref(null)`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("ref<ReturnType<typeof ___VERTER___Comp10>|null>(null)");
       });
@@ -934,7 +959,7 @@ describe("process script plugin template-ref", () => {
           `const notARef = ref()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         // Should not add type parameters since variable name doesn't match
         expect(result).toContain("const notARef = ref()");
@@ -946,7 +971,7 @@ describe("process script plugin template-ref", () => {
           `import MyComp from './MyComp.vue'; const compRef = ref()`,
           false,
           "ts",
-          '<template><MyComp ref="compRef"/></template>'
+          '<template><MyComp ref="compRef"/></template>',
         );
         expect(result).toContain("ref<ReturnType<typeof ___VERTER___Comp10>|null>()");
       });
@@ -956,7 +981,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref<HTMLDivElement | null>(null)`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         // Should not modify if explicit type parameters are present
         expect(result).toContain("ref<HTMLDivElement | null>(null)");
@@ -967,7 +992,7 @@ describe("process script plugin template-ref", () => {
           `const itemRef = ref()`,
           false,
           "ts",
-          '<template><div v-for="item in items" :key="item" ref="itemRef"/></template>'
+          '<template><div v-for="item in items" :key="item" ref="itemRef"/></template>',
         );
         expect(result).toContain("ref<ReturnType<typeof ___VERTER___Comp10>[]|null>()");
       });
@@ -977,7 +1002,7 @@ describe("process script plugin template-ref", () => {
           `const myElement = ref()`,
           false,
           "ts",
-          '<template><div ref="myElement"/></template>'
+          '<template><div ref="myElement"/></template>',
         );
         expect(result).toContain("ref<ReturnType<typeof ___VERTER___Comp10>|null>()");
       });
@@ -987,7 +1012,7 @@ describe("process script plugin template-ref", () => {
           `const divRef = ref(); const spanRef = ref()`,
           false,
           "ts",
-          '<template><div ref="divRef"/><span ref="spanRef"/></template>'
+          '<template><div ref="divRef"/><span ref="spanRef"/></template>',
         );
         expect(result).toContain("divRef = ref<ReturnType<typeof ___VERTER___Comp10>|null>()");
         expect(result).toContain("spanRef = ref<ReturnType<typeof ___VERTER___Comp29>|null>()");
@@ -998,7 +1023,7 @@ describe("process script plugin template-ref", () => {
           `const nested = ref()`,
           false,
           "ts",
-          '<template><div><span><input ref="nested"/></span></div></template>'
+          '<template><div><span><input ref="nested"/></span></div></template>',
         );
         expect(result).toContain("ref<ReturnType<typeof ___VERTER___Comp");
         expect(result).toContain("|null>()");
@@ -1011,7 +1036,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref()`,
           false,
           "js",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         // JS currently doesn't add type annotations for ref()
         expect(result).toContain("const myDiv = ref()");
@@ -1022,7 +1047,7 @@ describe("process script plugin template-ref", () => {
           `const notARef = ref()`,
           false,
           "js",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         // Should not add type annotation
         expect(result).toContain("const notARef = ref()");
@@ -1041,7 +1066,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref<HTMLElement>()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref<HTMLElement>()");
         expect(result).not.toContain("ref<ReturnType");
@@ -1052,7 +1077,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref<HTMLDivElement | null>(null)`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("ref<HTMLDivElement | null>(null)");
         expect(result).not.toContain("ReturnType");
@@ -1063,7 +1088,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref<InstanceType<typeof MyComponent> | null>()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("ref<InstanceType<typeof MyComponent> | null>()");
         expect(result).not.toContain("___VERTER___");
@@ -1074,7 +1099,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref<any>()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref<any>()");
         expect(result).not.toContain("ReturnType");
@@ -1085,7 +1110,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref<unknown>(null)`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("ref<unknown>(null)");
         expect(result).not.toContain("___VERTER___");
@@ -1104,7 +1129,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref('initial')`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref('initial')");
         expect(result).not.toContain("ref<");
@@ -1115,7 +1140,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref(0)`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref(0)");
         expect(result).not.toContain("ref<");
@@ -1126,7 +1151,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref(false)`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref(false)");
         expect(result).not.toContain("ref<");
@@ -1137,7 +1162,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref({})`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref({})");
         expect(result).not.toContain("ref<");
@@ -1148,7 +1173,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref([])`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref([])");
         expect(result).not.toContain("ref<");
@@ -1159,7 +1184,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref(undefined)`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref(undefined)");
         expect(result).not.toContain("ref<");
@@ -1170,7 +1195,7 @@ describe("process script plugin template-ref", () => {
           `const initial = null; const myDiv = ref(initial)`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref(initial)");
         expect(result).not.toContain("ref<");
@@ -1181,7 +1206,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref(getInitialValue())`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref(getInitialValue())");
         expect(result).not.toContain("ref<");
@@ -1192,7 +1217,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref(null, {})`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref(null, {})");
         expect(result).not.toContain("ref<");
@@ -1203,7 +1228,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref(null)`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("ref<ReturnType<typeof ___VERTER___Comp10>|null>(null)");
       });
@@ -1213,7 +1238,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("ref<ReturnType<typeof ___VERTER___Comp10>|null>()");
       });
@@ -1225,7 +1250,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref('initial')`,
           false,
           "js",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref('initial')");
         expect(result).not.toContain("@type");
@@ -1236,7 +1261,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref({})`,
           false,
           "js",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDiv = ref({})");
         expect(result).not.toContain("@type");
@@ -1255,7 +1280,7 @@ describe("process script plugin template-ref", () => {
           `const my = ref()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const my = ref()");
         expect(result).not.toContain("ref<");
@@ -1266,7 +1291,7 @@ describe("process script plugin template-ref", () => {
           `const Div = ref()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const Div = ref()");
         expect(result).not.toContain("ref<");
@@ -1277,7 +1302,7 @@ describe("process script plugin template-ref", () => {
           `const myDivElement = ref()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const myDivElement = ref()");
         expect(result).not.toContain("ref<");
@@ -1288,7 +1313,7 @@ describe("process script plugin template-ref", () => {
           `const div = ref()`,
           false,
           "ts",
-          '<template><div ref="divRef"/></template>'
+          '<template><div ref="divRef"/></template>',
         );
         expect(result).toContain("const div = ref()");
         expect(result).not.toContain("ref<");
@@ -1299,7 +1324,7 @@ describe("process script plugin template-ref", () => {
           `const mydiv = ref()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const mydiv = ref()");
         expect(result).not.toContain("ref<");
@@ -1310,7 +1335,7 @@ describe("process script plugin template-ref", () => {
           `const MYDIV = ref()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const MYDIV = ref()");
         expect(result).not.toContain("ref<");
@@ -1321,7 +1346,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("ref<ReturnType<typeof ___VERTER___Comp10>|null>()");
       });
@@ -1331,7 +1356,7 @@ describe("process script plugin template-ref", () => {
           `console.log(ref())`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("console.log(ref())");
         expect(result).not.toContain("ref<");
@@ -1342,7 +1367,7 @@ describe("process script plugin template-ref", () => {
           `const obj = { myDiv: ref() }`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const obj = { myDiv: ref() }");
         expect(result).not.toContain("ref<");
@@ -1353,7 +1378,7 @@ describe("process script plugin template-ref", () => {
           `const arr = [ref()]`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("const arr = [ref()]");
         expect(result).not.toContain("ref<");
@@ -1364,7 +1389,7 @@ describe("process script plugin template-ref", () => {
           `function getRef() { return ref() }`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("return ref()");
         expect(result).not.toContain("ref<");
@@ -1375,7 +1400,7 @@ describe("process script plugin template-ref", () => {
           `someFunction(ref())`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         expect(result).toContain("someFunction(ref())");
         expect(result).not.toContain("ref<");
@@ -1386,7 +1411,7 @@ describe("process script plugin template-ref", () => {
           `const myDiv = ref(); const myDivRef = ref(); const notMyDiv = ref()`,
           false,
           "ts",
-          '<template><div ref="myDiv"/></template>'
+          '<template><div ref="myDiv"/></template>',
         );
         // Only myDiv should be modified
         expect(result).toContain("myDiv = ref<ReturnType<typeof ___VERTER___Comp10>|null>()");

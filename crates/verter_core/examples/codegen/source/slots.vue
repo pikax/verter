@@ -7,5 +7,5 @@
 </template>
 
 <script setup>
-import MyComponent from './MyComponent.vue'
+import MyComponent from "./MyComponent.vue";
 </script>

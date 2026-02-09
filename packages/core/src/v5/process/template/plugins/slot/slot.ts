@@ -5,16 +5,8 @@ import {
   NodeTypes,
   SimpleExpressionNode,
 } from "@vue/compiler-core";
-import {
-  declareTemplatePlugin,
-  TemplatePlugin,
-  TemplateContext,
-} from "../../template";
-import {
-  TemplateProp,
-  TemplateTypes,
-  TemplateRenderSlot,
-} from "../../../../parser/template/types";
+import { declareTemplatePlugin, TemplatePlugin, TemplateContext } from "../../template";
+import { TemplateProp, TemplateTypes, TemplateRenderSlot } from "../../../../parser/template/types";
 import { MagicString } from "@vue/compiler-sfc";
 import { createHelperImport } from "../../../utils";
 import { AvailableExports } from "@verter/types/string";
@@ -51,7 +43,7 @@ export const SlotPlugin = declareTemplatePlugin({
     slot: TemplateRenderSlot,
     s: MagicString,
     parent: ElementNode,
-    ctx: TemplateContext
+    ctx: TemplateContext,
   ) {
     if (this.processedParent.has(parent)) return;
     const slotInstance = ctx.retrieveAccessor("slotInstance");
@@ -98,7 +90,7 @@ export const SlotPlugin = declareTemplatePlugin({
           0,
           parent.children.length === 0
             ? endTagPos - parent.loc.start.offset
-            : children[0].loc.start.offset - parent.loc.start.offset
+            : children[0].loc.start.offset - parent.loc.start.offset,
         )
         .lastIndexOf(">");
     let pos = -1;
@@ -142,7 +134,7 @@ export const SlotPlugin = declareTemplatePlugin({
           // direction: "right",
           condition: slot.condition,
         },
-        s
+        s,
       );
     }
 
@@ -200,11 +192,7 @@ const $slots = PatchSlots(c.$slots);
       // <slot>
 
       // rename tag to be renderSlot
-      s.overwrite(
-        node.loc.start.offset + 1,
-        node.loc.start.offset + 5,
-        slotVarName
-      );
+      s.overwrite(node.loc.start.offset + 1, node.loc.start.offset + 5, slotVarName);
       // rename end tag
       if (!node.isSelfClosing) {
         const nameIndex =
@@ -237,47 +225,24 @@ const $slots = PatchSlots(c.$slots);
             s.move(prop.loc.start.offset, prop.loc.end.offset, insertIndex);
 
             if (prop.value) {
-              s.overwrite(
-                prop.nameLoc.start.offset,
-                prop.value.loc.start.offset + 1,
-                '["'
-              );
+              s.overwrite(prop.nameLoc.start.offset, prop.value.loc.start.offset + 1, '["');
 
-              s.overwrite(
-                prop.value.loc.end.offset - 1,
-                prop.value.loc.end.offset,
-                '"])'
-              );
+              s.overwrite(prop.value.loc.end.offset - 1, prop.value.loc.end.offset, '"])');
             } else {
-              s.prependLeft(prop.nameLoc.end.offset, ')');
+              s.prependLeft(prop.nameLoc.end.offset, ")");
             }
           } else if ("directive" in item.name && item.name.directive) {
             const directive = item.name.directive;
             // move name to the beginning
-            s.move(
-              directive.loc.start.offset,
-              directive.loc.end.offset,
-              insertIndex
-            );
+            s.move(directive.loc.start.offset, directive.loc.end.offset, insertIndex);
 
             if (directive.arg) {
-              s.remove(
-                directive.arg.loc.start.offset,
-                directive.arg.loc.end.offset
-              );
+              s.remove(directive.arg.loc.start.offset, directive.arg.loc.end.offset);
             }
 
             if (directive.exp) {
-              s.overwrite(
-                directive.exp.loc.start.offset - 2,
-                directive.exp.loc.start.offset,
-                "["
-              );
-              s.overwrite(
-                directive.exp.loc.end.offset,
-                directive.exp.loc.end.offset + 1,
-                "])"
-              );
+              s.overwrite(directive.exp.loc.start.offset - 2, directive.exp.loc.start.offset, "[");
+              s.overwrite(directive.exp.loc.end.offset, directive.exp.loc.end.offset + 1, "])");
             }
           }
         }
@@ -286,10 +251,7 @@ const $slots = PatchSlots(c.$slots);
         s.prependLeft(insertIndex, `.default)`);
       }
 
-      s.prependLeft(
-        insertIndex,
-        `const ${slotVarName}=${slotToRender}(${$slots}`
-      );
+      s.prependLeft(insertIndex, `const ${slotVarName}=${slotToRender}(${$slots}`);
 
       // s.prependRight(insertIndex, "<");
 
@@ -340,9 +302,8 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
           : node.loc.source
               .slice(
                 0,
-                (node.children[0]?.loc.start.offset ??
-                  node.loc.end.offset - "</template>".length) -
-                  node.loc.start.offset
+                (node.children[0]?.loc.start.offset ?? node.loc.end.offset - "</template>".length) -
+                  node.loc.start.offset,
               )
               .lastIndexOf(">") + node.loc.start.offset;
 
@@ -354,16 +315,12 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
         if (prop.type === TemplateTypes.Directive) {
           // replace v-slot or # with ___VERTER___$slot
           const start = prop.node.loc.start.offset;
-          const end =
-            start + (prop.node.rawName?.startsWith("v-slot:") ? 7 : 1);
+          const end = start + (prop.node.rawName?.startsWith("v-slot:") ? 7 : 1);
 
           s.prependLeft(start, `${slotRender}(${slotInstance}.`);
           s.overwrite(start, end, `$slots`);
           if (prop.node.arg) {
-            if (
-              prop.node.arg.type === NodeTypes.SIMPLE_EXPRESSION &&
-              prop.node.arg.isStatic
-            ) {
+            if (prop.node.arg.type === NodeTypes.SIMPLE_EXPRESSION && prop.node.arg.isStatic) {
               // check if we can use . notation or if we need to use wrap in ['']
               if (/^\w+$/.test(prop.node.arg.content)) {
                 s.prependLeft(end, ".");
@@ -379,22 +336,14 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
             s.overwrite(
               prop.node.exp.loc.start.offset - 2,
               prop.node.exp.loc.start.offset - 1,
-              ")"
+              ")",
             );
 
             s.prependLeft(prop.node.exp.loc.start.offset - 1, "(");
 
             // update delimiters " to (
-            s.overwrite(
-              prop.node.exp.loc.start.offset - 1,
-              prop.node.exp.loc.start.offset,
-              "("
-            );
-            s.overwrite(
-              prop.node.exp.loc.end.offset,
-              prop.node.exp.loc.end.offset + 1,
-              ")"
-            );
+            s.overwrite(prop.node.exp.loc.start.offset - 1, prop.node.exp.loc.start.offset, "(");
+            s.overwrite(prop.node.exp.loc.end.offset, prop.node.exp.loc.end.offset + 1, ")");
             s.prependLeft(prop.node.exp.loc.end.offset + 1, "=>{");
           } else {
             s.appendLeft(tagEnd, `)(()=>{`);
@@ -403,16 +352,14 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
           if (ctx.doNarrow && slot.context.conditions.length > 0) {
             ctx.doNarrow(
               {
-                index: prop.node.exp
-                  ? prop.node.exp.loc.end.offset + 1
-                  : tagEnd,
+                index: prop.node.exp ? prop.node.exp.loc.end.offset + 1 : tagEnd,
                 inBlock: true,
                 conditions: slot.context.conditions,
                 type: "append",
                 // empty condition because we need the current slot condition to also apply if present
                 condition: null,
               },
-              s
+              s,
             );
           }
 
@@ -438,26 +385,15 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
         slot.prop.node!.loc.start.offset,
         slot.prop.node!.loc.start.offset +
           (directive.rawName!.startsWith("#") ? 1 : "v-slot".length),
-        `$slots`
+        `$slots`,
       );
 
-      s.prependRight(
-        directive.loc.start.offset,
-        `${slotRender}(${slotInstance}.`
-      );
+      s.prependRight(directive.loc.start.offset, `${slotRender}(${slotInstance}.`);
 
       // update exp delimiters
       if (directive.exp) {
-        s.overwrite(
-          directive.exp.loc.start.offset - 1,
-          directive.exp.loc.start.offset,
-          ""
-        );
-        s.overwrite(
-          directive.exp.loc.end.offset,
-          directive.exp.loc.end.offset + 1,
-          ""
-        );
+        s.overwrite(directive.exp.loc.start.offset - 1, directive.exp.loc.start.offset, "");
+        s.overwrite(directive.exp.loc.end.offset, directive.exp.loc.end.offset + 1, "");
       }
 
       if (directive.arg) {
@@ -474,11 +410,7 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
         }
 
         if (directive.exp) {
-          s.update(
-            directive.arg.loc.end.offset,
-            directive.exp.loc.start.offset,
-            ""
-          );
+          s.update(directive.arg.loc.end.offset, directive.exp.loc.start.offset, "");
           s.prependLeft(directive.exp.loc.start.offset, `)((`);
 
           s.prependLeft(directive.exp.loc.end.offset, `)=>{`);
@@ -488,11 +420,10 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
       } else {
         if (directive.exp) {
           s.update(
-            directive.loc.start.offset +
-              (directive.rawName!.startsWith("#") ? 1 : "v-slot".length),
+            directive.loc.start.offset + (directive.rawName!.startsWith("#") ? 1 : "v-slot".length),
             directive.loc.start.offset +
               (directive.rawName!.startsWith("#") ? 2 : "v-slot=".length),
-            ""
+            "",
           );
 
           s.prependLeft(directive.exp.loc.start.offset, `.default)((`);
@@ -514,7 +445,7 @@ declare function ___VERTER___SLOT_CALLBACK<T>(slot?: (...args: T[]) => any): (cb
             // empty condition because we need the current slot condition to also apply if present
             condition: null,
           },
-          s
+          s,
         );
       }
       // content

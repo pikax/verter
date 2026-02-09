@@ -42,12 +42,9 @@ describe("parser template", () => {
 
       const [comment] = result.Comment;
 
-      expect(
-        result.source.slice(
-          comment.node.loc.start.offset,
-          comment.node.loc.end.offset
-        )
-      ).toBe(comment.node.loc.source);
+      expect(result.source.slice(comment.node.loc.start.offset, comment.node.loc.end.offset)).toBe(
+        comment.node.loc.source,
+      );
     });
 
     it("comment in a component", () => {
@@ -69,18 +66,13 @@ describe("parser template", () => {
 
       const [comment] = result.Comment;
 
-      expect(
-        result.source.slice(
-          comment.node.loc.start.offset,
-          comment.node.loc.end.offset
-        )
-      ).toBe(comment.node.loc.source);
+      expect(result.source.slice(comment.node.loc.start.offset, comment.node.loc.end.offset)).toBe(
+        comment.node.loc.source,
+      );
     });
 
     it("multiple", () => {
-      const result = parse(
-        `<!-- comment --><div> <!-- comment deep --> </div>`
-      );
+      const result = parse(`<!-- comment --><div> <!-- comment deep --> </div>`);
 
       expect(result).toMatchObject({
         Comment: [
@@ -107,18 +99,12 @@ describe("parser template", () => {
 
       const [comment, commentDeep] = result.Comment;
 
-      expect(
-        result.source.slice(
-          comment.node.loc.start.offset,
-          comment.node.loc.end.offset
-        )
-      ).toBe(comment.node.loc.source);
+      expect(result.source.slice(comment.node.loc.start.offset, comment.node.loc.end.offset)).toBe(
+        comment.node.loc.source,
+      );
 
       expect(
-        result.source.slice(
-          commentDeep.node.loc.start.offset,
-          commentDeep.node.loc.end.offset
-        )
+        result.source.slice(commentDeep.node.loc.start.offset, commentDeep.node.loc.end.offset),
       ).toBe(commentDeep.node.loc.source);
     });
   });
@@ -161,9 +147,7 @@ describe("parser template", () => {
     });
 
     it('<div v-if="hello === false"> <div> {{ hello }}</div></div>', () => {
-      const result = parse(
-        `<div v-if="hello === false"> <div> {{ hello }}</div></div>`
-      );
+      const result = parse(`<div v-if="hello === false"> <div> {{ hello }}</div></div>`);
 
       expect(result).toMatchObject({
         Element: [
@@ -234,9 +218,7 @@ describe("parser template", () => {
     });
 
     it('<div v-for="item in items"> <div> {{ item }}</div></div>', () => {
-      const result = parse(
-        `<div v-for="item in items"> <div> {{ item }}</div></div>`
-      );
+      const result = parse(`<div v-for="item in items"> <div> {{ item }}</div></div>`);
 
       expect(result).toMatchObject({
         Element: [

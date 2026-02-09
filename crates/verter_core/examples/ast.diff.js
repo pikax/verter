@@ -84,7 +84,7 @@ function diffFile(baseName) {
     const diffOutput = diffString(official, verter, {
       sort: true,
       color: false,
-      excludeKeys: ['parsed']
+      excludeKeys: ["parsed"],
     });
 
     // Write diff to file
@@ -94,9 +94,7 @@ function diffFile(baseName) {
     const hasDifferences = diffOutput.trim().length > 0;
 
     if (hasDifferences) {
-      console.log(
-        `📝 ${baseName}: Has differences (written to ${baseName}.diff)`,
-      );
+      console.log(`📝 ${baseName}: Has differences (written to ${baseName}.diff)`);
     } else {
       console.log(`✅ ${baseName}: Identical`);
     }
@@ -129,9 +127,7 @@ function main() {
     }
   }
 
-  console.log(
-    `\n✨ Completed: ${successCount}/${fileNames.length} files processed`,
-  );
+  console.log(`\n✨ Completed: ${successCount}/${fileNames.length} files processed`);
 }
 
 main();

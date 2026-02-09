@@ -2,6 +2,10 @@
   "name": "@verter/vite-plugin",
   "version": "0.0.1-alpha.1",
   "description": "Vite plugin for Verter Vue compiler",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
   "main": "dist/index.js",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
@@ -17,9 +21,6 @@
     "dev": "tsdown src/index.ts --format cjs,esm --dts --watch",
     "test": "vitest run"
   },
-  "peerDependencies": {
-    "vite": "^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0"
-  },
   "dependencies": {
     "@verter/native": "workspace:*"
   },
@@ -29,8 +30,7 @@
     "vite": "^7.3.1",
     "vitest": "^4.0.18"
   },
-  "files": [
-    "dist"
-  ],
-  "license": "MIT"
+  "peerDependencies": {
+    "vite": "^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0"
+  }
 }

@@ -1,4 +1,3 @@
-
 /**
  * Type helper that extracts the key and value types from a loop iterable (array or object).
  *
@@ -19,11 +18,12 @@
  * // Result = { key: "a"; value: number } | { key: "b"; value: string }
  * ```
  */
-export type ExtractLoopsResult<T> = T extends Array<infer V>
-  ? { key: number; value: V }
-  : T extends Record<any, any>
-    ? { [K in keyof T]: { key: K; value: T[K] } }[keyof T]
-    : never;
+export type ExtractLoopsResult<T> =
+  T extends Array<infer V>
+    ? { key: number; value: V }
+    : T extends Record<any, any>
+      ? { [K in keyof T]: { key: K; value: T[K] } }[keyof T]
+      : never;
 
 /**
  * Extracts the key and value types from a loop iterable (array or object).
@@ -54,10 +54,8 @@ export type ExtractLoopsResult<T> = T extends Array<infer V>
  * @see {@link file://packages/core/src/v5/process/script/plugins/component-type/component-type.ts} - Component type plugin that uses this helper
  */
 export declare function extractLoops<T extends Array<any>>(
-  element: T
-): T extends Array<infer V>
-  ? { key: number; value: V }
-  : { key: number; value: unknown };
+  element: T,
+): T extends Array<infer V> ? { key: number; value: V } : { key: number; value: unknown };
 
 /**
  * Extracts the key and value types from an object for loop iteration.
@@ -76,7 +74,7 @@ export declare function extractLoops<T extends Array<any>>(
  * ```
  */
 export declare function extractLoops<T extends Record<any, any>>(
-  element: T
+  element: T,
 ): {
   [K in keyof T]: {
     key: K;

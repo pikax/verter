@@ -1,12 +1,12 @@
-import { createApp } from 'vue'
-import App from './App.vue'
-import './style.css'
-import { registerVueLanguage } from './editor/vueLanguage'
-import { registerLanguages } from './editor/languageConfigs'
+import { createApp } from "vue";
+import App from "./App.vue";
+import "./style.css";
+import { registerVueLanguage } from "./editor/vueLanguage";
+import { registerLanguages } from "./editor/languageConfigs";
 
 // Register languages for Monaco
-registerVueLanguage()
-registerLanguages()
+registerVueLanguage();
+registerLanguages();
 
-const app = createApp(App)
-app.mount('#app')
+const app = createApp(App);
+app.mount("#app");

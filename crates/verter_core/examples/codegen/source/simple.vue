@@ -5,5 +5,5 @@
 </template>
 
 <script setup>
-const msg = 'Hello World'
+const msg = "Hello World";
 </script>

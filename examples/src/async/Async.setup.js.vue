@@ -1,16 +1,8 @@
 <script setup>
-import {
-  defineAsyncComponent,
-  ref,
-  shallowRef,
-  markRaw,
-  computed,
-} from "vue";
+import { defineAsyncComponent, ref, shallowRef, markRaw, computed } from "vue";
 
 // Basic async component
-const AsyncBasic = defineAsyncComponent(() =>
-  import("./AsyncChild.vue")
-);
+const AsyncBasic = defineAsyncComponent(() => import("./AsyncChild.vue"));
 
 // Async component with loading state
 const AsyncWithLoading = defineAsyncComponent({
@@ -64,10 +56,8 @@ const componentName = ref("ComponentA");
 
 const AsyncDynamic = computed(() =>
   defineAsyncComponent(() =>
-    componentName.value === "ComponentA"
-      ? import("./ComponentA.vue")
-      : import("./ComponentB.vue")
-  )
+    componentName.value === "ComponentA" ? import("./ComponentA.vue") : import("./ComponentB.vue"),
+  ),
 );
 
 // Lazy loaded components map
@@ -102,10 +92,10 @@ function createAsyncComponent(loader, options = {}) {
   });
 }
 
-const CustomAsyncComponent = createAsyncComponent(
-  () => import("./CustomComponent.vue"),
-  { delay: 100, timeout: 5000 }
-);
+const CustomAsyncComponent = createAsyncComponent(() => import("./CustomComponent.vue"), {
+  delay: 100,
+  timeout: 5000,
+});
 
 // State
 const showAsync = ref(false);

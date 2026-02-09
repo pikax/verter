@@ -20,7 +20,7 @@ export default {
   computed: {
     orderedItems() {
       return this.items.sort((item1, item2) =>
-        this.getLabel(item1).localeCompare(this.getLabel(item2))
+        this.getLabel(item1).localeCompare(this.getLabel(item2)),
       );
     },
   },

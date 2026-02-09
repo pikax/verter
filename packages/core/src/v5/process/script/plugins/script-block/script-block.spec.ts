@@ -13,7 +13,7 @@ describe("process script plugin script block", () => {
 
     pre = "",
     post = "",
-    attrs = ""
+    attrs = "",
   ) {
     const prepend = `${pre}<script ${
       wrapper === false ? "setup" : ""
@@ -23,9 +23,7 @@ describe("process script plugin script block", () => {
 
     const s = new MagicString(source);
 
-    const scriptBlock = parsed.blocks.find(
-      (x) => x.type === "script"
-    ) as ParsedBlockScript;
+    const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
 
     const r = processScript(scriptBlock.result.items, [ScriptBlockPlugin], {
       ...parsed,
@@ -41,15 +39,9 @@ describe("process script plugin script block", () => {
   }
 
   it("leave the script untouched", () => {
-    const { result } = parse(
-      `let a = 0`,
-      false,
-      "js",
-      "<template></template>",
-      "<style></style>"
-    );
+    const { result } = parse(`let a = 0`, false, "js", "<template></template>", "<style></style>");
     expect(result).toMatchInlineSnapshot(
-      `"<template></template>;function script  (){let a = 0}<style></style>"`
+      `"<template></template>;function script  (){let a = 0}<style></style>"`,
     );
   });
 
@@ -59,7 +51,7 @@ describe("process script plugin script block", () => {
       false,
       "js",
       "<template></template>",
-      "<script>first = 0;</script><style></style>"
+      "<script>first = 0;</script><style></style>",
     );
     expect(result).toContain("first = 0;");
     expect(result).toContain("<template></template>");
@@ -73,10 +65,10 @@ describe("process script plugin script block", () => {
       false,
       "js",
       "<template></template>",
-      "<style></style>"
+      "<style></style>",
     );
     expect(result).toMatchInlineSnapshot(
-      `"<template></template>;async function script  (){await fetch('')}<style></style>"`
+      `"<template></template>;async function script  (){await fetch('')}<style></style>"`,
     );
   });
 
@@ -87,10 +79,10 @@ describe("process script plugin script block", () => {
       "js",
       "<template></template>",
       "<style></style>",
-      'generic="T"'
+      'generic="T"',
     );
     expect(result).toMatchInlineSnapshot(
-      `"<template></template>;function script   <T>(){let a = {} as unknown as T}<style></style>"`
+      `"<template></template>;function script   <T>(){let a = {} as unknown as T}<style></style>"`,
     );
   });
 
@@ -99,23 +91,18 @@ describe("process script plugin script block", () => {
       `import {a} from 'b'
 let a = 0`,
       false,
-      "js"
+      "js",
     );
     expect(result).toMatchInlineSnapshot(
       `
       ";function script  (){import {a} from 'b'
       let a = 0}"
-    `
+    `,
     );
   });
 
   it("not move non-main script to the beginning if its the beginning", () => {
-    const { result } = parse(
-      `let a = 0`,
-      false,
-      "js",
-      "<script>let first = 0;</script>"
-    );
+    const { result } = parse(`let a = 0`, false, "js", "<script>let first = 0;</script>");
     expect(result).toContain("let first = 0;");
     expect(result).toContain("let a = 0");
   });

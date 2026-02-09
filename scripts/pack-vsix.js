@@ -19,14 +19,11 @@ fs.mkdirSync(PKG_DEST, { recursive: true });
 
 // 2) Copy root package.json (workspace config) & package-lock.json if you have one
 console.log("📋 Copying root package.json & lockfile…");
-fs.copyFileSync(
-  path.join(REPO_ROOT, "package.json"),
-  path.join(TMP_ROOT, "package.json")
-);
+fs.copyFileSync(path.join(REPO_ROOT, "package.json"), path.join(TMP_ROOT, "package.json"));
 if (fs.existsSync(path.join(REPO_ROOT, "package-lock.json"))) {
   fs.copyFileSync(
     path.join(REPO_ROOT, "package-lock.json"),
-    path.join(TMP_ROOT, "package-lock.json")
+    path.join(TMP_ROOT, "package-lock.json"),
   );
 }
 
@@ -49,7 +46,6 @@ fs.writeFileSync(path.join(TMP_ROOT, "package.json"), JSON.stringify(pkg));
 // return;
 
 // 4 ) update workspace to *
-
 
 // 5) NPM install only production deps across the workspace
 process.chdir(TMP_ROOT);

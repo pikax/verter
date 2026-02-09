@@ -22,9 +22,7 @@ const label = computed(() => {
   return props.label || props.action?.label;
 });
 
-const disabled = computed(
-  () => props.loading || props.action?.loading || props.action?.disabled
-);
+const disabled = computed(() => props.loading || props.action?.loading || props.action?.disabled);
 
 const color = computed(() => {
   switch (props.secondary ? "secondary" : props.color) {
@@ -56,11 +54,7 @@ const color = computed(() => {
         v-if="icon"
         :icon="icon"
         class="flex h-full items-center text-xl max-sm:text-base"
-        :class="
-          !label
-            ? 'w-full justify-center'
-            : 'absolute inset-y-0 left-0 w-10 pl-2'
-        "
+        :class="!label ? 'w-full justify-center' : 'absolute inset-y-0 left-0 w-10 pl-2'"
       />
     </slot>
     <span

@@ -1,10 +1,6 @@
 import { AvailableExports } from "@verter/types/string";
 import { TemplateTypes, VerterASTNode } from "../../../../parser";
-import {
-  ProcessItemDefineModel,
-  ProcessItemMacroBinding,
-  ProcessItemType,
-} from "../../../types";
+import { ProcessItemDefineModel, ProcessItemMacroBinding, ProcessItemType } from "../../../types";
 import { createHelperImport } from "../../../utils";
 import { definePlugin } from "../../types";
 import { generateTypeString } from "../utils";
@@ -16,9 +12,7 @@ export const TemplateBindingPlugin = definePlugin({
   enforce: "post",
 
   pre(s, ctx) {
-    ctx.items.push(
-      createHelperImport(["createMacroReturn", "shallowUnwrapRef"], ctx.prefix)
-    );
+    ctx.items.push(createHelperImport(["createMacroReturn", "shallowUnwrapRef"], ctx.prefix));
   },
 
   post(s, ctx) {
@@ -36,7 +30,7 @@ export const TemplateBindingPlugin = definePlugin({
           from: `${name}FN`,
           isFunction: true,
         },
-        ctx
+        ctx,
       );
 
       s.prependRight(tag.pos.close.end, [declaration, typeStr].join(";"));
@@ -104,9 +98,7 @@ export const TemplateBindingPlugin = definePlugin({
     // const unwrapRef = ctx.prefix("UnwrapRef");
     const unwrapRef = `import('vue').UnwrapRef`;
     const shallowUnwrapRef = ctx.prefix("shallowUnwrapRef");
-    const createMacroReturn = ctx.prefix(
-      "createMacroReturn" as AvailableExports
-    );
+    const createMacroReturn = ctx.prefix("createMacroReturn" as AvailableExports);
 
     // const macroBindings = ctx.items
     //   .filter((x) => x.type === ProcessItemType.MacroBinding)
@@ -136,16 +128,11 @@ export const TemplateBindingPlugin = definePlugin({
     //   .filter((x) => !!x);
 
     const namedDirectives = templateDirectivesItems.map((x) =>
-      isBuiltInDirective(x.node.name)
-        ? undefined
-        : `v${capitalize(camelize(x.node.name))}`
+      isBuiltInDirective(x.node.name) ? undefined : `v${capitalize(camelize(x.node.name))}`,
     );
 
     const usedBindings = Array.from(
-      new Set([
-        ...ctx.templateBindings.map((x) => x.name),
-        ...namedDirectives,
-      ]).values()
+      new Set([...ctx.templateBindings.map((x) => x.name), ...namedDirectives]).values(),
     )
       .map((x) => {
         if (!x) return;
@@ -162,16 +149,12 @@ export const TemplateBindingPlugin = definePlugin({
 
     // .filter((x) => x.name && bindings.has(x.name));
 
-    const macroReturn = ctx.items.find(
-      (x) => x.type === ProcessItemType.MacroReturn
-    );
+    const macroReturn = ctx.items.find((x) => x.type === ProcessItemType.MacroReturn);
 
     const propsReturn = propsBindings
       .filter((x) => !!x.valueName)
       .map((x) => {
-        const keyType = x.typeName
-          ? `keyof ${x.typeName}`
-          : `keyof typeof ${x.valueName}`;
+        const keyType = x.typeName ? `keyof ${x.typeName}` : `keyof typeof ${x.valueName}`;
 
         return `...({} as Pick<typeof ${x.valueName}, ${keyType}>)`;
       })
@@ -179,34 +162,26 @@ export const TemplateBindingPlugin = definePlugin({
 
     const modelReturns = Array.from(modelBindings.values()).map(
       (x) =>
-        `${x.name}/*${x.node.start},${x.node.end}*/: {} as typeof ${x.valueName} extends import('vue').ModelRef<infer V> ? V extends boolean|undefined ? boolean : V & {b: 1} : ${unwrapRef}<typeof ${x.valueName}> & {a: 1}`
+        `${x.name}/*${x.node.start},${x.node.end}*/: {} as typeof ${x.valueName} extends import('vue').ModelRef<infer V> ? V extends boolean|undefined ? boolean : V & {b: 1} : ${unwrapRef}<typeof ${x.valueName}> & {a: 1}`,
     );
 
     const returnBindings = usedBindings.map(
       (x) =>
         `${x.name}/*${x.start},${x.end}*/: ${
-          isTS
-            ? `${x.name} as unknown as typeof ${x.name}`
-            : `${unref}(${x.name})`
-        }`
+          isTS ? `${x.name} as unknown as typeof ${x.name}` : `${unref}(${x.name})`
+        }`,
     );
 
     // ..${
     //     macroReturn ? `${createMacroReturn}(${macroReturn.content})` : "{}"
     //   }}
-    const macroReturnStr = macroReturn
-      ? `...${createMacroReturn}(${macroReturn.content})`
-      : "";
+    const macroReturnStr = macroReturn ? `...${createMacroReturn}(${macroReturn.content})` : "";
     s.prependRight(
       tag.pos.close.start,
-      `;return {...${shallowUnwrapRef}({${[
-        propsReturn,
-        ...returnBindings,
-        ...modelReturns,
-      ]
+      `;return {...${shallowUnwrapRef}({${[propsReturn, ...returnBindings, ...modelReturns]
         .filter((x) => x.length > 0)
         .join(",\n")}})
-${macroReturnStr ? `,${macroReturnStr}` : ""}}`
+${macroReturnStr ? `,${macroReturnStr}` : ""}}`,
     );
 
     if (!isTS) {
@@ -214,7 +189,7 @@ ${macroReturnStr ? `,${macroReturnStr}` : ""}}`
         tag.pos.open.start,
         `/** @returns {{${usedBindings
           .map((x) => `${x.name}:${unwrapRef}<typeof ${x.name}>`)
-          .join(",")}}} */`
+          .join(",")}}} */`,
       );
     }
 
@@ -224,7 +199,7 @@ ${macroReturnStr ? `,${macroReturnStr}` : ""}}`
         from: `${name}FN`,
         isFunction: true,
       },
-      ctx
+      ctx,
     );
 
     s.prependRight(tag.pos.close.end, typeStr);

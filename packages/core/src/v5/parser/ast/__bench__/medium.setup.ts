@@ -1,14 +1,7 @@
 /**
  * Import the necessary Composition API functions
  */
-import {
-  ref,
-  reactive,
-  computed,
-  watch,
-  onMounted,
-  onBeforeUnmount,
-} from "vue";
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from "vue";
 
 /**
  * Example interface for typed items

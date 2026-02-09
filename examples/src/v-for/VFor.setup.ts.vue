@@ -139,9 +139,7 @@ function focusItem(index: number) {
       </dl>
       <!-- With index -->
       <ul>
-        <li v-for="(value, key, index) in user" :key="key">
-          {{ index }}. {{ key }}: {{ value }}
-        </li>
+        <li v-for="(value, key, index) in user" :key="key">{{ index }}. {{ key }}: {{ value }}</li>
       </ul>
     </section>
 
@@ -165,7 +163,13 @@ function focusItem(index: number) {
             <input
               type="number"
               :value="product.price"
-              @input="updateProduct(category.id, product.id, Number(($event.target as HTMLInputElement).value))"
+              @input="
+                updateProduct(
+                  category.id,
+                  product.id,
+                  Number(($event.target as HTMLInputElement).value),
+                )
+              "
             />
           </li>
         </ul>
@@ -192,9 +196,7 @@ function focusItem(index: number) {
       <h3>v-for with v-if (using template wrapper)</h3>
       <ul>
         <template v-for="user in users" :key="user.id">
-          <li v-if="user.active">
-            {{ user.name }} (active)
-          </li>
+          <li v-if="user.active">{{ user.name }} (active)</li>
         </template>
       </ul>
     </section>
@@ -219,9 +221,7 @@ function focusItem(index: number) {
     <section>
       <h3>Destructuring in v-for</h3>
       <ul>
-        <li v-for="{ id, name, email } in users" :key="id">
-          {{ name }} &lt;{{ email }}&gt;
-        </li>
+        <li v-for="{ id, name, email } in users" :key="id">{{ name }} &lt;{{ email }}&gt;</li>
       </ul>
     </section>
   </div>

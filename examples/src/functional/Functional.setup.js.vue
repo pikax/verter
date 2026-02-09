@@ -66,11 +66,7 @@ export const FunctionalButton = (props, { slots, emit, attrs }) => {
       onClick: props.onClick,
       ...attrs,
     },
-    [
-      props.title,
-      props.count !== undefined ? ` (${props.count})` : "",
-      slots.default?.(),
-    ]
+    [props.title, props.count !== undefined ? ` (${props.count})` : "", slots.default?.()],
   );
 };
 
@@ -98,11 +94,7 @@ export const RenderList = (props, { slots }) => {
 
   const renderFn = props.renderItem ?? defaultRenderItem;
 
-  return createElement(
-    "ul",
-    { class: "render-list" },
-    props.items.map(renderFn)
-  );
+  return createElement("ul", { class: "render-list" }, props.items.map(renderFn));
 };
 
 RenderList.props = {
@@ -150,9 +142,7 @@ export function createTypedList() {
     </ul>
 
     <!-- Conditional rendering based on props only -->
-    <button :class="buttonClasses" :disabled="disabled">
-      {{ variant ?? "primary" }} button
-    </button>
+    <button :class="buttonClasses" :disabled="disabled">{{ variant ?? "primary" }} button</button>
 
     <!-- Slot for composition -->
     <slot name="footer" :count="itemCount" />

@@ -83,8 +83,10 @@ const vColor: Directive<HTMLElement, string, "red" | "blue"> = (el, binding) => 
 </script>
 
 <template>
-  <span v-color.blue="'red'" />     <!-- valid -->
-  <span v-color.green="'red'" />    <!-- type error: invalid modifier -->
+  <span v-color.blue="'red'" />
+  <!-- valid -->
+  <span v-color.green="'red'" />
+  <!-- type error: invalid modifier -->
   <input v-model.number.trim="count" />
 </template>
 ```
@@ -95,13 +97,13 @@ Since the Vetur days, Vue has struggled with type safety and tooling quality. Vu
 
 ### Verter vs Volar
 
-| Aspect | Verter | Volar |
-|--------|--------|-------|
-| Maturity | Experimental / Alpha | Production-ready |
-| Approach | SFC → Typed TSX representation | Virtual file mapping |
-| Compiler | Rust (template) + TypeScript (SFC) | TypeScript only |
-| Focus | Best TypeScript integration | Feature-rich IDE support |
-| Use case | When you need strict type safety | General Vue development |
+| Aspect   | Verter                             | Volar                    |
+| -------- | ---------------------------------- | ------------------------ |
+| Maturity | Experimental / Alpha               | Production-ready         |
+| Approach | SFC → Typed TSX representation     | Virtual file mapping     |
+| Compiler | Rust (template) + TypeScript (SFC) | TypeScript only          |
+| Focus    | Best TypeScript integration        | Feature-rich IDE support |
+| Use case | When you need strict type safety   | General Vue development  |
 
 > [!NOTE]
 > If you haven't encountered specific issues with Volar, there's no reason to switch. Verter is for developers who need enhanced TypeScript support and are comfortable with experimental software.
@@ -317,27 +319,27 @@ Test files are co-located with source files as `*.spec.ts`.
 
 ### TypeScript Packages
 
-| Package | README | Description |
-|---------|--------|-------------|
-| `@verter/core` | [README](./packages/core/README.md) | SFC → TSX transformation engine |
-| `@verter/types` | [README](./packages/types/readme.md) | TypeScript utility types |
-| `@verter/native` | [README](./packages/native/README.md) | Native Node.js bindings (NAPI-RS) |
-| `@verter/wasm` | [README](./packages/wasm/README.md) | WASM bindings for browser |
-| `@verter/vite-plugin` | [README](./packages/vite-plugin/README.md) | Vite build integration |
-| `@verter/language-server` | [README](./packages/language-server/readme.md) | LSP server |
-| `@verter/language-shared` | [README](./packages/language-shared/readme.md) | Shared protocol types |
-| `@verter/typescript-plugin` | [README](./packages/typescript-plugin/readme.md) | TypeScript plugin |
-| `@verter/oxc-bindings` | [README](./packages/oxc-bindings/readme.md) | OXC parser helper |
-| `verter-vscode` | [README](./packages/vue-vscode/readme.md) | VS Code extension |
-| `@verter/playground` | [README](./packages/playground/README.md) | Online playground |
+| Package                     | README                                           | Description                       |
+| --------------------------- | ------------------------------------------------ | --------------------------------- |
+| `@verter/core`              | [README](./packages/core/README.md)              | SFC → TSX transformation engine   |
+| `@verter/types`             | [README](./packages/types/readme.md)             | TypeScript utility types          |
+| `@verter/native`            | [README](./packages/native/README.md)            | Native Node.js bindings (NAPI-RS) |
+| `@verter/wasm`              | [README](./packages/wasm/README.md)              | WASM bindings for browser         |
+| `@verter/vite-plugin`       | [README](./packages/vite-plugin/README.md)       | Vite build integration            |
+| `@verter/language-server`   | [README](./packages/language-server/readme.md)   | LSP server                        |
+| `@verter/language-shared`   | [README](./packages/language-shared/readme.md)   | Shared protocol types             |
+| `@verter/typescript-plugin` | [README](./packages/typescript-plugin/readme.md) | TypeScript plugin                 |
+| `@verter/oxc-bindings`      | [README](./packages/oxc-bindings/readme.md)      | OXC parser helper                 |
+| `verter-vscode`             | [README](./packages/vue-vscode/readme.md)        | VS Code extension                 |
+| `@verter/playground`        | [README](./packages/playground/README.md)        | Online playground                 |
 
 ### Rust Crates
 
-| Crate | README | Description |
-|-------|--------|-------------|
-| `verter_core` | [README](./crates/verter_core/README.md) | Core template compiler |
+| Crate         | README                                   | Description              |
+| ------------- | ---------------------------------------- | ------------------------ |
+| `verter_core` | [README](./crates/verter_core/README.md) | Core template compiler   |
 | `verter_napi` | [README](./crates/verter_napi/README.md) | NAPI-RS Node.js bindings |
-| `verter_wasm` | [README](./crates/verter_wasm/README.md) | WASM bindings |
+| `verter_wasm` | [README](./crates/verter_wasm/README.md) | WASM bindings            |
 
 ## Credits
 

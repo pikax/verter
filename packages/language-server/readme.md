@@ -26,13 +26,13 @@ pnpm add @verter/language-server
 
 The package expects the following peer/co-dependencies to be available in the workspace:
 
-| Package | Role |
-|---------|------|
-| `@verter/core` | SFC parser and TSX transformer |
-| `@verter/native` | Rust-based template compiler (NAPI-RS) |
-| `@verter/types` | TypeScript utility types injected into the TS environment |
-| `@verter/language-shared` | Shared protocol types between client and server |
-| `typescript` | TypeScript compiler API |
+| Package                   | Role                                                      |
+| ------------------------- | --------------------------------------------------------- |
+| `@verter/core`            | SFC parser and TSX transformer                            |
+| `@verter/native`          | Rust-based template compiler (NAPI-RS)                    |
+| `@verter/types`           | TypeScript utility types injected into the TS environment |
+| `@verter/language-shared` | Shared protocol types between client and server           |
+| `typescript`              | TypeScript compiler API                                   |
 
 ## Architecture
 
@@ -72,12 +72,12 @@ graph TD
 
 ### Core Managers
 
-| Manager | Responsibility |
-|---------|---------------|
-| **DocumentManager** | Tracks all open files. Creates `VueDocument` or `TypescriptDocument` instances on demand. Caches file contents and `IScriptSnapshot` objects. Handles file create/update/delete notifications. |
-| **VerterManager** | Discovers `tsconfig.json` files across workspace folders. Creates and caches one `ts.LanguageService` per tsconfig scope. Routes URI-based queries to the correct service instance. |
+| Manager                | Responsibility                                                                                                                                                                                      |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **DocumentManager**    | Tracks all open files. Creates `VueDocument` or `TypescriptDocument` instances on demand. Caches file contents and `IScriptSnapshot` objects. Handles file create/update/delete notifications.      |
+| **VerterManager**      | Discovers `tsconfig.json` files across workspace folders. Creates and caches one `ts.LanguageService` per tsconfig scope. Routes URI-based queries to the correct service instance.                 |
 | **DiagnosticsManager** | Debounces and batches diagnostic requests (250 ms). Supports cancellation tokens to discard stale results. Collects TypeScript semantic, syntactic, and suggestion diagnostics plus CSS validation. |
-| **StatisticsManager** | Records performance events (diagnostics, file reads, parsing). Provides session and global summaries. Optionally persists to disk at `.verter/statistics.json`. |
+| **StatisticsManager**  | Records performance events (diagnostics, file reads, parsing). Provides session and global summaries. Optionally persists to disk at `.verter/statistics.json`.                                     |
 
 ### Virtual File Mapping
 
@@ -91,12 +91,12 @@ graph LR
     VUE --> STYLE["App.vue.style.css\nStyle blocks"]
 ```
 
-| Virtual path pattern | Content |
-|---------------------|---------|
-| `{path}.vue.bundle.ts` | Bundled TypeScript module -- the entry point for the component as seen by other files |
-| `{path}.vue.script.ts` | Extracted `<script setup>` or `<script>` block |
-| `{path}.vue.render.tsx` | Template compiled to TSX for type-checked rendering |
-| `{path}.vue.style.css` | Extracted `<style>` blocks (CSS / SCSS / LESS) |
+| Virtual path pattern    | Content                                                                               |
+| ----------------------- | ------------------------------------------------------------------------------------- |
+| `{path}.vue.bundle.ts`  | Bundled TypeScript module -- the entry point for the component as seen by other files |
+| `{path}.vue.script.ts`  | Extracted `<script setup>` or `<script>` block                                        |
+| `{path}.vue.render.tsx` | Template compiled to TSX for type-checked rendering                                   |
+| `{path}.vue.style.css`  | Extracted `<style>` blocks (CSS / SCSS / LESS)                                        |
 
 ### Request Flow
 
@@ -135,8 +135,8 @@ startServer();
 
 // With options:
 startServer({
-  connection: myConnection,   // provide your own LSP connection
-  logErrorsOnly: true,        // suppress non-error logs
+  connection: myConnection, // provide your own LSP connection
+  logErrorsOnly: true, // suppress non-error logs
 });
 ```
 
@@ -166,27 +166,27 @@ interface LsConnectionOption {
 
 The server advertises the following capabilities on `initialize`:
 
-| Capability | Details |
-|-----------|---------|
-| `textDocumentSync` | `Full` -- entire document sent on each change |
-| `completionProvider` | Trigger characters: `.`, `@`, `<`, `:`, ` ` with resolve support |
-| `definitionProvider` | Go-to-definition across `.vue` boundaries |
-| `hoverProvider` | TypeScript quick info and CSS hover |
-| `diagnosticProvider` | For `*.vue` files with `interFileDependencies: true` |
-| `referencesProvider` | Find all references |
-| `typeDefinitionProvider` | Go-to-type-definition |
-| `declarationProvider` | Go-to-declaration |
-| `renameProvider` | Symbol rename |
-| `workspace` | Workspace folder support with change notifications and file operation tracking |
+| Capability               | Details                                                                        |
+| ------------------------ | ------------------------------------------------------------------------------ |
+| `textDocumentSync`       | `Full` -- entire document sent on each change                                  |
+| `completionProvider`     | Trigger characters: `.`, `@`, `<`, `:`, ` ` with resolve support               |
+| `definitionProvider`     | Go-to-definition across `.vue` boundaries                                      |
+| `hoverProvider`          | TypeScript quick info and CSS hover                                            |
+| `diagnosticProvider`     | For `*.vue` files with `interFileDependencies: true`                           |
+| `referencesProvider`     | Find all references                                                            |
+| `typeDefinitionProvider` | Go-to-type-definition                                                          |
+| `declarationProvider`    | Go-to-declaration                                                              |
+| `renameProvider`         | Symbol rename                                                                  |
+| `workspace`              | Workspace folder support with change notifications and file operation tracking |
 
 ### Custom Requests
 
 These are defined in `@verter/language-shared` and handled by the server:
 
-| Request | Method | Description |
-|---------|--------|-------------|
-| `GetCompiledCode` | `$/getCompiledCode` | Returns the compiled JS, CSS, and Rust/WASM output for a `.vue` file URI |
-| `GetStatistics` | `$/verter/getStatistics` | Returns performance statistics (session and/or global scope) |
+| Request           | Method                   | Description                                                              |
+| ----------------- | ------------------------ | ------------------------------------------------------------------------ |
+| `GetCompiledCode` | `$/getCompiledCode`      | Returns the compiled JS, CSS, and Rust/WASM output for a `.vue` file URI |
+| `GetStatistics`   | `$/verter/getStatistics` | Returns performance statistics (session and/or global scope)             |
 
 ### Protocol Extensions
 
@@ -201,8 +201,8 @@ const patchedConnection = patchClient(connection);
 patchedConnection.onRequest(RequestType.GetCompiledCode, async (uri) => {
   // uri is typed as string
   return {
-    js:   { code: "...", map: undefined },
-    css:  { code: "...", map: undefined },
+    js: { code: "...", map: undefined },
+    css: { code: "...", map: undefined },
     wasm: { code: "...", map: undefined },
   };
 });
@@ -259,22 +259,22 @@ pnpm --filter @verter/language-server test
 
 ## Dependencies
 
-| Package | Purpose |
-|---------|---------|
-| `vscode-languageserver` | LSP server framework (connection, capabilities, handlers) |
-| `vscode-languageserver-textdocument` | Text document abstraction |
-| `vscode-languageserver-protocol` | LSP protocol types |
-| `vscode-css-languageservice` | CSS / SCSS / LESS completions, diagnostics, hover |
-| `typescript` | TypeScript compiler API (`LanguageService`, `LanguageServiceHost`) |
-| `@verter/core` | SFC-to-TSX transformation |
-| `@verter/native` | Rust-compiled template compiler (NAPI-RS) |
-| `@verter/language-shared` | Shared LSP protocol types and virtual file utilities |
-| `@verter/types` | TypeScript utility types injected into the TS environment |
-| `oxc-parser` | Fast JavaScript / TypeScript parser |
-| `magic-string` | String manipulation with sourcemap preservation |
-| `source-map-js` | Source map support |
-| `glob` | File globbing for tsconfig discovery |
-| `minimatch` | Glob pattern matching for tsconfig-to-file routing |
+| Package                              | Purpose                                                            |
+| ------------------------------------ | ------------------------------------------------------------------ |
+| `vscode-languageserver`              | LSP server framework (connection, capabilities, handlers)          |
+| `vscode-languageserver-textdocument` | Text document abstraction                                          |
+| `vscode-languageserver-protocol`     | LSP protocol types                                                 |
+| `vscode-css-languageservice`         | CSS / SCSS / LESS completions, diagnostics, hover                  |
+| `typescript`                         | TypeScript compiler API (`LanguageService`, `LanguageServiceHost`) |
+| `@verter/core`                       | SFC-to-TSX transformation                                          |
+| `@verter/native`                     | Rust-compiled template compiler (NAPI-RS)                          |
+| `@verter/language-shared`            | Shared LSP protocol types and virtual file utilities               |
+| `@verter/types`                      | TypeScript utility types injected into the TS environment          |
+| `oxc-parser`                         | Fast JavaScript / TypeScript parser                                |
+| `magic-string`                       | String manipulation with sourcemap preservation                    |
+| `source-map-js`                      | Source map support                                                 |
+| `glob`                               | File globbing for tsconfig discovery                               |
+| `minimatch`                          | Glob pattern matching for tsconfig-to-file routing                 |
 
 ## License
 

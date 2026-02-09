@@ -24,10 +24,8 @@ Add the plugin to your `tsconfig.json`:
 ```jsonc
 {
   "compilerOptions": {
-    "plugins": [
-      { "name": "@verter/typescript-plugin" }
-    ]
-  }
+    "plugins": [{ "name": "@verter/typescript-plugin" }],
+  },
 }
 ```
 
@@ -104,7 +102,7 @@ defineProps<{
 }>();
 
 defineEmits<{
-  (e: 'update', value: number): void;
+  (e: "update", value: number): void;
 }>();
 </script>
 ```
@@ -119,21 +117,21 @@ const init: tsModule.server.PluginModuleFactory = ({ typescript: ts }) => {
     create(info: tsModule.server.PluginCreateInfo) {
       const languageServiceHost = new Proxy(info.languageServiceHost, {
         get(target, key) {
-          if (key === 'resolveModuleNameLiterals') {
+          if (key === "resolveModuleNameLiterals") {
             return customResolver; // TS 5.x
           }
-          if (key === 'resolveModuleNames') {
+          if (key === "resolveModuleNames") {
             return legacyResolver; // TS 4.x
           }
           return target[key];
-        }
+        },
       });
 
       return ts.createLanguageService(languageServiceHost);
     },
     getExternalFiles(project) {
       return getVueFilesInProject(project);
-    }
+    },
   };
 };
 ```
@@ -152,11 +150,9 @@ The plugin uses content-hash-based cache invalidation to avoid redundant parsing
 The Verter VS Code extension automatically configures this plugin on activation:
 
 ```typescript
-commands.executeCommand(
-  "_typescript.configurePlugin",
-  "@verter/typescript-plugin",
-  { enable: true }
-);
+commands.executeCommand("_typescript.configurePlugin", "@verter/typescript-plugin", {
+  enable: true,
+});
 ```
 
 ## Development / Build
@@ -173,25 +169,25 @@ To test changes inside VS Code, rebuild the plugin and then reload the TypeScrip
 
 ### Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| Plugin not loading | Ensure `@verter/typescript-plugin` is listed in `tsconfig.json` `compilerOptions.plugins`, then restart the TS server |
-| Missing type inference | Verify `@verter/core` is installed; check for SFC parse errors |
-| Slow first load | Expected on large projects — subsequent loads use the content-hash cache |
+| Problem                | Solution                                                                                                              |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Plugin not loading     | Ensure `@verter/typescript-plugin` is listed in `tsconfig.json` `compilerOptions.plugins`, then restart the TS server |
+| Missing type inference | Verify `@verter/core` is installed; check for SFC parse errors                                                        |
+| Slow first load        | Expected on large projects — subsequent loads use the content-hash cache                                              |
 
 ## TypeScript Compatibility
 
-| TypeScript Version | Resolution Hook | Status |
-|--------------------|-----------------|--------|
-| 5.x | `resolveModuleNameLiterals` | Full support |
-| 4.x | `resolveModuleNames` | Supported (legacy path) |
+| TypeScript Version | Resolution Hook             | Status                  |
+| ------------------ | --------------------------- | ----------------------- |
+| 5.x                | `resolveModuleNameLiterals` | Full support            |
+| 4.x                | `resolveModuleNames`        | Supported (legacy path) |
 
 ## Dependencies
 
-| Dependency | Purpose |
-|------------|---------|
-| `typescript` | TypeScript compiler API (peer dependency) |
-| `@verter/core` | SFC parsing and TSX transformation |
+| Dependency     | Purpose                                   |
+| -------------- | ----------------------------------------- |
+| `typescript`   | TypeScript compiler API (peer dependency) |
+| `@verter/core` | SFC parsing and TSX transformation        |
 
 ## License
 

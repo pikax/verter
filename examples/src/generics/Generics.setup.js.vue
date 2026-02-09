@@ -30,11 +30,7 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits([
-  "select",
-  "change",
-  "optionSelect",
-]);
+const emit = defineEmits(["select", "change", "optionSelect"]);
 
 defineExpose({
   getSelected: () => props.selected,
@@ -66,9 +62,7 @@ function selectOption(value) {
 }
 
 const itemCount = computed(() => props.items.length);
-const selectedLabel = computed(() =>
-  props.selected ? getLabel(props.selected) : ""
-);
+const selectedLabel = computed(() => (props.selected ? getLabel(props.selected) : ""));
 </script>
 
 <template>

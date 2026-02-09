@@ -14,7 +14,7 @@ const props = withDefaults(
   }>(),
   {
     size: "2.5rem",
-  }
+  },
 );
 const initialsBackground = computed(() => stringToHslColor(props.id || props.alt || "", 30, 80));
 

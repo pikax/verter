@@ -16,9 +16,7 @@ export const ContextPlugin = {
   name: "VerterContext",
   pre(s, ctx) {
     const isSetup =
-      ctx.blocks.find(
-        (x) => x.type === "script" && x.block.tag.attributes.setup
-      ) !== undefined;
+      ctx.blocks.find((x) => x.type === "script" && x.block.tag.attributes.setup) !== undefined;
 
     ctx.items.push({
       type: ProcessItemType.Import,
@@ -33,17 +31,11 @@ export const ContextPlugin = {
     const ComponentInstanceName = ctx.prefix("ComponentInstance");
     const instance = ctx.prefix("Instance");
     const components = ctx.prefix("components");
-    const retrieveSetupDirectives = ctx.prefix(
-      "retrieveSetupDirectives" as AvailableExports
-    );
+    const retrieveSetupDirectives = ctx.prefix("retrieveSetupDirectives" as AvailableExports);
     // const SlotsToRender = ctx.prefix("SlotsToRender" as AvailableExports);
-    const ExtractComponents = ctx.prefix(
-      "extractComponents" as AvailableExports
-    );
+    const ExtractComponents = ctx.prefix("extractComponents" as AvailableExports);
 
-    const getVueGlobalComponents = ctx.prefix(
-      "getVueGlobalComponents" as AvailableExports
-    );
+    const getVueGlobalComponents = ctx.prefix("getVueGlobalComponents" as AvailableExports);
 
     ctx.items.push(
       createHelperImport(
@@ -54,8 +46,8 @@ export const ContextPlugin = {
           "getVueGlobalComponents",
           "retrieveSetupDirectives",
         ],
-        ctx.prefix
-      )
+        ctx.prefix,
+      ),
     );
 
     const macros = isSetup ? [] : [];
@@ -129,9 +121,7 @@ export const ContextPlugin = {
     const componentsStr = `const ${components} = {
 ${[
   `...${getVueGlobalComponents}()`,
-  isSetup
-    ? `...${ExtractComponents}({${ctxItems}})`
-    : `...${DefaultName}.components`,
+  isSetup ? `...${ExtractComponents}({${ctxItems}})` : `...${DefaultName}.components`,
 ].join(",\n")}
 };`;
 
@@ -140,30 +130,24 @@ ${[
     const directivesAccessor = ctx.retrieveAccessor("directiveAccessor");
     const setupDirectives = `const ${directivesAccessor} = ${retrieveSetupDirectives}(${CTX});`;
 
-    const debuggers = DEBUG && false
-      ? [
-          `const ___DEBUG_Verter = ${CTX};`,
-          `const ___DEBUG_ComponentInstance = ${ComponentInstanceName};`,
-          `const ___DEBUG_Instance = ({} as ${instance}${generic});`,
-          `const ___DEBUG_Default = ${DefaultName};`,
-          `const ___DEBUG_Components = ${components};`,
-          // `const ___DEBUG_Props = ({} as ___VERTER___resolveProps${generic});`,
-          // `const ___DEBUG_Components = ({} as Required<typeof ___VERTER___default.components> & {});`,
-          `const ___DEBUG_FullContext = ({} as ${FullContextName}${generic});`,
-          // `const ___DEBUG_Binding = ({} as ___VERTER___TemplateBinding${generic});`,
-          // `const ___DEBUG_Slots = ___VERTER___ctx['$slots'];`,
-        ].join("\n")
-      : "";
+    const debuggers =
+      DEBUG && false
+        ? [
+            `const ___DEBUG_Verter = ${CTX};`,
+            `const ___DEBUG_ComponentInstance = ${ComponentInstanceName};`,
+            `const ___DEBUG_Instance = ({} as ${instance}${generic});`,
+            `const ___DEBUG_Default = ${DefaultName};`,
+            `const ___DEBUG_Components = ${components};`,
+            // `const ___DEBUG_Props = ({} as ___VERTER___resolveProps${generic});`,
+            // `const ___DEBUG_Components = ({} as Required<typeof ___VERTER___default.components> & {});`,
+            `const ___DEBUG_FullContext = ({} as ${FullContextName}${generic});`,
+            // `const ___DEBUG_Binding = ({} as ___VERTER___TemplateBinding${generic});`,
+            // `const ___DEBUG_Slots = ___VERTER___ctx['$slots'];`,
+          ].join("\n")
+        : "";
     s.prependLeft(
       ctx.block.block.block.loc.start.offset,
-      [
-        instanceStr,
-        ctxStr,
-        componentsStr,
-        slotsCtx,
-        setupDirectives,
-        debuggers,
-      ].join("\n")
+      [instanceStr, ctxStr, componentsStr, slotsCtx, setupDirectives, debuggers].join("\n"),
     );
 
     // add slots Helper

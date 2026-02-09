@@ -1,1 +1,1 @@
-export * from './script-block.js'
+export * from "./script-block.js";

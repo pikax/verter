@@ -10,7 +10,7 @@ export type LoopsContext = {
 export function handleLoopProp<T extends LoopsContext>(
   node: VerterNode,
   parent: VerterNode,
-  parentContext: T
+  parentContext: T,
 ): null | {
   context: T;
   loop: TemplateLoop;
@@ -20,9 +20,7 @@ export function handleLoopProp<T extends LoopsContext>(
     return null;
   }
 
-  const forProp = node.props.find(
-    (x) => x.type === NodeTypes.DIRECTIVE && "forParseResult" in x
-  ) as
+  const forProp = node.props.find((x) => x.type === NodeTypes.DIRECTIVE && "forParseResult" in x) as
     | (DirectiveNode & Required<Pick<DirectiveNode, "forParseResult">>)
     | undefined;
 
@@ -46,25 +44,16 @@ export function handleLoopProp<T extends LoopsContext>(
   const items = [];
 
   const toAddIgnoredIdentifiers = [
-    ...valueBindings
-      .filter((x) => x.type === TemplateTypes.Binding)
-      .map((x) => x.name),
-    ...keyBindings
-      .filter((x) => x.type === TemplateTypes.Binding)
-      .map((x) => x.name),
-    ...indexBindings
-      .filter((x) => x.type === TemplateTypes.Binding)
-      .map((x) => x.name),
+    ...valueBindings.filter((x) => x.type === TemplateTypes.Binding).map((x) => x.name),
+    ...keyBindings.filter((x) => x.type === TemplateTypes.Binding).map((x) => x.name),
+    ...indexBindings.filter((x) => x.type === TemplateTypes.Binding).map((x) => x.name),
   ];
 
   const context =
     toAddIgnoredIdentifiers.length > 0
       ? {
           ...parentContext,
-          ignoredIdentifiers: [
-            ...parentContext.ignoredIdentifiers,
-            ...toAddIgnoredIdentifiers,
-          ],
+          ignoredIdentifiers: [...parentContext.ignoredIdentifiers, ...toAddIgnoredIdentifiers],
           inFor: true,
         }
       : {

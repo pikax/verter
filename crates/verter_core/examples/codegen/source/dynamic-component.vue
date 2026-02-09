@@ -29,37 +29,32 @@
     <component :is="computedComponent" />
 
     <!-- Dynamic component in v-for -->
-    <component
-      v-for="item in components"
-      :key="item.id"
-      :is="item.component"
-      :data="item.data"
-    />
+    <component v-for="item in components" :key="item.id" :is="item.component" :data="item.data" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
-import CompA from './CompA.vue'
-import CompB from './CompB.vue'
+import { ref, computed } from "vue";
+import CompA from "./CompA.vue";
+import CompB from "./CompB.vue";
 
-const currentComponent = ref('CompA')
-const title = ref('Dynamic Title')
-const count = ref(0)
-const inputComponent = ref('input')
-const inputValue = ref('')
-const condition = ref(true)
-const sharedValue = ref('shared')
+const currentComponent = ref("CompA");
+const title = ref("Dynamic Title");
+const count = ref(0);
+const inputComponent = ref("input");
+const inputValue = ref("");
+const condition = ref(true);
+const sharedValue = ref("shared");
 
 const computedComponent = computed(() => {
-  return condition.value ? CompA : CompB
-})
+  return condition.value ? CompA : CompB;
+});
 
 const components = ref([
-  { id: 1, component: 'CompA', data: { x: 1 } },
-  { id: 2, component: 'CompB', data: { y: 2 } },
-])
+  { id: 1, component: "CompA", data: { x: 1 } },
+  { id: 2, component: "CompB", data: { y: 2 } },
+]);
 
-const handleClick = () => console.log('clicked')
-const handleCustom = () => console.log('custom event')
+const handleClick = () => console.log("clicked");
+const handleCustom = () => console.log("custom event");
 </script>

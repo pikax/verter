@@ -1,33 +1,36 @@
 <script setup lang="ts">
-import { computed, watch } from 'vue'
+import { computed, watch } from "vue";
 
 // Reactive Props Destructure (Vue 3.5+)
 const {
   name,
   count = 0,
   disabled = false,
-  items = []
+  items = [],
 } = defineProps<{
-  name?: string
-  count?: number
-  disabled?: boolean
-  items?: string[]
-}>()
+  name?: string;
+  count?: number;
+  disabled?: boolean;
+  items?: string[];
+}>();
 
 const emit = defineEmits<{
-  update: [number]
-}>()
+  update: [number];
+}>();
 
 // Destructured props are reactive!
-const doubled = computed(() => count * 2)
-const itemCount = computed(() => items.length)
+const doubled = computed(() => count * 2);
+const itemCount = computed(() => items.length);
 
-watch(() => count, (newVal) => {
-  console.log('count changed:', newVal)
-})
+watch(
+  () => count,
+  (newVal) => {
+    console.log("count changed:", newVal);
+  },
+);
 
 function increment() {
-  emit('update', count + 1)
+  emit("update", count + 1);
 }
 </script>
 
@@ -37,9 +40,7 @@ function increment() {
       <h2>{{ name }}</h2>
       <p>Count: {{ count }} (doubled: {{ doubled }})</p>
       <p>Items: {{ itemCount }}</p>
-      <button @click="increment" :disabled="disabled">
-        Increment
-      </button>
+      <button @click="increment" :disabled="disabled">Increment</button>
     </div>
   </div>
 </template>

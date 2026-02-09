@@ -1,18 +1,11 @@
 import { parse as parseSFC } from "@vue/compiler-sfc";
-import {
-  SlotsContext,
-  handleSlotDeclaration,
-  handleSlotProp,
-} from "./slots.js";
+import { SlotsContext, handleSlotDeclaration, handleSlotProp } from "./slots.js";
 import { ElementNode, ElementTypes, NodeTypes } from "@vue/compiler-core";
 import { TemplateTypes } from "../../types.js";
 
 describe("parser template slots", () => {
   describe("element", () => {
-    function parse(
-      content: string,
-      context: SlotsContext = { ignoredIdentifiers: [] }
-    ) {
+    function parse(content: string, context: SlotsContext = { ignoredIdentifiers: [] }) {
       const source = `<template>${content}</template>`;
 
       const sfc = parseSFC(source, {});
@@ -20,11 +13,7 @@ describe("parser template slots", () => {
       const template = sfc.descriptor.template;
       const ast = template?.ast!;
 
-      const result = handleSlotDeclaration(
-        ast.children[0] as any,
-        ast as any,
-        context
-      );
+      const result = handleSlotDeclaration(ast.children[0] as any, ast as any, context);
 
       return {
         source,
@@ -36,9 +25,7 @@ describe("parser template slots", () => {
       const node = {
         type: NodeTypes.COMMENT,
       } as any as ElementNode;
-      expect(
-        handleSlotDeclaration(node, {} as any, { ignoredIdentifiers: [] })
-      ).toBeNull();
+      expect(handleSlotDeclaration(node, {} as any, { ignoredIdentifiers: [] })).toBeNull();
     });
     it("return null if node type is not <slot/>", () => {
       expect(parse(`<div/>`).result).toBeNull();
@@ -356,10 +343,7 @@ describe("parser template slots", () => {
   });
 
   describe("handleSlotProp", () => {
-    function parse(
-      content: string,
-      context: SlotsContext = { ignoredIdentifiers: [] }
-    ) {
+    function parse(content: string, context: SlotsContext = { ignoredIdentifiers: [] }) {
       const source = `<template>${content}</template>`;
 
       const sfc = parseSFC(source, {});
@@ -379,9 +363,7 @@ describe("parser template slots", () => {
       const node = {
         type: NodeTypes.COMMENT,
       } as any as ElementNode;
-      expect(
-        handleSlotProp(node, {} as any, { ignoredIdentifiers: [] })
-      ).toBeNull();
+      expect(handleSlotProp(node, {} as any, { ignoredIdentifiers: [] })).toBeNull();
     });
 
     it("return null if no v-slot", () => {
@@ -773,9 +755,7 @@ describe("parser template slots", () => {
     });
 
     it('v-slot:[`test:${name}`]="{foo:bar}"', () => {
-      const { result } = parse(
-        `<div v-slot:[\`test:\${name}\`]="{foo:bar}"></div>`
-      );
+      const { result } = parse(`<div v-slot:[\`test:\${name}\`]="{foo:bar}"></div>`);
 
       expect(result).toMatchObject({
         slot: {
@@ -1088,7 +1068,7 @@ describe("parser template slots", () => {
         expect(result).toMatchObject({
           slot: {
             type: TemplateTypes.SlotRender,
-            parent:null,
+            parent: null,
             name: [
               {
                 type: TemplateTypes.Binding,
@@ -1182,9 +1162,7 @@ describe("parser template slots", () => {
       });
 
       it('#[`test:${name}`]="{foo:bar}"', () => {
-        const { result } = parse(
-          `<div #[\`test:\${name}\`]="{foo:bar}"></div>`
-        );
+        const { result } = parse(`<div #[\`test:\${name}\`]="{foo:bar}"></div>`);
 
         expect(result).toMatchObject({
           slot: {

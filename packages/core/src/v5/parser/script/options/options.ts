@@ -1,17 +1,12 @@
 import { Expression } from "oxc-parser";
 import { MacrosPlugin } from "../../../process/script/plugins/macros";
-import {
-  FunctionBody,
-  FunctionDeclaration,
-  ObjectExpression,
-  VerterASTNode,
-} from "../../ast";
+import { FunctionBody, FunctionDeclaration, ObjectExpression, VerterASTNode } from "../../ast";
 import { shallowWalk } from "../../walk";
 import { createSetupContext, handleSetupNode } from "../setup";
 import { ScriptItem, ScriptTypes } from "../types";
 
 export function handleOptionsNode(
-  node: VerterASTNode
+  node: VerterASTNode,
 ): ScriptItem[] | { items: ScriptItem[]; isAsync: boolean } {
   switch (node.type) {
     case "ExportDefaultDeclaration": {
@@ -110,7 +105,7 @@ export function createOptionsContext(opts: {
   function visit(
     node: VerterASTNode,
     parent: VerterASTNode | null,
-    key?: string
+    key?: string,
   ): void | ScriptItem | ScriptItem[] {
     if (node.type === "ExportDefaultDeclaration") {
       track = true;
@@ -156,16 +151,12 @@ export function createOptionsContext(opts: {
         ) {
           setupFunction = parent.value.body;
         }
-        return
+        return;
       }
     }
   }
 
-  function leave(
-    node: VerterASTNode,
-    parent: VerterASTNode | null,
-    key?: string
-  ): void {
+  function leave(node: VerterASTNode, parent: VerterASTNode | null, key?: string): void {
     switch (node.type) {
       case "ExportDefaultDeclaration": {
         track = false;

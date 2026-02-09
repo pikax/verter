@@ -13,9 +13,7 @@ describe("process template plugins comment", () => {
 
     const s = new MagicString(source);
 
-    const templateBlock = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processTemplate(
       templateBlock.result.items,
@@ -35,7 +33,7 @@ describe("process template plugins comment", () => {
         blocks: parsed.blocks,
         block: templateBlock,
         blockNameResolver: (name) => name,
-      }
+      },
     );
 
     return r;

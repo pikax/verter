@@ -93,17 +93,11 @@ function run(cmd, opts = {}) {
           build.onDispose(async () => {
             console.log("ff");
             try {
-              const fp = path.resolve(
-                __dirname,
-                `../${outFolder}/extension.js`
-              );
+              const fp = path.resolve(__dirname, `../${outFolder}/extension.js`);
               let text = (await fs.promises.readFile(fp)).toString();
 
               text = text.replace("@verter/typescript-plugin", "./plugin.js");
-              text = text.replace(
-                "@verter/language-server/dist/server.js",
-                "./server.js"
-              );
+              text = text.replace("@verter/language-server/dist/server.js", "./server.js");
 
               await fs.promises.writeFile(fp, text);
               console.log("updated deps");

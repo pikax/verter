@@ -45,9 +45,7 @@ describe("utils", () => {
 
       const templateBlock = result.find((b) => b.type === "template")!;
       expect(templateBlock.languageId).toBe("tsx");
-      expect(templateBlock.uri).toBe(
-        uriToVerterVirtual(createSubDocumentUri(uri, "render.tsx"))
-      );
+      expect(templateBlock.uri).toBe(uriToVerterVirtual(createSubDocumentUri(uri, "render.tsx")));
       expect(templateBlock.blocks).toHaveLength(1);
     });
 
@@ -66,9 +64,7 @@ describe("utils", () => {
       const scriptBlock = result.find((b) => b.type === "script")!;
       // First script block had no lang => languageId = 'js'
       expect(scriptBlock.languageId).toBe("js");
-      expect(scriptBlock.uri).toBe(
-        uriToVerterVirtual(createSubDocumentUri(uri, "options.ts"))
-      );
+      expect(scriptBlock.uri).toBe(uriToVerterVirtual(createSubDocumentUri(uri, "options.ts")));
       expect(scriptBlock.blocks).toHaveLength(3);
     });
 
@@ -84,31 +80,19 @@ describe("utils", () => {
       // bundle + css + sass
       expect(result).toHaveLength(3);
 
-      const cssBlock = result.find(
-        (b) => b.type === "style" && b.languageId === "css"
-      )!;
-      const sassBlock = result.find(
-        (b) => b.type === "style" && b.languageId === "sass"
-      )!;
+      const cssBlock = result.find((b) => b.type === "style" && b.languageId === "css")!;
+      const sassBlock = result.find((b) => b.type === "style" && b.languageId === "sass")!;
 
-      expect(cssBlock.uri).toBe(
-        uriToVerterVirtual(createSubDocumentUri(uri, "style.css"))
-      );
+      expect(cssBlock.uri).toBe(uriToVerterVirtual(createSubDocumentUri(uri, "style.css")));
       expect(cssBlock.blocks).toHaveLength(2); // noLang and true are both css
 
-      expect(sassBlock.uri).toBe(
-        uriToVerterVirtual(createSubDocumentUri(uri, "style.sass"))
-      );
+      expect(sassBlock.uri).toBe(uriToVerterVirtual(createSubDocumentUri(uri, "style.sass")));
       expect(sassBlock.blocks).toHaveLength(1);
     });
 
     it("should put unknown tags into custom if no known blocks consume them", () => {
       const uri = "file:///some/path.vue";
-      const blocks = [
-        makeBlock("template"),
-        makeBlock("unknown"),
-        makeBlock("weird"),
-      ];
+      const blocks = [makeBlock("template"), makeBlock("unknown"), makeBlock("weird")];
       const result = processBlocks(uri, blocks);
 
       // Template is known, unknown and weird remain -> custom block produced
@@ -119,13 +103,8 @@ describe("utils", () => {
       expect(templateBlock.blocks).toHaveLength(1);
 
       const customBlock = result.find((b) => b.type === "custom")!;
-      expect(customBlock.blocks.map((b) => b.block.tag.type).sort()).toEqual([
-        "unknown",
-        "weird",
-      ]);
-      expect(customBlock.uri).toBe(
-        uriToVerterVirtual(createSubDocumentUri(uri, "custom.temp"))
-      );
+      expect(customBlock.blocks.map((b) => b.block.tag.type).sort()).toEqual(["unknown", "weird"]);
+      expect(customBlock.uri).toBe(uriToVerterVirtual(createSubDocumentUri(uri, "custom.temp")));
     });
 
     it("should handle multiple known and leftover blocks producing a custom block", () => {
@@ -218,9 +197,7 @@ describe("utils", () => {
         source: ".",
       });
 
-      const consumerWithSpans = new SourceMapConsumer(
-        generator.toJSON() as any
-      );
+      const consumerWithSpans = new SourceMapConsumer(generator.toJSON() as any);
       consumerWithSpans.computeColumnSpans();
 
       const genPos = generatedPositionFor(consumerWithSpans, {

@@ -9,11 +9,7 @@ const vFocus: Directive<HTMLInputElement> = {
 };
 
 // Full directive with all hooks
-const vHighlight: Directive<
-  HTMLElement,
-  string,
-  "important" | "normal" | "low"
-> = {
+const vHighlight: Directive<HTMLElement, string, "important" | "normal" | "low"> = {
   created(el, binding) {
     // Called before element's attributes or event listeners are applied
   },
@@ -78,10 +74,7 @@ const vResize: Directive<HTMLElement, ResizeOptions> = {
     const { minWidth = 0, maxWidth = Infinity, onResize } = binding.value || {};
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
-        const width = Math.min(
-          Math.max(entry.contentRect.width, minWidth),
-          maxWidth,
-        );
+        const width = Math.min(Math.max(entry.contentRect.width, minWidth), maxWidth);
         onResize?.(width);
       }
     });
@@ -94,10 +87,7 @@ const vResize: Directive<HTMLElement, ResizeOptions> = {
 };
 
 // Function shorthand (mounted + updated)
-const vColor: Directive<HTMLElement, string, "red" | "blue"> = (
-  el,
-  binding,
-) => {
+const vColor: Directive<HTMLElement, string, "red" | "blue"> = (el, binding) => {
   el.style.color = binding.value;
 };
 
@@ -123,8 +113,8 @@ const Comp = defineComponent({
     click: () => true,
   },
   setup() {
-    return ()=> h('div')
-  }
+    return () => h("div");
+  },
 });
 </script>
 
@@ -154,9 +144,7 @@ const Comp = defineComponent({
     <button v-tooltip:bottom="'Bottom tooltip'">Bottom</button>
 
     <!-- v-resize with complex options -->
-    <div v-resize="{ minWidth: 100, maxWidth: 500, onResize: handleResize }">
-      Resizable content
-    </div>
+    <div v-resize="{ minWidth: 100, maxWidth: 500, onResize: handleResize }">Resizable content</div>
 
     <span v-color.red.blue.green="color" />
     <span v-color.red="color" />

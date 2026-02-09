@@ -13,16 +13,17 @@ const cachedComponents = ref<string[]>(["Tab1", "Tab2"]);
 const maxCached = ref(10);
 
 // Suspense state
-const AsyncComponent = defineAsyncComponent(() =>
-  new Promise<{ default: Component }>((resolve) => {
-    setTimeout(() => {
-      resolve({
-        default: {
-          template: "<div>Async content loaded!</div>",
-        },
-      });
-    }, 1000);
-  })
+const AsyncComponent = defineAsyncComponent(
+  () =>
+    new Promise<{ default: Component }>((resolve) => {
+      setTimeout(() => {
+        resolve({
+          default: {
+            template: "<div>Async content loaded!</div>",
+          },
+        });
+      }, 1000);
+    }),
 );
 
 const showAsync = ref(true);
@@ -143,12 +144,10 @@ function onFallback() {
           <button @click="toggleModal">Close</button>
         </div>
       </Teleport>
-      
+
       <!-- Conditional teleport -->
       <Teleport to="body" :disabled="tooltipDisabled">
-        <div v-if="showTooltip" class="tooltip">
-          Tooltip content
-        </div>
+        <div v-if="showTooltip" class="tooltip">Tooltip content</div>
       </Teleport>
       <button @click="toggleTooltip">Toggle Tooltip</button>
       <label>
@@ -171,11 +170,7 @@ function onFallback() {
         </button>
       </div>
       <KeepAlive :include="cachedComponents" :max="maxCached">
-        <component
-          :is="currentTab"
-          @vue:mounted="onActivated"
-          @vue:unmounted="onDeactivated"
-        />
+        <component :is="currentTab" @vue:mounted="onActivated" @vue:unmounted="onDeactivated" />
       </KeepAlive>
       <!-- KeepAlive with exclude -->
       <KeepAlive exclude="Tab3">
@@ -188,12 +183,7 @@ function onFallback() {
       <h3>Suspense</h3>
       <button @click="reloadAsync">Reload</button>
       <button @click="showAsync = !showAsync">Toggle</button>
-      <Suspense
-        :key="suspenseKey"
-        @pending="onPending"
-        @resolve="onResolve"
-        @fallback="onFallback"
-      >
+      <Suspense :key="suspenseKey" @pending="onPending" @resolve="onResolve" @fallback="onFallback">
         <template #default>
           <AsyncComponent v-if="showAsync" />
         </template>
@@ -231,9 +221,7 @@ function onFallback() {
         @leave="onLeave"
         @after-leave="onAfterLeave"
       >
-        <div v-if="transitionShow" class="box">
-          Transitioning content
-        </div>
+        <div v-if="transitionShow" class="box">Transitioning content</div>
       </Transition>
     </section>
 
@@ -245,11 +233,7 @@ function onFallback() {
         <button @click="shuffleItems">Shuffle</button>
       </div>
       <TransitionGroup name="list" tag="ul" class="list">
-        <li
-          v-for="item in items"
-          :key="item.id"
-          class="list-item"
-        >
+        <li v-for="item in items" :key="item.id" class="list-item">
           {{ item.text }}
           <button @click="removeItem(item.id)">×</button>
         </li>

@@ -61,8 +61,8 @@ const now = new Date();
 
     <!-- Array operations -->
     <p>{{ items.join(", ") }}</p>
-    <p>{{ items.map(i => i.toUpperCase()).join(" | ") }}</p>
-    <p>{{ items.filter(i => i !== "b") }}</p>
+    <p>{{ items.map((i) => i.toUpperCase()).join(" | ") }}</p>
+    <p>{{ items.filter((i) => i !== "b") }}</p>
     <p>{{ items.length }}</p>
     <p>{{ items[0] }}</p>
     <p>{{ items.at(-1) }}</p>
@@ -85,10 +85,10 @@ const now = new Date();
     <p>{{ (nullableValue as string).length }}</p>
 
     <!-- Destructuring in expressions -->
-    <p>{{ ({ a: 1, b: 2 }).a }}</p>
+    <p>{{ { a: 1, b: 2 }.a }}</p>
 
     <!-- Array spread -->
-    <p>{{ [...items, 'd'].join(', ') }}</p>
+    <p>{{ [...items, "d"].join(", ") }}</p>
 
     <!-- Object spread -->
     <p>{{ JSON.stringify({ ...user, extra: true }) }}</p>
@@ -100,8 +100,8 @@ const now = new Date();
 
     <!-- String methods -->
     <p>{{ name.slice(0, 2) }}</p>
-    <p>{{ name.split('').reverse().join('') }}</p>
-    <p>{{ name.padStart(10, '-') }}</p>
+    <p>{{ name.split("").reverse().join("") }}</p>
+    <p>{{ name.padStart(10, "-") }}</p>
 
     <!-- Date expressions -->
     <p>{{ now.getFullYear() }}</p>
@@ -113,7 +113,7 @@ const now = new Date();
     <p>{{ count >= 1 && count <= 10 }}</p>
 
     <!-- Bitwise (rarely used but valid) -->
-    <p>{{ (count | 0) }}</p>
+    <p>{{ count | 0 }}</p>
     <p>{{ count & 1 }}</p>
     <p>{{ count << 1 }}</p>
 

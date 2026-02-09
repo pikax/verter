@@ -49,8 +49,7 @@ describe("InferFunctionPlugin fixtures", () => {
           const { result } = processFixture(fixture);
 
           fixture.expectations!.patterns!.forEach((pattern) => {
-            const resolvedPattern =
-              typeof pattern === "function" ? pattern(PREFIX) : pattern;
+            const resolvedPattern = typeof pattern === "function" ? pattern(PREFIX) : pattern;
             it(`should contain: ${resolvedPattern.substring(0, 50)}...`, () => {
               expect(result).toContain(resolvedPattern);
             });
@@ -63,8 +62,7 @@ describe("InferFunctionPlugin fixtures", () => {
           const { result } = processFixture(fixture);
 
           fixture.expectations!.antiPatterns!.forEach((pattern) => {
-            const resolvedPattern =
-              typeof pattern === "function" ? pattern(PREFIX) : pattern;
+            const resolvedPattern = typeof pattern === "function" ? pattern(PREFIX) : pattern;
             it(`should NOT contain: ${resolvedPattern.substring(0, 50)}...`, () => {
               expect(result).not.toContain(resolvedPattern);
             });
@@ -84,72 +82,56 @@ describe("InferFunctionPlugin fixtures", () => {
     });
 
     it("input event infers correct type", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "input event on input element"
-      );
+      const fixture = fixtures.find((f) => f.name === "input event on input element");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["input"]["onInput"]');
     });
 
     it("change event infers correct type", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "change event on select element"
-      );
+      const fixture = fixtures.find((f) => f.name === "change event on select element");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["select"]["onChange"]');
     });
 
     it("submit event infers correct type", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "submit event on form element"
-      );
+      const fixture = fixtures.find((f) => f.name === "submit event on form element");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["form"]["onSubmit"]');
     });
 
     it("keydown event infers correct type", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "keydown event on input element"
-      );
+      const fixture = fixtures.find((f) => f.name === "keydown event on input element");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["input"]["onKeydown"]');
     });
 
     it("focus event infers correct type", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "focus event on input element"
-      );
+      const fixture = fixtures.find((f) => f.name === "focus event on input element");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["input"]["onFocus"]');
     });
 
     it("blur event infers correct type", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "blur event on input element"
-      );
+      const fixture = fixtures.find((f) => f.name === "blur event on input element");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["input"]["onBlur"]');
     });
 
     it("mouseenter event infers correct type", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "mouseenter event on div element"
-      );
+      const fixture = fixtures.find((f) => f.name === "mouseenter event on div element");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["div"]["onMouseenter"]');
     });
 
     it("mouseleave event infers correct type", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "mouseleave event on div element"
-      );
+      const fixture = fixtures.find((f) => f.name === "mouseleave event on div element");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["div"]["onMouseleave"]');
@@ -158,9 +140,7 @@ describe("InferFunctionPlugin fixtures", () => {
 
   describe("multiple parameters", () => {
     it("transforms all parameters with spread syntax", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "function with multiple parameters"
-      );
+      const fixture = fixtures.find((f) => f.name === "function with multiple parameters");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain("...[a, b, c]:");
@@ -170,9 +150,7 @@ describe("InferFunctionPlugin fixtures", () => {
 
   describe("no transformation cases", () => {
     it("does not transform function not used in template", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "function not used in template"
-      );
+      const fixture = fixtures.find((f) => f.name === "function not used in template");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain("function unusedFunction(x)");
@@ -182,14 +160,12 @@ describe("InferFunctionPlugin fixtures", () => {
 
     // NOTE: Currently the plugin transforms parameters even when they have type annotations
     it("transforms function with typed parameter (current behavior)", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "function with typed parameter"
-      );
+      const fixture = fixtures.find((f) => f.name === "function with typed parameter");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       // Currently transforms even typed parameters - wraps in spread syntax
       expect(result).not.toContain("...[e: MouseEvent]:");
-      expect(result).toContain('handler(e: MouseEvent)');
+      expect(result).toContain("handler(e: MouseEvent)");
     });
 
     it("does not transform arrow functions", () => {
@@ -201,9 +177,7 @@ describe("InferFunctionPlugin fixtures", () => {
     });
 
     it("does not transform function with no parameters", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "function with no parameters"
-      );
+      const fixture = fixtures.find((f) => f.name === "function with no parameters");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain("function noParams()");
@@ -213,9 +187,7 @@ describe("InferFunctionPlugin fixtures", () => {
 
   describe("different element types", () => {
     it("anchor element click event", () => {
-      const fixture = fixtures.find(
-        (f) => f.name === "click on anchor element"
-      );
+      const fixture = fixtures.find((f) => f.name === "click on anchor element");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
       expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["a"]["onClick"]');
@@ -232,7 +204,9 @@ describe("InferFunctionPlugin fixtures", () => {
       const fixture = fixtures.find((f) => f.name === "contextmenu event");
       expect(fixture).toBeDefined();
       const { result } = processFixture(fixture!);
-      expect(result).toContain('import(\'vue\').IntrinsicElementAttributes["div"]["onContextmenu"]');
+      expect(result).toContain(
+        'import(\'vue\').IntrinsicElementAttributes["div"]["onContextmenu"]',
+      );
     });
   });
 });

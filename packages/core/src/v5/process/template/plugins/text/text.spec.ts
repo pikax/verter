@@ -13,9 +13,7 @@ describe("process template plugins text", () => {
 
     const s = new MagicString(source);
 
-    const templateBlock = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processTemplate(
       templateBlock.result.items,
@@ -33,8 +31,9 @@ describe("process template plugins text", () => {
         s,
         filename: "test.vue",
         blocks: parsed.blocks,
-        block: templateBlock,blockNameResolver: (name) => name,
-      }
+        block: templateBlock,
+        blockNameResolver: (name) => name,
+      },
     );
 
     return r;
@@ -60,8 +59,8 @@ describe("process template plugins text", () => {
     expect(result).toMatchInlineSnapshot(`"{"\\""}"`);
   });
 
-  it('should ignore empty text', () => {
-    const source = `\n\n\r\n      \n\r\n`
+  it("should ignore empty text", () => {
+    const source = `\n\n\r\n      \n\r\n`;
     const { result } = parse(source);
     expect(result).toBe(source);
   });

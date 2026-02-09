@@ -8,7 +8,7 @@ const mockLanguageService: LanguageService = {
     () =>
       ({
         mock: "stylesheet",
-      } as unknown as Stylesheet)
+      }) as unknown as Stylesheet,
   ),
   // Add any other required LanguageService methods if needed
 } as unknown as LanguageService;
@@ -24,13 +24,7 @@ describe("StyleDocument", () => {
   let doc: StyleDocument;
   beforeEach(() => {
     vi.clearAllMocks();
-    doc = StyleDocument.create(
-      mockLanguageService,
-      uri,
-      languageId,
-      version,
-      initialContent
-    );
+    doc = StyleDocument.create(mockLanguageService, uri, languageId, version, initialContent);
   });
 
   describe("constructor and basic properties", () => {

@@ -83,9 +83,9 @@ pnpm add @verter/vite-plugin
 
 ### Peer Dependencies
 
-| Dependency | Versions |
-|------------|----------|
-| `vite` | `^4.0.0 \|\| ^5.0.0 \|\| ^6.0.0 \|\| ^7.0.0` |
+| Dependency | Versions                                     |
+| ---------- | -------------------------------------------- |
+| `vite`     | `^4.0.0 \|\| ^5.0.0 \|\| ^6.0.0 \|\| ^7.0.0` |
 
 The `@verter/native` package is a direct dependency and will be installed automatically with the correct platform binary.
 
@@ -95,8 +95,8 @@ The `@verter/native` package is a direct dependency and will be installed automa
 
 ```typescript
 // vite.config.ts
-import { defineConfig } from 'vite';
-import { verter } from '@verter/vite-plugin';
+import { defineConfig } from "vite";
+import { verter } from "@verter/vite-plugin";
 
 export default defineConfig({
   plugins: [verter()],
@@ -108,8 +108,8 @@ export default defineConfig({
 By default, Verter generates component IDs by hashing the filename (production) or filename + source content (development). You can override this with a custom generator:
 
 ```typescript
-import { defineConfig } from 'vite';
-import { verter } from '@verter/vite-plugin';
+import { defineConfig } from "vite";
+import { verter } from "@verter/vite-plugin";
 
 export default defineConfig({
   plugins: [
@@ -143,13 +143,13 @@ interface VerterPluginOptions {
 
 ### Plugin Behavior
 
-| Hook | Behavior |
-|------|----------|
-| `configResolved` | Captures the resolved Vite config (command mode, SSR flag, etc.) |
-| `resolveId` | Resolves virtual module IDs for style block requests (`?vue&type=style&index=N`) |
-| `load` | Serves cached style block content for virtual module requests |
-| `transform` | Compiles `.vue` files: runs `compileForVite`, assembles the main module, strips TypeScript via esbuild |
-| `handleHotUpdate` | Clears the descriptor cache and triggers a full reload for changed `.vue` files |
+| Hook              | Behavior                                                                                               |
+| ----------------- | ------------------------------------------------------------------------------------------------------ |
+| `configResolved`  | Captures the resolved Vite config (command mode, SSR flag, etc.)                                       |
+| `resolveId`       | Resolves virtual module IDs for style block requests (`?vue&type=style&index=N`)                       |
+| `load`            | Serves cached style block content for virtual module requests                                          |
+| `transform`       | Compiles `.vue` files: runs `compileForVite`, assembles the main module, strips TypeScript via esbuild |
+| `handleHotUpdate` | Clears the descriptor cache and triggers a full reload for changed `.vue` files                        |
 
 ### Main Module Assembly
 
@@ -202,13 +202,13 @@ packages/vite-plugin/src/
 
 ## Dependencies
 
-| Dependency | Type | Purpose |
-|------------|------|---------|
-| `@verter/native` | runtime | Rust template compiler (provides `compileForVite`) |
-| `vite` | peer | Vite build tool (`transformWithEsbuild`, plugin types) |
-| `tsdown` | dev | TypeScript bundler |
-| `typescript` | dev | Type checking |
-| `vitest` | dev | Test runner |
+| Dependency       | Type    | Purpose                                                |
+| ---------------- | ------- | ------------------------------------------------------ |
+| `@verter/native` | runtime | Rust template compiler (provides `compileForVite`)     |
+| `vite`           | peer    | Vite build tool (`transformWithEsbuild`, plugin types) |
+| `tsdown`         | dev     | TypeScript bundler                                     |
+| `typescript`     | dev     | Type checking                                          |
+| `vitest`         | dev     | Test runner                                            |
 
 ## License
 

@@ -6,12 +6,7 @@ import { createSubDocumentUri, uriToPath } from "../../../../../utils.js";
 import type { VueDocument } from "../../../vue.js";
 
 export class VueBundleDocument extends VueTypescriptDocument {
-  static create(
-    uri: string,
-    parent: VueDocument,
-    languageId: LanguageTypescript,
-    version: number
-  ) {
+  static create(uri: string, parent: VueDocument, languageId: LanguageTypescript, version: number) {
     return new VueBundleDocument(uri, parent, languageId, version);
   }
 
@@ -19,22 +14,19 @@ export class VueBundleDocument extends VueTypescriptDocument {
 
   protected process(context: SubDocumentProcessContext) {
     const block = context.blocks.find(
-      (block) => block.type === "script" && (block as ParsedBlockScript).isMain
+      (block) => block.type === "script" && (block as ParsedBlockScript).isMain,
     );
     if (!block) return;
 
-    this.buildResult = buildBundle(
-      (block.result?.items as ScriptItem[]) ?? [],
-      {
-        ...context,
-        block,
-        filename: uriToPath(this.uri),
-        override: true,
-        blockNameResolver: (name) => {
-          const n = this.parent.uri.split("/").pop() ?? "Comp.vue";
-          return createSubDocumentUri(n, name);
-        },
-      }
-    );
+    this.buildResult = buildBundle((block.result?.items as ScriptItem[]) ?? [], {
+      ...context,
+      block,
+      filename: uriToPath(this.uri),
+      override: true,
+      blockNameResolver: (name) => {
+        const n = this.parent.uri.split("/").pop() ?? "Comp.vue";
+        return createSubDocumentUri(n, name);
+      },
+    });
   }
 }

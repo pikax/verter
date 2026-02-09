@@ -105,7 +105,7 @@ onMounted(() => {
   // Refs are available after mount
   console.log("Input ref:", inputRef.value);
   console.log("Div ref:", divRef.value);
-  
+
   // Focus input on mount
   inputRef.value?.focus();
 });

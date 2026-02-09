@@ -122,12 +122,12 @@ flowchart LR
     PKG --> TsxStr
 ```
 
-| Export Path | Entry Point | Purpose |
-|-------------|-------------|---------|
-| `.` | `dist/index.d.ts` | All type helpers (PatchHidden, EmitsToProps, etc.) |
-| `./string` | `dist/string-export.js` | All declarations as a JS string with `$V_` prefix |
-| `./tsx` | `dist/tsx-export.d.ts` | JSX `IntrinsicClassAttributes` augmentations |
-| `./tsx-string` | `dist/tsx-string-export.js` | TSX augmentations as a string export |
+| Export Path    | Entry Point                 | Purpose                                            |
+| -------------- | --------------------------- | -------------------------------------------------- |
+| `.`            | `dist/index.d.ts`           | All type helpers (PatchHidden, EmitsToProps, etc.) |
+| `./string`     | `dist/string-export.js`     | All declarations as a JS string with `$V_` prefix  |
+| `./tsx`        | `dist/tsx-export.d.ts`      | JSX `IntrinsicClassAttributes` augmentations       |
+| `./tsx-string` | `dist/tsx-string-export.js` | TSX augmentations as a string export               |
 
 ### Package Structure
 
@@ -197,24 +197,24 @@ import type {
 
 // Attach hidden metadata to a type via a unique symbol key
 type Tagged = PatchHidden<{ id: number }, { __brand: "user" }>;
-type Meta = ExtractHidden<Tagged>;  // { __brand: "user" }
-type Clean = ExtractHidden<{ id: number }>;  // never (no hidden data)
+type Meta = ExtractHidden<Tagged>; // { __brand: "user" }
+type Clean = ExtractHidden<{ id: number }>; // never (no hidden data)
 
 // Make undefined-able properties optional
 type A = { a: string; b: number | undefined; c: boolean };
-type Opt = PartialUndefined<A>;  // { a: string; b?: number | undefined; c: boolean }
+type Opt = PartialUndefined<A>; // { a: string; b?: number | undefined; c: boolean }
 
 // Convert a union into an intersection
 type U = { x: 1 } | { y: 2 };
-type I = UnionToIntersection<U>;  // { x: 1 } & { y: 2 }
+type I = UnionToIntersection<U>; // { x: 1 } & { y: 2 }
 
 // Filter out never-valued properties
 type WithNever = { a: string; b: never; c: number };
-type Cleaned = OmitNever<WithNever>;  // { a: string; c: number }
+type Cleaned = OmitNever<WithNever>; // { a: string; c: number }
 
 // Pick properties by value type
 type Obj = { name: string; age: number; active: boolean };
-type Strings = PickByValue<Obj, string>;  // { name: string }
+type Strings = PickByValue<Obj, string>; // { name: string }
 ```
 
 ### Vue Emits Helpers
@@ -233,9 +233,7 @@ type AsObject = FunctionToObject<EmitFn>;
 // { [UniqueKey]?: { save: [number] } } & ((e: "save", id: number) => void)
 
 // Merge multiple emit overloads into a single event map
-type Overloads =
-  & ((e: "open", path: string) => void)
-  & ((e: "close") => void);
+type Overloads = ((e: "open", path: string) => void) & ((e: "close") => void);
 type Merged = IntersectionFunctionToObject<Overloads>;
 
 // Convert emits to Vue-style onXxx props
@@ -371,6 +369,7 @@ console.log(ExportedTypes);
 ```
 
 The string export process:
+
 1. Reads all source files discovered from `src/index.ts` exports
 2. Collects all declaration names (types, interfaces, functions, variables)
 3. Rewrites every identifier with the `$V_` prefix via a TypeScript AST transformer
@@ -444,19 +443,19 @@ The benchmark generates scalable type files with varying numbers of properties a
 
 This is a types-only package with minimal dependencies:
 
-| Dependency | Scope | Purpose |
-|-----------|-------|---------|
-| `typescript` | dev | Type checking and string export build script |
-| `vitest` | dev | Type test runner (`--typecheck` mode) |
-| `vue` | dev | Vue 3 types for testing compatibility |
+| Dependency   | Scope | Purpose                                      |
+| ------------ | ----- | -------------------------------------------- |
+| `typescript` | dev   | Type checking and string export build script |
+| `vitest`     | dev   | Type test runner (`--typecheck` mode)        |
+| `vue`        | dev   | Vue 3 types for testing compatibility        |
 
 ## Compatibility
 
-| Requirement | Version |
-|-------------|---------|
-| TypeScript | 5.x (tested with 5.8+) |
-| Vue | 3.5+ |
-| Runtime | None (types-only, zero runtime side-effects) |
+| Requirement | Version                                      |
+| ----------- | -------------------------------------------- |
+| TypeScript  | 5.x (tested with 5.8+)                       |
+| Vue         | 3.5+                                         |
+| Runtime     | None (types-only, zero runtime side-effects) |
 
 ## License
 

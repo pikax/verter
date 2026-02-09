@@ -8,22 +8,18 @@ import { ExtractHidden, IntersectionFunctionToObject } from "../helpers";
 export type EmitsToProps<T> = T extends () => any
   ? {}
   : IntersectionFunctionToObject<T> extends infer O
-  ? ExtractHidden<O> extends infer E extends Record<PropertyKey, any>
-    ? {
-        [K in keyof E as `on${Capitalize<K & string>}`]?: (
-          ...args: E[K]
-        ) => void;
-      }
-    : {}
-  : {};
+    ? ExtractHidden<O> extends infer E extends Record<PropertyKey, any>
+      ? {
+          [K in keyof E as `on${Capitalize<K & string>}`]?: (...args: E[K]) => void;
+        }
+      : {}
+    : {};
 
 /**
  * Extracts emit event types from a Vue component and converts them to props.
  * Works with components created via defineComponent.
  */
-export type ComponentEmitsToProps<T> = T extends new (
-  ...args: any[]
-) => infer Instance
+export type ComponentEmitsToProps<T> = T extends new (...args: any[]) => infer Instance
   ? Instance extends { $emit: infer EmitFn }
     ? EmitsToProps<EmitFn>
     : {}
@@ -31,7 +27,7 @@ export type ComponentEmitsToProps<T> = T extends new (
 
 export declare function eventCallbacks<
   TArgs extends Array<any>,
-  R extends ($event: TArgs[0]) => any
+  R extends ($event: TArgs[0]) => any,
 >(event: TArgs, cb: R): R;
 
 // function onFoo(e: number, b: string): void {}

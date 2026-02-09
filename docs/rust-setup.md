@@ -17,6 +17,7 @@ crates/
 ## Setup & Development
 
 ### Prerequisites
+
 - Rust 1.70+ ([Install Rust](https://rustup.rs/))
 
 ### Building
@@ -92,6 +93,7 @@ license.workspace = true
 ## Workspace Configuration
 
 All crates inherit shared settings from the root `Cargo.toml`:
+
 - `version`: 0.1.0
 - `edition`: 2021
 - `license`: ISC
@@ -101,6 +103,7 @@ Release builds are optimized with LTO and single-threaded compilation for maximu
 ## Integration with Node.js
 
 For Rust crates that need to be called from Node.js/TypeScript:
+
 - Use [napi-rs](https://napi.rs/) for N-API bindings
 - Use [wasm-bindgen](https://github.com/rustwasm/wasm-bindgen) for WebAssembly bindings
 - Consider [cargo-build-scripts](https://doc.rust-lang.org/cargo/build-scripts.html) for native module compilation
@@ -108,6 +111,7 @@ For Rust crates that need to be called from Node.js/TypeScript:
 ## CI/CD
 
 Rust code should be included in CI/CD pipelines:
+
 - Format check: `cargo fmt --check`
 - Linting: `cargo clippy -- -D warnings`
 - Tests: `cargo test`

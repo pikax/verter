@@ -19,9 +19,7 @@ export type StatisticsOptions = {
   maxPersistedEntries?: number;
 };
 
-type ResolvedStatisticsOptions = Required<
-  Omit<StatisticsOptions, "filePath">
-> & {
+type ResolvedStatisticsOptions = Required<Omit<StatisticsOptions, "filePath">> & {
   filePath?: string;
 };
 
@@ -131,7 +129,7 @@ export class StatisticsManager {
     type: StatisticsEventType | string,
     uri: string | undefined,
     fn: () => Promise<T> | T,
-    meta?: Record<string, unknown>
+    meta?: Record<string, unknown>,
   ): Promise<T> {
     const start = performance.now();
     try {
@@ -159,8 +157,7 @@ export class StatisticsManager {
     return {
       enabled: this.options.enabled,
       session: {
-        events:
-          includeSession && includeEvents ? [...this.sessionEvents] : undefined,
+        events: includeSession && includeEvents ? [...this.sessionEvents] : undefined,
         byType: includeSession ? this.toSummaryObject(this.sessionByType) : {},
         byFile: includeSession ? this.toSummaryObject(this.sessionByFile) : {},
       },
@@ -176,9 +173,7 @@ export class StatisticsManager {
     };
   }
 
-  private resolveOptions(
-    options?: StatisticsOptions
-  ): ResolvedStatisticsOptions {
+  private resolveOptions(options?: StatisticsOptions): ResolvedStatisticsOptions {
     const merged: ResolvedStatisticsOptions = {
       ...DEFAULTS,
       ...options,
@@ -191,11 +186,7 @@ export class StatisticsManager {
     return merged;
   }
 
-  private upsertSummary(
-    map: Map<string, MutableSummary>,
-    key: string,
-    durationMs: number
-  ) {
+  private upsertSummary(map: Map<string, MutableSummary>, key: string, durationMs: number) {
     const current = map.get(key);
     if (!current) {
       map.set(key, {
@@ -213,9 +204,7 @@ export class StatisticsManager {
     current.maxMs = Math.max(current.maxMs, durationMs);
   }
 
-  private toSummaryObject(
-    map: Map<string, MutableSummary>
-  ): Record<string, StatisticsSummary> {
+  private toSummaryObject(map: Map<string, MutableSummary>): Record<string, StatisticsSummary> {
     const output: Record<string, StatisticsSummary> = {};
     for (const [key, value] of map.entries()) {
       output[key] = {
@@ -259,17 +248,11 @@ export class StatisticsManager {
     };
 
     await mkdir(dirname(this.options.filePath), { recursive: true });
-    await writeFile(
-      this.options.filePath,
-      JSON.stringify(payload, null, 2),
-      "utf-8"
-    );
+    await writeFile(this.options.filePath, JSON.stringify(payload, null, 2), "utf-8");
     this.lastPersistedAt = payload.updatedAt;
   }
 
-  private toPersistable(
-    map: Map<string, MutableSummary>
-  ): Record<string, MutableSummary> {
+  private toPersistable(map: Map<string, MutableSummary>): Record<string, MutableSummary> {
     const output: Record<string, MutableSummary> = {};
     for (const [key, value] of map.entries()) {
       output[key] = { ...value };
@@ -292,15 +275,13 @@ export class StatisticsManager {
         this.globalByFile.set(key, { ...summary });
       }
       if (parsed.events && Array.isArray(parsed.events)) {
-        this.persistedEvents = parsed.events.slice(
-          -this.options.maxPersistedEntries
-        );
+        this.persistedEvents = parsed.events.slice(-this.options.maxPersistedEntries);
       }
       this.lastPersistedAt = parsed.updatedAt;
     } catch (e) {
       console.error(
         `[statistics] Failed to read persisted statistics from ${this.options.filePath}`,
-        e
+        e,
       );
     }
   }

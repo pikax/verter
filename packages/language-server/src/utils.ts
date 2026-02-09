@@ -20,22 +20,18 @@ export function findTsConfigPath(
   fileName: string,
   rootUris: string[],
   fileExists: (path: string) => boolean,
-  getCanonicalFileName: GetCanonicalFileName
+  getCanonicalFileName: GetCanonicalFileName,
 ) {
   const searchDir = dirname(fileName);
 
-  const tsconfig =
-    ts.findConfigFile(searchDir, fileExists, "tsconfig.json") || "";
-  const jsconfig =
-    ts.findConfigFile(searchDir, fileExists, "jsconfig.json") || "";
+  const tsconfig = ts.findConfigFile(searchDir, fileExists, "tsconfig.json") || "";
+  const jsconfig = ts.findConfigFile(searchDir, fileExists, "jsconfig.json") || "";
   // Prefer closest config file
   const config = tsconfig.length >= jsconfig.length ? tsconfig : jsconfig;
 
   // Don't return config files that exceed the current workspace context or cross a node_modules folder
   return !!config &&
-    rootUris.some((rootUri) =>
-      isSubPath(rootUri, config, getCanonicalFileName)
-    ) &&
+    rootUris.some((rootUri) => isSubPath(rootUri, config, getCanonicalFileName)) &&
     !fileName
       .substring(config.length - 13)
       .split("/")
@@ -47,13 +43,11 @@ export function findTsConfigPath(
 export function isSubPath(
   uri: string,
   possibleSubPath: string,
-  getCanonicalFileName: GetCanonicalFileName
+  getCanonicalFileName: GetCanonicalFileName,
 ): boolean {
   // URL escape codes are in upper-case
   // so getCanonicalFileName should be called after converting to file url
-  return getCanonicalFileName(pathToUrl(possibleSubPath)).startsWith(
-    getCanonicalFileName(uri)
-  );
+  return getCanonicalFileName(pathToUrl(possibleSubPath)).startsWith(getCanonicalFileName(uri));
 }
 
 export function uniqueArray<T>(items: T[]) {

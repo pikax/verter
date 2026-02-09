@@ -17,21 +17,19 @@ function ensureDirs() {
 function genBenchFile(size) {
   const file = path.join(genDir, `bench-size-${size}.ts`);
   // Generate a large object type with many keys
-  const props = Array.from(
-    { length: size },
-    (_, i) => `  P${i + 1}: number | undefined;`
-  ).join("\n");
+  const props = Array.from({ length: size }, (_, i) => `  P${i + 1}: number | undefined;`).join(
+    "\n",
+  );
   // Generate a union with many types
   const unionCount = Math.min(size, 40);
-  const unionParts = Array.from(
-    { length: unionCount },
-    (_, i) => `{ K${i + 1}: ${i + 1} }`
-  ).join(" | ");
+  const unionParts = Array.from({ length: unionCount }, (_, i) => `{ K${i + 1}: ${i + 1} }`).join(
+    " | ",
+  );
   // Generate many event signatures for IntersectionFunctionToObject
   const evtCount = Math.min(size, 20);
   const eventSigs = Array.from(
     { length: evtCount },
-    (_, i) => `((e: '${`evt${i + 1}`}', ...args: [number, string]) => void)`
+    (_, i) => `((e: '${`evt${i + 1}`}', ...args: [number, string]) => void)`,
   ).join(" & ");
 
   // Generate some model entries to exercise ModelToProps/ModelToEmits
@@ -162,8 +160,7 @@ function main() {
   for (const size of sizes) {
     genBenchFile(size);
     const traceDir = trace ? path.join(benchDir, `trace-${size}`) : undefined;
-    if (traceDir && !fs.existsSync(traceDir))
-      fs.mkdirSync(traceDir, { recursive: true });
+    if (traceDir && !fs.existsSync(traceDir)) fs.mkdirSync(traceDir, { recursive: true });
     let out = "";
     let failed = false;
     try {
@@ -177,28 +174,24 @@ function main() {
     const prefix = failed ? "✗" : "✓";
     console.log(
       `${prefix} size=${size} total=${(stats.totalMs || 0).toFixed(
-        0
-      )}ms check=${(stats.checkMs || 0).toFixed(0)}ms mem=${(
-        stats.memoryMB || 0
-      ).toFixed(1)}MB types=${stats.types}`
+        0,
+      )}ms check=${(stats.checkMs || 0).toFixed(0)}ms mem=${(stats.memoryMB || 0).toFixed(
+        1,
+      )}MB types=${stats.types}`,
     );
   }
 
   // Print a Markdown table
   console.log("\nBenchmark results (TypeScript extendedDiagnostics)");
-  console.log(
-    "| Size | Status | Total ms | Check ms | Memory MB | Types | Nodes |"
-  );
-  console.log(
-    "|-----:|:------:|---------:|---------:|----------:|------:|------:|"
-  );
+  console.log("| Size | Status | Total ms | Check ms | Memory MB | Types | Nodes |");
+  console.log("|-----:|:------:|---------:|---------:|----------:|------:|------:|");
   for (const r of results) {
     console.log(
       `| ${r.size} | ${r.failed ? "fail" : "ok"} | ${(r.totalMs || 0).toFixed(
-        0
+        0,
       )} | ${(r.checkMs || 0).toFixed(0)} | ${(r.memoryMB || 0).toFixed(1)} | ${
         r.types || ""
-      } | ${r.nodes || ""} |`
+      } | ${r.nodes || ""} |`,
     );
   }
 }

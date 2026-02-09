@@ -6,12 +6,7 @@ import { VerterDocument } from "./index.js";
 class TestVerterDocument extends VerterDocument {
   getDocFn: Function = vi.fn();
 
-  constructor(
-    uri: string,
-    languageId: string,
-    version: number,
-    content: string
-  ) {
+  constructor(uri: string, languageId: string, version: number, content: string) {
     super(uri, languageId, version, content);
   }
 

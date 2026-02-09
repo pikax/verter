@@ -1,1 +1,1 @@
-export * from './VueSingleDocument'
+export * from "./VueSingleDocument";

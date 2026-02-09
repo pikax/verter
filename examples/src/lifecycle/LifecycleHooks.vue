@@ -87,7 +87,7 @@ onMounted(async () => {
 onMounted(() => {
   const handler = () => console.log("resize");
   window.addEventListener("resize", handler);
-  
+
   onUnmounted(() => {
     window.removeEventListener("resize", handler);
   });
@@ -98,7 +98,7 @@ function useFeature() {
   onMounted(() => {
     console.log("feature mounted");
   });
-  
+
   onUnmounted(() => {
     console.log("feature unmounted");
   });

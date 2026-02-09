@@ -26,14 +26,11 @@ export const BindingPlugin = {
       // when there's a argument binding the name is wrapped in [{name}], but the loc
       // is to [ instead of {name} index
       if (item.name) {
-        let offset =
-          item.node.loc.source.indexOf(item.name) + item.node.loc.start.offset;
+        let offset = item.node.loc.source.indexOf(item.name) + item.node.loc.start.offset;
 
         // on Template Literal the position is skewed
         if (s.original.slice(offset, offset + item.name.length) !== item.name) {
-          offset =
-            item.exp!.loc.source.indexOf(item.name) +
-            item.exp!.loc.start.offset;
+          offset = item.exp!.loc.source.indexOf(item.name) + item.exp!.loc.start.offset;
         }
         s.prependRight(offset, `${accessor}.`);
       } else {

@@ -19,9 +19,7 @@ const items = ["First", "Second", "Third"];
     <div :class="[$style.box, $style.highlighted]">Highlighted box</div>
 
     <!-- Conditional classes -->
-    <div :class="{ [$style.box]: true, [$style.active]: true }">
-      Active box
-    </div>
+    <div :class="{ [$style.box]: true, [$style.active]: true }">Active box</div>
 
     <!-- Using useCssModule() -->
     <div :class="styles.box">Using useCssModule()</div>

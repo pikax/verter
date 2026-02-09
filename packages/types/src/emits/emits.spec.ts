@@ -192,12 +192,7 @@ describe('"emits" helper', () => {
       });
 
       it("multiple arguments", () => {
-        type Fn = (
-          e: "change",
-          value: string,
-          index: number,
-          meta: boolean
-        ) => void;
+        type Fn = (e: "change", value: string, index: number, meta: boolean) => void;
         type Props = EmitsToProps<Fn>;
         type ExpectedProps = {
           onChange: (value: string, index: number, meta: boolean) => void;
@@ -342,9 +337,7 @@ describe('"emits" helper', () => {
 
     describe("generic tests", () => {
       it("EmitsToProps preserves generic constraints", () => {
-        function createEmitHandler<T extends string>(
-          eventName: T
-        ): (e: T, value: number) => void {
+        function createEmitHandler<T extends string>(eventName: T): (e: T, value: number) => void {
           return (e: T, value: number) => {};
         }
 
@@ -364,7 +357,7 @@ describe('"emits" helper', () => {
         assertType<Result>(
           {} as {
             onCustomEvent: (value: number) => void;
-          }
+          },
         );
 
         result.onCustomEvent;
@@ -388,7 +381,7 @@ describe('"emits" helper', () => {
         assertType<StringProps>(
           {} as {
             onUpdate: (value: string) => void;
-          }
+          },
         );
 
         stringProps.onUpdate;
@@ -404,7 +397,7 @@ describe('"emits" helper', () => {
         assertType<NumberProps>(
           {} as {
             onChange: (value: number) => void;
-          }
+          },
         );
 
         numberProps.onChange;
@@ -429,7 +422,7 @@ describe('"emits" helper', () => {
           {} as {
             onFoo: (value: boolean) => void;
             onBar: (value: boolean) => void;
-          }
+          },
         );
 
         props.onFoo;
@@ -500,31 +493,20 @@ describe('"emits" helper', () => {
       });
 
       it("EmitsToProps with generic intersection types", () => {
-        function createIntersectionEmitProps<
-          T1 extends string,
-          T2 extends string,
-          V1,
-          V2
-        >() {
-          type EmitFn = ((e: T1, value: V1) => void) &
-            ((e: T2, value: V2) => void);
+        function createIntersectionEmitProps<T1 extends string, T2 extends string, V1, V2>() {
+          type EmitFn = ((e: T1, value: V1) => void) & ((e: T2, value: V2) => void);
           type Props = EmitsToProps<EmitFn>;
           return {} as Props;
         }
 
-        const props = createIntersectionEmitProps<
-          "input",
-          "change",
-          string,
-          number
-        >();
+        const props = createIntersectionEmitProps<"input", "change", string, number>();
         type Props = typeof props;
 
         assertType<Props>(
           {} as {
             onInput: (value: string) => void;
             onChange: (value: number) => void;
-          }
+          },
         );
 
         props.onInput;
@@ -775,7 +757,7 @@ describe('"emits" helper', () => {
       it("ComponentEmitsToProps preserves generic event types", () => {
         function createGenericComponent<T extends string, V>(
           eventName: T,
-          validator: (value: V) => boolean
+          validator: (value: V) => boolean,
         ) {
           return defineComponent({
             emits: {
@@ -786,7 +768,7 @@ describe('"emits" helper', () => {
 
         function testComponentProps<T extends string, V>(
           eventName: T,
-          validator: (value: V) => boolean
+          validator: (value: V) => boolean,
         ) {
           const component = createGenericComponent(eventName, validator);
           type Component = typeof component;
@@ -794,20 +776,14 @@ describe('"emits" helper', () => {
           return {} as any as Props;
         }
 
-        const stringProps = testComponentProps(
-          "update",
-          (value: string) => true
-        );
+        const stringProps = testComponentProps("update", (value: string) => true);
 
         stringProps.onUpdate;
         stringProps.onUpdate?.("test");
         // @ts-expect-error wrong arg type
         stringProps.onUpdate?.(123);
 
-        const numberProps = testComponentProps(
-          "change",
-          (value: number) => true
-        );
+        const numberProps = testComponentProps("change", (value: number) => true);
 
         numberProps.onChange;
         numberProps.onChange?.(123);
@@ -865,11 +841,7 @@ describe('"emits" helper', () => {
           });
         }
 
-        const component = createMultiGenericComponent<
-          string,
-          number,
-          boolean
-        >();
+        const component = createMultiGenericComponent<string, number, boolean>();
         type Component = typeof component;
         type Props = ComponentEmitsToProps<Component>;
 
@@ -903,9 +875,7 @@ describe('"emits" helper', () => {
       });
 
       it("ComponentEmitsToProps with constrained generics", () => {
-        function createConstrainedComponent<
-          T extends { id: number; name: string }
-        >() {
+        function createConstrainedComponent<T extends { id: number; name: string }>() {
           return defineComponent({
             emits: {
               update: (item: T) => true,

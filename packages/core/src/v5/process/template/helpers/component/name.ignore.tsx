@@ -3,7 +3,7 @@ import { $V_NormaliseComponentKey } from "./name";
 import { defineComponent } from "vue";
 
 function normaliseComponents<T extends Record<PropertyKey, any>>(
-  obj: T
+  obj: T,
 ): {
   [K in keyof T as $V_NormaliseComponentKey<K & string>]: T[K];
 } {

@@ -13,7 +13,7 @@ export const ScriptBlockPlugin = definePlugin({
       s.overwrite(
         tag.pos.open.start,
         tag.pos.open.start + 1,
-        `${ctx.isAsync ? "async " : ""}function `
+        `${ctx.isAsync ? "async " : ""}function `,
       );
       s.appendRight(tag.pos.open.start, ";");
 
@@ -33,8 +33,7 @@ export const ScriptBlockPlugin = definePlugin({
   post(s, ctx) {
     // move non-main to the top
     const notMainScripts = ctx.blocks.filter(
-      (block) =>
-        block.type === "script" && (block as ParsedBlockScript).isMain === false
+      (block) => block.type === "script" && (block as ParsedBlockScript).isMain === false,
     ) as ParsedBlockScript[];
 
     if (notMainScripts.length) {
@@ -46,14 +45,8 @@ export const ScriptBlockPlugin = definePlugin({
         }
 
         // clean tags, the main script will be handled by other plugin
-        s.remove(
-          script.block.tag.pos.open.start,
-          script.block.tag.pos.open.end
-        );
-        s.remove(
-          script.block.tag.pos.close.start,
-          script.block.tag.pos.close.end
-        );
+        s.remove(script.block.tag.pos.open.start, script.block.tag.pos.open.end);
+        s.remove(script.block.tag.pos.close.start, script.block.tag.pos.close.end);
       }
     }
 

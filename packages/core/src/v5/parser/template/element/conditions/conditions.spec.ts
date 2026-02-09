@@ -1,8 +1,4 @@
-import {
-  parse as parseSFC,
-  compileTemplate,
-  extractRuntimeProps,
-} from "@vue/compiler-sfc";
+import { parse as parseSFC, compileTemplate, extractRuntimeProps } from "@vue/compiler-sfc";
 import { handleConditions, ConditionsContext } from "./index.js";
 import { ElementNode, NodeTypes } from "@vue/compiler-core";
 import { TemplateCondition, TemplateTypes } from "../../types.js";
@@ -13,7 +9,7 @@ describe("parser template conditions", () => {
     context: ConditionsContext = {
       ignoredIdentifiers: [],
       conditions: [],
-    }
+    },
   ) {
     const source = `<template>${content}</template>`;
 
@@ -167,7 +163,7 @@ describe("parser template conditions", () => {
       context: ConditionsContext = {
         ignoredIdentifiers: [],
         conditions: [],
-      }
+      },
     ) {
       const source = `<template>${content}</template>`;
 
@@ -176,9 +172,7 @@ describe("parser template conditions", () => {
       const template = sfc.descriptor.template;
       const ast = template?.ast!;
 
-      const results = ast!.children.map((x) =>
-        handleConditions(x as any, ast!, context)
-      );
+      const results = ast!.children.map((x) => handleConditions(x as any, ast!, context));
 
       return {
         source,
@@ -190,7 +184,7 @@ describe("parser template conditions", () => {
     it("v-if v-else", () => {
       const { items } = parse(
         `<div v-if="true" />
-          <div v-else />`
+          <div v-else />`,
       );
 
       expect(items).toMatchObject([
@@ -225,7 +219,7 @@ describe("parser template conditions", () => {
     it("v-if v-else-if", () => {
       const { items } = parse(
         `<div v-if="true" />
-          <div v-else-if="true" />`
+          <div v-else-if="true" />`,
       );
 
       expect(items).toMatchObject([
@@ -265,7 +259,7 @@ describe("parser template conditions", () => {
       const { items } = parse(
         `<div v-if="true" />
           <div v-else-if="false" />
-          <div v-else />`
+          <div v-else />`,
       );
 
       expect(items).toMatchObject([

@@ -37,8 +37,20 @@ const matrix: number[][] = [
 ];
 
 const nestedMap = new Map<string, Map<string, number>>([
-  ["group1", new Map([["a", 1], ["b", 2]])],
-  ["group2", new Map([["c", 3], ["d", 4]])],
+  [
+    "group1",
+    new Map([
+      ["a", 1],
+      ["b", 2],
+    ]),
+  ],
+  [
+    "group2",
+    new Map([
+      ["c", 3],
+      ["d", 4],
+    ]),
+  ],
 ]);
 
 // Set iteration
@@ -66,9 +78,7 @@ function range(start: number, end: number): number[] {
     <section>
       <h3>With Index</h3>
       <ul>
-        <li v-for="(item, index) in items" :key="item.id">
-          {{ index }}: {{ item.name }}
-        </li>
+        <li v-for="(item, index) in items" :key="item.id">{{ index }}: {{ item.name }}</li>
       </ul>
     </section>
 
@@ -76,9 +86,7 @@ function range(start: number, end: number): number[] {
     <section>
       <h3>Destructuring</h3>
       <ul>
-        <li v-for="{ id, name, email } in users" :key="id">
-          {{ name }} ({{ email }})
-        </li>
+        <li v-for="{ id, name, email } in users" :key="id">{{ name }} ({{ email }})</li>
       </ul>
     </section>
 
@@ -86,9 +94,7 @@ function range(start: number, end: number): number[] {
     <section>
       <h3>Destructuring with Index</h3>
       <ul>
-        <li v-for="({ id, name }, index) in users" :key="id">
-          #{{ index }}: {{ name }}
-        </li>
+        <li v-for="({ id, name }, index) in users" :key="id">#{{ index }}: {{ name }}</li>
       </ul>
     </section>
 
@@ -106,9 +112,7 @@ function range(start: number, end: number): number[] {
     <section>
       <h3>Object Iteration</h3>
       <ul>
-        <li v-for="(value, key) in config" :key="key">
-          {{ key }}: {{ value }}
-        </li>
+        <li v-for="(value, key) in config" :key="key">{{ key }}: {{ value }}</li>
       </ul>
     </section>
 
@@ -138,9 +142,7 @@ function range(start: number, end: number): number[] {
     <section>
       <h3>Nested (Matrix)</h3>
       <div v-for="(row, rowIdx) in matrix" :key="rowIdx">
-        <span v-for="(cell, colIdx) in row" :key="`${rowIdx}-${colIdx}`">
-          [{{ cell }}]
-        </span>
+        <span v-for="(cell, colIdx) in row" :key="`${rowIdx}-${colIdx}`"> [{{ cell }}] </span>
       </div>
     </section>
 
@@ -151,9 +153,7 @@ function range(start: number, end: number): number[] {
         <template v-for="item in items" :key="item.id">
           <li>{{ item.name }}</li>
           <ul v-if="item.children">
-            <li v-for="child in item.children" :key="child.id">
-              ↳ {{ child.name }}
-            </li>
+            <li v-for="child in item.children" :key="child.id">↳ {{ child.name }}</li>
           </ul>
         </template>
       </ul>
@@ -164,9 +164,7 @@ function range(start: number, end: number): number[] {
       <h3>v-for with v-if (template)</h3>
       <ul>
         <template v-for="user in users" :key="user.id">
-          <li v-if="user.roles.includes('admin')">
-            {{ user.name }} [ADMIN]
-          </li>
+          <li v-if="user.roles.includes('admin')">{{ user.name }} [ADMIN]</li>
         </template>
       </ul>
     </section>

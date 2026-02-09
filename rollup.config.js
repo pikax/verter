@@ -9,17 +9,11 @@ function patchVerter() {
   return {
     name: "patch-verter",
     writeBundle() {
-      const outPath = path.resolve(
-        import.meta.dirname,
-        "extensions/vscode/dist/extension.js"
-      );
+      const outPath = path.resolve(import.meta.dirname, "extensions/vscode/dist/extension.js");
       console.log("out to ", outPath);
       let code = fs.readFileSync(outPath, "utf8");
       code = code.replace(/@verter\/typescript-plugin/g, "./plugin.js");
-      code = code.replace(
-        /@verter\/language-server\/dist\/server\.js/g,
-        "./server.js"
-      );
+      code = code.replace(/@verter\/language-server\/dist\/server\.js/g, "./server.js");
       fs.writeFileSync(outPath, code);
       this.warn("✔ patched verter imports in extension.js");
     },
@@ -65,7 +59,7 @@ export default [
       /^@vue\//,
       "vue",
       "oxc-parser",
-    //   "ts-node",
+      //   "ts-node",
       "typescript",
     ],
     plugins: commonPlugins("node16"),
@@ -98,7 +92,7 @@ export default [
       /^@vue\//,
       "vue",
       "oxc-parser",
-    //   "ts-node",
+      //   "ts-node",
       "@verter/typescript-plugin",
       "@verter/language-server/dist/server.js",
     ],

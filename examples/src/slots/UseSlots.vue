@@ -60,10 +60,7 @@ const users: User[] = [
       <template v-for="name in ['header', 'empty', 'footer'] as const" #[name]>
         <div>Dynamic slot: {{ name }}</div>
       </template>
-      <template
-        v-for="name in ['header', 'footer'] as const"
-        #[name]="{ count, items }"
-      >
+      <template v-for="name in ['header', 'footer'] as const" #[name]="{ count, items }">
         <div>Dynamic slot: {{ name }} {{ count }} {{ items.length }}</div>
       </template>
     </GenericSlots>

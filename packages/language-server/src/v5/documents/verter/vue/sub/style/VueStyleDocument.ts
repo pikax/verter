@@ -10,24 +10,14 @@ export class VueStyleDocument extends VueSubDocument {
     languageId: string,
     languageService: LanguageService,
     version: number,
-    block: ProcessedBlock
+    block: ProcessedBlock,
   ) {
-    return new VueStyleDocument(
-      uri,
-      parent,
-      languageId,
-      languageService,
-      version,
-      block
-    );
+    return new VueStyleDocument(uri, parent, languageId, languageService, version, block);
   }
 
   private _stylesheet: Stylesheet | null = null;
   get stylesheet() {
-    return (
-      this._stylesheet ??
-      (this._stylesheet = this._languageService.parseStylesheet(this))
-    );
+    return this._stylesheet ?? (this._stylesheet = this._languageService.parseStylesheet(this));
   }
 
   get languageService() {
@@ -40,7 +30,7 @@ export class VueStyleDocument extends VueSubDocument {
     languageId: string,
     private _languageService: LanguageService,
     version: number,
-    public block: ProcessedBlock
+    public block: ProcessedBlock,
   ) {
     super(uri, parent, languageId, version);
   }

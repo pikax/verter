@@ -31,10 +31,7 @@
 import { definePlugin, ScriptContext } from "../../types";
 import { createHelperImport } from "../../../utils";
 import { type AvailableExports } from "@verter/types/string";
-import {
-  TemplateTypes,
-  type TemplateElement,
-} from "../../../../parser/template/types";
+import { TemplateTypes, type TemplateElement } from "../../../../parser/template/types";
 import { ParsedBlockTemplate, ProcessItemType, ScriptTypes } from "../../../..";
 import {
   AttributeNode,
@@ -43,10 +40,7 @@ import {
   ElementTypes,
   NodeTypes,
 } from "@vue/compiler-core";
-import {
-  ConditionalPlugin,
-  generateConditionText,
-} from "../../../template/plugins";
+import { ConditionalPlugin, generateConditionText } from "../../../template/plugins";
 import { camelize, capitalize } from "vue";
 
 /**
@@ -107,7 +101,7 @@ export const ComponentTypePlugin = definePlugin({
       .map((el) => {
         if (!el.condition) return;
 
-          if(!ctx.isSingleFile) {
+        if (!ctx.isSingleFile) {
           ConditionalPlugin.transformCondition(el.condition, ctx.s, {
             narrow: true,
           } as any);
@@ -124,27 +118,23 @@ export const ComponentTypePlugin = definePlugin({
 
     ctx.items.push(
       createHelperImport(
-        [
-          "enhanceElementWithProps",
-          "extractLoops",
-          "extractArgumentsFromRenderSlot",
-        ],
-        ctx.prefix
-      )
+        ["enhanceElementWithProps", "extractLoops", "extractArgumentsFromRenderSlot"],
+        ctx.prefix,
+      ),
     );
 
     const components = template.result.items.filter(
       (x) =>
         x.type === TemplateTypes.Element &&
         x.node.tagType !== ElementTypes.SLOT &&
-        x.node.tagType !== ElementTypes.TEMPLATE
+        x.node.tagType !== ElementTypes.TEMPLATE,
     ) as TemplateElement[];
 
     const imports = new Set(
       ctx.block.result?.items
         .filter((x) => x.type === ScriptTypes.Import)
         .flatMap((x) => x.bindings)
-        .map((x) => x.name)
+        .map((x) => x.name),
     );
 
     const templateBindings = new Set<string>(
@@ -153,35 +143,33 @@ export const ComponentTypePlugin = definePlugin({
           x.type === TemplateTypes.Binding && x.name && !imports.has(x.name)
             ? x.name
             : x.type === TemplateTypes.Binding && x.name
-            ? `v${capitalize(camelize(x.name))}`
-            : null
+              ? `v${capitalize(camelize(x.name))}`
+              : null,
         )
-        .filter(Boolean) as string[]
+        .filter(Boolean) as string[],
     );
 
     const extraContext = {} as any;
 
     const allComponents = components.map((x) =>
-      resolveComponent(x, templateBindings, extraContext, ctx)
+      resolveComponent(x, templateBindings, extraContext, ctx),
     );
 
     const rootComponent = template.result.items.filter(
-      (x) =>
-        x.type === TemplateTypes.Element &&
-        x.parent === template.block.block.ast
+      (x) => x.type === TemplateTypes.Element && x.parent === template.block.block.ast,
     ) as TemplateElement[];
 
     s.append(
       `function ${ctx.prefix("getRootComponent")}${
         ctx.generic ? `<${ctx.generic.source}>` : ""
-      }(){`
+      }(){`,
     );
 
     if (rootComponent.length === 1) {
       s.append(
         `return ${ctx.prefix("Comp")}${rootComponent[0].node.loc.start.offset}${
           ctx.generic ? `<${ctx.generic.names.join(",")}>` : ""
-        }()`
+        }()`,
       );
     } else {
       s.append(`return {};`);
@@ -191,16 +179,11 @@ export const ComponentTypePlugin = definePlugin({
     s.append(
       `function ${ctx.prefix("getRootComponentPassedProps")}${
         ctx.generic ? `<${ctx.generic.source}>` : ""
-      }(){`
+      }(){`,
     );
     if (rootComponent.length === 1) {
       const props = resolveComponentProps(rootComponent[0], ctx);
-      const pre = availableContext(
-        rootComponent[0],
-        templateBindings,
-        extraContext,
-        ctx
-      );
+      const pre = availableContext(rootComponent[0], templateBindings, extraContext, ctx);
       s.append(`${pre}return ${props};`);
     } else {
       s.append(`return {};`);
@@ -243,9 +226,7 @@ function isComponent(element: TemplateElement, ctx: ScriptContext) {
   return (
     node.tagType === ElementTypes.COMPONENT ||
     (node.tagType === ElementTypes.ELEMENT &&
-      ctx.items.find(
-        (x) => x.type === ProcessItemType.Binding && x.name === name
-      ))
+      ctx.items.find((x) => x.type === ProcessItemType.Binding && x.name === name))
   );
 }
 
@@ -268,19 +249,11 @@ function isComponent(element: TemplateElement, ctx: ScriptContext) {
  * @param ctx - The script context
  * @returns A string like `"propName": value` or empty string if not applicable
  */
-function propToString(
-  prop: AttributeNode | DirectiveNode,
-  ctx: ScriptContext
-): string {
+function propToString(prop: AttributeNode | DirectiveNode, ctx: ScriptContext): string {
   if (prop.type === NodeTypes.ATTRIBUTE /* ATTRIBUTE */) {
-    return `"${prop.name}": ${JSON.stringify(
-      prop.value ? prop.value.content : true
-    )}`;
+    return `"${prop.name}": ${JSON.stringify(prop.value ? prop.value.content : true)}`;
   } else if (prop.type === NodeTypes.DIRECTIVE /* DIRECTIVE */) {
-    if (
-      prop.arg &&
-      prop.arg.type === NodeTypes.SIMPLE_EXPRESSION /* SIMPLE_EXPRESSION */
-    ) {
+    if (prop.arg && prop.arg.type === NodeTypes.SIMPLE_EXPRESSION /* SIMPLE_EXPRESSION */) {
       const argContent = prop.arg.content;
       if (prop.exp && prop.exp.type === 4 /* SIMPLE_EXPRESSION */) {
         const isEvent =
@@ -309,10 +282,7 @@ function propToString(
  * @param ctx - The script context
  * @returns A string like `{ "id": "app", "class": myClass }`
  */
-export function resolveComponentProps(
-  element: TemplateElement,
-  ctx: ScriptContext
-) {
+export function resolveComponentProps(element: TemplateElement, ctx: ScriptContext) {
   const node = element.node;
 
   const props = node.props
@@ -354,7 +324,7 @@ function resolveComponent(
   element: TemplateElement,
   templateBindings: Set<string>,
   extraContext: any,
-  ctx: ScriptContext
+  ctx: ScriptContext,
 ) {
   const node = element.node;
   const tag = node.tag;
@@ -369,7 +339,7 @@ ${pre}
     isComp
       ? `new ${tag}(${props})`
       : `${ctx.prefix(
-          "enhanceElementWithProps" as AvailableExports
+          "enhanceElementWithProps" as AvailableExports,
         )}(${tagToHTMLElement(tag)},${props})`
   }  
 }`;
@@ -416,22 +386,18 @@ function availableContext(
   element: TemplateElement,
   templateBindings: Set<string>,
   extraContext: any,
-  ctx: ScriptContext
+  ctx: ScriptContext,
 ) {
   const bindings = ctx.items
     .map((x) =>
-      x.type === ProcessItemType.Binding &&
-      x.name &&
-      templateBindings.has(x.name)
-        ? x.name
-        : null
+      x.type === ProcessItemType.Binding && x.name && templateBindings.has(x.name) ? x.name : null,
     )
     .filter(Boolean);
 
   const bStr =
     bindings?.length > 0
       ? `const {${bindings?.join(",") ?? ""}}={} as ${ctx.prefix(
-          "FullContext"
+          "FullContext",
         )}${ctx.generic ? `<${ctx.generic.names.join(",")}>` : ""};`
       : "";
 
@@ -451,7 +417,7 @@ function availableContext(
         forLoop.value?.loc.source ? `value:${forLoop.value?.loc.source}` : "",
       ].filter(Boolean);
       item = `const {${bindings.join(",")}}=${ctx.prefix(
-        "extractLoops" as AvailableExports
+        "extractLoops" as AvailableExports,
       )}(${forLoop.source.loc.source});`;
     }
 
@@ -465,14 +431,9 @@ function availableContext(
   }
 
   const slotProp = element.node.props.find(
-    (x) => x.name === "slot" && x.type === NodeTypes.DIRECTIVE
+    (x) => x.name === "slot" && x.type === NodeTypes.DIRECTIVE,
   ) as DirectiveNode | undefined;
-  if (
-    element.slot &&
-    element.slot.type === TemplateTypes.SlotRender &&
-    slotProp &&
-    slotProp.exp
-  ) {
+  if (element.slot && element.slot.type === TemplateTypes.SlotRender && slotProp && slotProp.exp) {
     const slot = element.slot;
     const parentName = `Comp${slot.parent?.loc.start.offset}`;
 
@@ -481,10 +442,8 @@ function availableContext(
     }()`;
 
     const content = `const ${slotProp.exp.loc.source}=${ctx.prefix(
-      "extractArgumentsFromRenderSlot" as AvailableExports
-    )}(${parentRetriever},"${
-      Array.isArray(slot.name) ? slot.name[0].name : slot.name
-    }");`;
+      "extractArgumentsFromRenderSlot" as AvailableExports,
+    )}(${parentRetriever},"${Array.isArray(slot.name) ? slot.name[0].name : slot.name}");`;
 
     extraContext.narrowBindings.push({
       start: element.node.loc.start.offset,
@@ -496,8 +455,7 @@ function availableContext(
   const matchedLoops = extraContext.narrowBindings
     .filter(
       (x: { start: number; end: number; content: string }) =>
-        x.start <= element.node.loc.start.offset &&
-        x.end >= element.node.loc.end.offset
+        x.start <= element.node.loc.start.offset && x.end >= element.node.loc.end.offset,
     )
     .map((x: { content: string }) => x.content);
 
@@ -506,11 +464,7 @@ function availableContext(
 
 /**
  * Generates conditional narrowing code for v-if/v-else-if/v-else elements.\n *\n * When an element has conditions (from v-if/v-else-if), this generates\n * early return statements that help TypeScript narrow types.\n *\n * @example For `<div v-if=\"user\">...</div>`:\n * ```typescript\n * if(!(user)) return null;\n * ```\n *\n * @param element - The template element with conditional rendering\n * @param extraContext - Shared context for accumulating narrowing bindings\n * @param ctx - The script context\n * @returns Generated narrowing code or undefined if no condition\n */
-function resolveNarrow(
-  element: TemplateElement,
-  extraContext: any,
-  ctx: ScriptContext
-) {
+function resolveNarrow(element: TemplateElement, extraContext: any, ctx: ScriptContext) {
   if (!element.condition) return;
 
   if (element.context.conditions.length > 0) {

@@ -2,15 +2,15 @@
 defineProps({
   name: {
     type: String,
-    required: true
+    required: true,
   },
   age: Number,
 });
 const value = defineModel<string>();
 
-const supa = defineModel('supa', {
+const supa = defineModel("supa", {
   type: String,
-  default: 'supa',
+  default: "supa",
 });
 
 defineEmits({
@@ -29,8 +29,8 @@ defineOptions({
   <span>{{ $props }}</span>
   <span>{{ $props.name }}</span>
   <span>{{ $props.modelValue }}</span>
-  <span>{{ $props.onFoo}}</span>
-  <span>{{ $emit("update:modelValue", 'a') }} </span>
+  <span>{{ $props.onFoo }}</span>
+  <span>{{ $emit("update:modelValue", "a") }} </span>
   <span>{{ name }}</span>
   <span>{{ value }}</span>
   <span>{{ modelValue }}</span>

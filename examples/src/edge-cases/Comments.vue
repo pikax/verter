@@ -21,7 +21,7 @@ function process(value: string): string {
 
 // Inline comments
 const result = process(
-  "test" // argument comment
+  "test", // argument comment
 ); // call comment
 
 // Comment with special characters: < > & " ' ` $ { } [ ] ( )

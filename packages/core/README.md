@@ -162,7 +162,7 @@ const props = defineProps<{ msg: string }>()
 <template>
   <button @click="count++">{{ props.msg }}: {{ count }}</button>
 </template>`,
-  "MyComponent.vue"
+  "MyComponent.vue",
 );
 
 // result.s        -> MagicString instance (for sourcemap generation)
@@ -176,15 +176,15 @@ const props = defineProps<{ msg: string }>()
 
 The parser returns a `ParserResult` containing:
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `s` | `MagicString` | Source string with mutation tracking |
-| `blocks` | `ParsedBlock[]` | Parsed SFC blocks (script, template, unknown) |
-| `isTS` | `boolean` | Whether the script uses TypeScript |
-| `isSetup` | `boolean` | Whether `<script setup>` is present |
-| `isAsync` | `boolean` | Whether the script has top-level `await` |
-| `generic` | `GenericInfo \| null` | Generic type parameter info from `generic="T"` |
-| `filename` | `string` | Source filename |
+| Property   | Type                  | Description                                    |
+| ---------- | --------------------- | ---------------------------------------------- |
+| `s`        | `MagicString`         | Source string with mutation tracking           |
+| `blocks`   | `ParsedBlock[]`       | Parsed SFC blocks (script, template, unknown)  |
+| `isTS`     | `boolean`             | Whether the script uses TypeScript             |
+| `isSetup`  | `boolean`             | Whether `<script setup>` is present            |
+| `isAsync`  | `boolean`             | Whether the script has top-level `await`       |
+| `generic`  | `GenericInfo \| null` | Generic type parameter info from `generic="T"` |
+| `filename` | `string`              | Source filename                                |
 
 ### Processing with Plugins
 
@@ -193,15 +193,15 @@ import { processScript } from "@verter/core";
 
 // Auto-run mode: executes all phases and returns the result
 const { context, s, result } = processScript(
-  parsedItems,    // ScriptItem[] from the parser
-  plugins,        // ScriptPlugin[] array
+  parsedItems, // ScriptItem[] from the parser
+  plugins, // ScriptPlugin[] array
   {
     filename: "MyComponent.vue",
     s: magicString,
     blocks: parsedBlocks,
     block: mainBlock,
     blockNameResolver: (name) => name,
-  }
+  },
 );
 
 // result  -> transformed TSX string
@@ -217,12 +217,12 @@ const { context, s, pre, main, post } = processScript(
   parsedItems,
   plugins,
   contextOptions,
-  false  // autorun = false
+  false, // autorun = false
 );
 
-pre();   // Run pre-phase plugins
-main();  // Run item transforms
-post();  // Run post-phase plugins
+pre(); // Run pre-phase plugins
+main(); // Run item transforms
+post(); // Run post-phase plugins
 ```
 
 ### Parsed Block Types
@@ -235,8 +235,8 @@ interface ParsedBlockScript {
   type: "script";
   lang: "js" | "jsx" | "ts" | "tsx";
   block: VerterSFCBlock;
-  result: ParsedScriptResult;    // { isAsync, items: ScriptItem[] }
-  isMain: boolean;               // true for the primary script block
+  result: ParsedScriptResult; // { isAsync, items: ScriptItem[] }
+  isMain: boolean; // true for the primary script block
 }
 
 // Template block (<template>)
@@ -260,16 +260,16 @@ interface ParsedBlockUnknown {
 
 The script parser extracts categorized AST items from script blocks:
 
-| ScriptType | Item Type | Description |
-|------------|-----------|-------------|
-| `Import` | `ScriptImport` | Import declarations with resolved bindings |
-| `Export` | `ScriptExport` | Named/re-export declarations |
-| `DefaultExport` | `ScriptDefaultExport` | Default export declaration |
-| `Declaration` | `ScriptDeclaration` | Variable, function, and class declarations |
-| `FunctionCall` | `ScriptFunctionCall` | Standalone function call expressions (including macros) |
-| `Binding` | `ScriptBinding` | Variable binding identifiers |
-| `Async` | `ScriptAsync` | Async markers / `await` expressions |
-| `TypeAssertion` | `ScriptTypeAssertion` | TypeScript type assertion expressions |
+| ScriptType      | Item Type             | Description                                             |
+| --------------- | --------------------- | ------------------------------------------------------- |
+| `Import`        | `ScriptImport`        | Import declarations with resolved bindings              |
+| `Export`        | `ScriptExport`        | Named/re-export declarations                            |
+| `DefaultExport` | `ScriptDefaultExport` | Default export declaration                              |
+| `Declaration`   | `ScriptDeclaration`   | Variable, function, and class declarations              |
+| `FunctionCall`  | `ScriptFunctionCall`  | Standalone function call expressions (including macros) |
+| `Binding`       | `ScriptBinding`       | Variable binding identifiers                            |
+| `Async`         | `ScriptAsync`         | Async markers / `await` expressions                     |
+| `TypeAssertion` | `ScriptTypeAssertion` | TypeScript type assertion expressions                   |
 
 ## Plugin System
 
@@ -354,17 +354,17 @@ Plugins are sorted by their `enforce` value, then within each phase, hooks execu
 
 Each plugin can implement hooks that target specific `ScriptTypes`:
 
-| Hook | Triggered By |
-|------|-------------|
-| `transformImport` | `import` declarations |
-| `transformExport` | Named exports and re-exports |
-| `transformDefaultExport` | `export default` declarations |
-| `transformDeclaration` | Variable, function, and class declarations |
-| `transformFunctionCall` | Standalone function call expressions |
-| `transformBinding` | Binding identifiers |
-| `transformAsync` | Async markers / `await` expressions |
+| Hook                     | Triggered By                                         |
+| ------------------------ | ---------------------------------------------------- |
+| `transformImport`        | `import` declarations                                |
+| `transformExport`        | Named exports and re-exports                         |
+| `transformDefaultExport` | `export default` declarations                        |
+| `transformDeclaration`   | Variable, function, and class declarations           |
+| `transformFunctionCall`  | Standalone function call expressions                 |
+| `transformBinding`       | Binding identifiers                                  |
+| `transformAsync`         | Async markers / `await` expressions                  |
 | `transformTypeAssertion` | TypeScript type assertion expressions (`<Type>expr`) |
-| `transform` | Catch-all: runs for every item regardless of type |
+| `transform`              | Catch-all: runs for every item regardless of type    |
 
 ### ScriptContext
 
@@ -372,42 +372,42 @@ The context object available to all plugin hooks:
 
 ```typescript
 interface ScriptContext {
-  filename: string;              // Source .vue filename
-  s: MagicString;                // Current MagicString instance
-  isTS: boolean;                 // Whether script uses TypeScript
-  isSetup: boolean;              // Whether using <script setup>
-  isAsync: boolean;              // Whether script has top-level await
-  generic: GenericInfo | null;   // Generic type parameter info
-  block: ParsedBlock;            // Current block being processed
-  blocks: ParsedBlock[];         // All parsed blocks in the SFC
-  items: ProcessItem[];          // Accumulated process items (bindings, macros, etc.)
-  templateBindings: TemplateBinding[];  // Template binding information
-  handledAttributes?: Set<string>;      // Attributes already processed
-  prefix(name: string): string;  // Generates prefixed identifier (e.g. ___VERTER___name)
+  filename: string; // Source .vue filename
+  s: MagicString; // Current MagicString instance
+  isTS: boolean; // Whether script uses TypeScript
+  isSetup: boolean; // Whether using <script setup>
+  isAsync: boolean; // Whether script has top-level await
+  generic: GenericInfo | null; // Generic type parameter info
+  block: ParsedBlock; // Current block being processed
+  blocks: ParsedBlock[]; // All parsed blocks in the SFC
+  items: ProcessItem[]; // Accumulated process items (bindings, macros, etc.)
+  templateBindings: TemplateBinding[]; // Template binding information
+  handledAttributes?: Set<string>; // Attributes already processed
+  prefix(name: string): string; // Generates prefixed identifier (e.g. ___VERTER___name)
 }
 ```
 
 ## Built-in Plugins
 
-| Plugin | Phase | Purpose |
-|--------|-------|---------|
-| **macros** | pre | Transforms Vue macros (`defineProps`, `defineEmits`, `defineModel`, `defineSlots`, `defineExpose`, `withDefaults`) into typed TSX equivalents |
-| **define-options** | pre | Handles the `defineOptions()` macro |
-| **template-ref** | pre | Handles `useTemplateRef()` for typed template refs |
-| **imports** | main | Processes and transforms import declarations |
-| **binding** | main | Tracks variable declarations for binding context |
-| **script-block** | main | Wraps `<script setup>` content in proper TSX structure |
-| **declare** | main | Handles TypeScript `declare` statements |
-| **infer-function** | main | Infers function return types for template bindings |
-| **sfc-cleaner** | main | Cleans up SFC-specific syntax artifacts |
-| **script-default** | main | Handles `<script>` (non-setup) default exports |
-| **template-binding** | post | Generates template binding type information for IDE support |
-| **full-context** | post | Generates the full component context type |
-| **attributes** | post | Processes component `$attrs` type |
-| **resolvers** | post | Resolves component references for template usage |
-| **component-instance** | post | Generates component instance type |
-| **component-type** | post | Generates component type for parent component usage |
-| **current-instance** | post | Handles `getCurrentInstance()` typing |
+| Plugin                 | Phase | Purpose                                                                                                                                       |
+| ---------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| **macros**             | pre   | Transforms Vue macros (`defineProps`, `defineEmits`, `defineModel`, `defineSlots`, `defineExpose`, `withDefaults`) into typed TSX equivalents |
+| **define-options**     | pre   | Handles the `defineOptions()` macro                                                                                                           |
+| **template-ref**       | pre   | Handles `useTemplateRef()` for typed template refs                                                                                            |
+| **imports**            | main  | Processes and transforms import declarations                                                                                                  |
+| **binding**            | main  | Tracks variable declarations for binding context                                                                                              |
+| **script-block**       | main  | Wraps `<script setup>` content in proper TSX structure                                                                                        |
+| **declare**            | main  | Handles TypeScript `declare` statements                                                                                                       |
+| **infer-function**     | main  | Infers function return types for template bindings                                                                                            |
+| **sfc-cleaner**        | main  | Cleans up SFC-specific syntax artifacts                                                                                                       |
+| **script-default**     | main  | Handles `<script>` (non-setup) default exports                                                                                                |
+| **template-binding**   | post  | Generates template binding type information for IDE support                                                                                   |
+| **full-context**       | post  | Generates the full component context type                                                                                                     |
+| **attributes**         | post  | Processes component `$attrs` type                                                                                                             |
+| **resolvers**          | post  | Resolves component references for template usage                                                                                              |
+| **component-instance** | post  | Generates component instance type                                                                                                             |
+| **component-type**     | post  | Generates component type for parent component usage                                                                                           |
+| **current-instance**   | post  | Handles `getCurrentInstance()` typing                                                                                                         |
 
 ## Sourcemap Support
 
@@ -462,17 +462,17 @@ pnpm generate:fixtures:annotations    # Generate annotated fixtures
 
 ## Dependencies
 
-| Dependency | Purpose |
-|-----------|---------|
-| `@vue/compiler-sfc` | Vue SFC parsing and MagicString |
-| `@vue/compiler-core` | Vue template AST types and compiler utilities |
-| `@babel/parser` | JavaScript/TypeScript AST parsing (fallback parser) |
-| `oxc-parser` | Fast Rust-based JavaScript/TypeScript AST parsing (primary) |
-| `acorn` / `acorn-typescript` | Lightweight JS/TS parsing |
-| `estree-walker` | AST traversal |
-| `source-map-js` | Sourcemap manipulation and remapping |
-| `@verter/types` | Shared TypeScript utility types |
-| `deepmerge` | Deep object merging for configuration |
+| Dependency                   | Purpose                                                     |
+| ---------------------------- | ----------------------------------------------------------- |
+| `@vue/compiler-sfc`          | Vue SFC parsing and MagicString                             |
+| `@vue/compiler-core`         | Vue template AST types and compiler utilities               |
+| `@babel/parser`              | JavaScript/TypeScript AST parsing (fallback parser)         |
+| `oxc-parser`                 | Fast Rust-based JavaScript/TypeScript AST parsing (primary) |
+| `acorn` / `acorn-typescript` | Lightweight JS/TS parsing                                   |
+| `estree-walker`              | AST traversal                                               |
+| `source-map-js`              | Sourcemap manipulation and remapping                        |
+| `@verter/types`              | Shared TypeScript utility types                             |
+| `deepmerge`                  | Deep object merging for configuration                       |
 
 ## License
 

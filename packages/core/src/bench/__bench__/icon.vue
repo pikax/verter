@@ -13,11 +13,11 @@ const el = ref<HTMLElement | null>(null);
 const update = async () => {
   if (el.value) {
     // const svg = Iconify.renderSVG(props.icon, {});
-    
-    const { body, attributes } = iconToSVG(props.icon, {});
-          const svgHtml = iconToHTML(body, attributes);
 
-          const svg = document.createElement("svg");
+    const { body, attributes } = iconToSVG(props.icon, {});
+    const svgHtml = iconToHTML(body, attributes);
+
+    const svg = document.createElement("svg");
     if (svg) {
       el.value.textContent = "";
       if (props.size) {

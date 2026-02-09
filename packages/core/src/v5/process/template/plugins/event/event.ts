@@ -58,7 +58,7 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
 
     s.prependLeft(
       exp.loc.start.offset,
-      `(...${eventArgs})=>${eventCallbacks}(${eventArgs},($event)=>$event&&0?undefined:`
+      `(...${eventArgs})=>${eventCallbacks}(${eventArgs},($event)=>$event&&0?undefined:`,
     );
 
     const context = prop.context as ParseTemplateContext;
@@ -70,7 +70,7 @@ declare function ___VERTER___eventCb<TArgs extends Array<any>, R extends ($event
           conditions: context.conditions,
           type: "append",
         },
-        s
+        s,
       );
     }
 

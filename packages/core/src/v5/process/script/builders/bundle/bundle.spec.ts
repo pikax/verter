@@ -15,19 +15,15 @@ describe("process script builders bundle", () => {
     content: string,
     wrapper: string | false = false,
     lang = "ts",
-    filename = "test.vue"
+    filename = "test.vue",
   ) {
-    const prepend = `<script ${
-      wrapper === false ? "setup" : ""
-    } lang="${lang}">`;
+    const prepend = `<script ${wrapper === false ? "setup" : ""} lang="${lang}">`;
     const source = `${prepend}${content}</script>`;
     const parsed = parser(source);
 
     const s = new MagicString(source);
 
-    const scriptBlock = parsed.blocks.find(
-      (x) => x.type === "script"
-    ) as ParsedBlockScript;
+    const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
 
     return buildBundle(scriptBlock.result.items, {
       isAsync: scriptBlock.result.isAsync,
@@ -61,9 +57,7 @@ describe("process script builders bundle", () => {
       // Check key parts of the output
       expect(result).toContain(`import { ___VERTER___Component }`);
       expect(result).toContain(`from "./options"`);
-      expect(result).toContain(
-        `declare const Test: typeof ___VERTER___Component`
-      );
+      expect(result).toContain(`declare const Test: typeof ___VERTER___Component`);
       expect(result).toContain(`export default Test;`);
     });
 
@@ -122,9 +116,7 @@ describe("process script builders bundle", () => {
 
         const s = new MagicString(source);
 
-        const scriptBlock = parsed.blocks.find(
-          (x) => x.type === "script"
-        ) as ParsedBlockScript;
+        const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
 
         const { result } = buildBundle(scriptBlock.result.items, {
           isAsync: scriptBlock.result.isAsync,

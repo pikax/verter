@@ -1,9 +1,5 @@
 import { MagicString } from "@vue/compiler-sfc";
-import {
-  ScriptItem,
-  ScriptItemByType,
-  ScriptTypes,
-} from "../../parser/script/types";
+import { ScriptItem, ScriptItemByType, ScriptTypes } from "../../parser/script/types";
 import { ProcessContext } from "../types";
 import { ScriptContext, ScriptPlugin } from "./types";
 import { defaultPrefix } from "../utils";
@@ -12,44 +8,35 @@ export function processScript(
   items: ScriptItem[],
   plugins: ScriptPlugin[],
   _context: Partial<ScriptContext> &
-    Pick<
-      ProcessContext,
-      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
-    >,
+    Pick<ProcessContext, "filename" | "s" | "blocks" | "block" | "blockNameResolver">,
 
-  autorun?: true
+  autorun?: true,
 ): {
   context: ScriptContext;
   s: MagicString;
   result: string;
-}
+};
 export function processScript(
   items: ScriptItem[],
   plugins: ScriptPlugin[],
   _context: Partial<ScriptContext> &
-    Pick<
-      ProcessContext,
-      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
-    >,
+    Pick<ProcessContext, "filename" | "s" | "blocks" | "block" | "blockNameResolver">,
 
-  autoRun: false
+  autoRun: false,
 ): {
   context: ScriptContext;
   s: MagicString;
   pre: () => void;
   main: () => void;
   post: () => void;
-}
+};
 export function processScript(
   items: ScriptItem[],
   plugins: ScriptPlugin[],
   _context: Partial<ScriptContext> &
-    Pick<
-      ProcessContext,
-      "filename" | "s" | "blocks" | "block" | "blockNameResolver"
-    >,
+    Pick<ProcessContext, "filename" | "s" | "blocks" | "block" | "blockNameResolver">,
 
-  autorun = true
+  autorun = true,
 ) {
   const context: ScriptContext = {
     generic: null,
@@ -80,21 +67,13 @@ export function processScript(
     [ScriptTypes.Warning]: [],
   } as {
     [K in ScriptTypes]: Array<
-      (
-        item: ScriptItemByType[K],
-        s: MagicString,
-        context: ScriptContext
-      ) => void
+      (item: ScriptItemByType[K], s: MagicString, context: ScriptContext) => void
     >;
   };
   const PLUGIN_TYPES = Object.keys(pluginsByType) as readonly ScriptTypes[];
 
-  const prePlugins = [] as Array<
-    (s: MagicString, context: ScriptContext) => void
-  >;
-  const postPlugins = [] as Array<
-    (s: MagicString, context: ScriptContext) => void
-  >;
+  const prePlugins = [] as Array<(s: MagicString, context: ScriptContext) => void>;
+  const postPlugins = [] as Array<(s: MagicString, context: ScriptContext) => void>;
 
   [...plugins]
     .sort((a, b) => {
@@ -167,8 +146,7 @@ export function processScript(
     }
   };
 
-  
-  if(autorun)  {
+  if (autorun) {
     pre();
     main();
     post();
@@ -176,7 +154,7 @@ export function processScript(
       context,
       s: s,
       result: s.toString(),
-    }
+    };
   }
   return {
     context,
@@ -184,5 +162,5 @@ export function processScript(
     pre,
     main,
     post,
-  }
+  };
 }

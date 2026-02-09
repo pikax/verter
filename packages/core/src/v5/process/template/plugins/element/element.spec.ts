@@ -5,19 +5,13 @@ import { MagicString, parse as parseSFC } from "@vue/compiler-sfc";
 import { DefaultPlugins } from "../..";
 
 describe("process template plugins element", () => {
-  function parse(
-    content: string,
-    options: Partial<TemplateContext> = {},
-    post: string = ""
-  ) {
+  function parse(content: string, options: Partial<TemplateContext> = {}, post: string = "") {
     const source = `<template>${content}</template>${post}`;
     const parsed = parser(source);
 
     const s = new MagicString(source);
 
-    const templateBlock = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processTemplate(
       templateBlock.result.items,
@@ -29,7 +23,7 @@ describe("process template plugins element", () => {
         blocks: parsed.blocks,
         block: templateBlock,
         blockNameResolver: (name) => name,
-      }
+      },
     );
 
     return r;
@@ -38,16 +32,14 @@ describe("process template plugins element", () => {
   it("Comp", () => {
     const { result } = parse(`<Comp></Comp>`);
 
-    expect(result).toContain(
-      "<___VERTER___components.Comp></___VERTER___components.Comp>"
-    );
+    expect(result).toContain("<___VERTER___components.Comp></___VERTER___components.Comp>");
   });
 
   it("Comp v-if", () => {
     const { result } = parse(`<Comp v-if="test"></Comp>`);
 
     expect(result).toContain(
-      "if(___VERTER___ctx.test){<___VERTER___components.Comp ></___VERTER___components.Comp>}"
+      "if(___VERTER___ctx.test){<___VERTER___components.Comp ></___VERTER___components.Comp>}",
     );
   });
 
@@ -55,23 +47,21 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Comp v-for="item in items"></Comp>`);
 
     expect(result).toContain(
-      "___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <___VERTER___components.Comp ></___VERTER___components.Comp>})"
+      "___VERTER___renderList(___VERTER___ctx.items,(item)=>{  <___VERTER___components.Comp ></___VERTER___components.Comp>})",
     );
   });
 
   it('Comp v-for="item in items" v-if="test"', () => {
     const { result } = parse(`<Comp v-for="item in items" v-if="test"></Comp>`);
 
-    expect(result).toContain(
-      "<___VERTER___components.Comp  ></___VERTER___components.Comp>"
-    );
+    expect(result).toContain("<___VERTER___components.Comp  ></___VERTER___components.Comp>");
   });
 
   it("Component.Comp", () => {
     const { result, s } = parse(`<Component.Comp></Component.Comp>`);
 
     expect(result).toContain(
-      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp>"
+      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp>",
     );
   });
 
@@ -79,27 +69,23 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Component.Comp v-if="test"></Component.Comp>`);
 
     expect(result).toContain(
-      "if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___components.Component.Comp;"
+      "if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___components.Component.Comp;",
     );
   });
 
   it("Component.Comp v-for", () => {
-    const { result } = parse(
-      `<Component.Comp v-for="item in items"></Component.Comp>`
-    );
+    const { result } = parse(`<Component.Comp v-for="item in items"></Component.Comp>`);
 
     expect(result).toContain(
-      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;"
+      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;",
     );
   });
 
   it('Component.Comp v-for="item in items" v-if="test"', () => {
-    const { result } = parse(
-      `<Component.Comp v-for="item in items" v-if="test"></Component.Comp>`
-    );
+    const { result } = parse(`<Component.Comp v-for="item in items" v-if="test"></Component.Comp>`);
 
     expect(result).toContain(
-      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;"
+      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;",
     );
   });
 
@@ -107,7 +93,7 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Component.Comp/>`);
 
     expect(result).toContain(
-      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp/>"
+      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp/>",
     );
   });
 
@@ -115,7 +101,7 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Component.Comp v-if="test"/>`);
 
     expect(result).toContain(
-      "if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp"
+      "if(___VERTER___ctx.test){const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp",
     );
   });
 
@@ -123,17 +109,15 @@ describe("process template plugins element", () => {
     const { result } = parse(`<Component.Comp v-for="item in items"/>`);
 
     expect(result).toContain(
-      "___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp />"
+      "___VERTER___renderList(___VERTER___ctx.items,(item)=>{  const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp />",
     );
   });
 
   it('Component.Comp v-for="item in items" v-if="test"/>', () => {
-    const { result } = parse(
-      `<Component.Comp v-for="item in items" v-if="test"/>`
-    );
+    const { result } = parse(`<Component.Comp v-for="item in items" v-if="test"/>`);
 
     expect(result).toContain(
-      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp"
+      "const Componentl__verter__lComp=___VERTER___components.Component.Comp;<Componentl__verter__lComp",
     );
   });
 
@@ -152,16 +136,14 @@ describe("process template plugins element", () => {
     test(":is", () => {
       const { result } = parse(`<component :is="'div'"></component>`);
 
-      expect(result).toContain(
-        "<___VERTER___component_render ></___VERTER___component_render>"
-      );
+      expect(result).toContain("<___VERTER___component_render ></___VERTER___component_render>");
     });
 
     test(`:is="as || 'div'"`, () => {
       const { result } = parse(`<component :is="as || 'div'"></component>`);
 
       expect(result).toContain(
-        "const ___VERTER___component_render=___VERTER___extractRenderComponent(___VERTER___ctx.as || 'div');\n<___VERTER___component_render ></___VERTER___component_render>"
+        "const ___VERTER___component_render=___VERTER___extractRenderComponent(___VERTER___ctx.as || 'div');\n<___VERTER___component_render ></___VERTER___component_render>",
       );
     });
   });
@@ -171,7 +153,7 @@ describe("process template plugins element", () => {
       const { result } = parse(`<item-render></item-render>`);
 
       expect(result).toContain(
-        `const ITEMRENDER=___VERTER___components["item-render"];<ITEMRENDER>`
+        `const ITEMRENDER=___VERTER___components["item-render"];<ITEMRENDER>`,
       );
     });
 

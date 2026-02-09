@@ -61,12 +61,12 @@ Called automatically on WASM module instantiation via `#[wasm_bindgen(start)]`. 
 Compiles a Vue SFC string into JavaScript with source maps.
 
 ```javascript
-import init, { compile } from '@verter/wasm';
+import init, { compile } from "@verter/wasm";
 
 await init(); // load and instantiate WASM
 
 const result = compile(sfcSource, {
-  filename: 'App.vue',
+  filename: "App.vue",
   includeSourceContent: true,
   isProduction: false,
   ssr: false,
@@ -76,8 +76,8 @@ const result = compile(sfcSource, {
   },
 });
 
-console.log(result.code);             // compiled JavaScript
-console.log(result.sourceMap);         // source map JSON string
+console.log(result.code); // compiled JavaScript
+console.log(result.sourceMap); // source map JSON string
 console.log(result.codeWithSourceMap); // code with inline source map
 ```
 
@@ -86,23 +86,23 @@ console.log(result.codeWithSourceMap); // code with inline source map
 Compiles a Vue SFC from UTF-8 bytes (Uint8Array) into JavaScript with source maps.
 
 ```javascript
-import init, { compileBytes } from '@verter/wasm';
+import init, { compileBytes } from "@verter/wasm";
 
 await init(); // load and instantiate WASM
 
-const bytes = new TextEncoder().encode('<template><div>{{ msg }}</div></template>');
-const result = compileBytes(bytes, { filename: 'App.vue' });
+const bytes = new TextEncoder().encode("<template><div>{{ msg }}</div></template>");
+const result = compileBytes(bytes, { filename: "App.vue" });
 ```
 
 ### Serde Types (camelCase for JavaScript)
 
 All types use `#[serde(rename_all = "camelCase")]` for JavaScript-friendly field names:
 
-| Type | Fields |
-|---|---|
-| `FeatureFlags` | `optionsApi: bool`, `propsDestructure: bool` |
+| Type             | Fields                                                                                 |
+| ---------------- | -------------------------------------------------------------------------------------- |
+| `FeatureFlags`   | `optionsApi: bool`, `propsDestructure: bool`                                           |
 | `CodegenOptions` | `filename?`, `includeSourceContent`, `ssr`, `isProduction`, `componentId?`, `features` |
-| `CodegenResult` | `code`, `sourceMap`, `codeWithSourceMap` |
+| `CodegenResult`  | `code`, `sourceMap`, `codeWithSourceMap`                                               |
 
 ## Build
 
@@ -149,16 +149,16 @@ wasm-pack test --headless --chrome --firefox
 
 ## Dependencies
 
-| Crate | Purpose |
-|---|---|
-| `verter_core` | Core Rust template compiler |
-| `oxc_allocator` | Memory allocator for OXC AST (created per-call) |
-| `wasm-bindgen` | Rust/WASM interop bindings |
-| `serde` | Serialization framework |
-| `serde-wasm-bindgen` | JS `JsValue` <-> Rust struct conversion |
+| Crate                      | Purpose                                                           |
+| -------------------------- | ----------------------------------------------------------------- |
+| `verter_core`              | Core Rust template compiler                                       |
+| `oxc_allocator`            | Memory allocator for OXC AST (created per-call)                   |
+| `wasm-bindgen`             | Rust/WASM interop bindings                                        |
+| `serde`                    | Serialization framework                                           |
+| `serde-wasm-bindgen`       | JS `JsValue` <-> Rust struct conversion                           |
 | `console_error_panic_hook` | Readable panic messages in browser console (optional, default on) |
-| `getrandom` | WASM-compatible random number generation (`wasm_js` feature) |
-| `wasm-bindgen-test` | WASM integration test harness (dev) |
+| `getrandom`                | WASM-compatible random number generation (`wasm_js` feature)      |
+| `wasm-bindgen-test`        | WASM integration test harness (dev)                               |
 
 ## License
 

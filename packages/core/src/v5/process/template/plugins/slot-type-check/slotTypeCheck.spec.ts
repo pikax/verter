@@ -11,9 +11,7 @@ describe("process template plugins slot-type-check", () => {
 
     const s = new MagicString(source);
 
-    const templateBlock = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processTemplate(
       templateBlock.result.items,
@@ -32,8 +30,9 @@ describe("process template plugins slot-type-check", () => {
         s,
         filename: "test.vue",
         blocks: parsed.blocks,
-        block: templateBlock,blockNameResolver: (name) => name,
-      }
+        block: templateBlock,
+        blockNameResolver: (name) => name,
+      },
     );
 
     return r;
@@ -41,24 +40,18 @@ describe("process template plugins slot-type-check", () => {
 
   it("should render", () => {
     const { result } = parse(`<Comp> <div /><div /></Comp>`);
-    expect(result).toMatchInlineSnapshot(
-      `"<Comp> <div /><div /></Comp>"`
-    );
+    expect(result).toMatchInlineSnapshot(`"<Comp> <div /><div /></Comp>"`);
   });
 
   it("slot rendering", () => {
-    const { result } = parse(
-      `<Comp> <template v-slot:foo> <div /> </template> </Comp>`
-    );
+    const { result } = parse(`<Comp> <template v-slot:foo> <div /> </template> </Comp>`);
     expect(result).toMatchInlineSnapshot(
-      `"<Comp> <template v-slot:foo> <div /> </template> </Comp>"`
+      `"<Comp> <template v-slot:foo> <div /> </template> </Comp>"`,
     );
   });
 
   it("v-slot", () => {
     const { result } = parse(`<Comp v-slot:foo><div /></Comp>`);
-    expect(result).toMatchInlineSnapshot(
-      `"<Comp v-slot:foo><div /></Comp>"`
-    );
+    expect(result).toMatchInlineSnapshot(`"<Comp v-slot:foo><div /></Comp>"`);
   });
 });

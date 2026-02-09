@@ -20,8 +20,12 @@ const nullable: string | null = null;
 const optional: string | undefined = undefined;
 
 // Intersection types
-interface A { a: string }
-interface B { b: number }
+interface A {
+  a: string;
+}
+interface B {
+  b: number;
+}
 type AB = A & B;
 const ab: AB = { a: "hello", b: 42 };
 
@@ -40,7 +44,7 @@ const config = {
 
 // Const assertions
 const directions = ["up", "down", "left", "right"] as const;
-type Direction = typeof directions[number];
+type Direction = (typeof directions)[number];
 
 // Template literal types (in type position)
 type EventName = `on${Capitalize<"click" | "focus" | "blur">}`;

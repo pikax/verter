@@ -5,12 +5,7 @@ import { uriToPath } from "../../../../../utils.js";
 import type { VueDocument } from "../../../vue.js";
 
 export class VueSingleDocument extends VueTypescriptDocument {
-  static create(
-    uri: string,
-    parent: VueDocument,
-    languageId: LanguageTypescript,
-    version: number
-  ) {
+  static create(uri: string, parent: VueDocument, languageId: LanguageTypescript, version: number) {
     return new VueSingleDocument(uri, parent, languageId, version);
   }
 

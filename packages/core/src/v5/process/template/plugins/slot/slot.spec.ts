@@ -14,9 +14,7 @@ describe("process template plugins slot", () => {
 
     const s = new MagicString(source);
 
-    const templateBlock = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const templateBlock = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processTemplate(
       templateBlock.result.items,
@@ -37,7 +35,7 @@ describe("process template plugins slot", () => {
         blocks: parsed.blocks,
         block: templateBlock,
         blockNameResolver: (name) => name,
-      }
+      },
     );
 
     return r;
@@ -47,20 +45,20 @@ describe("process template plugins slot", () => {
     it("<slot/>", () => {
       const { result } = parse(`<slot/>`);
       expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+\/>/
+        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+\/>/,
       );
     });
     it('<slot name="test" />', () => {
       const { result } = parse(`<slot name="test"/>`);
       expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\["test"\]\);<___VERTER___slotComponent\d+\s\/>/
+        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\["test"\]\);<___VERTER___slotComponent\d+\s\/>/,
       );
     });
 
     it(`<slot :name="test"/>`, () => {
       const { result } = parse(`<slot :name="test"/>`);
       expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\[___VERTER___ctx\.test\]\);<___VERTER___slotComponent\d+\s\/>/
+        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\[___VERTER___ctx\.test\]\);<___VERTER___slotComponent\d+\s\/>/,
       );
     });
 
@@ -68,16 +66,16 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot :[msg]="test"/>`);
 
       expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+ \{\.\.\.\{\[___VERTER___ctx\.msg\]:___VERTER___ctx\.test\}\}\/\>/
+        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+ \{\.\.\.\{\[___VERTER___ctx\.msg\]:___VERTER___ctx\.test\}\}\/\>/,
       );
     });
 
     it("with props", () => {
       const { result } = parse(
-        `<slot :[msg]="test" :name="name" v-bind:onTest="()=> callMe()" @bind="bind"/>`
+        `<slot :[msg]="test" :name="name" v-bind:onTest="()=> callMe()" @bind="bind"/>`,
       );
       expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\[___VERTER___ctx\.name\]\);<___VERTER___slotComponent\d+ \{\.\.\.\{\[___VERTER___ctx\.msg\]:___VERTER___ctx\.test\}\}  onTest=\{\(\)=> ___VERTER___ctx\.callMe\(\)\}\s+onBind=\{___VERTER___ctx\.bind\}\/>/
+        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\[___VERTER___ctx\.name\]\);<___VERTER___slotComponent\d+ \{\.\.\.\{\[___VERTER___ctx\.msg\]:___VERTER___ctx\.test\}\}  onTest=\{\(\)=> ___VERTER___ctx\.callMe\(\)\}\s+onBind=\{___VERTER___ctx\.bind\}\/>/,
       );
     });
 
@@ -85,7 +83,7 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot v-if="test === 'app'"/>`);
 
       expect(result).toMatch(
-        /if\(___VERTER___ctx\.test === 'app'\)\{const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+ \/>\}/
+        /if\(___VERTER___ctx\.test === 'app'\)\{const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+ \/>\}/,
       );
     });
 
@@ -93,7 +91,7 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<div v-if="test === 'app'"> <slot /> </div>`);
 
       expect(result).toMatch(
-        /<div > \{\(\)=>\{const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+ \/>\}\} <\/div>/
+        /<div > \{\(\)=>\{const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+ \/>\}\} <\/div>/,
       );
     });
 
@@ -101,7 +99,7 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot> <span>1</span> </slot>`);
 
       expect(result).toMatch(
-        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+> <span>1<\/span> <\/___VERTER___slotComponent\d+>/
+        /const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\.default\);<___VERTER___slotComponent\d+> <span>1<\/span> <\/___VERTER___slotComponent\d+>/,
       );
     });
 
@@ -109,7 +107,7 @@ describe("process template plugins slot", () => {
       const { result } = parse(`<slot v-for="name in names" :name="name"/>`);
 
       expect(result).toMatch(
-        /___VERTER___renderList\(___VERTER___ctx\.names,\(name\)=>\{\s+const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\[name\]\);<___VERTER___slotComponent\d+\s*\/\>\}\)/
+        /___VERTER___renderList\(___VERTER___ctx\.names,\(name\)=>\{\s+const ___VERTER___slotComponent\d+=___VERTER___slotToRender\(___VERTER___\$slot\[name\]\);<___VERTER___slotComponent\d+\s*\/\>\}\)/,
       );
     });
 
@@ -118,9 +116,7 @@ describe("process template plugins slot", () => {
 
       // Extract the offset numbers from both slot variables
       const slotComponentPattern = /___VERTER___slotComponent(\d+)/;
-      const matches = result.match(
-        new RegExp(slotComponentPattern.source, "g")
-      );
+      const matches = result.match(new RegExp(slotComponentPattern.source, "g"));
       expect(matches).toHaveLength(4); // 2 slots × 2 occurrences (declaration + usage)
 
       const offsets = Array.from(
@@ -129,8 +125,8 @@ describe("process template plugins slot", () => {
             const match = m.match(slotComponentPattern);
             if (!match) throw new Error(`Unexpected match format: ${m}`);
             return match[1];
-          })
-        )
+          }),
+        ),
       );
       expect(offsets).toHaveLength(2); // Ensure two different offset values
     });
@@ -139,24 +135,20 @@ describe("process template plugins slot", () => {
   describe("render", () => {
     describe("element", () => {
       it("template v-slot:foo", () => {
-        const { result } = parse(
-          `<div><template v-slot:foo><span>1</span></template></div>`
-        );
+        const { result } = parse(`<div><template v-slot:foo><span>1</span></template></div>`);
 
         expect(result).toContain("<div v-slot={(___VERTER___slotInstance)=>{");
-        expect(result).toContain(
-          "___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)"
-        );
+        expect(result).toContain("___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)");
       });
 
       it(`template v-if="test === 'app'" v-slot:foo`, () => {
         const { result } = parse(
-          `<div><template v-if="test==='app'" v-slot:foo><span>1{{test}}</span></template></div>`
+          `<div><template v-if="test==='app'" v-slot:foo><span>1{{test}}</span></template></div>`,
         );
 
         expect(result).toContain("<div v-slot={(___VERTER___slotInstance)=>{");
         expect(result).toContain(
-          "if(___VERTER___ctx.test==='app'){ ___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)"
+          "if(___VERTER___ctx.test==='app'){ ___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)",
         );
       });
 
@@ -167,134 +159,124 @@ describe("process template plugins slot", () => {
             <template v-else-if="foo === 'app'" v-slot:app><span>1</span></template>
             <template v-else-if="foo === 'baz'" v-slot:baz><span>1</span></template>
             <template v-else v-slot:bar><span>1</span></template>
-          </div>`
+          </div>`,
         );
 
         expect(result).toContain(`<div v-slot={(___VERTER___slotInstance)=>{`);
         expect(result).toContain(
-          `if(___VERTER___ctx.foo === 'test'){ ___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)`
+          `if(___VERTER___ctx.foo === 'test'){ ___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)`,
         );
         expect(result).toContain(
-          `else if(___VERTER___ctx.foo === 'app'){ ___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.app)`
+          `else if(___VERTER___ctx.foo === 'app'){ ___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.app)`,
         );
         expect(result).toContain(
-          `else if(___VERTER___ctx.foo === 'baz'){ ___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.baz)`
+          `else if(___VERTER___ctx.foo === 'baz'){ ___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.baz)`,
         );
         expect(result).toContain(
-          `else{ ___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.bar)`
+          `else{ ___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.bar)`,
         );
       });
 
       it("template #foo", () => {
-        const { result } = parse(
-          `<div><template #foo><span>1</span></template></div>`
-        );
+        const { result } = parse(`<div><template #foo><span>1</span></template></div>`);
 
         expect(result).toContain("<div v-slot={(___VERTER___slotInstance)=>{");
-        expect(result).toContain(
-          "___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)"
-        );
+        expect(result).toContain("___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)");
       });
 
       it("template #foo-bar", () => {
-        const { result } = parse(
-          `<div><template #foo-bar><span>1</span></template></div>`
-        );
+        const { result } = parse(`<div><template #foo-bar><span>1</span></template></div>`);
 
         expect(result).toContain(`<div v-slot={(___VERTER___slotInstance)=>{`);
         expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots['foo-bar'])`
+          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots['foo-bar'])`,
         );
       });
 
       it('template v-slot:foo="obj"', () => {
         const { result } = parse(
-          `<div><template v-slot:foo="obj"><span>1 {{ obj.test }}</span></template></div>`
+          `<div><template v-slot:foo="obj"><span>1 {{ obj.test }}</span></template></div>`,
         );
 
         expect(result).toContain(`<div v-slot={(___VERTER___slotInstance)=>{`);
         expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)((obj)=>`
+          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)((obj)=>`,
         );
       });
       it('template #foo="obj"', () => {
         const { result } = parse(
-          `<div><template #foo="obj"><span>1 {{ obj.test }}</span></template></div>`
+          `<div><template #foo="obj"><span>1 {{ obj.test }}</span></template></div>`,
         );
 
         expect(result).toContain(`<div v-slot={(___VERTER___slotInstance)=>{`);
         expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)((obj)=>`
+          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)((obj)=>`,
         );
       });
 
       it('template v-slot:foo="{bar}"', () => {
         const { result } = parse(
-          `<div><template v-slot:foo="{bar}"><span>1{{bar}}</span></template></div>`
+          `<div><template v-slot:foo="{bar}"><span>1{{bar}}</span></template></div>`,
         );
 
         expect(result).toContain(`<div v-slot={(___VERTER___slotInstance)=>{`);
         expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)(({bar})=>`
+          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)(({bar})=>`,
         );
       });
       it('template #foo="{bar}"', () => {
         const { result } = parse(
-          `<div><template #foo="{bar}"><span>1{{bar}}</span></template></div>`
+          `<div><template #foo="{bar}"><span>1{{bar}}</span></template></div>`,
         );
 
         expect(result).toContain(`<div v-slot={(___VERTER___slotInstance)=>{`);
         expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)(({bar})=>`
+          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)(({bar})=>`,
         );
       });
 
       it("template v-slot:[foo]", () => {
-        const { result } = parse(
-          `<div><template v-slot:[foo]><span>1</span></template></div>`
-        );
+        const { result } = parse(`<div><template v-slot:[foo]><span>1</span></template></div>`);
         expect(result).toContain(`<div v-slot={(___VERTER___slotInstance)=>{`);
         expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])`
+          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])`,
         );
       });
       it("template #[foo]", () => {
-        const { result } = parse(
-          `<div><template #[foo]><span>1</span></template></div>`
-        );
+        const { result } = parse(`<div><template #[foo]><span>1</span></template></div>`);
         expect(result).toContain(`<div v-slot={(___VERTER___slotInstance)=>{`);
         expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])`
+          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])`,
         );
       });
 
       it('template v-slot:[foo]="{obj}"', () => {
         const { result } = parse(
-          `<div><template v-slot:[foo]="{obj}"><span>1{{obj}}</span></template></div>`
+          `<div><template v-slot:[foo]="{obj}"><span>1{{obj}}</span></template></div>`,
         );
         expect(result).toContain(`<div v-slot={(___VERTER___slotInstance)=>{`);
         expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(({obj})=>`
+          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(({obj})=>`,
         );
       });
       it('template #[foo]="{obj}"', () => {
         const { result } = parse(
-          `<div><template #[foo]="{obj}"><span>1{{obj}}</span></template></div>`
+          `<div><template #[foo]="{obj}"><span>1{{obj}}</span></template></div>`,
         );
         expect(result).toContain(`<div v-slot={(___VERTER___slotInstance)=>{`);
         expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(({obj})=>`
+          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.foo])(({obj})=>`,
         );
       });
 
       it("parent conditional", () => {
         const { result } = parse(
-          `<div v-if="test === 'foo'"><template #[test]>{{test}}</template></div>`
+          `<div v-if="test === 'foo'"><template #[test]>{{test}}</template></div>`,
         );
 
         expect(result).toContain(`<div v-slot={(___VERTER___slotInstance)=>{`);
         expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])`
+          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])`,
         );
       });
 
@@ -302,12 +284,10 @@ describe("process template plugins slot", () => {
         const { result } = parse(
           `<div v-if="test === 'foo'">
           // @ts-expect-error invalid app
-          <template v-if="test==='app'" v-slot:foo><span>1{{test}}</span></template></div>`
+          <template v-if="test==='app'" v-slot:foo><span>1{{test}}</span></template></div>`,
         );
         expect(result).toContain(`// @ts-expect-error invalid app`);
-        expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)`
-        );
+        expect(result).toContain(`___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.foo)`);
       });
 
       it("short no children", () => {
@@ -316,9 +296,7 @@ describe("process template plugins slot", () => {
 </Comp>`);
         expect(result).toContain(`<___VERTER___components.Comp`);
         expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
-        expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)`
-        );
+        expect(result).toContain(`___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)`);
       });
     });
 
@@ -329,7 +307,7 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)`,
           );
         });
 
@@ -338,7 +316,7 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)`,
           );
         });
 
@@ -347,7 +325,7 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)`,
           );
           expect(result).toContain(`{___VERTER___ctx.foo}`);
         });
@@ -357,7 +335,7 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)(({foo})=>`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)(({foo})=>`,
           );
         });
         it('#="{foo}"', () => {
@@ -365,18 +343,16 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)(({foo})=>`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)(({foo})=>`,
           );
         });
 
         it('v-if="test === \'app\'" v-slot="{foo}"', () => {
-          const { result } = parse(
-            `<Comp v-if="test === 'app'" v-slot="{foo}">{{foo}}</Comp>`
-          );
+          const { result } = parse(`<Comp v-if="test === 'app'" v-slot="{foo}">{{foo}}</Comp>`);
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)(({foo})=>`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.default)(({foo})=>`,
           );
         });
       });
@@ -387,7 +363,7 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)`,
           );
         });
 
@@ -396,7 +372,7 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)`,
           );
         });
 
@@ -405,7 +381,7 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)`,
           );
           expect(result).toContain(`{___VERTER___ctx.foo}`);
         });
@@ -415,7 +391,7 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)(({foo})=>`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)(({foo})=>`,
           );
         });
         it('#test="{foo}"', () => {
@@ -423,18 +399,18 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)(({foo})=>`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)(({foo})=>`,
           );
         });
 
         it('v-if="test === \'app\'" v-slot:test="{foo}"', () => {
           const { result } = parse(
-            `<Comp v-if="test === 'app'" v-slot:test="{foo}">{{foo}}</Comp>`
+            `<Comp v-if="test === 'app'" v-slot:test="{foo}">{{foo}}</Comp>`,
           );
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)(({foo})=>`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots.test)(({foo})=>`,
           );
         });
       });
@@ -445,7 +421,7 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])`,
           );
         });
 
@@ -454,7 +430,7 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])`,
           );
         });
 
@@ -463,19 +439,17 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])`,
           );
           expect(result).toContain(`{___VERTER___ctx.foo}`);
         });
 
         it('Comp v-slot:[test]="{foo}"', () => {
-          const { result } = parse(
-            `<Comp v-slot:[test]="{foo}">{{foo}}</Comp>`
-          );
+          const { result } = parse(`<Comp v-slot:[test]="{foo}">{{foo}}</Comp>`);
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>`,
           );
         });
         it('#[test]="{foo}"', () => {
@@ -483,30 +457,30 @@ describe("process template plugins slot", () => {
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>`,
           );
         });
 
         it('v-if="test === \'app\'" v-slot:[test]="{foo}"', () => {
           const { result } = parse(
-            `<Comp v-if="test === 'app'" v-slot:[test]="{foo}">{{foo}}</Comp>`
+            `<Comp v-if="test === 'app'" v-slot:[test]="{foo}">{{foo}}</Comp>`,
           );
           expect(result).toContain(`<___VERTER___components.Comp`);
           expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
           expect(result).toContain(
-            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>`
+            `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>`,
           );
         });
       });
 
       it('Comp v-if="test === \'app\'" v-slot:[test]="{foo}"', () => {
         const { result } = parse(
-          `<Comp v-if="test === 'app'" v-slot:[test]="{foo}">{{foo}}</Comp>`
+          `<Comp v-if="test === 'app'" v-slot:[test]="{foo}">{{foo}}</Comp>`,
         );
         expect(result).toContain(`<___VERTER___components.Comp`);
         expect(result).toContain(`v-slot={(___VERTER___slotInstance)=>{`);
         expect(result).toContain(
-          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>`
+          `___VERTER___renderSlotJSX(___VERTER___slotInstance.$slots[___VERTER___ctx.test])(({foo})=>`,
         );
       });
     });
@@ -521,9 +495,7 @@ describe("process template plugins slot", () => {
         </div>
         <span v-else>—</span>
       </template></div>`);
-      expect(result).toContain(
-        "renderSlotJSX(___VERTER___slotInstance.$slots.default)"
-      );
+      expect(result).toContain("renderSlotJSX(___VERTER___slotInstance.$slots.default)");
       expect(result).toContain("tel:${value}");
       expect(result).toContain("<span> ({ type })</span>");
     });

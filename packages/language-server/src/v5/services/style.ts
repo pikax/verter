@@ -19,7 +19,7 @@ const cssServices = new Map<
 
 export function getStyleLanguageService(
   uri: string,
-  languageId: "css" | "scss" | "less" = "css"
+  languageId: "css" | "scss" | "less" = "css",
 ): LanguageService {
   const root = normalisePath(uri);
   let entry = cssServices.get(root);
@@ -43,9 +43,7 @@ export function getStyleLanguageService(
       return entry.scss;
     }
     default: {
-      console.warn(
-        `Language ${languageId} not recognised as a supported style`
-      );
+      console.warn(`Language ${languageId} not recognised as a supported style`);
       return entry.css;
     }
   }

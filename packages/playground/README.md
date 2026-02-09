@@ -98,15 +98,15 @@ src/
 
 ## Tech Stack
 
-| Technology | Purpose |
-|---|---|
-| Vue 3 | Application framework |
-| Monaco Editor (`monaco-editor-core`) | Code editor |
-| Shiki (`shiki`, `@shikijs/monaco`) | Syntax highlighting |
-| OXC Transform (`oxc-transform`) | TypeScript to JavaScript transpilation |
-| `@verter/wasm` | Vue SFC compilation (Rust compiled to WASM) |
-| Vite | Build tool and dev server |
-| Netlify | Deployment target |
+| Technology                           | Purpose                                     |
+| ------------------------------------ | ------------------------------------------- |
+| Vue 3                                | Application framework                       |
+| Monaco Editor (`monaco-editor-core`) | Code editor                                 |
+| Shiki (`shiki`, `@shikijs/monaco`)   | Syntax highlighting                         |
+| OXC Transform (`oxc-transform`)      | TypeScript to JavaScript transpilation      |
+| `@verter/wasm`                       | Vue SFC compilation (Rust compiled to WASM) |
+| Vite                                 | Build tool and dev server                   |
+| Netlify                              | Deployment target                           |
 
 ## Development
 
@@ -149,20 +149,21 @@ The playground is deployed to Netlify. The `netlify.toml` configuration (at work
 - COOP/COEP headers for `SharedArrayBuffer` support (configured in `vite.config.ts`)
 
 Deployment happens automatically via:
+
 - **Preview deploys**: When a maintainer adds the `preview` label to a PR
-- **Production deploys**: When a release tag is pushed (v*)
+- **Production deploys**: When a release tag is pushed (v\*)
 
 ## Dependencies
 
-| Package | Purpose |
-|---|---|
-| `@verter/wasm` | Rust-based Vue SFC compiler (WASM) |
-| `vue` | Application framework |
-| `monaco-editor-core` | Code editor component |
-| `shiki` / `@shikijs/monaco` | Syntax highlighting |
-| `oxc-transform` | TypeScript transpilation in the browser |
-| `@verter/vite-plugin` | Vite plugin for Vue SFC compilation (dev tooling) |
-| `vite` / `@vitejs/plugin-vue` | Build tooling |
+| Package                       | Purpose                                           |
+| ----------------------------- | ------------------------------------------------- |
+| `@verter/wasm`                | Rust-based Vue SFC compiler (WASM)                |
+| `vue`                         | Application framework                             |
+| `monaco-editor-core`          | Code editor component                             |
+| `shiki` / `@shikijs/monaco`   | Syntax highlighting                               |
+| `oxc-transform`               | TypeScript transpilation in the browser           |
+| `@verter/vite-plugin`         | Vite plugin for Vue SFC compilation (dev tooling) |
+| `vite` / `@vitejs/plugin-vue` | Build tooling                                     |
 
 ## License
 

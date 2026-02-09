@@ -1,19 +1,19 @@
 {
   "name": "@verter/native-darwin-arm64",
   "version": "0.0.1-alpha.1",
+  "description": "Native Node.js bindings for Verter Vue compiler",
+  "license": "ISC",
+  "files": [
+    "verter-native.darwin-arm64.node"
+  ],
+  "os": [
+    "darwin"
+  ],
   "cpu": [
     "arm64"
   ],
   "main": "verter-native.darwin-arm64.node",
-  "files": [
-    "verter-native.darwin-arm64.node"
-  ],
-  "description": "Native Node.js bindings for Verter Vue compiler",
-  "license": "ISC",
   "engines": {
     "node": ">=18"
-  },
-  "os": [
-    "darwin"
-  ]
+  }
 }

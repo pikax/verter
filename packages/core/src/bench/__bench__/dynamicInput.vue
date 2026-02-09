@@ -23,11 +23,7 @@ const Editor = defineComponent({});
 </script>
 
 <template>
-  <Suspense
-    @resolve="$emit('resolve')"
-    @fallback="$emit('fallback')"
-    @pending="$emit('pending')"
-  >
+  <Suspense @resolve="$emit('resolve')" @fallback="$emit('fallback')" @pending="$emit('pending')">
     <Editor v-bind="{ ...$props, ...$attrs }" />
   </Suspense>
 </template>

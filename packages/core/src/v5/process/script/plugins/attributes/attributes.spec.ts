@@ -15,7 +15,7 @@ describe("process script plugin attributes", () => {
     attributes = "",
 
     pre = "",
-    post = ""
+    post = "",
   ) {
     const prepend = `${pre}<script ${
       wrapper === false ? "setup" : ""
@@ -25,25 +25,19 @@ describe("process script plugin attributes", () => {
 
     const s = new MagicString(source);
 
-    const scriptBlock = parsed.blocks.find(
-      (x) => x.type === "script"
-    ) as ParsedBlockScript;
+    const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
 
-    const r = processScript(
-      scriptBlock.result.items,
-      [ScriptBlockPlugin, AttributesPlugin],
-      {
-        s,
-        filename: "test.vue",
-        blocks: parsed.blocks,
-        isSetup: wrapper === false,
-        isAsync: parsed.isAsync,
-        block: scriptBlock,
-        generic: parsed.generic,
-        handledAttributes: new Set(),
-        blockNameResolver: (name) => name,
-      }
-    );
+    const r = processScript(scriptBlock.result.items, [ScriptBlockPlugin, AttributesPlugin], {
+      s,
+      filename: "test.vue",
+      blocks: parsed.blocks,
+      isSetup: wrapper === false,
+      isAsync: parsed.isAsync,
+      block: scriptBlock,
+      generic: parsed.generic,
+      handledAttributes: new Set(),
+      blockNameResolver: (name) => name,
+    });
 
     return r;
   }
@@ -56,22 +50,22 @@ describe("process script plugin attributes", () => {
     it("work", () => {
       const { result } = parse(`let a = 0`, 'attributes="{ a: number }"');
       expect(result).toMatchInlineSnapshot(
-      `";function script   (){let a = 0};type ___VERTER___attributes={ a: number };"`);
+        `";function script   (){let a = 0};type ___VERTER___attributes={ a: number };"`,
+      );
     });
 
     it("generic", () => {
       const { result } = parse(`let a = 0`, 'attributes="T" generic="T"');
       expect(result).toMatchInlineSnapshot(
-      `";function script    <T>(){let a = 0};type ___VERTER___attributes<T>=T;"`);
+        `";function script    <T>(){let a = 0};type ___VERTER___attributes<T>=T;"`,
+      );
     });
 
     it("async", () => {
-      const { result } = parse(
-        `let a = await Promise.resolve(0)`,
-        'attributes="{ a: number }"'
-      );
+      const { result } = parse(`let a = await Promise.resolve(0)`, 'attributes="{ a: number }"');
       expect(result).toMatchInlineSnapshot(
-      `";async function script   (){let a = await Promise.resolve(0)};type ___VERTER___attributes={ a: number };"`);
+        `";async function script   (){let a = await Promise.resolve(0)};type ___VERTER___attributes={ a: number };"`,
+      );
     });
   });
 
@@ -82,7 +76,8 @@ describe("process script plugin attributes", () => {
     it("work", () => {
       const { result } = parse(`let a = 0`, 'attributes="{ a: number }"');
       expect(result).toMatchInlineSnapshot(
-      `";function script   (){let a = 0}/** @typedef {{ a: number }}___VERTER___attributes*/"`);
+        `";function script   (){let a = 0}/** @typedef {{ a: number }}___VERTER___attributes*/"`,
+      );
     });
   });
 });

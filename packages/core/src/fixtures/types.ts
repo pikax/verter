@@ -575,10 +575,7 @@ export interface FixtureResult {
  * // => "___VERTER___defineProps_Type"
  * ```
  */
-export function resolveWithPrefix(
-  value: WithPrefixString,
-  prefix: string = ""
-): string {
+export function resolveWithPrefix(value: WithPrefixString, prefix: string = ""): string {
   return typeof value === "function" ? value(prefix) : value;
 }
 
@@ -689,9 +686,7 @@ export function addTwoslashAnnotations(code: string): string {
     }
 
     // Add ^? annotation after standalone type alias declarations
-    const standaloneTypeMatch = line.match(
-      /^(\s*)type\s+(___VERTER___\w+)\s*=/
-    );
+    const standaloneTypeMatch = line.match(/^(\s*)type\s+(___VERTER___\w+)\s*=/);
     if (standaloneTypeMatch) {
       const [, , typeName] = standaloneTypeMatch;
       const typeStart = line.indexOf(typeName);
@@ -728,7 +723,7 @@ export function addTwoslashAnnotations(code: string): string {
 export function generateFixtureBlock(
   fixture: Fixture,
   output: string,
-  includeAnnotations: boolean = true
+  includeAnnotations: boolean = true,
 ): string {
   const processedOutput = includeAnnotations
     ? addTwoslashAnnotations(output)

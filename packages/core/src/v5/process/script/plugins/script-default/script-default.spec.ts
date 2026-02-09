@@ -1,9 +1,6 @@
 import { MagicString } from "@vue/compiler-sfc";
 import { parser } from "../../../../parser";
-import {
-  ParsedBlockScript,
-  ParsedBlockTemplate,
-} from "../../../../parser/types";
+import { ParsedBlockScript, ParsedBlockTemplate } from "../../../../parser/types";
 import { processScript } from "../../script";
 
 import { ScriptDefaultPlugin } from "./index";
@@ -21,7 +18,7 @@ describe("process script plugin script-default", () => {
 
     pre = "",
     post = "",
-    attrs = ""
+    attrs = "",
   ) {
     const prepend = `${pre}<script ${
       wrapper === false ? "setup" : ""
@@ -31,22 +28,12 @@ describe("process script plugin script-default", () => {
 
     const s = new MagicString(source);
 
-    const scriptBlock = parsed.blocks.find(
-      (x) => x.type === "script"
-    ) as ParsedBlockScript;
-    const template = parsed.blocks.find(
-      (x) => x.type === "template"
-    ) as ParsedBlockTemplate;
+    const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
+    const template = parsed.blocks.find((x) => x.type === "template") as ParsedBlockTemplate;
 
     const r = processScript(
       scriptBlock.result.items,
-      [
-        ImportsPlugin,
-        ScriptBlockPlugin,
-        ScriptDefaultPlugin,
-        BindingPlugin,
-        MacrosPlugin,
-      ],
+      [ImportsPlugin, ScriptBlockPlugin, ScriptDefaultPlugin, BindingPlugin, MacrosPlugin],
       {
         ...parsed,
         s,
@@ -55,11 +42,9 @@ describe("process script plugin script-default", () => {
         block: scriptBlock,
         isAsync: parsed.isAsync,
         templateBindings:
-          template?.result?.items.filter(
-            (x) => x.type === TemplateTypes.Binding
-          ) ?? [],
+          template?.result?.items.filter((x) => x.type === TemplateTypes.Binding) ?? [],
         blockNameResolver: (name) => name,
-      }
+      },
     );
     return r;
   }
@@ -70,58 +55,49 @@ describe("process script plugin script-default", () => {
 
       // needs to import the defineComponent
       expect(result).toContain(
-        `import { defineComponent as ___VERTER___defineComponent } from "vue"`
+        `import { defineComponent as ___VERTER___defineComponent } from "vue"`,
       );
 
       // needs to export the default
       expect(result).toContain(
-        `;export const ___VERTER___default_Component=___VERTER___defineComponent({});`
+        `;export const ___VERTER___default_Component=___VERTER___defineComponent({});`,
       );
 
       expect(result).not.toContain("export default");
     });
 
     test("export default { props: { foo: String } }", () => {
-      const { result } = _parse(
-        `export default { props: { foo: String } }`,
-        ""
-      );
+      const { result } = _parse(`export default { props: { foo: String } }`, "");
 
       // needs to export the default
       expect(result).toContain(
-        `;export const ___VERTER___default_Component=___VERTER___defineComponent({ props: { foo: String } })`
+        `;export const ___VERTER___default_Component=___VERTER___defineComponent({ props: { foo: String } })`,
       );
       expect(result).not.toContain("export default");
     });
 
     test("export default defineComponent", () => {
-      const { result } = _parse(
-        `export default defineComponent({ props: { foo: String } })`,
-        ""
-      );
+      const { result } = _parse(`export default defineComponent({ props: { foo: String } })`, "");
 
       // needs to import the defineComponent
       expect(result).not.toContain("___VERTER___defineComponent");
 
       // needs to export the default
       expect(result).toContain(
-        `export const ___VERTER___default_Component=defineComponent({ props: { foo: String } })`
+        `export const ___VERTER___default_Component=defineComponent({ props: { foo: String } })`,
       );
       expect(result).not.toContain("export default");
     });
 
     test("export default customDefineComponent", () => {
-      const { result } = _parse(
-        `export default customDefineComponent({ setup() {} })`,
-        ""
-      );
+      const { result } = _parse(`export default customDefineComponent({ setup() {} })`, "");
 
       // needs to import the defineComponent
       expect(result).not.toContain("___VERTER___defineComponent");
 
       // needs to export the default
       expect(result).toContain(
-        `export const ___VERTER___default_Component=customDefineComponent({ setup() {} })`
+        `export const ___VERTER___default_Component=customDefineComponent({ setup() {} })`,
       );
     });
 
@@ -129,7 +105,7 @@ describe("process script plugin script-default", () => {
       const { result } = _parse(
         `const Comp = { props: { foo: String } };
 export default Comp`,
-        ""
+        "",
       );
 
       // needs to import the defineComponent
@@ -152,7 +128,7 @@ export default Comp`,
 
         // needs to import the defineComponent
         expect(result).toContain(
-          `import { defineComponent as ___VERTER___defineComponent } from "vue"`
+          `import { defineComponent as ___VERTER___defineComponent } from "vue"`,
         );
 
         // needs to export the empty script
@@ -160,7 +136,7 @@ export default Comp`,
 
         // needs to export the default
         expect(result).toContain(
-          `;export const ___VERTER___default_Component=___VERTER___defineComponent({});`
+          `;export const ___VERTER___default_Component=___VERTER___defineComponent({});`,
         );
       });
 
@@ -169,7 +145,7 @@ export default Comp`,
 
         // needs to import the defineComponent
         expect(result).toContain(
-          `import { defineComponent as ___VERTER___defineComponent } from "vue"`
+          `import { defineComponent as ___VERTER___defineComponent } from "vue"`,
         );
 
         // needs to export the empty script
@@ -177,50 +153,42 @@ export default Comp`,
 
         // needs to export the default
         expect(result).toContain(
-          `;export const ___VERTER___default_Component=___VERTER___defineComponent({});`
+          `;export const ___VERTER___default_Component=___VERTER___defineComponent({});`,
         );
       });
       it("defineOptions({ inheritAttrs: false })", () => {
-        const { result } = _parse(
-          `defineOptions({ inheritAttrs: false })`,
-          false
-        );
+        const { result } = _parse(`defineOptions({ inheritAttrs: false })`, false);
 
         // needs to import the defineComponent
         expect(result).toContain(
-          `import { defineComponent as ___VERTER___defineComponent } from "vue"`
+          `import { defineComponent as ___VERTER___defineComponent } from "vue"`,
         );
 
         // needs to export the empty script
-        expect(result).toContain(
-          `function script  (){defineOptions({ inheritAttrs: false })}`
-        );
+        expect(result).toContain(`function script  (){defineOptions({ inheritAttrs: false })}`);
 
         // needs to export the default using the boxed options variable
         expect(result).toContain(
-          `export const ___VERTER___default_Component=___VERTER___defineComponent(___VERTER___defineOptions_Boxed);`
+          `export const ___VERTER___default_Component=___VERTER___defineComponent(___VERTER___defineOptions_Boxed);`,
         );
       });
 
       it("let a = defineOptions({ inheritAttrs: false })", () => {
-        const { result } = _parse(
-          `let a = defineOptions({ inheritAttrs: false })`,
-          false
-        );
+        const { result } = _parse(`let a = defineOptions({ inheritAttrs: false })`, false);
 
         // needs to import the defineComponent
         expect(result).toContain(
-          `import { defineComponent as ___VERTER___defineComponent } from "vue"`
+          `import { defineComponent as ___VERTER___defineComponent } from "vue"`,
         );
 
         // needs to export the empty script
         expect(result).toContain(
-          `function script  (){let a = defineOptions({ inheritAttrs: false })}`
+          `function script  (){let a = defineOptions({ inheritAttrs: false })}`,
         );
 
         // needs to export the default using the boxed options variable
         expect(result).toContain(
-          `;export const ___VERTER___default_Component=___VERTER___defineComponent(___VERTER___defineOptions_Boxed);`
+          `;export const ___VERTER___default_Component=___VERTER___defineComponent(___VERTER___defineOptions_Boxed);`,
         );
       });
     });
@@ -231,58 +199,49 @@ export default Comp`,
 
         // needs to import the defineComponent
         expect(result).toContain(
-          `import { defineComponent as ___VERTER___defineComponent } from "vue"`
+          `import { defineComponent as ___VERTER___defineComponent } from "vue"`,
         );
 
         // needs to export the default
         expect(result).toContain(
-          `;export const ___VERTER___default_Component=___VERTER___defineComponent({});`
+          `;export const ___VERTER___default_Component=___VERTER___defineComponent({});`,
         );
 
         expect(result).not.toContain("export default");
       });
 
       test("export default { props: { foo: String } }", () => {
-        const { result } = _parse(
-          `export default { props: { foo: String } }`,
-          ""
-        );
+        const { result } = _parse(`export default { props: { foo: String } }`, "");
 
         // needs to export the default
         expect(result).toContain(
-          `;export const ___VERTER___default_Component=___VERTER___defineComponent({ props: { foo: String } })`
+          `;export const ___VERTER___default_Component=___VERTER___defineComponent({ props: { foo: String } })`,
         );
         expect(result).not.toContain("export default");
       });
 
       test("export default defineComponent", () => {
-        const { result } = _parse(
-          `export default defineComponent({ props: { foo: String } })`,
-          ""
-        );
+        const { result } = _parse(`export default defineComponent({ props: { foo: String } })`, "");
 
         // needs to import the defineComponent
         expect(result).not.toContain("___VERTER___defineComponent");
 
         // needs to export the default
         expect(result).toContain(
-          `export const ___VERTER___default_Component=defineComponent({ props: { foo: String } })`
+          `export const ___VERTER___default_Component=defineComponent({ props: { foo: String } })`,
         );
         expect(result).not.toContain("export default");
       });
 
       test("export default customDefineComponent", () => {
-        const { result } = _parse(
-          `export default customDefineComponent({ setup() {} })`,
-          ""
-        );
+        const { result } = _parse(`export default customDefineComponent({ setup() {} })`, "");
 
         // needs to import the defineComponent
         expect(result).not.toContain("___VERTER___defineComponent");
 
         // needs to export the default
         expect(result).toContain(
-          `export const ___VERTER___default_Component=customDefineComponent({ setup() {} })`
+          `export const ___VERTER___default_Component=customDefineComponent({ setup() {} })`,
         );
       });
 
@@ -290,7 +249,7 @@ export default Comp`,
         const { result } = _parse(
           `const Comp = { props: { foo: String } };
   export default Comp`,
-          ""
+          "",
         );
 
         // needs to import the defineComponent
@@ -305,15 +264,13 @@ export default Comp`,
         const { result } = parse(
           `export const CompB = defineComponent({ setup() {} });
 export default { components: { CompB }}`,
-          ""
+          "",
         );
 
-        expect(result).toContain(
-          "export const CompB = defineComponent({ setup() {} });"
-        );
+        expect(result).toContain("export const CompB = defineComponent({ setup() {} });");
 
         expect(result).toContain(
-          `export const ___VERTER___default_Component=___VERTER___defineComponent({ components: { CompB }});`
+          `export const ___VERTER___default_Component=___VERTER___defineComponent({ components: { CompB }});`,
         );
       });
     });

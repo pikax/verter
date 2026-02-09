@@ -14,15 +14,13 @@ export type InterpolationContext = {
   ignoredIdentifiers: string[];
 };
 
-export function handleInterpolation<
-  Context extends InterpolationContext = InterpolationContext
->(
+export function handleInterpolation<Context extends InterpolationContext = InterpolationContext>(
   node: InterpolationNode,
-  context: Context
+  context: Context,
 ):
   | [
       TemplateInterpolation,
-      ...Array<TemplateBinding | TemplateFunction | TemplateLiteral | TemplateBrokenExpression>
+      ...Array<TemplateBinding | TemplateFunction | TemplateLiteral | TemplateBrokenExpression>,
     ]
   | null {
   if (node.type !== NodeTypes.INTERPOLATION) {

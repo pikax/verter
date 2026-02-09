@@ -38,20 +38,20 @@ export type GetVueComponent<T> = T extends {
 }
   ? I
   : T extends (...args: any) => infer R
-  ? void extends R
-    ? typeof import("vue").Comment
-    : R extends Array<any>
-    ? typeof import("vue").Fragment
-    : HTMLElement
-  : T extends HTMLElement
-  ? T
-  : T extends { $props: any }
-  ? T
-  : T extends { new (): infer I; prototype: HTMLElement }
-  ? I
-  : T extends { new (): any }
-  ? T
-  : never;
+    ? void extends R
+      ? typeof import("vue").Comment
+      : R extends Array<any>
+        ? typeof import("vue").Fragment
+        : HTMLElement
+    : T extends HTMLElement
+      ? T
+      : T extends { $props: any }
+        ? T
+        : T extends { new (): infer I; prototype: HTMLElement }
+          ? I
+          : T extends { new (): any }
+            ? T
+            : never;
 
 // prototype: HTMLElement;
 // new(): HTMLElement;
@@ -80,7 +80,7 @@ export type GetVueComponent<T> = T extends {
 export declare function DefineOptions<
   T extends { name?: TName; inheritAttrs?: TAttr },
   TName extends string,
-  TAttr extends boolean
+  TAttr extends boolean,
 >(o: T): T;
 
 /**
@@ -115,11 +115,8 @@ export declare function DefineOptions<
  */
 export declare function retrieveInstance<
   C extends { new (): { $props: {} } },
-  P extends import("vue").ExtractPublicPropTypes<InstanceType<C>["$props"]>
->(
-  comp: C,
-  props: P
-): Omit<InstanceType<C>, "$props"> & { $props: InstanceType<C>["$props"] & P };
+  P extends import("vue").ExtractPublicPropTypes<InstanceType<C>["$props"]>,
+>(comp: C, props: P): Omit<InstanceType<C>, "$props"> & { $props: InstanceType<C>["$props"] & P };
 
 /**
  * Extracts only valid Vue component types from an object, deeply removing non-component properties.
@@ -169,8 +166,8 @@ export type ExtractComponents<T, Default = {}> = {
   [K in keyof T as ExtractComponent<T[K]> extends never
     ? never
     : K extends `${Capitalize<K & string>}`
-    ? K
-    : never]: ExtractComponent<T[K]>;
+      ? K
+      : never]: ExtractComponent<T[K]>;
 } extends infer O
   ? [{}] extends [O]
     ? Default
@@ -205,15 +202,16 @@ export type ExtractComponents<T, Default = {}> = {
  *
  * @typeParam T - The value to extract component(s) from
  */
-export type ExtractComponent<T> = GetVueComponent<T> extends never
-  ? T extends Array<infer U>
-    ? U extends Record<string, any>
-      ? ExtractComponents<U, never>
-      : never
-    : T extends Record<string, any>
-    ? ExtractComponents<T, never>
-    : never
-  : T;
+export type ExtractComponent<T> =
+  GetVueComponent<T> extends never
+    ? T extends Array<infer U>
+      ? U extends Record<string, any>
+        ? ExtractComponents<U, never>
+        : never
+      : T extends Record<string, any>
+        ? ExtractComponents<T, never>
+        : never
+    : T;
 
 export type ExtractRenderComponent<T> = T extends {
   new (): infer I;
@@ -221,26 +219,22 @@ export type ExtractRenderComponent<T> = T extends {
   ? I extends { $props: any }
     ? T
     : I extends HTMLElement
-    ? (props: ExtractFromHTMLElement<I>) => I
-    : I
+      ? (props: ExtractFromHTMLElement<I>) => I
+      : I
   : T extends (...args: any) => infer R
-  ? void extends R
-    ? typeof import("vue").Comment
-    : R extends Array<any>
-    ? typeof import("vue").Fragment
-    : HTMLElement
-  : T extends HTMLElement
-  ? (props: ExtractFromHTMLElement<T>) => T
-  : T extends keyof import("vue").NativeElements
-  ? (props: import("vue").NativeElements[T]) => JSX.Element
-  : (props: {}) => JSX.Element;
+    ? void extends R
+      ? typeof import("vue").Comment
+      : R extends Array<any>
+        ? typeof import("vue").Fragment
+        : HTMLElement
+    : T extends HTMLElement
+      ? (props: ExtractFromHTMLElement<T>) => T
+      : T extends keyof import("vue").NativeElements
+        ? (props: import("vue").NativeElements[T]) => JSX.Element
+        : (props: {}) => JSX.Element;
 
-export declare function extractRenderComponent<T extends string>(
-  t: T
-): ExtractRenderComponent<T>;
-export declare function extractRenderComponent<T>(
-  t: T
-): ExtractRenderComponent<T>;
+export declare function extractRenderComponent<T extends string>(t: T): ExtractRenderComponent<T>;
+export declare function extractRenderComponent<T>(t: T): ExtractRenderComponent<T>;
 
 /**
  * Runtime helper function for extracting components from an object.
@@ -299,14 +293,14 @@ export declare function extractComponents<T>(t: T): ExtractComponents<T>;
  */
 export declare function enhanceElementWithProps<T, P>(
   t: T,
-  p: P
+  p: P,
 ): T extends { new (): infer I extends P }
   ? I
   : T extends { new (): infer I }
-  ? I & P
-  : T extends { new (): any }
-  ? InstanceType<T> & P
-  : T & P;
+    ? I & P
+    : T extends { new (): any }
+      ? InstanceType<T> & P
+      : T & P;
 
 /**
  * Extracts the props type from a Vue component or HTML element.
@@ -361,25 +355,21 @@ export declare function enhanceElementWithProps<T, P>(
 export type ExtractComponentProps<T> = T extends { new (): infer I }
   ? ExtractComponentProps<I>
   : T extends { $props: infer P }
-  ? P
-  : T extends HTMLElement
-  ? ExtractFromHTMLElement<T>
-  : T extends (p: infer P) => any
-  ? P
-  : {};
+    ? P
+    : T extends HTMLElement
+      ? ExtractFromHTMLElement<T>
+      : T extends (p: infer P) => any
+        ? P
+        : {};
 
 export declare function getVueGlobalComponents(): /**
  * Make sure the vue global components are included
  */
 {
   Transition: import("vue").DefineComponent<import("vue").TransitionProps>;
-  TransitionGroup: import("vue").DefineComponent<
-    import("vue").TransitionGroupProps
-  >;
+  TransitionGroup: import("vue").DefineComponent<import("vue").TransitionGroupProps>;
   Teleport: import("vue").DefineComponent<import("vue").TeleportProps>;
   Suspense: import("vue").DefineComponent<import("vue").SuspenseProps>;
   KeepAlive: import("vue").DefineComponent<import("vue").KeepAliveProps>;
-  BaseTransition: import("vue").DefineComponent<
-    import("vue").BaseTransitionProps
-  >;
+  BaseTransition: import("vue").DefineComponent<import("vue").BaseTransitionProps>;
 } & import("vue").GlobalComponents;

@@ -124,18 +124,18 @@ import { definePlugin, ScriptContext } from "../../types";
 export const MyPlugin = definePlugin({
   name: "my-plugin",
   enforce: "pre", // or "post"
-  
+
   pre(s, ctx) {
     // Runs before transforms
   },
-  
+
   transformFunctionCall(item, s, context) {
     // Transform function calls
   },
-  
+
   post(s, context) {
     // Runs after transforms
-  }
+  },
 });
 ```
 
@@ -154,15 +154,15 @@ import { MagicString } from "@vue/compiler-sfc";
 
 function transform(code: string) {
   const s = new MagicString(code);
-  
+
   // Use methods that preserve sourcemaps
   s.overwrite(start, end, newContent);
   s.prepend(header);
   s.append(footer);
-  
+
   return {
     code: s.toString(),
-    map: s.generateMap({ source: "file.vue" })
+    map: s.generateMap({ source: "file.vue" }),
   };
 }
 ```
@@ -214,6 +214,7 @@ node --inspect=6009 packages/language-server/dist/server.js
 ### TypeScript Plugin
 
 Plugin logs go to TypeScript's server log. In VS Code:
+
 1. Open command palette
 2. "TypeScript: Open TS Server Log"
 

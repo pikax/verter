@@ -1,18 +1,15 @@
-import type {
-  StatisticsRequestParams,
-  StatisticsSnapshot,
-} from "./statistics";
+import type { StatisticsRequestParams, StatisticsSnapshot } from "./statistics";
 
 // fluff
 export type RequestTyped = {
   onRequest: <T extends RequestType>(
     type: T,
-    cb: (e: RequestParams[T]) => RequestResponse[T] | null
+    cb: (e: RequestParams[T]) => RequestResponse[T] | null,
   ) => Promise<void>;
 
   sendRequest: <T extends RequestType>(
     type: T,
-    params: RequestParams[T]
+    params: RequestParams[T],
   ) => Promise<RequestResponse[T] | null>;
 };
 

@@ -8,18 +8,14 @@ const fetchJson = (url: string) =>
       let d = "";
       r.on("data", (c) => (d += c));
       r.on("end", () => res(JSON.parse(d)));
-    }).on("error", rej)
+    }).on("error", rej),
   );
 
 function hasTar(): boolean {
   return spawnSync("tar", ["--version"], { stdio: "ignore" }).status === 0;
 }
 
-export async function downloadPackage(
-  pkg: string,
-  toPath: string,
-  currentVersion: string
-) {
+export async function downloadPackage(pkg: string, toPath: string, currentVersion: string) {
   const m = await fetchJson(`https://registry.npmjs.org/${pkg}`);
   const v = m["dist-tags"].latest;
 
@@ -39,18 +35,14 @@ export async function downloadPackage(
         writeFileSync(tgz, Buffer.concat(buff));
         r();
       });
-    })
+    }),
   );
 
   if (process.platform === "win32" && !hasTar()) {
     spawnSync(
       "powershell",
-      [
-        "-NoProfile",
-        "-Command",
-        `gzip -d -c ${tgz} | tar -x --strip-components=1 -C ${toPath}`,
-      ],
-      { stdio: "inherit" }
+      ["-NoProfile", "-Command", `gzip -d -c ${tgz} | tar -x --strip-components=1 -C ${toPath}`],
+      { stdio: "inherit" },
     );
   } else {
     spawnSync("tar", ["-xzf", tgz, "--strip-components=1", "-C", toPath]);

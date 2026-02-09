@@ -137,9 +137,7 @@ export default defineComponent({
     <div :class="[baseClass, activeClass]">Array of classes</div>
 
     <!-- Array with conditionals -->
-    <div :class="[isActive ? activeClass : '', hasError ? errorClass : '']">
-      Array with ternary
-    </div>
+    <div :class="[isActive ? activeClass : '', hasError ? errorClass : '']">Array with ternary</div>
 
     <!-- Array with object in array -->
     <div :class="[{ active: isActive }, errorClass]">Array with object</div>
@@ -184,16 +182,8 @@ export default defineComponent({
     <!-- Complex combined example -->
     <div
       class="base-element"
-      :class="[
-        { active: isActive, error: hasError },
-        sizeClasses[size],
-        dynamicClassName,
-      ]"
-      :style="[
-        computedStyleObject,
-        baseStyles,
-        { border: hasError ? '2px solid red' : 'none' },
-      ]"
+      :class="[{ active: isActive, error: hasError }, sizeClasses[size], dynamicClassName]"
+      :style="[computedStyleObject, baseStyles, { border: hasError ? '2px solid red' : 'none' }]"
     >
       Complex combined bindings
     </div>

@@ -6,7 +6,7 @@ import { TemplateTypes } from "../types";
 describe("parser template interpolation", () => {
   function interpolate(
     content: string,
-    context: InterpolationContext = { ignoredIdentifiers: [] }
+    context: InterpolationContext = { ignoredIdentifiers: [] },
   ) {
     const source = `<template>${content}</template>`;
 
@@ -46,9 +46,7 @@ describe("parser template interpolation", () => {
 
     const [_, n] = result as any;
 
-    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
-      n.node.loc.source
-    );
+    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(n.node.loc.source);
   });
   it("{{ temp }} but ignored", () => {
     const { result, source } = interpolate(`{{ temp }}`, {
@@ -67,9 +65,7 @@ describe("parser template interpolation", () => {
 
     const [_, n] = result as any;
 
-    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
-      n.node.loc.source
-    );
+    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(n.node.loc.source);
   });
 
   it('{{ temp + "temp" }}', () => {
@@ -91,9 +87,7 @@ describe("parser template interpolation", () => {
 
     const [_, n] = result as any;
 
-    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
-      n.node.loc.source
-    );
+    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(n.node.loc.source);
   });
 
   it("{{ temp as string}} ", () => {
@@ -111,9 +105,7 @@ describe("parser template interpolation", () => {
 
     const [_, n] = result as any;
 
-    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
-      n.node.loc.source
-    );
+    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(n.node.loc.source);
   });
 
   it("{{ temp as typeof Foo }} ", () => {
@@ -135,9 +127,9 @@ describe("parser template interpolation", () => {
 
     // @ts-expect-error
     for (const node of result) {
-      expect(
-        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
-      ).toBe(node.node.loc.source);
+      expect(source.slice(node.node.loc.start.offset, node.node.loc.end.offset)).toBe(
+        node.node.loc.source,
+      );
     }
   });
 
@@ -162,9 +154,9 @@ describe("parser template interpolation", () => {
 
     // @ts-expect-error
     for (const node of result) {
-      expect(
-        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
-      ).toBe(node.node.loc.source);
+      expect(source.slice(node.node.loc.start.offset, node.node.loc.end.offset)).toBe(
+        node.node.loc.source,
+      );
     }
   });
 
@@ -183,9 +175,7 @@ describe("parser template interpolation", () => {
 
     const [_, n] = result as any;
 
-    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
-      n.node.loc.source
-    );
+    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(n.node.loc.source);
   });
 
   it("{{ temp.foo.bar }}", () => {
@@ -203,9 +193,7 @@ describe("parser template interpolation", () => {
 
     const [_, n] = result as any;
 
-    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
-      n.node.loc.source
-    );
+    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(n.node.loc.source);
   });
 
   it("{{ temp.foo.bar() }}", () => {
@@ -223,9 +211,7 @@ describe("parser template interpolation", () => {
 
     const [_, n] = result as any;
 
-    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
-      n.node.loc.source
-    );
+    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(n.node.loc.source);
   });
 
   it("{{ (()=> { temp })() }}", () => {
@@ -250,9 +236,7 @@ describe("parser template interpolation", () => {
 
     const [_, __, n] = result as any;
 
-    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
-      n.node.loc.source
-    );
+    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(n.node.loc.source);
   });
   it("{{ (()=> { temp }) }}", () => {
     const { result, source } = interpolate(`{{ (()=> { temp }) }}`);
@@ -275,9 +259,7 @@ describe("parser template interpolation", () => {
 
     const [_, __, n] = result as any;
 
-    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
-      n.node.loc.source
-    );
+    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(n.node.loc.source);
   });
 
   it("{{ 'test' }}", () => {
@@ -309,9 +291,7 @@ describe("parser template interpolation", () => {
 
     const [_, n] = result as any;
 
-    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
-      n.node.loc.source
-    );
+    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(n.node.loc.source);
   });
 
   it('{{ (Foo["bar"]) }}', () => {
@@ -333,9 +313,7 @@ describe("parser template interpolation", () => {
 
     const [_, n] = result as any;
 
-    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(
-      n.node.loc.source
-    );
+    expect(source.slice(n.node.loc.start.offset, n.node.loc.end.offset)).toBe(n.node.loc.source);
   });
 
   it("{{ temp | filter }} - binary", () => {
@@ -357,16 +335,14 @@ describe("parser template interpolation", () => {
 
     // @ts-expect-error
     for (const node of result) {
-      expect(
-        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
-      ).toBe(node.node.loc.source);
+      expect(source.slice(node.node.loc.start.offset, node.node.loc.end.offset)).toBe(
+        node.node.loc.source,
+      );
     }
   });
 
   it("{{ isActive ? doActive() : doInactive() }}", () => {
-    const { result, source } = interpolate(
-      `{{ isActive ? doActive() : doInactive() }}`
-    );
+    const { result, source } = interpolate(`{{ isActive ? doActive() : doInactive() }}`);
 
     expect(result).toMatchObject([
       {
@@ -388,9 +364,9 @@ describe("parser template interpolation", () => {
 
     // @ts-expect-error
     for (const node of result) {
-      expect(
-        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
-      ).toBe(node.node.loc.source);
+      expect(source.slice(node.node.loc.start.offset, node.node.loc.end.offset)).toBe(
+        node.node.loc.source,
+      );
     }
   });
 
@@ -458,16 +434,14 @@ describe("parser template interpolation", () => {
 
     // @ts-expect-error
     for (const node of result) {
-      expect(
-        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
-      ).toBe(node.node.loc.source);
+      expect(source.slice(node.node.loc.start.offset, node.node.loc.end.offset)).toBe(
+        node.node.loc.source,
+      );
     }
   });
 
   it("should ignore params arrow function", () => {
-    const { result, source } = interpolate(
-      `{{ ((ar)=> { ar.toString()})(1) }}`
-    );
+    const { result, source } = interpolate(`{{ ((ar)=> { ar.toString()})(1) }}`);
 
     expect(result).toMatchObject([
       {
@@ -495,15 +469,13 @@ describe("parser template interpolation", () => {
 
     // @ts-expect-error
     for (const node of result) {
-      expect(
-        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
-      ).toBe(node.node.loc.source);
+      expect(source.slice(node.node.loc.start.offset, node.node.loc.end.offset)).toBe(
+        node.node.loc.source,
+      );
     }
   });
   it("should ignore params function", () => {
-    const { result, source } = interpolate(
-      `{{ (function (ar) { ar.toString()})(1) }}`
-    );
+    const { result, source } = interpolate(`{{ (function (ar) { ar.toString()})(1) }}`);
 
     expect(result).toMatchObject([
       {
@@ -531,15 +503,13 @@ describe("parser template interpolation", () => {
 
     // @ts-expect-error
     for (const node of result) {
-      expect(
-        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
-      ).toBe(node.node.loc.source);
+      expect(source.slice(node.node.loc.start.offset, node.node.loc.end.offset)).toBe(
+        node.node.loc.source,
+      );
     }
   });
   it("should ignore params function named", () => {
-    const { result, source } = interpolate(
-      `{{ (function foo(ar) { ar.toString(); foo();})(1) }}`
-    );
+    const { result, source } = interpolate(`{{ (function foo(ar) { ar.toString(); foo();})(1) }}`);
 
     expect(result).toMatchObject([
       {
@@ -575,15 +545,15 @@ describe("parser template interpolation", () => {
 
     // @ts-expect-error
     for (const node of result) {
-      expect(
-        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
-      ).toBe(node.node.loc.source);
+      expect(source.slice(node.node.loc.start.offset, node.node.loc.end.offset)).toBe(
+        node.node.loc.source,
+      );
     }
   });
 
   it("ignore class", () => {
     const { result, source } = interpolate(
-      `{{ (class foo { constructor() { this.toString(); new foo(); } }) }}`
+      `{{ (class foo { constructor() { this.toString(); new foo(); } }) }}`,
     );
 
     expect(result).toMatchObject([
@@ -602,9 +572,9 @@ describe("parser template interpolation", () => {
 
     // @ts-expect-error
     for (const node of result) {
-      expect(
-        source.slice(node.node.loc.start.offset, node.node.loc.end.offset)
-      ).toBe(node.node.loc.source);
+      expect(source.slice(node.node.loc.start.offset, node.node.loc.end.offset)).toBe(
+        node.node.loc.source,
+      );
     }
   });
 });

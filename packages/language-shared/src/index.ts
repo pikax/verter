@@ -5,9 +5,7 @@ export * from "./notifications";
 export * from "./request";
 export * from "./statistics";
 
-export type PatchClient<T> = OmitNotification<OmitRequest<T>> &
-  NotificationTyped &
-  RequestTyped;
+export type PatchClient<T> = OmitNotification<OmitRequest<T>> & NotificationTyped & RequestTyped;
 
 export function patchClient<T extends {}>(client: T): PatchClient<T>;
 export function patchClient<T>(client?: T): PatchClient<T> | undefined;

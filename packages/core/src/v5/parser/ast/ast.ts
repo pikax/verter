@@ -7,9 +7,7 @@ import type AcornTypes from "acorn";
 import { babelParse } from "@vue/compiler-sfc";
 import { VerterAST } from "./types";
 
-export function parseAcornLoose(
-  source: string
-): ReturnType<typeof acornLooseParse> {
+export function parseAcornLoose(source: string): ReturnType<typeof acornLooseParse> {
   const ast = acornLooseParse(source, {
     ecmaVersion: "latest",
     allowAwaitOutsideFunction: true,
@@ -30,10 +28,7 @@ export function parseOXC(source: string, options?: ParserOptions) {
   return parseSync("index.ts", source, options);
 }
 
-export function parseBabel(
-  source: string,
-  options?: Parameters<typeof babelParse>[1]
-) {
+export function parseBabel(source: string, options?: Parameters<typeof babelParse>[1]) {
   return babelParse(source, options);
 }
 
@@ -53,10 +48,7 @@ function langFilename(filename: string) {
   }
   throw new Error("Unknown extension: " + ext);
 }
-export function parseAST(
-  source: string,
-  sourceFilename: string = "index.ts"
-): VerterAST {
+export function parseAST(source: string, sourceFilename: string = "index.ts"): VerterAST {
   // return parseOXC(source).program;
   // const normaliseSource = sanitisePosition(source);
   const normaliseSource = source;

@@ -16,7 +16,7 @@ describe("process script plugin full context", () => {
     attributes = "",
 
     pre = "",
-    post = ""
+    post = "",
   ) {
     const prepend = `${pre}<script ${
       wrapper === false ? "setup" : ""
@@ -26,9 +26,7 @@ describe("process script plugin full context", () => {
 
     const s = new MagicString(source);
 
-    const scriptBlock = parsed.blocks.find(
-      (x) => x.type === "script"
-    ) as ParsedBlockScript;
+    const scriptBlock = parsed.blocks.find((x) => x.type === "script") as ParsedBlockScript;
 
     const r = processScript(
       scriptBlock.result.items,
@@ -42,7 +40,7 @@ describe("process script plugin full context", () => {
         generic: parsed.generic,
         isAsync: parsed.isAsync,
         blockNameResolver: (name) => name,
-      }
+      },
     );
 
     return r;
@@ -55,29 +53,45 @@ describe("process script plugin full context", () => {
       }
       it("work", () => {
         const { result } = parse("let a = 0");
-        expect(result).toContain("function ___VERTER___FullContextFN() {let a = 0;return ___VERTER___shallowUnwrapRef({a: {} as typeof a})}");
-        expect(result).toContain("export type ___VERTER___FullContext=ReturnType<typeof ___VERTER___FullContextFN>");
+        expect(result).toContain(
+          "function ___VERTER___FullContextFN() {let a = 0;return ___VERTER___shallowUnwrapRef({a: {} as typeof a})}",
+        );
+        expect(result).toContain(
+          "export type ___VERTER___FullContext=ReturnType<typeof ___VERTER___FullContextFN>",
+        );
       });
 
       it("async", () => {
         const { result } = parse("let a = await Promise.resolve(0);");
-        expect(result).toContain("async function ___VERTER___FullContextFN() {let a = await Promise.resolve(0);;return ___VERTER___shallowUnwrapRef({a: {} as typeof a})}");
-        expect(result).toContain("export type ___VERTER___FullContext=ReturnType<typeof ___VERTER___FullContextFN> extends Promise<infer R>?R:never;");
+        expect(result).toContain(
+          "async function ___VERTER___FullContextFN() {let a = await Promise.resolve(0);;return ___VERTER___shallowUnwrapRef({a: {} as typeof a})}",
+        );
+        expect(result).toContain(
+          "export type ___VERTER___FullContext=ReturnType<typeof ___VERTER___FullContextFN> extends Promise<infer R>?R:never;",
+        );
       });
 
       it("generic", () => {
         const { result } = parse("let a = {} as unknown as T", 'generic="T"');
-        expect(result).toContain("function ___VERTER___FullContextFN<T>() {let a = {} as unknown as T;return ___VERTER___shallowUnwrapRef({a: {} as typeof a})}");
-        expect(result).toContain("export type ___VERTER___FullContext<T>=ReturnType<typeof ___VERTER___FullContextFN<T>>");
+        expect(result).toContain(
+          "function ___VERTER___FullContextFN<T>() {let a = {} as unknown as T;return ___VERTER___shallowUnwrapRef({a: {} as typeof a})}",
+        );
+        expect(result).toContain(
+          "export type ___VERTER___FullContext<T>=ReturnType<typeof ___VERTER___FullContextFN<T>>",
+        );
       });
 
       it("generic async", () => {
         const { result } = parse(
           "let a = await Promise.resolve({} as unknown as T)",
-          'generic="T"'
+          'generic="T"',
         );
-        expect(result).toContain("async function ___VERTER___FullContextFN<T>() {let a = await Promise.resolve({} as unknown as T);return ___VERTER___shallowUnwrapRef({a: {} as typeof a})}");
-        expect(result).toContain("export type ___VERTER___FullContext<T>=ReturnType<typeof ___VERTER___FullContextFN<T>> extends Promise<infer R>?R:never;");
+        expect(result).toContain(
+          "async function ___VERTER___FullContextFN<T>() {let a = await Promise.resolve({} as unknown as T);return ___VERTER___shallowUnwrapRef({a: {} as typeof a})}",
+        );
+        expect(result).toContain(
+          "export type ___VERTER___FullContext<T>=ReturnType<typeof ___VERTER___FullContextFN<T>> extends Promise<infer R>?R:never;",
+        );
       });
     });
   });

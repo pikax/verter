@@ -4,8 +4,8 @@ export const TextPlugin = {
   name: "VerterText",
   transformText(item, s) {
     const content = item.content.trim();
-    if(!content) {
-      return
+    if (!content) {
+      return;
     }
 
     // ignore <, because it can be just the start of the tag
@@ -19,16 +19,11 @@ export const TextPlugin = {
 
     for (let i = 0; i < content.length; i++) {
       if (content[i] === '"') {
-        s.overwrite(
-          item.node.loc.start.offset + i,
-          item.node.loc.start.offset + i + 1,
-          '\\"'
-        );
+        s.overwrite(item.node.loc.start.offset + i, item.node.loc.start.offset + i + 1, '\\"');
       }
     }
 
-    const start =
-      item.node.loc.source.indexOf(content) + item.node.loc.start.offset;
+    const start = item.node.loc.source.indexOf(content) + item.node.loc.start.offset;
 
     const end = start + content.length;
 

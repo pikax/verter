@@ -20,7 +20,7 @@ watch(
       // cleanup logic
     });
   },
-  { immediate: true, deep: true }
+  { immediate: true, deep: true },
 );
 
 // Watch multiple sources (tuple)
@@ -37,17 +37,14 @@ watch(
   (newAge, oldAge) => {
     const _new: number = newAge;
     const _old: number = oldAge;
-  }
+  },
 );
 
 // Watch multiple getters
-watch(
-  [() => user.value.name, () => user.value.age] as const,
-  ([newName, newAge]) => {
-    const _name: string = newName;
-    const _age: number = newAge;
-  }
-);
+watch([() => user.value.name, () => user.value.age] as const, ([newName, newAge]) => {
+  const _name: string = newName;
+  const _age: number = newAge;
+});
 
 // watchEffect - auto tracks dependencies
 watchEffect((onCleanup) => {
@@ -62,7 +59,7 @@ watchEffect(
   () => {
     console.log("Name is:", name.value);
   },
-  { flush: "post" }
+  { flush: "post" },
 );
 
 // watchPostEffect - shorthand for flush: 'post'
@@ -81,7 +78,7 @@ watch(
   (newVal) => {
     console.log("Triggered once:", newVal);
   },
-  { once: true }
+  { once: true },
 );
 
 // Stop handle

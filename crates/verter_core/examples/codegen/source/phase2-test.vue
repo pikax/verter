@@ -22,18 +22,18 @@
   </div>
 </template>
 <script setup lang="ts">
-import { ref } from 'vue'
-import CustomInput from './CustomInput.vue'
-import Container from './Container.vue'
-import ChildComponent from './ChildComponent.vue'
+import { ref } from "vue";
+import CustomInput from "./CustomInput.vue";
+import Container from "./Container.vue";
+import ChildComponent from "./ChildComponent.vue";
 
-const inputValue = ref('')
-const isActive = ref(true)
-const isLoading = ref(false)
-const items = ref([1, 2, 3])
-const message = ref('Hello')
+const inputValue = ref("");
+const isActive = ref(true);
+const isLoading = ref(false);
+const items = ref([1, 2, 3]);
+const message = ref("Hello");
 
 function handleClick(value: boolean) {
-  console.log('clicked', value)
+  console.log("clicked", value);
 }
 </script>
