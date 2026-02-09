@@ -282,6 +282,19 @@ jobs:
       - name: Generate changelog
         run: git-cliff --latest --strip header > /tmp/RELEASE_NOTES.md
 
+      - name: Update CHANGELOG.md
+        run: git-cliff --output CHANGELOG.md
+
+      - name: Commit and push changelog
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          if ! git diff --cached --quiet; then
+            git commit -m "release: ${GITHUB_REF_NAME}"
+            git push origin HEAD:main
+          fi
+
       - uses: actions/download-artifact@v4
         with:
           pattern: native-*
