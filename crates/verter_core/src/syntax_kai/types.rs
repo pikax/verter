@@ -46,6 +46,18 @@ pub enum ElementKind {
     CustomComponent,
 }
 
+impl ElementKind {
+    /// Whether this element kind represents a Vue component (as opposed to a
+    /// plain HTML element, slot outlet, or template wrapper).
+    #[inline]
+    pub fn is_component(&self) -> bool {
+        matches!(
+            self,
+            ElementKind::Component | ElementKind::DynamicComponent | ElementKind::CustomComponent
+        )
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum PropKind {
     /// Static attribute: foo="foo"
@@ -156,6 +168,19 @@ pub struct ElementOpenTagStart {
     pub nested_level: usize,
     pub is_void_element: bool,
     pub patch_flag: PatchFlag,
+
+    /// Prop names that are dynamic (the `arg` spans from `:prop="expr"` bindings).
+    /// Only populated when PROPS flag is set (not FULL_PROPS, since FULL_PROPS
+    /// implies all props are dynamic and no list is needed).
+    /// Corresponds to Vue's `dynamicProps` array in codegen output.
+    pub dynamic_props: Vec<Span>,
+
+    /// Whether this element has a `ref` attribute (static or dynamic).
+    /// Used for conditional NEED_PATCH at tag close.
+    pub has_ref: bool,
+    /// Whether this element has a `@vnode*` lifecycle hook listener.
+    /// Used for conditional NEED_PATCH at tag close.
+    pub has_vnode_hook: bool,
 }
 impl SyntaxNode for ElementOpenTagStart {
     // offset of `</`
@@ -183,7 +208,10 @@ pub struct ElementOpenTagEnd {
     pub is_self_closing: bool,
 
     pub patch_flag: PatchFlag,
+    pub dynamic_props: Vec<Span>,
 
+    pub has_ref: bool,
+    pub has_vnode_hook: bool,
 }
 impl SyntaxNode for ElementOpenTagEnd {
     // offset of `<`

@@ -11,6 +11,170 @@ use crate::{
     },
 };
 
+/// Flags that are mutually exclusive with FULL_PROPS.
+/// When dynamic keys are detected, these individual flags are cleared
+/// because FULL_PROPS implies a full diff that covers them all.
+const FULL_PROPS_EXCLUDES: PatchFlag = PatchFlag(
+    PatchFlags::Class as i16 | PatchFlags::Style as i16 | PatchFlags::Props as i16,
+);
+
+/// Estimate the patch flag contribution of a single prop and track dynamic prop names.
+///
+/// Vue's official compiler collects all props first, then computes flags.
+/// FULL_PROPS (dynamic keys) is mutually exclusive with CLASS/STYLE/PROPS.
+/// When we encounter a dynamic-key prop, we upgrade to FULL_PROPS and remove
+/// the individual flags. Conversely, individual flags are only added when
+/// FULL_PROPS is not already set.
+///
+/// Additional prop-level tracking:
+/// - `dynamic_props`: arg spans of props contributing to PROPS (cleared on FULL_PROPS).
+/// - `has_ref`: set when a `ref` attribute (static or `:ref`) is detected.
+/// - `has_vnode_hook`: set when a `@vnode*` lifecycle hook listener is detected.
+/// - Component CLASS/STYLE: on components, `:class`/`:style` become PROPS (not CLASS/STYLE)
+///   because components handle their own class/style merging.
+#[inline]
+fn estimate_patch_flag(parent: &mut ElementOpenTagStart, prop: &Prop, bytes: &[u8]) {
+    let is_component = parent.kind.is_component();
+
+    // SAFETY: all flags used below are positive bitmask flags (not CACHED/BAIL).
+    unsafe {
+        match prop.kind {
+            PropKind::BindSpread => {
+                // v-bind="obj" spread → always dynamic keys
+                parent.patch_flag = parent
+                    .patch_flag
+                    .remove_mask_unchecked(FULL_PROPS_EXCLUDES)
+                    .add_unchecked(PatchFlags::FullProps);
+                parent.dynamic_props.clear();
+            }
+            PropKind::OnSpread => {
+                // v-on="obj" spread → dynamic keys + hydration for events
+                parent.patch_flag = parent
+                    .patch_flag
+                    .remove_mask_unchecked(FULL_PROPS_EXCLUDES)
+                    .add_unchecked(PatchFlags::FullProps)
+                    .add_unchecked(PatchFlags::NeedHydration);
+                parent.dynamic_props.clear();
+            }
+            PropKind::Bind => {
+                // detect :ref
+                if let Some(arg) = prop.arg {
+                    if &bytes[arg.start as usize..arg.end as usize] == b"ref" {
+                        parent.has_ref = true;
+                    }
+                }
+
+                if prop.has_dynamic_arg {
+                    // :[dynamicProp]="expr" → dynamic key
+                    parent.patch_flag = parent
+                        .patch_flag
+                        .remove_mask_unchecked(FULL_PROPS_EXCLUDES)
+                        .add_unchecked(PatchFlags::FullProps);
+                    parent.dynamic_props.clear();
+                } else if !parent.patch_flag.contains_unchecked(PatchFlags::FullProps) {
+                    // :staticProp="expr" → PROPS (only if FULL_PROPS not already set)
+                    parent.patch_flag =
+                        parent.patch_flag.add_unchecked(PatchFlags::Props);
+                    if let Some(arg) = prop.arg {
+                        parent.dynamic_props.push(arg);
+                    }
+                }
+            }
+            PropKind::On => {
+                // detect @vnode* lifecycle hooks
+                if let Some(arg) = prop.arg {
+                    if bytes[arg.start as usize..arg.end as usize].starts_with(b"vnode") {
+                        parent.has_vnode_hook = true;
+                    }
+                }
+
+                // all event listeners need hydration
+                parent.patch_flag =
+                    parent.patch_flag.add_unchecked(PatchFlags::NeedHydration);
+                if prop.has_dynamic_arg {
+                    // @[dynamicEvent]="handler" → dynamic key
+                    parent.patch_flag = parent
+                        .patch_flag
+                        .remove_mask_unchecked(FULL_PROPS_EXCLUDES)
+                        .add_unchecked(PatchFlags::FullProps);
+                    parent.dynamic_props.clear();
+                }
+            }
+            PropKind::ClassBind => {
+                // On components, :class becomes PROPS (components handle their own merging).
+                // On elements, :class → CLASS.
+                // NOTE: when class value is analysed it might remove this,
+                // because when the class is static even when is a directive
+                // it will remove the patch flag.
+                if !parent.patch_flag.contains_unchecked(PatchFlags::FullProps) {
+                    if is_component {
+                        parent.patch_flag =
+                            parent.patch_flag.add_unchecked(PatchFlags::Props);
+                        if let Some(arg) = prop.arg {
+                            parent.dynamic_props.push(arg);
+                        }
+                    } else {
+                        parent.patch_flag =
+                            parent.patch_flag.add_unchecked(PatchFlags::Class);
+                    }
+                }
+            }
+            PropKind::StyleBind => {
+                // On components, :style becomes PROPS. On elements, :style → STYLE.
+                if !parent.patch_flag.contains_unchecked(PatchFlags::FullProps) {
+                    if is_component {
+                        parent.patch_flag =
+                            parent.patch_flag.add_unchecked(PatchFlags::Props);
+                        if let Some(arg) = prop.arg {
+                            parent.dynamic_props.push(arg);
+                        }
+                    } else {
+                        parent.patch_flag =
+                            parent.patch_flag.add_unchecked(PatchFlags::Style);
+                    }
+                }
+            }
+            PropKind::Model => {
+                // v-model creates modelValue prop + onUpdate:modelValue event
+                if !parent.patch_flag.contains_unchecked(PatchFlags::FullProps) {
+                    parent.patch_flag =
+                        parent.patch_flag.add_unchecked(PatchFlags::Props);
+                    // "modelValue" is synthetic — codegen emits the string directly
+                }
+                parent.patch_flag =
+                    parent.patch_flag.add_unchecked(PatchFlags::NeedHydration);
+            }
+            PropKind::Show | PropKind::Directive => {
+                // v-show and custom directives have runtime hooks → NEED_PATCH
+                parent.patch_flag =
+                    parent.patch_flag.add_unchecked(PatchFlags::NeedPatch);
+            }
+            PropKind::Html | PropKind::Text => {
+                // v-html/v-text create innerHTML/textContent prop bindings → PROPS
+                // "innerHTML"/"textContent" are synthetic — codegen emits them directly
+                if !parent.patch_flag.contains_unchecked(PatchFlags::FullProps) {
+                    parent.patch_flag =
+                        parent.patch_flag.add_unchecked(PatchFlags::Props);
+                }
+            }
+            PropKind::Value => {
+                // detect static ref="..."
+                if &bytes[prop.start as usize..prop.name_end as usize] == b"ref" {
+                    parent.has_ref = true;
+                }
+            }
+            // Static class/style and structural directives don't affect patch flags
+            PropKind::ClassValue
+            | PropKind::StyleValue
+            | PropKind::If
+            | PropKind::ElseIf
+            | PropKind::Else
+            | PropKind::For
+            | PropKind::Slot => {}
+        }
+    }
+}
+
 // intermediary state for prop
 struct PropTempState {
     /// Start position of the attribute/directive name
@@ -186,6 +350,9 @@ impl<'alloc> Syntax<'alloc> {
 
                 nested_level: self.nested_level,
                 patch_flag: PatchFlag::empty(),
+                dynamic_props: Vec::new(),
+                has_ref: false,
+                has_vnode_hook: false,
             };
             self.last_event_open_tag = Some(ev.clone());
 
@@ -244,6 +411,10 @@ impl<'alloc> Syntax<'alloc> {
                     parent_id: open_tag.parent_id,
                     is_void_element: open_tag.is_void_element,
                     nested_level: open_tag.nested_level,
+                    patch_flag: open_tag.patch_flag,
+                    dynamic_props: open_tag.dynamic_props,
+                    has_ref: open_tag.has_ref,
+                    has_vnode_hook: open_tag.has_vnode_hook,
 
                     is_self_closing: is_self_closing || open_tag.is_void_element, // for void elements, treat as self-closing
                 };
@@ -503,38 +674,11 @@ impl<'alloc> Syntax<'alloc> {
             is_directive: state.is_directive,
         };
 
+
+        // estimate the patch_flag based on props
+        // note patch_flags can also be changed by children
         if let Some(parent) = &mut self.last_event_open_tag {
-            match ev.kind {
-                PropKind::BindSpread => {
-                    parent.patch_flag = unsafe {
-                        parent
-                            .patch_flag
-                            .remove_unchecked(PatchFlags::Props)
-                            .add_unchecked(PatchFlags::FullProps)
-                    };
-                }
-                PropKind::Bind => {
-                    parent.patch_flag = unsafe {
-                        parent
-                            .patch_flag
-                            .remove_unchecked(PatchFlags::Props)
-                            .add_unchecked(PatchFlags::FullProps)
-                    };
-                }
-                PropKind::On => {
-                    parent.patch_flag =
-                        unsafe { parent.patch_flag.add_unchecked(PatchFlags::NeedHydration) };
-                }
-                PropKind::ClassBind => {
-                    // NOTE that when class value is analysed it might remove this,
-                    // because when the class is static even when is a directive it will remove the patch flag.
-                    parent.patch_flag = unsafe {
-                        parent
-                            .patch_flag
-                            .add_unchecked(PatchFlags::Class)
-                    };
-                }
-            }
+            estimate_patch_flag(parent, &ev, ctx.bytes);
         }
 
         if self.last_event_open_tag.is_none() && self.last_root_node.is_some() {

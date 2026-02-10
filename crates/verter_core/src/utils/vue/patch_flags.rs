@@ -406,6 +406,17 @@ impl PatchFlag {
     }
 
     /**
+     * Remove a combined PatchFlag bitmask WITHOUT checking for special flags.
+     *
+     * Like `remove_unchecked` but accepts a pre-combined `PatchFlag` mask,
+     * allowing multiple flags to be cleared in a single operation.
+     */
+    #[inline(always)]
+    pub const unsafe fn remove_mask_unchecked(self, mask: PatchFlag) -> Self {
+        Self(self.0 & !mask.0)
+    }
+
+    /**
      * Bitwise membership check WITHOUT checking mode.
      *
      * Fastest version (AND + compare), intended for hot paths where `self.0 > 0`
