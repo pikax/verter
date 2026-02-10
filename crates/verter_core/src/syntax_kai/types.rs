@@ -1,10 +1,15 @@
+use lightningcss::traits::Op;
+
 use crate::{
     common::Span,
     cursor::ScriptLanguage,
     tokenizer::QuoteType,
-    utils::oxc::{
-        vue::{GenericParseResult, VForWithBindings, VSlotWithBindings},
-        BindingExtractionResult,
+    utils::{
+        oxc::{
+            vue::{GenericParseResult, VForWithBindings, VSlotWithBindings},
+            BindingExtractionResult,
+        },
+        vue::{PatchFlag, PatchFlags},
     },
 };
 
@@ -150,6 +155,7 @@ pub struct ElementOpenTagStart {
 
     pub nested_level: usize,
     pub is_void_element: bool,
+    pub patch_flag: PatchFlag,
 }
 impl SyntaxNode for ElementOpenTagStart {
     // offset of `</`
@@ -175,6 +181,9 @@ pub struct ElementOpenTagEnd {
     pub nested_level: usize,
     pub is_void_element: bool,
     pub is_self_closing: bool,
+
+    pub patch_flag: PatchFlag,
+
 }
 impl SyntaxNode for ElementOpenTagEnd {
     // offset of `<`
@@ -183,6 +192,7 @@ impl SyntaxNode for ElementOpenTagEnd {
     }
 }
 
+#[derive(Debug)]
 pub struct ElementCloseTag {
     pub kind: ElementKind,
 
@@ -512,6 +522,167 @@ pub struct OxcElseCondition {
 
 // /OXC Parsed
 
+// Compiled Elements
+
+#[derive(Debug)]
+pub enum CompiledProp<'alloc> {
+    Prop(Prop),
+    Oxc(OxcProp<'alloc>),
+}
+
+#[derive(Debug)]
+pub struct CompiledRootScriptStart<'alloc> {
+    pub start: u32,
+    pub name_end: u32,
+
+    pub tag_open: Span,
+
+    pub setup: Option<Span>,
+
+    // lang attribute
+    pub lang: Option<ScriptLanguage>,
+    // generic attribute
+    pub generic: Option<Span>,
+    // attrs attributes
+    pub attrs: Option<Span>,
+    // all attributes
+    pub attributes: Vec<CompiledProp<'alloc>>,
+
+    pub tag_open_event: RootNodeOpenTagStart,
+    pub tag_open_end_event: RootNodeOpenTagEnd,
+}
+#[derive(Debug)]
+pub struct CompiledRootScriptEnd {
+    pub start: u32,
+    pub name_end: u32,
+    pub end: u32,
+
+    // None if self-closing tag
+    pub tag_close: Option<Span>,
+
+    // None is self-closing tag, otherwise content is the full content between open and close tags
+    pub content: Option<Span>,
+
+    pub tag_close_event: Option<RootNodeCloseTag>,
+}
+
+#[derive(Debug)]
+pub struct CompiledRootTemplateStart<'alloc> {
+    pub start: u32,
+    pub name_end: u32,
+
+    pub tag_open: Span,
+
+    // vapor attribute
+    pub vapor: Option<Span>,
+    // lang attribute
+    pub lang: Option<Span>,
+    // all attributes
+    pub attributes: Vec<CompiledProp<'alloc>>,
+
+    pub tag_open_event: RootNodeOpenTagStart,
+    pub tag_open_end_event: RootNodeOpenTagEnd,
+}
+
+#[derive(Debug)]
+pub struct CompiledRootTemplateEnd {
+    pub start: u32,
+    pub name_end: u32,
+    pub end: u32,
+
+    // None if self-closing tag
+    pub tag_close: Option<Span>,
+
+    // None is self-closing tag, otherwise content is the full content between open and close tags
+    pub content: Option<Span>,
+
+    pub tag_close_event: Option<RootNodeCloseTag>,
+}
+
+#[derive(Debug)]
+pub struct CompiledRootStyleStart<'alloc> {
+    pub start: u32,
+    pub name_end: u32,
+
+    pub tag_open: Span,
+
+    // lang attribute
+    pub lang: Option<StyleLang>,
+    // scoped attribute
+    pub scoped: bool,
+    // module attribute
+    pub module: Option<Span>,
+    // all attributes
+    pub attributes: Vec<CompiledProp<'alloc>>,
+
+    pub tag_open_event: RootNodeOpenTagStart,
+    pub tag_open_end_event: RootNodeOpenTagEnd,
+}
+#[derive(Debug)]
+pub struct CompiledRootStyleEnd {
+    pub start: u32,
+    pub name_end: u32,
+    pub end: u32,
+
+    // None if self-closing tag
+    pub tag_close: Option<Span>,
+
+    // None is self-closing tag, otherwise content is the full content between open and close tags
+    pub content: Option<Span>,
+
+    pub tag_close_event: Option<RootNodeCloseTag>,
+}
+
+#[derive(Debug)]
+pub struct CompiledRootUnknownStart<'alloc> {
+    pub start: u32,
+    pub name_end: u32,
+
+    pub tag_open: Span,
+
+    pub content: Option<Span>,
+
+    // all attributes
+    pub attributes: Vec<CompiledProp<'alloc>>,
+
+    pub tag_open_event: RootNodeOpenTagStart,
+    pub tag_open_end_event: RootNodeOpenTagEnd,
+}
+#[derive(Debug)]
+pub struct CompiledRootUnknownEnd {
+    pub start: u32,
+    pub name_end: u32,
+    pub end: u32,
+
+    // None if self-closing tag
+    pub tag_close: Option<Span>,
+
+    // None is self-closing tag, otherwise content is the full content between open and close tags
+    pub content: Option<Span>,
+
+    pub tag_close_event: Option<RootNodeCloseTag>,
+}
+
+#[derive(Debug)]
+pub struct CompiledElementStart<'alloc> {
+    pub element_id: u32,
+    pub parent_id: u32,
+
+    pub event_open_tag: ElementOpenTagStart,
+    pub event_open_tag_end: ElementOpenTagEnd,
+
+    pub props: Vec<CompiledProp<'alloc>>,
+}
+#[derive(Debug)]
+pub struct CompiledElementClosed {
+    pub element_id: u32,
+    pub parent_id: u32,
+
+    pub event_close_tag: Option<ElementCloseTag>,
+}
+
+// Compiled Elements
+
 // CSS styles
 
 /// Language for style preprocessing
@@ -553,19 +724,17 @@ pub enum Event<'alloc> {
     OpenTagEnd(ElementOpenTagEnd),
     CloseTag(ElementCloseTag),
 
-    // Scopes
-    ScopeIf(ElementScopeConditionIf),
-    ScopeElseIf(ElementScopeConditionElseIf),
-    ScopeElse(ElementScopeConditionElse),
-    ScopeFor(ElementScopeFor),
-    ScopeSlotElement(ElementScopeSlotElement),
-    ScopeSlotTemplate(ElementScopeSlotTemplate),
-
     // Content
     Prop(Prop),
     Interpolation(Interpolation),
     Comment(Comment),
     Text(Text),
+
+    // Compiled
+    RootScript(CompiledRootScript),
+    RootTemplate(CompiledRootTemplate),
+    RootStyle(CompiledRootStyle),
+    RootUnknown(CompiledRootUnknown),
 
     // Oxc Parsed
     OxcScript(OxcScript<'alloc>),
@@ -577,4 +746,16 @@ pub enum Event<'alloc> {
     OxcIfCondition(OxcIfCondition<'alloc>),
     OxcElseIfCondition(OxcElseIfCondition<'alloc>),
     OxcElseCondition(OxcElseCondition),
+
+    // Compiled
+    ElementStart(CompiledElementStart<'alloc>),
+    ElementClosed(CompiledElementClosed),
+
+    // Scopes
+    ScopeIf(ElementScopeConditionIf),
+    ScopeElseIf(ElementScopeConditionElseIf),
+    ScopeElse(ElementScopeConditionElse),
+    ScopeFor(ElementScopeFor),
+    ScopeSlotElement(ElementScopeSlotElement),
+    ScopeSlotTemplate(ElementScopeSlotTemplate),
 }

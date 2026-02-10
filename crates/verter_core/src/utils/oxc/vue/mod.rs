@@ -20,7 +20,7 @@ pub use script_generic::{
 pub use span::{
     adjust_expression_spans, adjust_formal_parameters_spans, subtract_formal_parameters_spans,
 };
-pub use vfor::{parse_vfor, parse_vfor_with_bindings, VForParseResult, VForWithBindings};
+pub use vfor::{parse_vfor, parse_vfor_with_bindings, VForParseResult, VForWithBindings, extract_vfor_positions};
 pub use vslot::{parse_vslot, parse_vslot_with_bindings, VSlotParseResult, VSlotWithBindings};
 
 pub use script::*;

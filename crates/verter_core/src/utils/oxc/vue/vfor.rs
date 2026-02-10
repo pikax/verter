@@ -5,7 +5,7 @@
 //! The parser splits on ` of ` or ` in ` and parses left and right sides separately,
 //! which properly handles Vue's multi-variable syntax.
 
-use memchr::memmem;
+use memchr::memmem::{self, find};
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{ArrayExpressionElement, Expression, ObjectPropertyKind, PropertyKey};
 use oxc_diagnostics::OxcDiagnostic;
@@ -284,8 +284,8 @@ pub fn parse_vfor<'a>(
 
     // Find ` of ` or ` in ` separator
     // Note: Both are 4 bytes (space + 2 chars + space)
-    let of_pos = memmem::find(source_bytes, b" of ");
-    let in_pos = memmem::find(source_bytes, b" in ");
+    let of_pos = find(source_bytes, b" of ");
+    let in_pos = find(source_bytes, b" in ");
 
     let (is_of, separator_pos) = match (of_pos, in_pos) {
         (Some(of), Some(r#in)) => {
@@ -356,6 +356,16 @@ pub fn parse_vfor<'a>(
         right_offset,
         left_errors,
         right_errors,
+    }
+}
+
+pub fn extract_vfor_positions(bytes: &[u8], start: u32, end: u32) -> Option<(u32, u32, u32, bool)> {
+    let source_bytes = &bytes[start as usize..end as usize];
+
+    if let Some(pos) = find(source_bytes, b" in ") {
+        Some((start, start + pos as u32, start + pos as u32 + 4, false))
+    } else {
+        find(source_bytes, b" of ").map(|pos| (start, start + pos as u32, start + pos as u32 + 4, true))
     }
 }
 

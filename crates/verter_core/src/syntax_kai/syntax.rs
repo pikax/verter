@@ -3,7 +3,12 @@ use crate::{
     cursor::ScriptLanguage,
     syntax_kai::{plugin::SyntaxPluginContext, types::*},
     tokenizer::{Event as TokenizerEvent, QuoteType},
-    utils::vue::{is_html_tag, is_mathml_tag, is_svg_tag, is_tag_name_component},
+    utils::{
+        oxc::vue::extract_vfor_positions,
+        vue::{
+            is_html_tag, is_mathml_tag, is_svg_tag, is_tag_name_component, PatchFlag, PatchFlags,
+        },
+    },
 };
 
 // intermediary state for prop
@@ -180,6 +185,7 @@ impl<'alloc> Syntax<'alloc> {
                 is_void_element,
 
                 nested_level: self.nested_level,
+                patch_flag: PatchFlag::empty(),
             };
             self.last_event_open_tag = Some(ev.clone());
 
@@ -497,6 +503,40 @@ impl<'alloc> Syntax<'alloc> {
             is_directive: state.is_directive,
         };
 
+        if let Some(parent) = &mut self.last_event_open_tag {
+            match ev.kind {
+                PropKind::BindSpread => {
+                    parent.patch_flag = unsafe {
+                        parent
+                            .patch_flag
+                            .remove_unchecked(PatchFlags::Props)
+                            .add_unchecked(PatchFlags::FullProps)
+                    };
+                }
+                PropKind::Bind => {
+                    parent.patch_flag = unsafe {
+                        parent
+                            .patch_flag
+                            .remove_unchecked(PatchFlags::Props)
+                            .add_unchecked(PatchFlags::FullProps)
+                    };
+                }
+                PropKind::On => {
+                    parent.patch_flag =
+                        unsafe { parent.patch_flag.add_unchecked(PatchFlags::NeedHydration) };
+                }
+                PropKind::ClassBind => {
+                    // NOTE that when class value is analysed it might remove this,
+                    // because when the class is static even when is a directive it will remove the patch flag.
+                    parent.patch_flag = unsafe {
+                        parent
+                            .patch_flag
+                            .add_unchecked(PatchFlags::Class)
+                    };
+                }
+            }
+        }
+
         if self.last_event_open_tag.is_none() && self.last_root_node.is_some() {
             // in root node, treat as root prop
             if name == b"lang" {
@@ -507,6 +547,84 @@ impl<'alloc> Syntax<'alloc> {
                 }
             }
         }
+
+        // // check for scope directives, v-if/else-if/else on root node, and v-for and emit corresponding events
+        // if state.is_directive {
+        //     match ev.kind {
+        //         PropKind::If => {
+        //             self.events.push(Event::ScopeIf(ElementScopeConditionIf {
+        //                 element_start: ev.element_id,
+        //                 start: ev.start,
+        //                 end,
+        //                 value,
+        //             }));
+        //         }
+        //         PropKind::ElseIf => {
+        //             self.events
+        //                 .push(Event::ScopeElseIf(ElementScopeConditionElseIf {
+        //                     element_start: ev.element_id,
+        //                     start: ev.start,
+        //                     end,
+        //                     value,
+        //                 }));
+        //         }
+        //         PropKind::Else => {
+        //             self.events
+        //                 .push(Event::ScopeElse(ElementScopeConditionElse {
+        //                     element_start: ev.element_id,
+        //                     start: ev.start,
+        //                     end,
+        //                 }));
+        //         }
+        //         PropKind::For => {
+        //             if let Some(v) = value {
+        //                 // let source_bytes = &ctx.bytes[v.start as usize..v.end as usize];
+        //                 if let Some((left, in_of_pos, right, is_of)) =
+        //                     extract_vfor_positions(ctx.bytes, v.start, v.end)
+        //                 {
+        //                     self.events.push(Event::ScopeFor(ElementScopeFor {
+        //                         element_start: ev.element_id,
+        //                         start: ev.start,
+        //                         end,
+        //                         value,
+
+        //                         is_of,
+        //                         iterator: Some(Span::new(left, in_of_pos)),
+        //                         iterable: Some(Span::new(right, end)),
+        //                     }));
+        //                 } else {
+        //                     // todo not a valid v-for expression, add error event
+        //                 }
+        //             } else {
+        //                 // todo add error event for v-for without value
+        //             }
+        //         }
+        //         PropKind::Slot => {
+        //             // let see if the element is `template`
+        //             if let Some(open_tag) = self.last_event_open_tag {
+        //                 if open_tag.kind == ElementKind::Template {
+        //                     self.events
+        //                         .push(Event::ScopeSlotTemplate(ElementScopeSlotTemplate {
+        //                             element_start: ev.element_id,
+        //                             start: ev.start,
+        //                             end,
+        //                             name: value,
+        //                         }));
+        //                 } else {
+        //                     self.events
+        //                         .push(Event::ScopeSlotElement(ElementScopeSlotElement {
+        //                             element_content_start: open_tag.,
+        //                             element_start: ev.element_id,
+        //                             start: ev.start,
+        //                             end,
+        //                             name: value,
+        //                         }));
+        //                 }
+        //             }
+        //         }
+        //         _ => {}
+        //     }
+        // }
 
         self.events.push(Event::Prop(ev));
     }
