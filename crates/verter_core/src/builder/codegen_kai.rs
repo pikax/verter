@@ -19,7 +19,8 @@ use crate::{
             code_gen_script::code_gen_script::CodeGenScriptPlugin,
             code_gen_template::code_gen_template::VdomTemplateCodegenPlugin,
             code_gen_template_vapor::code_gen_template_vapor::VaporTemplateCodegenPlugin,
-            code_gen_tsx::code_gen_tsx::TsxCodegenPlugin, css_style::css_style::CssStylePlugin,
+            code_gen_tsx::code_gen_tsx::TsxCodegenPlugin, css_parser::css_parser::CssParserPlugin,
+            css_style::css_style::CssStylePlugin,
             element_compiler::element_compiler::ElementCompilerPlugin,
             oxc_parser::oxc_parser::OxcParserPlugin,
         },
@@ -290,8 +291,9 @@ pub fn generate_kai(
     }
     template_events.extend(events_after_ec);
 
-    // 6. Template pipeline: css_style → oxc_parser → code_gen_template (VDOM or Vapor)
-    let mut css_style = CssStylePlugin::new();
+    // 6. Template pipeline: css_parser → css_style → oxc_parser → code_gen_template (VDOM or Vapor)
+    let mut css_parser = CssParserPlugin::new();
+    let mut css_style = CssStylePlugin::new(allocator);
     if let Some(sid) = scope_id {
         css_style.set_scope_id(sid);
     }
@@ -308,7 +310,12 @@ pub fn generate_kai(
 
         let _output = run_pipeline(
             template_events,
-            &mut [&mut css_style, &mut template_oxc, &mut vapor_codegen],
+            &mut [
+                &mut css_parser,
+                &mut css_style,
+                &mut template_oxc,
+                &mut vapor_codegen,
+            ],
             &mut ctx,
         );
 
@@ -321,7 +328,12 @@ pub fn generate_kai(
 
         let _output = run_pipeline(
             template_events,
-            &mut [&mut css_style, &mut template_oxc, &mut vdom_codegen],
+            &mut [
+                &mut css_parser,
+                &mut css_style,
+                &mut template_oxc,
+                &mut vdom_codegen,
+            ],
             &mut ctx,
         );
 
@@ -455,7 +467,8 @@ pub fn generate_with_tsx_kai(
     }
     template_events.extend(events_after_ec);
 
-    let mut css_style = CssStylePlugin::new();
+    let mut css_parser = CssParserPlugin::new();
+    let mut css_style = CssStylePlugin::new(allocator);
     if let Some(sid) = scope_id {
         css_style.set_scope_id(sid);
     }
@@ -469,14 +482,19 @@ pub fn generate_with_tsx_kai(
     let pipeline_output = if options.include_tsx {
         run_pipeline(
             template_events,
-            &mut [&mut css_style, &mut template_oxc, &mut tsx_codegen],
+            &mut [
+                &mut css_parser,
+                &mut css_style,
+                &mut template_oxc,
+                &mut tsx_codegen,
+            ],
             &mut ctx,
         )
     } else {
         // Run pipeline without TSX plugin — still produces CSS from ProcessedStyle events
         run_pipeline(
             template_events,
-            &mut [&mut css_style, &mut template_oxc],
+            &mut [&mut css_parser, &mut css_style, &mut template_oxc],
             &mut ctx,
         )
     };

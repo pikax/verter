@@ -353,11 +353,7 @@ impl<'alloc> TsxCodegenPlugin<'alloc> {
         }
     }
 
-    fn process_style_block(
-        &mut self,
-        ps: &ProcessedStyleBlock,
-        ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    fn process_style_block(&mut self, ps: &ProcessedStyleBlock, ctx: &SyntaxPluginContext<'alloc>) {
         // Comment out style blocks in TSX
         let content_start = ps.compiled_start.tag_open.start;
         let content_end = ps.compiled_end.end;

@@ -5291,14 +5291,6 @@ const versions = ref([{ id: 1, label: "v1" }, { id: 2, label: "v2" }]);
   </div>
 </template>"#;
 
-        let vue_render = r#"import { renderList as _renderList, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock, toDisplayString as _toDisplayString } from "vue"
-
-export function render(_ctx, _cache, $props, $setup, $data, $options) {
-  return (_openBlock(true), _createElementBlock(_Fragment, null, _renderList($setup.versions, (entry) => {
-    return (_openBlock(), _createElementBlock("div", { key: entry.id }, _toDisplayString(entry.label), 1))
-  }), 128))
-}"#;
-
         let allocator = oxc_allocator::Allocator::new();
         let options = ViteCodegenOptions {
             filename: Some("test.vue".to_string()),

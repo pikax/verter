@@ -1,43 +1,39 @@
 use crate::{
+    code_transform::CodeTransform,
     common::Span,
     syntax_kai::{
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxResult},
         types::{
-            CompiledRootStyleEnd, CompiledRootStyleStart, CssModuleClassMapping, CssModuleInfo,
-            Event, ProcessedCssVBind, ProcessedStyleBlock,
+            CssModuleClassMapping, CssModuleInfo, CssParsedSpecialPseudoKind, CssParsedStyleBlock,
+            CssParsedVBind, Event, ProcessedCssVBind, ProcessedStyleBlock,
         },
     },
 };
 
 /// CSS style plugin for the syntax_kai pipeline.
 ///
-/// Processes `CompiledStyleStart`/`CompiledStyleEnd` events to handle:
-/// - **Scoped CSS**: Transforms selectors with `[data-v-{scope_id}]` attribute selectors
-/// - **CSS v-bind()**: Extracts expressions and replaces with CSS custom properties
+/// Consumes `CssParsedStyle` events (from css_parser) and applies transformations:
+/// - **Scoped CSS**: Inserts `[data-v-{scope_id}]` attribute selectors
+/// - **CSS v-bind()**: Replaces `v-bind(expr)` with `var(--{scope_id}-{sanitized})`
 /// - **CSS Modules**: Hashes class names and builds runtime mappings
-pub struct CssStylePlugin {
+///
+/// Uses `CodeTransform` for all modifications, preserving source positions.
+pub struct CssStylePlugin<'alloc> {
+    alloc: &'alloc oxc_allocator::Allocator,
     /// Scope ID for scoped styles, pre-computed by builder from component name hash.
     scope_id: Option<[u8; 8]>,
     /// Component ID for CSS module class hashing.
     component_id: Option<[u8; 8]>,
-    /// Buffered CompiledStyleStart (set on Start, consumed on End).
-    current_start: Option<CompiledRootStyleStart>,
     /// Counter for CSS module hash uniqueness across multiple module blocks.
     module_class_counter: usize,
 }
 
-impl<'alloc> Default for CssStylePlugin {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<'alloc> CssStylePlugin {
-    pub fn new() -> Self {
+impl<'alloc> CssStylePlugin<'alloc> {
+    pub fn new(alloc: &'alloc oxc_allocator::Allocator) -> Self {
         Self {
+            alloc,
             scope_id: None,
             component_id: None,
-            current_start: None,
             module_class_counter: 0,
         }
     }
@@ -50,86 +46,98 @@ impl<'alloc> CssStylePlugin {
         self.component_id = Some(component_id);
     }
 
-    fn process_style_block(
+    fn process_parsed_style(
         &mut self,
-        start: CompiledRootStyleStart,
-        end: CompiledRootStyleEnd,
+        parsed: CssParsedStyleBlock,
         ctx: &SyntaxPluginContext<'alloc>,
     ) -> ProcessedStyleBlock {
-        let css_content = end
-            .content
-            .map(|c| &ctx.bytes[c.start as usize..c.end as usize]);
-        let content_offset = end.content.map_or(0, |c| c.start);
-
+        let content = parsed.content;
         let mut transformed_css: Option<Vec<u8>> = None;
         let mut v_bind_expressions: Vec<ProcessedCssVBind> = Vec::new();
         let mut module_info: Option<CssModuleInfo> = None;
 
-        // 1. Extract v-bind() expressions
-        if let Some(css) = css_content {
-            v_bind_expressions = extract_v_bind(css, content_offset, &self.scope_id);
-        }
+        if let Some(content_span) = content {
+            let css_str = &ctx.input[content_span.start as usize..content_span.end as usize];
+            let content_offset = content_span.start;
 
-        // 2. Scoped CSS transformation
-        if start.scoped {
-            if let (Some(css), Some(scope_id)) = (css_content, &self.scope_id) {
-                let mut output = Vec::with_capacity(css.len() + css.len() / 4);
-                transform_scoped_css(css, scope_id, &mut output);
+            // Create a CodeTransform for the CSS content
+            let mut ct = CodeTransform::new(css_str, self.alloc);
+            let mut modified = false;
 
-                // Apply v-bind replacements
-                if !v_bind_expressions.is_empty() {
-                    output = apply_v_bind_replacements(
-                        &output,
-                        css,
-                        content_offset,
-                        &v_bind_expressions,
+            // 1. Scoped CSS: insert [data-v-{scope_id}] in selectors
+            if parsed.scoped {
+                if let Some(scope_id) = &self.scope_id {
+                    let scope_attr = format!(
+                        "[data-v-{}]",
+                        std::str::from_utf8(scope_id).unwrap_or("00000000")
                     );
+
+                    for rule in &parsed.rules {
+                        for selector in &rule.selectors {
+                            apply_scoped_selector(
+                                &mut ct,
+                                selector,
+                                content_offset,
+                                &scope_attr,
+                                ctx.bytes,
+                            );
+                        }
+                    }
+                    modified = true;
                 }
-
-                transformed_css = Some(output);
             }
-        }
 
-        // 3. CSS Modules transformation
-        if start.module.is_some() {
-            if let Some(css) = css_content {
+            // 2. v-bind(): replace with var(--{scope_id}-{sanitized})
+            if !parsed.v_binds.is_empty() {
+                for vb in &parsed.v_binds {
+                    let processed = apply_v_bind_replacement(
+                        &mut ct,
+                        vb,
+                        content_offset,
+                        &self.scope_id,
+                        ctx.bytes,
+                    );
+                    v_bind_expressions.push(processed);
+                }
+                modified = true;
+            }
+
+            // 3. CSS Modules: hash class names
+            if parsed.module.is_some() {
                 let component_id = self.component_id.unwrap_or([b'0'; 8]);
-                let (module, hashed_css) = transform_css_modules(
-                    css,
+                let (info, did_modify) = apply_css_modules(
+                    &mut ct,
+                    &parsed.classes,
                     content_offset,
-                    &start.module,
+                    &parsed.module,
                     &component_id,
                     &mut self.module_class_counter,
+                    ctx.bytes,
                 );
-                module_info = Some(module);
-
-                let base = transformed_css.take().unwrap_or_else(|| css.to_vec());
-                transformed_css = Some(hashed_css.unwrap_or(base));
+                module_info = Some(info);
+                if did_modify {
+                    modified = true;
+                }
             }
-        }
 
-        // 4. If only v-bind (no scoped, no modules), apply replacements
-        if transformed_css.is_none() && !v_bind_expressions.is_empty() {
-            if let Some(css) = css_content {
-                let output =
-                    apply_v_bind_replacements_raw(css, content_offset, &v_bind_expressions);
-                transformed_css = Some(output);
+            if modified {
+                transformed_css = Some(ct.to_string().into_bytes());
             }
         }
 
         ProcessedStyleBlock {
-            lang: start.lang,
-            scoped: start.scoped,
+            lang: parsed.lang,
+            scoped: parsed.scoped,
             module: module_info,
             transformed_css,
             v_bind_expressions,
-            compiled_start: start,
-            compiled_end: end,
+            compiled_start: parsed.compiled_start,
+            compiled_end: parsed.compiled_end,
         }
     }
 }
 
-impl<'alloc> SyntaxPlugin<'alloc> for CssStylePlugin {
+impl<'alloc> SyntaxPlugin<'alloc> for CssStylePlugin<'alloc> {
     fn name(&self) -> &str {
         "css_style"
     }
@@ -140,334 +148,195 @@ impl<'alloc> SyntaxPlugin<'alloc> for CssStylePlugin {
         ctx: &mut SyntaxPluginContext<'alloc>,
     ) -> SyntaxResult<Event<'alloc>> {
         match event {
-            Event::CompiledStyleStart(start) => {
-                self.current_start = Some(start);
-                SyntaxResult::Drop
-            }
-            Event::CompiledStyleEnd(end) => {
-                if let Some(start) = self.current_start.take() {
-                    let processed = self.process_style_block(start, end, ctx);
-                    SyntaxResult::Replace(Event::ProcessedStyle(processed))
-                } else {
-                    SyntaxResult::Keep(Event::CompiledStyleEnd(end))
-                }
+            Event::CssParsedStyle(parsed) => {
+                let processed = self.process_parsed_style(parsed, ctx);
+                SyntaxResult::Replace(Event::ProcessedStyle(processed))
             }
             other => SyntaxResult::Keep(other),
         }
     }
 }
 
-// --- v-bind extraction ---
+// =============================================================================
+// Scoped CSS transformation
+// =============================================================================
 
-/// Extract v-bind() expressions from CSS content.
-fn extract_v_bind(css: &[u8], offset: u32, scope_id: &Option<[u8; 8]>) -> Vec<ProcessedCssVBind> {
-    let mut results = Vec::new();
-    let mut i = 0;
+/// Apply scoped attribute to a single parsed selector using CodeTransform.
+fn apply_scoped_selector(
+    ct: &mut CodeTransform<'_>,
+    selector: &crate::syntax_kai::types::CssParsedSelector,
+    content_offset: u32,
+    scope_attr: &str,
+    bytes: &[u8],
+) {
+    let sel_text = &bytes[selector.span.start as usize..selector.span.end as usize];
 
-    while i < css.len() {
-        if i + 7 <= css.len() && &css[i..i + 7] == b"v-bind(" {
-            let start_pos = i;
-            let expr_start = i + 7;
-            let mut depth = 1u32;
-            let mut j = expr_start;
-            while j < css.len() && depth > 0 {
-                match css[j] {
-                    b'(' => depth += 1,
-                    b')' => depth -= 1,
-                    _ => {}
+    // Check for special pseudos first — only the first special pseudo is relevant
+    if let Some(special) = selector.specials.first() {
+        match special.kind {
+            CssParsedSpecialPseudoKind::Global => {
+                // :global(.class) → .class — remove the :global() wrapper
+                if let Some(inner) = special.inner {
+                    let inner_text = &bytes[inner.start as usize..inner.end as usize];
+                    let inner_str = std::str::from_utf8(inner_text).unwrap_or("");
+                    ct.overwrite(
+                        special.span.start - content_offset,
+                        special.span.end - content_offset,
+                        inner_str,
+                    );
                 }
-                if depth > 0 {
-                    j += 1;
-                }
+                return; // No scoping for :global
             }
+            CssParsedSpecialPseudoKind::Deep => {
+                // :deep(.inner) → [scope] .inner
+                // .parent :deep(.inner) → .parent[scope] .inner
+                let deep_local_start = special.span.start - content_offset;
+                let deep_local_end = special.span.end - content_offset;
 
-            if depth == 0 {
-                let expr_end = j;
-                let full_end = j + 1;
+                // Check if there's a parent selector before :deep
+                let sel_local_start = selector.span.start - content_offset;
+                let before_deep = &bytes[selector.span.start as usize..special.span.start as usize];
+                let before_trimmed = trim_bytes(before_deep);
 
-                let expr_bytes = &css[expr_start..expr_end];
-                let trimmed = trim_bytes(expr_bytes);
-
-                // Strip surrounding quotes
-                let unquoted = if trimmed.len() >= 2
-                    && ((trimmed[0] == b'\'' && trimmed[trimmed.len() - 1] == b'\'')
-                        || (trimmed[0] == b'"' && trimmed[trimmed.len() - 1] == b'"'))
-                {
-                    &trimmed[1..trimmed.len() - 1]
+                if before_trimmed.is_empty() {
+                    // :deep(.inner) at start → [scope] .inner
+                    if let Some(inner) = special.inner {
+                        let inner_text = &bytes[inner.start as usize..inner.end as usize];
+                        let inner_str = std::str::from_utf8(inner_text).unwrap_or("");
+                        let replacement = format!("{} {}", scope_attr, inner_str);
+                        ct.overwrite(deep_local_start, deep_local_end, &replacement);
+                    }
                 } else {
-                    trimmed
-                };
-
-                let scope = scope_id.unwrap_or([b'0'; 8]);
-                let mut var_name = Vec::with_capacity(2 + 8 + 1 + unquoted.len());
-                var_name.extend_from_slice(b"--");
-                var_name.extend_from_slice(&scope);
-                var_name.push(b'-');
-                for &b in unquoted {
-                    match b {
-                        b'.' | b' ' => var_name.push(b'-'),
-                        b'\'' | b'"' => {}
-                        _ => var_name.push(b),
+                    // .parent :deep(.inner) → .parent[scope] .inner
+                    // Find end of parent selector (before whitespace + :deep)
+                    let before_str = std::str::from_utf8(before_trimmed).unwrap_or("");
+                    if let Some(inner) = special.inner {
+                        let inner_text = &bytes[inner.start as usize..inner.end as usize];
+                        let inner_str = std::str::from_utf8(inner_text).unwrap_or("");
+                        let replacement = format!("{}{} {}", before_str, scope_attr, inner_str);
+                        ct.overwrite(sel_local_start, deep_local_end, &replacement);
                     }
                 }
-
-                results.push(ProcessedCssVBind {
-                    expression: Span::new(offset + expr_start as u32, offset + expr_end as u32),
-                    var_name,
-                    css_start: offset + start_pos as u32,
-                    css_end: offset + full_end as u32,
-                });
-
-                i = full_end;
-            } else {
-                i += 1;
+                return;
             }
-        } else {
-            i += 1;
+            CssParsedSpecialPseudoKind::Slotted => {
+                // :slotted(.slot) → .slot[scope-s]
+                if let Some(inner) = special.inner {
+                    let inner_text = &bytes[inner.start as usize..inner.end as usize];
+                    let inner_str = std::str::from_utf8(inner_text).unwrap_or("");
+                    let slotted_scope = scope_attr.replace(']', "-s]");
+                    let replacement = format!("{}{}", inner_str, slotted_scope);
+                    ct.overwrite(
+                        special.span.start - content_offset,
+                        special.span.end - content_offset,
+                        &replacement,
+                    );
+                }
+                return;
+            }
         }
     }
 
-    results
-}
-
-/// Apply v-bind() → var(--name) replacements to CSS.
-fn apply_v_bind_replacements(
-    _transformed: &[u8],
-    original: &[u8],
-    offset: u32,
-    v_binds: &[ProcessedCssVBind],
-) -> Vec<u8> {
-    apply_v_bind_replacements_raw(original, offset, v_binds)
-}
-
-fn apply_v_bind_replacements_raw(
-    css: &[u8],
-    offset: u32,
-    v_binds: &[ProcessedCssVBind],
-) -> Vec<u8> {
-    if v_binds.is_empty() {
-        return css.to_vec();
-    }
-
-    let mut output = Vec::with_capacity(css.len());
-    let mut last_end = 0usize;
-
-    for vb in v_binds {
-        let local_start = (vb.css_start - offset) as usize;
-        let local_end = (vb.css_end - offset) as usize;
-        output.extend_from_slice(&css[last_end..local_start]);
-        output.extend_from_slice(b"var(");
-        output.extend_from_slice(&vb.var_name);
-        output.push(b')');
-        last_end = local_end;
-    }
-
-    output.extend_from_slice(&css[last_end..]);
-    output
-}
-
-// --- Scoped CSS transformation ---
-
-fn transform_scoped_css(css: &[u8], scope_id: &[u8; 8], output: &mut Vec<u8>) {
-    let scope_attr = format!(
-        "[data-v-{}]",
-        std::str::from_utf8(scope_id).unwrap_or("00000000")
+    // Normal selector: scope each compound selector
+    // Split by combinators and spaces, append [scope] to each compound selector
+    scope_selector_with_ct(
+        ct,
+        sel_text,
+        selector.span.start - content_offset,
+        scope_attr,
     );
-    let scope_bytes = scope_attr.as_bytes();
+}
+
+/// Scope a normal selector (no special pseudos) using CodeTransform.
+fn scope_selector_with_ct(
+    ct: &mut CodeTransform<'_>,
+    sel_text: &[u8],
+    sel_offset: u32,
+    scope_attr: &str,
+) {
+    let parts = split_by_combinators(sel_text);
+
+    for part in &parts {
+        if let SelectorPart::SimpleSelector(sel, local_start) = part {
+            let (base, _pseudo) = split_pseudo(sel);
+
+            // Insert [scope] after the base part, before the pseudo part
+            let insert_pos = sel_offset + *local_start as u32 + base.len() as u32;
+            ct.append_left(insert_pos, scope_attr);
+        }
+    }
+}
+
+/// Split a trimmed selector into parts: simple selectors, combinators, spaces.
+fn split_by_combinators(selector: &[u8]) -> Vec<SelectorPart<'_>> {
+    let mut parts = Vec::new();
     let mut i = 0;
-    let len = css.len();
+    let len = selector.len();
 
     while i < len {
-        // Skip CSS comments
-        if i + 1 < len && css[i] == b'/' && css[i + 1] == b'*' {
-            let start = i;
-            i += 2;
-            while i + 1 < len && !(css[i] == b'*' && css[i + 1] == b'/') {
-                i += 1;
-            }
-            if i + 1 < len {
-                i += 2;
-            }
-            output.extend_from_slice(&css[start..i]);
-            continue;
-        }
-
-        // Skip strings
-        if css[i] == b'"' || css[i] == b'\'' {
-            let quote = css[i];
-            output.push(css[i]);
+        // Skip whitespace
+        while i < len && is_ws(selector[i]) {
             i += 1;
-            while i < len && css[i] != quote {
-                if css[i] == b'\\' && i + 1 < len {
-                    output.push(css[i]);
-                    i += 1;
-                }
-                output.push(css[i]);
-                i += 1;
-            }
-            if i < len {
-                output.push(css[i]);
-                i += 1;
-            }
+        }
+        if i >= len {
+            break;
+        }
+
+        // Combinator
+        if selector[i] == b'>' || selector[i] == b'+' || selector[i] == b'~' {
+            parts.push(SelectorPart::Combinator(selector[i]));
+            i += 1;
             continue;
         }
 
-        // At-rules
-        if css[i] == b'@' {
-            while i < len && css[i] != b'{' && css[i] != b';' {
-                output.push(css[i]);
-                i += 1;
-            }
-            if i < len && css[i] == b';' {
-                output.push(css[i]);
-                i += 1;
-            }
-            continue;
-        }
-
-        // Collect selector up to '{'
-        if is_selector_start_char(css[i]) {
-            let selector_start = i;
-            while i < len && css[i] != b'{' {
-                i += 1;
-            }
-
-            if i > selector_start {
-                let selector_bytes = &css[selector_start..i];
-                let scoped = scope_selectors(selector_bytes, scope_bytes);
-                output.extend_from_slice(&scoped);
-            }
-
-            if i < len {
-                // Push '{' and skip to matching '}'
-                output.push(css[i]);
-                i += 1;
+        // Simple selector
+        let start = i;
+        while i < len && !is_ws(selector[i]) && !is_combinator(selector[i]) {
+            if selector[i] == b'(' {
                 let mut depth = 1u32;
+                i += 1;
                 while i < len && depth > 0 {
-                    if css[i] == b'{' {
-                        depth += 1;
-                    } else if css[i] == b'}' {
-                        depth -= 1;
+                    match selector[i] {
+                        b'(' => depth += 1,
+                        b')' => depth -= 1,
+                        _ => {}
                     }
-                    output.push(css[i]);
                     i += 1;
                 }
+                continue;
             }
-            continue;
+            if selector[i] == b'[' {
+                while i < len && selector[i] != b']' {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
+                continue;
+            }
+            i += 1;
         }
 
-        output.push(css[i]);
-        i += 1;
+        if i > start {
+            if !parts.is_empty() && matches!(parts.last(), Some(SelectorPart::SimpleSelector(..))) {
+                parts.push(SelectorPart::Space);
+            }
+            parts.push(SelectorPart::SimpleSelector(&selector[start..i], start));
+        }
     }
+
+    parts
 }
 
-/// Scope a selector list.
-fn scope_selectors(selector_list: &[u8], scope_attr: &[u8]) -> Vec<u8> {
-    let mut output = Vec::with_capacity(selector_list.len() + scope_attr.len() * 2);
-
-    for (idx, selector) in selector_list.split(|&b| b == b',').enumerate() {
-        if idx > 0 {
-            output.push(b',');
-        }
-
-        let trimmed = trim_bytes(selector);
-        if trimmed.is_empty() {
-            output.extend_from_slice(selector);
-            continue;
-        }
-
-        // Check for :deep(), :global(), :slotted()
-        if let Some(result) = handle_special_pseudo(trimmed, scope_attr) {
-            let leading = leading_whitespace(selector);
-            output.extend_from_slice(leading);
-            output.extend_from_slice(&result);
-        } else {
-            scope_single_selector(selector, scope_attr, &mut output);
-        }
-    }
-
-    output
+#[derive(Debug)]
+enum SelectorPart<'a> {
+    SimpleSelector(&'a [u8], usize), // (bytes, local_start_offset)
+    Combinator(#[allow(dead_code)] u8),
+    Space,
 }
 
-fn handle_special_pseudo(selector: &[u8], scope_attr: &[u8]) -> Option<Vec<u8>> {
-    // :global(.class) → .class
-    if selector.starts_with(b":global(") {
-        return extract_pseudo_inner(selector, b":global(").map(|inner| inner.to_vec());
-    }
-
-    // :deep(.inner) → [scope] .inner
-    if selector.starts_with(b":deep(") {
-        if let Some(inner) = extract_pseudo_inner(selector, b":deep(") {
-            let mut result = Vec::new();
-            result.extend_from_slice(scope_attr);
-            result.push(b' ');
-            result.extend_from_slice(inner);
-            return Some(result);
-        }
-    }
-
-    // .parent :deep(.inner) → .parent[scope] .inner
-    if let Some(deep_pos) = find_subsequence(selector, b":deep(") {
-        let before = trim_bytes(&selector[..deep_pos]);
-        if !before.is_empty() {
-            if let Some(inner) = extract_pseudo_inner(&selector[deep_pos..], b":deep(") {
-                let mut result = Vec::new();
-                result.extend_from_slice(before);
-                result.extend_from_slice(scope_attr);
-                result.push(b' ');
-                result.extend_from_slice(inner);
-                return Some(result);
-            }
-        }
-    }
-
-    // :slotted(.slot) → .slot[scope-s]
-    if selector.starts_with(b":slotted(") {
-        if let Some(inner) = extract_pseudo_inner(selector, b":slotted(") {
-            let scope_str = std::str::from_utf8(scope_attr).unwrap_or("");
-            // Replace last ] with -s]
-            let slotted_scope = scope_str.replace(']', "-s]");
-            let mut result = Vec::new();
-            result.extend_from_slice(inner);
-            result.extend_from_slice(slotted_scope.as_bytes());
-            return Some(result);
-        }
-    }
-
-    None
-}
-
-fn scope_single_selector(selector: &[u8], scope_attr: &[u8], output: &mut Vec<u8>) {
-    let leading = leading_whitespace(selector);
-    let trimmed = trim_bytes(selector);
-    if trimmed.is_empty() {
-        output.extend_from_slice(selector);
-        return;
-    }
-
-    output.extend_from_slice(leading);
-
-    let parts = split_by_combinators(trimmed);
-    for part in &parts {
-        match part {
-            SelectorPart::Combinator(c) => {
-                output.push(b' ');
-                output.push(*c);
-                output.push(b' ');
-            }
-            SelectorPart::Space => {
-                output.push(b' ');
-            }
-            SelectorPart::SimpleSelector(sel) => {
-                let (base, pseudo) = split_pseudo(sel);
-                output.extend_from_slice(base);
-                output.extend_from_slice(scope_attr);
-                output.extend_from_slice(pseudo);
-            }
-        }
-    }
-}
-
+/// Split a simple selector into base and pseudo parts.
+/// E.g., `.btn:hover` → (`.btn`, `:hover`)
 fn split_pseudo(selector: &[u8]) -> (&[u8], &[u8]) {
     let mut i = selector.len();
     while i > 0 {
@@ -487,107 +356,93 @@ fn split_pseudo(selector: &[u8]) -> (&[u8], &[u8]) {
     (selector, b"")
 }
 
-#[derive(Debug)]
-enum SelectorPart<'a> {
-    SimpleSelector(&'a [u8]),
-    Combinator(u8),
-    Space,
-}
+// =============================================================================
+// v-bind() transformation
+// =============================================================================
 
-fn split_by_combinators(selector: &[u8]) -> Vec<SelectorPart<'_>> {
-    let mut parts = Vec::new();
-    let mut i = 0;
-    let len = selector.len();
+/// Replace a single v-bind() expression with var(--{scope_id}-{sanitized}).
+fn apply_v_bind_replacement(
+    ct: &mut CodeTransform<'_>,
+    vb: &CssParsedVBind,
+    content_offset: u32,
+    scope_id: &Option<[u8; 8]>,
+    bytes: &[u8],
+) -> ProcessedCssVBind {
+    let expr_bytes = &bytes[vb.expression.start as usize..vb.expression.end as usize];
 
-    while i < len {
-        while i < len && is_ws(selector[i]) {
-            i += 1;
-        }
-        if i >= len {
-            break;
-        }
-
-        if selector[i] == b'>' || selector[i] == b'+' || selector[i] == b'~' {
-            parts.push(SelectorPart::Combinator(selector[i]));
-            i += 1;
-            continue;
-        }
-
-        let start = i;
-        while i < len && !is_ws(selector[i]) && !is_combinator(selector[i]) {
-            if selector[i] == b'(' {
-                let mut depth = 1;
-                i += 1;
-                while i < len && depth > 0 {
-                    match selector[i] {
-                        b'(' => depth += 1,
-                        b')' => depth -= 1,
-                        _ => {}
-                    }
-                    i += 1;
-                }
-                continue;
-            }
-            i += 1;
-        }
-
-        if i > start {
-            if !parts.is_empty() && matches!(parts.last(), Some(SelectorPart::SimpleSelector(_))) {
-                parts.push(SelectorPart::Space);
-            }
-            parts.push(SelectorPart::SimpleSelector(&selector[start..i]));
+    let scope = scope_id.unwrap_or([b'0'; 8]);
+    let mut var_name = Vec::with_capacity(2 + 8 + 1 + expr_bytes.len());
+    var_name.extend_from_slice(b"--");
+    var_name.extend_from_slice(&scope);
+    var_name.push(b'-');
+    for &b in expr_bytes {
+        match b {
+            b'.' | b' ' => var_name.push(b'-'),
+            b'\'' | b'"' => {}
+            _ => var_name.push(b),
         }
     }
 
-    parts
+    let var_name_str = std::str::from_utf8(&var_name).unwrap_or("--unknown");
+    let replacement = format!("var({})", var_name_str);
+
+    ct.overwrite(
+        vb.full_span.start - content_offset,
+        vb.full_span.end - content_offset,
+        &replacement,
+    );
+
+    ProcessedCssVBind {
+        expression: vb.expression,
+        var_name,
+        css_start: vb.full_span.start,
+        css_end: vb.full_span.end,
+    }
 }
 
-// --- CSS Modules transformation ---
+// =============================================================================
+// CSS Modules transformation
+// =============================================================================
 
-fn transform_css_modules(
-    css: &[u8],
-    offset: u32,
+/// Hash class names for CSS Modules.
+fn apply_css_modules(
+    ct: &mut CodeTransform<'_>,
+    classes: &[crate::syntax_kai::types::CssParsedClass],
+    content_offset: u32,
     module_attr: &Option<Span>,
     component_id: &[u8; 8],
     counter: &mut usize,
-) -> (CssModuleInfo, Option<Vec<u8>>) {
-    let mut classes: Vec<CssModuleClassMapping> = Vec::new();
-    let mut output = Vec::with_capacity(css.len());
-    let mut i = 0;
+    bytes: &[u8],
+) -> (CssModuleInfo, bool) {
+    let mut mappings: Vec<CssModuleClassMapping> = Vec::new();
+    let mut did_modify = false;
 
-    while i < css.len() {
-        if css[i] == b'.' && (i == 0 || is_selector_context_char(css[i - 1])) {
-            let class_start = i + 1;
-            let mut class_end = class_start;
-            while class_end < css.len() && is_css_ident_char(css[class_end]) {
-                class_end += 1;
-            }
+    for cls in classes {
+        let class_name = &bytes[cls.name_span.start as usize..cls.name_span.end as usize];
 
-            if class_end > class_start {
-                let class_name = &css[class_start..class_end];
+        let mut hashed = Vec::with_capacity(1 + class_name.len() + 1 + 8 + 4);
+        hashed.push(b'_');
+        hashed.extend_from_slice(class_name);
+        hashed.push(b'_');
+        hashed.extend_from_slice(component_id);
+        hashed.extend_from_slice(counter.to_string().as_bytes());
+        *counter += 1;
 
-                let mut hashed = Vec::with_capacity(1 + class_name.len() + 1 + 8 + 4);
-                hashed.push(b'_');
-                hashed.extend_from_slice(class_name);
-                hashed.push(b'_');
-                hashed.extend_from_slice(component_id);
-                hashed.extend_from_slice(counter.to_string().as_bytes());
-                *counter += 1;
+        let hashed_str = std::str::from_utf8(&hashed).unwrap_or("_unknown_");
 
-                classes.push(CssModuleClassMapping {
-                    original: Span::new(offset + class_start as u32, offset + class_end as u32),
-                    hashed: hashed.clone(),
-                });
+        // Overwrite the class name (just the name after the `.`)
+        ct.overwrite(
+            cls.name_span.start - content_offset,
+            cls.name_span.end - content_offset,
+            hashed_str,
+        );
 
-                output.push(b'.');
-                output.extend_from_slice(&hashed);
-                i = class_end;
-                continue;
-            }
-        }
+        mappings.push(CssModuleClassMapping {
+            original: cls.name_span,
+            hashed,
+        });
 
-        output.push(css[i]);
-        i += 1;
+        did_modify = true;
     }
 
     let custom_name = module_attr.and_then(|span| {
@@ -601,41 +456,15 @@ fn transform_css_modules(
     (
         CssModuleInfo {
             custom_name,
-            classes,
+            classes: mappings,
         },
-        Some(output),
+        did_modify,
     )
 }
 
-// --- Helpers ---
-
-fn extract_pseudo_inner<'a>(selector: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
-    if !selector.starts_with(prefix) {
-        return None;
-    }
-    let inner_start = prefix.len();
-    let mut depth = 1u32;
-    let mut i = inner_start;
-    while i < selector.len() && depth > 0 {
-        match selector[i] {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            _ => {}
-        }
-        if depth > 0 {
-            i += 1;
-        }
-    }
-    if depth == 0 {
-        Some(&selector[inner_start..i])
-    } else {
-        None
-    }
-}
-
-fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
+// =============================================================================
+// Helpers
+// =============================================================================
 
 fn trim_bytes(bytes: &[u8]) -> &[u8] {
     let start = bytes.iter().position(|&b| !is_ws(b)).unwrap_or(bytes.len());
@@ -646,11 +475,6 @@ fn trim_bytes(bytes: &[u8]) -> &[u8] {
     &bytes[start..end]
 }
 
-fn leading_whitespace(bytes: &[u8]) -> &[u8] {
-    let end = bytes.iter().position(|&b| !is_ws(b)).unwrap_or(bytes.len());
-    &bytes[..end]
-}
-
 fn is_ws(b: u8) -> bool {
     b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
 }
@@ -659,44 +483,27 @@ fn is_combinator(b: u8) -> bool {
     b == b'>' || b == b'+' || b == b'~'
 }
 
-fn is_css_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
-}
-
-fn is_selector_start_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric()
-        || b == b'.'
-        || b == b'#'
-        || b == b':'
-        || b == b'['
-        || b == b'*'
-        || b == b'&'
-}
-
-fn is_selector_context_char(b: u8) -> bool {
-    is_ws(b)
-        || b == b','
-        || b == b'{'
-        || b == b'}'
-        || b == b';'
-        || b == b'>'
-        || b == b'+'
-        || b == b'~'
-}
+// =============================================================================
+// Tests
+// =============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::syntax_kai::plugin::{SyntaxPluginContext, SyntaxPluginOptions};
+    use crate::syntax_kai::plugins::css_parser::css_parser::CssParserPlugin;
     use crate::syntax_kai::plugins::element_compiler::element_compiler::ElementCompilerPlugin;
     use crate::syntax_kai::syntax::Syntax;
     use crate::tokenizer::byte::tokenize;
 
+    /// Run input through tokenizer → syntax → element_compiler → css_parser → css_style pipeline.
     fn process_style_events(
         input: &str,
         scope_id: Option<[u8; 8]>,
         component_id: Option<[u8; 8]>,
     ) -> Vec<String> {
+        let allocator = oxc_allocator::Allocator::new();
+
         let mut tokenizer_events = Vec::new();
         tokenize(input.as_bytes(), |event| tokenizer_events.push(event));
 
@@ -716,6 +523,7 @@ mod tests {
             }
         }
 
+        // element_compiler
         let mut ec = ElementCompilerPlugin::new();
         let mut compiled = Vec::new();
         for event in events_storage {
@@ -725,7 +533,18 @@ mod tests {
             }
         }
 
-        let mut css = CssStylePlugin::new();
+        // css_parser
+        let mut parser = CssParserPlugin::new();
+        let mut parsed = Vec::new();
+        for event in compiled {
+            match parser.process_event(event, &mut ctx) {
+                SyntaxResult::Keep(e) | SyntaxResult::Replace(e) => parsed.push(e),
+                SyntaxResult::Drop => {}
+            }
+        }
+
+        // css_style
+        let mut css = CssStylePlugin::new(&allocator);
         if let Some(sid) = scope_id {
             css.set_scope_id(sid);
         }
@@ -734,7 +553,7 @@ mod tests {
         }
 
         let mut result = Vec::new();
-        for event in compiled {
+        for event in parsed {
             match css.process_event(event, &mut ctx) {
                 SyntaxResult::Keep(e) | SyntaxResult::Replace(e) => result.push(e),
                 SyntaxResult::Drop => {}
@@ -773,12 +592,6 @@ mod tests {
             .expect("Expected ProcessedStyle");
         assert!(ps.contains("scoped=false"));
         assert!(ps.contains("css=None"));
-    }
-
-    #[test]
-    fn test_compiled_style_start_is_dropped() {
-        let events = process_style_events("<style>.box { }</style>", None, None);
-        assert!(!events.iter().any(|e| e.contains("CompiledStyleStart")));
     }
 
     #[test]
@@ -911,26 +724,6 @@ mod tests {
     }
 
     #[test]
-    fn test_trim_bytes() {
-        assert_eq!(trim_bytes(b"  hello  "), b"hello");
-        assert_eq!(trim_bytes(b"hello"), b"hello");
-        assert_eq!(trim_bytes(b"  "), b"" as &[u8]);
-    }
-
-    #[test]
-    fn test_split_pseudo() {
-        assert_eq!(
-            split_pseudo(b".btn:hover"),
-            (b".btn" as &[u8], b":hover" as &[u8])
-        );
-        assert_eq!(
-            split_pseudo(b".text::before"),
-            (b".text" as &[u8], b"::before" as &[u8])
-        );
-        assert_eq!(split_pseudo(b"div"), (b"div" as &[u8], b"" as &[u8]));
-    }
-
-    #[test]
     fn test_empty_style_block() {
         let events = process_style_events("<style scoped></style>", Some(*b"a1b2c3d4"), None);
         assert!(
@@ -958,5 +751,18 @@ mod tests {
             scope_count,
             ps
         );
+    }
+
+    #[test]
+    fn test_split_pseudo() {
+        assert_eq!(
+            split_pseudo(b".btn:hover"),
+            (b".btn" as &[u8], b":hover" as &[u8])
+        );
+        assert_eq!(
+            split_pseudo(b".text::before"),
+            (b".text" as &[u8], b"::before" as &[u8])
+        );
+        assert_eq!(split_pseudo(b"div"), (b"div" as &[u8], b"" as &[u8]));
     }
 }

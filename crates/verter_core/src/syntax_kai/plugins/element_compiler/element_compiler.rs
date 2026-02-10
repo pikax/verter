@@ -204,10 +204,7 @@ impl<'alloc> ElementCompilerPlugin {
     }
 
     /// Build a CompiledRootUnknownStart from the root open tag end and buffered props.
-    fn build_unknown_start(
-        &mut self,
-        open_end: RootNodeOpenTagEnd,
-    ) -> CompiledRootUnknownStart {
+    fn build_unknown_start(&mut self, open_end: RootNodeOpenTagEnd) -> CompiledRootUnknownStart {
         let props = std::mem::take(&mut self.pending_root_props);
 
         let tag_open = Span::new(open_end.start, open_end.end);

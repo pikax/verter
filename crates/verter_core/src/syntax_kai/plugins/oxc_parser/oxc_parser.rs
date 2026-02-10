@@ -442,10 +442,7 @@ impl<'alloc> OxcParserPlugin<'alloc> {
                 crate::utils::oxc::vue::parse_generic(self.alloc, source_slice, span.start)
             }),
             attrs: start.attrs,
-            attributes: start
-                .attributes
-                .into_iter()
-                .collect(),
+            attributes: start.attributes.into_iter().collect(),
         }
     }
 

@@ -584,7 +584,6 @@ pub enum ElementScope<'alloc> {
 
 // Compiled Elements
 
-
 #[derive(Debug)]
 pub struct CompiledRootScriptStart {
     pub start: u32,
@@ -766,6 +765,95 @@ pub struct StyleVBind {
     // todo add parsed results maybe??
 }
 
+// CSS parsed types (emitted by css_parser plugin)
+
+/// Kind of Vue special pseudo-selector in scoped CSS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CssParsedSpecialPseudoKind {
+    /// `:deep(.inner)` — scopes the parent, descends into inner.
+    Deep,
+    /// `:global(.class)` — removes scoping entirely.
+    Global,
+    /// `:slotted(.slot)` — scopes with slot variant.
+    Slotted,
+}
+
+/// A Vue special pseudo-selector found in a CSS selector.
+#[derive(Debug, Clone)]
+pub struct CssParsedSpecialPseudo {
+    pub kind: CssParsedSpecialPseudoKind,
+    /// Span of the full pseudo (e.g., `:deep(.inner)`) in SFC source.
+    pub span: Span,
+    /// Span of the inner content (e.g., `.inner`). None for bare `:deep`.
+    pub inner: Option<Span>,
+}
+
+/// A parsed CSS selector with its span and structural info.
+#[derive(Debug, Clone)]
+pub struct CssParsedSelector {
+    /// Full span of this selector text in SFC source.
+    pub span: Span,
+    /// Parsed special pseudo-selectors (:deep, :global, :slotted) with their spans.
+    pub specials: Vec<CssParsedSpecialPseudo>,
+}
+
+/// A parsed v-bind() function call in CSS.
+#[derive(Debug, Clone)]
+pub struct CssParsedVBind {
+    /// Span of full `v-bind(...)` in SFC source.
+    pub full_span: Span,
+    /// Span of the expression inside v-bind() in SFC source.
+    pub expression: Span,
+    /// Whether the expression was quoted (e.g., `v-bind('foo.bar')`).
+    pub quoted: bool,
+}
+
+/// A class selector found in CSS (for CSS modules).
+#[derive(Debug, Clone)]
+pub struct CssParsedClass {
+    /// Span of the class name (after the `.`) in SFC source.
+    pub name_span: Span,
+}
+
+/// A parsed CSS style rule with selectors and declarations metadata.
+#[derive(Debug, Clone)]
+pub struct CssParsedRule {
+    /// Span of the full selector list (before `{`) in SFC source.
+    pub selector_span: Span,
+    /// Individual selectors (split by `,`).
+    pub selectors: Vec<CssParsedSelector>,
+    /// v-bind() calls within this rule's declarations.
+    pub v_binds: Vec<CssParsedVBind>,
+    /// Class selectors found in this rule's selectors (for CSS modules).
+    pub classes: Vec<CssParsedClass>,
+}
+
+/// Result of CSS parsing for a single `<style>` block.
+/// Emitted as `Event::CssParsedStyle` by the css_parser plugin.
+#[derive(Debug)]
+pub struct CssParsedStyleBlock {
+    /// Style language (css, scss, sass, less, stylus).
+    pub lang: Option<StyleLang>,
+    /// Whether this block has the `scoped` attribute.
+    pub scoped: bool,
+    /// Module attribute span (None if not a module block).
+    pub module: Option<Span>,
+    /// Content span in source (CSS content between `<style>` tags).
+    pub content: Option<Span>,
+    /// Parsed rules with selectors, v-binds, classes.
+    pub rules: Vec<CssParsedRule>,
+    /// All v-bind expressions across all rules (flattened for convenience).
+    pub v_binds: Vec<CssParsedVBind>,
+    /// All class selectors across all rules (flattened for convenience).
+    pub classes: Vec<CssParsedClass>,
+    /// Original compiled start event (preserves source positions and attributes).
+    pub compiled_start: CompiledRootStyleStart,
+    /// Original compiled end event (preserves content span and close tag positions).
+    pub compiled_end: CompiledRootStyleEnd,
+}
+
+// /CSS parsed types
+
 // CSS processed types (emitted by css_style plugin)
 
 /// Processed v-bind() expression extracted from CSS.
@@ -880,6 +968,9 @@ pub enum Event<'alloc> {
     ScopeFor(ElementScopeFor),
     ScopeSlotElement(ElementScopeSlotElement),
     ScopeSlotTemplate(ElementScopeSlotTemplate),
+
+    // CSS parsed style (emitted by css_parser plugin)
+    CssParsedStyle(CssParsedStyleBlock),
 
     // CSS processed style (emitted by css_style plugin)
     ProcessedStyle(ProcessedStyleBlock),
