@@ -153,12 +153,11 @@ impl<'a, 'p> Syntax<'a, 'p> {
             }
             Event::OpenTagEnd { end } => {
                 if let Some(start_ev) = self.last_event_open_tag.take() {
-                    // NOTE: Tokenizer emits end pointing TO '>', not after it. Add +1 to include '>'.
                     // Use is_void_element to set self_closing for void tags like <br>, <img>, etc.
                     // Without explicit />, the tokenizer emits OpenTagEnd (not SelfClosingTag),
                     // but void elements should still be treated as self-closing.
                     let is_void = start_ev.is_void_element;
-                    let ev = start_ev.to_end(*end + 1, is_void);
+                    let ev = start_ev.to_end(*end, is_void);
                     // Only update last_parent_id for non-void elements.
                     // Void elements can't have children, so they shouldn't become the
                     // "current parent" — doing so corrupts parent tracking for siblings.
@@ -353,7 +352,7 @@ impl<'a, 'p> Syntax<'a, 'p> {
                     value,
                     arg,
                     modifiers: state.modifiers,
-                    quote: Some(quote.clone()),
+                    quote: Some(*quote),
                 };
 
                 self.emit(SyntaxEvent::Prop(ev), ctx);
@@ -367,7 +366,7 @@ impl<'a, 'p> Syntax<'a, 'p> {
                 };
                 self.emit(SyntaxEvent::Text(ev), ctx);
             }
-            Event::Comment { start, end } => {
+            Event::Comment { start, end, .. } => {
                 let ev = SyntaxComment {
                     parent_id: self.last_parent_id,
                     start: *start,

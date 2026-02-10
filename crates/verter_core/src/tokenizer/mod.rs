@@ -8,3 +8,6 @@ pub mod runner;
 
 pub use string::tokenize;
 pub use types::{Event, QuoteType};
+
+#[cfg(test)]
+mod byte_tests;

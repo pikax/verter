@@ -60,6 +60,10 @@ harness = false
 name = "vslot_bench"
 harness = false
 
+[[bench]]
+name = "tokenizer_bench"
+harness = false
+
 
 [[example]]
 name = "codegen"

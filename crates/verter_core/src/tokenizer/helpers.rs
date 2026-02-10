@@ -1,11 +1,10 @@
 use crate::tokenizer::types::char_codes::{
-    CARRIAGE_RETURN, FORM_FEED, GT, LEFT_BRACE, LOWER_A, LOWER_Z, NEWLINE, RIGHT_BRACE, SLASH,
-    SPACE, TAB, UPPER_A, UPPER_Z,
+    CARRIAGE_RETURN, FORM_FEED, GT, LEFT_BRACE, NEWLINE, RIGHT_BRACE, SLASH, SPACE, TAB,
 };
 
 #[inline(always)]
 pub fn is_tag_start_char(c: u8) -> bool {
-    (LOWER_A..=LOWER_Z).contains(&c) || (UPPER_A..=UPPER_Z).contains(&c)
+    c.is_ascii_alphabetic()
 }
 
 #[inline(always)]

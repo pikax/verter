@@ -29,22 +29,21 @@ pub mod char_codes {
     pub const LOWER_A: u8 = 0x61;
     pub const LOWER_V: u8 = 0x76;
     pub const LOWER_Z: u8 = 0x7A;
+    pub const SEMICOLON: u8 = 0x3B;
     pub const LEFT_BRACE: u8 = 0x7B;
     pub const RIGHT_BRACE: u8 = 0x7D;
 }
 
 pub mod sequences {
-    pub const CDATA: &[u8] = b"CDATA[";
     pub const CDATA_END: &[u8] = b"]]>";
     pub const COMMENT_END: &[u8] = b"-->";
     pub const SCRIPT_END: &[u8] = b"</script";
     pub const STYLE_END: &[u8] = b"</style";
-    pub const TITLE_END: &[u8] = b"</title";
     pub const TEXTAREA_END: &[u8] = b"</textarea";
 }
 
 /// Quote type for attribute values
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum QuoteType {
     NoValue = 0,
@@ -130,6 +129,10 @@ pub enum Event<'bump> {
     Comment {
         start: u32,
         end: u32,
+        /// Start of the comment content (after opening delimiter like `<!--`)
+        content_start: u32,
+        /// End of the comment content (before closing delimiter like `-->`)
+        content_end: u32,
     },
     // Cdata { start: u32, end: u32 },
     ProcessingInstruction {
