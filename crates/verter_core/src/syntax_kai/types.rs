@@ -15,7 +15,7 @@ pub trait SyntaxNode {
 }
 // ROOT
 
-#[derive(Debug, Clone, PartialEq, Eq    )]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootNodeKind {
     Script,
     Template,
@@ -327,6 +327,9 @@ pub struct Text {
 
     pub start: u32,
     pub end: u32,
+
+    /// Whether this text span contains an HTML entity (e.g. `&amp;`) that needs decoding.
+    pub has_entity: bool,
 }
 
 #[derive(Debug, Clone)]

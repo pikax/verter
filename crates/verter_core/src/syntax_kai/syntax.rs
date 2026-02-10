@@ -117,7 +117,10 @@ impl<'alloc> Syntax<'alloc> {
 
             // leafs
             TokenizerEvent::Text { start, end } => {
-                self.handle_text(*start, *end);
+                self.handle_text(*start, *end, false);
+            }
+            TokenizerEvent::TextEntity { start, end } => {
+                self.handle_text(*start, *end, true);
             }
             TokenizerEvent::Comment {
                 start,
@@ -215,7 +218,7 @@ impl<'alloc> Syntax<'alloc> {
                             self.last_parent_id = self.parent_stack.pop().unwrap_or(NO_PARENT);
                         }
 
-                        if root.kind == RootNodeKind::Script {
+                        if ev.kind == RootNodeKind::Script {
                             self.root_script_events.push(Event::RootOpenTagEnd(ev));
                         } else {
                             self.events.push(Event::RootOpenTagEnd(ev));
@@ -574,11 +577,12 @@ impl<'alloc> Syntax<'alloc> {
 
     // other elements
 
-    fn handle_text(&mut self, start: u32, end: u32) {
+    fn handle_text(&mut self, start: u32, end: u32, has_entity: bool) {
         self.events.push(Event::Text(Text {
             parent_id: self.last_parent_id,
             start,
             end,
+            has_entity,
         }));
     }
 
@@ -599,11 +603,6 @@ impl<'alloc> Syntax<'alloc> {
             content: Span::new(content_start, content_end),
         }));
     }
-
-    // TODO add handling for entities, CDATA, etc.
-    // fn handle_entity(&mut self, start: u32, end: u32) {
-    //     self.events.push(Event::Entity(Entity { start, end }));
-    // }
 
     // /other elements
 }
@@ -874,7 +873,7 @@ mod tests {
     /// so the next top-level tag is also treated as a root node.
     #[test]
     fn test_bug_self_closing_root_decrement() {
-        with_syntax_events!("<template /><script></script>", false, |events| {
+        with_syntax_events!("<template /><style></style>", false, |events| {
             let root_open_count = events
                 .iter()
                 .filter(|e| matches!(e, Event::RootOpenTagEnd(_)))
@@ -882,8 +881,8 @@ mod tests {
 
             assert_eq!(
                 root_open_count, 2,
-                "Expected 2 RootOpenTagEnd events (<template/> and <script>), got {}. \
-                 Self-closing root doesn't decrement nested_level, causing <script> \
+                "Expected 2 RootOpenTagEnd events (<template/> and <style>), got {}. \
+                 Self-closing root doesn't decrement nested_level, causing <style> \
                  to be treated as a nested element instead of a root.",
                 root_open_count
             );
@@ -1038,6 +1037,52 @@ mod tests {
                 matches!(props[0].kind, PropKind::Slot),
                 "Expected # shorthand to be PropKind::Slot, got {:?}",
                 props[0].kind
+            );
+        });
+    }
+
+    // ==================== Entity handling ====================
+
+    /// @ai-generated - HTML entities like &amp; should be emitted as Text events
+    /// with has_entity=true, while regular text has has_entity=false.
+    #[test]
+    fn test_entity_emitted_as_text_with_flag() {
+        let input = "<template>hello &amp; world</template>";
+        with_syntax_events!(input, false, |events| {
+            let texts: Vec<_> = events
+                .iter()
+                .filter_map(|e| match e {
+                    Event::Text(t) => Some(t),
+                    _ => None,
+                })
+                .collect();
+
+            // Should have 3 text events: "hello ", "&amp;", " world"
+            assert_eq!(
+                texts.len(),
+                3,
+                "Expected 3 Text events, got {}",
+                texts.len()
+            );
+
+            // Regular text: has_entity=false
+            assert!(
+                !texts[0].has_entity,
+                "Plain text should have has_entity=false"
+            );
+
+            // Entity text: has_entity=true
+            assert!(
+                texts[1].has_entity,
+                "Entity text should have has_entity=true"
+            );
+            let entity_slice = &input[texts[1].start as usize..texts[1].end as usize];
+            assert_eq!(entity_slice, "&amp;", "Entity span should be '&amp;'");
+
+            // Regular text: has_entity=false
+            assert!(
+                !texts[2].has_entity,
+                "Plain text should have has_entity=false"
             );
         });
     }
