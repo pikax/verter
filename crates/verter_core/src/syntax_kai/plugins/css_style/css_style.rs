@@ -15,24 +15,24 @@ use crate::{
 /// - **Scoped CSS**: Transforms selectors with `[data-v-{scope_id}]` attribute selectors
 /// - **CSS v-bind()**: Extracts expressions and replaces with CSS custom properties
 /// - **CSS Modules**: Hashes class names and builds runtime mappings
-pub struct CssStylePlugin<'alloc> {
+pub struct CssStylePlugin {
     /// Scope ID for scoped styles, pre-computed by builder from component name hash.
     scope_id: Option<[u8; 8]>,
     /// Component ID for CSS module class hashing.
     component_id: Option<[u8; 8]>,
     /// Buffered CompiledStyleStart (set on Start, consumed on End).
-    current_start: Option<CompiledRootStyleStart<'alloc>>,
+    current_start: Option<CompiledRootStyleStart>,
     /// Counter for CSS module hash uniqueness across multiple module blocks.
     module_class_counter: usize,
 }
 
-impl<'alloc> Default for CssStylePlugin<'alloc> {
+impl<'alloc> Default for CssStylePlugin {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'alloc> CssStylePlugin<'alloc> {
+impl<'alloc> CssStylePlugin {
     pub fn new() -> Self {
         Self {
             scope_id: None,
@@ -52,10 +52,10 @@ impl<'alloc> CssStylePlugin<'alloc> {
 
     fn process_style_block(
         &mut self,
-        start: CompiledRootStyleStart<'alloc>,
+        start: CompiledRootStyleStart,
         end: CompiledRootStyleEnd,
         ctx: &SyntaxPluginContext<'alloc>,
-    ) -> ProcessedStyleBlock<'alloc> {
+    ) -> ProcessedStyleBlock {
         let css_content = end
             .content
             .map(|c| &ctx.bytes[c.start as usize..c.end as usize]);
@@ -129,7 +129,7 @@ impl<'alloc> CssStylePlugin<'alloc> {
     }
 }
 
-impl<'alloc> SyntaxPlugin<'alloc> for CssStylePlugin<'alloc> {
+impl<'alloc> SyntaxPlugin<'alloc> for CssStylePlugin {
     fn name(&self) -> &str {
         "css_style"
     }

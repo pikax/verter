@@ -355,7 +355,7 @@ impl<'alloc> TsxCodegenPlugin<'alloc> {
 
     fn process_style_block(
         &mut self,
-        ps: &ProcessedStyleBlock<'alloc>,
+        ps: &ProcessedStyleBlock,
         ctx: &SyntaxPluginContext<'alloc>,
     ) {
         // Comment out style blocks in TSX

@@ -14,7 +14,7 @@ use crate::{
 /// - `CloseTag` → `ElementClosed(CompiledElementClosed)`
 /// - Root tag props + `RootOpenTagEnd` → `CompiledScriptStart` / `CompiledTemplateStart` / etc.
 /// - `RootCloseTag` → `CompiledScriptEnd` / `CompiledTemplateEnd` / etc.
-pub struct ElementCompilerPlugin<'alloc> {
+pub struct ElementCompilerPlugin {
     /// Current element being built (set on OpenTag, consumed on OpenTagEnd).
     current_element: Option<ElementBuildState>,
     /// Props buffered before a RootOpenTagEnd arrives.
@@ -23,8 +23,6 @@ pub struct ElementCompilerPlugin<'alloc> {
     in_root: bool,
     /// Track the last RootOpenTagEnd to pair with RootCloseTag for content span.
     last_root_open_end: Option<RootNodeOpenTagEnd>,
-    /// Phantom for lifetime.
-    _marker: std::marker::PhantomData<&'alloc ()>,
 }
 
 struct ElementBuildState {
@@ -32,20 +30,19 @@ struct ElementBuildState {
     props: Vec<Prop>,
 }
 
-impl<'alloc> Default for ElementCompilerPlugin<'alloc> {
+impl Default for ElementCompilerPlugin {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'alloc> ElementCompilerPlugin<'alloc> {
+impl<'alloc> ElementCompilerPlugin {
     pub fn new() -> Self {
         Self {
             current_element: None,
-            pending_root_props: Vec::new(),
+            pending_root_props: Vec::with_capacity(3),
             in_root: false,
             last_root_open_end: None,
-            _marker: std::marker::PhantomData,
         }
     }
 
@@ -53,8 +50,8 @@ impl<'alloc> ElementCompilerPlugin<'alloc> {
     fn build_script_start(
         &mut self,
         open_end: RootNodeOpenTagEnd,
-        ctx: &SyntaxPluginContext<'alloc>,
-    ) -> CompiledRootScriptStart<'alloc> {
+        ctx: &SyntaxPluginContext,
+    ) -> CompiledRootScriptStart {
         let props = std::mem::take(&mut self.pending_root_props);
         let mut setup: Option<Span> = None;
         let mut lang: Option<ScriptLanguage> = None;
@@ -99,7 +96,7 @@ impl<'alloc> ElementCompilerPlugin<'alloc> {
             lang,
             generic,
             attrs,
-            attributes: props.into_iter().map(CompiledProp::Prop).collect(),
+            attributes: props.into_iter().collect(),
             tag_open_event,
             tag_open_end_event: open_end,
         }
@@ -110,7 +107,7 @@ impl<'alloc> ElementCompilerPlugin<'alloc> {
         &mut self,
         open_end: RootNodeOpenTagEnd,
         ctx: &SyntaxPluginContext<'alloc>,
-    ) -> CompiledRootTemplateStart<'alloc> {
+    ) -> CompiledRootTemplateStart {
         let props = std::mem::take(&mut self.pending_root_props);
         let mut vapor: Option<Span> = None;
         let mut lang: Option<Span> = None;
@@ -141,7 +138,7 @@ impl<'alloc> ElementCompilerPlugin<'alloc> {
             tag_open,
             vapor,
             lang,
-            attributes: props.into_iter().map(CompiledProp::Prop).collect(),
+            attributes: props.into_iter().collect(),
             tag_open_event,
             tag_open_end_event: open_end,
         }
@@ -152,7 +149,7 @@ impl<'alloc> ElementCompilerPlugin<'alloc> {
         &mut self,
         open_end: RootNodeOpenTagEnd,
         ctx: &SyntaxPluginContext<'alloc>,
-    ) -> CompiledRootStyleStart<'alloc> {
+    ) -> CompiledRootStyleStart {
         let props = std::mem::take(&mut self.pending_root_props);
         let mut style_lang: Option<StyleLang> = None;
         let mut scoped = false;
@@ -200,7 +197,7 @@ impl<'alloc> ElementCompilerPlugin<'alloc> {
             lang: style_lang,
             scoped,
             module,
-            attributes: props.into_iter().map(CompiledProp::Prop).collect(),
+            attributes: props.into_iter().collect(),
             tag_open_event,
             tag_open_end_event: open_end,
         }
@@ -210,7 +207,7 @@ impl<'alloc> ElementCompilerPlugin<'alloc> {
     fn build_unknown_start(
         &mut self,
         open_end: RootNodeOpenTagEnd,
-    ) -> CompiledRootUnknownStart<'alloc> {
+    ) -> CompiledRootUnknownStart {
         let props = std::mem::take(&mut self.pending_root_props);
 
         let tag_open = Span::new(open_end.start, open_end.end);
@@ -225,7 +222,7 @@ impl<'alloc> ElementCompilerPlugin<'alloc> {
             name_end: open_end.name_end,
             tag_open,
             content: None,
-            attributes: props.into_iter().map(CompiledProp::Prop).collect(),
+            attributes: props.into_iter().collect(),
             tag_open_event,
             tag_open_end_event: open_end,
         }
@@ -240,7 +237,7 @@ impl<'alloc> ElementCompilerPlugin<'alloc> {
     }
 }
 
-impl<'alloc> SyntaxPlugin<'alloc> for ElementCompilerPlugin<'alloc> {
+impl<'alloc> SyntaxPlugin<'alloc> for ElementCompilerPlugin {
     fn name(&self) -> &str {
         "element_compiler"
     }

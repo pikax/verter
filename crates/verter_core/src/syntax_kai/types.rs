@@ -584,14 +584,9 @@ pub enum ElementScope<'alloc> {
 
 // Compiled Elements
 
-#[derive(Debug)]
-pub enum CompiledProp<'alloc> {
-    Prop(Prop),
-    Oxc(OxcProp<'alloc>),
-}
 
 #[derive(Debug)]
-pub struct CompiledRootScriptStart<'alloc> {
+pub struct CompiledRootScriptStart {
     pub start: u32,
     pub name_end: u32,
 
@@ -606,7 +601,7 @@ pub struct CompiledRootScriptStart<'alloc> {
     // attrs attributes
     pub attrs: Option<Span>,
     // all attributes
-    pub attributes: Vec<CompiledProp<'alloc>>,
+    pub attributes: Vec<Prop>,
 
     pub tag_open_event: RootNodeOpenTagStart,
     pub tag_open_end_event: RootNodeOpenTagEnd,
@@ -627,7 +622,7 @@ pub struct CompiledRootScriptEnd {
 }
 
 #[derive(Debug)]
-pub struct CompiledRootTemplateStart<'alloc> {
+pub struct CompiledRootTemplateStart {
     pub start: u32,
     pub name_end: u32,
 
@@ -638,7 +633,7 @@ pub struct CompiledRootTemplateStart<'alloc> {
     // lang attribute
     pub lang: Option<Span>,
     // all attributes
-    pub attributes: Vec<CompiledProp<'alloc>>,
+    pub attributes: Vec<Prop>,
 
     pub tag_open_event: RootNodeOpenTagStart,
     pub tag_open_end_event: RootNodeOpenTagEnd,
@@ -660,7 +655,7 @@ pub struct CompiledRootTemplateEnd {
 }
 
 #[derive(Debug)]
-pub struct CompiledRootStyleStart<'alloc> {
+pub struct CompiledRootStyleStart {
     pub start: u32,
     pub name_end: u32,
 
@@ -673,7 +668,7 @@ pub struct CompiledRootStyleStart<'alloc> {
     // module attribute
     pub module: Option<Span>,
     // all attributes
-    pub attributes: Vec<CompiledProp<'alloc>>,
+    pub attributes: Vec<Prop>,
 
     pub tag_open_event: RootNodeOpenTagStart,
     pub tag_open_end_event: RootNodeOpenTagEnd,
@@ -694,7 +689,7 @@ pub struct CompiledRootStyleEnd {
 }
 
 #[derive(Debug)]
-pub struct CompiledRootUnknownStart<'alloc> {
+pub struct CompiledRootUnknownStart {
     pub start: u32,
     pub name_end: u32,
 
@@ -703,7 +698,7 @@ pub struct CompiledRootUnknownStart<'alloc> {
     pub content: Option<Span>,
 
     // all attributes
-    pub attributes: Vec<CompiledProp<'alloc>>,
+    pub attributes: Vec<Prop>,
 
     pub tag_open_event: RootNodeOpenTagStart,
     pub tag_open_end_event: RootNodeOpenTagEnd,
@@ -809,7 +804,7 @@ pub struct CssModuleInfo {
 /// Result of CSS processing for a single `<style>` block.
 /// Emitted as `Event::ProcessedStyle` by the css_style plugin.
 #[derive(Debug)]
-pub struct ProcessedStyleBlock<'alloc> {
+pub struct ProcessedStyleBlock {
     /// Style language (css, scss, sass, less, stylus).
     pub lang: Option<StyleLang>,
     /// Whether this block is scoped.
@@ -824,7 +819,7 @@ pub struct ProcessedStyleBlock<'alloc> {
     pub v_bind_expressions: Vec<ProcessedCssVBind>,
 
     /// Original compiled start event (preserves source positions and attributes).
-    pub compiled_start: CompiledRootStyleStart<'alloc>,
+    pub compiled_start: CompiledRootStyleStart,
     /// Original compiled end event (preserves content span and close tag positions).
     pub compiled_end: CompiledRootStyleEnd,
 }
@@ -850,13 +845,13 @@ pub enum Event<'alloc> {
     Text(Text),
 
     // Compiled root open/close (emitted by element_compiler)
-    CompiledScriptStart(CompiledRootScriptStart<'alloc>),
+    CompiledScriptStart(CompiledRootScriptStart),
     CompiledScriptEnd(CompiledRootScriptEnd),
-    CompiledTemplateStart(CompiledRootTemplateStart<'alloc>),
+    CompiledTemplateStart(CompiledRootTemplateStart),
     CompiledTemplateEnd(CompiledRootTemplateEnd),
-    CompiledStyleStart(CompiledRootStyleStart<'alloc>),
+    CompiledStyleStart(CompiledRootStyleStart),
     CompiledStyleEnd(CompiledRootStyleEnd),
-    CompiledUnknownStart(CompiledRootUnknownStart<'alloc>),
+    CompiledUnknownStart(CompiledRootUnknownStart),
     CompiledUnknownEnd(CompiledRootUnknownEnd),
 
     // Compiled elements (emitted by element_compiler)
@@ -887,7 +882,7 @@ pub enum Event<'alloc> {
     ScopeSlotTemplate(ElementScopeSlotTemplate),
 
     // CSS processed style (emitted by css_style plugin)
-    ProcessedStyle(ProcessedStyleBlock<'alloc>),
+    ProcessedStyle(ProcessedStyleBlock),
 
     // Binding metadata (emitted by code_gen_script)
     ScriptBindings(super::binding_types::BindingMetadata),

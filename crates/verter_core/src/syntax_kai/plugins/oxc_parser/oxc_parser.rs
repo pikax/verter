@@ -24,7 +24,7 @@ pub struct OxcParserPlugin<'alloc> {
     source_type: SourceType,
     alloc: &'alloc Allocator,
     /// Buffered CompiledScriptStart (set on Start, consumed on End).
-    current_script_start: Option<CompiledRootScriptStart<'alloc>>,
+    current_script_start: Option<CompiledRootScriptStart>,
 }
 
 impl<'alloc> OxcParserPlugin<'alloc> {
@@ -395,7 +395,7 @@ impl<'alloc> OxcParserPlugin<'alloc> {
     /// Parse a script block.
     fn parse_script(
         &self,
-        start: CompiledRootScriptStart<'alloc>,
+        start: CompiledRootScriptStart,
         end: CompiledRootScriptEnd,
         ctx: &SyntaxPluginContext<'alloc>,
     ) -> OxcScript<'alloc> {
@@ -445,12 +445,6 @@ impl<'alloc> OxcParserPlugin<'alloc> {
             attributes: start
                 .attributes
                 .into_iter()
-                .map(|cp| match cp {
-                    CompiledProp::Prop(p) => p,
-                    CompiledProp::Oxc(_) => {
-                        unreachable!("OXC props should not exist before oxc_parser")
-                    }
-                })
                 .collect(),
         }
     }
