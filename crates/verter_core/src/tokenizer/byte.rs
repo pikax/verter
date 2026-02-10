@@ -840,9 +840,7 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                     self.state = State::InAttrName;
                     self.state_in_attr_name();
                     return;
-                } else if !self.in_v_pre
-                    && (c == DOT || c == COLON || c == AT || c == NUMBER)
-                {
+                } else if !self.in_v_pre && (c == DOT || c == COLON || c == AT || c == NUMBER) {
                     self.emit(Event::DirName {
                         start: self.index as u32,
                         end: (self.index + 1) as u32,

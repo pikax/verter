@@ -34,6 +34,7 @@ base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
 lightningcss = { version = "1.0.0-alpha.70", features = ["visitor"] }
+phf = { version = "0.13", features = ["macros"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"

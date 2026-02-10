@@ -233,7 +233,6 @@ impl<'a, 'p> Syntax<'a, 'p> {
                     ctx,
                 );
             }
-
             Event::AttribName { start, end } => {
                 self.current_prop = Some(PropTempState {
                     start: *start,
