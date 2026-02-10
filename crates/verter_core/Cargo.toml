@@ -65,6 +65,10 @@ harness = false
 name = "tokenizer_bench"
 harness = false
 
+[[bench]]
+name = "codegen_comparison"
+harness = false
+
 
 [[example]]
 name = "codegen"

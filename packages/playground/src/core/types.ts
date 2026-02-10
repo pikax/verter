@@ -2,6 +2,7 @@ export interface CompiledFile {
   ts: string;
   js: string;
   css: string;
+  tsx: string;
   errors: string[];
   sourceMap: string;
 }
@@ -13,6 +14,7 @@ export class File {
     ts: "",
     js: "",
     css: "",
+    tsx: "",
     errors: [],
     sourceMap: "",
   };
@@ -41,7 +43,7 @@ export class File {
   }
 }
 
-export type OutputMode = "preview" | "ts" | "js" | "css";
+export type OutputMode = "preview" | "ts" | "js" | "css" | "tsx";
 
 export interface CompilerOptions {
   isProduction: boolean;
@@ -52,6 +54,7 @@ export interface CompileTiming {
   verter: number | null; // ms for Vue SFC compilation (JS-measured)
   verterNative: number | null; // ms for Rust pipeline (reported by Rust)
   stripTypes: number | null; // ms for stripTypes call (when showTS is enabled)
+  tsx: number | null; // ms for TSX generation (reported by Rust, when showTSX is enabled)
 }
 
 export interface StoreState {
@@ -64,6 +67,7 @@ export interface StoreState {
   darkMode: boolean;
   autoSave: boolean;
   showTS: boolean;
+  showTSX: boolean;
   compilerOptions: CompilerOptions;
   compileTiming: CompileTiming;
 }

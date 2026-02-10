@@ -77,6 +77,7 @@ function compileInner(
   filename: string,
   options?: CompilerOptions,
   keepTs?: boolean,
+  includeTsx?: boolean,
 ): CodegenResult {
   if (!wasmCompile) {
     throw new Error("WASM compiler not initialized");
@@ -87,6 +88,7 @@ function compileInner(
     isProduction: options?.isProduction ?? false,
     ssr: options?.ssr ?? false,
     keepTs: keepTs ?? false,
+    includeTsx: includeTsx ?? false,
   });
   result.code = mergeRenderIntoComponent(result.code);
   return result;
@@ -116,21 +118,24 @@ export async function compileFile(
   file: File,
   options?: CompilerOptions,
   showTS?: boolean,
+  showTSX?: boolean,
 ): Promise<CompileTiming> {
   await initCompilers();
-  const timing: CompileTiming = { verter: null, verterNative: null, stripTypes: null };
+  const timing: CompileTiming = { verter: null, verterNative: null, stripTypes: null, tsx: null };
 
   if (file.filename.endsWith(".vue")) {
     try {
       if (showTS && file.isTS) {
         // Show TS mode: compile with keepTs: true, then stripTypes for JS
         const verterStart = performance.now();
-        const verterResult = compileInner(file.code, file.filename, options, true);
+        const verterResult = compileInner(file.code, file.filename, options, true, showTSX);
         timing.verter = performance.now() - verterStart;
         timing.verterNative = (verterResult as any).durationMs ?? null;
+        timing.tsx = (verterResult as any).tsxDurationMs ?? null;
 
         file.compiled.sourceMap = verterResult.sourceMap ?? "";
-        file.compiled.css = extractStyles(file.code);
+        file.compiled.css = verterResult.css || extractStyles(file.code);
+        file.compiled.tsx = verterResult.tsx ?? "";
         file.compiled.ts = verterResult.code;
 
         // Strip types for JS tab
@@ -147,12 +152,14 @@ export async function compileFile(
       } else {
         // Default: compile with keepTs: false → JS directly
         const verterStart = performance.now();
-        const verterResult = compileInner(file.code, file.filename, options, false);
+        const verterResult = compileInner(file.code, file.filename, options, false, showTSX);
         timing.verter = performance.now() - verterStart;
         timing.verterNative = (verterResult as any).durationMs ?? null;
+        timing.tsx = (verterResult as any).tsxDurationMs ?? null;
 
         file.compiled.sourceMap = verterResult.sourceMap ?? "";
-        file.compiled.css = extractStyles(file.code);
+        file.compiled.css = verterResult.css || extractStyles(file.code);
+        file.compiled.tsx = verterResult.tsx ?? "";
         file.compiled.js = verterResult.code;
         file.compiled.ts = "";
         file.compiled.errors = [];
@@ -172,8 +179,16 @@ export async function compileFile(
         // Show TS mode: compile with keepTs: true, then stripTypes
         file.compiled.ts = file.code;
         const verterStart = performance.now();
-        const result = compileInner(sfc, file.filename.replace(".ts", ".vue"), undefined, true);
+        const result = compileInner(
+          sfc,
+          file.filename.replace(".ts", ".vue"),
+          undefined,
+          true,
+          showTSX,
+        );
         timing.verter = performance.now() - verterStart;
+        timing.tsx = (result as any).tsxDurationMs ?? null;
+        file.compiled.tsx = result.tsx ?? "";
 
         if (wasmStripTypes) {
           const stripStart = performance.now();
@@ -189,21 +204,32 @@ export async function compileFile(
         // Default: compile with keepTs: false → JS directly
         file.compiled.ts = "";
         const verterStart = performance.now();
-        const result = compileInner(sfc, file.filename.replace(".ts", ".vue"), undefined, false);
+        const result = compileInner(
+          sfc,
+          file.filename.replace(".ts", ".vue"),
+          undefined,
+          false,
+          showTSX,
+        );
         timing.verter = performance.now() - verterStart;
+        timing.tsx = (result as any).tsxDurationMs ?? null;
+        file.compiled.tsx = result.tsx ?? "";
         file.compiled.js = result.code;
         file.compiled.errors = [];
       }
     } catch (e) {
       file.compiled.js = "";
+      file.compiled.tsx = "";
       file.compiled.errors = [e instanceof Error ? e.message : String(e)];
     }
   } else if (file.filename.endsWith(".js")) {
     file.compiled.js = file.code;
     file.compiled.ts = "";
+    file.compiled.tsx = "";
     file.compiled.errors = [];
   } else if (file.filename.endsWith(".css")) {
     file.compiled.css = file.code;
+    file.compiled.tsx = "";
     file.compiled.errors = [];
   }
 

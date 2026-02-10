@@ -1,5 +1,3 @@
-use lightningcss::traits::Op;
-
 use crate::{
     common::Span,
     cursor::ScriptLanguage,
@@ -9,7 +7,7 @@ use crate::{
             vue::{GenericParseResult, VForWithBindings, VSlotWithBindings},
             BindingExtractionResult,
         },
-        vue::{PatchFlag, PatchFlags},
+        vue::PatchFlag,
     },
 };
 
@@ -550,6 +548,40 @@ pub struct OxcElseCondition {
 
 // /OXC Parsed
 
+// OXC-Compiled Elements (emitted by oxc_parser after element_compiler)
+
+/// OXC-parsed element start — props are parsed, scopes extracted.
+/// Replaces `Event::ElementStart` after oxc_parser runs.
+#[derive(Debug)]
+pub struct OxcCompiledElementStart<'alloc> {
+    /// Parsed props (non-structural directives).
+    pub props: Vec<OxcProp<'alloc>>,
+    /// Structural directives, ordered by priority: v-if > v-for > v-slot.
+    pub scopes: Vec<ElementScope<'alloc>>,
+    /// Owns the CompiledElementStart this replaces.
+    pub event: CompiledElementStart,
+}
+
+/// OXC-parsed element closed — wraps the original for symmetry and future extension.
+#[derive(Debug)]
+pub struct OxcCompiledElementClosed {
+    pub event: CompiledElementClosed,
+}
+
+/// Structural directive extracted from element props during oxc_parser processing.
+/// Ordered by Vue priority: v-if/else-if/else > v-for > v-slot.
+#[derive(Debug)]
+pub enum ElementScope<'alloc> {
+    If(OxcIfCondition<'alloc>),
+    ElseIf(OxcElseIfCondition<'alloc>),
+    Else(OxcElseCondition),
+    For(OxcVFor<'alloc>),
+    SlotElement(OxcVSlotElement<'alloc>),
+    SlotTemplate(OxcVSlotTemplate<'alloc>),
+}
+
+// /OXC-Compiled Elements
+
 // Compiled Elements
 
 #[derive(Debug)]
@@ -692,14 +724,14 @@ pub struct CompiledRootUnknownEnd {
 }
 
 #[derive(Debug)]
-pub struct CompiledElementStart<'alloc> {
+pub struct CompiledElementStart {
     pub element_id: u32,
     pub parent_id: u32,
 
     pub event_open_tag: ElementOpenTagStart,
     pub event_open_tag_end: ElementOpenTagEnd,
 
-    pub props: Vec<CompiledProp<'alloc>>,
+    pub props: Vec<Prop>,
 }
 #[derive(Debug)]
 pub struct CompiledElementClosed {
@@ -739,9 +771,68 @@ pub struct StyleVBind {
     // todo add parsed results maybe??
 }
 
-// /CSS styles
+// CSS processed types (emitted by css_style plugin)
+
+/// Processed v-bind() expression extracted from CSS.
+/// `v-bind(expr)` → `var(--{scope_id}-{sanitized})`.
+#[derive(Debug, Clone)]
+pub struct ProcessedCssVBind {
+    /// Span of the original expression inside v-bind(...) in SFC source.
+    pub expression: Span,
+    /// Generated CSS variable name bytes (e.g., b"--a4f2eed6-color").
+    /// Owned because it is computed, not a source slice.
+    pub var_name: Vec<u8>,
+    /// Byte offset of `v-bind(` in original SFC source.
+    pub css_start: u32,
+    /// Byte offset of closing `)` + 1 in original SFC source.
+    pub css_end: u32,
+}
+
+/// A single CSS module class mapping: original class name → hashed class name.
+#[derive(Debug, Clone)]
+pub struct CssModuleClassMapping {
+    /// Original class name span in source (e.g., "btn").
+    pub original: Span,
+    /// Hashed class name (e.g., b"_btn_a4f2eed60"). Owned, computed.
+    pub hashed: Vec<u8>,
+}
+
+/// CSS module metadata for a single `<style module>` block.
+#[derive(Debug, Clone)]
+pub struct CssModuleInfo {
+    /// Span of custom module name in source. None for default "$style".
+    pub custom_name: Option<Span>,
+    /// Class name mappings (original → hashed).
+    pub classes: Vec<CssModuleClassMapping>,
+}
+
+/// Result of CSS processing for a single `<style>` block.
+/// Emitted as `Event::ProcessedStyle` by the css_style plugin.
+#[derive(Debug)]
+pub struct ProcessedStyleBlock<'alloc> {
+    /// Style language (css, scss, sass, less, stylus).
+    pub lang: Option<StyleLang>,
+    /// Whether this block is scoped.
+    pub scoped: bool,
+    /// CSS module info (None if not a module block).
+    pub module: Option<CssModuleInfo>,
+
+    /// Transformed CSS bytes (scoped selectors applied, v-bind replaced, modules hashed).
+    /// None if no transformation was needed (plain unscoped style).
+    pub transformed_css: Option<Vec<u8>>,
+    /// v-bind() expressions extracted from this style block.
+    pub v_bind_expressions: Vec<ProcessedCssVBind>,
+
+    /// Original compiled start event (preserves source positions and attributes).
+    pub compiled_start: CompiledRootStyleStart<'alloc>,
+    /// Original compiled end event (preserves content span and close tag positions).
+    pub compiled_end: CompiledRootStyleEnd,
+}
+
+// /CSS processed types
 
 pub enum Event<'alloc> {
+    // Raw tokenizer events (emitted by Syntax)
     RootOpenStart(RootNodeOpenTagStart),
     RootOpenTagEnd(RootNodeOpenTagEnd),
     RootCloseTag(RootNodeCloseTag),
@@ -758,13 +849,21 @@ pub enum Event<'alloc> {
     Comment(Comment),
     Text(Text),
 
-    // Compiled
-    RootScript(CompiledRootScript),
-    RootTemplate(CompiledRootTemplate),
-    RootStyle(CompiledRootStyle),
-    RootUnknown(CompiledRootUnknown),
+    // Compiled root open/close (emitted by element_compiler)
+    CompiledScriptStart(CompiledRootScriptStart<'alloc>),
+    CompiledScriptEnd(CompiledRootScriptEnd),
+    CompiledTemplateStart(CompiledRootTemplateStart<'alloc>),
+    CompiledTemplateEnd(CompiledRootTemplateEnd),
+    CompiledStyleStart(CompiledRootStyleStart<'alloc>),
+    CompiledStyleEnd(CompiledRootStyleEnd),
+    CompiledUnknownStart(CompiledRootUnknownStart<'alloc>),
+    CompiledUnknownEnd(CompiledRootUnknownEnd),
 
-    // Oxc Parsed
+    // Compiled elements (emitted by element_compiler)
+    ElementStart(CompiledElementStart),
+    ElementClosed(CompiledElementClosed),
+
+    // OXC-parsed events (emitted by oxc_parser)
     OxcScript(OxcScript<'alloc>),
     OxcProp(OxcProp<'alloc>),
     OxcInterpolation(OxcInterpolation<'alloc>),
@@ -775,15 +874,21 @@ pub enum Event<'alloc> {
     OxcElseIfCondition(OxcElseIfCondition<'alloc>),
     OxcElseCondition(OxcElseCondition),
 
-    // Compiled
-    ElementStart(CompiledElementStart<'alloc>),
-    ElementClosed(CompiledElementClosed),
+    // OXC-compiled elements (emitted by oxc_parser after element_compiler)
+    OxcCompiledElementStart(OxcCompiledElementStart<'alloc>),
+    OxcCompiledElementClosed(OxcCompiledElementClosed),
 
-    // Scopes
+    // Scopes (raw, emitted by Syntax)
     ScopeIf(ElementScopeConditionIf),
     ScopeElseIf(ElementScopeConditionElseIf),
     ScopeElse(ElementScopeConditionElse),
     ScopeFor(ElementScopeFor),
     ScopeSlotElement(ElementScopeSlotElement),
     ScopeSlotTemplate(ElementScopeSlotTemplate),
+
+    // CSS processed style (emitted by css_style plugin)
+    ProcessedStyle(ProcessedStyleBlock<'alloc>),
+
+    // Binding metadata (emitted by code_gen_script)
+    ScriptBindings(super::binding_types::BindingMetadata),
 }

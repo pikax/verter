@@ -50,6 +50,14 @@ function verterTimingTitle(): string {
       </button>
       <button
         class="toggle-btn"
+        :class="{ active: store.showTSX }"
+        @click="store.toggleShowTSX"
+        title="Show TSX output tab (template compiled to JSX)"
+      >
+        TSX {{ store.showTSX ? "ON" : "OFF" }}
+      </button>
+      <button
+        class="toggle-btn"
         :class="{ active: store.autoSave }"
         @click="store.toggleAutoSave"
         :title="store.autoSave ? 'Auto-save enabled' : 'Manual save (Ctrl+S)'"
@@ -58,7 +66,11 @@ function verterTimingTitle(): string {
       </button>
       <div
         class="timing"
-        v-if="store.compileTiming.verter !== null || store.compileTiming.stripTypes !== null"
+        v-if="
+          store.compileTiming.verter !== null ||
+          store.compileTiming.stripTypes !== null ||
+          store.compileTiming.tsx !== null
+        "
       >
         <span
           v-if="store.compileTiming.verter !== null"
@@ -73,6 +85,13 @@ function verterTimingTitle(): string {
           title="Strip Types: TypeScript → JavaScript"
         >
           S: {{ store.compileTiming.stripTypes.toFixed(1) }}ms
+        </span>
+        <span
+          v-if="store.compileTiming.tsx !== null"
+          class="timing-item"
+          title="TSX generation: Template → JSX"
+        >
+          TSX: {{ store.compileTiming.tsx.toFixed(1) }}ms
         </span>
       </div>
       <button

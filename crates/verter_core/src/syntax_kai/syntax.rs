@@ -3,20 +3,16 @@ use crate::{
     cursor::ScriptLanguage,
     syntax_kai::{plugin::SyntaxPluginContext, types::*},
     tokenizer::{Event as TokenizerEvent, QuoteType},
-    utils::{
-        oxc::vue::extract_vfor_positions,
-        vue::{
-            is_html_tag, is_mathml_tag, is_svg_tag, is_tag_name_component, PatchFlag, PatchFlags,
-        },
+    utils::vue::{
+        is_html_tag, is_mathml_tag, is_svg_tag, is_tag_name_component, PatchFlag, PatchFlags,
     },
 };
 
 /// Flags that are mutually exclusive with FULL_PROPS.
 /// When dynamic keys are detected, these individual flags are cleared
 /// because FULL_PROPS implies a full diff that covers them all.
-const FULL_PROPS_EXCLUDES: PatchFlag = PatchFlag(
-    PatchFlags::Class as i16 | PatchFlags::Style as i16 | PatchFlags::Props as i16,
-);
+const FULL_PROPS_EXCLUDES: PatchFlag =
+    PatchFlag(PatchFlags::Class as i16 | PatchFlags::Style as i16 | PatchFlags::Props as i16);
 
 /// Estimate the patch flag contribution of a single prop and track dynamic prop names.
 ///
@@ -73,8 +69,7 @@ fn estimate_patch_flag(parent: &mut ElementOpenTagStart, prop: &Prop, bytes: &[u
                     parent.dynamic_props.clear();
                 } else if !parent.patch_flag.contains_unchecked(PatchFlags::FullProps) {
                     // :staticProp="expr" → PROPS (only if FULL_PROPS not already set)
-                    parent.patch_flag =
-                        parent.patch_flag.add_unchecked(PatchFlags::Props);
+                    parent.patch_flag = parent.patch_flag.add_unchecked(PatchFlags::Props);
                     if let Some(arg) = prop.arg {
                         parent.dynamic_props.push(arg);
                     }
@@ -89,8 +84,7 @@ fn estimate_patch_flag(parent: &mut ElementOpenTagStart, prop: &Prop, bytes: &[u
                 }
 
                 // all event listeners need hydration
-                parent.patch_flag =
-                    parent.patch_flag.add_unchecked(PatchFlags::NeedHydration);
+                parent.patch_flag = parent.patch_flag.add_unchecked(PatchFlags::NeedHydration);
                 if prop.has_dynamic_arg {
                     // @[dynamicEvent]="handler" → dynamic key
                     parent.patch_flag = parent
@@ -108,14 +102,12 @@ fn estimate_patch_flag(parent: &mut ElementOpenTagStart, prop: &Prop, bytes: &[u
                 // it will remove the patch flag.
                 if !parent.patch_flag.contains_unchecked(PatchFlags::FullProps) {
                     if is_component {
-                        parent.patch_flag =
-                            parent.patch_flag.add_unchecked(PatchFlags::Props);
+                        parent.patch_flag = parent.patch_flag.add_unchecked(PatchFlags::Props);
                         if let Some(arg) = prop.arg {
                             parent.dynamic_props.push(arg);
                         }
                     } else {
-                        parent.patch_flag =
-                            parent.patch_flag.add_unchecked(PatchFlags::Class);
+                        parent.patch_flag = parent.patch_flag.add_unchecked(PatchFlags::Class);
                     }
                 }
             }
@@ -123,38 +115,32 @@ fn estimate_patch_flag(parent: &mut ElementOpenTagStart, prop: &Prop, bytes: &[u
                 // On components, :style becomes PROPS. On elements, :style → STYLE.
                 if !parent.patch_flag.contains_unchecked(PatchFlags::FullProps) {
                     if is_component {
-                        parent.patch_flag =
-                            parent.patch_flag.add_unchecked(PatchFlags::Props);
+                        parent.patch_flag = parent.patch_flag.add_unchecked(PatchFlags::Props);
                         if let Some(arg) = prop.arg {
                             parent.dynamic_props.push(arg);
                         }
                     } else {
-                        parent.patch_flag =
-                            parent.patch_flag.add_unchecked(PatchFlags::Style);
+                        parent.patch_flag = parent.patch_flag.add_unchecked(PatchFlags::Style);
                     }
                 }
             }
             PropKind::Model => {
                 // v-model creates modelValue prop + onUpdate:modelValue event
                 if !parent.patch_flag.contains_unchecked(PatchFlags::FullProps) {
-                    parent.patch_flag =
-                        parent.patch_flag.add_unchecked(PatchFlags::Props);
+                    parent.patch_flag = parent.patch_flag.add_unchecked(PatchFlags::Props);
                     // "modelValue" is synthetic — codegen emits the string directly
                 }
-                parent.patch_flag =
-                    parent.patch_flag.add_unchecked(PatchFlags::NeedHydration);
+                parent.patch_flag = parent.patch_flag.add_unchecked(PatchFlags::NeedHydration);
             }
             PropKind::Show | PropKind::Directive => {
                 // v-show and custom directives have runtime hooks → NEED_PATCH
-                parent.patch_flag =
-                    parent.patch_flag.add_unchecked(PatchFlags::NeedPatch);
+                parent.patch_flag = parent.patch_flag.add_unchecked(PatchFlags::NeedPatch);
             }
             PropKind::Html | PropKind::Text => {
                 // v-html/v-text create innerHTML/textContent prop bindings → PROPS
                 // "innerHTML"/"textContent" are synthetic — codegen emits them directly
                 if !parent.patch_flag.contains_unchecked(PatchFlags::FullProps) {
-                    parent.patch_flag =
-                        parent.patch_flag.add_unchecked(PatchFlags::Props);
+                    parent.patch_flag = parent.patch_flag.add_unchecked(PatchFlags::Props);
                 }
             }
             PropKind::Value => {
@@ -203,6 +189,9 @@ pub enum RootNodeOpenTag {
 pub struct Syntax<'alloc> {
     template_mode: bool,
 
+    /// When true, skip patch flag estimation (Vapor uses renderEffect, not patch flags).
+    is_vapor: bool,
+
     root_script_events: Vec<Event<'alloc>>,
 
     /// Current parent element ID (NO_PARENT at root level)
@@ -222,9 +211,16 @@ pub struct Syntax<'alloc> {
 }
 
 impl<'alloc> Syntax<'alloc> {
+    /// Take ownership of the root_script_events collected during parsing.
+    /// Call this after all tokenizer events have been processed.
+    pub fn take_root_script_events(&mut self) -> Vec<Event<'alloc>> {
+        std::mem::take(&mut self.root_script_events)
+    }
+
     pub fn new(events: &'alloc mut Vec<Event<'alloc>>, template_mode: bool) -> Self {
         Self {
             template_mode,
+            is_vapor: false,
             last_parent_id: NO_PARENT,
             nested_level: 0,
             last_root_node: None,
@@ -489,12 +485,18 @@ impl<'alloc> Syntax<'alloc> {
                         }
 
                         let ev = RootNodeCloseTag {
-                            kind: root.kind,
+                            kind: root.kind.clone(),
                             start,
                             name_end,
                             end,
                         };
-                        self.events.push(Event::RootCloseTag(ev));
+
+                        // Route script close tag to root_script_events
+                        if root.kind == RootNodeKind::Script {
+                            self.root_script_events.push(Event::RootCloseTag(ev));
+                        } else {
+                            self.events.push(Event::RootCloseTag(ev));
+                        }
 
                         self.nested_level -= 1;
                         self.last_parent_id = NO_PARENT;
@@ -674,11 +676,13 @@ impl<'alloc> Syntax<'alloc> {
             is_directive: state.is_directive,
         };
 
-
         // estimate the patch_flag based on props
         // note patch_flags can also be changed by children
-        if let Some(parent) = &mut self.last_event_open_tag {
-            estimate_patch_flag(parent, &ev, ctx.bytes);
+        // Vapor uses renderEffect instead of patch flags, so skip estimation.
+        if !self.is_vapor {
+            if let Some(parent) = &mut self.last_event_open_tag {
+                estimate_patch_flag(parent, &ev, ctx.bytes);
+            }
         }
 
         if self.last_event_open_tag.is_none() && self.last_root_node.is_some() {
@@ -769,6 +773,17 @@ impl<'alloc> Syntax<'alloc> {
         //         _ => {}
         //     }
         // }
+
+        // Route script root props to root_script_events so the script pipeline
+        // has all the props it needs (setup, lang, etc.)
+        if self.last_event_open_tag.is_none() {
+            if let Some(RootNodeOpenTag::Start(ref root)) = self.last_root_node {
+                if root.kind == RootNodeKind::Script {
+                    self.root_script_events.push(Event::Prop(ev));
+                    return;
+                }
+            }
+        }
 
         self.events.push(Event::Prop(ev));
     }

@@ -20,6 +20,8 @@ export interface CodegenOptions {
   features?: FeatureFlags;
   /** When true (default), preserve TypeScript syntax in output. Set to false to strip types. */
   keepTs?: boolean;
+  /** When true, generate TSX output via the syntax_kai pipeline. Default: false. */
+  includeTsx?: boolean;
 }
 
 export interface CodegenResult {
@@ -31,6 +33,12 @@ export interface CodegenResult {
   codeWithSourceMap: string;
   /** Time taken for the Rust pipeline in milliseconds */
   durationMs: number;
+  /** The generated TSX code (all blocks: script + template JSX + commented styles) */
+  tsx: string;
+  /** Compiled CSS (scoped selectors applied, v-bind replaced) */
+  css: string;
+  /** Time taken for TSX generation in milliseconds */
+  tsxDurationMs: number;
 }
 
 export interface StripTypesResult {

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use verter_core::builder::codegen::{
     generate as core_generate, CodegenOptions as CoreOptions, FeatureFlags as CoreFeatures,
 };
+use verter_core::builder::codegen_kai::{generate_with_tsx_kai, KaiCodegenOptions};
 use verter_core::strip_types::strip_types as core_strip_types;
 use wasm_bindgen::prelude::*;
 
@@ -49,6 +50,10 @@ pub struct CodegenOptions {
     /// Set to false to strip type annotations for browser execution (playground).
     #[serde(default = "default_true")]
     pub keep_ts: bool,
+    /// When true, generate TSX output via the syntax_kai pipeline.
+    /// Default: false (skip TSX generation to save time).
+    #[serde(default)]
+    pub include_tsx: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -62,6 +67,12 @@ pub struct CodegenResult {
     pub code_with_source_map: String,
     /// Time taken for the Rust pipeline in milliseconds
     pub duration_ms: f64,
+    /// The generated TSX code (all blocks: script + template JSX + commented styles)
+    pub tsx: String,
+    /// Compiled CSS (scoped selectors applied, v-bind replaced)
+    pub css: String,
+    /// Time taken for TSX generation in milliseconds
+    pub tsx_duration_ms: f64,
 }
 
 fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
@@ -74,6 +85,14 @@ fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
     } else {
         serde_wasm_bindgen::from_value(options)
             .map_err(|e| JsValue::from_str(&format!("Invalid options: {}", e)))?
+    };
+
+    // Build kai options before moving opts fields into core_options
+    let kai_options = KaiCodegenOptions {
+        filename: opts.filename.clone(),
+        is_production: opts.is_production,
+        component_id: opts.component_id.clone(),
+        include_tsx: opts.include_tsx,
     };
 
     let core_options = CoreOptions {
@@ -91,11 +110,19 @@ fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
 
     let result = core_generate(input, &core_options, &allocator);
 
+    // Run the syntax_kai pipeline — always produces compiled CSS,
+    // optionally produces TSX (controlled by kai_options.include_tsx)
+    let tsx_allocator = oxc_allocator::Allocator::new();
+    let tsx_result = generate_with_tsx_kai(input, &kai_options, &tsx_allocator);
+
     let js_result = CodegenResult {
         code: result.code,
         source_map: result.source_map,
         code_with_source_map: result.code_with_source_map,
         duration_ms: result.duration_ms,
+        tsx: tsx_result.tsx,
+        css: tsx_result.css,
+        tsx_duration_ms: tsx_result.duration_ms,
     };
 
     serde_wasm_bindgen::to_value(&js_result)
