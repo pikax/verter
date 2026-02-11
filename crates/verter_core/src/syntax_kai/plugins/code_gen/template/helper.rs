@@ -20,10 +20,87 @@ pub fn patch_bindings<'alloc>(
             if !f.ignore {
                 if let Some(b) = map.get(&f.name) {
                     code_transform.prepend_left(f.span.start, b.accessor_prefix(is_inline));
+                } else {
+                    // Unresolved identifiers get _ctx. prefix (Vue behavior)
+                    code_transform.prepend_left(f.span.start, "_ctx.");
                 }
             }
         });
     }
+}
+
+/// Apply accessor prefixes to identifiers inside a dynamic arg expression string.
+///
+/// For dynamic args like `:[foo]` or `v-slot:[foo]`, the arg text includes brackets
+/// (e.g. `[foo]`). Identifiers within need accessor prefixes (e.g. `_ctx.` or `$setup.`).
+///
+/// This builds a new string with prefixes inserted, because the arg text is used
+/// inside `overwrite` calls (not at its original source position).
+///
+/// `arg_start` is the absolute position of the arg span start in the original source,
+/// used to compute offsets for each binding within the arg text.
+pub fn apply_dynamic_arg_prefix(
+    raw: &str,
+    arg_start: u32,
+    bindings_result: &Option<BindingExtractionResult>,
+    map: &FxHashMap<&str, BindingType>,
+    is_inline: bool,
+) -> String {
+    let Some(br) = bindings_result else {
+        return raw.to_string();
+    };
+
+    // Collect non-ignored bindings with their offsets within the arg text, sorted by position
+    let mut patches: Vec<(usize, &str)> = Vec::new();
+    for b in &br.bindings {
+        if b.ignore {
+            continue;
+        }
+        let prefix = if let Some(bt) = map.get(b.name) {
+            bt.accessor_prefix(is_inline)
+        } else {
+            "_ctx."
+        };
+        if prefix.is_empty() {
+            continue;
+        }
+        // b.span.start is the absolute position in the original source
+        let offset = (b.span.start - arg_start) as usize;
+        patches.push((offset, prefix));
+    }
+
+    if patches.is_empty() {
+        return raw.to_string();
+    }
+
+    // Sort by offset (should already be in order, but be safe)
+    patches.sort_by_key(|&(off, _)| off);
+
+    // Build the result string with prefixes inserted
+    let mut result = String::with_capacity(raw.len() + patches.len() * 6);
+    let mut last = 0;
+    for (offset, prefix) in &patches {
+        result.push_str(&raw[last..*offset]);
+        result.push_str(prefix);
+        last = *offset;
+    }
+    result.push_str(&raw[last..]);
+    result
+}
+
+/// Build a value string with accessor prefixes applied, for use in `overwrite` calls
+/// where we can't use `patch_bindings` (because the position falls inside an overwritten range).
+///
+/// This reads binding positions relative to `val_start` in the original source and inserts
+/// accessor prefixes at the corresponding offsets in the value text.
+pub fn build_prefixed_value(
+    val_text: &str,
+    val_start: u32,
+    bindings_result: &Option<BindingExtractionResult>,
+    map: &FxHashMap<&str, BindingType>,
+    is_inline: bool,
+) -> String {
+    apply_dynamic_arg_prefix(val_text, val_start, bindings_result, map, is_inline)
 }
 
 /// Returns the prefix for a child node based on context.
@@ -109,9 +186,15 @@ pub fn build_patch_flag_suffix(
             if i > 0 {
                 suffix.push_str(", ");
             }
-            suffix.push('"');
-            suffix.push_str(prop);
-            suffix.push('"');
+            // Dynamic arg expressions (e.g. `"on" + _ctx.event`) already start
+            // with `"` — emit them verbatim without extra quoting.
+            if prop.starts_with('"') {
+                suffix.push_str(prop);
+            } else {
+                suffix.push('"');
+                suffix.push_str(prop);
+                suffix.push('"');
+            }
         }
         suffix.push(']');
     }

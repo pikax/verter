@@ -73,8 +73,23 @@ pub(crate) enum ScopeClose {
     ElseIfTernary,
     /// `)`
     Else,
-    /// `}), 128 /* KEYED_FRAGMENT */))`
-    For,
+    /// `}), 128 /* KEYED_FRAGMENT */))` or `}), 256 /* UNKEYED_FRAGMENT */))`
+    /// `is_keyed` is true when the v-for element has a `:key` prop.
+    For { is_keyed: bool },
+}
+
+/// A runtime directive entry for `_withDirectives(vnode, [[dir, val, arg, mods], ...])`.
+///
+/// Each entry corresponds to one directive on the element.
+pub(crate) struct DirectiveEntry {
+    /// The directive identifier (e.g. `_vModelText`, `_vShow`, `_directive_focus`)
+    pub directive: String,
+    /// The bound value expression (e.g. `_ctx.msg`), or empty if none.
+    pub value: String,
+    /// The argument string (e.g. `"arg"`), or empty if none.
+    pub arg: String,
+    /// Modifier object (e.g. `{ trim: true, number: true }`), or empty if none.
+    pub modifiers: String,
 }
 
 pub(crate) struct StateStack {
@@ -103,6 +118,9 @@ pub(crate) struct StateStack {
     /// Whether this element is a component (vs native element).
     pub is_component: bool,
 
+    /// Position of `<` of the open tag — used for withDirectives prepend.
+    pub open_tag_start: u32,
+
     /// Position after `>` of the open tag — used as fallback emit position for self-closing.
     pub open_tag_end: u32,
 
@@ -124,6 +142,43 @@ pub(crate) struct StateStack {
     /// When v-else-if/v-else follows, the last entry is popped (consumed by the else branch).
     /// When this element closes, remaining entries get `_createCommentVNode("v-if", true)`.
     pub pending_vif_fallbacks: Vec<u32>,
+
+    /// Counter for v-if branch keys within this parent's scope.
+    /// Each new v-if chain starts at 0, incremented for each v-if/v-else-if/v-else branch.
+    pub vif_key_counter: u32,
+
+    /// v-if branch key to inject into this element's props (set by directives module).
+    /// When Some(N), the element gets `{ key: N }` injected into its props.
+    pub vif_branch_key: Option<u32>,
+
+    // -- Static hoisting fields --
+    /// Whether all props on this element are static (Value, ClassValue, StyleValue only).
+    /// Used to determine if props can be hoisted.
+    pub has_all_static_props: bool,
+
+    /// Whether this element has any props at all.
+    pub has_props: bool,
+
+    /// Whether this element has any scope directives (v-if, v-for, v-once, etc.).
+    pub has_scope_directives: bool,
+
+    // -- Slot fields --
+    /// Slot parameters text (from v-slot="params"). When Some, component children
+    /// are wrapped in `{ slotName: _withCtx((params) => [...]), _: 1 }`.
+    /// None means no v-slot directive → children are passed as normal args.
+    pub slot_params: Option<String>,
+    /// Slot name (from v-slot:name). None → "default".
+    /// For dynamic slots (`v-slot:[expr]`), stored as the expression text and
+    /// `slot_is_dynamic` is true.
+    pub slot_name: Option<String>,
+    /// Whether the slot name is dynamic (`v-slot:[expr]`).
+    pub slot_is_dynamic: bool,
+
+    // -- Directive fields --
+    /// Runtime directives that need `_withDirectives()` wrapping.
+    /// Populated during element open for v-model (native), v-show, and custom directives.
+    /// The close phase emits `_withDirectives(vnode, [...])`.
+    pub runtime_directives: Vec<DirectiveEntry>,
 }
 
 impl StateStack {
@@ -143,12 +198,22 @@ impl StateStack {
             cache_id: None,
 
             is_component: false,
+            open_tag_start: 0,
             open_tag_end: 0,
             patch_flag: PatchFlag::empty(),
             dynamic_props: Vec::new(),
             pending_scope_closes: Vec::new(),
             is_block_root: false,
             pending_vif_fallbacks: Vec::new(),
+            vif_key_counter: 0,
+            vif_branch_key: None,
+            has_all_static_props: true,
+            has_props: false,
+            has_scope_directives: false,
+            slot_params: None,
+            slot_name: None,
+            slot_is_dynamic: false,
+            runtime_directives: Vec::new(),
         }
     }
 
@@ -170,12 +235,22 @@ impl StateStack {
             cache_id: None,
 
             is_component: false,
+            open_tag_start: 0,
             open_tag_end: 0,
             patch_flag: PatchFlag::empty(),
             dynamic_props: Vec::new(),
             pending_scope_closes: Vec::new(),
             is_block_root: false,
             pending_vif_fallbacks: Vec::new(),
+            vif_key_counter: 0,
+            vif_branch_key: None,
+            has_all_static_props: true,
+            has_props: false,
+            has_scope_directives: false,
+            slot_params: None,
+            slot_name: None,
+            slot_is_dynamic: false,
+            runtime_directives: Vec::new(),
         }
     }
 }
@@ -195,10 +270,23 @@ pub struct TemplateGeneratorPlugin<'alloc> {
 
     cache_id_counter: u16,
 
+    /// Hoisted constants emitted before the render function.
+    /// Each entry is the full expression (e.g., `{ class: "app" }` or
+    /// `/*#__PURE__*/_createElementVNode("span", null, "static", -1 /* HOISTED */)`).
+    hoisted_constants: Vec<String>,
+
+    /// Position of the template open tag — hoisted constants are emitted here.
+    template_start_pos: u32,
+
     /// Component tag names encountered during traversal that need `_resolveComponent` declarations.
     /// Each entry is the original tag name (e.g., "MyComponent").
     /// Deduped — only the first occurrence per name is stored.
     resolved_components: Vec<String>,
+
+    /// Custom directive names encountered during traversal that need `_resolveDirective` declarations.
+    /// Each entry is the directive name without `v-` prefix (e.g., "focus", "my-directive").
+    /// Deduped — only the first occurrence per name is stored.
+    resolved_directives: Vec<String>,
 }
 
 impl<'alloc> TemplateGeneratorPlugin<'alloc> {
@@ -213,7 +301,10 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
             bindings: FxHashMap::default(),
             stack: Vec::with_capacity(50),
             cache_id_counter: 0,
+            hoisted_constants: Vec::new(),
+            template_start_pos: 0,
             resolved_components: Vec::new(),
+            resolved_directives: Vec::new(),
         }
     }
 
@@ -234,6 +325,7 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
         _ctx: &SyntaxPluginContext<'alloc>,
     ) {
         self.stack.push(StateStack::new());
+        self.template_start_pos = ev.tag_open.start;
 
         let code_transform = &mut self.code_transform.borrow_mut();
 
@@ -265,6 +357,21 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
     ) {
         let code_transform = &mut self.code_transform.borrow_mut();
 
+        // Emit hoisted constants before the render function.
+        // Vue places these at module scope: `const _hoisted_1 = { class: "app" }`
+        if !self.hoisted_constants.is_empty() {
+            let mut hoist_str = String::new();
+            for (i, constant) in self.hoisted_constants.iter().enumerate() {
+                hoist_str.push_str(&format!(
+                    "const _hoisted_{} = {};\n",
+                    i + 1, // 1-indexed like Vue
+                    constant
+                ));
+            }
+            // prepend_left at template start — appears before the `function render(` replacement
+            code_transform.prepend_left(self.template_start_pos, &hoist_str);
+        }
+
         let extra_return = if let Some(state) = self.stack.pop() {
             // Emit pending v-if fallback comments for root-level children.
             // These are v-if/v-else-if chains that ended without a v-else.
@@ -284,8 +391,9 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
             if state.children.is_empty() {
                 "return null"
             } else {
-                // Build _resolveComponent declarations for any components used.
+                // Build _resolveComponent and _resolveDirective declarations.
                 // Vue pattern: const _component_X = _resolveComponent("X")
+                //              const _directive_X = _resolveDirective("X")
                 let mut resolve_decls = String::new();
                 for comp_name in &self.resolved_components {
                     resolve_decls.push_str(&format!(
@@ -293,28 +401,65 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
                         comp_name, comp_name
                     ));
                 }
+                for dir_name in &self.resolved_directives {
+                    let var_name = dir_name.replace('-', "_");
+                    resolve_decls.push_str(&format!(
+                        "const _directive_{} = _resolveDirective(\"{}\");\n",
+                        var_name, dir_name
+                    ));
+                }
 
-                // Insert declarations + "return " + scope_prefix + content_prefix
-                // before first root child. Combining into a single prepend_left
-                // ensures correct ordering.
-                let first = &state.children[0];
-                code_transform.prepend_left(
-                    first.start,
-                    &format!(
-                        "{}return {}{}",
-                        resolve_decls,
-                        first.scope_prefix,
-                        first.kind.content_prefix()
-                    ),
-                );
-                // Insert ", " + scope_prefix + content_prefix between subsequent root children
-                for child in state.children.iter().skip(1) {
+                let is_multi_root = state.children.len() > 1;
+
+                if is_multi_root {
+                    // Multiple roots: wrap in Fragment block
+                    // return (_openBlock(), _createElementBlock(_Fragment, null, [child1, child2], 64))
+                    self.imports.add(TemplateImportDependencies::OPEN_BLOCK);
+                    self.imports
+                        .add(TemplateImportDependencies::CREATE_ELEMENT_BLOCK);
+                    self.imports.add(TemplateImportDependencies::FRAGMENT);
+
+                    let first = &state.children[0];
                     code_transform.prepend_left(
-                        child.start,
-                        &format!(", {}{}", child.scope_prefix, child.kind.content_prefix()),
+                        first.start,
+                        &format!(
+                            "{}return (_openBlock(), _createElementBlock(_Fragment, null, [{}{}",
+                            resolve_decls,
+                            first.scope_prefix,
+                            first.kind.content_prefix()
+                        ),
+                    );
+                    for child in state.children.iter().skip(1) {
+                        code_transform.prepend_left(
+                            child.start,
+                            &format!(", {}{}", child.scope_prefix, child.kind.content_prefix()),
+                        );
+                    }
+                    // Close will be ], 64 /* STABLE_FRAGMENT */))
+                    // stored in extra_return via the template close tag handler
+                } else {
+                    // Single root: direct return
+                    let first = &state.children[0];
+                    code_transform.prepend_left(
+                        first.start,
+                        &format!(
+                            "{}return {}{}",
+                            resolve_decls,
+                            first.scope_prefix,
+                            first.kind.content_prefix()
+                        ),
                     );
                 }
-                ""
+
+                if is_multi_root {
+                    if self.is_production {
+                        "], 64))"
+                    } else {
+                        "], 64 /* STABLE_FRAGMENT */))"
+                    }
+                } else {
+                    ""
+                }
             }
         } else {
             "return null"
@@ -364,6 +509,9 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
             });
         }
 
+        // Extract the parent's vif_key_counter before creating child (since create_child consumes &mut parent)
+        let mut parent_vif_key_counter = parent.vif_key_counter;
+
         let mut state = parent.create_child(ev.event.element_id);
 
         // Root-level elements (direct children of <template>) are block roots.
@@ -385,7 +533,16 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
             self.is_production,
             &mut state,
             &mut self.imports,
+            &mut parent_vif_key_counter,
         );
+
+        // Write back the updated vif_key_counter to the parent
+        // (parent is at top of stack, we'll re-borrow it)
+        drop(code_transform);
+        if let Some(parent) = self.stack.last_mut() {
+            parent.vif_key_counter = parent_vif_key_counter;
+        }
+        code_transform = self.code_transform.borrow_mut();
 
         // Store the scope prefix on the parent's last ChildInfo (if this is a child).
         if !is_vif_continuation && !scope_prefix.is_empty() {
@@ -444,6 +601,80 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
             code_transform = self.code_transform.borrow_mut();
         }
 
+        // 2b. Handle v-slot (slot scopes on component elements and template children)
+        //
+        // SlotElement: `<Button v-slot="foo">` — default slot on the component itself
+        // SlotTemplate: `<template v-slot:name="params">` — named slot on a <template> child
+        //
+        // For SlotElement, we store slot_params on the component state so the close phase
+        // wraps children in `{ default: _withCtx((params) => [...]), _: 1 }`.
+        //
+        // For SlotTemplate, the <template> element itself becomes a named slot entry.
+        // TODO: Named slots via SlotTemplate are tracked but not yet fully emitted.
+        for scope in &ev.scopes {
+            let (event, parsed, slot_name, is_dynamic) =
+                match scope {
+                    ElementScope::SlotElement(s) => {
+                        let name =
+                            s.event.arg.as_ref().map(|arg| {
+                                ctx.input[arg.start as usize..arg.end as usize].to_string()
+                            });
+                        (&s.event, &s.parsed, name, s.event.has_dynamic_arg)
+                    }
+                    ElementScope::SlotTemplate(s) => {
+                        let name =
+                            s.event.arg.as_ref().map(|arg| {
+                                ctx.input[arg.start as usize..arg.end as usize].to_string()
+                            });
+                        (&s.event, &s.parsed, name, s.event.has_dynamic_arg)
+                    }
+                    _ => continue,
+                };
+
+            // Remove the v-slot directive from source
+            code_transform.remove(event.start, event.end);
+
+            // Use raw source text for params (preserves destructuring like `{ data }`)
+            let params = if let Some(val) = event.value {
+                ctx.input[val.start as usize..val.end as usize].to_string()
+            } else if !parsed.locals.is_empty() {
+                parsed
+                    .locals
+                    .iter()
+                    .map(|span| &ctx.input[span.start as usize..span.end as usize])
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            } else {
+                String::new()
+            };
+
+            state.slot_params = Some(params);
+            // For dynamic slot names (`v-slot:[foo]`), apply accessor prefix
+            // to the inner expression. The arg span includes brackets, e.g. `[foo]`.
+            state.slot_name = if is_dynamic {
+                slot_name.map(|name| {
+                    // Strip brackets: `[foo]` → `foo`
+                    let inner = name
+                        .strip_prefix('[')
+                        .and_then(|s| s.strip_suffix(']'))
+                        .unwrap_or(&name);
+                    // Look up binding and apply accessor prefix
+                    if let Some(bt) = self.bindings.get(inner) {
+                        let prefix = bt.accessor_prefix(false);
+                        format!("[{}{}]", prefix, inner)
+                    } else {
+                        // Unresolved → _ctx. prefix
+                        format!("[_ctx.{}]", inner)
+                    }
+                })
+            } else {
+                slot_name
+            };
+            state.slot_is_dynamic = is_dynamic;
+
+            self.imports.add(TemplateImportDependencies::WITH_CTX);
+        }
+
         // 3. Element VNode open — mutates state (is_component, patch_flag, etc.)
         element::handle_element_open(
             &mut code_transform,
@@ -454,6 +685,8 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
             &mut state,
             &mut self.imports,
             &mut self.resolved_components,
+            &mut self.resolved_directives,
+            &mut self.hoisted_constants,
         );
 
         // 4. Void/self-closing elements never get an OxcCompiledElementClosed event,
@@ -526,7 +759,13 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
         }
 
         // 2. Close element VNode
-        element::handle_element_close(&mut code_transform, ev, &state, self.is_production);
+        element::handle_element_close(
+            &mut code_transform,
+            ev,
+            &state,
+            self.is_production,
+            &mut self.imports,
+        );
 
         // 3. Close scope directives
         let close_pos = ev
@@ -944,31 +1183,49 @@ mod tests {
     #[test]
     fn test_props_static_id() {
         let code = gen_and_validate(r#"<template><div id="app">hi</div></template>"#);
+        // Static props are hoisted: const _hoisted_1 = { id: "app" }
         assert!(
-            code.contains(r#"{id: "app"}"#),
-            "Should have static id prop, got:\n{}",
+            code.contains(r#"_hoisted_1 = { id: "app" }"#),
+            "Static id prop should be hoisted, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_hoisted_1"),
+            "Render function should reference _hoisted_1, got:\n{}",
             code
         );
     }
 
-    /// @ai-generated — Static class attribute
+    /// @ai-generated — Static class attribute (hoisted)
     #[test]
     fn test_props_static_class() {
         let code = gen_and_validate(r#"<template><div class="foo bar">hi</div></template>"#);
+        // Static class is hoisted
         assert!(
             code.contains(r#"class: "foo bar""#),
-            "Should have class prop, got:\n{}",
+            "Should have class prop in hoisted constant, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_hoisted_1"),
+            "Render function should reference hoisted props, got:\n{}",
             code
         );
     }
 
-    /// @ai-generated — Static style attribute
+    /// @ai-generated — Static style attribute (hoisted)
     #[test]
     fn test_props_static_style() {
         let code = gen_and_validate(r#"<template><div style="color: red">hi</div></template>"#);
+        // Static style is hoisted
         assert!(
             code.contains(r#"style: "color: red""#),
-            "Should have style prop, got:\n{}",
+            "Should have style prop in hoisted constant, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_hoisted_1"),
+            "Render function should reference hoisted props, got:\n{}",
             code
         );
     }
@@ -993,8 +1250,8 @@ mod tests {
     fn test_props_bound_id() {
         let code = gen_and_validate(r#"<template><div :id="myId">hi</div></template>"#);
         assert!(
-            code.contains("{id: myId}"),
-            "Bound id should be {{id: myId}}, got:\n{}",
+            code.contains("{id: _ctx.myId}"),
+            "Bound id should be {{id: _ctx.myId}}, got:\n{}",
             code
         );
         assert!(
@@ -1014,7 +1271,7 @@ mod tests {
     fn test_props_class_normalize() {
         let code = gen_and_validate(r#"<template><div :class="cls">hi</div></template>"#);
         assert!(
-            code.contains("class: _normalizeClass(cls)"),
+            code.contains("class: _normalizeClass(_ctx.cls)"),
             "Should use _normalizeClass, got:\n{}",
             code
         );
@@ -1030,7 +1287,7 @@ mod tests {
     fn test_props_style_normalize() {
         let code = gen_and_validate(r#"<template><div :style="sty">hi</div></template>"#);
         assert!(
-            code.contains("style: _normalizeStyle(sty)"),
+            code.contains("style: _normalizeStyle(_ctx.sty)"),
             "Should use _normalizeStyle, got:\n{}",
             code
         );
@@ -1051,7 +1308,7 @@ mod tests {
             code
         );
         assert!(
-            code.contains("title: d"),
+            code.contains("title: _ctx.d"),
             "Bound title should be present, got:\n{}",
             code
         );
@@ -1067,12 +1324,12 @@ mod tests {
     fn test_props_class_style_combined() {
         let code = gen_and_validate(r#"<template><div :class="c" :style="s">hi</div></template>"#);
         assert!(
-            code.contains("_normalizeClass(c)"),
+            code.contains("_normalizeClass(_ctx.c)"),
             "Should have _normalizeClass, got:\n{}",
             code
         );
         assert!(
-            code.contains("_normalizeStyle(s)"),
+            code.contains("_normalizeStyle(_ctx.s)"),
             "Should have _normalizeStyle, got:\n{}",
             code
         );
@@ -1097,6 +1354,151 @@ mod tests {
     }
 
     // =========================================================================
+    // Static Hoisting
+    // Vue hoists static props to module-scope constants: const _hoisted_N = { ... }
+    // =========================================================================
+
+    /// @ai-generated — Static props hoisted to _hoisted_1 constant
+    #[test]
+    fn test_hoist_static_props() {
+        let code = gen_and_validate(r#"<template><div class="app">{{ msg }}</div></template>"#);
+        assert!(
+            code.contains(r#"const _hoisted_1 = { class: "app" };"#),
+            "Static props should be hoisted, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_hoisted_1"),
+            "Render function should reference _hoisted_1, got:\n{}",
+            code
+        );
+        // Inline props should NOT appear in render function
+        assert!(
+            !code.contains(r#"_createElementBlock("div", {class"#),
+            "Props should not be inline in render function, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Multiple static prop elements get separate hoisted constants
+    #[test]
+    fn test_hoist_multiple_props() {
+        let code = gen_and_validate(
+            r#"<template><div><span class="inner">{{ a }}</span><p id="footer">{{ b }}</p></div></template>"#,
+        );
+        assert!(
+            code.contains("_hoisted_1"),
+            "First element's props should be hoisted, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_hoisted_2"),
+            "Second element's props should be hoisted, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Mixed static+dynamic props are NOT hoisted
+    #[test]
+    fn test_hoist_mixed_props_not_hoisted() {
+        let code = gen_and_validate(r#"<template><div class="app" :id="myId">hi</div></template>"#);
+        assert!(
+            !code.contains("_hoisted_"),
+            "Mixed static+dynamic props should NOT be hoisted, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Event handler prevents hoisting
+    #[test]
+    fn test_hoist_event_prevents_hoisting() {
+        let code =
+            gen_and_validate(r#"<template><button class="btn" @click="go">hi</button></template>"#);
+        assert!(
+            !code.contains("_hoisted_"),
+            "Element with event handler should NOT have hoisted props, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — No props = no hoisting (null)
+    #[test]
+    fn test_hoist_no_props() {
+        let code = gen_and_validate(r#"<template><div>hi</div></template>"#);
+        assert!(
+            !code.contains("_hoisted_"),
+            "Element without props should not produce hoisted constants, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Component props are NOT hoisted (Vue rule)
+    #[test]
+    fn test_hoist_component_not_hoisted() {
+        let code =
+            gen_and_validate(r#"<template><MyComponent class="app">hi</MyComponent></template>"#);
+        assert!(
+            !code.contains("_hoisted_"),
+            "Component props should NOT be hoisted, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Hoisted constant appears before render function
+    #[test]
+    fn test_hoist_placement_before_render() {
+        let code = gen_and_validate(r#"<template><div id="app">{{ msg }}</div></template>"#);
+        let hoist_pos = code.find("const _hoisted_1").unwrap();
+        let render_pos = code.find("function render").unwrap();
+        assert!(
+            hoist_pos < render_pos,
+            "Hoisted constant should appear before render function, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Multiple static attributes hoisted together
+    #[test]
+    fn test_hoist_multiple_attrs() {
+        let code = gen_and_validate(
+            r#"<template><div id="app" class="main" style="color:red">{{ msg }}</div></template>"#,
+        );
+        assert!(
+            code.contains("_hoisted_1"),
+            "Multiple static attrs should be hoisted together, got:\n{}",
+            code
+        );
+        // All three props in the hoisted constant
+        assert!(
+            code.contains(r#"id: "app""#),
+            "Hoisted constant should contain id, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains(r#"class: "main""#),
+            "Hoisted constant should contain class, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains(r#"style: "color:red""#),
+            "Hoisted constant should contain style, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Production mode also hoists static props
+    #[test]
+    fn test_hoist_production_mode() {
+        let code =
+            gen_prod_and_validate(r#"<template><div class="app">{{ msg }}</div></template>"#);
+        assert!(
+            code.contains("_hoisted_1"),
+            "Production mode should also hoist static props, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
     // Events — @click etc.
     // =========================================================================
 
@@ -1106,8 +1508,18 @@ mod tests {
         let code =
             gen_and_validate(r#"<template><button @click="handler">click</button></template>"#);
         assert!(
-            code.contains("onClick: handler"),
-            "Should have onClick: handler, got:\n{}",
+            code.contains("onClick: _ctx.handler"),
+            "Should have onClick: _ctx.handler, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("8 /* PROPS */"),
+            "Event should produce PROPS (8) patch flag, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains(r#"["onClick"]"#),
+            "Event name should be in dynamic props list, got:\n{}",
             code
         );
     }
@@ -1119,20 +1531,29 @@ mod tests {
             r#"<template><button @click="a" @mouseover="b">hi</button></template>"#,
         );
         assert!(
-            code.contains("onClick: a"),
-            "Should have onClick, got:\n{}",
+            code.contains("onClick: _ctx.a"),
+            "Should have onClick: _ctx.a, got:\n{}",
             code
         );
         assert!(
-            code.contains("onMouseover: b"),
-            "Should have onMouseover, got:\n{}",
+            code.contains("onMouseover: _ctx.b"),
+            "Should have onMouseover: _ctx.b, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("8 /* PROPS */"),
+            "Events should produce PROPS (8) patch flag, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains(r#"["onClick", "onMouseover"]"#),
+            "Event names should be in dynamic props list, got:\n{}",
             code
         );
     }
 
     /// @ai-generated — Vue treats events as PROPS patch flag with event name in dynamic props
     #[test]
-    #[ignore = "events should track PROPS patch flag like Vue"]
     fn test_event_props_patch_flag() {
         let code =
             gen_and_validate(r#"<template><button @click="handler">click</button></template>"#);
@@ -1211,8 +1632,8 @@ mod tests {
             code
         );
         assert!(
-            code.contains("a ? b : c"),
-            "Ternary expression should be preserved, got:\n{}",
+            code.contains("_ctx.a ? _ctx.b : _ctx.c"),
+            "Ternary expression should be preserved with _ctx. prefix, got:\n{}",
             code
         );
     }
@@ -1247,6 +1668,127 @@ const msg = ref('hello')
         assert!(
             code.contains("$setup.msg"),
             "Setup binding should have $setup prefix, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Event handler with $setup binding prefix: onClick: $setup.increment
+    #[test]
+    fn test_event_with_setup_binding() {
+        let code = gen_and_validate(
+            r#"<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+function increment() { count.value++ }
+</script>
+<template><button @click="increment">Count: {{ count }}</button></template>"#,
+        );
+        assert!(
+            code.contains("onClick: $setup.increment"),
+            "Event handler should have $setup. prefix BEFORE identifier, got:\n{}",
+            code
+        );
+        // Make sure the broken pattern is NOT present
+        assert!(
+            !code.contains("increment$setup."),
+            "Accessor prefix must not appear AFTER identifier, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Bound prop with $setup binding prefix: id: $setup.myId
+    #[test]
+    fn test_bound_prop_with_setup_binding() {
+        let code = gen_and_validate(
+            r#"<script setup>
+import { ref } from 'vue'
+const myId = ref('app')
+</script>
+<template><div :id="myId">hi</div></template>"#,
+        );
+        assert!(
+            code.contains("id: $setup.myId"),
+            "Bound prop should have $setup. prefix BEFORE identifier, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("myId$setup."),
+            "Accessor prefix must not appear AFTER identifier, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — :class with $setup binding: class: _normalizeClass($setup.cls)
+    #[test]
+    fn test_class_bind_with_setup_binding() {
+        let code = gen_and_validate(
+            r#"<script setup>
+import { ref } from 'vue'
+const cls = ref('active')
+</script>
+<template><div :class="cls">hi</div></template>"#,
+        );
+        assert!(
+            code.contains("_normalizeClass($setup.cls)"),
+            ":class binding should have $setup. prefix BEFORE identifier, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — :style with $setup binding: style: _normalizeStyle($setup.sty)
+    #[test]
+    fn test_style_bind_with_setup_binding() {
+        let code = gen_and_validate(
+            r#"<script setup>
+import { ref } from 'vue'
+const sty = ref({ color: 'red' })
+</script>
+<template><div :style="sty">hi</div></template>"#,
+        );
+        assert!(
+            code.contains("_normalizeStyle($setup.sty)"),
+            ":style binding should have $setup. prefix BEFORE identifier, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Full SFC with multiple setup bindings in template
+    #[test]
+    fn test_full_sfc_setup_bindings() {
+        let code = gen_and_validate(
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+const message = ref('Hello from Verter!')
+function increment() { count.value++ }
+</script>
+<template>
+  <div class="app">
+    <h1>{{ message }}</h1>
+    <button @click="increment">Count: {{ count }}</button>
+  </div>
+</template>"#,
+        );
+        // Check all setup bindings have correct prefix
+        assert!(
+            code.contains("$setup.message"),
+            "Interpolation binding should have $setup prefix, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("onClick: $setup.increment"),
+            "Event handler should have $setup prefix, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("$setup.count"),
+            "Second interpolation binding should have $setup prefix, got:\n{}",
+            code
+        );
+        // Static class should be hoisted
+        assert!(
+            code.contains(r#"_hoisted_1 = { class: "app" }"#),
+            "Static class should be hoisted to _hoisted_1, got:\n{}",
             code
         );
     }
@@ -1382,7 +1924,7 @@ const msg = ref('hello')
     fn test_v_if_ternary() {
         let code = gen(r#"<template><div v-if="show">yes</div></template>"#);
         assert!(
-            code.contains("(show) ? ("),
+            code.contains("(_ctx.show) ? ("),
             "v-if should produce ternary, got:\n{}",
             code
         );
@@ -1398,7 +1940,7 @@ const msg = ref('hello')
     fn test_v_if_else() {
         let code = gen(r#"<template><div v-if="show">yes</div><div v-else>no</div></template>"#);
         assert!(
-            code.contains("(show) ? ("),
+            code.contains("(_ctx.show) ? ("),
             "Should have v-if ternary, got:\n{}",
             code
         );
@@ -1421,12 +1963,12 @@ const msg = ref('hello')
             r#"<template><div v-if="a">A</div><div v-else-if="b">B</div><div v-else>C</div></template>"#,
         );
         assert!(
-            code.contains("(a) ? ("),
+            code.contains("(_ctx.a) ? ("),
             "Should have first condition, got:\n{}",
             code
         );
         assert!(
-            code.contains("(b) ? ("),
+            code.contains("(_ctx.b) ? ("),
             "Should have else-if condition, got:\n{}",
             code
         );
@@ -1474,7 +2016,6 @@ const msg = ref('hello')
 
     /// @ai-generated — v-if branches should have { key: N } injection
     #[test]
-    #[ignore = "requires v-if key injection"]
     fn test_v_if_key_injection() {
         let code = gen_and_validate(r#"<template><div v-if="show">yes</div></template>"#);
         assert!(
@@ -1521,9 +2062,7 @@ const msg = ref('hello')
     }
 
     /// @ai-generated — Keyed v-for uses KEYED_FRAGMENT (128)
-    /// Current codegen always outputs UNKEYED (128 for both) — Vue uses 128 for keyed, 256 for unkeyed
     #[test]
-    #[ignore = "requires keyed vs unkeyed fragment distinction"]
     fn test_v_for_keyed_fragment() {
         let code =
             gen(r#"<template><div v-for="item in items" :key="item">{{ item }}</div></template>"#);
@@ -1795,7 +2334,7 @@ const msg = ref('hello')
             code
         );
         assert!(
-            code.contains("msg: hello"),
+            code.contains("msg: _ctx.hello"),
             "Should pass props, got:\n{}",
             code
         );
@@ -1995,7 +2534,6 @@ const msg = ref('hello')
 
     /// @ai-generated — Multiple roots should use Fragment wrapping
     #[test]
-    #[ignore = "requires Fragment wrapping for multiple roots"]
     fn test_multiple_roots_fragment() {
         let code = gen_and_validate(r#"<template><div>a</div><div>b</div></template>"#);
         assert!(
@@ -2149,8 +2687,8 @@ const x = 1
     fn test_v_if_full_output() {
         let code = gen_and_validate(r#"<template><div v-if="show">yes</div></template>"#);
         assert!(
-            code.contains("return (show) ? (_openBlock(), _createElementBlock("),
-            "v-if should produce return (cond) ? (_openBlock(), _createElementBlock..., got:\n{}",
+            code.contains("return (_ctx.show) ? (_openBlock(), _createElementBlock("),
+            "v-if should produce return (_ctx.show) ? (_openBlock(), _createElementBlock..., got:\n{}",
             code
         );
         assert!(
@@ -2174,7 +2712,7 @@ const x = 1
             code
         );
         assert!(
-            code.contains("(show) ? (_openBlock()"),
+            code.contains("(_ctx.show) ? (_openBlock()"),
             "v-if branch should be block root, got:\n{}",
             code
         );
@@ -2205,12 +2743,12 @@ const x = 1
             code
         );
         assert!(
-            code.contains("(a) ? ("),
+            code.contains("(_ctx.a) ? ("),
             "First condition should be present, got:\n{}",
             code
         );
         assert!(
-            code.contains("(b) ? ("),
+            code.contains("(_ctx.b) ? ("),
             "Second condition should be present, got:\n{}",
             code
         );
@@ -2246,7 +2784,7 @@ const x = 1
         );
         // Nested v-if branch should also be a block root
         assert!(
-            code.contains("(show) ? (_openBlock(), _createElementBlock(\"span\""),
+            code.contains("(_ctx.show) ? (_openBlock(), _createElementBlock(\"span\""),
             "Nested v-if should be block root, got:\n{}",
             code
         );
@@ -2298,7 +2836,7 @@ const x = 1
             code
         );
         assert!(
-            code.contains("(show) ? "),
+            code.contains("(_ctx.show) ? "),
             "v-if ternary should be present in array, got:\n{}",
             code
         );
@@ -2318,12 +2856,873 @@ const x = 1
 
     /// @ai-generated — Bound :id with _ctx prefix (template-only, no script setup)
     #[test]
-    #[ignore = "requires _ctx prefix for unresolved bindings"]
     fn test_bound_prop_ctx_prefix() {
         let code = gen_and_validate(r#"<template><div :id="myId">hi</div></template>"#);
         assert!(
             code.contains("_ctx.myId"),
             "Unresolved binding should get _ctx. prefix, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
+    // Class/Style Merging
+    // Vue merges static + dynamic class/style:
+    //   class="app" :class="msg" → class: _normalizeClass(["app", msg])
+    //   style="color:red" :style="s" → style: _normalizeStyle(["color:red", s])
+    // =========================================================================
+
+    /// @ai-generated — class="app" :class="msg" → _normalizeClass(["app", msg])
+    #[test]
+    fn test_class_merge_static_and_dynamic() {
+        let code =
+            gen_and_validate(r#"<template><div class="app" :class="msg">hi</div></template>"#);
+        assert!(
+            code.contains(r#"_normalizeClass(["app", "#),
+            "Should merge static+dynamic class into _normalizeClass array, got:\n{}",
+            code
+        );
+        // Must NOT have two separate `class:` properties
+        let class_count = code.matches("class:").count();
+        assert_eq!(
+            class_count, 1,
+            "Should have exactly one class: property (merged), got {} in:\n{}",
+            class_count, code
+        );
+    }
+
+    /// @ai-generated — style="color:red" :style="s" → _normalizeStyle(["color:red", s])
+    #[test]
+    fn test_style_merge_static_and_dynamic() {
+        let code =
+            gen_and_validate(r#"<template><div style="color:red" :style="s">hi</div></template>"#);
+        assert!(
+            code.contains(r#"_normalizeStyle(["color:red", "#),
+            "Should merge static+dynamic style into _normalizeStyle array, got:\n{}",
+            code
+        );
+        let style_count = code.matches("style:").count();
+        assert_eq!(
+            style_count, 1,
+            "Should have exactly one style: property (merged), got {} in:\n{}",
+            style_count, code
+        );
+    }
+
+    /// @ai-generated — class="app" :class="msg" with setup bindings
+    #[test]
+    fn test_class_merge_with_setup_bindings() {
+        let code = gen_and_validate(
+            r#"<script setup>
+import { ref } from 'vue'
+const msg = ref('active')
+</script>
+<template><div class="app" :class="msg">hi</div></template>"#,
+        );
+        assert!(
+            code.contains(r#"_normalizeClass(["app", $setup.msg])"#),
+            "Should merge class with $setup binding prefix, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — style="color:red" :style="sty" with setup bindings
+    #[test]
+    fn test_style_merge_with_setup_bindings() {
+        let code = gen_and_validate(
+            r#"<script setup>
+import { ref } from 'vue'
+const sty = ref({ fontSize: '14px' })
+</script>
+<template><div style="color:red" :style="sty">hi</div></template>"#,
+        );
+        assert!(
+            code.contains(r#"_normalizeStyle(["color:red", $setup.sty])"#),
+            "Should merge style with $setup binding prefix, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Only :class (no static class) should NOT use array form
+    #[test]
+    fn test_class_bind_only_no_merge() {
+        let code = gen_and_validate(r#"<template><div :class="cls">hi</div></template>"#);
+        assert!(
+            code.contains("_normalizeClass("),
+            "Should have _normalizeClass, got:\n{}",
+            code
+        );
+        // Should NOT use array form when there's no static class to merge
+        assert!(
+            !code.contains(r#"_normalizeClass(["#),
+            "Should NOT use array form without static class, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Only class="app" (no :class bind) should be a plain string prop
+    #[test]
+    fn test_class_static_only_no_merge() {
+        let code = gen_and_validate(r#"<template><div class="app" :id="x">hi</div></template>"#);
+        assert!(
+            code.contains(r#"class: "app""#),
+            "Static class without :class should be plain string, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("_normalizeClass"),
+            "Should NOT use _normalizeClass without :class, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — class="app" :class="cls" with additional props
+    #[test]
+    fn test_class_merge_with_other_props() {
+        let code = gen_and_validate(
+            r#"<template><div id="main" class="app" :class="cls" :title="t">hi</div></template>"#,
+        );
+        assert!(
+            code.contains(r#"_normalizeClass(["app", "#),
+            "Should merge class even with other props present, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains(r#"id: "main""#),
+            "Other static props should still work, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("title: "),
+            "Other bound props should still work, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Both class and style merging simultaneously
+    #[test]
+    fn test_class_and_style_merge_together() {
+        let code = gen_and_validate(
+            r#"<template><div class="app" :class="c" style="color:red" :style="s">hi</div></template>"#,
+        );
+        assert!(
+            code.contains(r#"_normalizeClass(["app", "#),
+            "Should merge class, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains(r#"_normalizeStyle(["color:red", "#),
+            "Should merge style, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
+    // Event Handler Wrapping
+    // Vue wraps non-identifier/non-member expressions:
+    //   @click="fn()" → onClick: $event => (fn())
+    //   @click="handler" → onClick: handler (no wrapping)
+    //   @click="obj.method" → onClick: obj.method (no wrapping)
+    //   @click="() => doSomething()" → onClick: () => doSomething() (no wrapping)
+    // =========================================================================
+
+    /// @ai-generated — Call expression gets wrapped: @click="fn()" → $event => (fn())
+    #[test]
+    fn test_event_handler_wrap_call_expr() {
+        let code = gen_and_validate(
+            r#"<template><button @click="doSomething()">click</button></template>"#,
+        );
+        assert!(
+            code.contains("$event => ("),
+            "Call expression handler should be wrapped with $event =>, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Call with $event arg gets wrapped: @click="fn($event)" → $event => (fn($event))
+    #[test]
+    fn test_event_handler_wrap_call_with_event() {
+        let code = gen_and_validate(
+            r#"<script setup>
+function increment(e) { console.log(e) }
+</script>
+<template><button @click="increment($event)">click</button></template>"#,
+        );
+        assert!(
+            code.contains("$event => ($setup.increment(_ctx.$event))"),
+            "Call expression with $event should be wrapped, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Simple identifier is NOT wrapped: @click="handler" → onClick: handler
+    #[test]
+    fn test_event_handler_no_wrap_identifier() {
+        let code =
+            gen_and_validate(r#"<template><button @click="handler">click</button></template>"#);
+        assert!(
+            code.contains("onClick: _ctx.handler"),
+            "Identifier handler should NOT be wrapped, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("$event =>"),
+            "Identifier handler should NOT have $event wrapper, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Member expression is NOT wrapped: @click="obj.method"
+    #[test]
+    fn test_event_handler_no_wrap_member() {
+        let code =
+            gen_and_validate(r#"<template><button @click="obj.method">click</button></template>"#);
+        assert!(
+            !code.contains("$event =>"),
+            "Member expression handler should NOT be wrapped, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Arrow function is NOT wrapped: @click="() => doSomething()"
+    #[test]
+    fn test_event_handler_no_wrap_arrow() {
+        let code = gen_and_validate(
+            r#"<template><button @click="() => doSomething()">click</button></template>"#,
+        );
+        assert!(
+            !code.contains("$event => ("),
+            "Arrow function handler should NOT be double-wrapped, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Inline expression with args: @click="count++" → $event => (count++)
+    #[test]
+    fn test_event_handler_wrap_update_expr() {
+        let code =
+            gen_and_validate(r#"<template><button @click="count++">click</button></template>"#);
+        assert!(
+            code.contains("$event => ("),
+            "Update expression should be wrapped, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Assignment expression: @click="x = 1" → $event => (x = 1)
+    #[test]
+    fn test_event_handler_wrap_assignment() {
+        let code =
+            gen_and_validate(r#"<template><button @click="x = 1">click</button></template>"#);
+        assert!(
+            code.contains("$event => ("),
+            "Assignment expression should be wrapped, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Event handler wrapping with setup bindings: $setup.fn($event)
+    #[test]
+    fn test_event_handler_wrap_with_setup_bindings() {
+        let code = gen_and_validate(
+            r#"<script setup>
+function handleClick(e) { console.log(e) }
+</script>
+<template><button @click="handleClick($event)">click</button></template>"#,
+        );
+        assert!(
+            code.contains("$event => ($setup.handleClick(_ctx.$event))"),
+            "Wrapped handler with setup binding should use $setup prefix, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
+    // Slot Support (v-slot → _withCtx)
+    // Vue wraps component children with v-slot:
+    //   <Button v-slot="foo">text</Button>
+    //   → _createVNode(Button, null, { default: _withCtx((foo) => [
+    //       _createTextVNode("text")
+    //     ]), _: 1 /* STABLE */ })
+    // =========================================================================
+
+    /// @ai-generated — v-slot with text content produces _withCtx + _createTextVNode
+    #[test]
+    fn test_slot_default_text() {
+        let code =
+            gen_and_validate(r#"<template><Button v-slot="foo">content</Button></template>"#);
+        assert!(
+            code.contains("_withCtx"),
+            "v-slot should produce _withCtx wrapper, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_createTextVNode"),
+            "Text inside v-slot should use _createTextVNode, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("(foo) => ["),
+            "v-slot params should be in arrow function, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("default:"),
+            "Bare v-slot should create default slot, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — v-slot with interpolation uses _createTextVNode + _toDisplayString
+    #[test]
+    fn test_slot_with_interpolation() {
+        let code = gen_and_validate(
+            r#"<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template><Button v-slot="foo">Count: {{ count }}</Button></template>"#,
+        );
+        assert!(
+            code.contains("_withCtx"),
+            "Should have _withCtx, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_createTextVNode"),
+            "Text+interp in slot should use _createTextVNode, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_toDisplayString"),
+            "Interpolation should still use _toDisplayString, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — v-slot without params uses empty arrow: () => [...]
+    #[test]
+    fn test_slot_no_params() {
+        let code = gen_and_validate(r#"<template><Button v-slot>content</Button></template>"#);
+        assert!(
+            code.contains("() => ["),
+            "v-slot without params should use () => [...], got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — v-slot with destructuring: v-slot="{ data }"
+    #[test]
+    fn test_slot_destructured_params() {
+        let code = gen_and_validate(
+            r#"<template><Button v-slot="{ data }">{{ data }}</Button></template>"#,
+        );
+        assert!(
+            code.contains("{ data }") && code.contains("_withCtx"),
+            "v-slot destructured params should be preserved, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Slot object has _: 1 (STABLE) marker
+    #[test]
+    fn test_slot_stable_marker() {
+        let code =
+            gen_and_validate(r#"<template><Button v-slot="foo">content</Button></template>"#);
+        assert!(
+            code.contains("_: 1"),
+            "Slot object should have _: 1 STABLE marker, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Slot with setup bindings in interpolation
+    #[test]
+    fn test_slot_setup_bindings() {
+        let code = gen_and_validate(
+            r#"<script setup>
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>
+<template><Button v-slot="foo">{{ msg }}</Button></template>"#,
+        );
+        assert!(
+            code.contains("$setup.msg"),
+            "Setup bindings should be prefixed inside slots, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_withCtx"),
+            "Should have _withCtx wrapper, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — v-slot directive is removed from output
+    #[test]
+    fn test_slot_removes_directive() {
+        let code =
+            gen_and_validate(r#"<template><Button v-slot="foo">content</Button></template>"#);
+        assert!(
+            !code.contains("v-slot"),
+            "v-slot directive should be removed from output, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Slot production mode uses numeric STABLE marker
+    #[test]
+    fn test_slot_production_stable() {
+        let code =
+            gen_prod_and_validate(r#"<template><Button v-slot="foo">content</Button></template>"#);
+        assert!(
+            code.contains("_: 1"),
+            "Production mode should have _: 1, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("STABLE"),
+            "Production mode should not have STABLE comment, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Named slot: v-slot:header → { header: _withCtx(...) }
+    #[test]
+    fn test_slot_named_static() {
+        let code = gen_and_validate(
+            r#"<template><Button v-slot:header="foo">content</Button></template>"#,
+        );
+        assert!(
+            code.contains("header: _withCtx"),
+            "Named slot should use slot name as key, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("default:"),
+            "Named slot should NOT have default key, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Dynamic slot: v-slot:[name] → { [name]: _withCtx(...) }
+    #[test]
+    fn test_slot_dynamic_name() {
+        let code = gen_and_validate(
+            r#"<template><Button v-slot:[name]="foo">content</Button></template>"#,
+        );
+        assert!(
+            code.contains("[_ctx.name]: _withCtx"),
+            "Dynamic slot should use computed property [_ctx.name] with accessor prefix, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Dynamic slot uses _: 2 (DYNAMIC) marker
+    #[test]
+    fn test_slot_dynamic_marker() {
+        let code = gen_and_validate(
+            r#"<template><Button v-slot:[name]="foo">content</Button></template>"#,
+        );
+        assert!(
+            code.contains("_: 2"),
+            "Dynamic slot should have _: 2 DYNAMIC marker, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Dynamic slot in production: _: 2 without comment
+    #[test]
+    fn test_slot_dynamic_production() {
+        let code = gen_prod_and_validate(
+            r#"<template><Button v-slot:[name]="foo">content</Button></template>"#,
+        );
+        assert!(
+            code.contains("_: 2"),
+            "Dynamic slot production should have _: 2, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("DYNAMIC"),
+            "Production should not have DYNAMIC comment, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
+    // Event Modifiers
+    // =========================================================================
+
+    /// @ai-generated — .stop and .prevent use _withModifiers
+    #[test]
+    fn test_event_modifier_stop_prevent() {
+        let code =
+            gen_and_validate(r#"<template><div @click.stop.prevent="handler">x</div></template>"#);
+        assert!(
+            code.contains("_withModifiers("),
+            "Should use _withModifiers, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains(r#"["stop","prevent"]"#),
+            "Should include stop and prevent modifiers, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — .enter key modifier uses _withKeys
+    #[test]
+    fn test_event_modifier_key_enter() {
+        let code = gen_and_validate(r#"<template><div @keyup.enter="handler">x</div></template>"#);
+        assert!(
+            code.contains("_withKeys("),
+            "Should use _withKeys for key modifier, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains(r#"["enter"]"#),
+            "Should include enter key, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — .once is a compile-time modifier that suffixes event name
+    #[test]
+    fn test_event_modifier_once_compile_time() {
+        let code = gen_and_validate(r#"<template><div @click.once="handler">x</div></template>"#);
+        assert!(
+            code.contains("onClickOnce:"),
+            "Should suffix event name with Once, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("_withModifiers"),
+            "Should NOT use _withModifiers for .once, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — .capture is a compile-time modifier
+    #[test]
+    fn test_event_modifier_capture_compile_time() {
+        let code =
+            gen_and_validate(r#"<template><div @click.capture="handler">x</div></template>"#);
+        assert!(
+            code.contains("onClickCapture:"),
+            "Should suffix event name with Capture, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Combined runtime + compile-time modifiers
+    #[test]
+    fn test_event_modifier_combined() {
+        let code =
+            gen_and_validate(r#"<template><div @click.stop.once="handler">x</div></template>"#);
+        assert!(
+            code.contains("onClickOnce:"),
+            "Should suffix with Once, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_withModifiers("),
+            "Should use _withModifiers for .stop, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
+    // v-model
+    // =========================================================================
+
+    /// @ai-generated — v-model on input generates withDirectives + vModelText
+    #[test]
+    fn test_vmodel_input_text() {
+        let code = gen_and_validate(r#"<template><input v-model="msg" /></template>"#);
+        assert!(
+            code.contains("_withDirectives("),
+            "Should wrap with _withDirectives, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_vModelText"),
+            "Should use _vModelText for text input, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("\"onUpdate:modelValue\""),
+            "Should have onUpdate:modelValue prop, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — v-model on checkbox uses vModelCheckbox
+    #[test]
+    fn test_vmodel_checkbox() {
+        let code =
+            gen_and_validate(r#"<template><input type="checkbox" v-model="checked" /></template>"#);
+        assert!(
+            code.contains("_vModelCheckbox"),
+            "Should use _vModelCheckbox, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — v-model on radio uses vModelRadio
+    #[test]
+    fn test_vmodel_radio() {
+        let code = gen_and_validate(
+            r#"<template><input type="radio" v-model="pick" value="a" /></template>"#,
+        );
+        assert!(
+            code.contains("_vModelRadio"),
+            "Should use _vModelRadio, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — v-model on select uses vModelSelect
+    #[test]
+    fn test_vmodel_select() {
+        let code = gen_and_validate(
+            r#"<template><select v-model="choice"><option>A</option></select></template>"#,
+        );
+        assert!(
+            code.contains("_vModelSelect"),
+            "Should use _vModelSelect, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — v-model with modifiers on native input
+    #[test]
+    fn test_vmodel_modifiers_native() {
+        let code = gen_and_validate(r#"<template><input v-model.trim.number="msg" /></template>"#);
+        assert!(
+            code.contains("_vModelText"),
+            "Should use _vModelText, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("trim: true"),
+            "Should have trim modifier, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("number: true"),
+            "Should have number modifier, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — v-model on component is prop-based (no withDirectives)
+    #[test]
+    fn test_vmodel_component() {
+        let code = gen_and_validate(r#"<template><MyComp v-model="val" /></template>"#);
+        assert!(
+            !code.contains("_withDirectives"),
+            "Component v-model should NOT use withDirectives, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("modelValue:"),
+            "Should have modelValue prop, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("\"onUpdate:modelValue\""),
+            "Should have onUpdate:modelValue event, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("$event => (("),
+            "Should have $event assignment handler, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — v-model:title on component uses named arg
+    #[test]
+    fn test_vmodel_component_named() {
+        let code = gen_and_validate(r#"<template><MyComp v-model:title="val" /></template>"#);
+        assert!(
+            code.contains("title:"),
+            "Should have title prop, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("\"onUpdate:title\""),
+            "Should have onUpdate:title event, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — v-model with modifiers on component emits modelModifiers
+    #[test]
+    fn test_vmodel_component_modifiers() {
+        let code = gen_and_validate(r#"<template><MyComp v-model.trim="val" /></template>"#);
+        assert!(
+            code.contains("modelModifiers: { trim: true }"),
+            "Should have modelModifiers prop, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
+    // v-show
+    // =========================================================================
+
+    /// @ai-generated — v-show uses withDirectives + vShow
+    #[test]
+    fn test_vshow() {
+        let code = gen_and_validate(r#"<template><div v-show="visible">hi</div></template>"#);
+        assert!(
+            code.contains("_withDirectives("),
+            "Should wrap with _withDirectives, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_vShow"),
+            "Should use _vShow directive, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
+    // v-html
+    // =========================================================================
+
+    /// @ai-generated — v-html compiles to innerHTML prop
+    #[test]
+    fn test_vhtml() {
+        let code = gen_and_validate(r#"<template><div v-html="rawHtml"></div></template>"#);
+        assert!(
+            code.contains("innerHTML:"),
+            "Should have innerHTML prop, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("_withDirectives"),
+            "v-html should NOT use withDirectives, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
+    // v-text
+    // =========================================================================
+
+    /// @ai-generated — v-text compiles to textContent prop with _toDisplayString
+    #[test]
+    fn test_vtext() {
+        let code = gen_and_validate(r#"<template><div v-text="content"></div></template>"#);
+        assert!(
+            code.contains("textContent: _toDisplayString("),
+            "Should have textContent with _toDisplayString, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
+    // v-bind spread / v-on spread
+    // =========================================================================
+
+    /// @ai-generated — v-bind spread uses _normalizeProps(_guardReactiveProps(...))
+    #[test]
+    fn test_vbind_spread() {
+        let code = gen_and_validate(r#"<template><div v-bind="attrs">x</div></template>"#);
+        assert!(
+            code.contains("_normalizeProps("),
+            "Should use _normalizeProps, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_guardReactiveProps("),
+            "Should use _guardReactiveProps, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — v-on spread uses _toHandlers
+    #[test]
+    fn test_von_spread() {
+        let code = gen_and_validate(r#"<template><div v-on="handlers">x</div></template>"#);
+        assert!(
+            code.contains("_toHandlers("),
+            "Should use _toHandlers, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
+    // Custom directives
+    // =========================================================================
+
+    /// @ai-generated — Custom directive uses resolveDirective + withDirectives
+    #[test]
+    fn test_custom_directive_simple() {
+        let code = gen_and_validate(r#"<template><div v-focus>x</div></template>"#);
+        assert!(
+            code.contains("_resolveDirective("),
+            "Should resolve directive, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_withDirectives("),
+            "Should use withDirectives, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("_directive_focus"),
+            "Should use _directive_focus variable, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Custom directive with arg, modifier, and value
+    #[test]
+    fn test_custom_directive_full() {
+        let code =
+            gen_and_validate(r#"<template><div v-my-directive:arg.mod="val">x</div></template>"#);
+        assert!(
+            code.contains("_directive_my_directive"),
+            "Should resolve my-directive, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains(r#""arg""#),
+            "Should have arg string, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("mod: true"),
+            "Should have modifier object, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
+    // Dynamic arg accessor prefix
+    // =========================================================================
+
+    /// @ai-generated — Dynamic bind arg gets accessor prefix
+    #[test]
+    fn test_dynamic_bind_arg_prefix() {
+        let code = gen_and_validate(r#"<template><div :[prop]="val">x</div></template>"#);
+        assert!(
+            code.contains("[_ctx.prop]"),
+            "Dynamic bind arg should get _ctx. prefix, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Dynamic event arg gets accessor prefix
+    #[test]
+    fn test_dynamic_event_arg_prefix() {
+        let code = gen_and_validate(r#"<template><div @[event]="handler">x</div></template>"#);
+        assert!(
+            code.contains("[\"on\" + _ctx.event]"),
+            "Dynamic event arg should get _ctx. prefix with 'on' + prefix, got:\n{}",
             code
         );
     }

@@ -5,7 +5,9 @@ use crate::{
     syntax_kai::{
         binding_types::BindingType,
         plugin::SyntaxPluginContext,
-        plugins::code_gen::{template::helper::patch_bindings, types::TemplateImportDependencies},
+        plugins::code_gen::{
+            template::helper::build_prefixed_value, types::TemplateImportDependencies,
+        },
         types::ElementScope,
     },
 };
@@ -41,6 +43,7 @@ pub(crate) fn process_scope_opens<'alloc>(
     is_production: bool,
     state: &mut StateStack,
     imports: &mut TemplateImportDependencies,
+    parent_vif_key_counter: &mut u32,
 ) -> String {
     let element_start = state.id;
     let mut scope_prefix = String::new();
@@ -51,13 +54,27 @@ pub(crate) fn process_scope_opens<'alloc>(
                 state.has_condition = true;
                 state.is_block_root = true;
 
-                patch_bindings(code_transform, &cond.bindings, bindings, is_production);
+                // Assign v-if branch key (new chain starts at 0)
+                *parent_vif_key_counter = 0;
+                state.vif_branch_key = Some(*parent_vif_key_counter);
+                *parent_vif_key_counter += 1;
+
                 code_transform.remove(cond.event.start, cond.event.end);
 
+                // Build condition with accessor prefixes applied.
+                // Can't use patch_bindings here because the condition positions are
+                // inside the removed region — use build_prefixed_value instead.
                 let condition = if let Some(val) = cond.event.value {
-                    &ctx.input[val.start as usize..val.end as usize]
+                    let val_text = &ctx.input[val.start as usize..val.end as usize];
+                    build_prefixed_value(
+                        val_text,
+                        val.start,
+                        &cond.bindings,
+                        bindings,
+                        is_production,
+                    )
                 } else {
-                    "true"
+                    "true".to_string()
                 };
 
                 // Store prefix — emitted by parent's close phase
@@ -70,13 +87,23 @@ pub(crate) fn process_scope_opens<'alloc>(
                 state.has_condition = true;
                 state.is_block_root = true;
 
-                patch_bindings(code_transform, &cond.bindings, bindings, is_production);
+                // Assign v-else-if branch key (continues chain)
+                state.vif_branch_key = Some(*parent_vif_key_counter);
+                *parent_vif_key_counter += 1;
+
                 code_transform.remove(cond.event.start, cond.event.end);
 
                 let condition = if let Some(val) = cond.event.value {
-                    &ctx.input[val.start as usize..val.end as usize]
+                    let val_text = &ctx.input[val.start as usize..val.end as usize];
+                    build_prefixed_value(
+                        val_text,
+                        val.start,
+                        &cond.bindings,
+                        bindings,
+                        is_production,
+                    )
                 } else {
-                    "true"
+                    "true".to_string()
                 };
 
                 // v-else-if is NOT a child — emit directly (no separator conflict).
@@ -88,6 +115,11 @@ pub(crate) fn process_scope_opens<'alloc>(
 
             ElementScope::Else(cond) => {
                 state.is_block_root = true;
+
+                // Assign v-else branch key (continues chain)
+                state.vif_branch_key = Some(*parent_vif_key_counter);
+                *parent_vif_key_counter += 1;
+
                 code_transform.remove(cond.event.start, cond.event.end);
                 // No prefix — the ` : ` from previous close transitions to this branch.
                 // Block root provides grouping via `(_openBlock(), ...)`.
@@ -99,9 +131,28 @@ pub(crate) fn process_scope_opens<'alloc>(
                 code_transform.remove(vfor.event.start, vfor.event.end);
 
                 let iterable = if let Some(val) = vfor.event.value {
-                    &ctx.input[val.start as usize..val.end as usize]
+                    let val_text = &ctx.input[val.start as usize..val.end as usize];
+                    // v-for references are in `parsed.references` (Vec<Span>), not
+                    // BindingExtractionResult. Apply prefixes manually.
+                    let mut result_str = val_text.to_string();
+                    // Apply _ctx. prefix to external references (in reverse order to preserve offsets)
+                    let mut refs: Vec<_> = vfor.parsed.references.iter().collect();
+                    refs.sort_by(|a, b| b.start.cmp(&a.start));
+                    for r in refs {
+                        let offset = (r.start - val.start) as usize;
+                        let name = &ctx.input[r.start as usize..r.end as usize];
+                        let prefix = if let Some(bt) = bindings.get(name) {
+                            bt.accessor_prefix(is_production)
+                        } else {
+                            "_ctx."
+                        };
+                        if !prefix.is_empty() {
+                            result_str.insert_str(offset, prefix);
+                        }
+                    }
+                    result_str
                 } else {
-                    "[]"
+                    "[]".to_string()
                 };
 
                 let params = if vfor.parsed.locals.is_empty() {
@@ -126,7 +177,9 @@ pub(crate) fn process_scope_opens<'alloc>(
                 imports.add(TemplateImportDependencies::RENDER_LIST);
                 imports.add(TemplateImportDependencies::CREATE_ELEMENT_BLOCK);
 
-                state.pending_scope_closes.push(ScopeClose::For);
+                state
+                    .pending_scope_closes
+                    .push(ScopeClose::For { is_keyed: false });
             }
 
             ElementScope::Once(_)
@@ -171,11 +224,17 @@ pub(crate) fn process_scope_closes(
             ScopeClose::Else => {
                 // Nothing — block root's `)` from handle_element_close is sufficient
             }
-            ScopeClose::For => {
-                if is_production {
-                    code_transform.append_left(position, "}), 128))");
+            ScopeClose::For { is_keyed } => {
+                if *is_keyed {
+                    if is_production {
+                        code_transform.append_left(position, "}), 128))");
+                    } else {
+                        code_transform.append_left(position, "}), 128 /* KEYED_FRAGMENT */))");
+                    }
+                } else if is_production {
+                    code_transform.append_left(position, "}), 256))");
                 } else {
-                    code_transform.append_left(position, "}), 128 /* UNKEYED_FRAGMENT */))");
+                    code_transform.append_left(position, "}), 256 /* UNKEYED_FRAGMENT */))");
                 }
             }
         }
