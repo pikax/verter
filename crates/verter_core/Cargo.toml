@@ -69,6 +69,10 @@ harness = false
 name = "codegen_comparison"
 harness = false
 
+[[bench]]
+name = "css_bench"
+harness = false
+
 
 [[example]]
 name = "codegen"
