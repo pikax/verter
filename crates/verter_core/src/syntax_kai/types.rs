@@ -244,89 +244,89 @@ impl SyntaxNode for ElementCloseTag {
 
 // /Elements
 
-// Scopes
+// // Scopes
 
-#[derive(Debug, Clone)]
-pub struct ElementScopeConditionIf {
-    // start of the element that creates the scope.
-    pub element_start: u32,
+// #[derive(Debug, Clone)]
+// pub struct ElementScopeConditionIf {
+//     // start of the element that creates the scope.
+//     pub element_start: u32,
 
-    // start contains v-
-    pub start: u32,
-    pub end: u32,
+//     // start contains v-
+//     pub start: u32,
+//     pub end: u32,
 
-    pub value: Option<Span>,
-}
+//     pub value: Option<Span>,
+// }
 
-#[derive(Debug, Clone)]
-pub struct ElementScopeConditionElseIf {
-    // start of the element that creates the scope.
-    pub element_start: u32,
+// #[derive(Debug, Clone)]
+// pub struct ElementScopeConditionElseIf {
+//     // start of the element that creates the scope.
+//     pub element_start: u32,
 
-    // start contains v-
-    pub start: u32,
-    pub end: u32,
+//     // start contains v-
+//     pub start: u32,
+//     pub end: u32,
 
-    pub value: Option<Span>,
-}
+//     pub value: Option<Span>,
+// }
 
-#[derive(Debug, Clone)]
-pub struct ElementScopeConditionElse {
-    // start of the element that creates the scope.
-    pub element_start: u32,
+// #[derive(Debug, Clone)]
+// pub struct ElementScopeConditionElse {
+//     // start of the element that creates the scope.
+//     pub element_start: u32,
 
-    // start contains v-
-    pub start: u32,
-    pub end: u32,
-}
+//     // start contains v-
+//     pub start: u32,
+//     pub end: u32,
+// }
 
-#[derive(Debug, Clone)]
-pub struct ElementScopeFor {
-    // start of the element that creates the scope.
-    pub element_start: u32,
+// #[derive(Debug, Clone)]
+// pub struct ElementScopeFor {
+//     // start of the element that creates the scope.
+//     pub element_start: u32,
 
-    // start contains v-
-    pub start: u32,
-    pub end: u32,
+//     // start contains v-
+//     pub start: u32,
+//     pub end: u32,
 
-    // full value span
-    pub value: Option<Span>,
+//     // full value span
+//     pub value: Option<Span>,
 
-    // left of "in" or "of"
-    pub iterator: Option<Span>,
-    // right of "in" or "of"
-    pub iterable: Option<Span>,
+//     // left of "in" or "of"
+//     pub iterator: Option<Span>,
+//     // right of "in" or "of"
+//     pub iterable: Option<Span>,
 
-    pub is_of: bool,
-}
+//     pub is_of: bool,
+// }
 
-// When the Slot is in the component <MyComponent v-slot:header="slotProps">, the scope is created by the component, not the <template> element. So we associate the scope with the component element instead of the <template> element.
-#[derive(Debug, Clone)]
-pub struct ElementScopeSlotElement {
-    // start of the element that creates the scope.
-    pub element_start: u32,
-    // where tag ends, contains >
-    pub element_content_start: u32,
+// // When the Slot is in the component <MyComponent v-slot:header="slotProps">, the scope is created by the component, not the <template> element. So we associate the scope with the component element instead of the <template> element.
+// #[derive(Debug, Clone)]
+// pub struct ElementScopeSlotElement {
+//     // start of the element that creates the scope.
+//     pub element_start: u32,
+//     // where tag ends, contains >
+//     pub element_content_start: u32,
 
-    // start contains v-
-    pub start: u32,
-    pub end: u32,
+//     // start contains v-
+//     pub start: u32,
+//     pub end: u32,
 
-    pub name: Option<Span>,
-}
+//     pub name: Option<Span>,
+// }
 
-#[derive(Debug, Clone)]
-pub struct ElementScopeSlotTemplate {
-    // start of <template>.
-    pub element_start: u32,
+// #[derive(Debug, Clone)]
+// pub struct ElementScopeSlotTemplate {
+//     // start of <template>.
+//     pub element_start: u32,
 
-    pub start: u32,
-    pub end: u32,
+//     pub start: u32,
+//     pub end: u32,
 
-    pub name: Option<Span>,
-}
+//     pub name: Option<Span>,
+// }
 
-// /Scopes
+// // /Scopes
 
 // Props
 
@@ -484,7 +484,7 @@ pub struct OxcVFor<'alloc> {
 
     pub parsed: VForWithBindings<'alloc>,
 
-    pub event: ElementScopeFor,
+    pub event: Prop,
 }
 
 #[derive(Debug)]
@@ -496,7 +496,7 @@ pub struct OxcVSlotElement<'alloc> {
 
     pub parsed: VSlotWithBindings<'alloc>,
 
-    pub event: ElementScopeSlotElement,
+    pub event: Prop,
 }
 
 #[derive(Debug)]
@@ -508,7 +508,7 @@ pub struct OxcVSlotTemplate<'alloc> {
 
     pub parsed: VSlotWithBindings<'alloc>,
 
-    pub event: ElementScopeSlotTemplate,
+    pub event: Prop,
 }
 
 #[derive(Debug)]
@@ -967,13 +967,13 @@ pub enum Event<'alloc> {
     OxcCompiledElementStart(OxcCompiledElementStart<'alloc>),
     OxcCompiledElementClosed(OxcCompiledElementClosed),
 
-    // Scopes (raw, emitted by Syntax)
-    ScopeIf(ElementScopeConditionIf),
-    ScopeElseIf(ElementScopeConditionElseIf),
-    ScopeElse(ElementScopeConditionElse),
-    ScopeFor(ElementScopeFor),
-    ScopeSlotElement(ElementScopeSlotElement),
-    ScopeSlotTemplate(ElementScopeSlotTemplate),
+    // // Scopes (raw, emitted by Syntax)
+    // ScopeIf(ElementScopeConditionIf),
+    // ScopeElseIf(ElementScopeConditionElseIf),
+    // ScopeElse(ElementScopeConditionElse),
+    // ScopeFor(ElementScopeFor),
+    // ScopeSlotElement(ElementScopeSlotElement),
+    // ScopeSlotTemplate(ElementScopeSlotTemplate),
 
     // CSS parsed style (emitted by css_parser plugin)
     CssParsedStyle(CssParsedStyleBlock),
