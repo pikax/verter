@@ -250,7 +250,7 @@ impl<'a> SyntaxPlugin<'a> for OxcParserPlugin<'a> {
                         if let Some(value) = &e.value {
                             let source = &ctx.input[value.start as usize..value.end as usize];
                             let parsed =
-                                parse_vfor_with_bindings(self.alloc, source, self.source_type);
+                                parse_vfor_with_bindings(self.alloc, source, self.source_type, &[]);
 
                             let vfor_binding = OxcVForProp {
                                 element_id: e.element_id,
@@ -273,7 +273,7 @@ impl<'a> SyntaxPlugin<'a> for OxcParserPlugin<'a> {
                             "" // No params - parse_vslot handles empty strings
                         };
                         let parsed =
-                            parse_vslot_with_bindings(self.alloc, source, self.source_type);
+                            parse_vslot_with_bindings(self.alloc, source, self.source_type, &[]);
 
                         let vslot_binding = OxcVSlotProp {
                             element_id: e.element_id,

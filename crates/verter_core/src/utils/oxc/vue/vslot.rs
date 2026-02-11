@@ -96,6 +96,7 @@ impl<'a> VSlotWithBindings<'a> {
 fn extract_slot_bindings_internal(
     params: &FormalParameters<'_>,
     source: &str,
+    ignored_extra: &[&str],
 ) -> (Vec<Span>, Vec<Span>) {
     let mut locals = Vec::new();
     let mut references_set = FxHashSet::default();
@@ -109,10 +110,16 @@ fn extract_slot_bindings_internal(
     }
 
     // Build ignored set from local names (need the actual strings to filter references)
-    let ignored: FxHashSet<&[u8]> = locals
+    let mut ignored: FxHashSet<&[u8]> = locals
         .iter()
         .map(|span| span.slice(source).as_bytes())
         .collect();
+
+    if !ignored_extra.is_empty() {
+        for name in ignored_extra {
+            ignored.insert(name.as_bytes());
+        }
+    }
 
     // Extract reference spans from type annotations and default values
     for param in &params.items {
@@ -147,6 +154,8 @@ fn extract_slot_bindings_internal(
 /// * `span` - The byte range within `input` containing the v-slot expression
 /// * `input` - The full source string (e.g., the entire SFC file)
 /// * `source_type` - The source type (e.g., TSX, JavaScript)
+/// * `ignored` - Identifiers to ignore when collecting references
+/// * `ignored` - Identifiers to ignore when collecting references
 ///
 /// # Example
 /// ```ignore
@@ -286,6 +295,7 @@ pub fn parse_vslot_with_bindings_sliced<'a>(
     span: Option<Span>,
     input: &str,
     source_type: SourceType,
+    ignored: &[&str],
 ) -> VSlotWithBindings<'a> {
     let (source, offset) = match span {
         Some(s) if s.start < s.end => (&input[s.start as usize..s.end as usize], s.start),
@@ -299,7 +309,7 @@ pub fn parse_vslot_with_bindings_sliced<'a>(
     let (mut locals, mut references) = if result.errors.is_some() {
         (Vec::new(), Vec::new())
     } else if let Some(params) = &result.params {
-        extract_slot_bindings_internal(params, source)
+        extract_slot_bindings_internal(params, source, ignored)
     } else {
         (Vec::new(), Vec::new())
     };
@@ -337,19 +347,21 @@ pub fn parse_vslot_with_bindings_sliced<'a>(
 /// # Example
 /// ```ignore
 /// let allocator = Allocator::default();
-/// let result = parse_vslot_with_bindings(&allocator, "{ data }", SourceType::tsx());
+/// let result = parse_vslot_with_bindings(&allocator, "{ data }", SourceType::tsx(), &[]);
 /// assert!(result.is_ok());
 /// ```
 pub fn parse_vslot_with_bindings<'a>(
     allocator: &'a Allocator,
     source: &str,
     source_type: SourceType,
+    ignored: &[&str],
 ) -> VSlotWithBindings<'a> {
     parse_vslot_with_bindings_sliced(
         allocator,
         Some(Span::new(0, source.len() as u32)),
         source,
         source_type,
+        ignored,
     )
 }
 
@@ -648,6 +660,7 @@ mod tests {
             Some(Span::new(20, 28)),
             input,
             SourceType::tsx(),
+            &[],
         );
 
         assert!(wb.is_ok());
@@ -663,7 +676,8 @@ mod tests {
     #[test]
     fn test_bindings_sliced_none_span() {
         let allocator = Box::leak(Box::new(Allocator::default()));
-        let wb = parse_vslot_with_bindings_sliced(allocator, None, "some input", SourceType::tsx());
+        let wb =
+            parse_vslot_with_bindings_sliced(allocator, None, "some input", SourceType::tsx(), &[]);
 
         assert!(wb.locals.is_empty());
         assert!(wb.references.is_empty());
@@ -674,12 +688,13 @@ mod tests {
     fn test_bindings_sliced_zero_offset() {
         let allocator = Box::leak(Box::new(Allocator::default()));
         let source = "{ item, index }";
-        let raw = parse_vslot_with_bindings(allocator, source, SourceType::tsx());
+        let raw = parse_vslot_with_bindings(allocator, source, SourceType::tsx(), &[]);
         let sliced = parse_vslot_with_bindings_sliced(
             allocator,
             Some(Span::new(0, source.len() as u32)),
             source,
             SourceType::tsx(),
+            &[],
         );
 
         assert_eq!(raw.locals.len(), sliced.locals.len());
@@ -703,6 +718,7 @@ mod tests {
             Some(Span::new(start, end)),
             input,
             SourceType::tsx(),
+            &[],
         );
 
         assert!(wb.is_ok());
@@ -719,5 +735,17 @@ mod tests {
             assert!(s.start >= start);
             assert!(s.end <= end);
         }
+    }
+
+    /// @ai-generated - Ignored identifiers are excluded from references.
+    #[test]
+    fn test_bindings_ignored_identifiers() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let source = "{ item = ignoredRef }";
+        let ignored: Vec<&str> = vec!["ignoredRef"];
+        let wb = parse_vslot_with_bindings(allocator, source, SourceType::tsx(), &ignored);
+
+        assert!(wb.is_ok());
+        assert!(wb.references.is_empty());
     }
 }

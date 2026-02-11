@@ -431,8 +431,8 @@ pub struct OxcScript<'alloc> {
 pub struct OxcProp<'alloc> {
     /// The ID of the element this prop belongs to
     pub element_id: u32,
-    /// The ID of this element's parent (NO_PARENT for root elements)
-    pub parent_id: u32,
+    // /// The ID of this element's parent (NO_PARENT for root elements)
+    // pub parent_id: u32,
 
     // start of the prop
     pub start: u32,
@@ -562,6 +562,9 @@ pub struct OxcCompiledElementStart<'alloc> {
     pub scopes: Vec<ElementScope<'alloc>>,
     /// Owns the CompiledElementStart this replaces.
     pub event: CompiledElementStart,
+
+    // it provides the bindings created in this
+    pub provided_bindings: Vec<Span>,
 }
 
 /// OXC-parsed element closed — wraps the original for symmetry and future extension.

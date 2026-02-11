@@ -306,9 +306,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
 
             Expression::ClassExpression(class) => {
                 if let Some(id) = &class.id {
-                    let name_bytes = id.name.as_bytes();
-                    self.ctx
-                        .add_ignored(unsafe { std::mem::transmute::<&[u8], &'a [u8]>(name_bytes) });
+                    self.ctx.add_ignored(unsafe { std::mem::transmute::<&str, &'a str>(id.name.as_str()) });
                 }
                 for element in &class.body.body {
                     match element {
@@ -564,7 +562,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
     fn visit_function(&mut self, func: &Function<'a>, span: OxcSpan) {
         let mut param_bytes: ParamBytes<'a> = SmallVec::new();
         if let Some(id) = &func.id {
-            param_bytes.push(unsafe { std::mem::transmute::<&[u8], &'a [u8]>(id.name.as_bytes()) });
+            param_bytes.push(unsafe { std::mem::transmute::<&str, &'a str>(id.name.as_str()) });
         }
 
         for param in &func.params.items {
@@ -624,7 +622,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
             BindingPattern::BindingIdentifier(ident) => {
                 // SAFETY: The lifetime is tied to the AST which outlives our usage
                 bytes
-                    .push(unsafe { std::mem::transmute::<&[u8], &'a [u8]>(ident.name.as_bytes()) });
+                    .push(unsafe { std::mem::transmute::<&str, &'a str>(ident.name.as_str()) });
             }
             BindingPattern::ObjectPattern(obj) => {
                 for prop in &obj.properties {
@@ -676,7 +674,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
 
     #[inline]
     fn add_binding(&mut self, name: &'a str, span: OxcSpan) {
-        let ignore = self.ctx.should_ignore(name.as_bytes());
+        let ignore = self.ctx.should_ignore(name);
         self.result.bindings.push(Binding {
             name,
             span: span.into(),

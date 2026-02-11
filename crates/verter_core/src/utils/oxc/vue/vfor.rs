@@ -206,6 +206,7 @@ fn collect_vfor_left_local_spans(expr: &Expression<'_>, locals: &mut Vec<Span>) 
 fn extract_vfor_bindings_internal(
     result: &VForParseResult<'_>,
     source: &str,
+    ignored_extra: &[&str],
 ) -> (Vec<Span>, Vec<Span>) {
     let mut locals = Vec::new();
     let mut references_set = FxHashSet::default();
@@ -216,10 +217,16 @@ fn extract_vfor_bindings_internal(
     }
 
     // Build ignored set from local names (need the actual strings to filter references)
-    let ignored: FxHashSet<&[u8]> = locals
+    let mut ignored: FxHashSet<&[u8]> = locals
         .iter()
         .map(|span| span.slice(source).as_bytes())
         .collect();
+
+    if !ignored_extra.is_empty() {
+        for name in ignored_extra {
+            ignored.insert(name.as_bytes());
+        }
+    }
 
     // Extract reference spans from the right side (the iterable)
     if let Some(right) = &result.right {
@@ -243,6 +250,7 @@ fn extract_vfor_bindings_internal(
 /// * `span` - The byte range within `input` containing the v-for expression
 /// * `input` - The full source string (e.g., the entire SFC file)
 /// * `source_type` - The source type (e.g., TSX, JavaScript)
+/// * `ignored` - Identifiers to ignore when collecting references
 ///
 /// # Example
 /// ```ignore
@@ -423,6 +431,7 @@ pub fn parse_vfor_with_bindings_sliced<'a>(
     span: Span,
     input: &str,
     source_type: SourceType,
+    ignored: &[&str],
 ) -> VForWithBindings<'a> {
     if span.start >= span.end {
         let result = parse_vfor_sliced(allocator, span, input, source_type);
@@ -443,7 +452,7 @@ pub fn parse_vfor_with_bindings_sliced<'a>(
     let (mut locals, mut references) = if result.has_left_errors() || result.has_right_errors() {
         (Vec::new(), Vec::new())
     } else {
-        extract_vfor_bindings_internal(&result, source)
+        extract_vfor_bindings_internal(&result, source, ignored)
     };
 
     // Adjust everything to file-relative
@@ -483,19 +492,21 @@ pub fn parse_vfor_with_bindings_sliced<'a>(
 /// # Example
 /// ```ignore
 /// let allocator = Allocator::default();
-/// let result = parse_vfor_with_bindings(&allocator, "(item, index) of items", SourceType::tsx());
+/// let result = parse_vfor_with_bindings(&allocator, "(item, index) of items", SourceType::tsx(), &[]);
 /// assert!(result.is_ok());
 /// ```
 pub fn parse_vfor_with_bindings<'a>(
     allocator: &'a Allocator,
     source: &str,
     source_type: SourceType,
+    ignored: &[&str],
 ) -> VForWithBindings<'a> {
     parse_vfor_with_bindings_sliced(
         allocator,
         Span::new(0, source.len() as u32),
         source,
         source_type,
+        ignored,
     )
 }
 
@@ -867,7 +878,7 @@ mod tests {
         //               0123456789012345678901234567890123
         let input = r#"<div v-for="item of items"></div>"#;
         let wb =
-            parse_vfor_with_bindings_sliced(allocator, Span::new(12, 25), input, SourceType::tsx());
+            parse_vfor_with_bindings_sliced(allocator, Span::new(12, 25), input, SourceType::tsx(), &[]);
 
         assert!(wb.is_ok());
 
@@ -889,12 +900,13 @@ mod tests {
     fn test_bindings_sliced_zero_offset() {
         let allocator = Box::leak(Box::new(Allocator::default()));
         let source = "(item, index) of items";
-        let raw = parse_vfor_with_bindings(allocator, source, SourceType::tsx());
+        let raw = parse_vfor_with_bindings(allocator, source, SourceType::tsx(), &[]);
         let sliced = parse_vfor_with_bindings_sliced(
             allocator,
             Span::new(0, source.len() as u32),
             source,
             SourceType::tsx(),
+            &[],
         );
 
         assert_eq!(raw.locals.len(), sliced.locals.len());
@@ -920,6 +932,7 @@ mod tests {
             Span::new(start, end),
             input,
             SourceType::tsx(),
+            &[],
         );
 
         assert!(wb.is_ok());
@@ -937,5 +950,17 @@ mod tests {
             assert!(s.start >= start);
             assert!(s.end <= end);
         }
+    }
+
+    /// @ai-generated - Ignored identifiers are excluded from references.
+    #[test]
+    fn test_bindings_ignored_identifiers() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let source = "item of ignoredItems";
+        let ignored: Vec<&str> = vec!["ignoredItems"];
+        let wb = parse_vfor_with_bindings(allocator, source, SourceType::tsx(), &ignored);
+
+        assert!(wb.is_ok());
+        assert!(wb.references.is_empty());
     }
 }

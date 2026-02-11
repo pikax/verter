@@ -15,7 +15,7 @@ pub fn parse_expression<'alloc>(
     input: &'alloc str,
     alloc: &'alloc Allocator,
     source_type: oxc_span::SourceType,
-    ignored: &[&'alloc [u8]],
+    ignored: &[&'alloc str],
 ) -> (
     Option<oxc_ast::ast::Expression<'alloc>>,
     Option<Vec<oxc_diagnostics::OxcDiagnostic>>,
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn parse_expression_with_ignored_identifiers() {
         let alloc = Allocator::default();
-        let ignored: Vec<&[u8]> = vec![b"item"];
+        let ignored: Vec<&str> = vec!["item"];
         let input = "item.name";
         let (expr, errors, bindings) =
             parse_expression(Span::new(0, 9), input, &alloc, SourceType::tsx(), &ignored);

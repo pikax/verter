@@ -12,7 +12,7 @@ pub fn parse_if_condition<'alloc>(
     input: &'alloc str,
     alloc: &'alloc Allocator,
     source_type: SourceType,
-    ignored: &[&'alloc [u8]],
+    ignored: &[&'alloc str],
 ) -> OxcIfCondition<'alloc> {
     let (expression, errors, bindings) = if let Some(value_span) = event.value {
         parse_expression(value_span, input, alloc, source_type, ignored)
@@ -37,7 +37,7 @@ pub fn parse_else_if_condition<'alloc>(
     input: &'alloc str,
     alloc: &'alloc Allocator,
     source_type: SourceType,
-    ignored: &[&'alloc [u8]],
+    ignored: &[&'alloc str],
 ) -> OxcElseIfCondition<'alloc> {
     let (expression, errors, bindings) = if let Some(value_span) = event.value {
         parse_expression(value_span, input, alloc, source_type, ignored)

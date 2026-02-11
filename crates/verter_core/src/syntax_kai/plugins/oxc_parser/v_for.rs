@@ -1,39 +1,32 @@
+use oxc_allocator::Allocator;
+use oxc_span::SourceType;
+
+use crate::{
+    syntax_kai::types::{OxcVFor, Prop},
+    utils::oxc::vue::{parse_vfor_with_bindings, parse_vfor_with_bindings_sliced},
+};
 
 /// Parse a v-for directive.
-pub fn parse_vfor(
-    &self,
-    prop: &Prop,
-    element_id: u32,
-    ctx: &SyntaxPluginContext<'alloc>,
+pub fn parse_vfor<'alloc>(
+    event: Prop,
+    input: &'alloc str,
+    alloc: &'alloc Allocator,
+    source_type: SourceType,
+    ignored: &[&'alloc str],
 ) -> Option<OxcVFor<'alloc>> {
-    let value_span = prop.value?;
-    let source_slice = &ctx.input[value_span.start as usize..value_span.end as usize];
+    let value_span = event.value;
 
-    let mut parsed = parse_vfor_with_bindings(self.alloc, source_slice, self.source_type);
-
-    // Adjust spans to be relative to original source
-    for s in &mut parsed.locals {
-        s.start += value_span.start;
-        s.end += value_span.start;
-    }
-    for s in &mut parsed.references {
-        s.start += value_span.start;
-        s.end += value_span.start;
-    }
+    let parsed = if let Some(value_span) = value_span {
+        parse_vfor_with_bindings_sliced(alloc, value_span, input, source_type, ignored)
+    } else {
+        parse_vfor_with_bindings(alloc, "", source_type, ignored)
+    };
 
     Some(OxcVFor {
-        element_id,
-        start: prop.start,
-        end: prop.end,
+        element_id: event.element_id,
+        start: event.start,
+        end: event.end,
         parsed,
-        event: ElementScopeFor {
-            element_start: element_id,
-            start: prop.start,
-            end: prop.end,
-            value: prop.value,
-            iterator: None,
-            iterable: None,
-            is_of: false,
-        },
+        event,
     })
 }

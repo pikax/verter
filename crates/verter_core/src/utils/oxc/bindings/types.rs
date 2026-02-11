@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use super::keywords::is_keyword;
 
 /// Type alias for parameter byte slices - most functions have ≤8 params
-pub type ParamBytes<'a> = SmallVec<[&'a [u8]; 8]>;
+pub type ParamBytes<'a> = SmallVec<[&'a str; 8]>;
 
 /// Represents a binding extracted from an expression (byte-optimized version).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,8 +99,8 @@ impl<'a> BindingExtractionResult<'a> {
 /// Context for binding extraction, tracking ignored identifiers in scope (byte-optimized version).
 #[derive(Debug, Clone)]
 pub struct BindingContext<'a> {
-    /// Identifiers that should be ignored (parameters, local variables) as byte slices
-    ignored_identifiers: FxHashSet<&'a [u8]>,
+    /// Identifiers that should be ignored (parameters, local variables) as str slices
+    ignored_identifiers: FxHashSet<&'a str>,
     /// Base offset to add to all positions
     pub base_offset: u32,
 }
@@ -121,7 +121,7 @@ impl<'a> BindingContext<'a> {
     }
 
     /// Create a context with pre-existing ignored identifiers
-    pub fn with_ignored(base_offset: u32, ignored: impl IntoIterator<Item = &'a [u8]>) -> Self {
+    pub fn with_ignored(base_offset: u32, ignored: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
             ignored_identifiers: ignored.into_iter().collect(),
             base_offset,
@@ -130,18 +130,18 @@ impl<'a> BindingContext<'a> {
 
     /// Check if an identifier should be ignored
     #[inline]
-    pub fn should_ignore(&self, name: &[u8]) -> bool {
-        is_keyword(name) || self.ignored_identifiers.contains(name)
+    pub fn should_ignore(&self, name: &str) -> bool {
+        is_keyword(name.as_bytes()) || self.ignored_identifiers.contains(name)
     }
 
     /// Add an identifier to the ignore list
     #[inline]
-    pub fn add_ignored(&mut self, name: &'a [u8]) {
+    pub fn add_ignored(&mut self, name: &'a str) {
         self.ignored_identifiers.insert(name);
     }
 
     /// Create a child context with additional ignored identifiers
-    pub fn child_with_ignored(&self, additional: SmallVec<[&'a [u8]; 8]>) -> Self {
+    pub fn child_with_ignored(&self, additional: SmallVec<[&'a str; 8]>) -> Self {
         let mut ignored = self.ignored_identifiers.clone();
         ignored.extend(additional);
         Self {
@@ -174,36 +174,36 @@ mod tests {
     fn test_binding_context_new() {
         let ctx = BindingContext::new(100);
         assert_eq!(ctx.base_offset, 100);
-        assert!(!ctx.should_ignore(b"foo"));
+        assert!(!ctx.should_ignore("foo"));
     }
 
     #[test]
     fn test_binding_context_keywords() {
         let ctx = BindingContext::new(0);
-        assert!(ctx.should_ignore(b"true"));
-        assert!(ctx.should_ignore(b"false"));
-        assert!(ctx.should_ignore(b"null"));
-        assert!(ctx.should_ignore(b"undefined"));
-        assert!(!ctx.should_ignore(b"myVar"));
+        assert!(ctx.should_ignore("true"));
+        assert!(ctx.should_ignore("false"));
+        assert!(ctx.should_ignore("null"));
+        assert!(ctx.should_ignore("undefined"));
+        assert!(!ctx.should_ignore("myVar"));
     }
 
     #[test]
     fn test_binding_context_add_ignored() {
         let mut ctx = BindingContext::new(0);
-        assert!(!ctx.should_ignore(b"foo"));
-        ctx.add_ignored(b"foo");
-        assert!(ctx.should_ignore(b"foo"));
+        assert!(!ctx.should_ignore("foo"));
+        ctx.add_ignored("foo");
+        assert!(ctx.should_ignore("foo"));
     }
 
     #[test]
     fn test_binding_context_child() {
         let ctx = BindingContext::new(50);
-        let child = ctx.child_with_ignored(smallvec::smallvec![b"x" as &[u8], b"y" as &[u8]]);
+        let child = ctx.child_with_ignored(smallvec::smallvec!["x", "y"]);
 
         assert_eq!(child.base_offset, 50);
-        assert!(child.should_ignore(b"x"));
-        assert!(child.should_ignore(b"y"));
-        assert!(!child.should_ignore(b"z"));
+        assert!(child.should_ignore("x"));
+        assert!(child.should_ignore("y"));
+        assert!(!child.should_ignore("z"));
     }
 
     #[test]
