@@ -238,9 +238,7 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
         // self.code_transform.borrow_mut().append_left(ev.tag_name_end, " data-foo=\"bar\"");
 
         if let Some(close) = &ev.event.event_close_tag {
-            self.code_transform
-                .borrow_mut()
-                .append_left(close.end, "<--");
+            code_transform.append_left(close.end, "<--");
         }
 
         if state.is_once {
