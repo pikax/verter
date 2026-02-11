@@ -14,7 +14,22 @@ use crate::syntax_kai::{
     },
 };
 
+/// Assign a sort priority to each prop kind.
+/// Vue processing order: v-if/else-if/else (0) > v-for (1) > v-slot (2) > regular props (3).
+fn prop_priority(kind: &PropKind) -> u8 {
+    match kind {
+        PropKind::If | PropKind::ElseIf | PropKind::Else => 0,
+        PropKind::For => 1,
+        PropKind::Slot => 2,
+        _ => 3,
+    }
+}
+
 /// Parse props from a CompiledElementStart into OxcProp and ElementScope vectors.
+///
+/// Props are processed in Vue priority order: v-if/else-if/else → v-for → v-slot → regular props.
+/// Each structural directive accumulates its local bindings into `local_ignored`
+/// so that later directives and regular props can see them.
 pub fn parse_element_props<'alloc>(
     event: CompiledElementStart,
     input: &'alloc str,
@@ -29,73 +44,99 @@ pub fn parse_element_props<'alloc>(
     let mut slot_scope = None;
     let mut template_scope = None;
 
-    let mut provided_bindings = Vec::with_capacity(5);
-
     let is_template = event.event_open_tag.kind == ElementKind::Template;
-    // borrow props
-    let props = &event.props;
 
-    let oxc_props = props
-        .into_iter()
-        .filter_map(|prop| match prop.kind {
+    // Build a sorted index so we process props in priority order
+    // without moving them out of the Vec.
+    let mut sorted_indices: Vec<usize> = (0..event.props.len()).collect();
+    sorted_indices.sort_by_key(|&i| prop_priority(&event.props[i].kind));
+
+    // Accumulated ignored bindings: starts with the inherited set,
+    // grows as each structural directive adds its locals.
+    let mut local_ignored: Vec<&'alloc str> = ignored.to_vec();
+
+    let mut oxc_props: Vec<OxcProp<'alloc>> = Vec::with_capacity(event.props.len());
+
+    for &idx in &sorted_indices {
+        let prop = &event.props[idx];
+        match prop.kind {
             PropKind::If => {
-                let scope = parse_if_condition(prop.clone(), input, alloc, source_type, ignored);
+                let scope =
+                    parse_if_condition(prop.clone(), input, alloc, source_type, &local_ignored);
                 // TODO add a check if we have already a condition, if we do should log an error
                 condition_if_scope = Some(scope);
-
-                None
+                // v-if has no locals to provide
             }
             PropKind::ElseIf => {
-                let scope =
-                    parse_else_if_condition(prop.clone(), input, alloc, source_type, ignored);
+                let scope = parse_else_if_condition(
+                    prop.clone(),
+                    input,
+                    alloc,
+                    source_type,
+                    &local_ignored,
+                );
                 // TODO add a check if we have already a condition, if we do should log an error
                 condition_else_if_scope = Some(scope);
-                None
             }
             PropKind::Else => {
                 let scope = parse_else_condition(prop.clone());
                 // TODO add a check if we have already a condition, if we do should log an error
                 condition_else_scope = Some(scope);
-                None
             }
             PropKind::For => {
                 // TODO add a check if we have already a for, if we do should log an error
-                let scope = parse_vfor(prop.clone(), input, alloc, source_type, ignored);
+                let scope =
+                    parse_vfor(prop.clone(), input, alloc, source_type, &local_ignored);
 
                 if let Some(scope) = &scope {
-                    provided_bindings.extend(scope.parsed.locals.iter());
+                    local_ignored
+                        .extend(scope.parsed.locals.iter().map(|span| span.slice(input)));
                 }
 
                 for_scope = scope;
-
-                None
             }
 
             PropKind::Slot => {
                 // TODO add a check if we have already a slot, if we do should log an error
                 if is_template {
-                    let scope =
-                        parse_vslot_template(prop.clone(), input, alloc, source_type, ignored);
+                    let scope = parse_vslot_template(
+                        prop.clone(),
+                        input,
+                        alloc,
+                        source_type,
+                        &local_ignored,
+                    );
 
                     if let Some(scope) = &scope {
-                        provided_bindings.extend(scope.parsed.locals.iter());
+                        local_ignored
+                            .extend(scope.parsed.locals.iter().map(|span| span.slice(input)));
                     }
                     template_scope = scope;
                 } else {
-                    let scope =
-                        parse_vslot_element(prop.clone(), input, alloc, source_type, ignored);
+                    let scope = parse_vslot_element(
+                        prop.clone(),
+                        input,
+                        alloc,
+                        source_type,
+                        &local_ignored,
+                    );
 
                     if let Some(scope) = &scope {
-                        provided_bindings.extend(scope.parsed.locals.iter());
+                        local_ignored
+                            .extend(scope.parsed.locals.iter().map(|span| span.slice(input)));
                     }
                     slot_scope = scope;
                 }
-                None
             }
-            _ => Some(parse_prop(prop.clone(), input, alloc, source_type, ignored)),
-        })
-        .collect();
+            _ => {
+                let oxc_prop =
+                    parse_prop(prop.clone(), input, alloc, source_type, &local_ignored);
+                oxc_props.push(oxc_prop);
+            }
+        }
+    }
 
+    // Build scopes in Vue priority order: v-if/else-if/else > v-for > v-slot
     let mut scopes: Vec<ElementScope<'_>> = Vec::with_capacity(3);
     if let Some(condition_if_scope) = condition_if_scope {
         scopes.push(ElementScope::If(condition_if_scope));
@@ -120,7 +161,7 @@ pub fn parse_element_props<'alloc>(
         props: oxc_props,
         scopes,
         event,
-        provided_bindings,
+        provided_locals: local_ignored,
     }
 }
 

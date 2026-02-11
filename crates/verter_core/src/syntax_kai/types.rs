@@ -563,8 +563,9 @@ pub struct OxcCompiledElementStart<'alloc> {
     /// Owns the CompiledElementStart this replaces.
     pub event: CompiledElementStart,
 
-    // it provides the bindings created in this
-    pub provided_bindings: Vec<Span>,
+    /// Local bindings provided by structural directives (v-for, v-slot) on this element.
+    /// Includes inherited bindings from parent scopes plus locals from this element's directives.
+    pub provided_locals: Vec<&'alloc str>,
 }
 
 /// OXC-parsed element closed — wraps the original for symmetry and future extension.

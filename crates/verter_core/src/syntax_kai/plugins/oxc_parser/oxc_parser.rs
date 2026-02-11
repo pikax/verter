@@ -1,4 +1,5 @@
 use oxc_allocator::Allocator;
+use oxc_ast::ast::ForInStatement;
 use oxc_span::SourceType;
 
 use crate::syntax_kai::{
@@ -64,10 +65,15 @@ impl<'alloc> SyntaxPlugin<'alloc> for OxcParserPlugin<'alloc> {
                     self.source_type,
                     current_bindings,
                 );
+
+                self.stack_provided_bindings
+                    .push(oxc_compiled.provided_locals.clone());
+
                 SyntaxResult::Replace(Event::OxcCompiledElementStart(oxc_compiled))
             }
 
             Event::ElementClosed(closed) => {
+                self.stack_provided_bindings.pop();
                 let oxc_closed = OxcCompiledElementClosed { event: closed };
                 SyntaxResult::Replace(Event::OxcCompiledElementClosed(oxc_closed))
             }
