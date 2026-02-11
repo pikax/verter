@@ -20,8 +20,24 @@ pub mod modules;
 pub mod prepass;
 pub mod scoped;
 pub mod types;
+mod walk;
 
 pub use types::{ProcessStyleOptions, ProcessStyleResult, VBindVar};
+
+use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
+
+/// Parse CSS with lightningcss and serialize back to normalize it.
+///
+/// This normalizes comments, strings, at-rules, and nesting so downstream
+/// string-level transforms (scoped, modules) see well-formed CSS.
+fn normalize_css(css: &str) -> Result<String, String> {
+    let stylesheet = StyleSheet::parse(css, ParserOptions::default())
+        .map_err(|e| format!("CSS parse error: {}", e))?;
+    let result = stylesheet
+        .to_css(PrinterOptions::default())
+        .map_err(|e| format!("CSS serialization error: {}", e))?;
+    Ok(result.code)
+}
 
 /// Process a CSS style block: apply scoping, CSS modules, and v-bind replacement.
 ///
@@ -30,24 +46,31 @@ pub use types::{ProcessStyleOptions, ProcessStyleResult, VBindVar};
 /// - The NAPI `processStyle()` binding for preprocessed CSS (from vite-plugin)
 pub fn process_style(
     css: &str,
-    options: &ProcessStyleOptions,
+    options: &ProcessStyleOptions<'_>,
 ) -> Result<ProcessStyleResult, String> {
     // Step 1: Pre-pass — replace v-bind() and Vue pseudo-selectors with valid CSS
-    let prepass_result = prepass::prepass(css, &options.scope_id);
+    let prepass_result = prepass::prepass(css, options.scope_id);
     let mut current_css = prepass_result.css;
     let v_bind_vars = prepass_result.v_bind_vars;
 
-    // Step 2: Apply CSS modules (class name hashing)
+    // Step 2: Normalize CSS once (if any transform needs it)
+    let needs_transform = options.is_module || options.scoped;
+    if needs_transform {
+        current_css = normalize_css(&current_css)?;
+    }
+
+    // Step 3: Apply CSS modules (class name hashing) on normalized CSS
     let mut module_classes = Vec::new();
     if options.is_module {
-        let (modules_css, mapping) = modules::apply_css_modules(&current_css, &options.scope_id)?;
+        let (modules_css, mapping) =
+            modules::apply_css_modules_normalized(&current_css, options.scope_id);
         current_css = modules_css;
         module_classes = mapping;
     }
 
-    // Step 3: Apply scoped selectors
+    // Step 4: Apply scoped selectors on normalized CSS
     if options.scoped {
-        current_css = scoped::apply_scoped(&current_css, &options.scope_id)?;
+        current_css = scoped::apply_scoped_normalized(&current_css, options.scope_id);
     }
 
     Ok(ProcessStyleResult {
@@ -67,10 +90,10 @@ mod tests {
         let result = process_style(
             ".box { color: red; }",
             &ProcessStyleOptions {
-                scope_id: "a4f2eed6".to_string(),
+                scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-                module_name: None,
+
                 filename: None,
                 sourcemap: false,
             },
@@ -89,10 +112,10 @@ mod tests {
         let result = process_style(
             ".box { color: v-bind(primary); }",
             &ProcessStyleOptions {
-                scope_id: "a4f2eed6".to_string(),
+                scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-                module_name: None,
+
                 filename: None,
                 sourcemap: false,
             },
@@ -118,10 +141,10 @@ mod tests {
         let result = process_style(
             ":deep(.inner) { color: red; }",
             &ProcessStyleOptions {
-                scope_id: "a4f2eed6".to_string(),
+                scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-                module_name: None,
+
                 filename: None,
                 sourcemap: false,
             },
@@ -147,10 +170,10 @@ mod tests {
         let result = process_style(
             ":slotted(.slot) { color: red; }",
             &ProcessStyleOptions {
-                scope_id: "a4f2eed6".to_string(),
+                scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-                module_name: None,
+
                 filename: None,
                 sourcemap: false,
             },
@@ -169,10 +192,10 @@ mod tests {
         let result = process_style(
             ":global(.reset) { margin: 0; }",
             &ProcessStyleOptions {
-                scope_id: "a4f2eed6".to_string(),
+                scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-                module_name: None,
+
                 filename: None,
                 sourcemap: false,
             },
@@ -192,10 +215,10 @@ mod tests {
         let result = process_style(
             ".btn { color: red; } .card { display: flex; }",
             &ProcessStyleOptions {
-                scope_id: "a4f2eed6".to_string(),
+                scope_id: "a4f2eed6",
                 scoped: false,
                 is_module: true,
-                module_name: None,
+
                 filename: None,
                 sourcemap: false,
             },
@@ -203,12 +226,12 @@ mod tests {
         .unwrap();
 
         assert!(
-            result.code.contains("_btn_a4f2eed6"),
+            result.code.contains("btn_a4f2eed6_"),
             "Got: {}",
             result.code
         );
         assert!(
-            result.code.contains("_card_a4f2eed6"),
+            result.code.contains("card_a4f2eed6_"),
             "Got: {}",
             result.code
         );
@@ -220,10 +243,10 @@ mod tests {
         let result = process_style(
             ".box { color: red; }",
             &ProcessStyleOptions {
-                scope_id: "a4f2eed6".to_string(),
+                scope_id: "a4f2eed6",
                 scoped: false,
                 is_module: false,
-                module_name: None,
+
                 filename: None,
                 sourcemap: false,
             },
@@ -240,14 +263,49 @@ mod tests {
     }
 
     #[test]
+    fn test_process_style_scoped_and_modules() {
+        let result = process_style(
+            ".btn { color: red; } .card { display: flex; }",
+            &ProcessStyleOptions {
+                scope_id: "a4f2eed6",
+                scoped: true,
+                is_module: true,
+
+                filename: None,
+                sourcemap: false,
+            },
+        )
+        .unwrap();
+
+        // Classes should be hashed AND scoped
+        assert_eq!(result.module_classes.len(), 2);
+        assert!(
+            result.code.contains("[data-v-a4f2eed6]"),
+            "Should have scope attr. Got: {}",
+            result.code
+        );
+        // Hashed class names should be present
+        assert!(
+            result.code.contains("btn_a4f2eed6_"),
+            "Should have hashed btn. Got: {}",
+            result.code
+        );
+        assert!(
+            result.code.contains("card_a4f2eed6_"),
+            "Should have hashed card. Got: {}",
+            result.code
+        );
+    }
+
+    #[test]
     fn test_process_style_pseudo_class_ordering() {
         let result = process_style(
             ".btn:hover { color: red; }",
             &ProcessStyleOptions {
-                scope_id: "a4f2eed6".to_string(),
+                scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-                module_name: None,
+
                 filename: None,
                 sourcemap: false,
             },
@@ -262,14 +320,37 @@ mod tests {
     }
 
     #[test]
+    fn test_process_style_pseudo_class_and_pseudo_element() {
+        let result = process_style(
+            ".btn:hover::before { content: ''; }",
+            &ProcessStyleOptions {
+                scope_id: "a4f2eed6",
+                scoped: true,
+                is_module: false,
+
+                filename: None,
+                sourcemap: false,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            result.code.contains(".btn[data-v-a4f2eed6]:hover:before")
+                || result.code.contains(".btn[data-v-a4f2eed6]:hover::before"),
+            "Scope should be before :hover. Got: {}",
+            result.code
+        );
+    }
+
+    #[test]
     fn test_process_style_pseudo_element_ordering() {
         let result = process_style(
             ".text::before { content: ''; }",
             &ProcessStyleOptions {
-                scope_id: "a4f2eed6".to_string(),
+                scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-                module_name: None,
+
                 filename: None,
                 sourcemap: false,
             },

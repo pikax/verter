@@ -25,17 +25,30 @@ pub struct PrepassResult {
 }
 
 /// Run the pre-pass on CSS, replacing Vue-specific syntax with valid CSS.
+///
+/// # Safety of byte-level iteration
+///
+/// This function iterates over `css.as_bytes()` rather than `char_indices()` for
+/// performance. This is safe because:
+/// 1. All matched patterns (`v-bind(`, `:deep(`, `:slotted(`, `/*`, `*/`, quotes)
+///    are pure ASCII bytes.
+/// 2. UTF-8 guarantees that continuation bytes (0x80–0xBF) never equal ASCII bytes
+///    (0x00–0x7F), so scanning for ASCII delimiters byte-by-byte cannot produce
+///    false matches inside multi-byte characters.
+/// 3. Segment boundaries (`seg_start`, `i`) are only set at positions that follow
+///    ASCII pattern matches, which are always valid UTF-8 character boundaries.
 pub fn prepass(css: &str, scope_id: &str) -> PrepassResult {
     let mut output = String::with_capacity(css.len() + 128);
     let mut v_bind_vars = Vec::new();
     let bytes = css.as_bytes();
     let len = bytes.len();
     let mut i = 0;
+    // Track start of the current unchanged segment to flush via push_str
+    let mut seg_start = 0;
 
     while i < len {
         // Skip block comments
         if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
-            let start = i;
             i += 2;
             while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
                 i += 1;
@@ -43,14 +56,12 @@ pub fn prepass(css: &str, scope_id: &str) -> PrepassResult {
             if i + 1 < len {
                 i += 2; // skip */
             }
-            output.push_str(&css[start..i]);
             continue;
         }
 
         // Skip strings
         if bytes[i] == b'"' || bytes[i] == b'\'' {
             let quote = bytes[i];
-            let start = i;
             i += 1;
             while i < len && bytes[i] != quote {
                 if bytes[i] == b'\\' && i + 1 < len {
@@ -61,58 +72,51 @@ pub fn prepass(css: &str, scope_id: &str) -> PrepassResult {
             if i < len {
                 i += 1; // skip closing quote
             }
-            output.push_str(&css[start..i]);
             continue;
+        }
+
+        // Macro to flush the pending unchanged segment, write a replacement, and advance
+        macro_rules! try_transform {
+            ($check_len:expr, $pattern:expr, $transform:expr) => {
+                if i + $check_len <= len && &bytes[i..i + $check_len] == $pattern {
+                    if let Some(result) = $transform {
+                        // Flush unchanged text before this match
+                        output.push_str(&css[seg_start..i]);
+                        output.push_str(&result.0);
+                        i = result.1;
+                        seg_start = i;
+                        continue;
+                    }
+                }
+            };
         }
 
         // Check for v-bind(
         if i + 7 <= len && &bytes[i..i + 7] == b"v-bind(" {
             if let Some((replacement, new_pos, var)) = transform_v_bind(css, i, scope_id) {
+                output.push_str(&css[seg_start..i]);
                 output.push_str(&replacement);
                 v_bind_vars.push(var);
                 i = new_pos;
+                seg_start = i;
                 continue;
             }
         }
 
-        // Check for :deep(
-        if i + 6 <= len && &bytes[i..i + 6] == b":deep(" {
-            if let Some((replacement, new_pos)) = transform_deep(css, i) {
-                output.push_str(&replacement);
-                i = new_pos;
-                continue;
-            }
-        }
+        // Check for :deep( / ::v-deep(
+        try_transform!(6, b":deep(", transform_deep(css, i));
+        try_transform!(9, b"::v-deep(", transform_deep(css, i));
 
-        // Check for ::v-deep(
-        if i + 9 <= len && &bytes[i..i + 9] == b"::v-deep(" {
-            if let Some((replacement, new_pos)) = transform_deep(css, i) {
-                output.push_str(&replacement);
-                i = new_pos;
-                continue;
-            }
-        }
+        // Check for :slotted( / ::v-slotted(
+        try_transform!(9, b":slotted(", transform_slotted(css, i));
+        try_transform!(12, b"::v-slotted(", transform_slotted(css, i));
 
-        // Check for :slotted(
-        if i + 9 <= len && &bytes[i..i + 9] == b":slotted(" {
-            if let Some((replacement, new_pos)) = transform_slotted(css, i) {
-                output.push_str(&replacement);
-                i = new_pos;
-                continue;
-            }
-        }
-
-        // Check for ::v-slotted(
-        if i + 12 <= len && &bytes[i..i + 12] == b"::v-slotted(" {
-            if let Some((replacement, new_pos)) = transform_slotted(css, i) {
-                output.push_str(&replacement);
-                i = new_pos;
-                continue;
-            }
-        }
-
-        output.push(css.as_bytes()[i] as char);
         i += 1;
+    }
+
+    // Flush any remaining unchanged segment
+    if seg_start < len {
+        output.push_str(&css[seg_start..]);
     }
 
     PrepassResult {
@@ -151,9 +155,10 @@ fn transform_v_bind(css: &str, start: usize, scope_id: &str) -> Option<(String, 
 
     let expr = css[expr_start..expr_end].trim();
 
-    // Remove quotes if present
-    let expr_clean = if (expr.starts_with('\'') && expr.ends_with('\''))
-        || (expr.starts_with('"') && expr.ends_with('"'))
+    // Remove quotes if present (need at least 2 chars for open+close quote)
+    let expr_clean = if expr.len() >= 2
+        && ((expr.starts_with('\'') && expr.ends_with('\''))
+            || (expr.starts_with('"') && expr.ends_with('"')))
     {
         &expr[1..expr.len() - 1]
     } else {
@@ -173,8 +178,18 @@ fn transform_v_bind(css: &str, start: usize, scope_id: &str) -> Option<(String, 
 
 /// Generate CSS variable name from scope ID and expression.
 /// Sanitizes the expression for use as a CSS variable name.
+///
+/// Matches Vue's upstream behavior: replaces non-word characters (except hyphens)
+/// with `_`. Word characters are ASCII `[a-zA-Z0-9_]`.
 fn generate_var_name(scope_id: &str, expr: &str) -> String {
-    let sanitized = expr.replace([' ', '\'', '"'], "").replace('.', "-");
+    let mut sanitized = String::with_capacity(expr.len());
+    for c in expr.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+            sanitized.push(c);
+        } else {
+            sanitized.push('_');
+        }
+    }
     format!("--{}-{}", scope_id, sanitized)
 }
 
@@ -272,14 +287,14 @@ mod tests {
     #[test]
     fn test_v_bind_quoted() {
         let result = prepass(".box { color: v-bind('theme.color'); }", "a4f2eed6");
-        assert_eq!(result.css, ".box { color: var(--a4f2eed6-theme-color); }");
+        assert_eq!(result.css, ".box { color: var(--a4f2eed6-theme_color); }");
         assert_eq!(result.v_bind_vars[0].expression, "theme.color");
     }
 
     #[test]
     fn test_v_bind_nested_parens() {
         let result = prepass(".box { width: v-bind(calc(a + b)); }", "a4f2eed6");
-        assert!(result.css.contains("var(--a4f2eed6-calc(a+b))"));
+        assert!(result.css.contains("var(--a4f2eed6-calc_a___b_)"));
     }
 
     #[test]
@@ -352,5 +367,89 @@ mod tests {
             "[__v_deep__] .inner { color: var(--a4f2eed6-color); }"
         );
         assert_eq!(result.v_bind_vars.len(), 1);
+    }
+
+    #[test]
+    fn test_v_bind_single_quote_char() {
+        // Edge case: v-bind with a single quote char — should not panic
+        let result = prepass(".box { color: v-bind('); }", "a4f2eed6");
+        // Malformed — the quote is treated as expr content, not stripped
+        assert!(result.v_bind_vars.is_empty() || !result.v_bind_vars[0].expression.is_empty());
+    }
+
+    #[test]
+    fn test_v_bind_empty_parens() {
+        // Edge case: v-bind() with empty expression
+        let result = prepass(".box { color: v-bind(); }", "a4f2eed6");
+        assert_eq!(result.v_bind_vars.len(), 1);
+        assert_eq!(result.v_bind_vars[0].expression, "");
+    }
+
+    #[test]
+    fn test_v_bind_unclosed() {
+        // Edge case: unclosed v-bind( — should not transform
+        let result = prepass(".box { color: v-bind(color; }", "a4f2eed6");
+        assert!(result.css.contains("v-bind(color"));
+        assert!(result.v_bind_vars.is_empty());
+    }
+
+    #[test]
+    fn test_non_ascii_in_comment() {
+        // Non-ASCII characters in CSS comments should pass through unmodified
+        let result = prepass("/* 日本語コメント */ .box { color: red; }", "a4f2eed6");
+        assert!(result.css.contains("日本語コメント"));
+        assert!(result.css.contains(".box"));
+    }
+
+    #[test]
+    fn test_non_ascii_in_content() {
+        // Non-ASCII content should pass through unmodified
+        let result = prepass(".box::before { content: '你好'; }", "a4f2eed6");
+        assert!(result.css.contains("你好"));
+    }
+
+    #[test]
+    fn test_v_bind_optional_chaining() {
+        let result = prepass(".box { color: v-bind(props?.color); }", "a4f2eed6");
+        assert_eq!(result.css, ".box { color: var(--a4f2eed6-props__color); }");
+        assert_eq!(result.v_bind_vars[0].expression, "props?.color");
+    }
+
+    #[test]
+    fn test_v_bind_array_access() {
+        let result = prepass(".box { color: v-bind(arr[0]); }", "a4f2eed6");
+        assert_eq!(result.css, ".box { color: var(--a4f2eed6-arr_0_); }");
+    }
+
+    #[test]
+    fn test_v_bind_arithmetic() {
+        let result = prepass(".box { width: v-bind(a + b); }", "a4f2eed6");
+        assert_eq!(result.css, ".box { width: var(--a4f2eed6-a___b); }");
+    }
+
+    #[test]
+    fn test_v_bind_function_call() {
+        let result = prepass(".box { color: v-bind(fn(x)); }", "a4f2eed6");
+        assert_eq!(result.css, ".box { color: var(--a4f2eed6-fn_x_); }");
+    }
+
+    #[test]
+    fn test_v_bind_dollar_sign() {
+        let result = prepass(".box { color: v-bind($color); }", "a4f2eed6");
+        assert_eq!(result.css, ".box { color: var(--a4f2eed6-_color); }");
+    }
+
+    #[test]
+    fn test_v_bind_hyphen_preserved() {
+        let result = prepass(".box { color: v-bind(my-color); }", "a4f2eed6");
+        assert_eq!(result.css, ".box { color: var(--a4f2eed6-my-color); }");
+    }
+
+    #[test]
+    fn test_deep_without_parens() {
+        // :deep without parens should pass through unchanged
+        let result = prepass(":deep { color: red; }", "a4f2eed6");
+        assert!(result.css.contains(":deep"));
+        assert!(!result.css.contains("__v_deep__"));
     }
 }

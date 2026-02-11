@@ -2,17 +2,15 @@
 
 /// Options for processing a style block with lightningcss.
 #[derive(Debug, Clone)]
-pub struct ProcessStyleOptions {
+pub struct ProcessStyleOptions<'a> {
     /// Scope ID string (e.g., "a4f2eed6")
-    pub scope_id: String,
+    pub scope_id: &'a str,
     /// Whether this style block is scoped
     pub scoped: bool,
     /// Whether this is a CSS module block
     pub is_module: bool,
-    /// Custom module name (None = "$style")
-    pub module_name: Option<String>,
     /// Source filename for source map generation
-    pub filename: Option<String>,
+    pub filename: Option<&'a str>,
     /// Whether to generate source maps
     pub sourcemap: bool,
 }

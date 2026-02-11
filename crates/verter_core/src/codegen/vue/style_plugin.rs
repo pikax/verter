@@ -29,6 +29,8 @@ pub struct ProcessedStyle<'a> {
     pub module_classes: Vec<(String, String)>,
     /// v-bind() expressions found in this style block.
     pub v_bind_expressions: Vec<CssVBindExpression>,
+    /// CSS processing errors (e.g., lightningcss parse failures).
+    pub errors: Vec<String>,
     /// UTF-8 byte offset of content start in original SFC.
     pub content_start: u32,
     /// UTF-8 byte offset of content end in original SFC.
@@ -144,6 +146,7 @@ impl<'a> StyleCodegenPlugin<'a> {
         let mut module_name = None;
         let mut module_classes = Vec::new();
         let mut is_module = false;
+        let mut errors: Vec<String> = Vec::new();
 
         // Determine style language
         let lang = css.lang.as_ref().map(|l| match l {
@@ -182,10 +185,9 @@ impl<'a> StyleCodegenPlugin<'a> {
 
             let css_str = std::str::from_utf8(css_content).unwrap_or("");
             let options = crate::css::ProcessStyleOptions {
-                scope_id: scope_id_str,
+                scope_id: &scope_id_str,
                 scoped: css.scoped,
                 is_module,
-                module_name: module_name.clone(),
                 filename: None,
                 sourcemap: false,
             };
@@ -195,8 +197,8 @@ impl<'a> StyleCodegenPlugin<'a> {
                     module_classes = result.module_classes;
                     code_transform.overwrite(css.content_start, css.content_end, &result.code);
                 }
-                Err(_e) => {
-                    // If lightningcss processing fails, keep original
+                Err(e) => {
+                    errors.push(e);
                 }
             }
         }
@@ -211,6 +213,7 @@ impl<'a> StyleCodegenPlugin<'a> {
             module_name,
             module_classes,
             v_bind_expressions,
+            errors,
             content_start: css.content_start,
             content_end: css.content_end,
             tag_open_start: css.tag_open_start,

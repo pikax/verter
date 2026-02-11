@@ -7,37 +7,28 @@
 //! - `[__v_deep__]` → `[data-v-{scopeId}]` (scope parent only)
 //! - `[__v_slotted__]` → `[data-v-{scopeId}-s]` (slot scope)
 
-use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
-
 use super::prepass::{DEEP_MARKER, SLOTTED_MARKER};
+
+/// Apply scoped selectors on already-normalized CSS (no lightningcss re-parse).
+///
+/// **Precondition:** `normalized_css` must have been parsed and serialized by
+/// lightningcss (via [`super::normalize_css`]). This ensures nested rules are
+/// flattened and comments/strings are well-formed. Calling this on raw CSS may
+/// skip selectors inside `@media` or `@supports` blocks.
+pub fn apply_scoped_normalized(normalized_css: &str, scope_id: &str) -> String {
+    let scope_attr = format!("[data-v-{}]", scope_id);
+    let slotted_attr = format!("[data-v-{}-s]", scope_id);
+    apply_scoped_to_normalized(normalized_css, &scope_attr, &slotted_attr)
+}
 
 /// Apply scoped attribute selectors to CSS.
 ///
+/// Standalone entry point that normalizes CSS internally.
 /// Replaces pre-pass markers and adds `[data-v-{scopeId}]` to all selectors
 /// that don't contain `:global()`.
 pub fn apply_scoped(css: &str, scope_id: &str) -> Result<String, String> {
-    let scope_attr = format!("[data-v-{}]", scope_id);
-    let slotted_attr = format!("[data-v-{}-s]", scope_id);
-
-    // Parse the CSS with lightningcss, then serialize back.
-    // This normalizes the CSS (handles comments, strings, at-rules, nesting correctly).
-    //
-    // NOTE: In a future iteration, we can use the Visitor trait to modify selectors
-    // directly on the AST. For now, lightningcss gives us correct CSS parsing and
-    // we do selector transformation on the normalized output.
-    let stylesheet = StyleSheet::parse(css, ParserOptions::default())
-        .map_err(|e| format!("CSS parse error: {}", e))?;
-
-    let result = stylesheet
-        .to_css(PrinterOptions::default())
-        .map_err(|e| format!("CSS serialization error: {}", e))?;
-
-    let normalized = result.code;
-
-    // Now apply scoping to the normalized CSS
-    let output = apply_scoped_to_normalized(&normalized, &scope_attr, &slotted_attr);
-
-    Ok(output)
+    let normalized = super::normalize_css(css)?;
+    Ok(apply_scoped_normalized(&normalized, scope_id))
 }
 
 /// Apply scoped selectors to normalized CSS (already parsed and serialized by lightningcss).
@@ -47,80 +38,9 @@ pub fn apply_scoped(css: &str, scope_id: &str) -> Result<String, String> {
 /// 2. Replacing `[__v_slotted__]` markers with `[data-v-xxx-s]`
 /// 3. Adding `[data-v-xxx]` to all other selectors (at the right position)
 fn apply_scoped_to_normalized(css: &str, scope_attr: &str, slotted_attr: &str) -> String {
-    let mut output = String::with_capacity(css.len() + 256);
-    let mut chars = css.char_indices().peekable();
-    let mut in_string = false;
-    let mut string_char = '"';
-    let mut in_comment = false;
-
-    while let Some((_i, c)) = chars.next() {
-        match c {
-            // Track comments
-            '/' if !in_string && !in_comment => {
-                if let Some(&(_, '*')) = chars.peek() {
-                    in_comment = true;
-                    output.push('/');
-                    if let Some((_, c2)) = chars.next() {
-                        output.push(c2);
-                    }
-                    continue;
-                }
-                output.push(c);
-                continue;
-            }
-            '*' if in_comment => {
-                output.push(c);
-                if let Some(&(_, '/')) = chars.peek() {
-                    in_comment = false;
-                    if let Some((_, c2)) = chars.next() {
-                        output.push(c2);
-                    }
-                }
-                continue;
-            }
-            _ if in_comment => {
-                output.push(c);
-                continue;
-            }
-            // Track strings
-            '"' | '\'' if !in_string => {
-                in_string = true;
-                string_char = c;
-                output.push(c);
-            }
-            c if in_string && c == string_char => {
-                in_string = false;
-                output.push(c);
-            }
-            // Handle rule blocks
-            '{' if !in_string => {
-                // Everything accumulated before '{' in output contains the selector
-                let selector_end = output.len();
-                let selector_start = output.rfind('}').map(|p| p + 1).unwrap_or(0);
-
-                if selector_start < selector_end {
-                    let raw_text = output[selector_start..selector_end].to_string();
-                    let trimmed = raw_text.trim();
-
-                    // Skip @-rules (media, keyframes, etc.)
-                    if !trimmed.starts_with('@') && !trimmed.is_empty() {
-                        let transformed =
-                            transform_selector_list(trimmed, scope_attr, slotted_attr);
-                        output.truncate(selector_start);
-                        // Preserve leading whitespace
-                        let leading_ws = &raw_text[..raw_text.len() - raw_text.trim_start().len()];
-                        output.push_str(leading_ws);
-                        output.push_str(&transformed);
-                    }
-                }
-
-                output.push('{');
-            }
-            _ => output.push(c),
-        }
-    }
-
-    output
+    super::walk::walk_and_transform_selectors(css, |selectors| {
+        transform_selector_list(selectors, scope_attr, slotted_attr)
+    })
 }
 
 /// Transform a comma-separated selector list.
@@ -188,33 +108,50 @@ fn transform_global(selector: &str) -> String {
     result
 }
 
-/// Add scope attribute to each compound selector in a complex selector.
+/// Add scope attribute to the last compound selector in a complex selector.
+///
+/// Matches Vue's official compiler behavior: only the rightmost compound selector
+/// receives the scope attribute (e.g., `.parent .child` → `.parent .child[data-v-xxx]`).
 fn add_scope_to_selector(selector: &str, scope_attr: &str) -> String {
-    let mut result = String::with_capacity(selector.len() + scope_attr.len() * 2);
-    let mut current_simple = String::new();
+    let mut segments: Vec<String> = Vec::new();
+    let mut combinators: Vec<String> = Vec::new();
+    let mut current = String::new();
     let mut chars = selector.chars().peekable();
 
     while let Some(c) = chars.next() {
         match c {
             ' ' | '>' | '+' | '~' => {
-                if !current_simple.trim().is_empty() {
-                    result.push_str(&scope_simple_selector(&current_simple, scope_attr));
-                    current_simple.clear();
+                if !current.trim().is_empty() {
+                    segments.push(current.clone());
+                    current.clear();
                 }
-                result.push(c);
+                let mut comb = String::new();
+                comb.push(c);
                 // Consume additional spaces
                 while chars.peek() == Some(&' ') {
-                    result.push(chars.next().unwrap());
+                    comb.push(chars.next().unwrap());
                 }
+                combinators.push(comb);
             }
-            _ => current_simple.push(c),
+            _ => current.push(c),
         }
     }
-
-    if !current_simple.trim().is_empty() {
-        result.push_str(&scope_simple_selector(&current_simple, scope_attr));
+    if !current.trim().is_empty() {
+        segments.push(current);
     }
 
+    // Build result: only the last segment gets the scope attribute
+    let mut result = String::with_capacity(selector.len() + scope_attr.len());
+    for (i, seg) in segments.iter().enumerate() {
+        if i == segments.len() - 1 {
+            result.push_str(&scope_simple_selector(seg, scope_attr));
+        } else {
+            result.push_str(seg);
+        }
+        if i < combinators.len() {
+            result.push_str(&combinators[i]);
+        }
+    }
     result
 }
 
@@ -230,9 +167,7 @@ fn scope_simple_selector(selector: &str, scope_attr: &str) -> String {
     // It should go after element/class/id selectors, before pseudo-classes/elements
     let mut insert_pos = selector.len();
 
-    if let Some(pos) = selector.find("::") {
-        insert_pos = pos;
-    } else if let Some(pos) = find_pseudo_class_pos(selector) {
+    if let Some(pos) = find_pseudo_class_pos(selector) {
         insert_pos = pos;
     }
 
@@ -251,11 +186,6 @@ fn find_pseudo_class_pos(selector: &str) -> Option<usize> {
 
     while i < bytes.len() {
         if bytes[i] == b':' {
-            // Check it's not ::
-            if i + 1 < bytes.len() && bytes[i + 1] == b':' {
-                return Some(i);
-            }
-            // Check if it's a functional pseudo we should skip (scope everything before it)
             return Some(i);
         }
         // Skip attribute selectors
@@ -313,10 +243,11 @@ mod tests {
 
     #[test]
     fn test_descendant_selector() {
+        // Vue behavior: only the last compound selector gets the scope attribute
         let result = scoped(".parent .child { color: red; }");
         assert!(
-            result.contains(".parent[data-v-a4f2eed6]"),
-            "Got: {}",
+            !result.contains(".parent[data-v-a4f2eed6]"),
+            "Parent should not be scoped. Got: {}",
             result
         );
         assert!(
@@ -405,6 +336,76 @@ mod tests {
         assert!(
             !result.contains("@media[data-v"),
             "Media rule should not be scoped. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_attribute_selector_with_pseudo() {
+        // [attr]:hover — scope should be inserted before :hover, after [attr]
+        let result = scoped("a[href]:hover { color: red; }");
+        assert!(
+            result.contains("[data-v-a4f2eed6]:hover"),
+            "Scope attr should be before :hover. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_child_combinator() {
+        // Vue behavior: only the last compound selector gets the scope attribute
+        let result = scoped(".parent > .child { color: red; }");
+        assert!(
+            !result.contains(".parent[data-v-a4f2eed6]"),
+            "Parent should not be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".child[data-v-a4f2eed6]"),
+            "Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_pseudo_class_and_pseudo_element() {
+        let result = scoped(".btn:hover::before { content: ''; }");
+        assert!(
+            result.contains(".btn[data-v-a4f2eed6]:hover:before")
+                || result.contains(".btn[data-v-a4f2eed6]:hover::before"),
+            "Scope should be before :hover. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_nth_child_and_pseudo_element() {
+        let result = scoped(".item:nth-child(2)::after { content: ''; }");
+        assert!(
+            result.contains(".item[data-v-a4f2eed6]:nth-child(2):after")
+                || result.contains(".item[data-v-a4f2eed6]:nth-child(2)::after"),
+            "Scope should be before :nth-child. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_three_level_descendant() {
+        // Only the last segment should be scoped
+        let result = scoped(".a .b .c { color: red; }");
+        assert!(
+            !result.contains(".a[data-v-a4f2eed6]"),
+            "First should not be scoped. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains(".b[data-v-a4f2eed6]"),
+            "Middle should not be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".c[data-v-a4f2eed6]"),
+            "Last should be scoped. Got: {}",
             result
         );
     }

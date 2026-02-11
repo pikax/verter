@@ -75,6 +75,8 @@ pub struct KaiTsxCodegenResult {
     pub tsx: String,
     /// Compiled CSS (from processed style blocks — scoped selectors applied, v-bind replaced).
     pub css: String,
+    /// CSS processing errors (e.g., lightningcss parse failures).
+    pub css_errors: Vec<String>,
     /// Time taken in milliseconds.
     pub duration_ms: f64,
 }
@@ -293,7 +295,7 @@ pub fn generate_kai(
 
     // 6. Template pipeline: css_parser → css_style → oxc_parser → code_gen_template (VDOM or Vapor)
     let mut css_parser = CssParserPlugin::new();
-    let mut css_style = CssStylePlugin::new(allocator);
+    let mut css_style = CssStylePlugin::new();
     if let Some(sid) = scope_id {
         css_style.set_scope_id(sid);
     }
@@ -468,7 +470,7 @@ pub fn generate_with_tsx_kai(
     template_events.extend(events_after_ec);
 
     let mut css_parser = CssParserPlugin::new();
-    let mut css_style = CssStylePlugin::new(allocator);
+    let mut css_style = CssStylePlugin::new();
     if let Some(sid) = scope_id {
         css_style.set_scope_id(sid);
     }
@@ -501,8 +503,10 @@ pub fn generate_with_tsx_kai(
 
     // 6. Extract compiled CSS from ProcessedStyle events
     let mut css = String::new();
+    let mut css_errors: Vec<String> = Vec::new();
     for event in &pipeline_output {
         if let Event::ProcessedStyle(ref ps) = event {
+            css_errors.extend(ps.errors.iter().cloned());
             if let Some(ref transformed) = ps.transformed_css {
                 if !css.is_empty() {
                     css.push('\n');
@@ -538,6 +542,7 @@ pub fn generate_with_tsx_kai(
     KaiTsxCodegenResult {
         tsx,
         css,
+        css_errors,
         duration_ms,
     }
 }

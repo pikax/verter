@@ -323,11 +323,10 @@ pub struct ProcessStyleResult {
 #[napi]
 pub fn process_style(css: String, options: ProcessStyleOptions) -> Result<ProcessStyleResult> {
     let core_options = verter_core::css::ProcessStyleOptions {
-        scope_id: options.scope_id,
+        scope_id: &options.scope_id,
         scoped: options.scoped.unwrap_or(false),
         is_module: options.is_module.unwrap_or(false),
-        module_name: options.module_name,
-        filename: options.filename,
+        filename: options.filename.as_deref(),
         sourcemap: options.sourcemap.unwrap_or(false),
     };
 

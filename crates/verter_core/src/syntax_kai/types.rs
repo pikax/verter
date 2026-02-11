@@ -864,7 +864,7 @@ pub struct ProcessedCssVBind {
     pub expression: Span,
     /// Generated CSS variable name bytes (e.g., b"--a4f2eed6-color").
     /// Owned because it is computed, not a source slice.
-    pub var_name: Vec<u8>,
+    pub var_name: String,
     /// Byte offset of `v-bind(` in original SFC source.
     pub css_start: u32,
     /// Byte offset of closing `)` + 1 in original SFC source.
@@ -876,8 +876,8 @@ pub struct ProcessedCssVBind {
 pub struct CssModuleClassMapping {
     /// Original class name span in source (e.g., "btn").
     pub original: Span,
-    /// Hashed class name (e.g., b"_btn_a4f2eed60"). Owned, computed.
-    pub hashed: Vec<u8>,
+    /// Hashed class name (e.g., "btn_a4f2eed6_0"). Owned, computed.
+    pub hashed: String,
 }
 
 /// CSS module metadata for a single `<style module>` block.
@@ -905,6 +905,10 @@ pub struct ProcessedStyleBlock {
     pub transformed_css: Option<Vec<u8>>,
     /// v-bind() expressions extracted from this style block.
     pub v_bind_expressions: Vec<ProcessedCssVBind>,
+
+    /// CSS processing errors (e.g., lightningcss parse failures).
+    /// Non-empty when CSS transformation was attempted but failed.
+    pub errors: Vec<String>,
 
     /// Original compiled start event (preserves source positions and attributes).
     pub compiled_start: CompiledRootStyleStart,
