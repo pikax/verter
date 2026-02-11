@@ -1,9 +1,10 @@
-import type { CodegenResult, StripTypesResult } from "@verter/wasm";
+import type { CodegenResult, KaiCodegenResult, StripTypesResult } from "@verter/wasm";
 import type { File, CompilerOptions, CompileTiming } from "./types";
 import { loadLocalWasm, loadCommitWasm, loadReleaseWasm, type WasmModule } from "./wasmLoader";
 import type { VersionEntry } from "./versions";
 
 let wasmCompile: ((input: string, options?: unknown) => CodegenResult) | null = null;
+let wasmGenerateKai: ((input: string, options?: unknown) => KaiCodegenResult) | null = null;
 let wasmStripTypes: ((source: string) => StripTypesResult) | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
@@ -15,6 +16,7 @@ export async function initCompilers(): Promise<void> {
   initPromise = (async () => {
     const wasmModule = await loadLocalWasm();
     wasmCompile = wasmModule.compile as typeof wasmCompile;
+    wasmGenerateKai = (wasmModule.generateKai as typeof wasmGenerateKai) ?? null;
     wasmStripTypes = (wasmModule.stripTypes as typeof wasmStripTypes) ?? null;
     initialized = true;
   })();
@@ -40,6 +42,7 @@ export async function switchWasmVersion(entry: VersionEntry): Promise<void> {
   }
 
   wasmCompile = wasmModule.compile as typeof wasmCompile;
+  wasmGenerateKai = (wasmModule.generateKai as typeof wasmGenerateKai) ?? null;
   wasmStripTypes = (wasmModule.stripTypes as typeof wasmStripTypes) ?? null;
 }
 
@@ -94,6 +97,18 @@ function compileInner(
   return result;
 }
 
+function compileKaiInner(
+  source: string,
+  filename: string,
+  options?: CompilerOptions,
+): KaiCodegenResult | null {
+  if (!wasmGenerateKai) return null;
+  return wasmGenerateKai(source, {
+    filename,
+    isProduction: options?.isProduction ?? false,
+  });
+}
+
 export async function compileVueSFC(
   source: string,
   filename: string,
@@ -121,7 +136,7 @@ export async function compileFile(
   showTSX?: boolean,
 ): Promise<CompileTiming> {
   await initCompilers();
-  const timing: CompileTiming = { verter: null, verterNative: null, stripTypes: null, tsx: null };
+  const timing: CompileTiming = { verter: null, verterNative: null, stripTypes: null, tsx: null, kai: null, kaiJs: null };
 
   if (file.filename.endsWith(".vue")) {
     try {
@@ -137,6 +152,15 @@ export async function compileFile(
         file.compiled.css = verterResult.css || extractStyles(file.code);
         file.compiled.tsx = verterResult.tsx ?? "";
         file.compiled.ts = verterResult.code;
+
+        // Run kai codegen pipeline
+        const kaiStart1 = performance.now();
+        const kaiResult1 = compileKaiInner(file.code, file.filename, options);
+        timing.kaiJs = performance.now() - kaiStart1;
+        if (kaiResult1) {
+          file.compiled.kai = kaiResult1.code;
+          timing.kai = kaiResult1.durationMs;
+        }
 
         // Strip types for JS tab
         if (wasmStripTypes) {
@@ -163,10 +187,19 @@ export async function compileFile(
         file.compiled.js = verterResult.code;
         file.compiled.ts = "";
         file.compiled.errors = [];
+
+        // Run kai codegen pipeline
+        const kaiStart2 = performance.now();
+        const kaiResult2 = compileKaiInner(file.code, file.filename, options);
+        timing.kaiJs = performance.now() - kaiStart2;
+        if (kaiResult2) {
+          file.compiled.kai = kaiResult2.code;
+          timing.kai = kaiResult2.durationMs;
+        }
       }
 
       console.log(
-        `Compiled ${file.filename} in ${timing.verter}ms (WASM:${timing.verterNative ?? "N/A"}ms)`,
+        `Compiled ${file.filename} in ${timing.verter}ms (WASM:${timing.verterNative ?? "N/A"}ms, Kai:${timing.kai ?? "N/A"}ms)`,
       );
     } catch (e) {
       file.compiled.errors = [e instanceof Error ? e.message : String(e)];

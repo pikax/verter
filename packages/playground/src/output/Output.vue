@@ -11,6 +11,7 @@ const props = defineProps<{
 
 const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "preview", label: "Preview" },
+  { mode: "kai", label: "Kai" },
   { mode: "tsx", label: "TSX" },
   { mode: "ts", label: "TS" },
   { mode: "js", label: "JS" },
@@ -22,9 +23,11 @@ const tabs = computed(() => {
   const file = props.store.activeFile;
   const showTSTab = props.store.showTS && (file?.isTS ?? false);
   const showTSXTab = props.store.showTSX;
+  const isVue = file?.filename.endsWith(".vue") ?? false;
   return allTabs.filter((tab) => {
     if (tab.mode === "ts") return showTSTab;
     if (tab.mode === "tsx") return showTSXTab;
+    if (tab.mode === "kai") return isVue;
     return true;
   });
 });
@@ -52,12 +55,14 @@ function openSourceMapVisualization() {
 }
 
 function getTabTiming(mode: OutputMode): string | null {
-  const { verter, stripTypes, tsx } = props.store.compileTiming;
+  const { verter, stripTypes, tsx, kai } = props.store.compileTiming;
   switch (mode) {
     case "preview": {
       const total = (verter ?? 0) + (stripTypes ?? 0);
       return total > 0 ? `${total.toFixed(1)}ms` : null;
     }
+    case "kai":
+      return kai !== null ? `${kai.toFixed(1)}ms` : null;
     case "tsx":
       return tsx !== null ? `${tsx.toFixed(1)}ms` : null;
     case "ts":

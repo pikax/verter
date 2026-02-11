@@ -3,6 +3,7 @@ export interface CompiledFile {
   js: string;
   css: string;
   tsx: string;
+  kai: string;
   errors: string[];
   sourceMap: string;
 }
@@ -15,6 +16,7 @@ export class File {
     js: "",
     css: "",
     tsx: "",
+    kai: "",
     errors: [],
     sourceMap: "",
   };
@@ -43,7 +45,7 @@ export class File {
   }
 }
 
-export type OutputMode = "preview" | "ts" | "js" | "css" | "tsx";
+export type OutputMode = "preview" | "ts" | "js" | "css" | "tsx" | "kai";
 
 export interface CompilerOptions {
   isProduction: boolean;
@@ -55,6 +57,8 @@ export interface CompileTiming {
   verterNative: number | null; // ms for Rust pipeline (reported by Rust)
   stripTypes: number | null; // ms for stripTypes call (when showTS is enabled)
   tsx: number | null; // ms for TSX generation (reported by Rust, when showTSX is enabled)
+  kai: number | null; // ms for kai codegen pipeline (reported by Rust)
+  kaiJs: number | null; // ms for kai codegen (JS-measured)
 }
 
 export interface StoreState {

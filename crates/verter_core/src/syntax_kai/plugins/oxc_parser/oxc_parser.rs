@@ -28,15 +28,11 @@ pub struct OxcParserPlugin<'alloc> {
 impl<'alloc> OxcParserPlugin<'alloc> {
     pub fn new(alloc: &'alloc Allocator) -> Self {
         Self {
-            source_type: SourceType::tsx(),
+            source_type: SourceType::mjs(),
             alloc,
             current_script_start: None,
             stack_provided_bindings: Vec::new(),
         }
-    }
-
-    pub fn set_source_type(&mut self, source_type: SourceType) {
-        self.source_type = source_type;
     }
 }
 
@@ -51,6 +47,10 @@ impl<'alloc> SyntaxPlugin<'alloc> for OxcParserPlugin<'alloc> {
         ctx: &mut SyntaxPluginContext<'alloc>,
     ) -> SyntaxResult<Event<'alloc>> {
         match event {
+            Event::Lang(ev) => {
+                self.source_type = ev.lang.to_source_type();
+                SyntaxResult::Keep(Event::Lang(ev))
+            }
             Event::ElementStart(compiled) => {
                 let current_bindings: &[&str] = self
                     .stack_provided_bindings

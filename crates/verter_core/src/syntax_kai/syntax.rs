@@ -207,17 +207,37 @@ pub struct Syntax<'alloc> {
     /// Pre-allocated with capacity 32 to avoid heap allocations for typical nesting depths.
     parent_stack: Vec<u32>,
 
-    events: &'alloc mut Vec<Event<'alloc>>,
+    events: Vec<Event<'alloc>>,
+
+    scripts_found: usize,
+
+    has_style_scope: bool,
+    has_style_module: bool,
 }
 
 impl<'alloc> Syntax<'alloc> {
-    /// Take ownership of the root_script_events collected during parsing.
-    /// Call this after all tokenizer events have been processed.
-    pub fn take_root_script_events(&mut self) -> Vec<Event<'alloc>> {
-        std::mem::take(&mut self.root_script_events)
+    // /// Take ownership of the root_script_events collected during parsing.
+    // /// Call this after all tokenizer events have been processed.
+    // pub fn take_root_script_events(&mut self) -> Vec<Event<'alloc>> {
+    //     std::mem::take(&mut self.root_script_events)
+    // }
+    pub fn has_style_scope(&self) -> bool {
+        self.has_style_scope
+    }
+    pub fn has_style_module(&self) -> bool {
+        self.has_style_module
     }
 
-    pub fn new(events: &'alloc mut Vec<Event<'alloc>>, template_mode: bool) -> Self {
+    pub fn events(&mut self) -> Vec<Event<'alloc>> {
+        let mut out = Vec::with_capacity(self.root_script_events.len() + self.events.len());
+
+        out.extend(self.root_script_events.drain(..));
+        out.extend(self.events.drain(..));
+
+        out
+    }
+
+    pub fn new(template_mode: bool) -> Self {
         Self {
             template_mode,
             is_vapor: false,
@@ -227,16 +247,16 @@ impl<'alloc> Syntax<'alloc> {
             last_event_open_tag: None,
             current_prop: None,
             parent_stack: Vec::with_capacity(32),
-            events,
+            events: Vec::with_capacity(50),
             root_script_events: Vec::with_capacity(6),
+
+            scripts_found: 0,
+            has_style_scope: false,
+            has_style_module: false,
         }
     }
 
-    pub fn handle(
-        &mut self,
-        event: &TokenizerEvent<'alloc>,
-        ctx: &mut SyntaxPluginContext<'alloc>,
-    ) {
+    pub fn handle(&mut self, event: &TokenizerEvent<'alloc>, ctx: &SyntaxPluginContext<'alloc>) {
         match event {
             // Element events
             TokenizerEvent::OpenTagName { start, end } => {
@@ -323,6 +343,10 @@ impl<'alloc> Syntax<'alloc> {
         if self.nested_level == 0 && !self.template_mode {
             // handle root
             let kind = Self::resolve_root_kind(name);
+
+            if kind == RootNodeKind::Script {
+                self.scripts_found += 1;
+            }
 
             self.last_root_node = Some(RootNodeOpenTag::Start(RootNodeOpenTagStart {
                 kind,
@@ -703,6 +727,13 @@ impl<'alloc> Syntax<'alloc> {
                 if root.kind == RootNodeKind::Script {
                     self.root_script_events.push(Event::Prop(ev));
                     return;
+                }
+                if root.kind == RootNodeKind::Style {
+                    if name == b"scoped" {
+                        self.has_style_scope = true;
+                    } else if name == b"module" {
+                        self.has_style_module = true;
+                    }
                 }
             }
         }

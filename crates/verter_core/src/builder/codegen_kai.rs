@@ -4,19 +4,25 @@
 //! - `generate_kai()` — VDOM/Vapor template codegen (production compiler output)
 //! - `generate_with_tsx_kai()` — TSX codegen for IDE type checking
 
+use oxc_span::Language;
 use sha2::{Digest, Sha256};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+use std::{
+    cell::{Ref, RefCell},
+    rc::Rc,
+};
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
 use crate::{
+    code_transform::{self, CodeTransform},
     cursor::ScriptDetector,
     syntax_kai::{
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxPluginOptions, SyntaxResult},
         plugins::{
-            code_gen_script::code_gen_script::CodeGenScriptPlugin,
+            code_gen::script::ScriptGeneratorPlugin,
             code_gen_template::code_gen_template::VdomTemplateCodegenPlugin,
             code_gen_template_vapor::code_gen_template_vapor::VaporTemplateCodegenPlugin,
             code_gen_tsx::code_gen_tsx::TsxCodegenPlugin, css_parser::css_parser::CssParserPlugin,
@@ -65,8 +71,6 @@ pub struct KaiCodegenResult {
     pub code: String,
     /// Time taken in milliseconds.
     pub duration_ms: f64,
-    /// Whether Vapor mode was used.
-    pub is_vapor: bool,
 }
 
 /// Result of the kai TSX codegen process.
@@ -134,38 +138,6 @@ fn extract_component_name(filename: &str) -> String {
     name.to_string()
 }
 
-/// Quick byte scan for `<style ... scoped ...>`.
-fn has_scoped_style(source: &[u8]) -> bool {
-    let style_tag = b"<style";
-    let scoped = b"scoped";
-    let close = b">";
-
-    let mut pos = 0;
-    while pos + style_tag.len() < source.len() {
-        if let Some(style_start) = find_bytes(&source[pos..], style_tag) {
-            let style_pos = pos + style_start;
-            if let Some(close_offset) = find_bytes(&source[style_pos..], close) {
-                let tag_content = &source[style_pos..style_pos + close_offset];
-                if find_bytes(tag_content, scoped).is_some() {
-                    return true;
-                }
-                pos = style_pos + close_offset + 1;
-            } else {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-    false
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
 /// Compute scope_id as 8 hex chars from component name.
 fn compute_scope_id(component_name: &str) -> [u8; 8] {
     let hash = get_hash(component_name);
@@ -173,16 +145,6 @@ fn compute_scope_id(component_name: &str) -> [u8; 8] {
     let mut scope_id = [0u8; 8];
     scope_id.copy_from_slice(&hash_bytes[..8.min(hash_bytes.len())]);
     scope_id
-}
-
-/// Detect if any template start event has the vapor attribute set.
-fn detect_vapor<'a>(events: &[Event<'a>]) -> bool {
-    for event in events {
-        if let Event::CompiledTemplateStart(ref start) = event {
-            return start.vapor.is_some();
-        }
-    }
-    false
 }
 
 // =============================================================================
@@ -212,128 +174,181 @@ pub fn generate_kai(
         bytes,
         options: &syntax_options,
     };
+    let mut has_style_scope = false;
+    let mut has_style_module = false;
 
-    // 1. Tokenize and run Syntax to produce events
-    let mut tokenizer_events = Vec::new();
-    tokenize(bytes, |e| tokenizer_events.push(e));
+    let mut syntax = Syntax::new(false);
+    tokenize(bytes, |e| syntax.handle(&e, &ctx));
 
-    let mut events_storage: Vec<Event<'_>> = Vec::new();
-    let ptr = &mut events_storage as *mut Vec<Event<'_>>;
-    let root_script_events;
-    {
-        // SAFETY: Decouples the mutable borrow lifetime from the Event lifetime.
-        // Syntax writes into the vec during handle() calls, then is dropped at scope end.
-        let mut syntax = Syntax::new(unsafe { &mut *ptr }, false);
-        for event in &tokenizer_events {
-            syntax.handle(event, &mut ctx);
-        }
-        root_script_events = syntax.take_root_script_events();
-    }
-    let events = events_storage;
+    let events = syntax.events();
 
-    // Detect script language for oxc parser
-    let script_detector = ScriptDetector::new();
-    let detected = script_detector.detect(bytes);
+    has_style_scope = syntax.has_style_scope();
+    has_style_module = syntax.has_style_module();
 
-    // 2. Compute scope_id if needed
+    // events are resolved
+
     let component_name = options
         .filename
         .as_ref()
         .map(|f| extract_component_name(f))
         .unwrap_or_else(|| "App".to_string());
 
-    let scope_id = if has_scoped_style(bytes) {
+    let scope_id = if has_style_scope {
         Some(compute_scope_id(&component_name))
     } else {
         None
     };
     let component_id = compute_scope_id(&component_name);
 
-    // 3. Script pipeline: element_compiler → oxc_parser → code_gen_script
+    let mut code_transform = Rc::new(RefCell::new(CodeTransform::new(input, allocator)));
+
+    // plugins for the pipeline
     let mut script_ec = ElementCompilerPlugin::new();
     let mut script_oxc = OxcParserPlugin::new(allocator);
-    script_oxc.set_source_type(detected.language.to_source_type());
-    let mut code_gen_script = CodeGenScriptPlugin::new();
-
-    let script_output = run_pipeline(
-        root_script_events,
-        &mut [&mut script_ec, &mut script_oxc, &mut code_gen_script],
-        &mut ctx,
+    let mut code_gen_script = ScriptGeneratorPlugin::new(
+        Rc::clone(&code_transform),
+        &component_name,
+        false,
+        false,
+        false,
     );
 
-    // 4. Detect vapor mode from template events
-    // The element_compiler in the template pipeline will produce CompiledTemplateStart,
-    // but we need to run it first. Let's run element_compiler on events first to detect.
-    let mut template_ec = ElementCompilerPlugin::new();
-    let events_after_ec = run_pipeline(events, &mut [&mut template_ec], &mut ctx);
+    let mut pipeline = vec![
+        &mut script_ec as &mut dyn SyntaxPlugin,
+        &mut script_oxc as &mut dyn SyntaxPlugin,
+        &mut code_gen_script as &mut dyn SyntaxPlugin,
+    ];
 
-    let is_vapor = detect_vapor(&events_after_ec);
-
-    // 5. Forward OxcScript events (containing bindings) to template pipeline
-    let mut template_events = Vec::with_capacity(script_output.len() + events_after_ec.len());
-    for event in script_output {
-        if matches!(&event, Event::OxcScript(_)) {
-            template_events.push(event);
-        }
-    }
-    template_events.extend(events_after_ec);
-
-    // 6. Template pipeline: css_parser → css_style → oxc_parser → code_gen_template (VDOM or Vapor)
-    let mut css_parser = CssParserPlugin::new();
-    let mut css_style = CssStylePlugin::new();
-    if let Some(sid) = scope_id {
-        css_style.set_scope_id(sid);
-    }
-    css_style.set_component_id(component_id);
-
-    let mut template_oxc = OxcParserPlugin::new(allocator);
-    template_oxc.set_source_type(detected.language.to_source_type());
-
-    let code = if is_vapor {
-        let mut vapor_codegen = VaporTemplateCodegenPlugin::new();
-        if let Some(sid) = scope_id {
-            vapor_codegen.set_scope_id(sid);
-        }
-
-        let _output = run_pipeline(
-            template_events,
-            &mut [
-                &mut css_parser,
-                &mut css_style,
-                &mut template_oxc,
-                &mut vapor_codegen,
-            ],
-            &mut ctx,
-        );
-
-        vapor_codegen.take_output()
-    } else {
-        let mut vdom_codegen = VdomTemplateCodegenPlugin::new();
-        if let Some(sid) = scope_id {
-            vdom_codegen.set_scope_id(sid);
-        }
-
-        let _output = run_pipeline(
-            template_events,
-            &mut [
-                &mut css_parser,
-                &mut css_style,
-                &mut template_oxc,
-                &mut vdom_codegen,
-            ],
-            &mut ctx,
-        );
-
-        vdom_codegen.take_output()
-    };
+    // run scripts
+    run_pipeline(events, &mut pipeline, &mut ctx);
 
     let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    KaiCodegenResult {
-        code,
+    return KaiCodegenResult {
+        code: code_transform.borrow().to_string(),
         duration_ms,
-        is_vapor,
-    }
+    };
+
+    // // 1. Tokenize and run Syntax to produce events
+    // let mut tokenizer_events = Vec::new();
+    // tokenize(bytes, |e| tokenizer_events.push(e));
+
+    // let mut events_storage: Vec<Event<'_>> = Vec::new();
+    // let ptr = &mut events_storage as *mut Vec<Event<'_>>;
+    // let root_script_events;
+    // let mut has_style_scope = false;
+    // let mut has_style_module = false;
+    // {
+    //     // SAFETY: Decouples the mutable borrow lifetime from the Event lifetime.
+    //     // Syntax writes into the vec during handle() calls, then is dropped at scope end.
+    //     let mut syntax = Syntax::new(unsafe { &mut *ptr }, false);
+    //     for event in &tokenizer_events {
+    //         syntax.handle(event, &mut ctx);
+    //     }
+    //     root_script_events = syntax.take_root_script_events();
+    //     has_style_scope = syntax.has_style_scope();
+    //     has_style_module = syntax.has_style_module();
+    // }
+    // let events = events_storage;
+
+    // // 2. Compute scope_id if needed
+    // let component_name = options
+    //     .filename
+    //     .as_ref()
+    //     .map(|f| extract_component_name(f))
+    //     .unwrap_or_else(|| "App".to_string());
+
+    // let scope_id = if has_style_scope {
+    //     Some(compute_scope_id(&component_name))
+    // } else {
+    //     None
+    // };
+    // let component_id = compute_scope_id(&component_name);
+
+    // // 3. Script pipeline: element_compiler → oxc_parser → code_gen_script
+    // let mut script_ec = ElementCompilerPlugin::new();
+    // let mut script_oxc = OxcParserPlugin::new(allocator);
+    // let mut code_gen_script = ScriptGeneratorPlugin::new(ctx.input, component_name, false, false);
+
+    // let script_output = run_pipeline(
+    //     root_script_events,
+    //     &mut [&mut script_ec, &mut script_oxc, &mut code_gen_script],
+    //     &mut ctx,
+    // );
+
+    // // 4. Detect vapor mode from template events
+    // // The element_compiler in the template pipeline will produce CompiledTemplateStart,
+    // // but we need to run it first. Let's run element_compiler on events first to detect.
+    // let mut template_ec = ElementCompilerPlugin::new();
+    // let events_after_ec = run_pipeline(events, &mut [&mut template_ec], &mut ctx);
+
+    // let is_vapor = detect_vapor(&events_after_ec);
+
+    // // 5. Forward OxcScript events (containing bindings) to template pipeline
+    // let mut template_events = Vec::with_capacity(script_output.len() + events_after_ec.len());
+    // for event in script_output {
+    //     if matches!(&event, Event::OxcScript(_)) {
+    //         template_events.push(event);
+    //     }
+    // }
+    // template_events.extend(events_after_ec);
+
+    // // 6. Template pipeline: css_parser → css_style → oxc_parser → code_gen_template (VDOM or Vapor)
+    // let mut css_parser = CssParserPlugin::new();
+    // let mut css_style = CssStylePlugin::new();
+    // if let Some(sid) = scope_id {
+    //     css_style.set_scope_id(sid);
+    // }
+    // css_style.set_component_id(component_id);
+
+    // let mut template_oxc = OxcParserPlugin::new(allocator);
+    // template_oxc.set_source_type(detected.language.to_source_type());
+
+    // let code = if is_vapor {
+    //     let mut vapor_codegen = VaporTemplateCodegenPlugin::new();
+    //     if let Some(sid) = scope_id {
+    //         vapor_codegen.set_scope_id(sid);
+    //     }
+
+    //     let _output = run_pipeline(
+    //         template_events,
+    //         &mut [
+    //             &mut css_parser,
+    //             &mut css_style,
+    //             &mut template_oxc,
+    //             &mut vapor_codegen,
+    //         ],
+    //         &mut ctx,
+    //     );
+
+    //     vapor_codegen.take_output()
+    // } else {
+    //     let mut vdom_codegen = VdomTemplateCodegenPlugin::new();
+    //     if let Some(sid) = scope_id {
+    //         vdom_codegen.set_scope_id(sid);
+    //     }
+
+    //     let _output = run_pipeline(
+    //         template_events,
+    //         &mut [
+    //             &mut css_parser,
+    //             &mut css_style,
+    //             &mut template_oxc,
+    //             &mut vdom_codegen,
+    //         ],
+    //         &mut ctx,
+    //     );
+
+    //     vdom_codegen.take_output()
+    // };
+
+    // let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    // KaiCodegenResult {
+    //     code,
+    //     duration_ms,
+    //     is_vapor,
+    // }
 }
 
 // =============================================================================
@@ -353,186 +368,192 @@ pub fn generate_with_tsx_kai(
     options: &KaiCodegenOptions,
     allocator: &oxc_allocator::Allocator,
 ) -> KaiTsxCodegenResult {
-    let start = Instant::now();
-    let bytes = input.as_bytes();
+    // let start = Instant::now();
+    // let bytes = input.as_bytes();
 
-    let syntax_options = SyntaxPluginOptions::default();
-    let mut ctx = SyntaxPluginContext {
-        input,
-        bytes,
-        options: &syntax_options,
-    };
+    // let syntax_options = SyntaxPluginOptions::default();
+    // let mut ctx = SyntaxPluginContext {
+    //     input,
+    //     bytes,
+    //     options: &syntax_options,
+    // };
 
-    // 1. Tokenize
-    let mut tokenizer_events = Vec::new();
-    tokenize(bytes, |e| tokenizer_events.push(e));
+    // // 1. Tokenize
+    // let mut tokenizer_events = Vec::new();
+    // tokenize(bytes, |e| tokenizer_events.push(e));
 
-    let mut events_storage: Vec<Event<'_>> = Vec::new();
-    let ptr = &mut events_storage as *mut Vec<Event<'_>>;
-    let root_script_events;
-    {
-        let mut syntax = Syntax::new(unsafe { &mut *ptr }, false);
-        for event in &tokenizer_events {
-            syntax.handle(event, &mut ctx);
-        }
-        root_script_events = syntax.take_root_script_events();
-    }
-    let events = events_storage;
+    // let mut events_storage: Vec<Event<'_>> = Vec::new();
+    // let ptr = &mut events_storage as *mut Vec<Event<'_>>;
+    // let root_script_events;
+    // {
+    //     let mut syntax = Syntax::new(unsafe { &mut *ptr }, false);
+    //     for event in &tokenizer_events {
+    //         syntax.handle(event, &mut ctx);
+    //     }
+    //     root_script_events = syntax.take_root_script_events();
+    // }
+    // let events = events_storage;
 
-    let script_detector = ScriptDetector::new();
-    let detected = script_detector.detect(bytes);
+    // let script_detector = ScriptDetector::new();
+    // let detected = script_detector.detect(bytes);
 
-    // 2. Compute IDs
-    let component_name = options
-        .filename
-        .as_ref()
-        .map(|f| extract_component_name(f))
-        .unwrap_or_else(|| "App".to_string());
+    // // 2. Compute IDs
+    // let component_name = options
+    //     .filename
+    //     .as_ref()
+    //     .map(|f| extract_component_name(f))
+    //     .unwrap_or_else(|| "App".to_string());
 
-    let scope_id = if has_scoped_style(bytes) {
-        Some(compute_scope_id(&component_name))
-    } else {
-        None
-    };
-    let component_id = compute_scope_id(&component_name);
+    // let scope_id = if has_scoped_style(bytes) {
+    //     Some(compute_scope_id(&component_name))
+    // } else {
+    //     None
+    // };
+    // let component_id = compute_scope_id(&component_name);
 
-    // 3. Script pipeline
-    let mut script_ec = ElementCompilerPlugin::new();
-    let mut script_oxc = OxcParserPlugin::new(allocator);
-    script_oxc.set_source_type(detected.language.to_source_type());
-    let mut code_gen_script = CodeGenScriptPlugin::new();
+    // // 3. Script pipeline
+    // let mut script_ec = ElementCompilerPlugin::new();
+    // let mut script_oxc = OxcParserPlugin::new(allocator);
+    // script_oxc.set_source_type(detected.language.to_source_type());
+    // let mut code_gen_script = CodeGenScriptPlugin::new();
 
-    let script_output = run_pipeline(
-        root_script_events,
-        &mut [&mut script_ec, &mut script_oxc, &mut code_gen_script],
-        &mut ctx,
-    );
+    // let script_output = run_pipeline(
+    //     root_script_events,
+    //     &mut [&mut script_ec, &mut script_oxc, &mut code_gen_script],
+    //     &mut ctx,
+    // );
 
-    // 4. Extract script block content and collect OxcScript events (for bindings)
-    let mut script_content = String::new();
-    let mut oxc_script_events: Vec<Event> = Vec::new();
-    for event in script_output {
-        match &event {
-            Event::CompiledScriptStart(ref start_ev) => {
-                // Comment the script open tag
-                let tag_bytes =
-                    &bytes[start_ev.tag_open.start as usize..start_ev.tag_open.end as usize];
-                script_content.push_str("// ");
-                script_content.push_str(&String::from_utf8_lossy(tag_bytes));
-                script_content.push('\n');
-            }
-            Event::CompiledScriptEnd(ref end_ev) => {
-                // Include the script content as-is
-                if let Some(content_span) = end_ev.content {
-                    let content_bytes =
-                        &bytes[content_span.start as usize..content_span.end as usize];
-                    let content_str = String::from_utf8_lossy(content_bytes);
-                    // Trim leading/trailing newlines but preserve internal formatting
-                    let trimmed = content_str.trim();
-                    if !trimmed.is_empty() {
-                        script_content.push_str(trimmed);
-                        script_content.push('\n');
-                    }
-                }
-                // Comment the script close tag
-                if let Some(close_span) = end_ev.tag_close {
-                    let close_bytes = &bytes[close_span.start as usize..close_span.end as usize];
-                    script_content.push_str("// ");
-                    script_content.push_str(&String::from_utf8_lossy(close_bytes));
-                    script_content.push('\n');
-                }
-            }
-            Event::OxcScript(_) => {
-                oxc_script_events.push(event);
-            }
-            _ => {}
-        }
-    }
+    // // 4. Extract script block content and collect OxcScript events (for bindings)
+    // let mut script_content = String::new();
+    // let mut oxc_script_events: Vec<Event> = Vec::new();
+    // for event in script_output {
+    //     match &event {
+    //         Event::CompiledScriptStart(ref start_ev) => {
+    //             // Comment the script open tag
+    //             let tag_bytes =
+    //                 &bytes[start_ev.tag_open.start as usize..start_ev.tag_open.end as usize];
+    //             script_content.push_str("// ");
+    //             script_content.push_str(&String::from_utf8_lossy(tag_bytes));
+    //             script_content.push('\n');
+    //         }
+    //         Event::CompiledScriptEnd(ref end_ev) => {
+    //             // Include the script content as-is
+    //             if let Some(content_span) = end_ev.content {
+    //                 let content_bytes =
+    //                     &bytes[content_span.start as usize..content_span.end as usize];
+    //                 let content_str = String::from_utf8_lossy(content_bytes);
+    //                 // Trim leading/trailing newlines but preserve internal formatting
+    //                 let trimmed = content_str.trim();
+    //                 if !trimmed.is_empty() {
+    //                     script_content.push_str(trimmed);
+    //                     script_content.push('\n');
+    //                 }
+    //             }
+    //             // Comment the script close tag
+    //             if let Some(close_span) = end_ev.tag_close {
+    //                 let close_bytes = &bytes[close_span.start as usize..close_span.end as usize];
+    //                 script_content.push_str("// ");
+    //                 script_content.push_str(&String::from_utf8_lossy(close_bytes));
+    //                 script_content.push('\n');
+    //             }
+    //         }
+    //         Event::OxcScript(_) => {
+    //             oxc_script_events.push(event);
+    //         }
+    //         _ => {}
+    //     }
+    // }
 
-    // 5. Template pipeline: element_compiler → css_style → oxc_parser → code_gen_tsx
-    let mut template_ec = ElementCompilerPlugin::new();
-    let events_after_ec = run_pipeline(events, &mut [&mut template_ec], &mut ctx);
+    // // 5. Template pipeline: element_compiler → css_style → oxc_parser → code_gen_tsx
+    // let mut template_ec = ElementCompilerPlugin::new();
+    // let events_after_ec = run_pipeline(events, &mut [&mut template_ec], &mut ctx);
 
-    // Forward OxcScript events (containing bindings) to template pipeline
-    let mut template_events = Vec::with_capacity(oxc_script_events.len() + events_after_ec.len());
-    template_events.extend(oxc_script_events);
-    template_events.extend(events_after_ec);
+    // // Forward OxcScript events (containing bindings) to template pipeline
+    // let mut template_events = Vec::with_capacity(oxc_script_events.len() + events_after_ec.len());
+    // template_events.extend(oxc_script_events);
+    // template_events.extend(events_after_ec);
 
-    let mut css_parser = CssParserPlugin::new();
-    let mut css_style = CssStylePlugin::new();
-    if let Some(sid) = scope_id {
-        css_style.set_scope_id(sid);
-    }
-    css_style.set_component_id(component_id);
+    // let mut css_parser = CssParserPlugin::new();
+    // let mut css_style = CssStylePlugin::new();
+    // if let Some(sid) = scope_id {
+    //     css_style.set_scope_id(sid);
+    // }
+    // css_style.set_component_id(component_id);
 
-    let mut template_oxc = OxcParserPlugin::new(allocator);
-    template_oxc.set_source_type(detected.language.to_source_type());
+    // let mut template_oxc = OxcParserPlugin::new(allocator);
+    // template_oxc.set_source_type(detected.language.to_source_type());
 
-    // Conditionally include the TSX codegen plugin
-    let mut tsx_codegen = TsxCodegenPlugin::new();
-    let pipeline_output = if options.include_tsx {
-        run_pipeline(
-            template_events,
-            &mut [
-                &mut css_parser,
-                &mut css_style,
-                &mut template_oxc,
-                &mut tsx_codegen,
-            ],
-            &mut ctx,
-        )
-    } else {
-        // Run pipeline without TSX plugin — still produces CSS from ProcessedStyle events
-        run_pipeline(
-            template_events,
-            &mut [&mut css_parser, &mut css_style, &mut template_oxc],
-            &mut ctx,
-        )
-    };
+    // // Conditionally include the TSX codegen plugin
+    // let mut tsx_codegen = TsxCodegenPlugin::new();
+    // let pipeline_output = if options.include_tsx {
+    //     run_pipeline(
+    //         template_events,
+    //         &mut [
+    //             &mut css_parser,
+    //             &mut css_style,
+    //             &mut template_oxc,
+    //             &mut tsx_codegen,
+    //         ],
+    //         &mut ctx,
+    //     )
+    // } else {
+    //     // Run pipeline without TSX plugin — still produces CSS from ProcessedStyle events
+    //     run_pipeline(
+    //         template_events,
+    //         &mut [&mut css_parser, &mut css_style, &mut template_oxc],
+    //         &mut ctx,
+    //     )
+    // };
 
-    // 6. Extract compiled CSS from ProcessedStyle events
-    let mut css = String::new();
-    let mut css_errors: Vec<String> = Vec::new();
-    for event in &pipeline_output {
-        if let Event::ProcessedStyle(ref ps) = event {
-            css_errors.extend(ps.errors.iter().cloned());
-            if let Some(ref transformed) = ps.transformed_css {
-                if !css.is_empty() {
-                    css.push('\n');
-                }
-                css.push_str(&String::from_utf8_lossy(transformed));
-            } else if let Some(content_span) = ps.compiled_end.content {
-                // No transformation (plain unscoped style) — use raw content
-                if !css.is_empty() {
-                    css.push('\n');
-                }
-                let raw = &bytes[content_span.start as usize..content_span.end as usize];
-                css.push_str(&String::from_utf8_lossy(raw));
-            }
-        }
-    }
+    // // 6. Extract compiled CSS from ProcessedStyle events
+    // let mut css = String::new();
+    // let mut css_errors: Vec<String> = Vec::new();
+    // for event in &pipeline_output {
+    //     if let Event::ProcessedStyle(ref ps) = event {
+    //         css_errors.extend(ps.errors.iter().cloned());
+    //         if let Some(ref transformed) = ps.transformed_css {
+    //             if !css.is_empty() {
+    //                 css.push('\n');
+    //             }
+    //             css.push_str(&String::from_utf8_lossy(transformed));
+    //         } else if let Some(content_span) = ps.compiled_end.content {
+    //             // No transformation (plain unscoped style) — use raw content
+    //             if !css.is_empty() {
+    //                 css.push('\n');
+    //             }
+    //             let raw = &bytes[content_span.start as usize..content_span.end as usize];
+    //             css.push_str(&String::from_utf8_lossy(raw));
+    //         }
+    //     }
+    // }
 
-    // 7. Combine: script content + template TSX (which includes commented styles)
-    let tsx = if options.include_tsx {
-        let template_tsx = tsx_codegen.take_output();
-        let mut tsx = String::with_capacity(script_content.len() + template_tsx.len() + 1);
-        if !script_content.is_empty() {
-            tsx.push_str(&script_content);
-            tsx.push('\n');
-        }
-        tsx.push_str(&template_tsx);
-        tsx
-    } else {
-        String::new()
-    };
+    // // 7. Combine: script content + template TSX (which includes commented styles)
+    // let tsx = if options.include_tsx {
+    //     let template_tsx = tsx_codegen.take_output();
+    //     let mut tsx = String::with_capacity(script_content.len() + template_tsx.len() + 1);
+    //     if !script_content.is_empty() {
+    //         tsx.push_str(&script_content);
+    //         tsx.push('\n');
+    //     }
+    //     tsx.push_str(&template_tsx);
+    //     tsx
+    // } else {
+    //     String::new()
+    // };
 
-    let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+    // let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
 
+    // KaiTsxCodegenResult {
+    //     tsx,
+    //     css,
+    //     css_errors,
+    //     duration_ms,
+    // }
     KaiTsxCodegenResult {
-        tsx,
-        css,
-        css_errors,
-        duration_ms,
+        tsx: String::new(),
+        css: String::new(),
+        css_errors: Vec::new(),
+        duration_ms: 0.0,
     }
 }
 

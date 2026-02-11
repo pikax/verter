@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use verter_core::builder::codegen::{
     generate as core_generate, CodegenOptions as CoreOptions, FeatureFlags as CoreFeatures,
 };
-use verter_core::builder::codegen_kai::{generate_with_tsx_kai, KaiCodegenOptions};
+use verter_core::builder::codegen_kai::{
+    generate_kai as core_generate_kai, generate_with_tsx_kai, KaiCodegenOptions,
+};
 use verter_core::strip_types::strip_types as core_strip_types;
 use wasm_bindgen::prelude::*;
 
@@ -149,6 +151,53 @@ pub fn compile_bytes(input: &[u8], options: JsValue) -> Result<JsValue, JsValue>
     let input_str = std::str::from_utf8(input)
         .map_err(|e| JsValue::from_str(&format!("input must be valid UTF-8: {}", e)))?;
     compile_inner(input_str, options)
+}
+
+// =============================================================================
+// Kai Codegen (VDOM/Vapor)
+// =============================================================================
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KaiCodegenResult {
+    /// The generated code (VDOM or Vapor render function)
+    pub code: String,
+    /// Time taken for the Rust pipeline in milliseconds
+    pub duration_ms: f64,
+}
+
+/// Compile a Vue SFC using the syntax_kai pipeline (VDOM/Vapor codegen).
+///
+/// @param input - The Vue SFC source code
+/// @param options - Optional compilation options (as JS object)
+/// @returns The compiled result with code and timing info
+#[wasm_bindgen(js_name = generateKai)]
+pub fn generate_kai(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
+    let allocator = oxc_allocator::Allocator::new();
+
+    let opts: CodegenOptions = if options.is_undefined() || options.is_null() {
+        CodegenOptions::default()
+    } else {
+        serde_wasm_bindgen::from_value(options)
+            .map_err(|e| JsValue::from_str(&format!("Invalid options: {}", e)))?
+    };
+
+    let kai_options = KaiCodegenOptions {
+        filename: opts.filename,
+        is_production: opts.is_production,
+        component_id: opts.component_id,
+        include_tsx: false,
+    };
+
+    let result = core_generate_kai(input, &kai_options, &allocator);
+
+    let js_result = KaiCodegenResult {
+        code: result.code,
+        duration_ms: result.duration_ms,
+    };
+
+    serde_wasm_bindgen::to_value(&js_result)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 // =============================================================================

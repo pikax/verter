@@ -89,6 +89,8 @@ export function useStore(): Store {
     verterNative: null,
     stripTypes: null,
     tsx: null,
+    kai: null,
+    kaiJs: null,
   });
 
   const verterVersion = ref("local");
@@ -140,6 +142,8 @@ export function useStore(): Store {
       verterNative: null,
       stripTypes: null,
       tsx: null,
+      kai: null,
+      kaiJs: null,
     };
     for (const file of Object.values(files.value)) {
       lastTiming = await compileFile(file, compilerOptions, showTS.value, showTSX.value);
