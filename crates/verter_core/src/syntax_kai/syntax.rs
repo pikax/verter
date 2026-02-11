@@ -232,8 +232,8 @@ impl<'alloc> Syntax<'alloc> {
     pub fn events(&mut self) -> Vec<Event<'alloc>> {
         let mut out = Vec::with_capacity(self.root_script_events.len() + self.events.len());
 
-        out.extend(self.root_script_events.drain(..));
-        out.extend(self.events.drain(..));
+        out.append(&mut self.root_script_events);
+        out.append(&mut self.events);
 
         out
     }
@@ -867,18 +867,12 @@ mod tests {
                 options: &options,
             };
 
-            let mut events_storage: Vec<Event<'_>> = Vec::new();
-            let ptr = &mut events_storage as *mut Vec<Event<'_>>;
-            {
-                // SAFETY: Decouples the mutable borrow lifetime from the Event lifetime.
-                // Syntax writes into the vec during handle() calls, then is dropped at
-                // scope end. The events borrow from tokenizer_events/input which are alive.
-                let mut syntax = Syntax::new(unsafe { &mut *ptr }, $template_mode);
-                for event in &tokenizer_events {
-                    syntax.handle(event, &mut ctx);
-                }
+            let mut syntax = Syntax::new($template_mode);
+            for event in &tokenizer_events {
+                syntax.handle(event, &mut ctx);
             }
 
+            let events_storage = syntax.events();
             let $events = &events_storage;
             $body
         }};

@@ -133,14 +133,11 @@ mod tests {
             options: &options,
         };
 
-        let mut events_storage: Vec<Event<'_>> = Vec::new();
-        let ptr = &mut events_storage as *mut Vec<Event<'_>>;
-        {
-            let mut syntax = Syntax::new(unsafe { &mut *ptr }, false);
-            for event in &tokenizer_events {
-                syntax.handle(event, &mut ctx);
-            }
+        let mut syntax = Syntax::new(false);
+        for event in &tokenizer_events {
+            syntax.handle(event, &mut ctx);
         }
+        let events_storage = syntax.events();
 
         // Run element_compiler
         let mut ec = ElementCompilerPlugin::new();

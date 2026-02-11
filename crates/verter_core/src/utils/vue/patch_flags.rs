@@ -22,7 +22,6 @@
  *
  * See the renderer diffing logic for how these flags are used at runtime.
  */
-
 #[repr(i16)]
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum PatchFlags {

@@ -1,4 +1,7 @@
-use crate::{code_transform::CodeTransform, syntax_kai::plugins::code_gen::script::macros::types::MacroProcessReturn};
+use crate::{
+    code_transform::CodeTransform,
+    syntax_kai::plugins::code_gen::script::macros::types::MacroProcessReturn,
+};
 
 /// Process props section: applies macro transformations and integrates with models.
 ///

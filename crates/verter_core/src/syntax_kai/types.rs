@@ -898,6 +898,19 @@ pub struct CssModuleInfo {
     pub classes: Vec<CssModuleClassMapping>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CssEarlyBinding {
+    pub bindings: Vec<()>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CssBind {
+    pub name: Span,
+
+    pub start: u32,
+    pub end: u32,
+}
+
 /// Result of CSS processing for a single `<style>` block.
 /// Emitted as `Event::ProcessedStyle` by the css_style plugin.
 #[derive(Debug)]

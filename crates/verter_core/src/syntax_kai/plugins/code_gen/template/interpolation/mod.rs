@@ -18,11 +18,12 @@ pub fn handle_interpolation<'alloc>(
     // ctx.code_transform.append_right(ev.expression.end, ".toUpperCase()");
     patch_bindings(code_transform, &ev.bindings, map, is_inline);
 
-    // convert {{ to (
+    // convert {{ to _toDisplayString(
+    // Note: the `_toDisplayString` prefix is NOT prepended here — it's added by
+    // the close phase as part of the separator insertion (see ChildKind::content_prefix).
+    // This avoids FIFO ordering issues with prepend_left at the same position.
     code_transform.overwrite(ev.start, ev.content.start, "(");
 
     // convert }} to )
     code_transform.overwrite(ev.content.end, ev.end, ")");
-
-    code_transform.prepend_left(ev.start, "_toDisplayString");
 }

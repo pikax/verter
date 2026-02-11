@@ -1,0 +1,287 @@
+{
+  "simple_div": {
+    "template": "<div>hello</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, \"hello\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, \"hello\"))\n}"
+  },
+  "self_closing_br": {
+    "template": "<br/>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"br\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"br\"))\n}"
+  },
+  "void_input": {
+    "template": "<input>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"input\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"input\"))\n}"
+  },
+  "void_img_attrs": {
+    "template": "<img src=\"a.png\" alt=\"pic\">",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"img\", {\n    src: \"a.png\",\n    alt: \"pic\"\n  }))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"img\", {\n    src: \"a.png\",\n    alt: \"pic\"\n  }))\n}"
+  },
+  "nested_elements": {
+    "template": "<div><span>inner</span></div>",
+    "dev": "import { createElementVNode as _createElementVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createElementVNode(\"span\", null, \"inner\")\n  ]))\n}",
+    "prod": "import { createElementVNode as _createElementVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createElementVNode(\"span\", null, \"inner\")\n  ]))\n}"
+  },
+  "deeply_nested": {
+    "template": "<div><span><em>deep</em></span></div>",
+    "dev": "import { createElementVNode as _createElementVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createElementVNode(\"span\", null, [\n      _createElementVNode(\"em\", null, \"deep\")\n    ])\n  ]))\n}",
+    "prod": "import { createElementVNode as _createElementVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createElementVNode(\"span\", null, [\n      _createElementVNode(\"em\", null, \"deep\")\n    ])\n  ]))\n}"
+  },
+  "multiple_children_elements": {
+    "template": "<div><span>a</span><span>b</span></div>",
+    "dev": "import { createElementVNode as _createElementVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createElementVNode(\"span\", null, \"a\"),\n    _createElementVNode(\"span\", null, \"b\")\n  ]))\n}",
+    "prod": "import { createElementVNode as _createElementVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createElementVNode(\"span\", null, \"a\"),\n    _createElementVNode(\"span\", null, \"b\")\n  ]))\n}"
+  },
+  "empty_div": {
+    "template": "<div></div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\"))\n}"
+  },
+  "sibling_void_elements": {
+    "template": "<div><input><hr><br></div>",
+    "dev": "import { createElementVNode as _createElementVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createElementVNode(\"input\"),\n    _createElementVNode(\"hr\"),\n    _createElementVNode(\"br\")\n  ]))\n}",
+    "prod": "import { createElementVNode as _createElementVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createElementVNode(\"input\"),\n    _createElementVNode(\"hr\"),\n    _createElementVNode(\"br\")\n  ]))\n}"
+  },
+  "static_id": {
+    "template": "<div id=\"app\">hi</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", { id: \"app\" }, \"hi\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", { id: \"app\" }, \"hi\"))\n}"
+  },
+  "static_class": {
+    "template": "<div class=\"foo bar\">hi</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", { class: \"foo bar\" }, \"hi\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", { class: \"foo bar\" }, \"hi\"))\n}"
+  },
+  "static_style": {
+    "template": "<div style=\"color: red\">hi</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", { style: {\"color\":\"red\"} }, \"hi\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", { style: {\"color\":\"red\"} }, \"hi\"))\n}"
+  },
+  "bound_id": {
+    "template": "<div :id=\"myId\">hi</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", { id: _ctx.myId }, \"hi\", 8 /* PROPS */, [\"id\"]))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", { id: _ctx.myId }, \"hi\", 8 /* PROPS */, [\"id\"]))\n}"
+  },
+  "bound_class": {
+    "template": "<div :class=\"cls\">hi</div>",
+    "dev": "import { normalizeClass as _normalizeClass, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", {\n    class: _normalizeClass(_ctx.cls)\n  }, \"hi\", 2 /* CLASS */))\n}",
+    "prod": "import { normalizeClass as _normalizeClass, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", {\n    class: _normalizeClass(_ctx.cls)\n  }, \"hi\", 2 /* CLASS */))\n}"
+  },
+  "bound_style": {
+    "template": "<div :style=\"sty\">hi</div>",
+    "dev": "import { normalizeStyle as _normalizeStyle, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", {\n    style: _normalizeStyle(_ctx.sty)\n  }, \"hi\", 4 /* STYLE */))\n}",
+    "prod": "import { normalizeStyle as _normalizeStyle, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", {\n    style: _normalizeStyle(_ctx.sty)\n  }, \"hi\", 4 /* STYLE */))\n}"
+  },
+  "multiple_bound": {
+    "template": "<div :id=\"a\" :title=\"b\">hi</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", {\n    id: _ctx.a,\n    title: _ctx.b\n  }, \"hi\", 8 /* PROPS */, [\"id\", \"title\"]))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", {\n    id: _ctx.a,\n    title: _ctx.b\n  }, \"hi\", 8 /* PROPS */, [\"id\", \"title\"]))\n}"
+  },
+  "mixed_static_bound": {
+    "template": "<div id=\"s\" :title=\"d\">hi</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", {\n    id: \"s\",\n    title: _ctx.d\n  }, \"hi\", 8 /* PROPS */, [\"title\"]))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", {\n    id: \"s\",\n    title: _ctx.d\n  }, \"hi\", 8 /* PROPS */, [\"title\"]))\n}"
+  },
+  "class_style_combined": {
+    "template": "<div :class=\"c\" :style=\"s\">hi</div>",
+    "dev": "import { normalizeClass as _normalizeClass, normalizeStyle as _normalizeStyle, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", {\n    class: _normalizeClass(_ctx.c),\n    style: _normalizeStyle(_ctx.s)\n  }, \"hi\", 6 /* CLASS, STYLE */))\n}",
+    "prod": "import { normalizeClass as _normalizeClass, normalizeStyle as _normalizeStyle, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", {\n    class: _normalizeClass(_ctx.c),\n    style: _normalizeStyle(_ctx.s)\n  }, \"hi\", 6 /* CLASS, STYLE */))\n}"
+  },
+  "event_click": {
+    "template": "<button @click=\"handler\">click</button>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"button\", { onClick: _ctx.handler }, \"click\", 8 /* PROPS */, [\"onClick\"]))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"button\", { onClick: _ctx.handler }, \"click\", 8 /* PROPS */, [\"onClick\"]))\n}"
+  },
+  "multiple_events": {
+    "template": "<button @click=\"a\" @mouseover=\"b\">hi</button>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"button\", {\n    onClick: _ctx.a,\n    onMouseover: _ctx.b\n  }, \"hi\", 40 /* PROPS, NEED_HYDRATION */, [\"onClick\", \"onMouseover\"]))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"button\", {\n    onClick: _ctx.a,\n    onMouseover: _ctx.b\n  }, \"hi\", 40 /* PROPS, NEED_HYDRATION */, [\"onClick\", \"onMouseover\"]))\n}"
+  },
+  "props_null_when_empty": {
+    "template": "<div>hello</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, \"hello\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, \"hello\"))\n}"
+  },
+  "text_only": {
+    "template": "<div>hello</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, \"hello\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, \"hello\"))\n}"
+  },
+  "text_with_quotes": {
+    "template": "<div>say \"hello\"</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, \"say \\\"hello\\\"\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, \"say \\\"hello\\\"\"))\n}"
+  },
+  "text_whitespace": {
+    "template": "<div>   </div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\"))\n}"
+  },
+  "interpolation_simple": {
+    "template": "<div>{{ msg }}</div>",
+    "dev": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(_ctx.msg), 1 /* TEXT */))\n}",
+    "prod": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(_ctx.msg), 1 /* TEXT */))\n}"
+  },
+  "interpolation_expr": {
+    "template": "<div>{{ a + b }}</div>",
+    "dev": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(_ctx.a + _ctx.b), 1 /* TEXT */))\n}",
+    "prod": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(_ctx.a + _ctx.b), 1 /* TEXT */))\n}"
+  },
+  "interpolation_ternary": {
+    "template": "<div>{{ a ? b : c }}</div>",
+    "dev": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(_ctx.a ? _ctx.b : _ctx.c), 1 /* TEXT */))\n}",
+    "prod": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(_ctx.a ? _ctx.b : _ctx.c), 1 /* TEXT */))\n}"
+  },
+  "interpolation_method": {
+    "template": "<div>{{ foo() }}</div>",
+    "dev": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(_ctx.foo()), 1 /* TEXT */))\n}",
+    "prod": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(_ctx.foo()), 1 /* TEXT */))\n}"
+  },
+  "interpolation_member": {
+    "template": "<div>{{ obj.prop }}</div>",
+    "dev": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(_ctx.obj.prop), 1 /* TEXT */))\n}",
+    "prod": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(_ctx.obj.prop), 1 /* TEXT */))\n}"
+  },
+  "text_and_interpolation": {
+    "template": "<div>hello {{ msg }}</div>",
+    "dev": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, \"hello \" + _toDisplayString(_ctx.msg), 1 /* TEXT */))\n}",
+    "prod": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, \"hello \" + _toDisplayString(_ctx.msg), 1 /* TEXT */))\n}"
+  },
+  "text_interpolation_text": {
+    "template": "<div>hello {{ msg }} world</div>",
+    "dev": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, \"hello \" + _toDisplayString(_ctx.msg) + \" world\", 1 /* TEXT */))\n}",
+    "prod": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, \"hello \" + _toDisplayString(_ctx.msg) + \" world\", 1 /* TEXT */))\n}"
+  },
+  "multiple_interpolations": {
+    "template": "<div>{{ a }}{{ b }}</div>",
+    "dev": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(_ctx.a) + _toDisplayString(_ctx.b), 1 /* TEXT */))\n}",
+    "prod": "import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(_ctx.a) + _toDisplayString(_ctx.b), 1 /* TEXT */))\n}"
+  },
+  "comment_basic": {
+    "template": "<div><!-- my comment --></div>",
+    "dev": "import { createCommentVNode as _createCommentVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createCommentVNode(\" my comment \")\n  ]))\n}",
+    "prod": "import { createCommentVNode as _createCommentVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createCommentVNode(\" my comment \")\n  ]))\n}"
+  },
+  "comment_only_child": {
+    "template": "<div><!-- only --></div>",
+    "dev": "import { createCommentVNode as _createCommentVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createCommentVNode(\" only \")\n  ]))\n}",
+    "prod": "import { createCommentVNode as _createCommentVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createCommentVNode(\" only \")\n  ]))\n}"
+  },
+  "comment_empty": {
+    "template": "<div><!----></div>",
+    "dev": "import { createCommentVNode as _createCommentVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createCommentVNode(\"\")\n  ]))\n}",
+    "prod": "import { createCommentVNode as _createCommentVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createCommentVNode(\"\")\n  ]))\n}"
+  },
+  "comment_with_elements": {
+    "template": "<div><span>a</span><!-- mid --><span>b</span></div>",
+    "dev": "import { createElementVNode as _createElementVNode, createCommentVNode as _createCommentVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createElementVNode(\"span\", null, \"a\"),\n    _createCommentVNode(\" mid \"),\n    _createElementVNode(\"span\", null, \"b\")\n  ]))\n}",
+    "prod": "import { createElementVNode as _createElementVNode, createCommentVNode as _createCommentVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createElementVNode(\"span\", null, \"a\"),\n    _createCommentVNode(\" mid \"),\n    _createElementVNode(\"span\", null, \"b\")\n  ]))\n}"
+  },
+  "v_if_simple": {
+    "template": "<div v-if=\"show\">yes</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock, createCommentVNode as _createCommentVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_ctx.show)\n    ? (_openBlock(), _createElementBlock(\"div\", { key: 0 }, \"yes\"))\n    : _createCommentVNode(\"v-if\", true)\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock, createCommentVNode as _createCommentVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_ctx.show)\n    ? (_openBlock(), _createElementBlock(\"div\", { key: 0 }, \"yes\"))\n    : _createCommentVNode(\"v-if\", true)\n}"
+  },
+  "v_if_else": {
+    "template": "<div v-if=\"show\">yes</div><div v-else>no</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock, createCommentVNode as _createCommentVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_ctx.show)\n    ? (_openBlock(), _createElementBlock(\"div\", { key: 0 }, \"yes\"))\n    : (_openBlock(), _createElementBlock(\"div\", { key: 1 }, \"no\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock, createCommentVNode as _createCommentVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_ctx.show)\n    ? (_openBlock(), _createElementBlock(\"div\", { key: 0 }, \"yes\"))\n    : (_openBlock(), _createElementBlock(\"div\", { key: 1 }, \"no\"))\n}"
+  },
+  "v_if_else_if_else": {
+    "template": "<div v-if=\"a\">A</div><div v-else-if=\"b\">B</div><div v-else>C</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock, createCommentVNode as _createCommentVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_ctx.a)\n    ? (_openBlock(), _createElementBlock(\"div\", { key: 0 }, \"A\"))\n    : (_ctx.b)\n      ? (_openBlock(), _createElementBlock(\"div\", { key: 1 }, \"B\"))\n      : (_openBlock(), _createElementBlock(\"div\", { key: 2 }, \"C\"))\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock, createCommentVNode as _createCommentVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_ctx.a)\n    ? (_openBlock(), _createElementBlock(\"div\", { key: 0 }, \"A\"))\n    : (_ctx.b)\n      ? (_openBlock(), _createElementBlock(\"div\", { key: 1 }, \"B\"))\n      : (_openBlock(), _createElementBlock(\"div\", { key: 2 }, \"C\"))\n}"
+  },
+  "v_if_with_class": {
+    "template": "<div v-if=\"show\" class=\"foo\">hi</div>",
+    "dev": "import { openBlock as _openBlock, createElementBlock as _createElementBlock, createCommentVNode as _createCommentVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_ctx.show)\n    ? (_openBlock(), _createElementBlock(\"div\", {\n        key: 0,\n        class: \"foo\"\n      }, \"hi\"))\n    : _createCommentVNode(\"v-if\", true)\n}",
+    "prod": "import { openBlock as _openBlock, createElementBlock as _createElementBlock, createCommentVNode as _createCommentVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_ctx.show)\n    ? (_openBlock(), _createElementBlock(\"div\", {\n        key: 0,\n        class: \"foo\"\n      }, \"hi\"))\n    : _createCommentVNode(\"v-if\", true)\n}"
+  },
+  "v_for_simple": {
+    "template": "<div v-for=\"item in items\">{{ item }}</div>",
+    "dev": "import { renderList as _renderList, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock, toDisplayString as _toDisplayString } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_ctx.items, (item) => {\n    return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(item), 1 /* TEXT */))\n  }), 256 /* UNKEYED_FRAGMENT */))\n}",
+    "prod": "import { renderList as _renderList, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock, toDisplayString as _toDisplayString } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_ctx.items, (item) => {\n    return (_openBlock(), _createElementBlock(\"div\", null, _toDisplayString(item), 1 /* TEXT */))\n  }), 256 /* UNKEYED_FRAGMENT */))\n}"
+  },
+  "v_for_keyed": {
+    "template": "<div v-for=\"item in items\" :key=\"item\">{{ item }}</div>",
+    "dev": "import { renderList as _renderList, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock, toDisplayString as _toDisplayString } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_ctx.items, (item) => {\n    return (_openBlock(), _createElementBlock(\"div\", { key: item }, _toDisplayString(item), 1 /* TEXT */))\n  }), 128 /* KEYED_FRAGMENT */))\n}",
+    "prod": "import { renderList as _renderList, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock, toDisplayString as _toDisplayString } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_ctx.items, (item) => {\n    return (_openBlock(), _createElementBlock(\"div\", { key: item }, _toDisplayString(item), 1 /* TEXT */))\n  }), 128 /* KEYED_FRAGMENT */))\n}"
+  },
+  "v_for_index": {
+    "template": "<div v-for=\"(item, index) in items\" :key=\"index\">{{ item }}</div>",
+    "dev": "import { renderList as _renderList, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock, toDisplayString as _toDisplayString } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_ctx.items, (item, index) => {\n    return (_openBlock(), _createElementBlock(\"div\", { key: index }, _toDisplayString(item), 1 /* TEXT */))\n  }), 128 /* KEYED_FRAGMENT */))\n}",
+    "prod": "import { renderList as _renderList, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock, toDisplayString as _toDisplayString } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_ctx.items, (item, index) => {\n    return (_openBlock(), _createElementBlock(\"div\", { key: index }, _toDisplayString(item), 1 /* TEXT */))\n  }), 128 /* KEYED_FRAGMENT */))\n}"
+  },
+  "v_for_nested": {
+    "template": "<div v-for=\"g in groups\"><span v-for=\"i in g\">{{ i }}</span></div>",
+    "dev": "import { renderList as _renderList, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock, toDisplayString as _toDisplayString } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_ctx.groups, (g) => {\n    return (_openBlock(), _createElementBlock(\"div\", null, [\n      (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(g, (i) => {\n        return (_openBlock(), _createElementBlock(\"span\", null, _toDisplayString(i), 1 /* TEXT */))\n      }), 256 /* UNKEYED_FRAGMENT */))\n    ]))\n  }), 256 /* UNKEYED_FRAGMENT */))\n}",
+    "prod": "import { renderList as _renderList, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock, toDisplayString as _toDisplayString } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_ctx.groups, (g) => {\n    return (_openBlock(), _createElementBlock(\"div\", null, [\n      (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(g, (i) => {\n        return (_openBlock(), _createElementBlock(\"span\", null, _toDisplayString(i), 1 /* TEXT */))\n      }), 256 /* UNKEYED_FRAGMENT */))\n    ]))\n  }), 256 /* UNKEYED_FRAGMENT */))\n}"
+  },
+  "v_once_simple": {
+    "template": "<div v-once>static</div>",
+    "dev": "import { setBlockTracking as _setBlockTracking, createTextVNode as _createTextVNode, createElementVNode as _createElementVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return _cache[0] || (\n    _setBlockTracking(-1, true),\n    (_cache[0] = _createElementVNode(\"div\", null, [\n      _createTextVNode(\"static\")\n    ])).cacheIndex = 0,\n    _setBlockTracking(1),\n    _cache[0]\n  )\n}",
+    "prod": "import { setBlockTracking as _setBlockTracking, createTextVNode as _createTextVNode, createElementVNode as _createElementVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return _cache[0] || (\n    _setBlockTracking(-1, true),\n    (_cache[0] = _createElementVNode(\"div\", null, [\n      _createTextVNode(\"static\")\n    ])).cacheIndex = 0,\n    _setBlockTracking(1),\n    _cache[0]\n  )\n}"
+  },
+  "v_once_with_dynamic": {
+    "template": "<div v-once :id=\"foo\">content</div>",
+    "dev": "import { setBlockTracking as _setBlockTracking, createTextVNode as _createTextVNode, createElementVNode as _createElementVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return _cache[0] || (\n    _setBlockTracking(-1, true),\n    (_cache[0] = _createElementVNode(\"div\", { id: _ctx.foo }, [\n      _createTextVNode(\"content\")\n    ], 8 /* PROPS */, [\"id\"])).cacheIndex = 0,\n    _setBlockTracking(1),\n    _cache[0]\n  )\n}",
+    "prod": "import { setBlockTracking as _setBlockTracking, createTextVNode as _createTextVNode, createElementVNode as _createElementVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return _cache[0] || (\n    _setBlockTracking(-1, true),\n    (_cache[0] = _createElementVNode(\"div\", { id: _ctx.foo }, [\n      _createTextVNode(\"content\")\n    ], 8 /* PROPS */, [\"id\"])).cacheIndex = 0,\n    _setBlockTracking(1),\n    _cache[0]\n  )\n}"
+  },
+  "text_and_element": {
+    "template": "<div>text<span>child</span></div>",
+    "dev": "import { createElementVNode as _createElementVNode, createTextVNode as _createTextVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createTextVNode(\"text\"),\n    _createElementVNode(\"span\", null, \"child\")\n  ]))\n}",
+    "prod": "import { createElementVNode as _createElementVNode, createTextVNode as _createTextVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createTextVNode(\"text\"),\n    _createElementVNode(\"span\", null, \"child\")\n  ]))\n}"
+  },
+  "element_and_text": {
+    "template": "<div><span>child</span>text</div>",
+    "dev": "import { createElementVNode as _createElementVNode, createTextVNode as _createTextVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createElementVNode(\"span\", null, \"child\"),\n    _createTextVNode(\"text\")\n  ]))\n}",
+    "prod": "import { createElementVNode as _createElementVNode, createTextVNode as _createTextVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createElementVNode(\"span\", null, \"child\"),\n    _createTextVNode(\"text\")\n  ]))\n}"
+  },
+  "interpolation_and_element": {
+    "template": "<div>{{ msg }}<span>fixed</span></div>",
+    "dev": "import { toDisplayString as _toDisplayString, createElementVNode as _createElementVNode, createTextVNode as _createTextVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createTextVNode(_toDisplayString(_ctx.msg), 1 /* TEXT */),\n    _createElementVNode(\"span\", null, \"fixed\")\n  ]))\n}",
+    "prod": "import { toDisplayString as _toDisplayString, createElementVNode as _createElementVNode, createTextVNode as _createTextVNode, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(\"div\", null, [\n    _createTextVNode(_toDisplayString(_ctx.msg), 1 /* TEXT */),\n    _createElementVNode(\"span\", null, \"fixed\")\n  ]))\n}"
+  },
+  "v_if_inside_v_for": {
+    "template": "<div v-for=\"item in items\"><span v-if=\"item.show\">{{ item.name }}</span></div>",
+    "dev": "import { renderList as _renderList, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock, toDisplayString as _toDisplayString, createCommentVNode as _createCommentVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_ctx.items, (item) => {\n    return (_openBlock(), _createElementBlock(\"div\", null, [\n      (item.show)\n        ? (_openBlock(), _createElementBlock(\"span\", { key: 0 }, _toDisplayString(item.name), 1 /* TEXT */))\n        : _createCommentVNode(\"v-if\", true)\n    ]))\n  }), 256 /* UNKEYED_FRAGMENT */))\n}",
+    "prod": "import { renderList as _renderList, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock, toDisplayString as _toDisplayString, createCommentVNode as _createCommentVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(true), _createElementBlock(_Fragment, null, _renderList(_ctx.items, (item) => {\n    return (_openBlock(), _createElementBlock(\"div\", null, [\n      (item.show)\n        ? (_openBlock(), _createElementBlock(\"span\", { key: 0 }, _toDisplayString(item.name), 1 /* TEXT */))\n        : _createCommentVNode(\"v-if\", true)\n    ]))\n  }), 256 /* UNKEYED_FRAGMENT */))\n}"
+  },
+  "component_simple": {
+    "template": "<MyComponent/>",
+    "dev": "import { resolveComponent as _resolveComponent, openBlock as _openBlock, createBlock as _createBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  const _component_MyComponent = _resolveComponent(\"MyComponent\")\n\n  return (_openBlock(), _createBlock(_component_MyComponent))\n}",
+    "prod": "import { resolveComponent as _resolveComponent, openBlock as _openBlock, createBlock as _createBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  const _component_MyComponent = _resolveComponent(\"MyComponent\")\n\n  return (_openBlock(), _createBlock(_component_MyComponent))\n}"
+  },
+  "component_with_props": {
+    "template": "<MyComponent :msg=\"hello\"/>",
+    "dev": "import { resolveComponent as _resolveComponent, openBlock as _openBlock, createBlock as _createBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  const _component_MyComponent = _resolveComponent(\"MyComponent\")\n\n  return (_openBlock(), _createBlock(_component_MyComponent, { msg: _ctx.hello }, null, 8 /* PROPS */, [\"msg\"]))\n}",
+    "prod": "import { resolveComponent as _resolveComponent, openBlock as _openBlock, createBlock as _createBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  const _component_MyComponent = _resolveComponent(\"MyComponent\")\n\n  return (_openBlock(), _createBlock(_component_MyComponent, { msg: _ctx.hello }, null, 8 /* PROPS */, [\"msg\"]))\n}"
+  },
+  "component_with_children": {
+    "template": "<MyComponent>content</MyComponent>",
+    "dev": "import { createTextVNode as _createTextVNode, resolveComponent as _resolveComponent, withCtx as _withCtx, openBlock as _openBlock, createBlock as _createBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  const _component_MyComponent = _resolveComponent(\"MyComponent\")\n\n  return (_openBlock(), _createBlock(_component_MyComponent, null, {\n    default: _withCtx(() => [\n      _createTextVNode(\"content\")\n    ]),\n    _: 1 /* STABLE */\n  }))\n}",
+    "prod": "import { createTextVNode as _createTextVNode, resolveComponent as _resolveComponent, withCtx as _withCtx, openBlock as _openBlock, createBlock as _createBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  const _component_MyComponent = _resolveComponent(\"MyComponent\")\n\n  return (_openBlock(), _createBlock(_component_MyComponent, null, {\n    default: _withCtx(() => [\n      _createTextVNode(\"content\")\n    ]),\n    _: 1 /* STABLE */\n  }))\n}"
+  },
+  "multiple_roots": {
+    "template": "<div>a</div><div>b</div>",
+    "dev": "import { createElementVNode as _createElementVNode, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(_Fragment, null, [\n    _createElementVNode(\"div\", null, \"a\"),\n    _createElementVNode(\"div\", null, \"b\")\n  ], 64 /* STABLE_FRAGMENT */))\n}",
+    "prod": "import { createElementVNode as _createElementVNode, Fragment as _Fragment, openBlock as _openBlock, createElementBlock as _createElementBlock } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return (_openBlock(), _createElementBlock(_Fragment, null, [\n    _createElementVNode(\"div\", null, \"a\"),\n    _createElementVNode(\"div\", null, \"b\")\n  ], 64 /* STABLE_FRAGMENT */))\n}"
+  },
+  "root_text_only": {
+    "template": "just text",
+    "dev": "\nexport function render(_ctx, _cache) {\n  return \"just text\"\n}",
+    "prod": "\nexport function render(_ctx, _cache) {\n  return \"just text\"\n}"
+  },
+  "root_interpolation": {
+    "template": "{{ msg }}",
+    "dev": "import { toDisplayString as _toDisplayString } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return _toDisplayString(_ctx.msg)\n}",
+    "prod": "import { toDisplayString as _toDisplayString } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return _toDisplayString(_ctx.msg)\n}"
+  },
+  "root_comment": {
+    "template": "<!-- comment -->",
+    "dev": "import { createCommentVNode as _createCommentVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return _createCommentVNode(\" comment \")\n}",
+    "prod": "import { createCommentVNode as _createCommentVNode } from \"vue\"\n\nexport function render(_ctx, _cache) {\n  return _createCommentVNode(\" comment \")\n}"
+  }
+}

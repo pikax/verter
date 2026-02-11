@@ -407,31 +407,17 @@ mod tests {
             options: &options,
         };
 
-        let mut events_storage: Vec<Event<'_>> = Vec::new();
-        let mut root_script_events: Vec<Event<'_>> = Vec::new();
-        let ptr = &mut events_storage as *mut Vec<Event<'_>>;
-        {
-            let mut syntax = Syntax::new(unsafe { &mut *ptr }, false);
-            for event in &tokenizer_events {
-                syntax.handle(event, &mut ctx);
-            }
-            root_script_events = syntax.take_root_script_events();
+        let mut syntax = Syntax::new(false);
+        for event in &tokenizer_events {
+            syntax.handle(event, &mut ctx);
         }
+        let events_storage = syntax.events();
 
         // Run element_compiler plugin on template events
         let mut plugin = ElementCompilerPlugin::new();
         let mut compiled = Vec::new();
         for event in events_storage {
             match plugin.process_event(event, &mut ctx) {
-                SyntaxResult::Keep(e) | SyntaxResult::Replace(e) => compiled.push(e),
-                SyntaxResult::Drop => {}
-            }
-        }
-
-        // Run a separate element_compiler plugin on root_script_events
-        let mut script_plugin = ElementCompilerPlugin::new();
-        for event in root_script_events {
-            match script_plugin.process_event(event, &mut ctx) {
                 SyntaxResult::Keep(e) | SyntaxResult::Replace(e) => compiled.push(e),
                 SyntaxResult::Drop => {}
             }
@@ -691,14 +677,11 @@ mod tests {
             options: &options,
         };
 
-        let mut events_storage: Vec<Event<'_>> = Vec::new();
-        let ptr = &mut events_storage as *mut Vec<Event<'_>>;
-        {
-            let mut syntax = Syntax::new(unsafe { &mut *ptr }, false);
-            for event in &tokenizer_events {
-                syntax.handle(event, &mut ctx);
-            }
+        let mut syntax = Syntax::new(false);
+        for event in &tokenizer_events {
+            syntax.handle(event, &mut ctx);
         }
+        let events_storage = syntax.events();
 
         let mut plugin = ElementCompilerPlugin::new();
         let mut compiled = Vec::new();

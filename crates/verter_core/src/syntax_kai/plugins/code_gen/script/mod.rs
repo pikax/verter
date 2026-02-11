@@ -1,8 +1,7 @@
 use std::{cell::RefCell, rc::Rc};
 
 use crate::{
-    code_transform::{self, CodeTransform, SourceMapOptions},
-    cursor::ScriptLanguage,
+    code_transform::{CodeTransform, SourceMapOptions},
     syntax_kai::{
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxResult},
         plugins::code_gen::{
@@ -106,11 +105,8 @@ impl<'alloc> SyntaxPlugin<'alloc> for ScriptGeneratorPlugin<'alloc> {
         event: Event<'alloc>,
         ctx: &mut SyntaxPluginContext<'alloc>,
     ) -> SyntaxResult<Event<'alloc>> {
-        match &event {
-            Event::OxcScript(script) => {
-                self.process_script(&script, ctx);
-            }
-            _ => {}
+        if let Event::OxcScript(script) = &event {
+            self.process_script(script, ctx);
         }
         SyntaxResult::Keep(event)
     }

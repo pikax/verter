@@ -349,7 +349,7 @@ pub fn generate_component_id(options: &CodegenOptions, source: &str) -> String {
 /// Check if source has `<style scoped>` to enable scope ID injection early.
 /// This is needed because template elements need scope attributes added before
 /// we see the style block (template comes before style in Vue SFCs).
-fn has_scoped_style(source: &[u8]) -> bool {
+pub(crate) fn has_scoped_style(source: &[u8]) -> bool {
     // Quick scan for <style followed by scoped attribute
     let style_tag = b"<style";
     let scoped = b"scoped";
