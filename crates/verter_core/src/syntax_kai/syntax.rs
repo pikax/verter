@@ -156,7 +156,8 @@ fn estimate_patch_flag(parent: &mut ElementOpenTagStart, prop: &Prop, bytes: &[u
             | PropKind::ElseIf
             | PropKind::Else
             | PropKind::For
-            | PropKind::Slot => {}
+            | PropKind::Slot
+            | PropKind::Once => {}
         }
     }
 }
@@ -788,6 +789,8 @@ impl<'alloc> Syntax<'alloc> {
                 PropKind::Html
             } else if name == b"v-text" {
                 PropKind::Text
+            } else if name == b"v-once" {
+                PropKind::Once
             } else if name.starts_with(b"v-") {
                 PropKind::Directive
             } else {

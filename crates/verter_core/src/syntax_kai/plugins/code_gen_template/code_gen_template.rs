@@ -263,7 +263,9 @@ impl<'alloc> VdomTemplateCodegenPlugin<'alloc> {
                         .or_default()
                         .push("}), 128 /* KEYED_FRAGMENT */))".to_string());
                 }
-                ElementScope::SlotTemplate(_) | ElementScope::SlotElement(_) => {
+                ElementScope::SlotTemplate(_)
+                | ElementScope::SlotElement(_)
+                | ElementScope::Once(_) => {
                     // Slot handling — simplified for now
                 }
             }

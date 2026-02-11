@@ -44,6 +44,32 @@ impl BindingType {
         }
     }
 
+    #[inline]
+    pub fn accessor_prefix(&self, is_inline: bool) -> &'static str {
+        match self {
+            BindingType::Props | BindingType::PropsAliased => {
+                if is_inline {
+                    "__props."
+                } else {
+                    "$props."
+                }
+            }
+            BindingType::SetupConst
+            | BindingType::SetupLet
+            | BindingType::SetupRef
+            | BindingType::SetupReactiveConst
+            | BindingType::SetupMaybeRef
+            | BindingType::LiteralConst => {
+                if is_inline {
+                    ""
+                } else {
+                    "$setup."
+                }
+            }
+            BindingType::Data | BindingType::Options => "_ctx.",
+        }
+    }
+
     /// Whether this binding needs `.value` access in inline mode.
     #[inline]
     pub fn needs_value_access(&self) -> bool {

@@ -56,7 +56,7 @@ impl ElementKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PropKind {
     /// Static attribute: foo="foo"
     Value,
@@ -104,6 +104,8 @@ pub enum PropKind {
     For,
     /// v-slot: template slot
     Slot,
+    /// v-once: render once and never update
+    Once,
 }
 
 #[derive(Debug, Clone)]
@@ -584,6 +586,7 @@ pub enum ElementScope<'alloc> {
     For(OxcVFor<'alloc>),
     SlotElement(OxcVSlotElement<'alloc>),
     SlotTemplate(OxcVSlotTemplate<'alloc>),
+    Once(Prop),
 }
 
 // /OXC-Compiled Elements

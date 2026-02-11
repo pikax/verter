@@ -191,7 +191,9 @@ impl<'alloc> TsxCodegenPlugin<'alloc> {
                         locals,
                     });
                 }
-                ElementScope::SlotTemplate(_) | ElementScope::SlotElement(_) => {
+                ElementScope::SlotTemplate(_)
+                | ElementScope::SlotElement(_)
+                | ElementScope::Once(_) => {
                     // Simplified slot handling for TSX
                 }
             }

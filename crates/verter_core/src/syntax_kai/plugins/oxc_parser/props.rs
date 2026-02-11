@@ -43,6 +43,7 @@ pub fn parse_element_props<'alloc>(
     let mut for_scope = None;
     let mut slot_scope = None;
     let mut template_scope = None;
+    let mut once_scope = None;
 
     let is_template = event.event_open_tag.kind == ElementKind::Template;
 
@@ -126,6 +127,9 @@ pub fn parse_element_props<'alloc>(
                     slot_scope = scope;
                 }
             }
+            PropKind::Once => {
+                once_scope = Some(prop.clone());
+            }
             _ => {
                 let oxc_prop = parse_prop(prop.clone(), input, alloc, source_type, &local_ignored);
                 oxc_props.push(oxc_prop);
@@ -133,8 +137,11 @@ pub fn parse_element_props<'alloc>(
         }
     }
 
-    // Build scopes in Vue priority order: v-if/else-if/else > v-for > v-slot
-    let mut scopes: Vec<ElementScope<'_>> = Vec::with_capacity(3);
+    // Build scopes in Vue priority order: v-once > v-if/else-if/else > v-for > v-slot
+    let mut scopes: Vec<ElementScope<'_>> = Vec::with_capacity(4);
+    if let Some(once_scope) = once_scope {
+        scopes.push(ElementScope::Once(once_scope));
+    }
     if let Some(condition_if_scope) = condition_if_scope {
         scopes.push(ElementScope::If(condition_if_scope));
     }

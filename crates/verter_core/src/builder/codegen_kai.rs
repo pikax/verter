@@ -22,10 +22,11 @@ use crate::{
     syntax_kai::{
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxPluginOptions, SyntaxResult},
         plugins::{
-            code_gen::script::ScriptGeneratorPlugin,
+            code_gen::{script::ScriptGeneratorPlugin, template::TemplateGeneratorPlugin},
             code_gen_template::code_gen_template::VdomTemplateCodegenPlugin,
             code_gen_template_vapor::code_gen_template_vapor::VaporTemplateCodegenPlugin,
-            code_gen_tsx::code_gen_tsx::TsxCodegenPlugin, css_parser::css_parser::CssParserPlugin,
+            code_gen_tsx::code_gen_tsx::TsxCodegenPlugin,
+            css_parser::css_parser::CssParserPlugin,
             css_style::css_style::CssStylePlugin,
             element_compiler::element_compiler::ElementCompilerPlugin,
             oxc_parser::oxc_parser::OxcParserPlugin,
@@ -203,8 +204,7 @@ pub fn generate_kai(
     let mut code_transform = Rc::new(RefCell::new(CodeTransform::new(input, allocator)));
 
     // plugins for the pipeline
-    let mut script_ec = ElementCompilerPlugin::new();
-    let mut script_oxc = OxcParserPlugin::new(allocator);
+    // codegen plugins
     let mut code_gen_script = ScriptGeneratorPlugin::new(
         Rc::clone(&code_transform),
         &component_name,
@@ -213,15 +213,25 @@ pub fn generate_kai(
         false,
     );
 
-    let mut pipeline = vec![
-        &mut script_ec as &mut dyn SyntaxPlugin,
-        &mut script_oxc as &mut dyn SyntaxPlugin,
-        &mut code_gen_script as &mut dyn SyntaxPlugin,
-    ];
+    let mut code_gen_template = TemplateGeneratorPlugin::new(Rc::clone(&code_transform), false);
 
-    // run scripts
-    run_pipeline(events, &mut pipeline, &mut ctx);
+    {
+        // transient plugins
+        let mut script_ec = ElementCompilerPlugin::new();
+        let mut script_oxc = OxcParserPlugin::new(allocator);
+        // let mut css_parser = CssParserPlugin::new();
 
+        let mut pipeline = vec![
+            &mut script_ec as &mut dyn SyntaxPlugin,
+            &mut script_oxc as &mut dyn SyntaxPlugin,
+            // &mut css_parser as &mut dyn SyntaxPlugin,
+            &mut code_gen_script as &mut dyn SyntaxPlugin,
+            &mut code_gen_template as &mut dyn SyntaxPlugin,
+        ];
+
+        // run scripts
+        run_pipeline(events, &mut pipeline, &mut ctx);
+    }
     let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     return KaiCodegenResult {
