@@ -1,20 +1,30 @@
+use oxc_allocator::Allocator;
+use oxc_span::SourceType;
 
-    /// Parse an interpolation expression.
-    pub fn parse_interpolation(
-        &self,
-        interp: Interpolation,
-        ctx: &SyntaxPluginContext<'alloc>,
-    ) -> OxcInterpolation<'alloc> {
-        let (expression, errors, bindings) = self.parse_expression(interp.content, ctx);
+use crate::syntax_kai::{
+    plugins::oxc_parser::helpers::parse_expression,
+    types::{Interpolation, OxcInterpolation},
+};
 
-        OxcInterpolation {
-            parent_id: interp.parent_id,
-            start: interp.start,
-            end: interp.end,
-            content: interp.content,
-            expression,
-            errors,
-            bindings,
-            event: interp,
-        }
+/// Parse an interpolation expression.
+pub fn parse_interpolation<'alloc>(
+    event: Interpolation,
+    input: &'alloc str,
+    alloc: &'alloc Allocator,
+    source_type: SourceType,
+    ignored: &'alloc Vec<&[u8]>,
+) -> OxcInterpolation<'alloc> {
+    let (expression, errors, bindings) =
+        parse_expression(event.content, input, alloc, source_type, ignored);
+
+    OxcInterpolation {
+        parent_id: event.parent_id,
+        start: event.start,
+        end: event.end,
+        content: event.content,
+        expression,
+        errors,
+        bindings,
+        event,
     }
+}

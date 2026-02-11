@@ -11,9 +11,10 @@ use crate::{
             OxcVConditional, OxcVForProp, OxcVSlotProp, SyntaxEvent, SyntaxProp,
         },
     },
+    syntax_kai::plugins::oxc_parser::script::parse_script,
     utils::oxc::{
         extract_bindings_from_expression,
-        vue::{parse_generic, parse_vfor_with_bindings, parse_vslot_with_bindings},
+        vue::{parse_generic, parse_vfor_with_bindings, parse_vslot_with_bindings, ScriptMode},
         BindingContext,
     },
 };
@@ -132,6 +133,8 @@ impl<'a> SyntaxPlugin<'a> for OxcParserPlugin<'a> {
                             None
                         };
 
+                        let setup = self.script_setup_span.take();
+
                         let script_content = OxcScriptContent {
                             element_id: e.element_id,
                             parent_id: 0,
@@ -149,7 +152,7 @@ impl<'a> SyntaxPlugin<'a> for OxcParserPlugin<'a> {
                             errors: parsed.errors,
 
                             lang,
-                            setup: self.script_setup_span.take(),
+                            setup,
                             generic,
                             attrs: self.script_attrs_span.take(),
                             attributes: self.script_element_props.drain(..).collect(),

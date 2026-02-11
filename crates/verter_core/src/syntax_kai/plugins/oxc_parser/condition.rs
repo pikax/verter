@@ -1,59 +1,67 @@
-use crate::syntax_kai::types::Prop;
+use oxc_allocator::Allocator;
+use oxc_span::SourceType;
 
+use crate::syntax_kai::{
+    plugins::oxc_parser::helpers::parse_expression,
+    types::{OxcElseCondition, OxcElseIfCondition, OxcIfCondition, Prop},
+};
 
 /// Parse a v-if condition.
-pub fn parse_if_condition(
-    prop: &Prop,
-    element_id: u32,
-    ctx: &SyntaxPluginContext<'alloc>,
+pub fn parse_if_condition<'alloc>(
+    event: Prop,
+    input: &'alloc str,
+    alloc: &'alloc Allocator,
+    source_type: SourceType,
+    ignored: &'alloc Vec<&[u8]>,
 ) -> OxcIfCondition<'alloc> {
-    let (expression, errors, bindings) = if let Some(value_span) = prop.value {
-        parse_expression(value_span, ctx)
+    let (expression, errors, bindings) = if let Some(value_span) = event.value {
+        parse_expression(value_span, input, alloc, source_type, ignored)
     } else {
         (None, None, None)
     };
 
     OxcIfCondition {
-        element_id,
-        start: prop.start,
-        end: prop.end,
+        element_id: event.element_id,
+        start: event.start,
+        end: event.end,
         expression,
         errors,
         bindings,
-        event: ElementScopeConditionIf {
-            element_start: element_id,
-            start: prop.start,
-            end: prop.end,
-            value: prop.value,
-        },
+        event,
     }
 }
 
 /// Parse a v-else-if condition.
-pub fn parse_else_if_condition(
-    &self,
-    prop: &Prop,
-    element_id: u32,
-    ctx: &SyntaxPluginContext<'alloc>,
+pub fn parse_else_if_condition<'alloc>(
+    event: Prop,
+    input: &'alloc str,
+    alloc: &'alloc Allocator,
+    source_type: SourceType,
+    ignored: &'alloc Vec<&[u8]>,
 ) -> OxcElseIfCondition<'alloc> {
-    let (expression, errors, bindings) = if let Some(value_span) = prop.value {
-        self.parse_expression(value_span, ctx)
+    let (expression, errors, bindings) = if let Some(value_span) = event.value {
+        parse_expression(value_span, input, alloc, source_type, ignored)
     } else {
         (None, None, None)
     };
 
     OxcElseIfCondition {
-        element_id,
-        start: prop.start,
-        end: prop.end,
+        element_id: event.element_id,
+        start: event.start,
+        end: event.end,
         expression,
         errors,
         bindings,
-        event: ElementScopeConditionIf {
-            element_start: element_id,
-            start: prop.start,
-            end: prop.end,
-            value: prop.value,
-        },
+        event,
+    }
+}
+
+// Parse a v-else condition. Note that v-else has no expression, but we still want to create an OxcElseCondition for it to be consistent with the other conditions and to store the event info.
+pub fn parse_else_condition(event: Prop) -> OxcElseCondition {
+    OxcElseCondition {
+        element_id: event.element_id,
+        start: event.start,
+        end: event.end,
+        event,
     }
 }

@@ -4,8 +4,7 @@ use crate::{
     tokenizer::QuoteType,
     utils::{
         oxc::{
-            vue::{GenericParseResult, VForWithBindings, VSlotWithBindings},
-            BindingExtractionResult,
+            BindingExtractionResult, vue::{GenericParseResult, ScriptParseResult, VForWithBindings, VSlotWithBindings}
         },
         vue::PatchFlag,
     },
@@ -413,6 +412,8 @@ pub struct OxcScript<'alloc> {
     pub program: oxc_ast::ast::Program<'alloc>,
     pub errors: Vec<oxc_diagnostics::OxcDiagnostic>,
 
+    pub result: ScriptParseResult<'alloc>,
+
     pub setup: Option<Span>,
 
     // lang attribute
@@ -521,7 +522,7 @@ pub struct OxcIfCondition<'alloc> {
 
     pub bindings: Option<BindingExtractionResult<'alloc>>,
 
-    pub event: ElementScopeConditionIf,
+    pub event: Prop,
 }
 
 #[derive(Debug)]
@@ -535,7 +536,7 @@ pub struct OxcElseIfCondition<'alloc> {
 
     pub bindings: Option<BindingExtractionResult<'alloc>>,
 
-    pub event: ElementScopeConditionIf,
+    pub event: Prop,
 }
 
 #[derive(Debug)]
@@ -543,7 +544,7 @@ pub struct OxcElseCondition {
     pub element_id: u32,
     pub start: u32,
     pub end: u32,
-    pub event: ElementScopeConditionElse,
+    pub event: Prop,
 }
 
 // /OXC Parsed

@@ -5,12 +5,14 @@ use crate::{
     common::Span,
     syntax_kai::{
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxResult},
+        plugins::oxc_parser::script::parse_script,
         types::*,
     },
-    utils::oxc::vue::{
-        adjust_expression_spans, parse_vfor_with_bindings, parse_vslot_with_bindings,
+    utils::oxc::{
+        extract_bindings_from_expression,
+        vue::{adjust_expression_spans, parse_vfor_with_bindings, parse_vslot_with_bindings},
+        BindingContext, BindingExtractionResult,
     },
-    utils::oxc::{extract_bindings_from_expression, BindingContext, BindingExtractionResult},
 };
 
 /// OXC Parser Plugin for the syntax_kai pipeline.
@@ -93,25 +95,25 @@ impl<'alloc> OxcParserPlugin<'alloc> {
             match prop.kind {
                 // Structural directives → extract into scopes
                 PropKind::If => {
-                    let scope = self.parse_if_condition(&prop, element_id, ctx);
-                    scopes.push(ElementScope::If(scope));
+                    // let scope = self.parse_if_condition(&prop, element_id, ctx);
+                    // scopes.push(ElementScope::If(scope));
                 }
                 PropKind::ElseIf => {
-                    let scope = self.parse_else_if_condition(&prop, element_id, ctx);
-                    scopes.push(ElementScope::ElseIf(scope));
+                    // let scope = self.parse_else_if_condition(&prop, element_id, ctx);
+                    // scopes.push(ElementScope::ElseIf(scope));
                 }
                 PropKind::Else => {
-                    let scope = ElementScope::Else(OxcElseCondition {
-                        element_id,
-                        start: prop.start,
-                        end: prop.end,
-                        event: ElementScopeConditionElse {
-                            element_start: element_id,
-                            start: prop.start,
-                            end: prop.end,
-                        },
-                    });
-                    scopes.push(scope);
+                    // let scope = ElementScope::Else(OxcElseCondition {
+                    //     element_id,
+                    //     start: prop.start,
+                    //     end: prop.end,
+                    //     event: ElementScopeConditionElse {
+                    //         element_start: element_id,
+                    //         start: prop.start,
+                    //         end: prop.end,
+                    //     },
+                    // });
+                    // scopes.push(scope);
                 }
                 PropKind::For => {
                     if let Some(scope) = self.parse_vfor(&prop, element_id, ctx) {
@@ -212,63 +214,63 @@ impl<'alloc> OxcParserPlugin<'alloc> {
         }
     }
 
-    /// Parse a v-if condition.
-    fn parse_if_condition(
-        &self,
-        prop: &Prop,
-        element_id: u32,
-        ctx: &SyntaxPluginContext<'alloc>,
-    ) -> OxcIfCondition<'alloc> {
-        let (expression, errors, bindings) = if let Some(value_span) = prop.value {
-            self.parse_expression(value_span, ctx)
-        } else {
-            (None, None, None)
-        };
+    // /// Parse a v-if condition.
+    // fn parse_if_condition(
+    //     &self,
+    //     prop: &Prop,
+    //     element_id: u32,
+    //     ctx: &SyntaxPluginContext<'alloc>,
+    // ) -> OxcIfCondition<'alloc> {
+    //     let (expression, errors, bindings) = if let Some(value_span) = prop.value {
+    //         self.parse_expression(value_span, ctx)
+    //     } else {
+    //         (None, None, None)
+    //     };
 
-        OxcIfCondition {
-            element_id,
-            start: prop.start,
-            end: prop.end,
-            expression,
-            errors,
-            bindings,
-            event: ElementScopeConditionIf {
-                element_start: element_id,
-                start: prop.start,
-                end: prop.end,
-                value: prop.value,
-            },
-        }
-    }
+    //     OxcIfCondition {
+    //         element_id,
+    //         start: prop.start,
+    //         end: prop.end,
+    //         expression,
+    //         errors,
+    //         bindings,
+    //         event: ElementScopeConditionIf {
+    //             element_start: element_id,
+    //             start: prop.start,
+    //             end: prop.end,
+    //             value: prop.value,
+    //         },
+    //     }
+    // }
 
-    /// Parse a v-else-if condition.
-    fn parse_else_if_condition(
-        &self,
-        prop: &Prop,
-        element_id: u32,
-        ctx: &SyntaxPluginContext<'alloc>,
-    ) -> OxcElseIfCondition<'alloc> {
-        let (expression, errors, bindings) = if let Some(value_span) = prop.value {
-            self.parse_expression(value_span, ctx)
-        } else {
-            (None, None, None)
-        };
+    // /// Parse a v-else-if condition.
+    // fn parse_else_if_condition(
+    //     &self,
+    //     prop: &Prop,
+    //     element_id: u32,
+    //     ctx: &SyntaxPluginContext<'alloc>,
+    // ) -> OxcElseIfCondition<'alloc> {
+    //     let (expression, errors, bindings) = if let Some(value_span) = prop.value {
+    //         self.parse_expression(value_span, ctx)
+    //     } else {
+    //         (None, None, None)
+    //     };
 
-        OxcElseIfCondition {
-            element_id,
-            start: prop.start,
-            end: prop.end,
-            expression,
-            errors,
-            bindings,
-            event: ElementScopeConditionIf {
-                element_start: element_id,
-                start: prop.start,
-                end: prop.end,
-                value: prop.value,
-            },
-        }
-    }
+    //     OxcElseIfCondition {
+    //         element_id,
+    //         start: prop.start,
+    //         end: prop.end,
+    //         expression,
+    //         errors,
+    //         bindings,
+    //         event: ElementScopeConditionIf {
+    //             element_start: element_id,
+    //             start: prop.start,
+    //             end: prop.end,
+    //             value: prop.value,
+    //         },
+    //     }
+    // }
 
     /// Parse a v-for directive.
     fn parse_vfor(
@@ -392,60 +394,6 @@ impl<'alloc> OxcParserPlugin<'alloc> {
         })
     }
 
-    /// Parse a script block.
-    fn parse_script(
-        &self,
-        start: CompiledRootScriptStart,
-        end: CompiledRootScriptEnd,
-        ctx: &SyntaxPluginContext<'alloc>,
-    ) -> OxcScript<'alloc> {
-        let (program, errors) = if let Some(content) = end.content {
-            let source_slice = &ctx.input[content.start as usize..content.end as usize];
-            let parser_result =
-                oxc_parser::Parser::new(self.alloc, source_slice, self.source_type).parse();
-
-            let mut program = parser_result.program;
-            // Adjust all spans to be relative to the original source
-            for _stmt in program.body.iter_mut() {
-                // The program was parsed from content.start offset
-                // OXC gives spans relative to the slice, need to add content.start
-                // This is handled by adjusting spans post-parse
-            }
-
-            let errors = parser_result.errors;
-            (program, errors)
-        } else {
-            // Self-closing script or empty — parse empty string
-            let parser_result = oxc_parser::Parser::new(self.alloc, "", self.source_type).parse();
-            (parser_result.program, parser_result.errors)
-        };
-
-        let content_start = end.content.map_or(start.tag_open.end, |c| c.start);
-        let content_end = end.content.map_or(start.tag_open.end, |c| c.end);
-
-        OxcScript {
-            start: start.start,
-            end: end.end,
-            tag_open_start: start.tag_open.start,
-            tag_open_end: start.tag_open.end,
-            tag_close_start: end.tag_close.map_or(end.end, |t| t.start),
-            tag_close_end: end.tag_close.map_or(end.end, |t| t.end),
-            content_start,
-            content_end,
-            program,
-            errors,
-            setup: start.setup,
-            lang: start.lang,
-            generic: start.generic.map(|span| {
-                // Parse generic type parameters
-                let source_slice = &ctx.input[span.start as usize..span.end as usize];
-                crate::utils::oxc::vue::parse_generic(self.alloc, source_slice, span.start)
-            }),
-            attrs: start.attrs,
-            attributes: start.attributes.into_iter().collect(),
-        }
-    }
-
     /// Parse an interpolation expression.
     fn parse_interpolation(
         &self,
@@ -501,7 +449,7 @@ impl<'alloc> SyntaxPlugin<'alloc> for OxcParserPlugin<'alloc> {
 
             Event::CompiledScriptEnd(end) => {
                 if let Some(start) = self.current_script_start.take() {
-                    let script = self.parse_script(start, end, ctx);
+                    let script = parse_script(start, end, ctx.input, self.alloc, self.source_type);
                     SyntaxResult::Replace(Event::OxcScript(script))
                 } else {
                     SyntaxResult::Keep(Event::CompiledScriptEnd(end))
