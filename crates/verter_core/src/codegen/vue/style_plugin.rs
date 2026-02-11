@@ -140,7 +140,7 @@ impl<'a> StyleCodegenPlugin<'a> {
             code_transform.remove(css.content_end, self.source.len() as u32);
         }
 
-        let mut v_bind_expressions = Vec::new();
+        let v_bind_expressions = Vec::new();
         let mut module_name = None;
         let mut module_classes = Vec::new();
         let mut is_module = false;
@@ -154,69 +154,54 @@ impl<'a> StyleCodegenPlugin<'a> {
             crate::syntax::types::StyleLang::Stylus => "stylus".to_string(),
         });
 
-        // Handle CSS modules
+        let is_plain_css = lang.is_none() || lang.as_deref() == Some("css");
+
+        // Extract module info
         if let Some(ref module_span) = css.module {
             is_module = true;
-
-            let hash = get_hash(&self.component_name);
-            let hash_bytes = hash.as_bytes();
-            let mut component_id = [0u8; 8];
-            component_id.copy_from_slice(&hash_bytes[..8.min(hash_bytes.len())]);
-
-            // Get module name
             module_name = Some(if module_span.start == 0 && module_span.end == 0 {
                 "$style".to_string()
             } else {
                 ctx.input[module_span.start as usize..module_span.end as usize].to_string()
             });
-
-            // Transform CSS for modules
-            match crate::syntax::plugins::css_parser::transform_css_modules(
-                css_content,
-                &component_id,
-            ) {
-                Ok(result) => {
-                    module_classes = result.class_mapping;
-                    // Overwrite the content region with transformed CSS
-                    let transformed_str = std::str::from_utf8(&result.css).unwrap_or("");
-                    code_transform.overwrite(css.content_start, css.content_end, transformed_str);
-                }
-                Err(_e) => {
-                    // If transformation fails, keep original
-                }
-            }
         }
-        // Handle scoped styles
-        else if css.scoped {
-            // Generate or use existing scope ID
-            let scope_id = if let Some(id) = self.scope_id {
-                id
+
+        if is_plain_css && (css.scoped || is_module) {
+            // Plain CSS: use lightningcss for scoping and/or modules
+            let scope_id_str = if let Some(id) = self.scope_id {
+                std::str::from_utf8(&id).unwrap_or("00000000").to_string()
             } else {
                 let hash = get_hash(&self.component_name);
-                let hash_bytes = hash.as_bytes();
+                let hash_str = hash[..8.min(hash.len())].to_string();
+                let hash_bytes = hash_str.as_bytes();
                 let mut id = [0u8; 8];
                 id.copy_from_slice(&hash_bytes[..8.min(hash_bytes.len())]);
                 self.scope_id = Some(id);
-                id
+                hash_str
             };
 
-            // Transform the CSS content with scoping
-            match crate::syntax::plugins::css_parser::transform_scoped_css(
-                css_content,
-                &scope_id,
-                css.content_start,
-            ) {
+            let css_str = std::str::from_utf8(css_content).unwrap_or("");
+            let options = crate::css::ProcessStyleOptions {
+                scope_id: scope_id_str,
+                scoped: css.scoped,
+                is_module,
+                module_name: module_name.clone(),
+                filename: None,
+                sourcemap: false,
+            };
+
+            match crate::css::process_style(css_str, &options) {
                 Ok(result) => {
-                    v_bind_expressions = result.v_bind_expressions;
-                    let transformed_str = std::str::from_utf8(&result.css).unwrap_or("");
-                    code_transform.overwrite(css.content_start, css.content_end, transformed_str);
+                    module_classes = result.module_classes;
+                    code_transform.overwrite(css.content_start, css.content_end, &result.code);
                 }
                 Err(_e) => {
-                    // If transformation fails, keep original
+                    // If lightningcss processing fails, keep original
                 }
             }
         }
-        // Plain style - no transformation needed, CodeTransform stays as-is
+        // Preprocessor langs: skip transforms — Vite plugin will handle
+        // via preprocessCSS + NAPI processStyle. Raw content passes through.
 
         self.styles.push(ProcessedStyle {
             code_transform,

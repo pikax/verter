@@ -272,6 +272,88 @@ pub fn compile_for_vite(
 }
 
 // =============================================================================
+// Standalone CSS Style Processing (for preprocessed CSS from Vite plugin)
+// =============================================================================
+
+#[napi(object)]
+#[derive(Default)]
+pub struct ProcessStyleOptions {
+    /// Scope ID string (e.g., "a4f2eed6")
+    pub scope_id: String,
+    /// Whether this style block is scoped
+    pub scoped: Option<bool>,
+    /// Whether this is a CSS module block
+    pub is_module: Option<bool>,
+    /// Custom module name (None = "$style")
+    pub module_name: Option<String>,
+    /// Source filename for source map generation
+    pub filename: Option<String>,
+    /// Whether to generate source maps
+    pub sourcemap: Option<bool>,
+}
+
+#[napi(object)]
+pub struct ProcessStyleVBind {
+    /// The original expression text (e.g., "color" or "theme.color")
+    pub expression: String,
+    /// The generated CSS variable name (e.g., "--a4f2eed6-color")
+    pub var_name: String,
+}
+
+#[napi(object)]
+pub struct ProcessStyleResult {
+    /// Transformed CSS code
+    pub code: String,
+    /// Source map as JSON string (if sourcemap was requested)
+    pub source_map: Option<String>,
+    /// CSS module class mappings (original → hashed), each entry is [original, hashed]
+    pub module_classes: Vec<Vec<String>>,
+    /// v-bind() expressions found and replaced
+    pub v_bind_vars: Vec<ProcessStyleVBind>,
+}
+
+/// Process a CSS style block: apply scoping, CSS modules, and v-bind replacement.
+///
+/// Called by the Vite plugin after preprocessing SCSS/Less/Stylus to valid CSS.
+/// For plain CSS blocks, the Rust compiler handles this inline during compileForVite().
+///
+/// @param css - Valid CSS string (already preprocessed if originally SCSS/Less/etc.)
+/// @param options - Processing options (scope ID, scoped, modules, etc.)
+/// @returns Processed CSS with scoping/modules applied, plus v-bind metadata
+#[napi]
+pub fn process_style(css: String, options: ProcessStyleOptions) -> Result<ProcessStyleResult> {
+    let core_options = verter_core::css::ProcessStyleOptions {
+        scope_id: options.scope_id,
+        scoped: options.scoped.unwrap_or(false),
+        is_module: options.is_module.unwrap_or(false),
+        module_name: options.module_name,
+        filename: options.filename,
+        sourcemap: options.sourcemap.unwrap_or(false),
+    };
+
+    let result = verter_core::css::process_style(&css, &core_options)
+        .map_err(|e| Error::new(Status::GenericFailure, e))?;
+
+    Ok(ProcessStyleResult {
+        code: result.code,
+        source_map: result.source_map,
+        module_classes: result
+            .module_classes
+            .into_iter()
+            .map(|(k, v)| vec![k, v])
+            .collect(),
+        v_bind_vars: result
+            .v_bind_vars
+            .into_iter()
+            .map(|v| ProcessStyleVBind {
+                expression: v.expression,
+                var_name: v.var_name,
+            })
+            .collect(),
+    })
+}
+
+// =============================================================================
 // Standalone TypeScript Stripping
 // =============================================================================
 

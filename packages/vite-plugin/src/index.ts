@@ -1,6 +1,11 @@
 import type { Plugin, ResolvedConfig } from "vite";
-import { transformWithEsbuild } from "vite";
-import type { ViteCodegenOptions, ViteCodegenResult } from "@verter/native";
+import { preprocessCSS, transformWithEsbuild } from "vite";
+import type {
+  ViteCodegenOptions,
+  ViteCodegenResult,
+  ProcessStyleOptions,
+  ProcessStyleResult,
+} from "@verter/native";
 import { createHash } from "crypto";
 import { createRequire } from "module";
 import { generateMainModule } from "./main";
@@ -32,6 +37,7 @@ export interface VerterPluginOptions {
 
 interface Compiler {
   compileForVite(input: string, options?: ViteCodegenOptions): ViteCodegenResult;
+  processStyle(css: string, options: ProcessStyleOptions): ProcessStyleResult;
 }
 
 /**
@@ -74,6 +80,7 @@ export function verter(options: VerterPluginOptions = {}): Plugin {
     const native = require("@verter/native") as typeof import("@verter/native");
     compiler = {
       compileForVite: (input, opts) => native.compileForVite(input, opts),
+      processStyle: (css, opts) => native.processStyle(css, opts),
     };
     return compiler;
   };
@@ -145,11 +152,50 @@ export function verter(options: VerterPluginOptions = {}): Plugin {
       try {
         const result = compiler.compileForVite(code, compileOptions);
 
-        // Cache the result for virtual module loading (style blocks)
-        setDescriptor(filename, result);
+        // Process preprocessor styles (SCSS/Less/Stylus) that need Vite's preprocessCSS
+        // Plain CSS is already processed inline by Rust's lightningcss pipeline.
+        const processedStyles = await Promise.all(
+          result.styles.map(async (style) => {
+            const hasPreprocessor = style.lang && style.lang !== "css";
+
+            if (hasPreprocessor) {
+              // 1. Preprocess SCSS/Less/Stylus → CSS via Vite's API
+              const preprocessed = await preprocessCSS(
+                style.code,
+                `${filename}.${style.lang}`,
+                config,
+              );
+
+              // 2. Apply scoping/modules via NAPI if needed
+              if (style.scoped || style.is_module) {
+                const processed = compiler.processStyle(preprocessed.code, {
+                  scope_id: componentId,
+                  scoped: style.scoped,
+                  is_module: style.is_module,
+                  module_name: style.module_name ?? undefined,
+                });
+                return {
+                  ...style,
+                  code: processed.code,
+                  lang: "css",
+                  module_classes: processed.module_classes,
+                };
+              }
+
+              // Preprocessor but no scoping/modules — just preprocessed
+              return { ...style, code: preprocessed.code, lang: "css" };
+            }
+
+            // Plain CSS — already processed by Rust inline
+            return style;
+          }),
+        );
+
+        // Cache with processed styles for virtual module loading
+        setDescriptor(filename, { ...result, styles: processedStyles });
 
         // Assemble the main module from split blocks
-        const output = generateMainModule(result, {
+        const output = generateMainModule({ ...result, styles: processedStyles }, {
           filename,
           scopeId: componentId,
           ssr,

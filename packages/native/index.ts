@@ -225,4 +225,89 @@ export declare function compileForVite(
   options?: ViteCodegenOptions,
 ): ViteCodegenResult;
 
+// =============================================================================
+// Standalone CSS Style Processing (for preprocessed CSS from Vite plugin)
+// =============================================================================
+
+/**
+ * Options for processing a CSS style block
+ */
+export interface ProcessStyleOptions {
+  /**
+   * Scope ID string (e.g., "a4f2eed6")
+   */
+  scope_id: string;
+  /**
+   * Whether this style block is scoped
+   */
+  scoped?: boolean;
+  /**
+   * Whether this is a CSS module block
+   */
+  is_module?: boolean;
+  /**
+   * Custom module name (None = "$style")
+   */
+  module_name?: string;
+  /**
+   * Source filename for source map generation
+   */
+  filename?: string;
+  /**
+   * Whether to generate source maps
+   */
+  sourcemap?: boolean;
+}
+
+/**
+ * A v-bind() expression that was replaced with a CSS variable
+ */
+export interface ProcessStyleVBind {
+  /**
+   * The original expression text (e.g., "color" or "theme.color")
+   */
+  expression: string;
+  /**
+   * The generated CSS variable name (e.g., "--a4f2eed6-color")
+   */
+  var_name: string;
+}
+
+/**
+ * Result of processing a CSS style block
+ */
+export interface ProcessStyleResult {
+  /**
+   * Transformed CSS code
+   */
+  code: string;
+  /**
+   * Source map as JSON string (if sourcemap was requested)
+   */
+  source_map?: string;
+  /**
+   * CSS module class mappings (original -> hashed)
+   */
+  module_classes: string[][];
+  /**
+   * v-bind() expressions found and replaced
+   */
+  v_bind_vars: ProcessStyleVBind[];
+}
+
+/**
+ * Process a CSS style block: apply scoping, CSS modules, and v-bind replacement.
+ *
+ * Called by the Vite plugin after preprocessing SCSS/Less/Stylus to valid CSS.
+ * For plain CSS blocks, the Rust compiler handles this inline during compileForVite().
+ *
+ * @param css - Valid CSS string (already preprocessed if originally SCSS/Less/etc.)
+ * @param options - Processing options (scope ID, scoped, modules, etc.)
+ * @returns Processed CSS with scoping/modules applied, plus v-bind metadata
+ */
+export declare function processStyle(
+  css: string,
+  options: ProcessStyleOptions,
+): ProcessStyleResult;
+
 export {};
