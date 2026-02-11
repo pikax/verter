@@ -22,8 +22,12 @@ pub use span::{
     adjust_program_spans, subtract_formal_parameters_spans,
 };
 pub use vfor::{
-    extract_vfor_positions, parse_vfor, parse_vfor_with_bindings, VForParseResult, VForWithBindings,
+    extract_vfor_positions, parse_vfor, parse_vfor_sliced, parse_vfor_with_bindings,
+    parse_vfor_with_bindings_sliced, VForParseResult, VForWithBindings,
 };
-pub use vslot::{parse_vslot, parse_vslot_with_bindings, VSlotParseResult, VSlotWithBindings};
+pub use vslot::{
+    parse_vslot, parse_vslot_sliced, parse_vslot_with_bindings, parse_vslot_with_bindings_sliced,
+    VSlotParseResult, VSlotWithBindings,
+};
 
 pub use script::*;

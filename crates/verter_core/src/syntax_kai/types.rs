@@ -4,7 +4,8 @@ use crate::{
     tokenizer::QuoteType,
     utils::{
         oxc::{
-            BindingExtractionResult, vue::{GenericParseResult, ScriptParseResult, VForWithBindings, VSlotWithBindings}
+            vue::{GenericParseResult, ScriptParseResult, VForWithBindings, VSlotWithBindings},
+            BindingExtractionResult,
         },
         vue::PatchFlag,
     },

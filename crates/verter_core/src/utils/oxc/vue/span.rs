@@ -1032,10 +1032,7 @@ fn adjust_for_statement_init_spans(init: &mut ForStatementInit<'_>, offset: u32)
     }
 }
 
-fn adjust_for_statement_left_spans(
-    left: &mut oxc_ast::ast::ForStatementLeft<'_>,
-    offset: u32,
-) {
+fn adjust_for_statement_left_spans(left: &mut oxc_ast::ast::ForStatementLeft<'_>, offset: u32) {
     match left {
         oxc_ast::ast::ForStatementLeft::VariableDeclaration(decl) => {
             adjust_variable_declaration_spans(decl, offset);

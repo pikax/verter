@@ -1,7 +1,10 @@
-use crate::{syntax_kai::{
-    plugins::oxc_parser::helpers::parse_program,
-    types::{CompiledRootScriptEnd, CompiledRootScriptStart, OxcScript},
-}, utils::oxc::vue::ScriptMode};
+use crate::{
+    syntax_kai::{
+        plugins::oxc_parser::helpers::parse_program,
+        types::{CompiledRootScriptEnd, CompiledRootScriptStart, OxcScript},
+    },
+    utils::oxc::vue::ScriptMode,
+};
 use oxc_allocator::Allocator;
 
 /// Parse a script block.
@@ -48,7 +51,7 @@ pub fn parse_script<'alloc>(
         program,
         errors,
         result,
-        
+
         setup: start.setup,
         lang: start.lang,
         generic: start.generic.map(|span| {

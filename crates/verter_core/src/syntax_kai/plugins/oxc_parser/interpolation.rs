@@ -12,7 +12,7 @@ pub fn parse_interpolation<'alloc>(
     input: &'alloc str,
     alloc: &'alloc Allocator,
     source_type: SourceType,
-    ignored: &'alloc Vec<&[u8]>,
+    ignored: &[&'alloc [u8]],
 ) -> OxcInterpolation<'alloc> {
     let (expression, errors, bindings) =
         parse_expression(event.content, input, alloc, source_type, ignored);

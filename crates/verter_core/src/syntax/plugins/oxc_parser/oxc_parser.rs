@@ -11,10 +11,9 @@ use crate::{
             OxcVConditional, OxcVForProp, OxcVSlotProp, SyntaxEvent, SyntaxProp,
         },
     },
-    syntax_kai::plugins::oxc_parser::script::parse_script,
     utils::oxc::{
         extract_bindings_from_expression,
-        vue::{parse_generic, parse_vfor_with_bindings, parse_vslot_with_bindings, ScriptMode},
+        vue::{parse_generic, parse_vfor_with_bindings, parse_vslot_with_bindings},
         BindingContext,
     },
 };

@@ -15,7 +15,7 @@ pub fn parse_expression<'alloc>(
     input: &'alloc str,
     alloc: &'alloc Allocator,
     source_type: oxc_span::SourceType,
-    ignored: &'alloc Vec<&[u8]>,
+    ignored: &[&'alloc [u8]],
 ) -> (
     Option<oxc_ast::ast::Expression<'alloc>>,
     Option<Vec<oxc_diagnostics::OxcDiagnostic>>,
@@ -86,13 +86,8 @@ mod tests {
     fn parse_expression_empty_span() {
         let alloc = Allocator::default();
         let ignored = vec![];
-        let (expr, errors, bindings) = parse_expression(
-            Span::new(0, 0),
-            "",
-            &alloc,
-            SourceType::tsx(),
-            &ignored,
-        );
+        let (expr, errors, bindings) =
+            parse_expression(Span::new(0, 0), "", &alloc, SourceType::tsx(), &ignored);
         assert!(expr.is_none());
         assert!(errors.is_none());
         assert!(bindings.is_none());
@@ -121,13 +116,8 @@ mod tests {
         let alloc = Allocator::default();
         let ignored = vec![];
         let input = "foo";
-        let (expr, errors, bindings) = parse_expression(
-            Span::new(0, 3),
-            input,
-            &alloc,
-            SourceType::tsx(),
-            &ignored,
-        );
+        let (expr, errors, bindings) =
+            parse_expression(Span::new(0, 3), input, &alloc, SourceType::tsx(), &ignored);
         assert!(expr.is_some(), "Expected expression to parse");
         assert!(errors.is_none(), "Expected no errors");
         let bindings = bindings.expect("Expected bindings");
@@ -143,13 +133,8 @@ mod tests {
         //                   0123456789...
         let input = "prefix foo + bar suffix";
         // Expression "foo + bar" starts at 7, ends at 16
-        let (expr, errors, bindings) = parse_expression(
-            Span::new(7, 16),
-            input,
-            &alloc,
-            SourceType::tsx(),
-            &ignored,
-        );
+        let (expr, errors, bindings) =
+            parse_expression(Span::new(7, 16), input, &alloc, SourceType::tsx(), &ignored);
         assert!(expr.is_some(), "Expected expression to parse");
         assert!(errors.is_none());
         let bindings = bindings.expect("Expected bindings");
@@ -172,13 +157,8 @@ mod tests {
         let alloc = Allocator::default();
         let ignored: Vec<&[u8]> = vec![b"item"];
         let input = "item.name";
-        let (expr, errors, bindings) = parse_expression(
-            Span::new(0, 9),
-            input,
-            &alloc,
-            SourceType::tsx(),
-            &ignored,
-        );
+        let (expr, errors, bindings) =
+            parse_expression(Span::new(0, 9), input, &alloc, SourceType::tsx(), &ignored);
         assert!(expr.is_some());
         assert!(errors.is_none());
         let bindings = bindings.expect("Expected bindings");
@@ -197,13 +177,8 @@ mod tests {
         let alloc = Allocator::default();
         let ignored = vec![];
         let input = "if (";
-        let (expr, errors, _bindings) = parse_expression(
-            Span::new(0, 4),
-            input,
-            &alloc,
-            SourceType::tsx(),
-            &ignored,
-        );
+        let (expr, errors, _bindings) =
+            parse_expression(Span::new(0, 4), input, &alloc, SourceType::tsx(), &ignored);
         assert!(expr.is_none(), "Expected no expression for invalid syntax");
         assert!(errors.is_some(), "Expected parse errors");
     }
@@ -215,13 +190,8 @@ mod tests {
         let ignored = vec![];
         let input = "prefix if ( suffix";
         // "if (" at offset 7..11
-        let (_expr, errors, _bindings) = parse_expression(
-            Span::new(7, 11),
-            input,
-            &alloc,
-            SourceType::tsx(),
-            &ignored,
-        );
+        let (_expr, errors, _bindings) =
+            parse_expression(Span::new(7, 11), input, &alloc, SourceType::tsx(), &ignored);
         let errors = errors.expect("Expected parse errors");
         assert!(!errors.is_empty());
         // Error label spans should be adjusted by offset 7
@@ -294,7 +264,12 @@ mod tests {
     #[test]
     fn parse_program_inverted_span() {
         let alloc = Allocator::default();
-        let result = parse_program(Span::new(10, 5), "some input text", &alloc, SourceType::tsx());
+        let result = parse_program(
+            Span::new(10, 5),
+            "some input text",
+            &alloc,
+            SourceType::tsx(),
+        );
         assert!(result.program.body.is_empty());
         assert!(result.errors.is_empty());
     }

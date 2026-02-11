@@ -2,17 +2,12 @@ use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 
 use crate::{
-    common::Span,
     syntax_kai::{
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxResult},
-        plugins::oxc_parser::script::parse_script,
+        plugins::oxc_parser::{helpers, script::parse_script},
         types::*,
     },
-    utils::oxc::{
-        extract_bindings_from_expression,
-        vue::{adjust_expression_spans, parse_vfor_with_bindings, parse_vslot_with_bindings},
-        BindingContext, BindingExtractionResult,
-    },
+    utils::oxc::vue::{parse_vfor_with_bindings_sliced, parse_vslot_with_bindings_sliced},
 };
 
 /// OXC Parser Plugin for the syntax_kai pipeline.
@@ -42,39 +37,6 @@ impl<'alloc> OxcParserPlugin<'alloc> {
         self.source_type = source_type;
     }
 
-    /// Parse a single expression from a source span.
-    fn parse_expression(
-        &self,
-        span: Span,
-        ctx: &SyntaxPluginContext<'alloc>,
-    ) -> (
-        Option<oxc_ast::ast::Expression<'alloc>>,
-        Option<Vec<oxc_diagnostics::OxcDiagnostic>>,
-        Option<BindingExtractionResult<'alloc>>,
-    ) {
-        let source_slice = &ctx.input[span.start as usize..span.end as usize];
-        if source_slice.trim().is_empty() {
-            return (None, None, None);
-        }
-
-        let parser = oxc_parser::Parser::new(self.alloc, source_slice, self.source_type);
-        let result = parser.parse_expression();
-
-        match result {
-            Ok(mut expr) => {
-                // Adjust spans to be relative to original source
-                adjust_expression_spans(&mut expr, span.start);
-
-                // Extract bindings
-                let binding_ctx = BindingContext::new(span.start);
-                let bindings = extract_bindings_from_expression(&expr, ctx.input, &binding_ctx);
-
-                (Some(expr), None, Some(bindings))
-            }
-            Err(errors) => (None, Some(errors), None),
-        }
-    }
-
     /// Parse props from a CompiledElementStart into OxcProp and ElementScope vectors.
     fn parse_element_props(
         &self,
@@ -95,42 +57,35 @@ impl<'alloc> OxcParserPlugin<'alloc> {
             match prop.kind {
                 // Structural directives → extract into scopes
                 PropKind::If => {
-                    // let scope = self.parse_if_condition(&prop, element_id, ctx);
-                    // scopes.push(ElementScope::If(scope));
+                    let scope = self.parse_if_condition(prop, ctx);
+                    scopes.push(ElementScope::If(scope));
                 }
                 PropKind::ElseIf => {
-                    // let scope = self.parse_else_if_condition(&prop, element_id, ctx);
-                    // scopes.push(ElementScope::ElseIf(scope));
+                    let scope = self.parse_else_if_condition(prop, ctx);
+                    scopes.push(ElementScope::ElseIf(scope));
                 }
                 PropKind::Else => {
-                    // let scope = ElementScope::Else(OxcElseCondition {
-                    //     element_id,
-                    //     start: prop.start,
-                    //     end: prop.end,
-                    //     event: ElementScopeConditionElse {
-                    //         element_start: element_id,
-                    //         start: prop.start,
-                    //         end: prop.end,
-                    //     },
-                    // });
-                    // scopes.push(scope);
+                    let scope = ElementScope::Else(OxcElseCondition {
+                        element_id: prop.element_id,
+                        start: prop.start,
+                        end: prop.end,
+                        event: prop,
+                    });
+                    scopes.push(scope);
                 }
                 PropKind::For => {
-                    if let Some(scope) = self.parse_vfor(&prop, element_id, ctx) {
+                    if let Some(scope) = self.parse_vfor(&prop, ctx) {
                         scopes.push(ElementScope::For(scope));
                     }
                 }
                 PropKind::Slot => {
                     if is_template {
-                        if let Some(scope) = self.parse_vslot_template(&prop, element_id, ctx) {
+                        if let Some(scope) = self.parse_vslot_template(&prop, ctx) {
                             scopes.push(ElementScope::SlotTemplate(scope));
                         }
-                    } else if let Some(scope) = self.parse_vslot_element(
-                        &prop,
-                        element_id,
-                        &compiled.event_open_tag_end,
-                        ctx,
-                    ) {
+                    } else if let Some(scope) =
+                        self.parse_vslot_element(&prop, &compiled.event_open_tag_end, ctx)
+                    {
                         scopes.push(ElementScope::SlotElement(scope));
                     }
                 }
@@ -167,7 +122,13 @@ impl<'alloc> OxcParserPlugin<'alloc> {
         let arg = if let Some(arg_span) = prop.arg {
             if prop.has_dynamic_arg {
                 // Dynamic arg: :[key]="value" — parse the arg expression
-                let (expression, errors, bindings) = self.parse_expression(arg_span, ctx);
+                let (expression, errors, bindings) = helpers::parse_expression(
+                    arg_span,
+                    ctx.input,
+                    self.alloc,
+                    self.source_type,
+                    &[],
+                );
                 Some(OxcPropProcessed {
                     start: arg_span.start,
                     end: arg_span.end,
@@ -186,7 +147,13 @@ impl<'alloc> OxcParserPlugin<'alloc> {
         let exp = if let Some(value_span) = prop.value {
             if prop.is_directive {
                 // Directive value is an expression — parse it
-                let (expression, errors, bindings) = self.parse_expression(value_span, ctx);
+                let (expression, errors, bindings) = helpers::parse_expression(
+                    value_span,
+                    ctx.input,
+                    self.alloc,
+                    self.source_type,
+                    &[],
+                );
                 Some(OxcPropProcessed {
                     start: value_span.start,
                     end: value_span.end,
@@ -214,93 +181,71 @@ impl<'alloc> OxcParserPlugin<'alloc> {
         }
     }
 
-    // /// Parse a v-if condition.
-    // fn parse_if_condition(
-    //     &self,
-    //     prop: &Prop,
-    //     element_id: u32,
-    //     ctx: &SyntaxPluginContext<'alloc>,
-    // ) -> OxcIfCondition<'alloc> {
-    //     let (expression, errors, bindings) = if let Some(value_span) = prop.value {
-    //         self.parse_expression(value_span, ctx)
-    //     } else {
-    //         (None, None, None)
-    //     };
+    /// Parse a v-if condition.
+    fn parse_if_condition(
+        &self,
+        prop: Prop,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) -> OxcIfCondition<'alloc> {
+        let (expression, errors, bindings) = if let Some(value_span) = prop.value {
+            helpers::parse_expression(value_span, ctx.input, self.alloc, self.source_type, &[])
+        } else {
+            (None, None, None)
+        };
 
-    //     OxcIfCondition {
-    //         element_id,
-    //         start: prop.start,
-    //         end: prop.end,
-    //         expression,
-    //         errors,
-    //         bindings,
-    //         event: ElementScopeConditionIf {
-    //             element_start: element_id,
-    //             start: prop.start,
-    //             end: prop.end,
-    //             value: prop.value,
-    //         },
-    //     }
-    // }
+        OxcIfCondition {
+            element_id: prop.element_id,
+            start: prop.start,
+            end: prop.end,
+            expression,
+            errors,
+            bindings,
+            event: prop,
+        }
+    }
 
-    // /// Parse a v-else-if condition.
-    // fn parse_else_if_condition(
-    //     &self,
-    //     prop: &Prop,
-    //     element_id: u32,
-    //     ctx: &SyntaxPluginContext<'alloc>,
-    // ) -> OxcElseIfCondition<'alloc> {
-    //     let (expression, errors, bindings) = if let Some(value_span) = prop.value {
-    //         self.parse_expression(value_span, ctx)
-    //     } else {
-    //         (None, None, None)
-    //     };
+    /// Parse a v-else-if condition.
+    fn parse_else_if_condition(
+        &self,
+        prop: Prop,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) -> OxcElseIfCondition<'alloc> {
+        let (expression, errors, bindings) = if let Some(value_span) = prop.value {
+            helpers::parse_expression(value_span, ctx.input, self.alloc, self.source_type, &[])
+        } else {
+            (None, None, None)
+        };
 
-    //     OxcElseIfCondition {
-    //         element_id,
-    //         start: prop.start,
-    //         end: prop.end,
-    //         expression,
-    //         errors,
-    //         bindings,
-    //         event: ElementScopeConditionIf {
-    //             element_start: element_id,
-    //             start: prop.start,
-    //             end: prop.end,
-    //             value: prop.value,
-    //         },
-    //     }
-    // }
+        OxcElseIfCondition {
+            element_id: prop.element_id,
+            start: prop.start,
+            end: prop.end,
+            expression,
+            errors,
+            bindings,
+            event: prop,
+        }
+    }
 
-    /// Parse a v-for directive.
+    /// Parse a v-for directive using the sliced parser.
     fn parse_vfor(
         &self,
         prop: &Prop,
-        element_id: u32,
         ctx: &SyntaxPluginContext<'alloc>,
     ) -> Option<OxcVFor<'alloc>> {
         let value_span = prop.value?;
-        let source_slice = &ctx.input[value_span.start as usize..value_span.end as usize];
 
-        let mut parsed = parse_vfor_with_bindings(self.alloc, source_slice, self.source_type);
-
-        // Adjust spans to be relative to original source
-        for s in &mut parsed.locals {
-            s.start += value_span.start;
-            s.end += value_span.start;
-        }
-        for s in &mut parsed.references {
-            s.start += value_span.start;
-            s.end += value_span.start;
-        }
+        // All spans (AST + bindings) are adjusted to file-relative by _sliced
+        let parsed =
+            parse_vfor_with_bindings_sliced(self.alloc, value_span, ctx.input, self.source_type);
 
         Some(OxcVFor {
-            element_id,
+            element_id: prop.element_id,
             start: prop.start,
             end: prop.end,
             parsed,
             event: ElementScopeFor {
-                element_start: element_id,
+                element_start: prop.element_id,
                 start: prop.start,
                 end: prop.end,
                 value: prop.value,
@@ -311,40 +256,23 @@ impl<'alloc> OxcParserPlugin<'alloc> {
         })
     }
 
-    /// Parse a v-slot on a template element.
+    /// Parse a v-slot on a template element using the sliced parser.
     fn parse_vslot_template(
         &self,
         prop: &Prop,
-        element_id: u32,
         ctx: &SyntaxPluginContext<'alloc>,
     ) -> Option<OxcVSlotTemplate<'alloc>> {
-        let value_span = prop.value;
-        let source_slice = value_span.map(|s| &ctx.input[s.start as usize..s.end as usize]);
-
-        let mut parsed = if let Some(slice) = source_slice {
-            parse_vslot_with_bindings(self.alloc, slice, self.source_type)
-        } else {
-            parse_vslot_with_bindings(self.alloc, "", self.source_type)
-        };
-
-        // Adjust spans
-        let offset = value_span.map_or(0, |s| s.start);
-        for s in &mut parsed.locals {
-            s.start += offset;
-            s.end += offset;
-        }
-        for s in &mut parsed.references {
-            s.start += offset;
-            s.end += offset;
-        }
+        // All spans adjusted to file-relative by _sliced; None value handled internally
+        let parsed =
+            parse_vslot_with_bindings_sliced(self.alloc, prop.value, ctx.input, self.source_type);
 
         Some(OxcVSlotTemplate {
-            element_id,
+            element_id: prop.element_id,
             start: prop.start,
             end: prop.end,
             parsed,
             event: ElementScopeSlotTemplate {
-                element_start: element_id,
+                element_start: prop.element_id,
                 start: prop.start,
                 end: prop.end,
                 name: prop.arg,
@@ -352,40 +280,24 @@ impl<'alloc> OxcParserPlugin<'alloc> {
         })
     }
 
-    /// Parse a v-slot on a component element (not template).
+    /// Parse a v-slot on a component element (not template) using the sliced parser.
     fn parse_vslot_element(
         &self,
         prop: &Prop,
-        element_id: u32,
         open_tag_end: &ElementOpenTagEnd,
         ctx: &SyntaxPluginContext<'alloc>,
     ) -> Option<OxcVSlotElement<'alloc>> {
-        let value_span = prop.value;
-        let source_slice = value_span.map(|s| &ctx.input[s.start as usize..s.end as usize]);
-
-        let mut parsed = if let Some(slice) = source_slice {
-            parse_vslot_with_bindings(self.alloc, slice, self.source_type)
-        } else {
-            parse_vslot_with_bindings(self.alloc, "", self.source_type)
-        };
-
-        let offset = value_span.map_or(0, |s| s.start);
-        for s in &mut parsed.locals {
-            s.start += offset;
-            s.end += offset;
-        }
-        for s in &mut parsed.references {
-            s.start += offset;
-            s.end += offset;
-        }
+        // All spans adjusted to file-relative by _sliced; None value handled internally
+        let parsed =
+            parse_vslot_with_bindings_sliced(self.alloc, prop.value, ctx.input, self.source_type);
 
         Some(OxcVSlotElement {
-            element_id,
+            element_id: prop.element_id,
             start: prop.start,
             end: prop.end,
             parsed,
             event: ElementScopeSlotElement {
-                element_start: element_id,
+                element_start: prop.element_id,
                 element_content_start: open_tag_end.end,
                 start: prop.start,
                 end: prop.end,
@@ -400,7 +312,8 @@ impl<'alloc> OxcParserPlugin<'alloc> {
         interp: Interpolation,
         ctx: &SyntaxPluginContext<'alloc>,
     ) -> OxcInterpolation<'alloc> {
-        let (expression, errors, bindings) = self.parse_expression(interp.content, ctx);
+        let (expression, errors, bindings) =
+            helpers::parse_expression(interp.content, ctx.input, self.alloc, self.source_type, &[]);
 
         OxcInterpolation {
             parent_id: interp.parent_id,

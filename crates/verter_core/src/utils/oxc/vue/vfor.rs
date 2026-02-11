@@ -13,7 +13,7 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 
-use super::span::adjust_expression_spans;
+use super::span::{adjust_diagnostics_spans, adjust_expression_spans};
 use crate::common::Span;
 use crate::utils::oxc::bindings::{
     collect_expression_reference_spans, collect_ts_type_reference_spans_from_expression,
@@ -232,54 +232,50 @@ fn extract_vfor_bindings_internal(
     (locals, references)
 }
 
-/// Parse a Vue v-for expression.
+/// Parse a Vue v-for expression from a span within a larger source string.
+///
+/// This is the primary implementation. All AST spans, diagnostic spans, and
+/// offset fields in the result are adjusted to be relative to the full `input`,
+/// not the extracted substring.
 ///
 /// # Arguments
 /// * `allocator` - The OXC allocator for AST memory
-/// * `source` - The v-for expression content (e.g., "item of items")
+/// * `span` - The byte range within `input` containing the v-for expression
+/// * `input` - The full source string (e.g., the entire SFC file)
 /// * `source_type` - The source type (e.g., TSX, JavaScript)
-///
-/// # Returns
-/// A `VForParseResult` containing the parsed left/right expressions,
-/// metadata about the parse, and any errors.
-///
-/// # How it works
-/// 1. Finds the ` of ` or ` in ` separator
-/// 2. Splits the expression into left and right parts
-/// 3. Parses each part separately as an expression
-/// 4. Returns both with their respective offsets
-///
-/// # Offset Information
-/// - `left_offset`: Always 0 (left expression starts at position 0)
-/// - `right_offset`: Position after the separator (e.g., 8 for "item of items" → "items" starts at 8)
 ///
 /// # Example
 /// ```ignore
 /// let allocator = Allocator::default();
-/// let result = parse_vfor(&allocator, "item of items", SourceType::tsx());
+/// //                0         1         2         3
+/// //                0123456789012345678901234567890123456
+/// let input = r#"<div v-for="item of items"></div>"#;
+/// // The v-for value "item of items" spans bytes 12..25
+/// let result = parse_vfor_sliced(&allocator, Span::new(12, 25), input, SourceType::tsx());
 /// assert!(result.is_ok());
-/// assert!(result.is_of);
-/// // result.left contains "item" parsed as Identifier
-/// // result.right contains "items" parsed as Identifier
-/// // result.right_offset == 8 (position of "items" in original)
+/// // All spans are file-relative:
+/// // result.left_offset == 12
+/// // result.right_offset == 20 (12 + 8)
 /// ```
-pub fn parse_vfor<'a>(
+pub fn parse_vfor_sliced<'a>(
     allocator: &'a Allocator,
-    source: &str,
+    span: Span,
+    input: &str,
     source_type: SourceType,
 ) -> VForParseResult<'a> {
-    if source.is_empty() {
+    if span.start >= span.end {
         return VForParseResult {
             left: None,
             right: None,
             is_of: false,
-            left_offset: 0,
-            right_offset: 0,
+            left_offset: span.start,
+            right_offset: span.start,
             left_errors: vec![],
             right_errors: vec![],
         };
     }
 
+    let source = &input[span.start as usize..span.end as usize];
     let source_bytes = source.as_bytes();
 
     // Find ` of ` or ` in ` separator
@@ -304,8 +300,8 @@ pub fn parse_vfor<'a>(
                 left: None,
                 right: None,
                 is_of: false,
-                left_offset: 0,
-                right_offset: 0,
+                left_offset: span.start,
+                right_offset: span.start,
                 left_errors: vec![OxcDiagnostic::error(
                     "Invalid v-for expression: missing 'in' or 'of' keyword",
                 )],
@@ -331,32 +327,70 @@ pub fn parse_vfor<'a>(
     let right_parser = Parser::new(allocator, right_alloc, source_type);
     let right_result = right_parser.parse_expression();
 
+    // The right expression offset within the v-for substring
+    let right_offset_in_substring = right_start as u32;
+
     // Extract left and errors
     let (left, left_errors) = match left_result {
-        Ok(expr) => (Some(expr), vec![]),
-        Err(errors) => (None, errors),
-    };
-
-    // Extract right and errors, adjusting spans to reflect original positions
-    let right_offset = right_start as u32;
-    let (right, right_errors) = match right_result {
         Ok(mut expr) => {
-            // Adjust all spans in the right expression to reflect original source positions
-            adjust_expression_spans(&mut expr, right_offset);
+            // Adjust left expression spans to be input-relative
+            adjust_expression_spans(&mut expr, span.start);
             (Some(expr), vec![])
         }
-        Err(errors) => (None, errors),
+        Err(mut errors) => {
+            adjust_diagnostics_spans(&mut errors, span.start);
+            (None, errors)
+        }
+    };
+
+    // Extract right and errors, adjusting spans to be input-relative
+    let (right, right_errors) = match right_result {
+        Ok(mut expr) => {
+            // Adjust by right_offset_in_substring + span.start to get file-relative
+            adjust_expression_spans(&mut expr, right_offset_in_substring + span.start);
+            (Some(expr), vec![])
+        }
+        Err(mut errors) => {
+            adjust_diagnostics_spans(&mut errors, right_offset_in_substring + span.start);
+            (None, errors)
+        }
     };
 
     VForParseResult {
         left,
         right,
         is_of,
-        left_offset: 0,
-        right_offset,
+        left_offset: span.start,
+        right_offset: right_offset_in_substring + span.start,
         left_errors,
         right_errors,
     }
+}
+
+/// Parse a Vue v-for expression from a raw string.
+///
+/// Convenience wrapper around [`parse_vfor_sliced`] that treats the entire
+/// `source` string as the expression. All spans in the result are relative
+/// to `source` (starting from 0).
+///
+/// # Example
+/// ```ignore
+/// let allocator = Allocator::default();
+/// let result = parse_vfor(&allocator, "item of items", SourceType::tsx());
+/// assert!(result.is_ok());
+/// assert!(result.is_of);
+/// ```
+pub fn parse_vfor<'a>(
+    allocator: &'a Allocator,
+    source: &str,
+    source_type: SourceType,
+) -> VForParseResult<'a> {
+    parse_vfor_sliced(
+        allocator,
+        Span::new(0, source.len() as u32),
+        source,
+        source_type,
+    )
 }
 
 pub fn extract_vfor_positions(bytes: &[u8], start: u32, end: u32) -> Option<(u32, u32, u32, bool)> {
@@ -370,49 +404,99 @@ pub fn extract_vfor_positions(bytes: &[u8], start: u32, end: u32) -> Option<(u32
     }
 }
 
-/// Parse a Vue v-for expression and extract bindings in one pass.
+/// Parse a Vue v-for expression from a span and extract bindings in one pass.
 ///
 /// This is the preferred function when you need both the parsed AST and the
-/// extracted bindings, as it avoids having to call separate functions.
+/// extracted bindings with file-relative spans. Binding extraction happens on
+/// the substring-relative AST, then all spans are adjusted to be input-relative.
 ///
 /// # Arguments
 /// * `allocator` - The OXC allocator for AST memory
-/// * `source` - The v-for expression content (e.g., "item of items")
+/// * `span` - The byte range within `input` containing the v-for expression
+/// * `input` - The full source string (e.g., the entire SFC file)
 /// * `source_type` - The source type (e.g., TSX, JavaScript)
 ///
 /// # Returns
-/// A `VForWithBindings` containing:
-/// - `result`: The parsed VForParseResult with AST
-/// - `locals`: Declared iteration variables (e.g., `["item", "index"]`)
-/// - `references`: External identifiers referenced (e.g., `["items"]`)
-///
-/// # Example
-/// ```ignore
-/// let allocator = Allocator::default();
-/// let result = parse_vfor_with_bindings(&allocator, "(item, index) of items", SourceType::tsx());
-/// assert!(result.is_ok());
-/// assert_eq!(result.locals, vec!["item", "index"]);
-/// assert_eq!(result.references, vec!["items"]);
-/// ```
-pub fn parse_vfor_with_bindings<'a>(
+/// A `VForWithBindings` with all spans (AST, locals, references) file-relative.
+pub fn parse_vfor_with_bindings_sliced<'a>(
     allocator: &'a Allocator,
-    source: &str,
+    span: Span,
+    input: &str,
     source_type: SourceType,
 ) -> VForWithBindings<'a> {
-    let result = parse_vfor(allocator, source, source_type);
+    if span.start >= span.end {
+        let result = parse_vfor_sliced(allocator, span, input, source_type);
+        return VForWithBindings {
+            result,
+            locals: Vec::new(),
+            references: Vec::new(),
+        };
+    }
 
-    // Extract bindings if parsing succeeded
-    let (locals, references) = if result.has_left_errors() || result.has_right_errors() {
+    let source = &input[span.start as usize..span.end as usize];
+
+    // Parse with substring — result has substring-relative spans so that
+    // extract_vfor_bindings_internal can use span.slice(source) correctly.
+    let mut result = parse_vfor(allocator, source, source_type);
+
+    // Extract bindings while spans are still substring-relative
+    let (mut locals, mut references) = if result.has_left_errors() || result.has_right_errors() {
         (Vec::new(), Vec::new())
     } else {
         extract_vfor_bindings_internal(&result, source)
     };
+
+    // Adjust everything to file-relative
+    if span.start > 0 {
+        if let Some(left) = &mut result.left {
+            adjust_expression_spans(left, span.start);
+        }
+        if let Some(right) = &mut result.right {
+            adjust_expression_spans(right, span.start);
+        }
+        adjust_diagnostics_spans(&mut result.left_errors, span.start);
+        adjust_diagnostics_spans(&mut result.right_errors, span.start);
+        result.left_offset += span.start;
+        result.right_offset += span.start;
+        for s in &mut locals {
+            s.start += span.start;
+            s.end += span.start;
+        }
+        for s in &mut references {
+            s.start += span.start;
+            s.end += span.start;
+        }
+    }
 
     VForWithBindings {
         result,
         locals,
         references,
     }
+}
+
+/// Parse a Vue v-for expression from a raw string and extract bindings.
+///
+/// Convenience wrapper around [`parse_vfor_with_bindings_sliced`] that treats
+/// the entire `source` string as the expression.
+///
+/// # Example
+/// ```ignore
+/// let allocator = Allocator::default();
+/// let result = parse_vfor_with_bindings(&allocator, "(item, index) of items", SourceType::tsx());
+/// assert!(result.is_ok());
+/// ```
+pub fn parse_vfor_with_bindings<'a>(
+    allocator: &'a Allocator,
+    source: &str,
+    source_type: SourceType,
+) -> VForWithBindings<'a> {
+    parse_vfor_with_bindings_sliced(
+        allocator,
+        Span::new(0, source.len() as u32),
+        source,
+        source_type,
+    )
 }
 
 #[cfg(test)]
@@ -706,6 +790,152 @@ mod tests {
             assert_eq!(obj.properties.len(), 3);
         } else {
             panic!("Expected ObjectExpression, got {:?}", result.right);
+        }
+    }
+
+    // ── parse_vfor_sliced ──────────────────────────────────────────
+
+    /// @ai-generated - Sliced parse adjusts all spans to be file-relative.
+    #[test]
+    fn test_sliced_span_adjustment() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        //               0         1         2         3
+        //               0123456789012345678901234567890123
+        let input = r#"<div v-for="item of items"></div>"#;
+        // "item of items" is at bytes 12..25
+        let result = parse_vfor_sliced(allocator, Span::new(12, 25), input, SourceType::tsx());
+
+        assert!(result.is_ok());
+        assert!(result.is_of);
+        assert_eq!(result.left_offset, 12);
+        assert_eq!(result.right_offset, 20); // 12 + 8 ("item of " = 8 chars)
+
+        // Left "item" should be at file position 12..16
+        if let Some(Expression::Identifier(id)) = &result.left {
+            assert_eq!(id.name.as_str(), "item");
+            assert_eq!(id.span.start, 12);
+            assert_eq!(id.span.end, 16);
+        } else {
+            panic!("Expected Identifier");
+        }
+
+        // Right "items" should be at file position 20..25
+        if let Some(Expression::Identifier(id)) = &result.right {
+            assert_eq!(id.name.as_str(), "items");
+            assert_eq!(id.span.start, 20);
+            assert_eq!(id.span.end, 25);
+        } else {
+            panic!("Expected Identifier");
+        }
+    }
+
+    /// @ai-generated - Sliced parse with offset zero matches raw parse.
+    #[test]
+    fn test_sliced_zero_offset_matches_raw() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let source = "item of items";
+        let raw = parse_vfor(allocator, source, SourceType::tsx());
+        let sliced = parse_vfor_sliced(
+            allocator,
+            Span::new(0, source.len() as u32),
+            source,
+            SourceType::tsx(),
+        );
+
+        assert_eq!(raw.is_of, sliced.is_of);
+        assert_eq!(raw.left_offset, sliced.left_offset);
+        assert_eq!(raw.right_offset, sliced.right_offset);
+    }
+
+    /// @ai-generated - Sliced parse with empty span returns empty result.
+    #[test]
+    fn test_sliced_empty_span() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let result = parse_vfor_sliced(allocator, Span::new(5, 5), "some input", SourceType::tsx());
+        assert!(!result.is_ok());
+        assert!(result.left.is_none());
+        assert!(result.right.is_none());
+    }
+
+    // ── parse_vfor_with_bindings_sliced ────────────────────────────
+
+    /// @ai-generated - Bindings sliced adjusts all spans to file-relative.
+    #[test]
+    fn test_bindings_sliced_span_adjustment() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        //               0         1         2         3
+        //               0123456789012345678901234567890123
+        let input = r#"<div v-for="item of items"></div>"#;
+        let wb =
+            parse_vfor_with_bindings_sliced(allocator, Span::new(12, 25), input, SourceType::tsx());
+
+        assert!(wb.is_ok());
+
+        // Local "item" should be at file position 12..16
+        assert_eq!(wb.locals.len(), 1);
+        assert_eq!(wb.locals[0].start, 12);
+        assert_eq!(wb.locals[0].end, 16);
+        assert_eq!(wb.locals[0].slice(input), "item");
+
+        // Reference "items" should be at file position 20..25
+        assert_eq!(wb.references.len(), 1);
+        assert_eq!(wb.references[0].start, 20);
+        assert_eq!(wb.references[0].end, 25);
+        assert_eq!(wb.references[0].slice(input), "items");
+    }
+
+    /// @ai-generated - Bindings sliced with zero offset matches raw.
+    #[test]
+    fn test_bindings_sliced_zero_offset() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let source = "(item, index) of items";
+        let raw = parse_vfor_with_bindings(allocator, source, SourceType::tsx());
+        let sliced = parse_vfor_with_bindings_sliced(
+            allocator,
+            Span::new(0, source.len() as u32),
+            source,
+            SourceType::tsx(),
+        );
+
+        assert_eq!(raw.locals.len(), sliced.locals.len());
+        assert_eq!(raw.references.len(), sliced.references.len());
+
+        // Spans should match since offset is 0
+        for (r, s) in raw.locals.iter().zip(sliced.locals.iter()) {
+            assert_eq!(r.start, s.start);
+            assert_eq!(r.end, s.end);
+        }
+    }
+
+    /// @ai-generated - Bindings sliced with destructuring and offset.
+    #[test]
+    fn test_bindings_sliced_destructuring() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let input = "prefix { id, name } of data.items suffix";
+        //           0123456 = 7 bytes prefix
+        let start = 7u32;
+        let end = start + "{ id, name } of data.items".len() as u32;
+        let wb = parse_vfor_with_bindings_sliced(
+            allocator,
+            Span::new(start, end),
+            input,
+            SourceType::tsx(),
+        );
+
+        assert!(wb.is_ok());
+        assert_eq!(wb.locals.len(), 2); // id, name
+
+        // All local spans should be within [start, end)
+        for s in &wb.locals {
+            assert!(s.start >= start, "Local span start {} < {}", s.start, start);
+            assert!(s.end <= end, "Local span end {} > {}", s.end, end);
+        }
+
+        // Reference "data" should be within [start, end)
+        assert!(!wb.references.is_empty());
+        for s in &wb.references {
+            assert!(s.start >= start);
+            assert!(s.end <= end);
         }
     }
 }

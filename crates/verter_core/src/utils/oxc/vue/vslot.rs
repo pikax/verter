@@ -13,7 +13,9 @@ use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashSet;
 
-use super::span::subtract_formal_parameters_spans;
+use super::span::{
+    adjust_diagnostics_spans, adjust_formal_parameters_spans, subtract_formal_parameters_spans,
+};
 use crate::common::Span;
 use crate::utils::oxc::bindings::{
     collect_expression_reference_spans, collect_pattern_local_spans,
@@ -135,34 +137,81 @@ fn extract_slot_bindings_internal(
     (locals, references)
 }
 
-/// Parse a Vue v-slot expression.
+/// Parse a Vue v-slot expression from a span within a larger source string.
+///
+/// This is the primary implementation. All AST spans in the result are
+/// adjusted to be relative to the full `input`, not the extracted substring.
 ///
 /// # Arguments
 /// * `allocator` - The OXC allocator for AST memory
-/// * `source` - The v-slot expression content (e.g., "{ data }", "item, index")
+/// * `span` - The byte range within `input` containing the v-slot expression
+/// * `input` - The full source string (e.g., the entire SFC file)
 /// * `source_type` - The source type (e.g., TSX, JavaScript)
 ///
-/// # Returns
-/// A `VSlotParseResult` containing the parsed FormalParameters and offset info.
+/// # Example
+/// ```ignore
+/// let allocator = Allocator::default();
+/// //                0         1         2         3
+/// //                012345678901234567890123456789012345
+/// let input = r#"<template #default="{ data }"></template>"#;
+/// // "{ data }" is at bytes 20..28
+/// let result = parse_vslot_sliced(&allocator, Span::new(20, 28), input, SourceType::tsx());
+/// assert!(result.is_ok());
+/// // FormalParameters spans are file-relative (20..28 range)
+/// ```
+pub fn parse_vslot_sliced<'a>(
+    allocator: &'a Allocator,
+    span: Span,
+    input: &str,
+    source_type: SourceType,
+) -> VSlotParseResult<'a> {
+    if span.start >= span.end {
+        return VSlotParseResult {
+            params: None,
+            offset: 0,
+            errors: None,
+        };
+    }
+
+    let source = &input[span.start as usize..span.end as usize];
+
+    // Parse substring-relative, then adjust to file-relative
+    let mut result = parse_vslot_internal(allocator, source, source_type);
+
+    // Adjust all AST spans to be file-relative
+    if span.start > 0 {
+        if let Some(params) = &mut result.params {
+            adjust_formal_parameters_spans(params, span.start);
+        }
+        if let Some(errors) = &mut result.errors {
+            adjust_diagnostics_spans(errors, span.start);
+        }
+    }
+
+    result
+}
+
+/// Parse a Vue v-slot expression from a raw string.
 ///
-/// # How it works
-/// 1. Wraps the content as arrow function parameters: `({content})=>{}`
-/// 2. Parses as an expression (ArrowFunctionExpression)
-/// 3. Extracts the FormalParameters
-///
-/// # Offset Adjustment
-/// The wrapper adds 1 byte (`(`) before the content. Subtract `result.offset`
-/// from any AST spans to get the original source position.
+/// Convenience wrapper around the internal parse logic. All spans in the
+/// result are relative to `source` (starting from 0).
 ///
 /// # Example
 /// ```ignore
 /// let allocator = Allocator::default();
 /// let result = parse_vslot(&allocator, "{ data, index = 0 }", SourceType::tsx());
 /// assert!(result.is_ok());
-/// // result.params contains the parsed parameters
-/// // Each param span needs result.offset subtracted for original position
 /// ```
 pub fn parse_vslot<'a>(
+    allocator: &'a Allocator,
+    source: &str,
+    source_type: SourceType,
+) -> VSlotParseResult<'a> {
+    parse_vslot_internal(allocator, source, source_type)
+}
+
+/// Internal v-slot parsing logic. Returns substring-relative spans.
+fn parse_vslot_internal<'a>(
     allocator: &'a Allocator,
     source: &str,
     source_type: SourceType,
@@ -217,39 +266,37 @@ pub fn parse_vslot<'a>(
     }
 }
 
-/// Parse a Vue v-slot expression and extract bindings in one pass.
+/// Parse a Vue v-slot expression from a span and extract bindings in one pass.
 ///
 /// This is the preferred function when you need both the parsed AST and the
-/// extracted bindings, as it avoids having to call separate functions.
+/// extracted bindings with file-relative spans. Binding extraction happens on
+/// the substring-relative AST, then all spans are adjusted to be input-relative.
 ///
 /// # Arguments
 /// * `allocator` - The OXC allocator for AST memory
-/// * `source` - The v-slot expression content (e.g., "{ data }", "item, index")
+/// * `span` - The byte range within `input` containing the v-slot expression,
+///   or `None` for a bare `v-slot` with no value
+/// * `input` - The full source string (e.g., the entire SFC file)
 /// * `source_type` - The source type (e.g., TSX, JavaScript)
 ///
 /// # Returns
-/// A `VSlotWithBindings` containing:
-/// - `result`: The parsed VSlotParseResult with AST
-/// - `locals`: Declared parameter bindings (e.g., `["item", "index"]`)
-/// - `references`: External identifiers referenced (e.g., `["MyType"]` from type annotations)
-///
-/// # Example
-/// ```ignore
-/// let allocator = Allocator::default();
-/// let result = parse_vslot_with_bindings(&allocator, "{ data }: { data: MyType }", SourceType::tsx());
-/// assert!(result.is_ok());
-/// assert_eq!(result.locals, vec!["data"]);
-/// assert_eq!(result.references, vec!["MyType"]);
-/// ```
-pub fn parse_vslot_with_bindings<'a>(
+/// A `VSlotWithBindings` with all spans (AST, locals, references) file-relative.
+pub fn parse_vslot_with_bindings_sliced<'a>(
     allocator: &'a Allocator,
-    source: &str,
+    span: Option<Span>,
+    input: &str,
     source_type: SourceType,
 ) -> VSlotWithBindings<'a> {
-    let result = parse_vslot(allocator, source, source_type);
+    let (source, offset) = match span {
+        Some(s) if s.start < s.end => (&input[s.start as usize..s.end as usize], s.start),
+        _ => ("", 0),
+    };
 
-    // Extract bindings if parsing succeeded
-    let (locals, references) = if result.errors.is_some() {
+    // Parse with substring — spans are substring-relative
+    let mut result = parse_vslot_internal(allocator, source, source_type);
+
+    // Extract bindings while spans are still substring-relative
+    let (mut locals, mut references) = if result.errors.is_some() {
         (Vec::new(), Vec::new())
     } else if let Some(params) = &result.params {
         extract_slot_bindings_internal(params, source)
@@ -257,11 +304,53 @@ pub fn parse_vslot_with_bindings<'a>(
         (Vec::new(), Vec::new())
     };
 
+    // Adjust everything to file-relative
+    if offset > 0 {
+        if let Some(params) = &mut result.params {
+            adjust_formal_parameters_spans(params, offset);
+        }
+        if let Some(errors) = &mut result.errors {
+            adjust_diagnostics_spans(errors, offset);
+        }
+        for s in &mut locals {
+            s.start += offset;
+            s.end += offset;
+        }
+        for s in &mut references {
+            s.start += offset;
+            s.end += offset;
+        }
+    }
+
     VSlotWithBindings {
         result,
         locals,
         references,
     }
+}
+
+/// Parse a Vue v-slot expression from a raw string and extract bindings.
+///
+/// Convenience wrapper around [`parse_vslot_with_bindings_sliced`] that treats
+/// the entire `source` string as the expression.
+///
+/// # Example
+/// ```ignore
+/// let allocator = Allocator::default();
+/// let result = parse_vslot_with_bindings(&allocator, "{ data }", SourceType::tsx());
+/// assert!(result.is_ok());
+/// ```
+pub fn parse_vslot_with_bindings<'a>(
+    allocator: &'a Allocator,
+    source: &str,
+    source_type: SourceType,
+) -> VSlotWithBindings<'a> {
+    parse_vslot_with_bindings_sliced(
+        allocator,
+        Some(Span::new(0, source.len() as u32)),
+        source,
+        source_type,
+    )
 }
 
 #[cfg(test)]
@@ -480,5 +569,155 @@ mod tests {
 
         // Check type annotation
         assert!(params.items[0].type_annotation.is_some());
+    }
+
+    // ── parse_vslot_sliced ─────────────────────────────────────────
+
+    /// @ai-generated - Sliced parse adjusts FormalParameters spans to file-relative.
+    #[test]
+    fn test_sliced_span_adjustment() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        //               0         1         2         3
+        //               0123456789012345678901234567890123456
+        let input = r#"<template #default="{ data }"></template>"#;
+        // "{ data }" is at bytes 20..28
+        let result = parse_vslot_sliced(allocator, Span::new(20, 28), input, SourceType::tsx());
+
+        assert!(result.is_ok());
+        let params = result.params.unwrap();
+        assert_eq!(params.items.len(), 1);
+
+        // "data" binding should be at file-relative position
+        if let BindingPattern::ObjectPattern(obj) = &params.items[0].pattern {
+            if let BindingPattern::BindingIdentifier(id) = &obj.properties[0].value {
+                assert_eq!(id.name.as_str(), "data");
+                // "data" is at position 22..26 in the full input
+                assert!(
+                    id.span.start >= 20,
+                    "span.start {} should be >= 20",
+                    id.span.start
+                );
+                assert!(
+                    id.span.end <= 28,
+                    "span.end {} should be <= 28",
+                    id.span.end
+                );
+            }
+        }
+    }
+
+    /// @ai-generated - Sliced parse with zero offset matches raw parse.
+    #[test]
+    fn test_sliced_zero_offset_matches_raw() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let source = "{ data }";
+        let raw = parse_vslot(allocator, source, SourceType::tsx());
+        let sliced = parse_vslot_sliced(
+            allocator,
+            Span::new(0, source.len() as u32),
+            source,
+            SourceType::tsx(),
+        );
+
+        assert_eq!(raw.is_ok(), sliced.is_ok());
+        assert_eq!(raw.offset, sliced.offset);
+    }
+
+    /// @ai-generated - Sliced parse with empty span returns empty result.
+    #[test]
+    fn test_sliced_empty_span() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let result =
+            parse_vslot_sliced(allocator, Span::new(5, 5), "some input", SourceType::tsx());
+        assert!(result.params.is_none());
+        assert!(result.errors.is_none());
+    }
+
+    // ── parse_vslot_with_bindings_sliced ───────────────────────────
+
+    /// @ai-generated - Bindings sliced adjusts all spans to file-relative.
+    #[test]
+    fn test_bindings_sliced_span_adjustment() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        //               0         1         2         3
+        //               0123456789012345678901234567890123456
+        let input = r#"<template #default="{ data }"></template>"#;
+        // "{ data }" at bytes 20..28
+        let wb = parse_vslot_with_bindings_sliced(
+            allocator,
+            Some(Span::new(20, 28)),
+            input,
+            SourceType::tsx(),
+        );
+
+        assert!(wb.is_ok());
+
+        // Local "data" should be at file-relative position
+        assert_eq!(wb.locals.len(), 1);
+        assert!(wb.locals[0].start >= 20);
+        assert!(wb.locals[0].end <= 28);
+        assert_eq!(wb.locals[0].slice(input), "data");
+    }
+
+    /// @ai-generated - Bindings sliced with None span returns empty result.
+    #[test]
+    fn test_bindings_sliced_none_span() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let wb = parse_vslot_with_bindings_sliced(allocator, None, "some input", SourceType::tsx());
+
+        assert!(wb.locals.is_empty());
+        assert!(wb.references.is_empty());
+    }
+
+    /// @ai-generated - Bindings sliced with zero offset matches raw.
+    #[test]
+    fn test_bindings_sliced_zero_offset() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let source = "{ item, index }";
+        let raw = parse_vslot_with_bindings(allocator, source, SourceType::tsx());
+        let sliced = parse_vslot_with_bindings_sliced(
+            allocator,
+            Some(Span::new(0, source.len() as u32)),
+            source,
+            SourceType::tsx(),
+        );
+
+        assert_eq!(raw.locals.len(), sliced.locals.len());
+        assert_eq!(raw.references.len(), sliced.references.len());
+        for (r, s) in raw.locals.iter().zip(sliced.locals.iter()) {
+            assert_eq!(r.start, s.start);
+            assert_eq!(r.end, s.end);
+        }
+    }
+
+    /// @ai-generated - Bindings sliced with type annotations and offset.
+    #[test]
+    fn test_bindings_sliced_with_types() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let input = "prefix { data }: { data: MyType } suffix";
+        //           0123456 = 7 bytes prefix
+        let start = 7u32;
+        let end = start + "{ data }: { data: MyType }".len() as u32;
+        let wb = parse_vslot_with_bindings_sliced(
+            allocator,
+            Some(Span::new(start, end)),
+            input,
+            SourceType::tsx(),
+        );
+
+        assert!(wb.is_ok());
+
+        // Local "data" should be within [start, end)
+        assert_eq!(wb.locals.len(), 1);
+        assert!(wb.locals[0].start >= start);
+        assert!(wb.locals[0].end <= end);
+        assert_eq!(wb.locals[0].slice(input), "data");
+
+        // Reference "MyType" should be within [start, end)
+        assert!(!wb.references.is_empty());
+        for s in &wb.references {
+            assert!(s.start >= start);
+            assert!(s.end <= end);
+        }
     }
 }
