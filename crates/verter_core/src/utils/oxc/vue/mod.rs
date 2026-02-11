@@ -18,7 +18,8 @@ pub use script_generic::{
     GENERIC_WRAPPER_SUFFIX,
 };
 pub use span::{
-    adjust_expression_spans, adjust_formal_parameters_spans, subtract_formal_parameters_spans,
+    adjust_diagnostics_spans, adjust_expression_spans, adjust_formal_parameters_spans,
+    adjust_program_spans, subtract_formal_parameters_spans,
 };
 pub use vfor::{
     extract_vfor_positions, parse_vfor, parse_vfor_with_bindings, VForParseResult, VForWithBindings,
