@@ -83,25 +83,16 @@ pub enum ReactivityLevel {
     Dynamic,
 }
 
-/// Zero-allocation binding metadata. Stores `(Span, BindingType)` pairs where
-/// each `Span` references identifier bytes in the original SFC source.
-#[derive(Debug, Default, Clone)]
-pub struct BindingMetadata {
-    pub entries: Vec<(Span, BindingType)>,
-}
-
-impl BindingMetadata {
-    /// Look up binding type by comparing identifier bytes against source spans.
-    pub fn get(&self, ident: &[u8], source: &[u8]) -> Option<BindingType> {
-        self.entries
-            .iter()
-            .find(|(span, _)| &source[span.start as usize..span.end as usize] == ident)
-            .map(|(_, bt)| *bt)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
+/// Look up binding type by comparing identifier bytes against source spans.
+pub fn get_binding_type(
+    entries: &[(Span, BindingType)],
+    ident: &[u8],
+    source: &[u8],
+) -> Option<BindingType> {
+    entries
+        .iter()
+        .find(|(span, _)| &source[span.start as usize..span.end as usize] == ident)
+        .map(|(_, bt)| *bt)
 }
 
 /// Resolve the correct accessor prefix for an identifier.
@@ -114,11 +105,11 @@ impl BindingMetadata {
 ///   Props use `$props.`, setup bindings use `$setup.`.
 pub fn resolve_binding_prefix(
     ident: &[u8],
-    metadata: &BindingMetadata,
+    entries: &[(Span, BindingType)],
     source: &[u8],
     is_inline: bool,
 ) -> &'static str {
-    match metadata.get(ident, source) {
+    match get_binding_type(entries, ident, source) {
         Some(bt) if bt.is_props() => {
             if is_inline {
                 "__props."
@@ -147,14 +138,14 @@ pub fn resolve_binding_prefix(
 /// need `.value` appended to access the underlying value.
 pub fn resolve_binding_suffix(
     ident: &[u8],
-    metadata: &BindingMetadata,
+    entries: &[(Span, BindingType)],
     source: &[u8],
     is_inline: bool,
 ) -> &'static str {
     if !is_inline {
         return "";
     }
-    match metadata.get(ident, source) {
+    match get_binding_type(entries, ident, source) {
         Some(bt) if bt.needs_value_access() => ".value",
         _ => "",
     }
@@ -164,8 +155,8 @@ pub fn resolve_binding_suffix(
 mod tests {
     use super::*;
 
-    /// Helper to build BindingMetadata from a source string and list of (name, type) pairs.
-    fn make_metadata(source: &str, bindings: &[(&str, BindingType)]) -> BindingMetadata {
+    /// Helper to build binding entries from a source string and list of (name, type) pairs.
+    fn make_entries(source: &str, bindings: &[(&str, BindingType)]) -> Vec<(Span, BindingType)> {
         let mut entries = Vec::new();
         for (name, bt) in bindings {
             if let Some(start) = source.find(name) {
@@ -178,7 +169,7 @@ mod tests {
                 ));
             }
         }
-        BindingMetadata { entries }
+        entries
     }
 
     // ==================== ReactivityLevel ====================
@@ -269,80 +260,80 @@ mod tests {
     #[test]
     fn test_props_standalone_uses_dollar_props_prefix() {
         let source = "title count";
-        let metadata = make_metadata(source, &[("title", BindingType::Props)]);
-        let prefix = resolve_binding_prefix(b"title", &metadata, source.as_bytes(), false);
+        let entries = make_entries(source, &[("title", BindingType::Props)]);
+        let prefix = resolve_binding_prefix(b"title", &entries, source.as_bytes(), false);
         assert_eq!(prefix, "$props.");
     }
 
     #[test]
     fn test_props_inline_uses_dunder_props_prefix() {
         let source = "title count";
-        let metadata = make_metadata(source, &[("title", BindingType::Props)]);
-        let prefix = resolve_binding_prefix(b"title", &metadata, source.as_bytes(), true);
+        let entries = make_entries(source, &[("title", BindingType::Props)]);
+        let prefix = resolve_binding_prefix(b"title", &entries, source.as_bytes(), true);
         assert_eq!(prefix, "__props.");
     }
 
     #[test]
     fn test_props_aliased_uses_props_prefix() {
         let source = "msg";
-        let metadata = make_metadata(source, &[("msg", BindingType::PropsAliased)]);
-        let prefix = resolve_binding_prefix(b"msg", &metadata, source.as_bytes(), false);
+        let entries = make_entries(source, &[("msg", BindingType::PropsAliased)]);
+        let prefix = resolve_binding_prefix(b"msg", &entries, source.as_bytes(), false);
         assert_eq!(prefix, "$props.");
     }
 
     #[test]
     fn test_setup_const_standalone_uses_setup_prefix() {
         let source = "count";
-        let metadata = make_metadata(source, &[("count", BindingType::SetupConst)]);
-        let prefix = resolve_binding_prefix(b"count", &metadata, source.as_bytes(), false);
+        let entries = make_entries(source, &[("count", BindingType::SetupConst)]);
+        let prefix = resolve_binding_prefix(b"count", &entries, source.as_bytes(), false);
         assert_eq!(prefix, "$setup.");
     }
 
     #[test]
     fn test_setup_const_inline_uses_bare_prefix() {
         let source = "count";
-        let metadata = make_metadata(source, &[("count", BindingType::SetupConst)]);
-        let prefix = resolve_binding_prefix(b"count", &metadata, source.as_bytes(), true);
+        let entries = make_entries(source, &[("count", BindingType::SetupConst)]);
+        let prefix = resolve_binding_prefix(b"count", &entries, source.as_bytes(), true);
         assert_eq!(prefix, "");
     }
 
     #[test]
     fn test_setup_ref_standalone_uses_setup_prefix() {
         let source = "count";
-        let metadata = make_metadata(source, &[("count", BindingType::SetupRef)]);
-        let prefix = resolve_binding_prefix(b"count", &metadata, source.as_bytes(), false);
+        let entries = make_entries(source, &[("count", BindingType::SetupRef)]);
+        let prefix = resolve_binding_prefix(b"count", &entries, source.as_bytes(), false);
         assert_eq!(prefix, "$setup.");
     }
 
     #[test]
     fn test_setup_ref_inline_uses_bare_prefix() {
         let source = "count";
-        let metadata = make_metadata(source, &[("count", BindingType::SetupRef)]);
-        let prefix = resolve_binding_prefix(b"count", &metadata, source.as_bytes(), true);
+        let entries = make_entries(source, &[("count", BindingType::SetupRef)]);
+        let prefix = resolve_binding_prefix(b"count", &entries, source.as_bytes(), true);
         assert_eq!(prefix, "");
     }
 
     #[test]
     fn test_data_uses_ctx_prefix() {
         let source = "count";
-        let metadata = make_metadata(source, &[("count", BindingType::Data)]);
-        let prefix = resolve_binding_prefix(b"count", &metadata, source.as_bytes(), false);
+        let entries = make_entries(source, &[("count", BindingType::Data)]);
+        let prefix = resolve_binding_prefix(b"count", &entries, source.as_bytes(), false);
         assert_eq!(prefix, "_ctx.");
     }
 
     #[test]
     fn test_options_uses_ctx_prefix() {
         let source = "count";
-        let metadata = make_metadata(source, &[("count", BindingType::Options)]);
-        let prefix = resolve_binding_prefix(b"count", &metadata, source.as_bytes(), true);
+        let entries = make_entries(source, &[("count", BindingType::Options)]);
+        let prefix = resolve_binding_prefix(b"count", &entries, source.as_bytes(), true);
         assert_eq!(prefix, "_ctx.");
     }
 
     #[test]
     fn test_unknown_binding_uses_ctx_prefix() {
         let source = "title count";
-        let metadata = BindingMetadata::default();
-        let prefix = resolve_binding_prefix(b"unknown", &metadata, source.as_bytes(), false);
+        let entries: Vec<(Span, BindingType)> = Vec::new();
+        let prefix = resolve_binding_prefix(b"unknown", &entries, source.as_bytes(), false);
         assert_eq!(prefix, "_ctx.");
     }
 
@@ -351,40 +342,40 @@ mod tests {
     #[test]
     fn test_setup_ref_inline_has_value_suffix() {
         let source = "count";
-        let metadata = make_metadata(source, &[("count", BindingType::SetupRef)]);
-        let suffix = resolve_binding_suffix(b"count", &metadata, source.as_bytes(), true);
+        let entries = make_entries(source, &[("count", BindingType::SetupRef)]);
+        let suffix = resolve_binding_suffix(b"count", &entries, source.as_bytes(), true);
         assert_eq!(suffix, ".value");
     }
 
     #[test]
     fn test_setup_maybe_ref_inline_has_value_suffix() {
         let source = "data";
-        let metadata = make_metadata(source, &[("data", BindingType::SetupMaybeRef)]);
-        let suffix = resolve_binding_suffix(b"data", &metadata, source.as_bytes(), true);
+        let entries = make_entries(source, &[("data", BindingType::SetupMaybeRef)]);
+        let suffix = resolve_binding_suffix(b"data", &entries, source.as_bytes(), true);
         assert_eq!(suffix, ".value");
     }
 
     #[test]
     fn test_setup_ref_standalone_has_no_suffix() {
         let source = "count";
-        let metadata = make_metadata(source, &[("count", BindingType::SetupRef)]);
-        let suffix = resolve_binding_suffix(b"count", &metadata, source.as_bytes(), false);
+        let entries = make_entries(source, &[("count", BindingType::SetupRef)]);
+        let suffix = resolve_binding_suffix(b"count", &entries, source.as_bytes(), false);
         assert_eq!(suffix, "");
     }
 
     #[test]
     fn test_setup_const_inline_has_no_suffix() {
         let source = "myFunc";
-        let metadata = make_metadata(source, &[("myFunc", BindingType::SetupConst)]);
-        let suffix = resolve_binding_suffix(b"myFunc", &metadata, source.as_bytes(), true);
+        let entries = make_entries(source, &[("myFunc", BindingType::SetupConst)]);
+        let suffix = resolve_binding_suffix(b"myFunc", &entries, source.as_bytes(), true);
         assert_eq!(suffix, "");
     }
 
     #[test]
     fn test_literal_const_inline_has_no_suffix() {
         let source = "msg";
-        let metadata = make_metadata(source, &[("msg", BindingType::LiteralConst)]);
-        let suffix = resolve_binding_suffix(b"msg", &metadata, source.as_bytes(), true);
+        let entries = make_entries(source, &[("msg", BindingType::LiteralConst)]);
+        let suffix = resolve_binding_suffix(b"msg", &entries, source.as_bytes(), true);
         assert_eq!(suffix, "");
     }
 }

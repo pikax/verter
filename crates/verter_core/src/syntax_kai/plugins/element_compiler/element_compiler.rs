@@ -224,14 +224,6 @@ impl<'alloc> ElementCompilerPlugin {
             tag_open_end_event: open_end,
         }
     }
-
-    /// Build a compiled root end event.
-    fn build_root_end(close: RootNodeCloseTag, open_end: &RootNodeOpenTagEnd) -> (u32, u32, u32) {
-        // Content span: from tag_open_end.end to close.start
-        let _content_start = open_end.end;
-        let _content_end = close.start;
-        (close.start, close.name_end, close.end)
-    }
 }
 
 impl<'alloc> SyntaxPlugin<'alloc> for ElementCompilerPlugin {

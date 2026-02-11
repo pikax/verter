@@ -85,12 +85,10 @@ pub fn parse_element_props<'alloc>(
             }
             PropKind::For => {
                 // TODO add a check if we have already a for, if we do should log an error
-                let scope =
-                    parse_vfor(prop.clone(), input, alloc, source_type, &local_ignored);
+                let scope = parse_vfor(prop.clone(), input, alloc, source_type, &local_ignored);
 
                 if let Some(scope) = &scope {
-                    local_ignored
-                        .extend(scope.parsed.locals.iter().map(|span| span.slice(input)));
+                    local_ignored.extend(scope.parsed.locals.iter().map(|span| span.slice(input)));
                 }
 
                 for_scope = scope;
@@ -129,8 +127,7 @@ pub fn parse_element_props<'alloc>(
                 }
             }
             _ => {
-                let oxc_prop =
-                    parse_prop(prop.clone(), input, alloc, source_type, &local_ignored);
+                let oxc_prop = parse_prop(prop.clone(), input, alloc, source_type, &local_ignored);
                 oxc_props.push(oxc_prop);
             }
         }

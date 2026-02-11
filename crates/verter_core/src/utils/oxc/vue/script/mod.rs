@@ -17,6 +17,7 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+pub mod bindings;
 pub mod macros;
 pub mod options;
 pub mod resolve_type;
@@ -139,10 +140,17 @@ pub fn parse_script<'a>(
         }
     }
 
+    // Extract binding metadata (only for script setup)
+    let bindings = match mode {
+        ScriptMode::Setup => bindings::extract_bindings(program, &ctx),
+        ScriptMode::Options => Vec::new(),
+    };
+
     ScriptParseResult {
         is_async,
         items,
         errors,
+        bindings,
     }
 }
 

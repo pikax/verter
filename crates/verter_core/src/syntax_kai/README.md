@@ -31,8 +31,7 @@ OXC-parsed Events (oxc_parser output):
 CSS Events (css_style output):
   ProcessedStyle (ProcessedStyleBlock)
 
-Metadata Events (code_gen_script output):
-  ScriptBindings (BindingMetadata)
+Note: Script bindings are carried inside OxcScript.result.bindings
 ```
 
 ## Plugin Pipeline Order
@@ -51,7 +50,7 @@ Where `code_gen_template` is one of:
 ## Binding Resolution Order
 
 1. Check scope stack (v-for locals, slot params) — bare identifier
-2. Check `BindingMetadata` — setup/props/data/options prefix
+2. Check binding entries (from `OxcScript.result.bindings`) — setup/props/data/options prefix
 3. Fallback: `_ctx.` prefix
 
 ## Testing Patterns
@@ -78,10 +77,10 @@ assert!(my_plugin.take_output().contains("expected"));
 | `types.rs` | All event and type definitions |
 | `syntax.rs` | Tokenizer → Event conversion |
 | `plugin.rs` | SyntaxPlugin trait and SyntaxResult |
-| `binding_types.rs` | BindingType, ReactivityLevel, BindingMetadata |
+| `binding_types.rs` | BindingType, ReactivityLevel, binding resolution helpers |
 | `plugins/element_compiler/` | Raw events → Compiled events |
 | `plugins/oxc_parser/` | Compiled events → OXC-parsed events |
-| `plugins/code_gen_script/` | OxcScript → BindingMetadata extraction |
+| `plugins/code_gen_script/` | OxcScript pass-through (bindings in OxcScript.result) |
 | `plugins/css_style/` | Scoped CSS, v-bind(), CSS Modules |
 | `plugins/code_gen_template/` | VDOM render function codegen |
 | `plugins/code_gen_template_vapor/` | Vapor mode codegen |

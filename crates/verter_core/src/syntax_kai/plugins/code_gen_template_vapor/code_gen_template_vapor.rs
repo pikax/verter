@@ -2,7 +2,8 @@ use crate::{
     common::Span,
     syntax_kai::{
         binding_types::{
-            resolve_binding_prefix, resolve_binding_suffix, BindingMetadata, ReactivityLevel,
+            get_binding_type, resolve_binding_prefix, resolve_binding_suffix, BindingType,
+            ReactivityLevel,
         },
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxResult},
         types::*,
@@ -22,8 +23,8 @@ use crate::{
 /// - Static → one-time `_setProp()`, no `_renderEffect` wrapper
 /// - Dynamic → wrapped in `_renderEffect()`
 pub struct VaporTemplateCodegenPlugin<'alloc> {
-    /// Binding metadata from <script setup>
-    binding_metadata: BindingMetadata,
+    /// Binding entries from <script setup>
+    binding_entries: Vec<(Span, BindingType)>,
     /// Accumulated output code
     output: String,
     /// Node counter for variable naming
@@ -90,7 +91,7 @@ impl<'alloc> Default for VaporTemplateCodegenPlugin<'alloc> {
 impl<'alloc> VaporTemplateCodegenPlugin<'alloc> {
     pub fn new() -> Self {
         Self {
-            binding_metadata: BindingMetadata::default(),
+            binding_entries: Vec::new(),
             output: String::with_capacity(4096),
             node_counter: 0,
             scope_stack: Vec::new(),
@@ -132,8 +133,8 @@ impl<'alloc> VaporTemplateCodegenPlugin<'alloc> {
             }
         }
 
-        let prefix = resolve_binding_prefix(ident, &self.binding_metadata, source, self.is_inline);
-        let suffix = resolve_binding_suffix(ident, &self.binding_metadata, source, self.is_inline);
+        let prefix = resolve_binding_prefix(ident, &self.binding_entries, source, self.is_inline);
+        let suffix = resolve_binding_suffix(ident, &self.binding_entries, source, self.is_inline);
         let name = String::from_utf8_lossy(ident);
         format!("{}{}{}", prefix, name, suffix)
     }
@@ -281,7 +282,9 @@ impl<'alloc> VaporTemplateCodegenPlugin<'alloc> {
                             .copied()
                             .filter(|b| !b.is_ascii_whitespace())
                             .collect();
-                        if let Some(bt) = self.binding_metadata.get(&trimmed, ctx.bytes) {
+                        if let Some(bt) =
+                            get_binding_type(&self.binding_entries, &trimmed, ctx.bytes)
+                        {
                             bt.reactivity_level() == ReactivityLevel::Dynamic
                         } else {
                             true // Unknown → dynamic
@@ -457,8 +460,8 @@ impl<'alloc> SyntaxPlugin<'alloc> for VaporTemplateCodegenPlugin<'alloc> {
         ctx: &mut SyntaxPluginContext<'alloc>,
     ) -> SyntaxResult<Event<'alloc>> {
         match &event {
-            Event::ScriptBindings(ref metadata) => {
-                self.binding_metadata = metadata.clone();
+            Event::OxcScript(ref script) => {
+                self.binding_entries = script.result.bindings.clone();
                 SyntaxResult::Keep(event)
             }
             Event::ProcessedStyle(ref ps) => {

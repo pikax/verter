@@ -1,7 +1,7 @@
 use crate::{
     common::Span,
     syntax_kai::{
-        binding_types::{resolve_binding_prefix, resolve_binding_suffix, BindingMetadata},
+        binding_types::{resolve_binding_prefix, resolve_binding_suffix, BindingType},
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxResult},
         types::*,
     },
@@ -20,8 +20,8 @@ use crate::{
 /// - `:class`/`:style` use `normalizeClass()`/`normalizeStyle()`
 /// - CSS module `$style` exposed as typed `Record<string, string>`
 pub struct TsxCodegenPlugin<'alloc> {
-    /// Binding metadata from <script setup>
-    binding_metadata: BindingMetadata,
+    /// Binding entries from <script setup>
+    binding_entries: Vec<(Span, BindingType)>,
     /// Accumulated output code
     output: String,
     /// Scope stack for v-for/v-slot variable resolution
@@ -63,7 +63,7 @@ impl<'alloc> Default for TsxCodegenPlugin<'alloc> {
 impl<'alloc> TsxCodegenPlugin<'alloc> {
     pub fn new() -> Self {
         Self {
-            binding_metadata: BindingMetadata::default(),
+            binding_entries: Vec::new(),
             output: String::with_capacity(4096),
             scope_stack: Vec::new(),
             is_inline: false,
@@ -90,8 +90,8 @@ impl<'alloc> TsxCodegenPlugin<'alloc> {
             }
         }
 
-        let prefix = resolve_binding_prefix(ident, &self.binding_metadata, source, self.is_inline);
-        let suffix = resolve_binding_suffix(ident, &self.binding_metadata, source, self.is_inline);
+        let prefix = resolve_binding_prefix(ident, &self.binding_entries, source, self.is_inline);
+        let suffix = resolve_binding_suffix(ident, &self.binding_entries, source, self.is_inline);
         let name = String::from_utf8_lossy(ident);
         format!("{}{}{}", prefix, name, suffix)
     }
@@ -382,8 +382,8 @@ impl<'alloc> SyntaxPlugin<'alloc> for TsxCodegenPlugin<'alloc> {
         ctx: &mut SyntaxPluginContext<'alloc>,
     ) -> SyntaxResult<Event<'alloc>> {
         match &event {
-            Event::ScriptBindings(ref metadata) => {
-                self.binding_metadata = metadata.clone();
+            Event::OxcScript(ref script) => {
+                self.binding_entries = script.result.bindings.clone();
                 SyntaxResult::Keep(event)
             }
             Event::ProcessedStyle(ref ps) => {

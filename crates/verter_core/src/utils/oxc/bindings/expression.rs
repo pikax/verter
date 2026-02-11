@@ -306,7 +306,9 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
 
             Expression::ClassExpression(class) => {
                 if let Some(id) = &class.id {
-                    self.ctx.add_ignored(unsafe { std::mem::transmute::<&str, &'a str>(id.name.as_str()) });
+                    self.ctx.add_ignored(unsafe {
+                        std::mem::transmute::<&str, &'a str>(id.name.as_str())
+                    });
                 }
                 for element in &class.body.body {
                     match element {
@@ -621,8 +623,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
         match pattern {
             BindingPattern::BindingIdentifier(ident) => {
                 // SAFETY: The lifetime is tied to the AST which outlives our usage
-                bytes
-                    .push(unsafe { std::mem::transmute::<&str, &'a str>(ident.name.as_str()) });
+                bytes.push(unsafe { std::mem::transmute::<&str, &'a str>(ident.name.as_str()) });
             }
             BindingPattern::ObjectPattern(obj) => {
                 for prop in &obj.properties {

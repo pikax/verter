@@ -1,5 +1,4 @@
 use oxc_allocator::Allocator;
-use oxc_ast::ast::ForInStatement;
 use oxc_span::SourceType;
 
 use crate::syntax_kai::{

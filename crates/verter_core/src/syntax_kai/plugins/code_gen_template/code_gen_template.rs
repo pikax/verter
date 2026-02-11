@@ -5,7 +5,8 @@ use crate::{
     common::Span,
     syntax_kai::{
         binding_types::{
-            resolve_binding_prefix, resolve_binding_suffix, BindingMetadata, ReactivityLevel,
+            get_binding_type, resolve_binding_prefix, resolve_binding_suffix, BindingType,
+            ReactivityLevel,
         },
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxResult},
         types::*,
@@ -24,8 +25,8 @@ use crate::{
 /// - v-if: ternary `(cond) ? vnode : _createCommentVNode("v-if", true)`
 /// - v-for: `_renderList(items, (item) => vnode)`
 pub struct VdomTemplateCodegenPlugin<'alloc> {
-    /// Binding metadata from <script setup>
-    binding_metadata: BindingMetadata,
+    /// Binding entries from <script setup>
+    binding_entries: Vec<(Span, BindingType)>,
     /// Accumulated output code
     output: String,
     /// Helper flags for import generation
@@ -85,7 +86,7 @@ impl<'alloc> Default for VdomTemplateCodegenPlugin<'alloc> {
 impl<'alloc> VdomTemplateCodegenPlugin<'alloc> {
     pub fn new() -> Self {
         Self {
-            binding_metadata: BindingMetadata::default(),
+            binding_entries: Vec::new(),
             output: String::with_capacity(4096),
             helpers: HelperFlags(0),
             scope_stack: Vec::new(),
@@ -130,8 +131,8 @@ impl<'alloc> VdomTemplateCodegenPlugin<'alloc> {
             }
         }
 
-        let prefix = resolve_binding_prefix(ident, &self.binding_metadata, source, self.is_inline);
-        let suffix = resolve_binding_suffix(ident, &self.binding_metadata, source, self.is_inline);
+        let prefix = resolve_binding_prefix(ident, &self.binding_entries, source, self.is_inline);
+        let suffix = resolve_binding_suffix(ident, &self.binding_entries, source, self.is_inline);
         let name = String::from_utf8_lossy(ident);
         format!("{}{}{}", prefix, name, suffix)
     }
@@ -339,7 +340,9 @@ impl<'alloc> VdomTemplateCodegenPlugin<'alloc> {
                                 .copied()
                                 .filter(|b| !b.is_ascii_whitespace())
                                 .collect();
-                            if let Some(bt) = self.binding_metadata.get(&trimmed, ctx.bytes) {
+                            if let Some(bt) =
+                                get_binding_type(&self.binding_entries, &trimmed, ctx.bytes)
+                            {
                                 if bt.reactivity_level() == ReactivityLevel::Dynamic {
                                     patch_flag |= 8; // PROPS
                                     dynamic_props.push(prop_name.clone());
@@ -539,8 +542,8 @@ impl<'alloc> SyntaxPlugin<'alloc> for VdomTemplateCodegenPlugin<'alloc> {
         ctx: &mut SyntaxPluginContext<'alloc>,
     ) -> SyntaxResult<Event<'alloc>> {
         match &event {
-            Event::ScriptBindings(ref metadata) => {
-                self.binding_metadata = metadata.clone();
+            Event::OxcScript(ref script) => {
+                self.binding_entries = script.result.bindings.clone();
                 SyntaxResult::Keep(event)
             }
 
@@ -600,13 +603,13 @@ mod tests {
 
     /// Helper: run full template pipeline and return the codegen output.
     fn generate_template(template_input: &str, alloc: &Allocator) -> String {
-        generate_template_with_bindings(template_input, alloc, BindingMetadata::default())
+        generate_template_with_bindings(template_input, alloc, Vec::new())
     }
 
     fn generate_template_with_bindings(
         template_input: &str,
         alloc: &Allocator,
-        bindings: BindingMetadata,
+        bindings: Vec<(Span, BindingType)>,
     ) -> String {
         let mut tokenizer_events = Vec::new();
         tokenize(template_input.as_bytes(), |event| {
@@ -629,17 +632,10 @@ mod tests {
             }
         }
 
-        // Prepend ScriptBindings event if we have bindings
-        let mut all_events = Vec::new();
-        if !bindings.is_empty() {
-            all_events.push(Event::ScriptBindings(bindings));
-        }
-        all_events.extend(events_storage);
-
         // Run element_compiler
         let mut ec = ElementCompilerPlugin::new();
         let mut compiled = Vec::new();
-        for event in all_events {
+        for event in events_storage {
             match ec.process_event(event, &mut ctx) {
                 SyntaxResult::Keep(e) | SyntaxResult::Replace(e) => compiled.push(e),
                 SyntaxResult::Drop => {}
@@ -656,8 +652,9 @@ mod tests {
             }
         }
 
-        // Run VDOM codegen
+        // Run VDOM codegen with bindings set directly on the plugin
         let mut codegen = VdomTemplateCodegenPlugin::new();
+        codegen.binding_entries = bindings;
         for event in parsed {
             match codegen.process_event(event, &mut ctx) {
                 SyntaxResult::Keep(_) | SyntaxResult::Replace(_) => {}
@@ -689,13 +686,7 @@ mod tests {
     #[test]
     fn test_interpolation() {
         let alloc = Allocator::default();
-        let mut bindings = BindingMetadata::default();
-        // Simulate a binding for "msg" at some position
-        // We need to create a binding entry. For the test, we'll use a known source.
         let source = "<template>{{ msg }}</template>";
-        // We can't easily create a Span for "msg" in the binding metadata
-        // because it would need to point into the source. Instead, test the output
-        // contains _toDisplayString.
         let output = generate_template(source, &alloc);
         assert!(
             output.contains("_toDisplayString("),
@@ -782,11 +773,8 @@ mod tests {
     fn test_binding_refinement_const() {
         let alloc = Allocator::default();
         let source = "<template><div :id=\"myId\">hello</div></template>";
-        // Create binding metadata with myId as SetupConst (Static)
-        let mut bindings = BindingMetadata::default();
-        // "myId" appears at position... we need it in the source
-        // For simplicity, test with unknown bindings (which are treated as dynamic)
-        let output = generate_template_with_bindings(source, &alloc, bindings);
+        // Test with empty bindings (unknown bindings are treated as dynamic)
+        let output = generate_template_with_bindings(source, &alloc, Vec::new());
         // With no binding metadata, the prop should be treated as dynamic
         assert!(
             output.contains("_createElementVNode(\"div\""),

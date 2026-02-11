@@ -175,18 +175,6 @@ fn compute_scope_id(component_name: &str) -> [u8; 8] {
     scope_id
 }
 
-/// Extract ScriptBindings event from pipeline output (if any).
-fn extract_script_bindings<'a>(
-    events: &[Event<'a>],
-) -> Option<crate::syntax_kai::binding_types::BindingMetadata> {
-    for event in events {
-        if let Event::ScriptBindings(ref metadata) = event {
-            return Some(metadata.clone());
-        }
-    }
-    None
-}
-
 /// Detect if any template start event has the vapor attribute set.
 fn detect_vapor<'a>(events: &[Event<'a>]) -> bool {
     for event in events {
@@ -273,9 +261,6 @@ pub fn generate_kai(
         &mut ctx,
     );
 
-    // Extract binding metadata from script pipeline
-    let _binding_metadata = extract_script_bindings(&script_output);
-
     // 4. Detect vapor mode from template events
     // The element_compiler in the template pipeline will produce CompiledTemplateStart,
     // but we need to run it first. Let's run element_compiler on events first to detect.
@@ -284,11 +269,11 @@ pub fn generate_kai(
 
     let is_vapor = detect_vapor(&events_after_ec);
 
-    // 5. Prepend ScriptBindings to template events
+    // 5. Forward OxcScript events (containing bindings) to template pipeline
     let mut template_events = Vec::with_capacity(script_output.len() + events_after_ec.len());
-    for event in &script_output {
-        if let Event::ScriptBindings(ref meta) = event {
-            template_events.push(Event::ScriptBindings(meta.clone()));
+    for event in script_output {
+        if matches!(&event, Event::OxcScript(_)) {
+            template_events.push(event);
         }
     }
     template_events.extend(events_after_ec);
@@ -423,36 +408,44 @@ pub fn generate_with_tsx_kai(
         &mut ctx,
     );
 
-    // 4. Extract script block content from script pipeline output events
+    // 4. Extract script block content and collect OxcScript events (for bindings)
     let mut script_content = String::new();
-    for event in &script_output {
-        if let Event::CompiledScriptStart(ref start_ev) = event {
-            // Comment the script open tag
-            let tag_bytes =
-                &bytes[start_ev.tag_open.start as usize..start_ev.tag_open.end as usize];
-            script_content.push_str("// ");
-            script_content.push_str(&String::from_utf8_lossy(tag_bytes));
-            script_content.push('\n');
-        }
-        if let Event::CompiledScriptEnd(ref end_ev) = event {
-            // Include the script content as-is
-            if let Some(content_span) = end_ev.content {
-                let content_bytes = &bytes[content_span.start as usize..content_span.end as usize];
-                let content_str = String::from_utf8_lossy(content_bytes);
-                // Trim leading/trailing newlines but preserve internal formatting
-                let trimmed = content_str.trim();
-                if !trimmed.is_empty() {
-                    script_content.push_str(trimmed);
+    let mut oxc_script_events: Vec<Event> = Vec::new();
+    for event in script_output {
+        match &event {
+            Event::CompiledScriptStart(ref start_ev) => {
+                // Comment the script open tag
+                let tag_bytes =
+                    &bytes[start_ev.tag_open.start as usize..start_ev.tag_open.end as usize];
+                script_content.push_str("// ");
+                script_content.push_str(&String::from_utf8_lossy(tag_bytes));
+                script_content.push('\n');
+            }
+            Event::CompiledScriptEnd(ref end_ev) => {
+                // Include the script content as-is
+                if let Some(content_span) = end_ev.content {
+                    let content_bytes =
+                        &bytes[content_span.start as usize..content_span.end as usize];
+                    let content_str = String::from_utf8_lossy(content_bytes);
+                    // Trim leading/trailing newlines but preserve internal formatting
+                    let trimmed = content_str.trim();
+                    if !trimmed.is_empty() {
+                        script_content.push_str(trimmed);
+                        script_content.push('\n');
+                    }
+                }
+                // Comment the script close tag
+                if let Some(close_span) = end_ev.tag_close {
+                    let close_bytes = &bytes[close_span.start as usize..close_span.end as usize];
+                    script_content.push_str("// ");
+                    script_content.push_str(&String::from_utf8_lossy(close_bytes));
                     script_content.push('\n');
                 }
             }
-            // Comment the script close tag
-            if let Some(close_span) = end_ev.tag_close {
-                let close_bytes = &bytes[close_span.start as usize..close_span.end as usize];
-                script_content.push_str("// ");
-                script_content.push_str(&String::from_utf8_lossy(close_bytes));
-                script_content.push('\n');
+            Event::OxcScript(_) => {
+                oxc_script_events.push(event);
             }
+            _ => {}
         }
     }
 
@@ -460,13 +453,9 @@ pub fn generate_with_tsx_kai(
     let mut template_ec = ElementCompilerPlugin::new();
     let events_after_ec = run_pipeline(events, &mut [&mut template_ec], &mut ctx);
 
-    // Prepend ScriptBindings
-    let mut template_events = Vec::with_capacity(script_output.len() + events_after_ec.len());
-    for event in &script_output {
-        if let Event::ScriptBindings(ref meta) = event {
-            template_events.push(Event::ScriptBindings(meta.clone()));
-        }
-    }
+    // Forward OxcScript events (containing bindings) to template pipeline
+    let mut template_events = Vec::with_capacity(oxc_script_events.len() + events_after_ec.len());
+    template_events.extend(oxc_script_events);
     template_events.extend(events_after_ec);
 
     let mut css_parser = CssParserPlugin::new();

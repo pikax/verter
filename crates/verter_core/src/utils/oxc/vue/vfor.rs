@@ -877,8 +877,13 @@ mod tests {
         //               0         1         2         3
         //               0123456789012345678901234567890123
         let input = r#"<div v-for="item of items"></div>"#;
-        let wb =
-            parse_vfor_with_bindings_sliced(allocator, Span::new(12, 25), input, SourceType::tsx(), &[]);
+        let wb = parse_vfor_with_bindings_sliced(
+            allocator,
+            Span::new(12, 25),
+            input,
+            SourceType::tsx(),
+            &[],
+        );
 
         assert!(wb.is_ok());
 

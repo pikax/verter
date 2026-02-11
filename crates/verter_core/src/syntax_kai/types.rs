@@ -924,6 +924,8 @@ pub struct ProcessedStyleBlock {
 
 // /CSS processed types
 
+// /Bindings (BindingMetadata removed — bindings now live in ScriptParseResult)
+
 pub enum Event<'alloc> {
     // Raw tokenizer events (emitted by Syntax)
     RootOpenStart(RootNodeOpenTagStart),
@@ -984,7 +986,5 @@ pub enum Event<'alloc> {
 
     // CSS processed style (emitted by css_style plugin)
     ProcessedStyle(ProcessedStyleBlock),
-
-    // Binding metadata (emitted by code_gen_script)
-    ScriptBindings(super::binding_types::BindingMetadata),
+    // (ScriptBindings removed — bindings now live in OxcScript.result.bindings)
 }
