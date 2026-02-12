@@ -50,7 +50,9 @@ use crate::{
     syntax_kai::{
         binding_types::BindingType,
         plugin::SyntaxPluginContext,
-        plugins::code_gen::types::TemplateImportDependencies,
+        plugins::code_gen::types::{
+            TemplateCodeGenError, TemplateCodeGenResult, TemplateImportDependencies,
+        },
         types::{
             Comment, CompiledRootTemplateEnd, CompiledRootTemplateStart, ElementScope,
             OxcCompiledElementClosed, OxcCompiledElementStart, OxcInterpolation, Text,
@@ -144,7 +146,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         &mut self,
         ev: &CompiledRootTemplateStart,
         _ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    ) -> TemplateCodeGenResult {
         self.stack.push(StateStack::new());
         self.template_start_pos = ev.tag_open.start;
 
@@ -163,13 +165,15 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                 "function render(_ctx, _cache, $props, $setup, $data, $options) {",
             );
         }
+
+        Ok(())
     }
 
     pub(crate) fn handle_template_closed(
         &mut self,
         ev: &CompiledRootTemplateEnd,
         _ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    ) -> TemplateCodeGenResult {
         let code_transform = &mut self.code_transform.borrow_mut();
 
         // Emit hoisted constants before the render function.
@@ -275,13 +279,15 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         } else {
             code_transform.append_right(ev.end, format!("{}}}", extra_return).as_str());
         }
+
+        Ok(())
     }
 
     pub(crate) fn handle_element_start(
         &mut self,
         ev: &OxcCompiledElementStart<'alloc>,
         ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    ) -> TemplateCodeGenResult {
         let is_vif_continuation = ev
             .scopes
             .iter()
@@ -290,7 +296,9 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         let parent = self
             .stack
             .last_mut()
-            .expect("Element start must be inside template");
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "element start must be inside template",
+            ))?;
 
         if is_vif_continuation {
             parent.pending_vif_fallbacks.pop();
@@ -483,17 +491,21 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         } else {
             self.stack.push(state);
         }
+
+        Ok(())
     }
 
     pub(crate) fn handle_element_closed(
         &mut self,
         ev: &OxcCompiledElementClosed,
         _ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    ) -> TemplateCodeGenResult {
         let state = self
             .stack
             .pop()
-            .expect("Element close must have matching open");
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "element close must have matching open",
+            ))?;
 
         let mut code_transform = self.code_transform.borrow_mut();
 
@@ -545,13 +557,21 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             );
             code_transform.append_left(close_pos, &close_str);
         }
+
+        Ok(())
     }
 
-    pub(crate) fn handle_comment(&mut self, ev: &Comment, ctx: &SyntaxPluginContext<'alloc>) {
+    pub(crate) fn handle_comment(
+        &mut self,
+        ev: &Comment,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) -> TemplateCodeGenResult {
         let state = self
             .stack
             .last_mut()
-            .expect("Comment inside template must have stack");
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "comment inside template must have stack",
+            ))?;
         comment::handle_comment(
             &mut self.code_transform.borrow_mut(),
             ev,
@@ -559,13 +579,21 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             state,
             &mut self.imports,
         );
+
+        Ok(())
     }
 
-    pub(crate) fn handle_text(&mut self, ev: &Text, ctx: &SyntaxPluginContext<'alloc>) {
+    pub(crate) fn handle_text(
+        &mut self,
+        ev: &Text,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) -> TemplateCodeGenResult {
         let state = self
             .stack
             .last_mut()
-            .expect("Text inside template must have stack");
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "text inside template must have stack",
+            ))?;
         text::handle_text(
             &mut self.code_transform.borrow_mut(),
             ev,
@@ -573,17 +601,21 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             state,
             &mut self.imports,
         );
+
+        Ok(())
     }
 
     pub(crate) fn handle_interpolation(
         &mut self,
         ev: &OxcInterpolation<'alloc>,
         _ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    ) -> TemplateCodeGenResult {
         let state = self
             .stack
             .last_mut()
-            .expect("Interpolation inside template must have stack");
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "interpolation inside template must have stack",
+            ))?;
         state.children.push(ChildInfo {
             start: ev.start,
             kind: ChildKind::Interpolation,
@@ -601,11 +633,13 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
 
         self.imports
             .add(TemplateImportDependencies::TO_DISPLAY_STRING);
+
+        Ok(())
     }
 
     fn allocate_cache_id(&mut self) -> u16 {
         let cache_id = self.cache_id_counter;
-        self.cache_id_counter += 1;
+        self.cache_id_counter = self.cache_id_counter.wrapping_add(1);
         cache_id
     }
 }

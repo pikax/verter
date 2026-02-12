@@ -62,9 +62,14 @@ use crate::{
 };
 
 use super::shared::helper::escape_js_string;
-use crate::syntax_kai::plugins::code_gen::types::VaporImportDependencies;
+use crate::syntax_kai::plugins::code_gen::types::{
+    TemplateCodeGenError, TemplateCodeGenResult, VaporImportDependencies,
+};
 
-use types::{VaporEffect, VaporElementState, VaporTextPart, VaporVIfChainState};
+use types::{
+    VaporCounters, VaporElementState, VaporPendingContent, VaporResolutions, VaporTextPart,
+    VaporVIfChainState,
+};
 
 /// Events that can be delegated (handled via event delegation at document level).
 static DELEGATABLE_EVENTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
@@ -116,12 +121,8 @@ pub(crate) struct VaporTemplateGenerator<'alloc> {
     /// Pending close tags for the HTML buffer (stripped if trailing).
     pending_close_tags: Vec<String>,
 
-    /// Node reference counter (`n0`, `n1`, ...).
-    node_counter: u32,
-    /// Text node reference counter (`x0`, `x1`, ...).
-    text_node_counter: u32,
-    /// Path variable counter (`p0`, `p1`, ...) for intermediate navigation.
-    path_counter: u32,
+    /// Node/text/path/for/slot counters for variable naming.
+    counters: VaporCounters,
 
     /// Position of `<template>` open tag start â€” hoisted constants emitted here.
     template_start_pos: u32,
@@ -134,44 +135,20 @@ pub(crate) struct VaporTemplateGenerator<'alloc> {
     /// Hash set for O(1) delegated event dedup lookups.
     delegated_events_set: FxHashSet<String>,
 
-    /// Collected navigation instructions for the current root element.
-    pending_nav: Vec<String>,
-    /// Collected text node creations (`const x{N} = _txt(n{X})`).
-    pending_text_creations: Vec<String>,
-    /// Collected effects from nested dynamic descendants.
-    pending_nested_effects: Vec<VaporEffect>,
-    /// Collected statements from nested dynamic descendants.
-    pending_nested_statements: Vec<String>,
+    /// Nested content collected during tree walk, emitted at root close.
+    pending: VaporPendingContent,
 
     /// Whether any element uses `ref` â€” triggers `_createTemplateRefSetter()` once.
     has_template_ref: bool,
-    /// Resolved custom directive names for deduplication.
-    resolved_directives: Vec<String>,
-    /// Hash set for O(1) directive dedup lookups.
-    resolved_directives_set: FxHashSet<String>,
-    /// Resolved directive declarations to emit at top of render function.
-    resolved_directive_decls: Vec<String>,
-
     inside_template: bool,
 
-    // â”€â”€ Structural directive state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    /// Resolved component names for `_resolveComponent` declarations (deduped).
-    resolved_components: Vec<String>,
-    /// Hash set for O(1) component dedup lookups.
-    resolved_components_set: FxHashSet<String>,
-    /// Resolved component declarations to emit before render function.
-    resolved_component_decls: Vec<String>,
+    /// Resolved component and directive declarations.
+    resolutions: VaporResolutions,
 
     /// Active v-if chain states. When a v-if element opens, a chain is started.
     /// When a v-else-if/v-else follows, it extends the chain. When a non-continuation
     /// sibling appears (or parent closes), the chain is flushed.
     pending_vif_chains: Vec<VaporVIfChainState>,
-
-    /// Current v-for nesting depth (for `_for_item0`, `_for_item1` naming).
-    for_depth: u32,
-
-    /// Counter for `_slotProps0`, `_slotProps1` naming.
-    slot_props_counter: u32,
 }
 
 impl<'alloc> VaporTemplateGenerator<'alloc> {
@@ -188,28 +165,16 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             templates: Vec::new(),
             current_html: String::new(),
             pending_close_tags: Vec::new(),
-            node_counter: 0,
-            text_node_counter: 0,
-            path_counter: 0,
+            counters: VaporCounters::new(),
             template_start_pos: 0,
             root_nodes: Vec::new(),
             delegated_events: Vec::new(),
             delegated_events_set: FxHashSet::default(),
-            pending_nav: Vec::new(),
-            pending_text_creations: Vec::new(),
-            pending_nested_effects: Vec::new(),
-            pending_nested_statements: Vec::new(),
+            pending: VaporPendingContent::new(),
             has_template_ref: false,
-            resolved_directives: Vec::new(),
-            resolved_directives_set: FxHashSet::default(),
-            resolved_directive_decls: Vec::new(),
             inside_template: false,
-            resolved_components: Vec::new(),
-            resolved_components_set: FxHashSet::default(),
-            resolved_component_decls: Vec::new(),
+            resolutions: VaporResolutions::new(),
             pending_vif_chains: Vec::new(),
-            for_depth: 0,
-            slot_props_counter: 0,
         }
     }
 
@@ -235,23 +200,40 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
     /// Allocate a new node reference index.
     pub(super) fn next_node_ref(&mut self) -> u32 {
-        let idx = self.node_counter;
-        self.node_counter += 1;
-        idx
+        self.counters.next_node_ref()
     }
 
     /// Allocate a new text node reference index.
     pub(super) fn next_text_node_ref(&mut self) -> u32 {
-        let idx = self.text_node_counter;
-        self.text_node_counter += 1;
-        idx
+        self.counters.next_text_node_ref()
     }
 
     /// Allocate a new path variable index.
     pub(super) fn next_path_ref(&mut self) -> u32 {
-        let idx = self.path_counter;
-        self.path_counter += 1;
-        idx
+        self.counters.next_path_ref()
+    }
+
+    /// Build a prefixed expression string with both accessor prefixes and v-for/v-slot
+    /// variable mappings applied, using OXC-parsed binding positions for precision.
+    pub(super) fn prefix_expr(
+        &self,
+        val_text: &str,
+        val_start: u32,
+        bindings_result: &Option<crate::utils::oxc::BindingExtractionResult>,
+    ) -> String {
+        let var_mappings = self
+            .stack
+            .last()
+            .map(|s| s.for_var_mappings.as_slice())
+            .unwrap_or(&[]);
+        super::shared::helper::build_prefixed_value_with_var_mappings(
+            val_text,
+            val_start,
+            bindings_result,
+            &self.bindings,
+            self.is_production,
+            var_mappings,
+        )
     }
 
     // â”€â”€ HTML buffer helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -278,6 +260,75 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
     pub(super) fn finalize_html(&mut self) -> String {
         self.pending_close_tags.clear();
         std::mem::take(&mut self.current_html)
+    }
+
+    /// Flush static text parts from a (popped) element state into the HTML buffer,
+    /// then push the element's close tag. Used by both `complete_element_close` and
+    /// `build_block_body` for native elements.
+    pub(super) fn flush_element_text_to_html(&mut self, state: &mut VaporElementState) {
+        if state.has_dynamic_children {
+            self.append_html(" ");
+        } else {
+            let texts: Vec<String> = state
+                .text_parts
+                .drain(..)
+                .filter_map(|p| match p {
+                    VaporTextPart::Static(s) => Some(s),
+                    VaporTextPart::Dynamic(_) => None,
+                })
+                .collect();
+            for text in texts {
+                self.append_html(&text);
+            }
+        }
+        if !state.is_void && !state.is_self_closing {
+            self.push_close_tag(&state.tag_name);
+        }
+    }
+
+    /// Finalize the current HTML buffer and register it as a hoisted template.
+    /// Returns the template index (for `t{idx}()` references).
+    pub(super) fn register_template(&mut self) -> u32 {
+        let html = self.finalize_html();
+        let template_idx = self.templates.len() as u32;
+        self.templates.push(html);
+        self.imports.add(VaporImportDependencies::TEMPLATE);
+        template_idx
+    }
+
+    /// Drain pending navigation instructions and text node creations into a buffer.
+    pub(super) fn drain_pending_instructions(&mut self, buf: &mut String) {
+        self.pending.drain_instructions(buf);
+    }
+
+    /// Emit effects wrapped in `_renderEffect()`, or as direct statements for v-once.
+    /// Appends the generated code to `buf` using the specified `indent`.
+    pub(super) fn emit_render_effect(
+        &mut self,
+        rendered: &[String],
+        is_once: bool,
+        indent: &str,
+        buf: &mut String,
+    ) {
+        if rendered.is_empty() {
+            return;
+        }
+        if is_once {
+            for effect in rendered {
+                buf.push_str(&format!("{}{}\n", indent, effect));
+            }
+        } else {
+            self.imports.add(VaporImportDependencies::RENDER_EFFECT);
+            if rendered.len() == 1 {
+                buf.push_str(&format!("{}_renderEffect(() => {})\n", indent, rendered[0]));
+            } else {
+                buf.push_str(&format!("{}_renderEffect(() => {{\n", indent));
+                for effect in rendered {
+                    buf.push_str(&format!("{}  {}\n", indent, effect));
+                }
+                buf.push_str(&format!("{}}})\n", indent));
+            }
+        }
     }
 
     /// Flush text_parts from the top-of-stack element into the HTML buffer.
@@ -368,11 +419,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             }
 
             // Get parent info (clone to avoid borrow issues).
-            let parent_var = self.stack[i - 1]
-                .var_name
-                .as_ref()
-                .expect("ensure_ancestor_var_names: parent must have var_name")
-                .clone();
+            let parent_var = if let Some(v) = self.stack[i - 1].var_name.as_ref() {
+                v.clone()
+            } else {
+                continue;
+            };
             let prev_nav = self.stack[i - 1].last_nav_child_var.clone();
             let child_index = self.stack[i].child_index;
 
@@ -394,7 +445,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 self.imports.add(VaporImportDependencies::NEXT);
                 let child0_path = self.next_path_ref();
                 let child0_var = format!("p{}", child0_path);
-                self.pending_nav
+                self.pending
+                    .nav
                     .push(format!("  const {} = _child({})", child0_var, parent_var));
                 format!(
                     "  const {} = _next({}, {})",
@@ -405,27 +457,31 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             self.stack[i - 1].last_nav_child_var = Some(var_name.clone());
             self.stack[i].var_name = Some(var_name);
             self.stack[i].needs_node_ref = true;
-            self.pending_nav.push(nav);
+            self.pending.nav.push(nav);
         }
     }
 
     /// Build a navigation instruction for a non-root element.
     /// Returns the navigation code line. Also updates parent's `last_nav_child_var`.
-    pub(super) fn build_nav_instruction(&mut self, var_name: &str, child_index: u32) -> String {
-        let parent_var = self
+    pub(super) fn build_nav_instruction(
+        &mut self,
+        var_name: &str,
+        child_index: u32,
+    ) -> TemplateCodeGenResult<String> {
+        let top = self
             .stack
             .last()
-            .expect("build_nav_instruction: stack must not be empty")
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "build_nav_instruction: stack must not be empty",
+            ))?;
+        let parent_var = top
             .var_name
             .as_ref()
-            .expect("build_nav_instruction: parent must have var_name")
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "build_nav_instruction: parent must have var_name",
+            ))?
             .clone();
-        let prev_nav = self
-            .stack
-            .last()
-            .expect("build_nav_instruction: stack must not be empty")
-            .last_nav_child_var
-            .clone();
+        let prev_nav = top.last_nav_child_var.clone();
 
         let nav = if child_index == 0 {
             self.imports.add(VaporImportDependencies::CHILD);
@@ -442,7 +498,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             self.imports.add(VaporImportDependencies::NEXT);
             let child0_path = self.next_path_ref();
             let child0_var = format!("p{}", child0_path);
-            self.pending_nav
+            self.pending
+                .nav
                 .push(format!("  const {} = _child({})", child0_var, parent_var));
             format!(
                 "  const {} = _next({}, {})",
@@ -455,7 +512,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             parent.last_nav_child_var = Some(var_name.to_string());
         }
 
-        nav
+        Ok(nav)
     }
 
     // â”€â”€ Event handling helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -471,7 +528,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         if let Some(mods) = modifiers {
             for m in mods {
                 let name = &ctx.input[m.start as usize..m.end as usize];
-                if matches!(name, "capture" | "once" | "passive") {
+                if super::shared::helper::classify_modifier(name)
+                    == super::shared::helper::ModifierKind::ListenerOption
+                {
                     return true;
                 }
             }
@@ -485,16 +544,17 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         &mut self,
         ev: &CompiledRootTemplateStart,
         _ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    ) -> TemplateCodeGenResult {
         self.template_start_pos = ev.tag_open.start;
         self.inside_template = true;
+        Ok(())
     }
 
     pub(crate) fn handle_template_closed(
         &mut self,
         ev: &CompiledRootTemplateEnd,
         _ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    ) -> TemplateCodeGenResult {
         // Flush any remaining v-if chains.
         self.flush_pending_vif_chain();
 
@@ -533,7 +593,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         // Build component resolution declarations (hoisted before render function).
         let mut comp_decl_str = String::new();
-        for decl in &self.resolved_component_decls {
+        for decl in &self.resolutions.component_decls {
             comp_decl_str.push_str(decl);
             comp_decl_str.push('\n');
         }
@@ -570,7 +630,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         if self.has_template_ref {
             render_decls.push_str("  const _setTemplateRef = _createTemplateRefSetter()\n");
         }
-        for decl in &self.resolved_directive_decls {
+        for decl in &self.resolutions.directive_decls {
             render_decls.push_str(decl);
             render_decls.push('\n');
         }
@@ -587,5 +647,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         } else {
             code_transform.append_right(ev.end, &return_stmt);
         }
+
+        Ok(())
     }
 }

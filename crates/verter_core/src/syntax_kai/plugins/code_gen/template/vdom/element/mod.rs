@@ -1,4 +1,5 @@
 mod close;
+mod props;
 pub(crate) use close::{handle_element_close, handle_element_close_self_closing};
 
 use oxc_ast::ast::Expression;
@@ -11,8 +12,7 @@ use crate::{
         plugin::SyntaxPluginContext,
         plugins::code_gen::{
             template::shared::helper::{
-                apply_dynamic_arg_prefix, build_prefixed_value, capitalize_first, escape_js_string,
-                patch_bindings,
+                apply_dynamic_arg_prefix, build_prefixed_value, escape_js_string, patch_bindings,
             },
             types::TemplateImportDependencies,
         },
@@ -43,7 +43,7 @@ pub(crate) struct ElementOpenContext<'a, 'alloc> {
 /// Vue wraps expressions that are NOT simple identifiers, member accesses,
 /// arrow functions, or function expressions. Call expressions like `fn($event)`
 /// need wrapping because they execute immediately rather than deferring.
-fn needs_event_handler_wrap(exp: &Option<oxc_ast::ast::Expression>) -> bool {
+pub(super) fn needs_event_handler_wrap(exp: &Option<oxc_ast::ast::Expression>) -> bool {
     match exp {
         None => false,
         Some(expr) => !matches!(
@@ -420,156 +420,16 @@ pub(crate) fn handle_element_open<'alloc>(
                     }
 
                     PropKind::On => {
-                        // @event="handler" → onEventName: handler
-                        // Modifiers: .stop/.prevent → _withModifiers, .enter etc → _withKeys
-                        // .once/.capture/.passive → compile-time event name suffix
-                        let raw_event = if let Some(arg_span) = prop.event.arg {
-                            ctx.input[arg_span.start as usize..arg_span.end as usize].to_string()
-                        } else {
-                            "click".to_string()
-                        };
-
-                        // Classify modifiers
-                        let modifiers: Vec<&str> = prop
-                            .event
-                            .modifiers
-                            .as_ref()
-                            .map(|m| {
-                                m.iter()
-                                    .map(|s| &ctx.input[s.start as usize..s.end as usize])
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-
-                        // Compile-time modifiers: .once, .capture, .passive → event name suffix
-                        let mut event_suffix = String::new();
-                        let mut runtime_mods: Vec<&str> = Vec::new();
-                        let mut key_mods: Vec<&str> = Vec::new();
-
-                        for m in &modifiers {
-                            match *m {
-                                "once" => event_suffix.push_str("Once"),
-                                "capture" => event_suffix.push_str("Capture"),
-                                "passive" => event_suffix.push_str("Passive"),
-                                // Key modifiers → _withKeys
-                                "enter" | "tab" | "delete" | "esc" | "space" | "up" | "down"
-                                | "left" | "right" => key_mods.push(m),
-                                // Runtime modifiers → _withModifiers
-                                _ => runtime_mods.push(m),
-                            }
-                        }
-
-                        let event_name = if prop.event.has_dynamic_arg {
-                            let arg_span = prop.event.arg.unwrap();
-                            let raw = &ctx.input[arg_span.start as usize..arg_span.end as usize];
-                            let prefixed = apply_dynamic_arg_prefix(
-                                raw,
-                                arg_span.start,
-                                &prop.arg.as_ref().and_then(|a| a.bindings.clone()),
-                                bindings,
-                                is_production,
-                            );
-                            let inner = prefixed
-                                .strip_prefix('[')
-                                .and_then(|s| s.strip_suffix(']'))
-                                .unwrap_or(&prefixed);
-                            format!("[\"on\" + {}]", inner)
-                        } else {
-                            format!("on{}{}", capitalize_first(&raw_event), event_suffix)
-                        };
-
-                        if let Some(val_span) = prop.event.value {
-                            let wrap = prop
-                                .exp
-                                .as_ref()
-                                .map(|e| needs_event_handler_wrap(&e.expression))
-                                .unwrap_or(false);
-
-                            // Build handler prefix/suffix based on modifiers
-                            let mut handler_prefix = String::new();
-                            let mut handler_suffix = String::new();
-
-                            if !runtime_mods.is_empty() {
-                                imports.add(TemplateImportDependencies::WITH_MODIFIERS);
-                                handler_prefix.push_str("_withModifiers(");
-                                handler_suffix.push_str(&format!(
-                                    ", [{}])",
-                                    runtime_mods
-                                        .iter()
-                                        .map(|m| format!("\"{}\"", m))
-                                        .collect::<Vec<_>>()
-                                        .join(",")
-                                ));
-                            }
-                            if !key_mods.is_empty() {
-                                imports.add(TemplateImportDependencies::WITH_KEYS);
-                                // Wrap around the existing (possibly already wrapped by withModifiers)
-                                handler_prefix = format!("_withKeys({}", handler_prefix);
-                                handler_suffix.push_str(&format!(
-                                    ", [{}])",
-                                    key_mods
-                                        .iter()
-                                        .map(|m| format!("\"{}\"", m))
-                                        .collect::<Vec<_>>()
-                                        .join(",")
-                                ));
-                            }
-
-                            if wrap {
-                                code_transform.overwrite(
-                                    prop.event.start,
-                                    val_span.start,
-                                    &format!(
-                                        "{}{}: {}$event => (",
-                                        sep, event_name, handler_prefix
-                                    ),
-                                );
-                                code_transform.overwrite(
-                                    val_span.end,
-                                    prop.event.end,
-                                    &format!("){}", handler_suffix),
-                                );
-                            } else {
-                                code_transform.overwrite(
-                                    prop.event.start,
-                                    val_span.start,
-                                    &format!("{}{}: {}", sep, event_name, handler_prefix),
-                                );
-                                code_transform.overwrite(
-                                    val_span.end,
-                                    prop.event.end,
-                                    &handler_suffix,
-                                );
-                            }
-
-                            if let Some(exp) = &prop.exp {
-                                patch_bindings(
-                                    code_transform,
-                                    &exp.bindings,
-                                    bindings,
-                                    is_production,
-                                );
-                            }
-                        } else {
-                            code_transform.overwrite(
-                                prop.event.start,
-                                prop.event.end,
-                                &format!("{}{}: () => {{}}", sep, event_name),
-                            );
-                        }
-                        // Events produce PROPS patch flag with event name in dynamic props.
-                        // For dynamic args like @[event], event_name is `["on" + expr]`;
-                        // strip the surrounding brackets so the expression goes into the
-                        // dynamic props array verbatim (build_patch_flag_suffix will skip
-                        // quoting it because it already starts with `"`).
-                        let dp_entry = event_name
-                            .strip_prefix('[')
-                            .and_then(|s| s.strip_suffix(']'))
-                            .unwrap_or(&event_name)
-                            .to_string();
-                        state.dynamic_props.push(dp_entry);
-                        state.patch_flag = state.patch_flag.add(PatchFlags::Props);
-                        written += 1;
+                        written += props::handle_prop_on(
+                            code_transform,
+                            prop,
+                            sep,
+                            ctx,
+                            state,
+                            bindings,
+                            is_production,
+                            imports,
+                        );
                     }
 
                     PropKind::ClassBind => {
@@ -647,163 +507,19 @@ pub(crate) fn handle_element_open<'alloc>(
                     }
 
                     PropKind::Model => {
-                        // v-model on native elements → withDirectives + vModel*
-                        // v-model on components → modelValue + onUpdate:modelValue props
-                        let model_arg = prop.event.arg.map(|arg_span| {
-                            ctx.input[arg_span.start as usize..arg_span.end as usize].to_string()
-                        });
-                        let model_name = model_arg.as_deref().unwrap_or("modelValue");
-
-                        let model_modifiers: Vec<&str> = prop
-                            .event
-                            .modifiers
-                            .as_ref()
-                            .map(|m| {
-                                m.iter()
-                                    .map(|s| &ctx.input[s.start as usize..s.end as usize])
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-
-                        if is_component {
-                            // Component v-model: prop-based, no withDirectives
-                            // `v-model="val"` → `modelValue: _ctx.val, "onUpdate:modelValue": $event => ((_ctx.val) = $event)`
-                            // `v-model:title="val"` → `title: _ctx.val, "onUpdate:title": $event => ((_ctx.val) = $event)`
-                            if let Some(val_span) = prop.event.value {
-                                let update_event = format!("\"onUpdate:{}\"", model_name);
-                                let val_text =
-                                    &ctx.input[val_span.start as usize..val_span.end as usize];
-                                let prefixed_val = if let Some(exp) = &prop.exp {
-                                    build_prefixed_value(
-                                        val_text,
-                                        val_span.start,
-                                        &exp.bindings,
-                                        bindings,
-                                        is_production,
-                                    )
-                                } else {
-                                    val_text.to_string()
-                                };
-
-                                let mut replacement = format!(
-                                    "{}{}: {}, {}: $event => (({}) = $event)",
-                                    sep, model_name, prefixed_val, update_event, prefixed_val
-                                );
-
-                                // Component v-model modifiers → modelModifiers prop
-                                if !model_modifiers.is_empty() {
-                                    let mods_obj = model_modifiers
-                                        .iter()
-                                        .map(|m| format!("{}: true", m))
-                                        .collect::<Vec<_>>()
-                                        .join(", ");
-                                    let mods_prop_name = if model_name == "modelValue" {
-                                        "modelModifiers".to_string()
-                                    } else {
-                                        format!("{}Modifiers", model_name)
-                                    };
-                                    replacement.push_str(&format!(
-                                        ", {}: {{ {} }}",
-                                        mods_prop_name, mods_obj
-                                    ));
-                                }
-
-                                code_transform.overwrite(
-                                    prop.event.start,
-                                    prop.event.end,
-                                    &replacement,
-                                );
-
-                                state.dynamic_props.push(model_name.to_string());
-                                state.dynamic_props.push(format!("onUpdate:{}", model_name));
-                                state.patch_flag = state.patch_flag.add(PatchFlags::Props);
-                            }
-                        } else {
-                            // Native v-model: directive-based (withDirectives)
-                            // Determine which vModel directive to use based on element type
-                            let type_attr = ev.props.iter().find_map(|p| {
-                                if p.event.kind == PropKind::Value {
-                                    let name = &ctx.input
-                                        [p.event.start as usize..p.event.name_end as usize];
-                                    if name == "type" {
-                                        p.event.value.map(|v| {
-                                            ctx.input[v.start as usize..v.end as usize].to_string()
-                                        })
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            });
-
-                            let (directive_name, import_flag) =
-                                match (tag_name, type_attr.as_deref()) {
-                                    ("select", _) => (
-                                        "_vModelSelect",
-                                        TemplateImportDependencies::V_MODEL_SELECT,
-                                    ),
-                                    (_, Some("checkbox")) => (
-                                        "_vModelCheckbox",
-                                        TemplateImportDependencies::V_MODEL_CHECKBOX,
-                                    ),
-                                    (_, Some("radio")) => {
-                                        ("_vModelRadio", TemplateImportDependencies::V_MODEL_RADIO)
-                                    }
-                                    _ => ("_vModelText", TemplateImportDependencies::V_MODEL_TEXT),
-                                };
-                            imports.add(import_flag);
-                            imports.add(TemplateImportDependencies::WITH_DIRECTIVES);
-
-                            // Emit the onUpdate:modelValue prop
-                            if let Some(val_span) = prop.event.value {
-                                let val_text =
-                                    &ctx.input[val_span.start as usize..val_span.end as usize];
-                                let prefixed_val = if let Some(exp) = &prop.exp {
-                                    build_prefixed_value(
-                                        val_text,
-                                        val_span.start,
-                                        &exp.bindings,
-                                        bindings,
-                                        is_production,
-                                    )
-                                } else {
-                                    val_text.to_string()
-                                };
-
-                                code_transform.overwrite(
-                                    prop.event.start,
-                                    prop.event.end,
-                                    &format!(
-                                        "{}\"onUpdate:modelValue\": $event => (({}) = $event)",
-                                        sep, prefixed_val
-                                    ),
-                                );
-
-                                // Add directive entry for withDirectives wrapping
-                                let mut dir_entry = DirectiveEntry {
-                                    directive: directive_name.to_string(),
-                                    value: prefixed_val,
-                                    arg: String::new(),
-                                    modifiers: String::new(),
-                                };
-                                if !model_modifiers.is_empty() {
-                                    dir_entry.modifiers = format!(
-                                        "{{ {} }}",
-                                        model_modifiers
-                                            .iter()
-                                            .map(|m| format!("{}: true", m))
-                                            .collect::<Vec<_>>()
-                                            .join(", ")
-                                    );
-                                }
-                                state.runtime_directives.push(dir_entry);
-                            }
-
-                            state.dynamic_props.push("onUpdate:modelValue".to_string());
-                            state.patch_flag = state.patch_flag.add(PatchFlags::Props);
-                        }
-                        written += 1;
+                        written += props::handle_prop_model(
+                            code_transform,
+                            prop,
+                            sep,
+                            ctx,
+                            state,
+                            bindings,
+                            is_production,
+                            imports,
+                            tag_name,
+                            is_component,
+                            &ev.props,
+                        );
                     }
 
                     PropKind::Show => {
@@ -937,92 +653,17 @@ pub(crate) fn handle_element_open<'alloc>(
                     }
 
                     PropKind::Directive => {
-                        // Custom directive: v-my-directive:arg.mod="val"
-                        // → resolveDirective + withDirectives
-                        let dir_raw_name =
-                            &ctx.input[prop.event.start as usize..prop.event.name_end as usize];
-                        // Strip "v-" prefix for resolve
-                        let dir_name = dir_raw_name.strip_prefix("v-").unwrap_or(dir_raw_name);
-                        let dir_var = format!("_directive_{}", dir_name.replace('-', "_"));
-                        // Register for _resolveDirective declaration (deduped)
-                        if resolved_directives_set.insert(dir_name.to_string()) {
-                            resolved_directives.push(dir_name.to_string());
-                        }
-                        imports.add(TemplateImportDependencies::RESOLVE_DIRECTIVE);
-                        imports.add(TemplateImportDependencies::WITH_DIRECTIVES);
-
-                        let value = if let Some(val_span) = prop.event.value {
-                            let val_text =
-                                &ctx.input[val_span.start as usize..val_span.end as usize];
-                            if let Some(exp) = &prop.exp {
-                                build_prefixed_value(
-                                    val_text,
-                                    val_span.start,
-                                    &exp.bindings,
-                                    bindings,
-                                    is_production,
-                                )
-                            } else {
-                                val_text.to_string()
-                            }
-                        } else {
-                            String::new()
-                        };
-
-                        let arg = prop
-                            .event
-                            .arg
-                            .map(|arg_span| {
-                                let raw =
-                                    &ctx.input[arg_span.start as usize..arg_span.end as usize];
-                                if prop.event.has_dynamic_arg {
-                                    apply_dynamic_arg_prefix(
-                                        raw,
-                                        arg_span.start,
-                                        &prop.arg.as_ref().and_then(|a| a.bindings.clone()),
-                                        bindings,
-                                        is_production,
-                                    )
-                                } else {
-                                    format!("\"{}\"", raw)
-                                }
-                            })
-                            .unwrap_or_default();
-
-                        let dir_modifiers: Vec<&str> = prop
-                            .event
-                            .modifiers
-                            .as_ref()
-                            .map(|m| {
-                                m.iter()
-                                    .map(|s| &ctx.input[s.start as usize..s.end as usize])
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-
-                        let mods = if dir_modifiers.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                "{{ {} }}",
-                                dir_modifiers
-                                    .iter()
-                                    .map(|m| format!("{}: true", m))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        };
-
-                        state.runtime_directives.push(DirectiveEntry {
-                            directive: dir_var,
-                            value,
-                            arg,
-                            modifiers: mods,
-                        });
-
-                        // Remove from props output
-                        code_transform.overwrite(prop.event.start, prop.event.end, "");
-                        state.patch_flag = state.patch_flag.add(PatchFlags::NeedPatch);
+                        props::handle_prop_directive(
+                            code_transform,
+                            prop,
+                            ctx,
+                            state,
+                            bindings,
+                            is_production,
+                            imports,
+                            resolved_directives,
+                            resolved_directives_set,
+                        );
                     }
 
                     // v-if, v-else-if, v-else, v-for, v-slot, v-once are handled

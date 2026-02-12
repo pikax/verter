@@ -3,8 +3,8 @@
 use crate::syntax_kai::{
     plugin::SyntaxPluginContext,
     plugins::code_gen::{
-        template::shared::helper::{build_prefixed_value, prefix_vfor_references},
-        types::VaporImportDependencies,
+        template::shared::helper::prefix_vfor_references,
+        types::{TemplateCodeGenError, TemplateCodeGenResult, VaporImportDependencies},
     },
     types::{ElementScope, OxcCompiledElementStart},
 };
@@ -25,13 +25,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 ElementScope::If(cond) => {
                     let condition = if let Some(ref val_span) = cond.event.value {
                         let raw = &ctx.input[val_span.start as usize..val_span.end as usize];
-                        build_prefixed_value(
-                            raw,
-                            val_span.start,
-                            &cond.bindings,
-                            &self.bindings,
-                            self.is_production,
-                        )
+                        self.prefix_expr(raw, val_span.start, &cond.bindings)
                     } else {
                         "true".to_string()
                     };
@@ -40,13 +34,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 ElementScope::ElseIf(cond) => {
                     let condition = if let Some(ref val_span) = cond.event.value {
                         let raw = &ctx.input[val_span.start as usize..val_span.end as usize];
-                        build_prefixed_value(
-                            raw,
-                            val_span.start,
-                            &cond.bindings,
-                            &self.bindings,
-                            self.is_production,
-                        )
+                        self.prefix_expr(raw, val_span.start, &cond.bindings)
                     } else {
                         "true".to_string()
                     };
@@ -77,7 +65,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     };
 
                     // Build callback parameter names.
-                    let depth = self.for_depth;
+                    let depth = self.counters.for_depth;
                     let original_params: Vec<String> = vfor
                         .parsed
                         .locals
@@ -103,7 +91,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                         key_fn,
                         depth,
                     });
-                    self.for_depth += 1;
+                    self.counters.for_depth += 1;
                 }
                 ElementScope::SlotElement(slot) => {
                     self.process_slot_scope(
@@ -160,19 +148,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 if has_dynamic_arg {
                     if let Some(arg) = arg {
                         let name_expr = &ctx.input[arg.start as usize..arg.end as usize];
-                        let prefixed = build_prefixed_value(
-                            name_expr,
-                            arg.start,
-                            &None,
-                            &self.bindings,
-                            self.is_production,
-                        );
+                        let prefixed = self.prefix_expr(name_expr, arg.start, &None);
                         *sn_dyn_expr = Some(prefixed);
                     }
                 }
                 if !locals.is_empty() {
-                    let slot_props_var = format!("_slotProps{}", self.slot_props_counter);
-                    self.slot_props_counter += 1;
+                    let slot_props_var = format!("_slotProps{}", self.counters.slot_props);
+                    self.counters.slot_props += 1;
                     *sp = Some(slot_props_var.clone());
                     for local_span in locals {
                         let local_name = ctx.input
@@ -190,8 +172,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             } => {
                 *sn = Some(slot_name);
                 if !locals.is_empty() {
-                    let slot_props_var = format!("_slotProps{}", self.slot_props_counter);
-                    self.slot_props_counter += 1;
+                    let slot_props_var = format!("_slotProps{}", self.counters.slot_props);
+                    self.counters.slot_props += 1;
                     *sp = Some(slot_props_var.clone());
                     for local_span in locals {
                         let local_name = ctx.input
@@ -237,11 +219,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         &mut self,
         state: &mut VaporElementState,
         close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
-    ) {
+    ) -> TemplateCodeGenResult {
         let scope = state
             .scope
             .take()
-            .expect("complete_structural_element_close: scope must be set");
+            .ok_or(TemplateCodeGenError::MissingScope(
+                "complete_structural_element_close: scope must be set",
+            ))?;
         let close_end = close_tag.map(|ct| ct.end).unwrap_or(state.open_tag_end);
 
         match scope {
@@ -249,10 +233,10 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 self.imports.add(VaporImportDependencies::CREATE_IF);
 
                 // Emit _setInsertionState for nested v-if inside native elements.
-                let insertion_state = self.build_insertion_state(state);
+                let insertion_state = self.build_insertion_state(state)?;
 
                 // Build the block body for this branch.
-                let body = self.build_block_body(state, close_tag, "    ");
+                let body = self.build_block_body(state, close_tag, "    ")?;
 
                 let node_ref = state.node_ref;
                 let code = format!(
@@ -280,7 +264,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 self.imports.add(VaporImportDependencies::CREATE_IF);
 
                 // Build the block body for this branch.
-                let body = self.build_block_body(state, close_tag, "    ");
+                let body = self.build_block_body(state, close_tag, "    ")?;
 
                 // Extend the pending v-if chain.
                 if let Some(chain) = self.pending_vif_chains.last_mut() {
@@ -301,7 +285,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
             VaporScopeKind::Else => {
                 // Build the block body for this branch.
-                let body = self.build_block_body(state, close_tag, "    ");
+                let body = self.build_block_body(state, close_tag, "    ")?;
 
                 // Extend the pending v-if chain with the else branch.
                 if let Some(chain) = self.pending_vif_chains.last_mut() {
@@ -315,10 +299,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     chain.open_parens = 0;
 
                     // Flush the chain immediately since it's complete.
-                    let chain = self
-                        .pending_vif_chains
-                        .pop()
-                        .expect("complete_structural_element_close: v-else chain must exist");
+                    let chain = self.pending_vif_chains.pop().ok_or(
+                        TemplateCodeGenError::StackUnderflow(
+                            "complete_structural_element_close: v-else chain must exist",
+                        ),
+                    )?;
                     let code = chain.code;
                     let code_with_newline = format!("{}\n", code);
 
@@ -354,10 +339,10 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 self.imports.add(VaporImportDependencies::CREATE_FOR);
 
                 // Emit _setInsertionState for nested v-for inside native elements.
-                let insertion_state = self.build_insertion_state(state);
+                let insertion_state = self.build_insertion_state(state)?;
 
                 // Build the block body.
-                let body = self.build_block_body(state, close_tag, "    ");
+                let body = self.build_block_body(state, close_tag, "    ")?;
 
                 let params_str = callback_params.join(", ");
                 let node_ref = state.node_ref;
@@ -375,7 +360,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 code.push_str(")\n");
 
                 // Decrement for_depth.
-                self.for_depth = self.for_depth.saturating_sub(1);
+                self.counters.for_depth = self.counters.for_depth.saturating_sub(1);
 
                 let is_root = self.stack.is_empty();
                 if is_root {
@@ -391,6 +376,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 }
             }
         }
+        Ok(())
     }
 
     /// Flush any pending v-if chain (emit the accumulated code).

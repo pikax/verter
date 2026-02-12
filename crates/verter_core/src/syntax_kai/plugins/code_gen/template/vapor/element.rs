@@ -2,13 +2,13 @@
 
 use crate::syntax_kai::{
     plugin::SyntaxPluginContext,
-    plugins::code_gen::{
-        template::shared::helper::build_prefixed_value, types::VaporImportDependencies,
+    plugins::code_gen::types::{
+        TemplateCodeGenError, TemplateCodeGenResult, VaporImportDependencies,
     },
     types::{ElementKind, ElementScope, OxcCompiledElementClosed, OxcCompiledElementStart},
 };
 
-use super::helpers::{apply_var_mappings, build_set_text_call, replace_node_ref};
+use super::helpers::{build_set_text_call, replace_node_ref};
 use super::types::{
     VaporEffect, VaporElementKind, VaporElementState, VaporScopeKind, VaporSlotInfo, VaporTextPart,
 };
@@ -19,7 +19,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         &mut self,
         ev: &OxcCompiledElementStart<'alloc>,
         ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    ) -> TemplateCodeGenResult {
         let open_tag = &ev.event.event_open_tag;
         let open_tag_end = &ev.event.event_open_tag_end;
 
@@ -187,7 +187,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         // Process props: classify static vs dynamic.
         // For slot outlets, we process props to extract name and slot props.
-        self.process_props(ev, ctx);
+        self.process_props(ev, ctx)?;
 
         // For slot outlets, extract static `name` attribute.
         if is_slot_outlet {
@@ -196,7 +196,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 let top = self
                     .stack
                     .last_mut()
-                    .expect("handle_element_start: stack empty after slot outlet name extraction");
+                    .ok_or(TemplateCodeGenError::StackUnderflow(
+                        "handle_element_start: stack empty after slot outlet name extraction",
+                    ))?;
                 if let VaporElementKind::SlotOutlet {
                     ref mut slot_name, ..
                 } = top.kind
@@ -208,23 +210,25 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         // Void/self-closing elements: complete immediately.
         if open_tag_end.is_self_closing || open_tag.is_void_element {
-            self.complete_element_close(None);
+            self.complete_element_close(None)?;
         }
+
+        Ok(())
     }
 
     pub(crate) fn handle_element_closed(
         &mut self,
         ev: &OxcCompiledElementClosed,
         _ctx: &SyntaxPluginContext<'alloc>,
-    ) {
-        self.complete_element_close(ev.event.event_close_tag.as_ref());
+    ) -> TemplateCodeGenResult {
+        self.complete_element_close(ev.event.event_close_tag.as_ref())
     }
 
     /// Shared logic for completing an element close (both normal and void/self-closing).
     pub(super) fn complete_element_close(
         &mut self,
         close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
-    ) {
+    ) -> TemplateCodeGenResult {
         // Flush any pending v-if chain from children before closing this element,
         // BUT only if this element is not itself a v-else-if/v-else continuation
         // (those need to extend the chain, not flush it).
@@ -241,7 +245,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         let mut state = self
             .stack
             .pop()
-            .expect("Element close without matching open");
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "element close without matching open",
+            ))?;
 
         let is_structural = state.scope.is_some();
         let is_component = state.is_component() || state.is_dynamic_component();
@@ -249,14 +255,14 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         // Handle structural elements (v-if, v-for).
         if is_structural {
-            self.complete_structural_element_close(&mut state, close_tag);
-            return;
+            self.complete_structural_element_close(&mut state, close_tag)?;
+            return Ok(());
         }
 
         // Handle component elements.
         if is_component || is_slot_outlet {
-            self.complete_component_element_close(&mut state, close_tag);
-            return;
+            self.complete_component_element_close(&mut state, close_tag)?;
+            return Ok(());
         }
 
         // Handle <template #name> children of components → collect as named slot.
@@ -269,52 +275,41 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 }
             )
         {
-            self.complete_slot_template_close(&mut state, close_tag);
-            return;
+            self.complete_slot_template_close(&mut state, close_tag)?;
+            return Ok(());
         }
 
         // Handle HTML content and close tag for native elements.
-        if state.has_dynamic_children {
-            self.append_html(" ");
-        } else {
-            let texts: Vec<String> = state
-                .text_parts
-                .drain(..)
-                .filter_map(|p| match p {
-                    VaporTextPart::Static(s) => Some(s),
-                    VaporTextPart::Dynamic(_) => None,
-                })
-                .collect();
-            for text in texts {
-                self.append_html(&text);
-            }
-        }
-
-        if !state.is_void && !state.is_self_closing {
-            self.push_close_tag(&state.tag_name);
-        }
+        self.flush_element_text_to_html(&mut state);
 
         if state.is_root {
-            self.complete_root_element_close(&mut state, close_tag);
+            self.complete_root_element_close(&mut state, close_tag)?;
         } else {
-            self.complete_non_root_element_close(&mut state, close_tag);
+            self.complete_non_root_element_close(&mut state, close_tag)?;
         }
+
+        Ok(())
     }
 
     /// Build a `_setInsertionState(parentVar, null, childIndex, true)` call
     /// if this structural element is nested inside a native element.
-    pub(super) fn build_insertion_state(&mut self, state: &VaporElementState) -> String {
+    pub(super) fn build_insertion_state(
+        &mut self,
+        state: &VaporElementState,
+    ) -> TemplateCodeGenResult<String> {
         // Only emit for non-root structural elements inside native elements.
         if state.is_root || self.stack.is_empty() {
-            return String::new();
+            return Ok(String::new());
         }
         let parent = self
             .stack
             .last()
-            .expect("build_insertion_state: stack must not be empty");
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "build_insertion_state: stack must not be empty",
+            ))?;
         // Don't emit for children of components (they become slots).
         if parent.is_component() || parent.is_dynamic_component() || parent.is_slot_outlet() {
-            return String::new();
+            return Ok(String::new());
         }
 
         // Ensure parent has a var_name for navigation.
@@ -328,21 +323,23 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             if let Some(ref v) = self
                 .stack
                 .last()
-                .expect("build_insertion_state: stack empty after ensure_ancestor_var_names")
+                .ok_or(TemplateCodeGenError::StackUnderflow(
+                    "build_insertion_state: stack empty after ensure_ancestor_var_names",
+                ))?
                 .var_name
             {
                 v.clone()
             } else {
-                return String::new();
+                return Ok(String::new());
             }
         };
 
         self.imports
             .add(VaporImportDependencies::SET_INSERTION_STATE);
-        format!(
+        Ok(format!(
             "  _setInsertionState({}, null, {}, true)\n",
             parent_var, state.child_index
-        )
+        ))
     }
 
     /// Complete a component element close: build component call with slots.
@@ -350,7 +347,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         &mut self,
         state: &mut VaporElementState,
         close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
-    ) {
+    ) -> TemplateCodeGenResult {
         let close_end = close_tag.map(|ct| ct.end).unwrap_or(state.open_tag_end);
 
         // Extract slot_params from Component kind (set by v-slot on the component itself).
@@ -379,7 +376,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 state
                     .kind
                     .slot_children_mut()
-                    .expect("complete_component_element_close: kind must have slot_children")
+                    .ok_or(TemplateCodeGenError::MissingScope(
+                        "complete_component_element_close: kind must have slot_children",
+                    ))?
                     .push(VaporSlotInfo {
                         name: "default".to_string(),
                         is_dynamic: false,
@@ -391,7 +390,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         }
 
         // Build the component call.
-        let comp_code = self.build_component_call(state, "  ");
+        let comp_code = self.build_component_call(state, "  ")?;
         let node_ref = state.node_ref;
         let code = format!("  const n{} = {}\n", node_ref, comp_code);
 
@@ -407,6 +406,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             let code_transform = &mut self.code_transform.borrow_mut();
             code_transform.overwrite(state.open_tag_start, close_end, "");
         }
+        Ok(())
     }
 
     /// Complete a native element child of a component: build as slot content block.
@@ -418,7 +418,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         let close_end = close_tag.map(|ct| ct.end).unwrap_or(state.open_tag_end);
 
         // Build a block body for this element (it becomes slot content).
-        let body = self.build_block_body(state, close_tag, "    ");
+        let body = self
+            .build_block_body(state, close_tag, "    ")
+            .unwrap_or_default();
         let code = body;
 
         // Add to parent's structural_children (will be collected as default slot).
@@ -436,7 +438,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         &mut self,
         state: &mut VaporElementState,
         close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
-    ) {
+    ) -> TemplateCodeGenResult {
         let close_end = close_tag.map(|ct| ct.end).unwrap_or(state.open_tag_end);
         let slot_name = if let VaporElementKind::TemplateWrapper {
             ref mut slot_name, ..
@@ -472,7 +474,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         // If there are no structural children but there are text parts, build a block body.
         if slot_body.is_empty() {
             // Build a block body for the template content.
-            let body = self.build_block_body(state, close_tag, "    ");
+            let body = self
+                .build_block_body(state, close_tag, "    ")
+                .unwrap_or_default();
             slot_body = body;
         }
 
@@ -481,7 +485,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             parent
                 .kind
                 .slot_children_mut()
-                .expect("complete_slot_template_close: parent kind must have slot_children")
+                .ok_or(TemplateCodeGenError::MissingScope(
+                    "complete_slot_template_close: parent kind must have slot_children",
+                ))?
                 .push(VaporSlotInfo {
                     name: slot_name,
                     is_dynamic,
@@ -494,6 +500,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         // Remove source from code_transform.
         let code_transform = &mut self.code_transform.borrow_mut();
         code_transform.overwrite(state.open_tag_start, close_end, "");
+        Ok(())
     }
 
     /// Complete a root element close: finalize HTML, emit template + navigation + effects.
@@ -501,20 +508,17 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         &mut self,
         state: &mut VaporElementState,
         close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
-    ) {
-        let html = self.finalize_html();
-        let template_idx = self.templates.len() as u32;
-        self.templates.push(html);
-        self.imports.add(VaporImportDependencies::TEMPLATE);
+    ) -> TemplateCodeGenResult {
+        let template_idx = self.register_template();
 
         // Build creation code: template instantiation + navigation + text creations.
         let mut creation = format!("  const n{} = t{}()\n", state.node_ref, template_idx);
 
         // Root's own text node creation (if root has dynamic text directly).
         if state.has_dynamic_children && !state.text_parts.is_empty() {
-            let text_ref = state
-                .text_node_ref
-                .expect("root element with dynamic text must have text_node_ref");
+            let text_ref = state.text_node_ref.ok_or(TemplateCodeGenError::MissingArg(
+                "root element with dynamic text must have text_node_ref",
+            ))?;
             self.imports.add(VaporImportDependencies::TXT);
             creation.push_str(&format!(
                 "  const x{} = _txt(n{})\n",
@@ -522,17 +526,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             ));
         }
 
-        // Append navigation instructions from nested elements.
-        for nav in self.pending_nav.drain(..) {
-            creation.push_str(&nav);
-            creation.push('\n');
-        }
-
-        // Append text node creations from nested elements.
-        for tc in self.pending_text_creations.drain(..) {
-            creation.push_str(&tc);
-            creation.push('\n');
-        }
+        // Append navigation instructions and text node creations from nested elements.
+        self.drain_pending_instructions(&mut creation);
 
         // Build close code: effects + statements.
         let mut close_code = String::new();
@@ -542,36 +537,20 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         if state.has_dynamic_children && !state.text_parts.is_empty() {
             self.imports.add(VaporImportDependencies::SET_TEXT);
-            let text_ref = state
-                .text_node_ref
-                .expect("root element with dynamic text must have text_node_ref for setText");
+            let text_ref = state.text_node_ref.ok_or(TemplateCodeGenError::MissingArg(
+                "root element with dynamic text must have text_node_ref for setText",
+            ))?;
             let set_text = build_set_text_call(text_ref, &state.text_parts);
             all_effects.push(VaporEffect::Raw(set_text));
         }
 
-        all_effects.append(&mut self.pending_nested_effects);
+        all_effects.append(&mut self.pending.nested_effects);
 
         if !all_effects.is_empty() {
             // Render all effects to code strings (no node_ref override for root).
             let rendered: Vec<String> =
                 all_effects.iter().map(|e| e.to_code_string(None)).collect();
-            if state.is_once {
-                // v-once: emit effects as direct statements (no _renderEffect wrapping).
-                for effect in &rendered {
-                    close_code.push_str(&format!("  {}\n", effect));
-                }
-            } else {
-                self.imports.add(VaporImportDependencies::RENDER_EFFECT);
-                if rendered.len() == 1 {
-                    close_code.push_str(&format!("  _renderEffect(() => {})\n", rendered[0]));
-                } else {
-                    close_code.push_str("  _renderEffect(() => {\n");
-                    for effect in &rendered {
-                        close_code.push_str(&format!("    {}\n", effect));
-                    }
-                    close_code.push_str("  })\n");
-                }
-            }
+            self.emit_render_effect(&rendered, state.is_once, "  ", &mut close_code);
         }
 
         // Emit structural children (nested v-if/v-for blocks).
@@ -583,7 +562,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         for stmt in &state.statements {
             close_code.push_str(&format!("  {}\n", stmt));
         }
-        for stmt in self.pending_nested_statements.drain(..) {
+        for stmt in self.pending.nested_statements.drain(..) {
             close_code.push_str(&format!("  {}\n", stmt));
         }
 
@@ -609,6 +588,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         } else if !close_code.is_empty() {
             code_transform.append_right(state.open_tag_end, &close_code);
         }
+        Ok(())
     }
 
     /// Complete a non-root element close: determine if navigation is needed,
@@ -617,7 +597,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         &mut self,
         state: &mut VaporElementState,
         close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
-    ) {
+    ) -> TemplateCodeGenResult {
         // If parent is a component, build this element as a slot content block.
         let parent_is_component = self
             .stack
@@ -626,7 +606,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             .unwrap_or(false);
         if parent_is_component {
             self.complete_component_child_close(state, close_tag);
-            return;
+            return Ok(());
         }
         let has_own_dynamic = !state.effects.is_empty()
             || !state.statements.is_empty()
@@ -645,8 +625,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 format!("p{}", p)
             };
 
-            let nav = self.build_nav_instruction(&var_name, state.child_index);
-            self.pending_nav.push(nav);
+            let nav = self.build_nav_instruction(&var_name, state.child_index)?;
+            self.pending.nav.push(nav);
 
             state.var_name = Some(var_name);
         }
@@ -656,29 +636,32 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             let var_name = state
                 .var_name
                 .as_ref()
-                .expect("non-root element with dynamic content must have var_name")
+                .ok_or(TemplateCodeGenError::StackUnderflow(
+                    "non-root element with dynamic content must have var_name",
+                ))?
                 .clone();
 
             // Text node creation + setText effect.
             if state.has_dynamic_children && !state.text_parts.is_empty() {
-                let text_ref = state
-                    .text_node_ref
-                    .expect("non-root element with dynamic text must have text_node_ref");
+                let text_ref = state.text_node_ref.ok_or(TemplateCodeGenError::MissingArg(
+                    "non-root element with dynamic text must have text_node_ref",
+                ))?;
                 self.imports.add(VaporImportDependencies::TXT);
-                self.pending_text_creations
+                self.pending
+                    .text_creations
                     .push(format!("  const x{} = _txt({})", text_ref, var_name));
 
                 self.imports.add(VaporImportDependencies::SET_TEXT);
                 let set_text = build_set_text_call(text_ref, &state.text_parts);
-                self.pending_nested_effects.push(VaporEffect::Raw(set_text));
+                self.pending.nested_effects.push(VaporEffect::Raw(set_text));
             }
 
             // Effects and statements.
             for effect in state.effects.drain(..) {
-                self.pending_nested_effects.push(effect);
+                self.pending.nested_effects.push(effect);
             }
             for stmt in state.statements.drain(..) {
-                self.pending_nested_statements.push(stmt);
+                self.pending.nested_statements.push(stmt);
             }
         }
 
@@ -697,6 +680,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         if let Some(ct) = close_tag {
             code_transform.overwrite(ct.start, ct.end, "");
         }
+
+        Ok(())
     }
 
     /// Build a block body for a structural element (v-if branch, v-for iteration, slot).
@@ -710,7 +695,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         state: &mut VaporElementState,
         _close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
         indent: &str,
-    ) -> String {
+    ) -> TemplateCodeGenResult<String> {
         let mut body = String::new();
 
         // Allocate a new node_ref for the inner template node.
@@ -719,7 +704,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         if state.is_component() || state.is_dynamic_component() || state.is_slot_outlet() {
             // Component/slot outlet: build the component call.
-            let comp_code = self.build_component_call(state, indent);
+            let comp_code = self.build_component_call(state, indent)?;
             body.push_str(&format!("{}const n{} = {}\n", indent, inner_ref, comp_code));
         } else if state.is_template_element() {
             // <template v-if/v-for>: children are the block body directly.
@@ -729,34 +714,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 body.push('\n');
             }
             // For template wrappers, we don't create a template node.
-            return body;
+            return Ok(body);
         } else {
             // Native element: finalize HTML and create template.
-            // Handle HTML content and close tag.
-            if state.has_dynamic_children {
-                self.append_html(" ");
-            } else {
-                let texts: Vec<String> = state
-                    .text_parts
-                    .drain(..)
-                    .filter_map(|p| match p {
-                        VaporTextPart::Static(s) => Some(s),
-                        VaporTextPart::Dynamic(_) => None,
-                    })
-                    .collect();
-                for text in texts {
-                    self.append_html(&text);
-                }
-            }
-
-            if !state.is_void && !state.is_self_closing {
-                self.push_close_tag(&state.tag_name);
-            }
-
-            let html = self.finalize_html();
-            let template_idx = self.templates.len() as u32;
-            self.templates.push(html);
-            self.imports.add(VaporImportDependencies::TEMPLATE);
+            self.flush_element_text_to_html(state);
+            let template_idx = self.register_template();
 
             body.push_str(&format!(
                 "{}const n{} = t{}()\n",
@@ -765,9 +727,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
             // Text node creation for dynamic text.
             if state.has_dynamic_children && !state.text_parts.is_empty() {
-                let text_ref = state
-                    .text_node_ref
-                    .expect("block body with dynamic text must have text_node_ref");
+                let text_ref = state.text_node_ref.ok_or(TemplateCodeGenError::MissingArg(
+                    "block body with dynamic text must have text_node_ref",
+                ))?;
                 self.imports.add(VaporImportDependencies::TXT);
                 body.push_str(&format!(
                     "{}const x{} = _txt(n{})\n",
@@ -775,17 +737,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 ));
             }
 
-            // Navigation instructions from nested elements.
-            for nav in self.pending_nav.drain(..) {
-                body.push_str(&nav);
-                body.push('\n');
-            }
-
-            // Text node creations from nested elements.
-            for tc in self.pending_text_creations.drain(..) {
-                body.push_str(&tc);
-                body.push('\n');
-            }
+            // Navigation instructions and text node creations from nested elements.
+            self.drain_pending_instructions(&mut body);
 
             // Structural children (nested v-if/v-for inside this element).
             for child in state.structural_children.drain(..) {
@@ -794,47 +747,36 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             }
         }
 
-        // Effects — render with inner_ref override so structured effects use the
-        // inner template's node ref instead of the outer structural directive's ref.
-        // This is safe because VaporEffect stores the node_ref structurally — no
-        // string replacement needed, eliminating the n1-inside-n10 corruption bug.
-        let mut all_effects = std::mem::take(&mut state.effects);
+        // Effects — render this element's own effects with inner_ref override, then
+        // append nested child effects (from pending_nested_effects) WITHOUT override.
+        // Own effects need the override because the structural directive's node_ref
+        // differs from the inner template node ref. Nested child effects already have
+        // their correct node_refs (from navigation) and must not be overridden.
+        let own_effects = std::mem::take(&mut state.effects);
+        let nested_effects = std::mem::take(&mut self.pending.nested_effects);
 
+        // Render own effects with inner_ref override.
+        let mut rendered: Vec<String> = own_effects
+            .iter()
+            .map(|e| e.to_code_string(Some(inner_ref)))
+            .collect();
+
+        // _setText for this element's text parts (Raw, no override needed).
         if state.has_dynamic_children && !state.text_parts.is_empty() {
             self.imports.add(VaporImportDependencies::SET_TEXT);
-            let text_ref = state
-                .text_node_ref
-                .expect("block body with dynamic text must have text_node_ref for setText");
+            let text_ref = state.text_node_ref.ok_or(TemplateCodeGenError::MissingArg(
+                "block body with dynamic text must have text_node_ref for setText",
+            ))?;
             let set_text = build_set_text_call(text_ref, &state.text_parts);
-            all_effects.push(VaporEffect::Raw(set_text));
+            rendered.push(set_text);
         }
-        all_effects.append(&mut self.pending_nested_effects);
 
-        if !all_effects.is_empty() {
-            // Render effects with node_ref override for this element's own effects.
-            // Nested effects (from pending_nested_effects) are Raw and ignore the override.
-            let rendered: Vec<String> = all_effects
-                .iter()
-                .map(|e| e.to_code_string(Some(inner_ref)))
-                .collect();
-            if state.is_once {
-                // v-once: emit effects as direct statements (no _renderEffect wrapping).
-                for effect in &rendered {
-                    body.push_str(&format!("{}{}\n", indent, effect));
-                }
-            } else {
-                self.imports.add(VaporImportDependencies::RENDER_EFFECT);
-                if rendered.len() == 1 {
-                    body.push_str(&format!("{}_renderEffect(() => {})\n", indent, rendered[0]));
-                } else {
-                    body.push_str(&format!("{}_renderEffect(() => {{\n", indent));
-                    for effect in &rendered {
-                        body.push_str(&format!("{}  {}\n", indent, effect));
-                    }
-                    body.push_str(&format!("{}}})\n", indent));
-                }
-            }
+        // Nested child effects — no override, they have their own node_refs.
+        for e in &nested_effects {
+            rendered.push(e.to_code_string(None));
         }
+
+        self.emit_render_effect(&rendered, state.is_once, indent, &mut body);
 
         // Statements — rewrite node_ref references.
         // Uses whole-word boundary matching to avoid corrupting n1 inside n10, n11, etc.
@@ -843,7 +785,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             .drain(..)
             .map(|s| replace_node_ref(&s, state.node_ref, inner_ref))
             .collect();
-        for stmt in self.pending_nested_statements.drain(..) {
+        for stmt in self.pending.nested_statements.drain(..) {
             all_stmts.push(stmt);
         }
         for stmt in &all_stmts {
@@ -853,26 +795,28 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         // Return statement.
         body.push_str(&format!("{}return n{}\n", indent, inner_ref));
 
-        body
+        Ok(body)
     }
 
     pub(crate) fn handle_comment(
         &mut self,
         ev: &crate::syntax_kai::types::Comment,
         ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    ) -> TemplateCodeGenResult {
         let content = &ctx.input[ev.content.start as usize..ev.content.end as usize];
         self.append_html(&format!("<!--{}-->", content));
 
         let code_transform = &mut self.code_transform.borrow_mut();
         code_transform.overwrite(ev.start, ev.end, "");
+
+        Ok(())
     }
 
     pub(crate) fn handle_text(
         &mut self,
         ev: &crate::syntax_kai::types::Text,
         ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    ) -> TemplateCodeGenResult {
         let text = &ctx.input[ev.start as usize..ev.end as usize];
 
         if let Some(state) = self.stack.last_mut() {
@@ -889,31 +833,22 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         let code_transform = &mut self.code_transform.borrow_mut();
         code_transform.overwrite(ev.start, ev.end, "");
+
+        Ok(())
     }
 
     pub(crate) fn handle_interpolation(
         &mut self,
         ev: &crate::syntax_kai::types::OxcInterpolation<'alloc>,
         _ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    ) -> TemplateCodeGenResult {
         let raw_content = &_ctx.input[ev.content.start as usize..ev.content.end as usize];
         let leading_ws = raw_content.len() - raw_content.trim_start().len();
         let trailing_ws = raw_content.len() - raw_content.trim_end().len();
         let trimmed_start = ev.content.start + leading_ws as u32;
         let trimmed_end = ev.content.end - trailing_ws as u32;
         let expr_text = &_ctx.input[trimmed_start as usize..trimmed_end as usize];
-        let mut prefixed = build_prefixed_value(
-            expr_text,
-            trimmed_start,
-            &ev.bindings,
-            &self.bindings,
-            self.is_production,
-        );
-
-        // Apply v-for / v-slot variable mappings (e.g., `item` → `_for_item0.value`).
-        if let Some(state) = self.stack.last() {
-            prefixed = apply_var_mappings(&prefixed, &state.for_var_mappings);
-        }
+        let prefixed = self.prefix_expr(expr_text, trimmed_start, &ev.bindings);
 
         self.imports.add(VaporImportDependencies::TO_DISPLAY_STRING);
         let display_expr = format!("_toDisplayString({})", prefixed);
@@ -942,5 +877,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         let code_transform = &mut self.code_transform.borrow_mut();
         code_transform.overwrite(ev.start, ev.end, "");
+
+        Ok(())
     }
 }

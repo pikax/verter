@@ -536,3 +536,125 @@ impl VaporElementState {
         self.kind.is_template_element()
     }
 }
+
+// ── Generator sub-structs ──────────────────────────────────────────────
+
+/// Counter state for node/text/path variable naming.
+///
+/// Extracted from `VaporTemplateGenerator` to reduce its field count
+/// and group related counter logic.
+pub(crate) struct VaporCounters {
+    /// Node reference counter (`n0`, `n1`, ...).
+    pub node: u32,
+    /// Text node reference counter (`x0`, `x1`, ...).
+    pub text_node: u32,
+    /// Path variable counter (`p0`, `p1`, ...) for intermediate navigation.
+    pub path: u32,
+    /// Current v-for nesting depth (for `_for_item0`, `_for_item1` naming).
+    pub for_depth: u32,
+    /// Counter for `_slotProps0`, `_slotProps1` naming.
+    pub slot_props: u32,
+}
+
+impl VaporCounters {
+    pub fn new() -> Self {
+        Self {
+            node: 0,
+            text_node: 0,
+            path: 0,
+            for_depth: 0,
+            slot_props: 0,
+        }
+    }
+
+    /// Allocate a new node reference index.
+    pub fn next_node_ref(&mut self) -> u32 {
+        let idx = self.node;
+        self.node += 1;
+        idx
+    }
+
+    /// Allocate a new text node reference index.
+    pub fn next_text_node_ref(&mut self) -> u32 {
+        let idx = self.text_node;
+        self.text_node += 1;
+        idx
+    }
+
+    /// Allocate a new path variable index.
+    pub fn next_path_ref(&mut self) -> u32 {
+        let idx = self.path;
+        self.path += 1;
+        idx
+    }
+}
+
+/// Resolved component and directive declarations for hoisting.
+///
+/// Tracks unique component/directive names (deduped via hash sets) and
+/// the declaration strings to emit before the render function.
+pub(crate) struct VaporResolutions {
+    /// Resolved component names for `_resolveComponent` declarations.
+    pub components: Vec<String>,
+    /// Hash set for O(1) component dedup lookups.
+    pub components_set: rustc_hash::FxHashSet<String>,
+    /// Resolved component declarations to emit before render function.
+    pub component_decls: Vec<String>,
+    /// Resolved custom directive names for deduplication.
+    pub directives: Vec<String>,
+    /// Hash set for O(1) directive dedup lookups.
+    pub directives_set: rustc_hash::FxHashSet<String>,
+    /// Resolved directive declarations to emit at top of render function.
+    pub directive_decls: Vec<String>,
+}
+
+impl VaporResolutions {
+    pub fn new() -> Self {
+        Self {
+            components: Vec::new(),
+            components_set: rustc_hash::FxHashSet::default(),
+            component_decls: Vec::new(),
+            directives: Vec::new(),
+            directives_set: rustc_hash::FxHashSet::default(),
+            directive_decls: Vec::new(),
+        }
+    }
+}
+
+/// Collected nested content waiting to be emitted when the root element closes.
+///
+/// During tree traversal, nested dynamic descendants generate navigation,
+/// text creations, effects, and statements that bubble up to the root.
+pub(crate) struct VaporPendingContent {
+    /// Navigation instructions (`const nX = _child(...)`, `const pX = _next(...)`).
+    pub nav: Vec<String>,
+    /// Text node creations (`const xN = _txt(nX)`).
+    pub text_creations: Vec<String>,
+    /// Effects from nested dynamic descendants.
+    pub nested_effects: Vec<VaporEffect>,
+    /// Statements from nested dynamic descendants.
+    pub nested_statements: Vec<String>,
+}
+
+impl VaporPendingContent {
+    pub fn new() -> Self {
+        Self {
+            nav: Vec::new(),
+            text_creations: Vec::new(),
+            nested_effects: Vec::new(),
+            nested_statements: Vec::new(),
+        }
+    }
+
+    /// Drain navigation instructions and text node creations into a buffer.
+    pub fn drain_instructions(&mut self, buf: &mut String) {
+        for nav in self.nav.drain(..) {
+            buf.push_str(&nav);
+            buf.push('\n');
+        }
+        for tc in self.text_creations.drain(..) {
+            buf.push_str(&tc);
+            buf.push('\n');
+        }
+    }
+}

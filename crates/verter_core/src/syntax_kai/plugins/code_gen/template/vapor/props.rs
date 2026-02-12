@@ -4,13 +4,14 @@
 use crate::syntax_kai::{
     plugin::SyntaxPluginContext,
     plugins::code_gen::{
-        template::shared::helper::{apply_dynamic_arg_prefix, build_prefixed_value},
-        types::VaporImportDependencies,
+        template::shared::helper::apply_dynamic_arg_prefix,
+        types::{TemplateCodeGenError, TemplateCodeGenResult, VaporImportDependencies},
     },
     types::{OxcCompiledElementStart, PropKind},
 };
 
-use super::helpers::is_simple_identifier;
+use super::super::shared::helper::{classify_modifier, ModifierKind};
+use super::helpers::is_member_expression;
 use super::types::{VaporEffect, VaporTextPart};
 use super::VaporTemplateGenerator;
 
@@ -20,11 +21,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         &mut self,
         ev: &OxcCompiledElementStart<'alloc>,
         ctx: &SyntaxPluginContext<'alloc>,
-    ) {
+    ) -> TemplateCodeGenResult {
         let node_ref = self
             .stack
             .last()
-            .expect("process_props called with empty stack")
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "process_props called with empty stack",
+            ))?
             .node_ref;
 
         for oxc_prop in &ev.props {
@@ -47,7 +50,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             let stmt = format!("_setTemplateRef(n{}, \"{}\")", node_ref, ref_name);
                             self.stack
                                 .last_mut()
-                                .expect("process_props: stack empty after ref check")
+                                .ok_or(TemplateCodeGenError::StackUnderflow(
+                                    "process_props: stack empty after ref check",
+                                ))?
                                 .statements
                                 .push(stmt);
                         }
@@ -57,17 +62,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 PropKind::ClassBind => {
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = build_prefixed_value(
-                            expr_text,
-                            exp.start,
-                            &exp.bindings,
-                            &self.bindings,
-                            self.is_production,
-                        );
+                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
                         self.imports.add(VaporImportDependencies::SET_CLASS);
                         self.stack
                             .last_mut()
-                            .expect("process_props: stack empty for ClassBind")
+                            .ok_or(TemplateCodeGenError::StackUnderflow(
+                                "process_props: stack empty for ClassBind",
+                            ))?
                             .effects
                             .push(VaporEffect::SetClass {
                                 node_ref,
@@ -79,17 +80,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 PropKind::StyleBind => {
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = build_prefixed_value(
-                            expr_text,
-                            exp.start,
-                            &exp.bindings,
-                            &self.bindings,
-                            self.is_production,
-                        );
+                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
                         self.imports.add(VaporImportDependencies::SET_STYLE);
                         self.stack
                             .last_mut()
-                            .expect("process_props: stack empty for StyleBind")
+                            .ok_or(TemplateCodeGenError::StackUnderflow(
+                                "process_props: stack empty for StyleBind",
+                            ))?
                             .effects
                             .push(VaporEffect::SetStyle {
                                 node_ref,
@@ -101,17 +98,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 PropKind::Bind => {
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = build_prefixed_value(
-                            expr_text,
-                            exp.start,
-                            &exp.bindings,
-                            &self.bindings,
-                            self.is_production,
-                        );
+                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
 
                         if prop.has_dynamic_arg {
                             // :[attrName]="value" → _setDynamicProps(n{X}, [{ [expr]: value }])
-                            let arg_span = prop.arg.expect("dynamic Bind prop must have arg span");
+                            let arg_span = prop.arg.ok_or(TemplateCodeGenError::MissingArg(
+                                "dynamic Bind prop must have arg span",
+                            ))?;
                             let arg_raw =
                                 &ctx.input[arg_span.start as usize..arg_span.end as usize];
                             let arg_prefixed = apply_dynamic_arg_prefix(
@@ -125,7 +118,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             let dynamic_expr = format!("{{ [{}]: {} }}", arg_prefixed, prefixed);
                             self.stack
                                 .last_mut()
-                                .expect("process_props: stack empty for dynamic Bind")
+                                .ok_or(TemplateCodeGenError::StackUnderflow(
+                                    "process_props: stack empty for dynamic Bind",
+                                ))?
                                 .effects
                                 .push(VaporEffect::SetDynamicProps {
                                     node_ref,
@@ -141,7 +136,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             self.imports.add(VaporImportDependencies::SET_PROP);
                             self.stack
                                 .last_mut()
-                                .expect("process_props: stack empty for Bind")
+                                .ok_or(TemplateCodeGenError::StackUnderflow(
+                                    "process_props: stack empty for Bind",
+                                ))?
                                 .effects
                                 .push(VaporEffect::SetProp {
                                     node_ref,
@@ -156,17 +153,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     // v-bind="obj" → _setDynamicProps(n{X}, [expr])
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = build_prefixed_value(
-                            expr_text,
-                            exp.start,
-                            &exp.bindings,
-                            &self.bindings,
-                            self.is_production,
-                        );
+                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
                         self.imports.add(VaporImportDependencies::SET_DYNAMIC_PROPS);
                         self.stack
                             .last_mut()
-                            .expect("process_props: stack empty for BindSpread")
+                            .ok_or(TemplateCodeGenError::StackUnderflow(
+                                "process_props: stack empty for BindSpread",
+                            ))?
                             .effects
                             .push(VaporEffect::SetDynamicProps {
                                 node_ref,
@@ -176,7 +169,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 }
 
                 PropKind::On => {
-                    self.process_event(oxc_prop, ctx, node_ref);
+                    self.process_event(oxc_prop, ctx, node_ref)?;
                 }
 
                 PropKind::OnSpread => {
@@ -184,19 +177,15 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     // Matches Vue's compiler behavior: spread event handlers via _toHandlers.
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = build_prefixed_value(
-                            expr_text,
-                            exp.start,
-                            &exp.bindings,
-                            &self.bindings,
-                            self.is_production,
-                        );
+                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
                         self.imports.add(VaporImportDependencies::SET_DYNAMIC_PROPS);
                         self.imports.add(VaporImportDependencies::TO_HANDLERS);
                         let dynamic_expr = format!("_toHandlers({})", prefixed);
                         self.stack
                             .last_mut()
-                            .expect("process_props: stack empty for OnSpread")
+                            .ok_or(TemplateCodeGenError::StackUnderflow(
+                                "process_props: stack empty for OnSpread",
+                            ))?
                             .effects
                             .push(VaporEffect::SetDynamicProps {
                                 node_ref,
@@ -208,17 +197,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 PropKind::Html => {
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = build_prefixed_value(
-                            expr_text,
-                            exp.start,
-                            &exp.bindings,
-                            &self.bindings,
-                            self.is_production,
-                        );
+                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
                         self.imports.add(VaporImportDependencies::SET_HTML);
                         self.stack
                             .last_mut()
-                            .expect("process_props: stack empty for Html")
+                            .ok_or(TemplateCodeGenError::StackUnderflow(
+                                "process_props: stack empty for Html",
+                            ))?
                             .effects
                             .push(VaporEffect::SetHtml {
                                 node_ref,
@@ -230,25 +215,21 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 PropKind::Text => {
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = build_prefixed_value(
-                            expr_text,
-                            exp.start,
-                            &exp.bindings,
-                            &self.bindings,
-                            self.is_production,
-                        );
+                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
                         self.imports.add(VaporImportDependencies::TO_DISPLAY_STRING);
                         let display_expr = format!("_toDisplayString({})", prefixed);
 
-                        let state = self
-                            .stack
-                            .last_mut()
-                            .expect("process_props: stack empty for Text");
+                        let state =
+                            self.stack
+                                .last_mut()
+                                .ok_or(TemplateCodeGenError::StackUnderflow(
+                                    "process_props: stack empty for Text",
+                                ))?;
                         state.has_dynamic_children = true;
                         state.text_parts.push(VaporTextPart::Dynamic(display_expr));
                         if state.text_node_ref.is_none() {
-                            let text_ref = self.text_node_counter;
-                            self.text_node_counter += 1;
+                            let text_ref = self.counters.text_node;
+                            self.counters.text_node += 1;
                             state.text_node_ref = Some(text_ref);
                         }
                     }
@@ -257,29 +238,25 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 PropKind::Show => {
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = build_prefixed_value(
-                            expr_text,
-                            exp.start,
-                            &exp.bindings,
-                            &self.bindings,
-                            self.is_production,
-                        );
+                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
                         self.imports.add(VaporImportDependencies::APPLY_V_SHOW);
                         let stmt = format!("_applyVShow(n{}, () => ({}))", node_ref, prefixed);
                         self.stack
                             .last_mut()
-                            .expect("process_props: stack empty for Show")
+                            .ok_or(TemplateCodeGenError::StackUnderflow(
+                                "process_props: stack empty for Show",
+                            ))?
                             .statements
                             .push(stmt);
                     }
                 }
 
                 PropKind::Model => {
-                    self.process_model(oxc_prop, ev, ctx, node_ref);
+                    self.process_model(oxc_prop, ev, ctx, node_ref)?;
                 }
 
                 PropKind::Directive => {
-                    self.process_directive(oxc_prop, ctx, node_ref);
+                    self.process_directive(oxc_prop, ctx, node_ref)?;
                 }
 
                 _ => {
@@ -288,6 +265,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 }
             }
         }
+
+        Ok(())
     }
 
     pub(super) fn process_event(
@@ -295,7 +274,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         oxc_prop: &crate::syntax_kai::types::OxcProp<'alloc>,
         ctx: &SyntaxPluginContext<'alloc>,
         node_ref: u32,
-    ) {
+    ) -> TemplateCodeGenResult {
         let prop = &oxc_prop.event;
 
         let is_dynamic = prop.has_dynamic_arg;
@@ -303,21 +282,15 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         let event_name = if let Some(ref arg) = prop.arg {
             ctx.input[arg.start as usize..arg.end as usize].to_string()
         } else {
-            return;
+            return Ok(());
         };
 
         let handler_expr = if let Some(ref exp) = oxc_prop.exp {
             let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-            let prefixed = build_prefixed_value(
-                expr_text,
-                exp.start,
-                &exp.bindings,
-                &self.bindings,
-                self.is_production,
-            );
+            let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
 
             let trimmed = prefixed.trim();
-            if is_simple_identifier(trimmed) {
+            if is_member_expression(trimmed) {
                 format!("e => {}(e)", trimmed)
             } else if trimmed.contains("$event") {
                 format!("$event => ({})", trimmed)
@@ -325,7 +298,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 format!("() => ({})", trimmed)
             }
         } else {
-            return;
+            return Ok(());
         };
 
         self.imports.add(VaporImportDependencies::CREATE_INVOKER);
@@ -338,18 +311,16 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             Vec::new()
         };
 
-        // Classify modifiers into three categories.
+        // Classify modifiers into three categories using shared classifier.
         let mut runtime_mods: Vec<&String> = Vec::new();
         let mut key_mods: Vec<&String> = Vec::new();
         let mut listener_opts: Vec<&String> = Vec::new();
 
         for m in &modifier_names {
-            match m.as_str() {
-                "capture" | "once" | "passive" => listener_opts.push(m),
-                "enter" | "tab" | "delete" | "esc" | "space" | "up" | "down" | "left" | "right" => {
-                    key_mods.push(m)
-                }
-                _ => runtime_mods.push(m),
+            match classify_modifier(m) {
+                ModifierKind::ListenerOption => listener_opts.push(m),
+                ModifierKind::KeyFilter => key_mods.push(m),
+                ModifierKind::Runtime => runtime_mods.push(m),
             }
         }
 
@@ -378,7 +349,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         if is_dynamic {
             // Dynamic event: @[eventName]="handler"
             // → _on(n{X}, expr, handler, { effect: true }) inside _renderEffect
-            let arg_span = prop.arg.expect("dynamic On prop must have arg span");
+            let arg_span = prop.arg.ok_or(TemplateCodeGenError::MissingArg(
+                "dynamic On prop must have arg span",
+            ))?;
             let arg_raw = &ctx.input[arg_span.start as usize..arg_span.end as usize];
             let arg_prefixed = apply_dynamic_arg_prefix(
                 arg_raw,
@@ -390,7 +363,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             self.imports.add(VaporImportDependencies::ON);
             self.stack
                 .last_mut()
-                .expect("process_event: stack empty for dynamic event")
+                .ok_or(TemplateCodeGenError::StackUnderflow(
+                    "process_event: stack empty for dynamic event",
+                ))?
                 .effects
                 .push(VaporEffect::OnDynamic {
                     node_ref,
@@ -407,7 +382,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 let stmt = format!("n{}.$evt{} = {}", node_ref, event_name, invoker_expr);
                 self.stack
                     .last_mut()
-                    .expect("process_event: stack empty for delegated event")
+                    .ok_or(TemplateCodeGenError::StackUnderflow(
+                        "process_event: stack empty for delegated event",
+                    ))?
                     .statements
                     .push(stmt);
             } else {
@@ -428,11 +405,15 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 );
                 self.stack
                     .last_mut()
-                    .expect("process_event: stack empty for non-delegated event")
+                    .ok_or(TemplateCodeGenError::StackUnderflow(
+                        "process_event: stack empty for non-delegated event",
+                    ))?
                     .statements
                     .push(stmt);
             }
         }
+
+        Ok(())
     }
 
     pub(super) fn process_model(
@@ -441,24 +422,20 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         ev: &OxcCompiledElementStart<'alloc>,
         ctx: &SyntaxPluginContext<'alloc>,
         node_ref: u32,
-    ) {
+    ) -> TemplateCodeGenResult {
         let Some(ref exp) = oxc_prop.exp else {
-            return;
+            return Ok(());
         };
 
         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-        let prefixed = build_prefixed_value(
-            expr_text,
-            exp.start,
-            &exp.bindings,
-            &self.bindings,
-            self.is_production,
-        );
+        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
 
         let tag_name = &self
             .stack
             .last()
-            .expect("process_model: stack empty")
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "process_model: stack empty",
+            ))?
             .tag_name
             .clone();
 
@@ -522,9 +499,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         );
         self.stack
             .last_mut()
-            .expect("process_model: stack empty after building statement")
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "process_model: stack empty after building statement",
+            ))?
             .statements
             .push(stmt);
+
+        Ok(())
     }
 
     pub(super) fn process_directive(
@@ -532,7 +513,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         oxc_prop: &crate::syntax_kai::types::OxcProp<'alloc>,
         ctx: &SyntaxPluginContext<'alloc>,
         node_ref: u32,
-    ) {
+    ) -> TemplateCodeGenResult {
         let prop = &oxc_prop.event;
 
         // Extract directive name: "v-my-directive" → "my-directive"
@@ -541,10 +522,10 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         let dir_var = format!("_directive_{}", dir_name.replace('-', "_"));
 
         // Register for _resolveDirective declaration (deduped).
-        if self.resolved_directives_set.insert(dir_name.to_string()) {
-            self.resolved_directives.push(dir_name.to_string());
+        if self.resolutions.directives_set.insert(dir_name.to_string()) {
+            self.resolutions.directives.push(dir_name.to_string());
             self.imports.add(VaporImportDependencies::RESOLVE_DIRECTIVE);
-            self.resolved_directive_decls.push(format!(
+            self.resolutions.directive_decls.push(format!(
                 "  const {} = _resolveDirective(\"{}\")",
                 dir_var, dir_name
             ));
@@ -555,13 +536,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         // Build value expression.
         let value = if let Some(ref exp) = oxc_prop.exp {
             let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-            let prefixed = build_prefixed_value(
-                expr_text,
-                exp.start,
-                &exp.bindings,
-                &self.bindings,
-                self.is_production,
-            );
+            let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
             format!("() => {}", prefixed)
         } else {
             String::new()
@@ -628,9 +603,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         let stmt = format!("_withVaporDirectives(n{}, [[{}]])", node_ref, entry);
         self.stack
             .last_mut()
-            .expect("process_directive: stack empty after building statement")
+            .ok_or(TemplateCodeGenError::StackUnderflow(
+                "process_directive: stack empty after building statement",
+            ))?
             .statements
             .push(stmt);
+
+        Ok(())
     }
 
     /// Find the value of a static attribute on the element.

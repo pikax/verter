@@ -18,8 +18,11 @@ pub(crate) fn build_set_text_call(text_ref: u32, parts: &[VaporTextPart]) -> Str
     format!("_setText(x{}, {})", text_ref, args)
 }
 
-/// Check if a string is a simple JavaScript identifier (possibly with dot-access).
-pub(crate) fn is_simple_identifier(s: &str) -> bool {
+/// Check if a string is a simple JavaScript member expression (identifier with optional dot-access).
+///
+/// Returns `true` for `foo`, `foo.bar`, `$setup.x`, `_ctx.msg.length`, etc.
+/// Returns `false` for expressions like `a + b`, `fn()`, `a[0]`, etc.
+pub(crate) fn is_member_expression(s: &str) -> bool {
     let mut chars = s.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -34,18 +37,10 @@ pub(crate) fn is_simple_identifier(s: &str) -> bool {
 /// Replaces standalone occurrences of original variable names with their mapped values.
 /// E.g., `item` → `_for_item0.value`, `data` → `_slotProps0.data`.
 ///
-/// # Limitations
-///
-/// This uses naive word-boundary string replacement rather than AST-based rewriting.
-/// Known limitations:
-/// - **Unicode identifiers**: only ASCII alphanumeric + `_` + `$` are recognized as
-///   word boundaries. ES2015+ unicode identifiers (e.g. `café`) may not be handled.
-/// - **String literals**: variable names inside string literals (`"item"`) will be
-///   incorrectly replaced. The caller should ensure expressions don't embed the
-///   variable name in string contexts.
-/// - **Performance**: the replacement loop rebuilds the string for each mapping.
-///   For templates with many v-for variables, consider using the OXC-parsed bindings
-///   approach (as `patch_bindings` does for VDOM) for correctness and efficiency.
+/// **Deprecated**: Superseded by [`build_prefixed_value_with_var_mappings`] in
+/// `shared/helper.rs` which uses OXC-parsed binding positions for precise identifier
+/// handling. Kept for tests and documentation.
+#[cfg(test)]
 pub(crate) fn apply_var_mappings(expr: &str, mappings: &[(String, String)]) -> String {
     if mappings.is_empty() {
         return expr.to_string();

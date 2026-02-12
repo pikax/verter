@@ -1,3 +1,41 @@
+use std::fmt;
+
+/// Error type for template code generation invariant violations.
+///
+/// These errors indicate that the upstream tokenizer emitted an unexpected event
+/// sequence (e.g., close without open, text outside template). Instead of panicking,
+/// the codegen backends return these errors for graceful handling.
+#[derive(Debug)]
+pub enum TemplateCodeGenError {
+    /// Stack underflow: attempted to pop/access an element that was never pushed.
+    StackUnderflow(&'static str),
+    /// A required scope was not set on the element state.
+    MissingScope(&'static str),
+    /// A required argument or value was not present.
+    MissingArg(&'static str),
+}
+
+impl fmt::Display for TemplateCodeGenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TemplateCodeGenError::StackUnderflow(ctx) => {
+                write!(f, "template codegen stack underflow: {}", ctx)
+            }
+            TemplateCodeGenError::MissingScope(ctx) => {
+                write!(f, "template codegen missing scope: {}", ctx)
+            }
+            TemplateCodeGenError::MissingArg(ctx) => {
+                write!(f, "template codegen missing argument: {}", ctx)
+            }
+        }
+    }
+}
+
+impl std::error::Error for TemplateCodeGenError {}
+
+/// Shorthand result type for template code generation.
+pub type TemplateCodeGenResult<T = ()> = Result<T, TemplateCodeGenError>;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ScriptSetupImportDependencies(pub u8);
 
@@ -37,239 +75,114 @@ impl ScriptSetupImportDependencies {
 }
 
 /// Bitwise flags tracking which Vue runtime helpers the compiled render function needs.
+///
+/// Upgraded from `u32` to `u64` — the previous `u32` was completely full at bit 31.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct TemplateImportDependencies(pub u32);
+pub struct TemplateImportDependencies(pub u64);
 
 impl TemplateImportDependencies {
-    pub const OPEN_BLOCK: u32 = 1 << 0;
-    pub const CREATE_ELEMENT_BLOCK: u32 = 1 << 1;
-    pub const CREATE_ELEMENT_VNODE: u32 = 1 << 2;
-    pub const CREATE_VNODE: u32 = 1 << 3;
-    pub const RENDER_LIST: u32 = 1 << 4;
-    pub const TO_DISPLAY_STRING: u32 = 1 << 5;
-    pub const CREATE_COMMENT_VNODE: u32 = 1 << 6;
-    pub const FRAGMENT: u32 = 1 << 7;
-    pub const WITH_CTX: u32 = 1 << 8;
-    pub const RENDER_SLOT: u32 = 1 << 9;
-    pub const NORMALIZE_PROPS: u32 = 1 << 10;
-    pub const MERGE_PROPS: u32 = 1 << 11;
-    pub const WITH_DIRECTIVES: u32 = 1 << 12;
-    pub const RESOLVE_COMPONENT: u32 = 1 << 13;
-    pub const WITH_MODIFIERS: u32 = 1 << 14;
-    pub const WITH_KEYS: u32 = 1 << 15;
-    pub const RESOLVE_DYNAMIC_COMPONENT: u32 = 1 << 16;
-    pub const CREATE_BLOCK: u32 = 1 << 17;
-    pub const CREATE_TEXT_VNODE: u32 = 1 << 18;
-    pub const GUARD_REACTIVE_PROPS: u32 = 1 << 19;
-    pub const RESOLVE_DIRECTIVE: u32 = 1 << 20;
-    pub const SET_BLOCK_TRACKING: u32 = 1 << 21;
-    pub const V_MODEL_TEXT: u32 = 1 << 22;
-    pub const V_MODEL_SELECT: u32 = 1 << 23;
-    pub const V_MODEL_CHECKBOX: u32 = 1 << 24;
-    pub const V_MODEL_RADIO: u32 = 1 << 25;
-    pub const V_MODEL_DYNAMIC: u32 = 1 << 26;
-    pub const NORMALIZE_CLASS: u32 = 1 << 27;
-    pub const NORMALIZE_STYLE: u32 = 1 << 28;
-    pub const V_SHOW: u32 = 1 << 29;
-    pub const CREATE_SLOTS: u32 = 1 << 30;
-    pub const TO_HANDLERS: u32 = 1 << 31;
+    pub const OPEN_BLOCK: u64 = 1 << 0;
+    pub const CREATE_ELEMENT_BLOCK: u64 = 1 << 1;
+    pub const CREATE_ELEMENT_VNODE: u64 = 1 << 2;
+    pub const CREATE_VNODE: u64 = 1 << 3;
+    pub const RENDER_LIST: u64 = 1 << 4;
+    pub const TO_DISPLAY_STRING: u64 = 1 << 5;
+    pub const CREATE_COMMENT_VNODE: u64 = 1 << 6;
+    pub const FRAGMENT: u64 = 1 << 7;
+    pub const WITH_CTX: u64 = 1 << 8;
+    pub const RENDER_SLOT: u64 = 1 << 9;
+    pub const NORMALIZE_PROPS: u64 = 1 << 10;
+    pub const MERGE_PROPS: u64 = 1 << 11;
+    pub const WITH_DIRECTIVES: u64 = 1 << 12;
+    pub const RESOLVE_COMPONENT: u64 = 1 << 13;
+    pub const WITH_MODIFIERS: u64 = 1 << 14;
+    pub const WITH_KEYS: u64 = 1 << 15;
+    pub const RESOLVE_DYNAMIC_COMPONENT: u64 = 1 << 16;
+    pub const CREATE_BLOCK: u64 = 1 << 17;
+    pub const CREATE_TEXT_VNODE: u64 = 1 << 18;
+    pub const GUARD_REACTIVE_PROPS: u64 = 1 << 19;
+    pub const RESOLVE_DIRECTIVE: u64 = 1 << 20;
+    pub const SET_BLOCK_TRACKING: u64 = 1 << 21;
+    pub const V_MODEL_TEXT: u64 = 1 << 22;
+    pub const V_MODEL_SELECT: u64 = 1 << 23;
+    pub const V_MODEL_CHECKBOX: u64 = 1 << 24;
+    pub const V_MODEL_RADIO: u64 = 1 << 25;
+    pub const V_MODEL_DYNAMIC: u64 = 1 << 26;
+    pub const NORMALIZE_CLASS: u64 = 1 << 27;
+    pub const NORMALIZE_STYLE: u64 = 1 << 28;
+    pub const V_SHOW: u64 = 1 << 29;
+    pub const CREATE_SLOTS: u64 = 1 << 30;
+    pub const TO_HANDLERS: u64 = 1 << 31;
 
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.0 == 0
-    }
+    // Compile-time assertion: highest flag must fit in the backing type.
+    #[allow(dead_code)]
+    const _HIGHEST_BIT_CHECK: () = assert!(Self::TO_HANDLERS <= (1u64 << 63));
 
-    #[inline]
-    pub fn add(&mut self, flag: u32) {
-        self.0 |= flag;
-    }
-
-    #[inline]
-    pub fn contains(&self, flag: u32) -> bool {
-        (self.0 & flag) != 0
-    }
-
-    pub fn to_import_string(&self) -> String {
-        if self.is_empty() {
-            return String::new();
-        }
-
-        let mut imports = Vec::new();
-
-        if self.contains(Self::OPEN_BLOCK) {
-            imports.push("openBlock as _openBlock");
-        }
-        if self.contains(Self::CREATE_ELEMENT_BLOCK) {
-            imports.push("createElementBlock as _createElementBlock");
-        }
-        if self.contains(Self::CREATE_ELEMENT_VNODE) {
-            imports.push("createElementVNode as _createElementVNode");
-        }
-        if self.contains(Self::CREATE_VNODE) {
-            imports.push("createVNode as _createVNode");
-        }
-        if self.contains(Self::RENDER_LIST) {
-            imports.push("renderList as _renderList");
-        }
-        if self.contains(Self::TO_DISPLAY_STRING) {
-            imports.push("toDisplayString as _toDisplayString");
-        }
-        if self.contains(Self::CREATE_COMMENT_VNODE) {
-            imports.push("createCommentVNode as _createCommentVNode");
-        }
-        if self.contains(Self::CREATE_TEXT_VNODE) {
-            imports.push("createTextVNode as _createTextVNode");
-        }
-        if self.contains(Self::FRAGMENT) {
-            imports.push("Fragment as _Fragment");
-        }
-        if self.contains(Self::WITH_CTX) {
-            imports.push("withCtx as _withCtx");
-        }
-        if self.contains(Self::RENDER_SLOT) {
-            imports.push("renderSlot as _renderSlot");
-        }
-        if self.contains(Self::NORMALIZE_PROPS) {
-            imports.push("normalizeProps as _normalizeProps");
-        }
-        if self.contains(Self::MERGE_PROPS) {
-            imports.push("mergeProps as _mergeProps");
-        }
-        if self.contains(Self::WITH_DIRECTIVES) {
-            imports.push("withDirectives as _withDirectives");
-        }
-        if self.contains(Self::RESOLVE_COMPONENT) {
-            imports.push("resolveComponent as _resolveComponent");
-        }
-        if self.contains(Self::WITH_MODIFIERS) {
-            imports.push("withModifiers as _withModifiers");
-        }
-        if self.contains(Self::WITH_KEYS) {
-            imports.push("withKeys as _withKeys");
-        }
-        if self.contains(Self::RESOLVE_DYNAMIC_COMPONENT) {
-            imports.push("resolveDynamicComponent as _resolveDynamicComponent");
-        }
-        if self.contains(Self::CREATE_BLOCK) {
-            imports.push("createBlock as _createBlock");
-        }
-        if self.contains(Self::GUARD_REACTIVE_PROPS) {
-            imports.push("guardReactiveProps as _guardReactiveProps");
-        }
-        if self.contains(Self::RESOLVE_DIRECTIVE) {
-            imports.push("resolveDirective as _resolveDirective");
-        }
-        if self.contains(Self::SET_BLOCK_TRACKING) {
-            imports.push("setBlockTracking as _setBlockTracking");
-        }
-        if self.contains(Self::V_MODEL_TEXT) {
-            imports.push("vModelText as _vModelText");
-        }
-        if self.contains(Self::V_MODEL_SELECT) {
-            imports.push("vModelSelect as _vModelSelect");
-        }
-        if self.contains(Self::V_MODEL_CHECKBOX) {
-            imports.push("vModelCheckbox as _vModelCheckbox");
-        }
-        if self.contains(Self::V_MODEL_RADIO) {
-            imports.push("vModelRadio as _vModelRadio");
-        }
-        if self.contains(Self::V_MODEL_DYNAMIC) {
-            imports.push("vModelDynamic as _vModelDynamic");
-        }
-        if self.contains(Self::NORMALIZE_CLASS) {
-            imports.push("normalizeClass as _normalizeClass");
-        }
-        if self.contains(Self::NORMALIZE_STYLE) {
-            imports.push("normalizeStyle as _normalizeStyle");
-        }
-        if self.contains(Self::V_SHOW) {
-            imports.push("vShow as _vShow");
-        }
-        if self.contains(Self::CREATE_SLOTS) {
-            imports.push("createSlots as _createSlots");
-        }
-        if self.contains(Self::TO_HANDLERS) {
-            imports.push("toHandlers as _toHandlers");
-        }
-
-        imports.join(",")
-    }
-}
-
-/// Bitwise flags tracking which `vue/vapor` runtime helpers the compiled Vapor render needs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct VaporImportDependencies(pub u64);
-
-impl VaporImportDependencies {
-    // ── Template & nodes ────────────────────────────────────────────────
-    pub const TEMPLATE: u64 = 1 << 0;
-    pub const CREATE_TEXT_NODE: u64 = 1 << 1;
-    pub const CREATE_COMMENT: u64 = 1 << 2;
-
-    // ── DOM mutation ────────────────────────────────────────────────────
-    pub const INSERT: u64 = 1 << 3;
-    pub const PREPEND: u64 = 1 << 4;
-    pub const REMOVE: u64 = 1 << 5;
-    pub const SET_TEXT: u64 = 1 << 6;
-    pub const SET_CLASS: u64 = 1 << 7;
-    pub const SET_STYLE: u64 = 1 << 8;
-    pub const SET_ATTR: u64 = 1 << 9;
-    pub const SET_PROP: u64 = 1 << 10;
-    pub const SET_DYNAMIC_PROPS: u64 = 1 << 11;
-    pub const SET_HTML: u64 = 1 << 12;
-    pub const SET_REF: u64 = 1 << 13;
-
-    // ── Events ──────────────────────────────────────────────────────────
-    pub const ON: u64 = 1 << 14;
-    pub const DELEGATE: u64 = 1 << 15;
-    pub const DELEGATE_EVENTS: u64 = 1 << 16;
-    pub const WITH_MODIFIERS: u64 = 1 << 17;
-    pub const WITH_KEYS: u64 = 1 << 18;
-
-    // ── Structural ──────────────────────────────────────────────────────
-    pub const CREATE_IF: u64 = 1 << 19;
-    pub const CREATE_FOR: u64 = 1 << 20;
-    pub const CREATE_COMPONENT: u64 = 1 << 21;
-    pub const CREATE_DYNAMIC_COMPONENT: u64 = 1 << 22;
-    pub const CREATE_SLOT: u64 = 1 << 23;
-    pub const CREATE_FOR_SLOTS: u64 = 1 << 24;
-
-    // ── Reactivity / effects ────────────────────────────────────────────
-    pub const RENDER_EFFECT: u64 = 1 << 25;
-    pub const TO_DISPLAY_STRING: u64 = 1 << 26;
-
-    // ── Resolution ──────────────────────────────────────────────────────
-    pub const RESOLVE_COMPONENT: u64 = 1 << 27;
-    pub const RESOLVE_DIRECTIVE: u64 = 1 << 28;
-    pub const WITH_DIRECTIVES: u64 = 1 << 29;
-
-    // ── Normalize helpers ───────────────────────────────────────────────
-    pub const NORMALIZE_CLASS: u64 = 1 << 30;
-    pub const NORMALIZE_STYLE: u64 = 1 << 31;
-
-    // ── Vue 3.6 vapor helpers ──────────────────────────────────────────
-    pub const TXT: u64 = 1 << 32;
-    pub const CREATE_INVOKER: u64 = 1 << 33;
-    pub const CHILD: u64 = 1 << 34;
-    pub const NEXT: u64 = 1 << 35;
-    pub const APPLY_V_SHOW: u64 = 1 << 36;
-    pub const APPLY_TEXT_MODEL: u64 = 1 << 37;
-    pub const APPLY_CHECKBOX_MODEL: u64 = 1 << 38;
-    pub const APPLY_RADIO_MODEL: u64 = 1 << 39;
-    pub const APPLY_SELECT_MODEL: u64 = 1 << 40;
-    pub const SET_VALUE: u64 = 1 << 41;
-    pub const CREATE_TEMPLATE_REF_SETTER: u64 = 1 << 42;
-    pub const WITH_VAPOR_DIRECTIVES: u64 = 1 << 43;
-
-    // ── Structural (Phase 4+) ──────────────────────────────────────────
-    pub const CREATE_COMPONENT_WITH_FALLBACK: u64 = 1 << 44;
-    pub const SET_INSERTION_STATE: u64 = 1 << 45;
-    pub const WITH_VAPOR_CTX: u64 = 1 << 46;
-    pub const VAPOR_TELEPORT: u64 = 1 << 47;
-    pub const VAPOR_TRANSITION: u64 = 1 << 48;
-    pub const VAPOR_TRANSITION_GROUP: u64 = 1 << 49;
-    pub const TO_HANDLERS: u64 = 1 << 50;
+    /// (flag, import_string) pairs for data-driven `to_import_string()`.
+    const IMPORTS: &[(u64, &str)] = &[
+        (Self::OPEN_BLOCK, "openBlock as _openBlock"),
+        (
+            Self::CREATE_ELEMENT_BLOCK,
+            "createElementBlock as _createElementBlock",
+        ),
+        (
+            Self::CREATE_ELEMENT_VNODE,
+            "createElementVNode as _createElementVNode",
+        ),
+        (Self::CREATE_VNODE, "createVNode as _createVNode"),
+        (Self::RENDER_LIST, "renderList as _renderList"),
+        (
+            Self::TO_DISPLAY_STRING,
+            "toDisplayString as _toDisplayString",
+        ),
+        (
+            Self::CREATE_COMMENT_VNODE,
+            "createCommentVNode as _createCommentVNode",
+        ),
+        (
+            Self::CREATE_TEXT_VNODE,
+            "createTextVNode as _createTextVNode",
+        ),
+        (Self::FRAGMENT, "Fragment as _Fragment"),
+        (Self::WITH_CTX, "withCtx as _withCtx"),
+        (Self::RENDER_SLOT, "renderSlot as _renderSlot"),
+        (Self::NORMALIZE_PROPS, "normalizeProps as _normalizeProps"),
+        (Self::MERGE_PROPS, "mergeProps as _mergeProps"),
+        (Self::WITH_DIRECTIVES, "withDirectives as _withDirectives"),
+        (
+            Self::RESOLVE_COMPONENT,
+            "resolveComponent as _resolveComponent",
+        ),
+        (Self::WITH_MODIFIERS, "withModifiers as _withModifiers"),
+        (Self::WITH_KEYS, "withKeys as _withKeys"),
+        (
+            Self::RESOLVE_DYNAMIC_COMPONENT,
+            "resolveDynamicComponent as _resolveDynamicComponent",
+        ),
+        (Self::CREATE_BLOCK, "createBlock as _createBlock"),
+        (
+            Self::GUARD_REACTIVE_PROPS,
+            "guardReactiveProps as _guardReactiveProps",
+        ),
+        (
+            Self::RESOLVE_DIRECTIVE,
+            "resolveDirective as _resolveDirective",
+        ),
+        (
+            Self::SET_BLOCK_TRACKING,
+            "setBlockTracking as _setBlockTracking",
+        ),
+        (Self::V_MODEL_TEXT, "vModelText as _vModelText"),
+        (Self::V_MODEL_SELECT, "vModelSelect as _vModelSelect"),
+        (Self::V_MODEL_CHECKBOX, "vModelCheckbox as _vModelCheckbox"),
+        (Self::V_MODEL_RADIO, "vModelRadio as _vModelRadio"),
+        (Self::V_MODEL_DYNAMIC, "vModelDynamic as _vModelDynamic"),
+        (Self::NORMALIZE_CLASS, "normalizeClass as _normalizeClass"),
+        (Self::NORMALIZE_STYLE, "normalizeStyle as _normalizeStyle"),
+        (Self::V_SHOW, "vShow as _vShow"),
+        (Self::CREATE_SLOTS, "createSlots as _createSlots"),
+        (Self::TO_HANDLERS, "toHandlers as _toHandlers"),
+    ];
 
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -290,163 +203,219 @@ impl VaporImportDependencies {
         if self.is_empty() {
             return String::new();
         }
+        Self::IMPORTS
+            .iter()
+            .filter(|(flag, _)| self.contains(*flag))
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
 
-        let mut imports = Vec::new();
+/// Bitwise flags tracking which `vue/vapor` runtime helpers the compiled Vapor render needs.
+///
+/// Upgraded from `u64` to `u128` — the previous `u64` was at bit 50 with only 13 bits remaining.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VaporImportDependencies(pub u128);
 
-        if self.contains(Self::TEMPLATE) {
-            imports.push("template as _template");
-        }
-        if self.contains(Self::CREATE_TEXT_NODE) {
-            imports.push("createTextNode as _createTextNode");
-        }
-        if self.contains(Self::CREATE_COMMENT) {
-            imports.push("createComment as _createComment");
-        }
-        if self.contains(Self::INSERT) {
-            imports.push("insert as _insert");
-        }
-        if self.contains(Self::PREPEND) {
-            imports.push("prepend as _prepend");
-        }
-        if self.contains(Self::REMOVE) {
-            imports.push("remove as _remove");
-        }
-        if self.contains(Self::SET_TEXT) {
-            imports.push("setText as _setText");
-        }
-        if self.contains(Self::SET_CLASS) {
-            imports.push("setClass as _setClass");
-        }
-        if self.contains(Self::SET_STYLE) {
-            imports.push("setStyle as _setStyle");
-        }
-        if self.contains(Self::SET_ATTR) {
-            imports.push("setAttr as _setAttr");
-        }
-        if self.contains(Self::SET_PROP) {
-            imports.push("setProp as _setProp");
-        }
-        if self.contains(Self::SET_DYNAMIC_PROPS) {
-            imports.push("setDynamicProps as _setDynamicProps");
-        }
-        if self.contains(Self::SET_HTML) {
-            imports.push("setHtml as _setHtml");
-        }
-        if self.contains(Self::SET_REF) {
-            imports.push("setRef as _setRef");
-        }
-        if self.contains(Self::ON) {
-            imports.push("on as _on");
-        }
-        if self.contains(Self::DELEGATE) {
-            imports.push("delegate as _delegate");
-        }
-        if self.contains(Self::DELEGATE_EVENTS) {
-            imports.push("delegateEvents as _delegateEvents");
-        }
-        if self.contains(Self::WITH_MODIFIERS) {
-            imports.push("withModifiers as _withModifiers");
-        }
-        if self.contains(Self::WITH_KEYS) {
-            imports.push("withKeys as _withKeys");
-        }
-        if self.contains(Self::CREATE_IF) {
-            imports.push("createIf as _createIf");
-        }
-        if self.contains(Self::CREATE_FOR) {
-            imports.push("createFor as _createFor");
-        }
-        if self.contains(Self::CREATE_COMPONENT) {
-            imports.push("createComponent as _createComponent");
-        }
-        if self.contains(Self::CREATE_DYNAMIC_COMPONENT) {
-            imports.push("createDynamicComponent as _createDynamicComponent");
-        }
-        if self.contains(Self::CREATE_SLOT) {
-            imports.push("createSlot as _createSlot");
-        }
-        if self.contains(Self::CREATE_FOR_SLOTS) {
-            imports.push("createForSlots as _createForSlots");
-        }
-        if self.contains(Self::RENDER_EFFECT) {
-            imports.push("renderEffect as _renderEffect");
-        }
-        if self.contains(Self::TO_DISPLAY_STRING) {
-            imports.push("toDisplayString as _toDisplayString");
-        }
-        if self.contains(Self::RESOLVE_COMPONENT) {
-            imports.push("resolveComponent as _resolveComponent");
-        }
-        if self.contains(Self::RESOLVE_DIRECTIVE) {
-            imports.push("resolveDirective as _resolveDirective");
-        }
-        if self.contains(Self::WITH_DIRECTIVES) {
-            imports.push("withDirectives as _withDirectives");
-        }
-        if self.contains(Self::NORMALIZE_CLASS) {
-            imports.push("normalizeClass as _normalizeClass");
-        }
-        if self.contains(Self::NORMALIZE_STYLE) {
-            imports.push("normalizeStyle as _normalizeStyle");
-        }
-        if self.contains(Self::TXT) {
-            imports.push("txt as _txt");
-        }
-        if self.contains(Self::CREATE_INVOKER) {
-            imports.push("createInvoker as _createInvoker");
-        }
-        if self.contains(Self::CHILD) {
-            imports.push("child as _child");
-        }
-        if self.contains(Self::NEXT) {
-            imports.push("next as _next");
-        }
-        if self.contains(Self::APPLY_V_SHOW) {
-            imports.push("applyVShow as _applyVShow");
-        }
-        if self.contains(Self::APPLY_TEXT_MODEL) {
-            imports.push("applyTextModel as _applyTextModel");
-        }
-        if self.contains(Self::APPLY_CHECKBOX_MODEL) {
-            imports.push("applyCheckboxModel as _applyCheckboxModel");
-        }
-        if self.contains(Self::APPLY_RADIO_MODEL) {
-            imports.push("applyRadioModel as _applyRadioModel");
-        }
-        if self.contains(Self::APPLY_SELECT_MODEL) {
-            imports.push("applySelectModel as _applySelectModel");
-        }
-        if self.contains(Self::SET_VALUE) {
-            imports.push("setValue as _setValue");
-        }
-        if self.contains(Self::CREATE_TEMPLATE_REF_SETTER) {
-            imports.push("createTemplateRefSetter as _createTemplateRefSetter");
-        }
-        if self.contains(Self::WITH_VAPOR_DIRECTIVES) {
-            imports.push("withVaporDirectives as _withVaporDirectives");
-        }
-        if self.contains(Self::CREATE_COMPONENT_WITH_FALLBACK) {
-            imports.push("createComponentWithFallback as _createComponentWithFallback");
-        }
-        if self.contains(Self::SET_INSERTION_STATE) {
-            imports.push("setInsertionState as _setInsertionState");
-        }
-        if self.contains(Self::WITH_VAPOR_CTX) {
-            imports.push("withVaporCtx as _withVaporCtx");
-        }
-        if self.contains(Self::VAPOR_TELEPORT) {
-            imports.push("VaporTeleport as _VaporTeleport");
-        }
-        if self.contains(Self::VAPOR_TRANSITION) {
-            imports.push("VaporTransition as _VaporTransition");
-        }
-        if self.contains(Self::VAPOR_TRANSITION_GROUP) {
-            imports.push("VaporTransitionGroup as _VaporTransitionGroup");
-        }
-        if self.contains(Self::TO_HANDLERS) {
-            imports.push("toHandlers as _toHandlers");
-        }
+impl VaporImportDependencies {
+    // ── Template & nodes ────────────────────────────────────────────────
+    pub const TEMPLATE: u128 = 1 << 0;
+    pub const CREATE_TEXT_NODE: u128 = 1 << 1;
+    pub const CREATE_COMMENT: u128 = 1 << 2;
 
-        imports.join(",")
+    // ── DOM mutation ────────────────────────────────────────────────────
+    pub const INSERT: u128 = 1 << 3;
+    pub const PREPEND: u128 = 1 << 4;
+    pub const REMOVE: u128 = 1 << 5;
+    pub const SET_TEXT: u128 = 1 << 6;
+    pub const SET_CLASS: u128 = 1 << 7;
+    pub const SET_STYLE: u128 = 1 << 8;
+    pub const SET_ATTR: u128 = 1 << 9;
+    pub const SET_PROP: u128 = 1 << 10;
+    pub const SET_DYNAMIC_PROPS: u128 = 1 << 11;
+    pub const SET_HTML: u128 = 1 << 12;
+    pub const SET_REF: u128 = 1 << 13;
+
+    // ── Events ──────────────────────────────────────────────────────────
+    pub const ON: u128 = 1 << 14;
+    pub const DELEGATE: u128 = 1 << 15;
+    pub const DELEGATE_EVENTS: u128 = 1 << 16;
+    pub const WITH_MODIFIERS: u128 = 1 << 17;
+    pub const WITH_KEYS: u128 = 1 << 18;
+
+    // ── Structural ──────────────────────────────────────────────────────
+    pub const CREATE_IF: u128 = 1 << 19;
+    pub const CREATE_FOR: u128 = 1 << 20;
+    pub const CREATE_COMPONENT: u128 = 1 << 21;
+    pub const CREATE_DYNAMIC_COMPONENT: u128 = 1 << 22;
+    pub const CREATE_SLOT: u128 = 1 << 23;
+    pub const CREATE_FOR_SLOTS: u128 = 1 << 24;
+
+    // ── Reactivity / effects ────────────────────────────────────────────
+    pub const RENDER_EFFECT: u128 = 1 << 25;
+    pub const TO_DISPLAY_STRING: u128 = 1 << 26;
+
+    // ── Resolution ──────────────────────────────────────────────────────
+    pub const RESOLVE_COMPONENT: u128 = 1 << 27;
+    pub const RESOLVE_DIRECTIVE: u128 = 1 << 28;
+    pub const WITH_DIRECTIVES: u128 = 1 << 29;
+
+    // ── Normalize helpers ───────────────────────────────────────────────
+    pub const NORMALIZE_CLASS: u128 = 1 << 30;
+    pub const NORMALIZE_STYLE: u128 = 1 << 31;
+
+    // ── Vue 3.6 vapor helpers ──────────────────────────────────────────
+    pub const TXT: u128 = 1 << 32;
+    pub const CREATE_INVOKER: u128 = 1 << 33;
+    pub const CHILD: u128 = 1 << 34;
+    pub const NEXT: u128 = 1 << 35;
+    pub const APPLY_V_SHOW: u128 = 1 << 36;
+    pub const APPLY_TEXT_MODEL: u128 = 1 << 37;
+    pub const APPLY_CHECKBOX_MODEL: u128 = 1 << 38;
+    pub const APPLY_RADIO_MODEL: u128 = 1 << 39;
+    pub const APPLY_SELECT_MODEL: u128 = 1 << 40;
+    pub const SET_VALUE: u128 = 1 << 41;
+    pub const CREATE_TEMPLATE_REF_SETTER: u128 = 1 << 42;
+    pub const WITH_VAPOR_DIRECTIVES: u128 = 1 << 43;
+
+    // ── Structural (Phase 4+) ──────────────────────────────────────────
+    pub const CREATE_COMPONENT_WITH_FALLBACK: u128 = 1 << 44;
+    pub const SET_INSERTION_STATE: u128 = 1 << 45;
+    pub const WITH_VAPOR_CTX: u128 = 1 << 46;
+    pub const VAPOR_TELEPORT: u128 = 1 << 47;
+    pub const VAPOR_TRANSITION: u128 = 1 << 48;
+    pub const VAPOR_TRANSITION_GROUP: u128 = 1 << 49;
+    pub const TO_HANDLERS: u128 = 1 << 50;
+
+    // Compile-time assertion: highest flag must fit in the backing type.
+    #[allow(dead_code)]
+    const _HIGHEST_BIT_CHECK: () = assert!(Self::TO_HANDLERS <= (1u128 << 127));
+
+    /// (flag, import_string) pairs for data-driven `to_import_string()`.
+    const IMPORTS: &[(u128, &str)] = &[
+        (Self::TEMPLATE, "template as _template"),
+        (Self::CREATE_TEXT_NODE, "createTextNode as _createTextNode"),
+        (Self::CREATE_COMMENT, "createComment as _createComment"),
+        (Self::INSERT, "insert as _insert"),
+        (Self::PREPEND, "prepend as _prepend"),
+        (Self::REMOVE, "remove as _remove"),
+        (Self::SET_TEXT, "setText as _setText"),
+        (Self::SET_CLASS, "setClass as _setClass"),
+        (Self::SET_STYLE, "setStyle as _setStyle"),
+        (Self::SET_ATTR, "setAttr as _setAttr"),
+        (Self::SET_PROP, "setProp as _setProp"),
+        (
+            Self::SET_DYNAMIC_PROPS,
+            "setDynamicProps as _setDynamicProps",
+        ),
+        (Self::SET_HTML, "setHtml as _setHtml"),
+        (Self::SET_REF, "setRef as _setRef"),
+        (Self::ON, "on as _on"),
+        (Self::DELEGATE, "delegate as _delegate"),
+        (Self::DELEGATE_EVENTS, "delegateEvents as _delegateEvents"),
+        (Self::WITH_MODIFIERS, "withModifiers as _withModifiers"),
+        (Self::WITH_KEYS, "withKeys as _withKeys"),
+        (Self::CREATE_IF, "createIf as _createIf"),
+        (Self::CREATE_FOR, "createFor as _createFor"),
+        (
+            Self::CREATE_COMPONENT,
+            "createComponent as _createComponent",
+        ),
+        (
+            Self::CREATE_DYNAMIC_COMPONENT,
+            "createDynamicComponent as _createDynamicComponent",
+        ),
+        (Self::CREATE_SLOT, "createSlot as _createSlot"),
+        (Self::CREATE_FOR_SLOTS, "createForSlots as _createForSlots"),
+        (Self::RENDER_EFFECT, "renderEffect as _renderEffect"),
+        (
+            Self::TO_DISPLAY_STRING,
+            "toDisplayString as _toDisplayString",
+        ),
+        (
+            Self::RESOLVE_COMPONENT,
+            "resolveComponent as _resolveComponent",
+        ),
+        (
+            Self::RESOLVE_DIRECTIVE,
+            "resolveDirective as _resolveDirective",
+        ),
+        (Self::WITH_DIRECTIVES, "withDirectives as _withDirectives"),
+        (Self::NORMALIZE_CLASS, "normalizeClass as _normalizeClass"),
+        (Self::NORMALIZE_STYLE, "normalizeStyle as _normalizeStyle"),
+        (Self::TXT, "txt as _txt"),
+        (Self::CREATE_INVOKER, "createInvoker as _createInvoker"),
+        (Self::CHILD, "child as _child"),
+        (Self::NEXT, "next as _next"),
+        (Self::APPLY_V_SHOW, "applyVShow as _applyVShow"),
+        (Self::APPLY_TEXT_MODEL, "applyTextModel as _applyTextModel"),
+        (
+            Self::APPLY_CHECKBOX_MODEL,
+            "applyCheckboxModel as _applyCheckboxModel",
+        ),
+        (
+            Self::APPLY_RADIO_MODEL,
+            "applyRadioModel as _applyRadioModel",
+        ),
+        (
+            Self::APPLY_SELECT_MODEL,
+            "applySelectModel as _applySelectModel",
+        ),
+        (Self::SET_VALUE, "setValue as _setValue"),
+        (
+            Self::CREATE_TEMPLATE_REF_SETTER,
+            "createTemplateRefSetter as _createTemplateRefSetter",
+        ),
+        (
+            Self::WITH_VAPOR_DIRECTIVES,
+            "withVaporDirectives as _withVaporDirectives",
+        ),
+        (
+            Self::CREATE_COMPONENT_WITH_FALLBACK,
+            "createComponentWithFallback as _createComponentWithFallback",
+        ),
+        (
+            Self::SET_INSERTION_STATE,
+            "setInsertionState as _setInsertionState",
+        ),
+        (Self::WITH_VAPOR_CTX, "withVaporCtx as _withVaporCtx"),
+        (Self::VAPOR_TELEPORT, "VaporTeleport as _VaporTeleport"),
+        (
+            Self::VAPOR_TRANSITION,
+            "VaporTransition as _VaporTransition",
+        ),
+        (
+            Self::VAPOR_TRANSITION_GROUP,
+            "VaporTransitionGroup as _VaporTransitionGroup",
+        ),
+        (Self::TO_HANDLERS, "toHandlers as _toHandlers"),
+    ];
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0 == 0
+    }
+
+    #[inline]
+    pub fn add(&mut self, flag: u128) {
+        self.0 |= flag;
+    }
+
+    #[inline]
+    pub fn contains(&self, flag: u128) -> bool {
+        (self.0 & flag) != 0
+    }
+
+    pub fn to_import_string(&self) -> String {
+        if self.is_empty() {
+            return String::new();
+        }
+        Self::IMPORTS
+            .iter()
+            .filter(|(flag, _)| self.contains(*flag))
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }

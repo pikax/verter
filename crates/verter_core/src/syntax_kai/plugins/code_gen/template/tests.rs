@@ -4167,3 +4167,50 @@ fn test_vapor_vfor_with_many_siblings_node_ref_integrity() {
         code
     );
 }
+
+// =========================================================================
+// Vapor: VaporEffect::Raw node_ref_override — nested effects keep their own ref
+// =========================================================================
+
+// @ai-generated — Vapor: nested child effects inside v-if keep their own node_ref
+#[test]
+fn test_vapor_vif_nested_child_effects_keep_node_ref() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><span v-if="show" :class="cls"><b :title="msg"/></span></template>"#,
+    );
+    // The v-if block creates an inner template node (e.g., n1).
+    // <span>'s _setClass uses inner_ref. <b>'s _setProp uses its own child ref.
+    // The _setProp effect must NOT be overridden with the span's inner_ref.
+    assert!(
+        code.contains("_setClass("),
+        "Should contain _setClass for span, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_setProp("),
+        "Should contain _setProp for b, got:\n{}",
+        code
+    );
+    // Extract node refs from _setClass(nX, ...) and _setProp(nY, ...).
+    let set_class_ref = code.find("_setClass(n").map(|pos| {
+        let start = pos + "_setClass(n".len();
+        let end = code[start..].find(',').map(|i| start + i).unwrap_or(start);
+        &code[start..end]
+    });
+    let set_prop_ref = code.find("_setProp(n").map(|pos| {
+        let start = pos + "_setProp(n".len();
+        let end = code[start..].find(',').map(|i| start + i).unwrap_or(start);
+        &code[start..end]
+    });
+    assert!(
+        set_class_ref.is_some() && set_prop_ref.is_some(),
+        "Both _setClass and _setProp should reference node refs, got:\n{}",
+        code
+    );
+    // They should reference DIFFERENT node refs: span's inner_ref vs b's child ref.
+    assert_ne!(
+        set_class_ref, set_prop_ref,
+        "Nested child effect should have a different node_ref than parent, got:\n{}",
+        code
+    );
+}

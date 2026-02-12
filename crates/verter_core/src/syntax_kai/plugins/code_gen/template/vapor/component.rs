@@ -2,8 +2,8 @@
 
 use crate::syntax_kai::{
     plugin::SyntaxPluginContext,
-    plugins::code_gen::{
-        template::shared::helper::build_prefixed_value, types::VaporImportDependencies,
+    plugins::code_gen::types::{
+        TemplateCodeGenError, TemplateCodeGenResult, VaporImportDependencies,
     },
     types::{OxcCompiledElementStart, PropKind},
 };
@@ -52,9 +52,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     .add(VaporImportDependencies::CREATE_COMPONENT_WITH_FALLBACK);
                 self.imports.add(VaporImportDependencies::WITH_VAPOR_CTX);
                 let comp_var = format!("_component_{}", tag_name.replace('-', "_"));
-                if self.resolved_components_set.insert(tag_name.to_string()) {
-                    self.resolved_components.push(tag_name.to_string());
-                    self.resolved_component_decls.push(format!(
+                if self.resolutions.components_set.insert(tag_name.to_string()) {
+                    self.resolutions.components.push(tag_name.to_string());
+                    self.resolutions.component_decls.push(format!(
                         "const {} = _resolveComponent(\"{}\")",
                         comp_var, tag_name
                     ));
@@ -76,9 +76,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     .add(VaporImportDependencies::CREATE_COMPONENT_WITH_FALLBACK);
                 self.imports.add(VaporImportDependencies::WITH_VAPOR_CTX);
                 let comp_var = format!("_component_{}", tag_name.replace('-', "_"));
-                if self.resolved_components_set.insert(tag_name.to_string()) {
-                    self.resolved_components.push(tag_name.to_string());
-                    self.resolved_component_decls.push(format!(
+                if self.resolutions.components_set.insert(tag_name.to_string()) {
+                    self.resolutions.components.push(tag_name.to_string());
+                    self.resolutions.component_decls.push(format!(
                         "const {} = _resolveComponent(\"{}\")",
                         comp_var, tag_name
                     ));
@@ -107,13 +107,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                                 if let Some(ref exp) = oxc_prop.exp {
                                     let expr_text =
                                         &ctx.input[exp.start as usize..exp.end as usize];
-                                    let prefixed = build_prefixed_value(
-                                        expr_text,
-                                        exp.start,
-                                        &exp.bindings,
-                                        &self.bindings,
-                                        self.is_production,
-                                    );
+                                    let prefixed =
+                                        self.prefix_expr(expr_text, exp.start, &exp.bindings);
                                     if let VaporElementKind::DynamicComponent {
                                         dynamic_is_expr,
                                         ..
@@ -133,9 +128,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 self.imports
                     .add(VaporImportDependencies::CREATE_COMPONENT_WITH_FALLBACK);
                 let comp_var = format!("_component_{}", tag_name.replace('-', "_"));
-                if self.resolved_components_set.insert(tag_name.to_string()) {
-                    self.resolved_components.push(tag_name.to_string());
-                    self.resolved_component_decls.push(format!(
+                if self.resolutions.components_set.insert(tag_name.to_string()) {
+                    self.resolutions.components.push(tag_name.to_string());
+                    self.resolutions.component_decls.push(format!(
                         "const {} = _resolveComponent(\"{}\")",
                         comp_var, tag_name
                     ));
@@ -152,13 +147,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         &mut self,
         state: &mut VaporElementState,
         indent: &str,
-    ) -> String {
+    ) -> TemplateCodeGenResult<String> {
         if state.is_slot_outlet() {
-            return self.build_slot_outlet_call(state);
+            return Ok(self.build_slot_outlet_call(state));
         }
 
         if state.is_dynamic_component() {
-            return self.build_dynamic_component_call(state, indent);
+            return Ok(self.build_dynamic_component_call(state, indent));
         }
 
         let comp_var = if let VaporElementKind::Component {
@@ -182,12 +177,12 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         let props_str = self.build_component_props(state);
 
         // Build slots object.
-        let slots_str = self.build_component_slots(state, indent);
+        let slots_str = self.build_component_slots(state, indent)?;
 
-        format!(
+        Ok(format!(
             "{}({}, {}, {}, true)",
             create_fn, comp_var, props_str, slots_str
-        )
+        ))
     }
 
     /// Build props object for a component call.
@@ -218,17 +213,16 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         &mut self,
         state: &mut VaporElementState,
         indent: &str,
-    ) -> String {
+    ) -> TemplateCodeGenResult<String> {
         if state.kind.slot_children().is_none_or(|sc| sc.is_empty()) {
-            return "null".to_string();
+            return Ok("null".to_string());
         }
 
-        let slots = std::mem::take(
-            state
-                .kind
-                .slot_children_mut()
-                .expect("build_component_slots: kind must have slot_children"),
-        );
+        let slots = std::mem::take(state.kind.slot_children_mut().ok_or(
+            TemplateCodeGenError::MissingScope(
+                "build_component_slots: kind must have slot_children",
+            ),
+        )?);
         let needs_vapor_ctx = matches!(
             state.kind,
             VaporElementKind::Component {
@@ -282,14 +276,14 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         }
 
         if parts.is_empty() {
-            "null".to_string()
+            Ok("null".to_string())
         } else {
-            format!(
+            Ok(format!(
                 "{{\n{}  {}\n{}}}",
                 indent,
                 parts.join(&format!(",\n{}  ", indent)),
                 indent
-            )
+            ))
         }
     }
 
