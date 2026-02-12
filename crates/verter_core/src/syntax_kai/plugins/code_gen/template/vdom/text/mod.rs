@@ -1,7 +1,10 @@
 use crate::{
     code_transform::CodeTransform,
     syntax_kai::{
-        plugin::SyntaxPluginContext, plugins::code_gen::types::TemplateImportDependencies,
+        plugin::SyntaxPluginContext,
+        plugins::code_gen::{
+            template::shared::helper::escape_js_string, types::TemplateImportDependencies,
+        },
         types::Text,
     },
 };
@@ -15,6 +18,8 @@ use super::{ChildInfo, ChildKind, StateStack};
 /// retroactively inserts separators based on the full children list.
 ///
 /// For source like `hello` between elements, this produces `"hello"`.
+/// Text containing special characters (quotes, backslashes, etc.) is escaped
+/// to produce valid JS string literals.
 ///
 /// # Ordering Invariant
 ///
@@ -25,7 +30,7 @@ use super::{ChildInfo, ChildKind, StateStack};
 pub(crate) fn handle_text<'alloc>(
     code_transform: &mut CodeTransform<'alloc>,
     ev: &Text,
-    _ctx: &SyntaxPluginContext<'alloc>,
+    ctx: &SyntaxPluginContext<'alloc>,
     state: &mut StateStack,
     _imports: &mut TemplateImportDependencies,
 ) {
@@ -35,12 +40,22 @@ pub(crate) fn handle_text<'alloc>(
         scope_prefix: String::new(),
     });
 
-    // TODO: handle has_entity (HTML entity decoding) — overwrite with decoded string
-    // For now, add only the closing quote. The opening quote is added by the
-    // close phase as part of the separator insertion (see ChildKind::content_prefix).
-    // This is necessary because prepend_left is FIFO at the same position — if we
-    // prepend `"` here and the close phase later prepends `, `, the quote would
-    // appear first: `", hello"` instead of `, "hello"`.
+    // Escape the text content for use inside a JS string literal.
+    // Characters like `"`, `\`, newlines, etc. must be escaped.
+    let raw_text = &ctx.input[ev.start as usize..ev.end as usize];
+    let escaped = escape_js_string(raw_text);
 
-    code_transform.append_left(ev.end, "\"");
+    if escaped != raw_text {
+        // Text needs escaping — overwrite with escaped version.
+        // The opening quote is added by the close phase via ChildKind::content_prefix().
+        code_transform.overwrite(ev.start, ev.end, &format!("{}\"", escaped));
+    } else {
+        // No escaping needed — just add the closing quote.
+        // The opening quote is added by the close phase as part of the separator
+        // insertion (see ChildKind::content_prefix). This is necessary because
+        // prepend_left is FIFO at the same position — if we prepend `"` here and
+        // the close phase later prepends `, `, the quote would appear first:
+        // `", hello"` instead of `, "hello"`.
+        code_transform.append_left(ev.end, "\"");
+    }
 }

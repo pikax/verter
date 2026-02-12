@@ -648,7 +648,7 @@ fn test_text_in_quotes() {
 /// @ai-generated — Text with quotes gets escaped
 #[test]
 fn test_text_escaped_quotes() {
-    let code = gen(r#"<template><div>say "hello"</div></template>"#);
+    let code = gen_and_validate(r#"<template><div>say "hello"</div></template>"#);
     // The text should escape inner quotes
     assert!(
         code.contains(r#"say \"hello\""#) || code.contains(r#"say "hello""#),
@@ -982,7 +982,7 @@ fn test_comment_only_child() {
 /// @ai-generated — v-if produces ternary with comment fallback
 #[test]
 fn test_v_if_ternary() {
-    let code = gen(r#"<template><div v-if="show">yes</div></template>"#);
+    let code = gen_and_validate(r#"<template><div v-if="show">yes</div></template>"#);
     assert!(
         code.contains("(_ctx.show) ? ("),
         "v-if should produce ternary, got:\n{}",
@@ -998,7 +998,7 @@ fn test_v_if_ternary() {
 /// @ai-generated — v-if/v-else produces both branches
 #[test]
 fn test_v_if_else() {
-    let code = gen(r#"<template><div v-if="show">yes</div><div v-else>no</div></template>"#);
+    let code = gen_and_validate(r#"<template><div v-if="show">yes</div><div v-else>no</div></template>"#);
     assert!(
         code.contains("(_ctx.show) ? ("),
         "Should have v-if ternary, got:\n{}",
@@ -1019,7 +1019,7 @@ fn test_v_if_else() {
 /// @ai-generated — v-if/v-else-if/v-else chain
 #[test]
 fn test_v_if_else_if_else() {
-    let code = gen(
+    let code = gen_and_validate(
         r#"<template><div v-if="a">A</div><div v-else-if="b">B</div><div v-else>C</div></template>"#,
     );
     assert!(
@@ -1037,7 +1037,7 @@ fn test_v_if_else_if_else() {
 /// @ai-generated — v-if with class attribute preserves class
 #[test]
 fn test_v_if_with_class() {
-    let code = gen(r#"<template><div v-if="show" class="foo">hi</div></template>"#);
+    let code = gen_and_validate(r#"<template><div v-if="show" class="foo">hi</div></template>"#);
     assert!(
         code.contains(r#"class: "foo""#),
         "v-if element should preserve class, got:\n{}",
@@ -1048,7 +1048,7 @@ fn test_v_if_with_class() {
 /// @ai-generated — v-if removes directive from props (no v-if="..." in output)
 #[test]
 fn test_v_if_removes_directive() {
-    let code = gen(r#"<template><div v-if="show">yes</div></template>"#);
+    let code = gen_and_validate(r#"<template><div v-if="show">yes</div></template>"#);
     // The v-if directive attribute should be removed from element props
     // (but "v-if" in the comment fallback is expected: _createCommentVNode("v-if", true))
     assert!(
@@ -1088,7 +1088,7 @@ fn test_v_if_key_injection() {
 /// @ai-generated — v-if prod mode uses empty string comment
 #[test]
 fn test_v_if_prod_empty_comment() {
-    let code = gen_prod(r#"<template><div v-if="show">yes</div></template>"#);
+    let code = gen_prod_and_validate(r#"<template><div v-if="show">yes</div></template>"#);
     assert!(
         code.contains(r#"_createCommentVNode("", true)"#),
         "Prod v-if should use empty comment, got:\n{}",
@@ -1103,7 +1103,7 @@ fn test_v_if_prod_empty_comment() {
 /// @ai-generated — v-for produces _renderList with Fragment wrapping
 #[test]
 fn test_v_for_render_list() {
-    let code = gen(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
+    let code = gen_and_validate(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
     assert!(
         code.contains("_renderList("),
         "v-for should produce _renderList, got:\n{}",
@@ -1125,7 +1125,7 @@ fn test_v_for_render_list() {
 #[test]
 fn test_v_for_keyed_fragment() {
     let code =
-        gen(r#"<template><div v-for="item in items" :key="item">{{ item }}</div></template>"#);
+        gen_and_validate(r#"<template><div v-for="item in items" :key="item">{{ item }}</div></template>"#);
     assert!(
         code.contains("128 /* KEYED_FRAGMENT */"),
         "Keyed v-for should use 128 KEYED_FRAGMENT, got:\n{}",
@@ -1136,7 +1136,7 @@ fn test_v_for_keyed_fragment() {
 /// @ai-generated — v-for with index parameter: (item, index) =>
 #[test]
 fn test_v_for_with_index() {
-    let code = gen(
+    let code = gen_and_validate(
         r#"<template><div v-for="(item, index) in items" :key="index">{{ item }}</div></template>"#,
     );
     assert!(
@@ -1154,7 +1154,7 @@ fn test_v_for_with_index() {
 /// @ai-generated — v-for removes directive from output
 #[test]
 fn test_v_for_removes_directive() {
-    let code = gen(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
+    let code = gen_and_validate(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
     assert!(
         !code.contains("v-for"),
         "v-for directive should be removed from output, got:\n{}",
@@ -1165,7 +1165,7 @@ fn test_v_for_removes_directive() {
 /// @ai-generated — Nested v-for produces two _renderList calls
 #[test]
 fn test_v_for_nested() {
-    let code = gen(
+    let code = gen_and_validate(
         r#"<template><div v-for="g in groups"><span v-for="i in g">{{ i }}</span></div></template>"#,
     );
     let count = code.matches("_renderList(").count();
@@ -1582,7 +1582,7 @@ fn test_component_native_not_resolved() {
 /// @ai-generated — Multiple root elements (both are block roots)
 #[test]
 fn test_multiple_roots() {
-    let code = gen(r#"<template><div>a</div><div>b</div></template>"#);
+    let code = gen_and_validate(r#"<template><div>a</div><div>b</div></template>"#);
     let count = code.matches("_createElementBlock").count();
     assert!(
         count >= 2,
@@ -1610,7 +1610,7 @@ fn test_multiple_roots_fragment() {
 /// @ai-generated — Script-only SFC should not panic
 #[test]
 fn test_script_only_no_panic() {
-    let code = gen(r#"<script setup>const x = 1</script>"#);
+    let code = gen_and_validate(r#"<script setup>const x = 1</script>"#);
     assert!(
         code.contains("const x = 1"),
         "Script content should be preserved, got:\n{}",
@@ -1687,7 +1687,7 @@ fn test_sibling_void_elements() {
 /// @ai-generated — Mixed text and element children
 #[test]
 fn test_mixed_text_and_element() {
-    let code = gen(r#"<template><div>text<span>child</span></div></template>"#);
+    let code = gen_and_validate(r#"<template><div>text<span>child</span></div></template>"#);
     assert!(
         code.contains(r#""text""#),
         "Should have text child, got:\n{}",
@@ -1703,7 +1703,7 @@ fn test_mixed_text_and_element() {
 /// @ai-generated — Comment with elements: mixed children
 #[test]
 fn test_comment_with_elements() {
-    let code = gen(r#"<template><div><span>a</span><!-- mid --><span>b</span></div></template>"#);
+    let code = gen_and_validate(r#"<template><div><span>a</span><!-- mid --><span>b</span></div></template>"#);
     assert!(
         code.contains("_createCommentVNode"),
         "Should have comment VNode, got:\n{}",
@@ -1721,7 +1721,7 @@ fn test_comment_with_elements() {
 /// @ai-generated — v-if inside v-for
 #[test]
 fn test_v_if_inside_v_for() {
-    let code = gen(
+    let code = gen_and_validate(
         r#"<template><div v-for="item in items"><span v-if="item.show">{{ item.name }}</span></div></template>"#,
     );
     assert!(
@@ -1900,7 +1900,7 @@ fn test_v_if_with_sibling_elements() {
 /// @ai-generated — v-for items should be block roots
 #[test]
 fn test_v_for_item_is_block_root() {
-    let code = gen(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
+    let code = gen_and_validate(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
     // Inside the renderList callback, the div should use _createElementBlock
     assert!(
         code.contains("_createElementBlock(\"div\""),

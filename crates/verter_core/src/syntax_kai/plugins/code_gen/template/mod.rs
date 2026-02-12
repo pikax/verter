@@ -1,8 +1,9 @@
 //! Template code generation orchestrator.
 //!
 //! This module detects whether the template uses VDOM or Vapor mode and
-//! delegates to the appropriate backend. The mode is determined by the
-//! presence of a `vapor` attribute on `<template vapor>`.
+//! delegates to the appropriate backend via the [`TemplateBackend`] trait.
+//! The mode is determined by the presence of a `vapor` attribute on
+//! `<template vapor>`.
 //!
 //! OxcScript events (carrying bindings) arrive before `CompiledTemplateStart`,
 //! so the orchestrator buffers bindings and passes them to the backend when
@@ -17,7 +18,10 @@ use crate::{
     syntax_kai::{
         binding_types::BindingType,
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxResult},
-        types::Event,
+        types::{
+            Comment, CompiledRootTemplateEnd, CompiledRootTemplateStart, Event,
+            OxcCompiledElementClosed, OxcCompiledElementStart, OxcInterpolation, Text,
+        },
     },
 };
 
@@ -28,11 +32,158 @@ pub(crate) mod vdom;
 use vapor::VaporTemplateGenerator;
 use vdom::VdomTemplateGenerator;
 
-#[allow(clippy::large_enum_variant)]
+/// Shared interface for VDOM and Vapor template code generation backends.
+///
+/// Both backends implement the same set of event handlers. This trait
+/// eliminates duplicated match arms in the orchestrator's `process_event`.
+trait TemplateBackend<'alloc> {
+    fn set_bindings(&mut self, bindings: FxHashMap<&'alloc str, BindingType>);
+    fn is_inside_template(&self) -> bool;
+
+    fn handle_template_start(
+        &mut self,
+        ev: &CompiledRootTemplateStart,
+        ctx: &SyntaxPluginContext<'alloc>,
+    );
+    fn handle_template_closed(
+        &mut self,
+        ev: &CompiledRootTemplateEnd,
+        ctx: &SyntaxPluginContext<'alloc>,
+    );
+    fn handle_element_start(
+        &mut self,
+        ev: &OxcCompiledElementStart<'alloc>,
+        ctx: &SyntaxPluginContext<'alloc>,
+    );
+    fn handle_element_closed(
+        &mut self,
+        ev: &OxcCompiledElementClosed,
+        ctx: &SyntaxPluginContext<'alloc>,
+    );
+    fn handle_comment(&mut self, ev: &Comment, ctx: &SyntaxPluginContext<'alloc>);
+    fn handle_text(&mut self, ev: &Text, ctx: &SyntaxPluginContext<'alloc>);
+    fn handle_interpolation(
+        &mut self,
+        ev: &OxcInterpolation<'alloc>,
+        ctx: &SyntaxPluginContext<'alloc>,
+    );
+}
+
+impl<'alloc> TemplateBackend<'alloc> for VdomTemplateGenerator<'alloc> {
+    fn set_bindings(&mut self, bindings: FxHashMap<&'alloc str, BindingType>) {
+        self.set_bindings(bindings);
+    }
+    fn is_inside_template(&self) -> bool {
+        self.is_inside_template()
+    }
+    fn handle_template_start(
+        &mut self,
+        ev: &CompiledRootTemplateStart,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        self.handle_template_start(ev, ctx);
+    }
+    fn handle_template_closed(
+        &mut self,
+        ev: &CompiledRootTemplateEnd,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        self.handle_template_closed(ev, ctx);
+    }
+    fn handle_element_start(
+        &mut self,
+        ev: &OxcCompiledElementStart<'alloc>,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        self.handle_element_start(ev, ctx);
+    }
+    fn handle_element_closed(
+        &mut self,
+        ev: &OxcCompiledElementClosed,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        self.handle_element_closed(ev, ctx);
+    }
+    fn handle_comment(&mut self, ev: &Comment, ctx: &SyntaxPluginContext<'alloc>) {
+        self.handle_comment(ev, ctx);
+    }
+    fn handle_text(&mut self, ev: &Text, ctx: &SyntaxPluginContext<'alloc>) {
+        self.handle_text(ev, ctx);
+    }
+    fn handle_interpolation(
+        &mut self,
+        ev: &OxcInterpolation<'alloc>,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        self.handle_interpolation(ev, ctx);
+    }
+}
+
+impl<'alloc> TemplateBackend<'alloc> for VaporTemplateGenerator<'alloc> {
+    fn set_bindings(&mut self, bindings: FxHashMap<&'alloc str, BindingType>) {
+        self.set_bindings(bindings);
+    }
+    fn is_inside_template(&self) -> bool {
+        self.is_inside_template()
+    }
+    fn handle_template_start(
+        &mut self,
+        ev: &CompiledRootTemplateStart,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        self.handle_template_start(ev, ctx);
+    }
+    fn handle_template_closed(
+        &mut self,
+        ev: &CompiledRootTemplateEnd,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        self.handle_template_closed(ev, ctx);
+    }
+    fn handle_element_start(
+        &mut self,
+        ev: &OxcCompiledElementStart<'alloc>,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        self.handle_element_start(ev, ctx);
+    }
+    fn handle_element_closed(
+        &mut self,
+        ev: &OxcCompiledElementClosed,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        self.handle_element_closed(ev, ctx);
+    }
+    fn handle_comment(&mut self, ev: &Comment, ctx: &SyntaxPluginContext<'alloc>) {
+        self.handle_comment(ev, ctx);
+    }
+    fn handle_text(&mut self, ev: &Text, ctx: &SyntaxPluginContext<'alloc>) {
+        self.handle_text(ev, ctx);
+    }
+    fn handle_interpolation(
+        &mut self,
+        ev: &OxcInterpolation<'alloc>,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        self.handle_interpolation(ev, ctx);
+    }
+}
+
 enum Backend<'alloc> {
     Uninitialized,
-    Vdom(VdomTemplateGenerator<'alloc>),
-    Vapor(VaporTemplateGenerator<'alloc>),
+    Vdom(Box<VdomTemplateGenerator<'alloc>>),
+    Vapor(Box<VaporTemplateGenerator<'alloc>>),
+}
+
+impl<'alloc> Backend<'alloc> {
+    /// Get a reference to the active backend, or `None` if uninitialized.
+    fn as_backend(&mut self) -> Option<&mut dyn TemplateBackend<'alloc>> {
+        match self {
+            Backend::Vdom(gen) => Some(gen.as_mut()),
+            Backend::Vapor(gen) => Some(gen.as_mut()),
+            Backend::Uninitialized => None,
+        }
+    }
 }
 
 pub struct TemplateGeneratorPlugin<'alloc> {
@@ -74,27 +225,24 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
 
     /// Initialize the appropriate backend based on the vapor flag.
     fn init_backend(&mut self, is_vapor: bool) {
-        let mut gen: Backend<'alloc> = if is_vapor {
-            Backend::Vapor(VaporTemplateGenerator::new(
+        self.backend = if is_vapor {
+            Backend::Vapor(Box::new(VaporTemplateGenerator::new(
                 Rc::clone(&self.code_transform),
                 self.is_production,
-            ))
+            )))
         } else {
-            Backend::Vdom(VdomTemplateGenerator::new(
+            Backend::Vdom(Box::new(VdomTemplateGenerator::new(
                 Rc::clone(&self.code_transform),
                 self.is_production,
-            ))
+            )))
         };
 
-        // Pass buffered bindings to the backend
+        // Pass buffered bindings to the backend.
         let bindings = std::mem::take(&mut self.bindings);
-        match &mut gen {
-            Backend::Vdom(g) => g.set_bindings(bindings),
-            Backend::Vapor(g) => g.set_bindings(bindings),
-            Backend::Uninitialized => unreachable!(),
-        }
-
-        self.backend = gen;
+        self.backend
+            .as_backend()
+            .expect("backend just initialized")
+            .set_bindings(bindings);
     }
 }
 
@@ -122,37 +270,29 @@ impl<'alloc> SyntaxPlugin<'alloc> for TemplateGeneratorPlugin<'alloc> {
             Event::CompiledTemplateStart(ev) => {
                 let is_vapor = ev.vapor.is_some();
                 self.init_backend(is_vapor);
-
-                match &mut self.backend {
-                    Backend::Vdom(gen) => gen.handle_template_start(&ev, ctx),
-                    Backend::Vapor(gen) => gen.handle_template_start(&ev, ctx),
-                    Backend::Uninitialized => unreachable!(),
-                }
+                self.backend
+                    .as_backend()
+                    .expect("backend just initialized")
+                    .handle_template_start(&ev, ctx);
                 SyntaxResult::keep(Event::CompiledTemplateStart(ev))
             }
 
             Event::CompiledTemplateEnd(ev) => {
-                match &mut self.backend {
-                    Backend::Vdom(gen) => gen.handle_template_closed(&ev, ctx),
-                    Backend::Vapor(gen) => gen.handle_template_closed(&ev, ctx),
-                    Backend::Uninitialized => {}
+                if let Some(gen) = self.backend.as_backend() {
+                    gen.handle_template_closed(&ev, ctx);
                 }
                 SyntaxResult::keep(Event::CompiledTemplateEnd(ev))
             }
 
             Event::OxcCompiledElementStart(ev) => {
-                match &mut self.backend {
-                    Backend::Vdom(gen) => gen.handle_element_start(&ev, ctx),
-                    Backend::Vapor(gen) => gen.handle_element_start(&ev, ctx),
-                    Backend::Uninitialized => {}
+                if let Some(gen) = self.backend.as_backend() {
+                    gen.handle_element_start(&ev, ctx);
                 }
                 SyntaxResult::keep(Event::OxcCompiledElementStart(ev))
             }
             Event::OxcCompiledElementClosed(ev) => {
-                match &mut self.backend {
-                    Backend::Vdom(gen) => gen.handle_element_closed(&ev, ctx),
-                    Backend::Vapor(gen) => gen.handle_element_closed(&ev, ctx),
-                    Backend::Uninitialized => {}
+                if let Some(gen) = self.backend.as_backend() {
+                    gen.handle_element_closed(&ev, ctx);
                 }
                 SyntaxResult::keep(Event::OxcCompiledElementClosed(ev))
             }
@@ -161,38 +301,26 @@ impl<'alloc> SyntaxPlugin<'alloc> for TemplateGeneratorPlugin<'alloc> {
             // These can arrive before CompiledTemplateStart or after CompiledTemplateEnd
             // when the stack is empty.
             Event::Comment(ev) => {
-                match &mut self.backend {
-                    Backend::Vdom(gen) if gen.is_inside_template() => {
+                if let Some(gen) = self.backend.as_backend() {
+                    if gen.is_inside_template() {
                         gen.handle_comment(&ev, ctx);
                     }
-                    Backend::Vapor(gen) if gen.is_inside_template() => {
-                        gen.handle_comment(&ev, ctx);
-                    }
-                    _ => {}
                 }
                 SyntaxResult::keep(Event::Comment(ev))
             }
             Event::Text(ev) => {
-                match &mut self.backend {
-                    Backend::Vdom(gen) if gen.is_inside_template() => {
+                if let Some(gen) = self.backend.as_backend() {
+                    if gen.is_inside_template() {
                         gen.handle_text(&ev, ctx);
                     }
-                    Backend::Vapor(gen) if gen.is_inside_template() => {
-                        gen.handle_text(&ev, ctx);
-                    }
-                    _ => {}
                 }
                 SyntaxResult::keep(Event::Text(ev))
             }
             Event::OxcInterpolation(ev) => {
-                match &mut self.backend {
-                    Backend::Vdom(gen) if gen.is_inside_template() => {
+                if let Some(gen) = self.backend.as_backend() {
+                    if gen.is_inside_template() {
                         gen.handle_interpolation(&ev, ctx);
                     }
-                    Backend::Vapor(gen) if gen.is_inside_template() => {
-                        gen.handle_interpolation(&ev, ctx);
-                    }
-                    _ => {}
                 }
                 SyntaxResult::keep(Event::OxcInterpolation(ev))
             }

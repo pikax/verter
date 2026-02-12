@@ -164,8 +164,8 @@ pub(crate) struct StateStack {
     pub runtime_directives: Vec<DirectiveEntry>,
 }
 
-impl StateStack {
-    pub fn new() -> Self {
+impl Default for StateStack {
+    fn default() -> Self {
         Self {
             id: 0,
             children: Vec::new(),
@@ -190,30 +190,18 @@ impl StateStack {
             runtime_directives: Vec::new(),
         }
     }
+}
+
+impl StateStack {
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn create_child(&mut self, element_id: u32) -> Self {
         Self {
             id: element_id,
-            children: Vec::new(),
-            cache_id: None,
-
-            is_component: false,
-            open_tag_start: 0,
-            open_tag_end: 0,
-            patch_flag: PatchFlag::empty(),
-            dynamic_props: Vec::new(),
-            pending_scope_closes: Vec::new(),
-            is_block_root: false,
-            pending_vif_fallbacks: Vec::new(),
-            vif_key_counter: 0,
-            vif_branch_key: None,
             has_all_static_props: true,
-            has_props: false,
-
-            slot_params: None,
-            slot_name: None,
-            slot_is_dynamic: false,
-            runtime_directives: Vec::new(),
+            ..Self::default()
         }
     }
 }

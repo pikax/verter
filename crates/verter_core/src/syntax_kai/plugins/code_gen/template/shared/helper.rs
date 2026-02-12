@@ -100,6 +100,9 @@ pub fn build_prefixed_value(
 }
 
 /// Escape a string for use inside a JavaScript string literal (double-quoted).
+///
+/// Handles backslash, double-quote, common whitespace escapes, null bytes,
+/// and other ASCII control characters (U+0000–U+001F) via `\xNN` notation.
 pub fn escape_js_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -109,6 +112,11 @@ pub fn escape_js_string(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            // Other ASCII control characters → \xNN
+            c if c.is_ascii_control() => {
+                out.push_str(&format!("\\x{:02X}", c as u32));
+            }
             _ => out.push(ch),
         }
     }
@@ -141,6 +149,9 @@ mod tests {
         assert_eq!(escape_js_string("he\"llo"), "he\\\"llo");
         assert_eq!(escape_js_string("a\\b"), "a\\\\b");
         assert_eq!(escape_js_string("a\nb"), "a\\nb");
+        assert_eq!(escape_js_string("a\0b"), "a\\0b");
+        assert_eq!(escape_js_string("a\x01b"), "a\\x01b");
+        assert_eq!(escape_js_string("a\x1Fb"), "a\\x1Fb");
     }
 
     #[test]

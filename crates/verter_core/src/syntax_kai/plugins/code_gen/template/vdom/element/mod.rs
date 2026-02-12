@@ -898,7 +898,7 @@ pub(crate) fn handle_element_open<'alloc>(
 
                     PropKind::OnSpread => {
                         // v-on="handlers" → _toHandlers(expr, true)
-                        // TODO: add TO_HANDLERS to imports when available
+                        imports.add(TemplateImportDependencies::TO_HANDLERS);
                         if let Some(val_span) = prop.event.value {
                             code_transform.overwrite(
                                 prop.event.start,

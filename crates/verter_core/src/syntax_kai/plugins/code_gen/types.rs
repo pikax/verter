@@ -72,6 +72,7 @@ impl TemplateImportDependencies {
     pub const NORMALIZE_STYLE: u32 = 1 << 28;
     pub const V_SHOW: u32 = 1 << 29;
     pub const CREATE_SLOTS: u32 = 1 << 30;
+    pub const TO_HANDLERS: u32 = 1 << 31;
 
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -187,6 +188,9 @@ impl TemplateImportDependencies {
         }
         if self.contains(Self::CREATE_SLOTS) {
             imports.push("createSlots as _createSlots");
+        }
+        if self.contains(Self::TO_HANDLERS) {
+            imports.push("toHandlers as _toHandlers");
         }
 
         imports.join(",")
