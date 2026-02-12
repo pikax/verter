@@ -42,8 +42,8 @@ use crate::{
         binding_types::BindingType,
         plugin::SyntaxPluginContext,
         types::{
-            Comment, CompiledRootTemplateEnd, CompiledRootTemplateStart, OxcCompiledElementClosed,
-            OxcCompiledElementStart, OxcInterpolation, PropKind, Text,
+            Comment, CompiledRootTemplateEnd, CompiledRootTemplateStart, ElementKind, ElementScope,
+            OxcCompiledElementClosed, OxcCompiledElementStart, OxcInterpolation, PropKind, Text,
         },
     },
 };
@@ -51,7 +51,7 @@ use crate::{
 use super::shared::helper::{apply_dynamic_arg_prefix, build_prefixed_value, escape_js_string};
 use crate::syntax_kai::plugins::code_gen::types::VaporImportDependencies;
 
-use types::{VaporElementState, VaporTextPart};
+use types::{VaporElementState, VaporScopeKind, VaporSlotInfo, VaporTextPart, VaporVIfChainState};
 
 /// Events that can be delegated (handled via event delegation at document level).
 const DELEGATABLE_EVENTS: &[&str] = &[
@@ -135,6 +135,24 @@ pub(crate) struct VaporTemplateGenerator<'alloc> {
     resolved_directive_decls: Vec<String>,
 
     inside_template: bool,
+
+    // ── Structural directive state ──────────────────────────────────────
+    /// Resolved component names for `_resolveComponent` declarations (deduped).
+    resolved_components: Vec<String>,
+    /// Resolved component declarations to emit before render function.
+    resolved_component_decls: Vec<String>,
+
+    /// Active v-if chain states. When a v-if element opens, a chain is started.
+    /// When a v-else-if/v-else follows, it extends the chain. When a non-continuation
+    /// sibling appears (or parent closes), the chain is flushed.
+    pending_vif_chains: Vec<VaporVIfChainState>,
+
+    /// Current v-for nesting depth (for `_for_item0`, `_for_item1` naming).
+    for_depth: u32,
+
+    /// Counter for `_slotProps0`, `_slotProps1` naming.
+    #[allow(dead_code)] // Used in future phases for scoped slots
+    slot_props_counter: u32,
 }
 
 impl<'alloc> VaporTemplateGenerator<'alloc> {
@@ -165,6 +183,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             resolved_directives: Vec::new(),
             resolved_directive_decls: Vec::new(),
             inside_template: false,
+            resolved_components: Vec::new(),
+            resolved_component_decls: Vec::new(),
+            pending_vif_chains: Vec::new(),
+            for_depth: 0,
+            slot_props_counter: 0,
         }
     }
 
@@ -439,6 +462,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         ev: &CompiledRootTemplateEnd,
         _ctx: &SyntaxPluginContext<'alloc>,
     ) {
+        // Flush any remaining v-if chains.
+        self.flush_pending_vif_chain();
+
         self.inside_template = false;
         let code_transform = &mut self.code_transform.borrow_mut();
 
@@ -466,16 +492,17 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         };
 
         // Build hoisted template constants.
-        // Single root: `_template("...", true)`. Multi-root: no second arg.
-        let is_single_root = self.root_nodes.len() == 1;
         let mut hoist_str = String::new();
         for (i, html) in self.templates.iter().enumerate() {
             let escaped = escape_js_string(html);
-            let true_arg = if is_single_root { ", true" } else { "" };
-            hoist_str.push_str(&format!(
-                "const t{} = _template(\"{}\"{})\n",
-                i, escaped, true_arg
-            ));
+            hoist_str.push_str(&format!("const t{} = _template(\"{}\")\n", i, escaped));
+        }
+
+        // Build component resolution declarations (hoisted before render function).
+        let mut comp_decl_str = String::new();
+        for decl in &self.resolved_component_decls {
+            comp_decl_str.push_str(decl);
+            comp_decl_str.push('\n');
         }
 
         // Build import line.
@@ -488,8 +515,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             String::new()
         };
 
-        // Emit: imports + hoisted templates + delegateEvents before render function.
-        let preamble = format!("{}{}{}", import_str, hoist_str, delegate_str);
+        // Emit: imports + hoisted templates + component decls + delegateEvents before render function.
+        let preamble = format!(
+            "{}{}{}{}",
+            import_str, hoist_str, comp_decl_str, delegate_str
+        );
         if !preamble.is_empty() {
             code_transform.prepend_left(self.template_start_pos, &preamble);
         }
@@ -537,7 +567,33 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         let tag_name =
             ctx.input[(open_tag.start + 1) as usize..open_tag.name_end as usize].to_string();
 
+        // Detect element kind.
+        let kind = &open_tag.kind;
+        let is_component = kind.is_component();
+        let is_slot_outlet = *kind == ElementKind::SlotOutlet;
+        let is_dynamic_component = *kind == ElementKind::DynamicComponent;
+        let is_template_element = *kind == ElementKind::Template;
+
+        // Detect structural directives from scopes.
+        let is_vif_continuation = ev
+            .scopes
+            .iter()
+            .any(|s| matches!(s, ElementScope::ElseIf(_) | ElementScope::Else(_)));
+        let has_vif = ev.scopes.iter().any(|s| matches!(s, ElementScope::If(_)));
+        let has_vfor = ev.scopes.iter().any(|s| matches!(s, ElementScope::For(_)));
+        let is_structural = has_vif
+            || is_vif_continuation
+            || has_vfor
+            || is_component
+            || is_slot_outlet
+            || is_dynamic_component;
+
         let is_root = self.stack.is_empty();
+
+        // Flush any pending v-if chain if this element is NOT a continuation.
+        if !is_vif_continuation && !is_root {
+            self.flush_pending_vif_chain();
+        }
 
         // If nested, handle parent state before this element.
         if !is_root {
@@ -546,14 +602,16 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 parent.text_child_started = false;
             }
 
-            // Flush parent's pending text_parts to HTML.
-            let parent_is_static = self
-                .stack
-                .last()
-                .map(|s| !s.has_dynamic_children)
-                .unwrap_or(false);
-            if parent_is_static {
-                self.flush_text_parts_to_html();
+            // Flush parent's pending text_parts to HTML (only for non-structural parents).
+            if !is_structural {
+                let parent_is_static = self
+                    .stack
+                    .last()
+                    .map(|s| !s.has_dynamic_children)
+                    .unwrap_or(false);
+                if parent_is_static {
+                    self.flush_text_parts_to_html();
+                }
             }
         }
 
@@ -569,28 +627,62 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             open_tag_end.end,
         );
 
+        state.is_component = is_component;
+        state.is_slot_outlet = is_slot_outlet;
+        state.is_dynamic_component = is_dynamic_component;
+        state.is_template_element = is_template_element;
+
+        // Process structural scopes.
+        self.process_scopes(ev, ctx, &mut state);
+
+        // Detect built-in components and register component resolution.
+        if is_component || is_dynamic_component {
+            self.setup_component(&tag_name, &mut state, ev, ctx);
+        }
+
         if is_root {
             // Root elements get var_name immediately.
             state.var_name = Some(format!("n{}", node_ref));
             // Start fresh HTML buffer.
-            self.current_html.clear();
-            self.pending_close_tags.clear();
-        } else {
-            // Non-root: set child_index and increment parent's child_count.
+            if !is_component && !is_slot_outlet && !is_dynamic_component {
+                self.current_html.clear();
+                self.pending_close_tags.clear();
+            }
+        } else if !is_vif_continuation {
+            // Non-root, non-continuation: set child_index and increment parent's child_count.
             if let Some(parent) = self.stack.last_mut() {
                 state.child_index = parent.child_count;
-                parent.child_count += 1;
+                // Structural children don't count as DOM children for navigation
+                // (they're virtual nodes, not real DOM children).
+                if !is_structural {
+                    parent.child_count += 1;
+                }
             }
         }
 
-        let html_tag = self.build_static_open_tag(&tag_name, ev, ctx);
-        self.append_html(&html_tag);
+        // For structural elements, save the parent's HTML buffer and start fresh.
+        // The structural element's HTML will be built into its own template.
+        if is_structural && !is_component && !is_slot_outlet && !is_dynamic_component {
+            // Save parent HTML state — will be restored when the structural element closes.
+            // For now, just clear the buffer; structural elements get their own template.
+            self.current_html.clear();
+            self.pending_close_tags.clear();
+        }
+
+        // Build HTML for native elements (including those with structural directives).
+        // Components, slot outlets, and dynamic components don't produce HTML.
+        if !is_component && !is_slot_outlet && !is_dynamic_component && !is_template_element {
+            let html_tag = self.build_static_open_tag(&tag_name, ev, ctx);
+            self.append_html(&html_tag);
+        }
 
         // Push state onto stack BEFORE processing props.
         self.stack.push(state);
 
         // Process props: classify static vs dynamic.
-        self.process_props(ev, ctx);
+        if !is_slot_outlet {
+            self.process_props(ev, ctx);
+        }
 
         // Void/self-closing elements: complete immediately.
         if open_tag_end.is_self_closing || open_tag.is_void_element {
@@ -611,12 +703,41 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         &mut self,
         close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
     ) {
+        // Flush any pending v-if chain from children before closing this element,
+        // BUT only if this element is not itself a v-else-if/v-else continuation
+        // (those need to extend the chain, not flush it).
+        let is_continuation = self
+            .stack
+            .last()
+            .and_then(|s| s.scope.as_ref())
+            .map(|s| matches!(s, VaporScopeKind::ElseIf { .. } | VaporScopeKind::Else))
+            .unwrap_or(false);
+        if !is_continuation {
+            self.flush_pending_vif_chain();
+        }
+
         let mut state = self
             .stack
             .pop()
             .expect("Element close without matching open");
 
-        // Handle HTML content and close tag.
+        let is_structural = state.scope.is_some();
+        let is_component = state.is_component || state.is_dynamic_component;
+        let is_slot_outlet = state.is_slot_outlet;
+
+        // Handle structural elements (v-if, v-for).
+        if is_structural {
+            self.complete_structural_element_close(&mut state, close_tag);
+            return;
+        }
+
+        // Handle component elements.
+        if is_component || is_slot_outlet {
+            self.complete_component_element_close(&mut state, close_tag);
+            return;
+        }
+
+        // Handle HTML content and close tag for native elements.
         if state.has_dynamic_children {
             self.append_html(" ");
         } else {
@@ -641,6 +762,201 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             self.complete_root_element_close(&mut state, close_tag);
         } else {
             self.complete_non_root_element_close(&mut state, close_tag);
+        }
+    }
+
+    /// Complete a structural element close (v-if, v-else-if, v-else, v-for).
+    fn complete_structural_element_close(
+        &mut self,
+        state: &mut VaporElementState,
+        close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
+    ) {
+        let scope = state.scope.take().unwrap();
+        let close_end = close_tag.map(|ct| ct.end).unwrap_or(state.open_tag_end);
+
+        match scope {
+            VaporScopeKind::If { condition } => {
+                self.imports.add(VaporImportDependencies::CREATE_IF);
+
+                // Build the block body for this branch.
+                let body = self.build_block_body(state, close_tag, "    ");
+
+                let node_ref = state.node_ref;
+                let code = format!(
+                    "  const n{} = _createIf(() => ({}), () => {{\n{}  }}",
+                    node_ref, condition, body
+                );
+
+                // Start a new v-if chain.
+                self.pending_vif_chains.push(VaporVIfChainState {
+                    node_ref,
+                    branch_index: 0,
+                    code,
+                    open_parens: 1,
+                    chain_start: state.open_tag_start,
+                    chain_end: close_end,
+                    child_index: state.child_index,
+                });
+
+                // Remove source from code_transform.
+                let code_transform = &mut self.code_transform.borrow_mut();
+                code_transform.overwrite(state.open_tag_start, close_end, "");
+            }
+
+            VaporScopeKind::ElseIf { condition } => {
+                self.imports.add(VaporImportDependencies::CREATE_IF);
+
+                // Build the block body for this branch.
+                let body = self.build_block_body(state, close_tag, "    ");
+
+                // Extend the pending v-if chain.
+                if let Some(chain) = self.pending_vif_chains.last_mut() {
+                    chain.branch_index += 1;
+                    // Close the previous _createIf and start a nested one.
+                    chain.code.push_str(&format!(
+                        ", () => _createIf(() => ({}), () => {{\n{}  }}",
+                        condition, body
+                    ));
+                    chain.open_parens += 1;
+                    chain.chain_end = close_end;
+                }
+
+                // Remove source from code_transform.
+                let code_transform = &mut self.code_transform.borrow_mut();
+                code_transform.overwrite(state.open_tag_start, close_end, "");
+            }
+
+            VaporScopeKind::Else => {
+                // Build the block body for this branch.
+                let body = self.build_block_body(state, close_tag, "    ");
+
+                // Extend the pending v-if chain with the else branch.
+                if let Some(chain) = self.pending_vif_chains.last_mut() {
+                    chain.code.push_str(&format!(", () => {{\n{}  }}", body));
+                    chain.chain_end = close_end;
+
+                    // Close all open parens now (chain is complete).
+                    for i in (0..chain.open_parens).rev() {
+                        chain.code.push_str(&format!(", null, {})", i));
+                    }
+                    chain.open_parens = 0;
+
+                    // Flush the chain immediately since it's complete.
+                    let chain = self.pending_vif_chains.pop().unwrap();
+                    let code = chain.code;
+                    let code_with_newline = format!("{}\n", code);
+
+                    let is_root = self.stack.is_empty();
+                    if is_root {
+                        self.root_nodes.push(chain.node_ref);
+                        let code_transform = &mut self.code_transform.borrow_mut();
+                        code_transform.overwrite(
+                            chain.chain_start,
+                            chain.chain_end,
+                            &code_with_newline,
+                        );
+                    } else {
+                        if let Some(parent) = self.stack.last_mut() {
+                            parent.structural_children.push(code_with_newline.clone());
+                        }
+                        let code_transform = &mut self.code_transform.borrow_mut();
+                        code_transform.overwrite(chain.chain_start, chain.chain_end, "");
+                    }
+                }
+
+                // Remove source from code_transform (already handled above for chain).
+                // The chain_start..chain_end overwrite covers this element too.
+            }
+
+            VaporScopeKind::For {
+                iterable,
+                callback_params,
+                original_params: _,
+                key_fn,
+                depth: _,
+            } => {
+                self.imports.add(VaporImportDependencies::CREATE_FOR);
+
+                // Build the block body.
+                let body = self.build_block_body(state, close_tag, "    ");
+
+                let params_str = callback_params.join(", ");
+                let node_ref = state.node_ref;
+
+                let mut code = format!(
+                    "  const n{} = _createFor(() => ({}), ({}) => {{\n{}  }}",
+                    node_ref, iterable, params_str, body
+                );
+
+                // Add key function if present.
+                if let Some(ref kf) = key_fn {
+                    code.push_str(&format!(", {}", kf));
+                }
+
+                code.push_str(")\n");
+
+                // Decrement for_depth.
+                self.for_depth = self.for_depth.saturating_sub(1);
+
+                let is_root = self.stack.is_empty();
+                if is_root {
+                    self.root_nodes.push(node_ref);
+                    let code_transform = &mut self.code_transform.borrow_mut();
+                    code_transform.overwrite(state.open_tag_start, close_end, &code);
+                } else {
+                    if let Some(parent) = self.stack.last_mut() {
+                        parent.structural_children.push(code);
+                    }
+                    let code_transform = &mut self.code_transform.borrow_mut();
+                    code_transform.overwrite(state.open_tag_start, close_end, "");
+                }
+            }
+        }
+    }
+
+    /// Complete a component element close: build component call with slots.
+    fn complete_component_element_close(
+        &mut self,
+        state: &mut VaporElementState,
+        close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
+    ) {
+        let close_end = close_tag.map(|ct| ct.end).unwrap_or(state.open_tag_end);
+
+        // Collect default slot from children if any structural children exist.
+        if !state.structural_children.is_empty() {
+            let mut slot_body = String::new();
+            for child in state.structural_children.drain(..) {
+                slot_body.push_str(&child);
+            }
+            // Check if there's already a default slot.
+            let has_default = state.slot_children.iter().any(|s| s.name == "default");
+            if !has_default && !slot_body.is_empty() {
+                state.slot_children.push(VaporSlotInfo {
+                    name: "default".to_string(),
+                    is_dynamic: false,
+                    dynamic_name_expr: None,
+                    params: None,
+                    body: slot_body,
+                });
+            }
+        }
+
+        // Build the component call.
+        let comp_code = self.build_component_call(state, "  ");
+        let node_ref = state.node_ref;
+        let code = format!("  const n{} = {}\n", node_ref, comp_code);
+
+        let is_root = self.stack.is_empty();
+        if is_root {
+            self.root_nodes.push(node_ref);
+            let code_transform = &mut self.code_transform.borrow_mut();
+            code_transform.overwrite(state.open_tag_start, close_end, &code);
+        } else {
+            if let Some(parent) = self.stack.last_mut() {
+                parent.structural_children.push(code);
+            }
+            let code_transform = &mut self.code_transform.borrow_mut();
+            code_transform.overwrite(state.open_tag_start, close_end, "");
         }
     }
 
@@ -876,6 +1192,574 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         let code_transform = &mut self.code_transform.borrow_mut();
         code_transform.overwrite(ev.start, ev.end, "");
+    }
+
+    // ── Structural directive processing ────────────────────────────────
+
+    /// Process structural directive scopes (v-if, v-else-if, v-else, v-for, v-slot).
+    fn process_scopes(
+        &mut self,
+        ev: &OxcCompiledElementStart<'alloc>,
+        ctx: &SyntaxPluginContext<'alloc>,
+        state: &mut VaporElementState,
+    ) {
+        for scope in &ev.scopes {
+            match scope {
+                ElementScope::If(cond) => {
+                    let condition = if let Some(ref val_span) = cond.event.value {
+                        let raw = &ctx.input[val_span.start as usize..val_span.end as usize];
+                        build_prefixed_value(
+                            raw,
+                            val_span.start,
+                            &cond.bindings,
+                            &self.bindings,
+                            false,
+                        )
+                    } else {
+                        "true".to_string()
+                    };
+                    state.scope = Some(VaporScopeKind::If { condition });
+                }
+                ElementScope::ElseIf(cond) => {
+                    let condition = if let Some(ref val_span) = cond.event.value {
+                        let raw = &ctx.input[val_span.start as usize..val_span.end as usize];
+                        build_prefixed_value(
+                            raw,
+                            val_span.start,
+                            &cond.bindings,
+                            &self.bindings,
+                            false,
+                        )
+                    } else {
+                        "true".to_string()
+                    };
+                    state.scope = Some(VaporScopeKind::ElseIf { condition });
+                }
+                ElementScope::Else(_) => {
+                    state.scope = Some(VaporScopeKind::Else);
+                }
+                ElementScope::For(vfor) => {
+                    // The v-for value span contains the full expression: "item in items"
+                    // We need to extract just the iterable (right side).
+                    // `right_offset()` is already absolute (file-relative).
+                    let val_span = vfor.event.value.as_ref();
+                    let iterable = if let Some(val) = val_span {
+                        let right_offset = vfor.parsed.right_offset();
+                        let iterable_raw = &ctx.input[right_offset as usize..val.end as usize];
+                        // Apply _ctx. prefix to external references manually
+                        // (same approach as VDOM backend).
+                        let mut result_str = iterable_raw.to_string();
+                        let mut refs: Vec<_> = vfor.parsed.references.iter().collect();
+                        refs.sort_by(|a, b| b.start.cmp(&a.start));
+                        for r in refs {
+                            // Only apply to references within the iterable range.
+                            if r.start >= right_offset && r.end <= val.end {
+                                let offset = (r.start - right_offset) as usize;
+                                let name = &ctx.input[r.start as usize..r.end as usize];
+                                let prefix = if let Some(bt) = self.bindings.get(name) {
+                                    bt.accessor_prefix(false)
+                                } else {
+                                    "_ctx."
+                                };
+                                if !prefix.is_empty() {
+                                    result_str.insert_str(offset, prefix);
+                                }
+                            }
+                        }
+                        result_str
+                    } else {
+                        "[]".to_string()
+                    };
+
+                    // Build callback parameter names.
+                    let depth = self.for_depth;
+                    let original_params: Vec<String> = vfor
+                        .parsed
+                        .locals
+                        .iter()
+                        .map(|span| ctx.input[span.start as usize..span.end as usize].to_string())
+                        .collect();
+
+                    let callback_params: Vec<String> = (0..original_params.len().max(1))
+                        .map(|i| match i {
+                            0 => format!("_for_item{}", depth),
+                            1 => format!("_for_key{}", depth),
+                            _ => format!("_for_index{}", depth),
+                        })
+                        .collect();
+
+                    // Extract :key expression if present.
+                    let key_fn = self.extract_key_fn(ev, ctx, &original_params);
+
+                    state.scope = Some(VaporScopeKind::For {
+                        iterable,
+                        callback_params,
+                        original_params,
+                        key_fn,
+                        depth,
+                    });
+                    self.for_depth += 1;
+                }
+                ElementScope::SlotElement(_) | ElementScope::SlotTemplate(_) => {
+                    // Slots are handled during component close.
+                }
+                ElementScope::Once(_) => {
+                    // v-once not yet handled in vapor.
+                }
+            }
+        }
+    }
+
+    /// Extract `:key` expression from element props for v-for key function.
+    fn extract_key_fn(
+        &self,
+        ev: &OxcCompiledElementStart<'alloc>,
+        ctx: &SyntaxPluginContext<'alloc>,
+        original_params: &[String],
+    ) -> Option<String> {
+        for oxc_prop in &ev.props {
+            let prop = &oxc_prop.event;
+            if prop.kind == PropKind::Bind {
+                if let Some(ref arg) = prop.arg {
+                    let attr_name = &ctx.input[arg.start as usize..arg.end as usize];
+                    if attr_name == "key" {
+                        if let Some(ref exp) = oxc_prop.exp {
+                            let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
+                            // The key function uses original param names, not _for_item{N}.
+                            let params_str = original_params.join(", ");
+                            return Some(format!("({}) => ({})", params_str, expr_text));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Set up component resolution and detect built-in components.
+    fn setup_component(
+        &mut self,
+        tag_name: &str,
+        state: &mut VaporElementState,
+        ev: &OxcCompiledElementStart<'alloc>,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        let lower = tag_name.to_lowercase();
+
+        match lower.as_str() {
+            "teleport" => {
+                self.imports.add(VaporImportDependencies::VAPOR_TELEPORT);
+                self.imports.add(VaporImportDependencies::CREATE_COMPONENT);
+                state.component_var = Some("_VaporTeleport".to_string());
+            }
+            "transition" => {
+                self.imports.add(VaporImportDependencies::VAPOR_TRANSITION);
+                self.imports.add(VaporImportDependencies::CREATE_COMPONENT);
+                state.component_var = Some("_VaporTransition".to_string());
+            }
+            "transition-group" | "transitiongroup" => {
+                self.imports
+                    .add(VaporImportDependencies::VAPOR_TRANSITION_GROUP);
+                self.imports.add(VaporImportDependencies::CREATE_COMPONENT);
+                state.component_var = Some("_VaporTransitionGroup".to_string());
+            }
+            "keep-alive" | "keepalive" => {
+                // KeepAlive uses _resolveComponent + _createComponentWithFallback.
+                self.imports.add(VaporImportDependencies::RESOLVE_COMPONENT);
+                self.imports
+                    .add(VaporImportDependencies::CREATE_COMPONENT_WITH_FALLBACK);
+                self.imports.add(VaporImportDependencies::WITH_VAPOR_CTX);
+                let comp_var = format!("_component_{}", tag_name.replace('-', "_"));
+                if !self.resolved_components.contains(&tag_name.to_string()) {
+                    self.resolved_components.push(tag_name.to_string());
+                    self.resolved_component_decls.push(format!(
+                        "const {} = _resolveComponent(\"{}\")",
+                        comp_var, tag_name
+                    ));
+                }
+                state.component_var = Some(comp_var);
+                state.needs_vapor_ctx = true;
+            }
+            "suspense" => {
+                // Suspense uses _resolveComponent + _createComponentWithFallback.
+                self.imports.add(VaporImportDependencies::RESOLVE_COMPONENT);
+                self.imports
+                    .add(VaporImportDependencies::CREATE_COMPONENT_WITH_FALLBACK);
+                self.imports.add(VaporImportDependencies::WITH_VAPOR_CTX);
+                let comp_var = format!("_component_{}", tag_name.replace('-', "_"));
+                if !self.resolved_components.contains(&tag_name.to_string()) {
+                    self.resolved_components.push(tag_name.to_string());
+                    self.resolved_component_decls.push(format!(
+                        "const {} = _resolveComponent(\"{}\")",
+                        comp_var, tag_name
+                    ));
+                }
+                state.component_var = Some(comp_var);
+                state.needs_vapor_ctx = true;
+            }
+            _ if state.is_dynamic_component => {
+                // <component :is="expr"> → _createDynamicComponent
+                self.imports
+                    .add(VaporImportDependencies::CREATE_DYNAMIC_COMPONENT);
+                // Extract :is expression.
+                for oxc_prop in &ev.props {
+                    let prop = &oxc_prop.event;
+                    if prop.kind == PropKind::Bind {
+                        if let Some(ref arg) = prop.arg {
+                            let attr_name = &ctx.input[arg.start as usize..arg.end as usize];
+                            if attr_name == "is" {
+                                if let Some(ref exp) = oxc_prop.exp {
+                                    let expr_text =
+                                        &ctx.input[exp.start as usize..exp.end as usize];
+                                    let prefixed = build_prefixed_value(
+                                        expr_text,
+                                        exp.start,
+                                        &exp.bindings,
+                                        &self.bindings,
+                                        false,
+                                    );
+                                    state.dynamic_is_expr = Some(prefixed);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                // Regular user component.
+                self.imports.add(VaporImportDependencies::RESOLVE_COMPONENT);
+                self.imports
+                    .add(VaporImportDependencies::CREATE_COMPONENT_WITH_FALLBACK);
+                let comp_var = format!("_component_{}", tag_name.replace('-', "_"));
+                if !self.resolved_components.contains(&tag_name.to_string()) {
+                    self.resolved_components.push(tag_name.to_string());
+                    self.resolved_component_decls.push(format!(
+                        "const {} = _resolveComponent(\"{}\")",
+                        comp_var, tag_name
+                    ));
+                }
+                state.component_var = Some(comp_var);
+            }
+        }
+    }
+
+    /// Flush any pending v-if chain (emit the accumulated code).
+    /// Called when a non-continuation sibling appears or when the parent closes.
+    fn flush_pending_vif_chain(&mut self) {
+        if let Some(chain) = self.pending_vif_chains.pop() {
+            let mut code = chain.code;
+
+            // Close all open _createIf parens that haven't been closed by v-else.
+            // Each open paren corresponds to a _createIf( call.
+            // For a simple v-if (no else), open_parens=1, branch_index=0 → just close with `)`
+            // For v-if/v-else-if (no else), open_parens=2, branch_index=1 → close inner then outer
+            if chain.open_parens > 0 {
+                // Close from innermost to outermost.
+                // The innermost _createIf has the highest branch index.
+                for _ in 0..chain.open_parens {
+                    code.push(')');
+                }
+            }
+
+            code.push('\n');
+
+            let is_root = self.stack.is_empty();
+            if is_root {
+                // Root-level v-if: emit as a root node.
+                self.root_nodes.push(chain.node_ref);
+                let code_transform = &mut self.code_transform.borrow_mut();
+                code_transform.overwrite(chain.chain_start, chain.chain_end, &code);
+            } else {
+                // Nested v-if: emit as a structural child of the parent.
+                if let Some(parent) = self.stack.last_mut() {
+                    parent.structural_children.push(code);
+                }
+                let code_transform = &mut self.code_transform.borrow_mut();
+                code_transform.overwrite(chain.chain_start, chain.chain_end, "");
+            }
+        }
+    }
+
+    /// Build a block body for a structural element (v-if branch, v-for iteration, slot).
+    /// This generates the template instantiation, navigation, effects, and return statement
+    /// as a string that can be used inside a block function.
+    ///
+    /// The `state.node_ref` is used for the outer structural directive result (e.g., `_createIf`).
+    /// A new inner node_ref is allocated for the template instantiation inside the block.
+    fn build_block_body(
+        &mut self,
+        state: &mut VaporElementState,
+        _close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
+        indent: &str,
+    ) -> String {
+        let mut body = String::new();
+
+        // Allocate a new node_ref for the inner template node.
+        // The outer `state.node_ref` is used for the structural directive result.
+        let inner_ref = self.next_node_ref();
+
+        if state.is_component || state.is_dynamic_component || state.is_slot_outlet {
+            // Component/slot outlet: build the component call.
+            let comp_code = self.build_component_call(state, indent);
+            body.push_str(&format!("{}const n{} = {}\n", indent, inner_ref, comp_code));
+        } else if state.is_template_element {
+            // <template v-if/v-for>: children are the block body directly.
+            // Structural children from nested v-if/v-for.
+            for child in state.structural_children.drain(..) {
+                body.push_str(&child);
+                body.push('\n');
+            }
+            // For template wrappers, we don't create a template node.
+            return body;
+        } else {
+            // Native element: finalize HTML and create template.
+            // Handle HTML content and close tag.
+            if state.has_dynamic_children {
+                self.append_html(" ");
+            } else {
+                let texts: Vec<String> = state
+                    .text_parts
+                    .drain(..)
+                    .filter_map(|p| match p {
+                        VaporTextPart::Static(s) => Some(s),
+                        VaporTextPart::Dynamic(_) => None,
+                    })
+                    .collect();
+                for text in texts {
+                    self.append_html(&text);
+                }
+            }
+
+            if !state.is_void && !state.is_self_closing {
+                self.push_close_tag(&state.tag_name);
+            }
+
+            let html = self.finalize_html();
+            let template_idx = self.templates.len() as u32;
+            self.templates.push(html);
+            self.imports.add(VaporImportDependencies::TEMPLATE);
+
+            body.push_str(&format!(
+                "{}const n{} = t{}()\n",
+                indent, inner_ref, template_idx
+            ));
+
+            // Text node creation for dynamic text.
+            if state.has_dynamic_children && !state.text_parts.is_empty() {
+                let text_ref = state.text_node_ref.unwrap();
+                self.imports.add(VaporImportDependencies::TXT);
+                body.push_str(&format!(
+                    "{}const x{} = _txt(n{})\n",
+                    indent, text_ref, inner_ref
+                ));
+            }
+
+            // Navigation instructions from nested elements.
+            for nav in self.pending_nav.drain(..) {
+                body.push_str(&nav);
+                body.push('\n');
+            }
+
+            // Text node creations from nested elements.
+            for tc in self.pending_text_creations.drain(..) {
+                body.push_str(&tc);
+                body.push('\n');
+            }
+
+            // Structural children (nested v-if/v-for inside this element).
+            for child in state.structural_children.drain(..) {
+                body.push_str(&child);
+                body.push('\n');
+            }
+        }
+
+        // Effects — rewrite node_ref references from state.node_ref to inner_ref.
+        let mut all_effects = std::mem::take(&mut state.effects);
+        let old_ref = format!("n{}", state.node_ref);
+        let new_ref = format!("n{}", inner_ref);
+        for effect in &mut all_effects {
+            *effect = effect.replace(&old_ref, &new_ref);
+        }
+
+        if state.has_dynamic_children && !state.text_parts.is_empty() {
+            self.imports.add(VaporImportDependencies::SET_TEXT);
+            let text_ref = state.text_node_ref.unwrap();
+            let set_text = build_set_text_call(text_ref, &state.text_parts);
+            all_effects.push(set_text);
+        }
+        all_effects.append(&mut self.pending_nested_effects);
+
+        if !all_effects.is_empty() {
+            self.imports.add(VaporImportDependencies::RENDER_EFFECT);
+            if all_effects.len() == 1 {
+                body.push_str(&format!(
+                    "{}_renderEffect(() => {})\n",
+                    indent, all_effects[0]
+                ));
+            } else {
+                body.push_str(&format!("{}_renderEffect(() => {{\n", indent));
+                for effect in &all_effects {
+                    body.push_str(&format!("{}  {}\n", indent, effect));
+                }
+                body.push_str(&format!("{}}})\n", indent));
+            }
+        }
+
+        // Statements — rewrite node_ref references.
+        let mut all_stmts: Vec<String> = state
+            .statements
+            .drain(..)
+            .map(|s| s.replace(&old_ref, &new_ref))
+            .collect();
+        for stmt in self.pending_nested_statements.drain(..) {
+            all_stmts.push(stmt);
+        }
+        for stmt in &all_stmts {
+            body.push_str(&format!("{}{}\n", indent, stmt));
+        }
+
+        // Return statement.
+        body.push_str(&format!("{}return n{}\n", indent, inner_ref));
+
+        body
+    }
+
+    /// Build a component call expression (without `const n{X} = ` prefix).
+    fn build_component_call(&mut self, state: &mut VaporElementState, indent: &str) -> String {
+        if state.is_slot_outlet {
+            return self.build_slot_outlet_call(state);
+        }
+
+        if state.is_dynamic_component {
+            return self.build_dynamic_component_call(state, indent);
+        }
+
+        let comp_var = state.component_var.as_ref().unwrap().clone();
+
+        // Determine if this uses _createComponent or _createComponentWithFallback.
+        let is_builtin_create = comp_var.starts_with("_Vapor");
+        let create_fn = if is_builtin_create {
+            "_createComponent"
+        } else {
+            "_createComponentWithFallback"
+        };
+
+        // Build props object.
+        let props_str = self.build_component_props(state);
+
+        // Build slots object.
+        let slots_str = self.build_component_slots(state, indent);
+
+        format!(
+            "{}({}, {}, {}, true)",
+            create_fn, comp_var, props_str, slots_str
+        )
+    }
+
+    /// Build props object for a component call.
+    fn build_component_props(&self, state: &VaporElementState) -> String {
+        // Collect effects as reactive props: each effect like `_setProp(n{X}, "attr", expr)`
+        // becomes `attr: () => (expr)` in the props object.
+        // For components, effects are actually prop bindings.
+        if state.effects.is_empty() {
+            return "null".to_string();
+        }
+
+        let mut entries = Vec::new();
+        for effect in &state.effects {
+            // Parse effect strings to extract prop name and value.
+            // Effects for components look like: `_setProp(n{X}, "attr", expr)`
+            if let Some(prop_entry) = parse_effect_as_component_prop(effect) {
+                entries.push(prop_entry);
+            }
+        }
+
+        if entries.is_empty() {
+            "null".to_string()
+        } else {
+            format!("{{ {} }}", entries.join(", "))
+        }
+    }
+
+    /// Build slots object for a component call.
+    fn build_component_slots(&mut self, state: &mut VaporElementState, indent: &str) -> String {
+        if state.slot_children.is_empty() {
+            return "null".to_string();
+        }
+
+        let slots = std::mem::take(&mut state.slot_children);
+        let needs_vapor_ctx = state.needs_vapor_ctx;
+
+        let mut static_slots = Vec::new();
+        let mut dynamic_slots = Vec::new();
+
+        for slot in slots {
+            if slot.is_dynamic {
+                dynamic_slots.push(slot);
+            } else {
+                static_slots.push(slot);
+            }
+        }
+
+        let mut parts = Vec::new();
+
+        for slot in &static_slots {
+            let params = slot.params.as_deref().unwrap_or("");
+            let wrapper_start = if needs_vapor_ctx && slot.name == "default" {
+                format!("_withVaporCtx(({}) => {{\n", params)
+            } else {
+                format!("({}) => {{\n", params)
+            };
+            let wrapper_end = if needs_vapor_ctx && slot.name == "default" {
+                format!("{}}})", indent)
+            } else {
+                format!("{}}}", indent)
+            };
+            parts.push(format!(
+                "\"{}\": {}{}{}",
+                slot.name, wrapper_start, slot.body, wrapper_end
+            ));
+        }
+
+        if !dynamic_slots.is_empty() {
+            let mut dyn_entries = Vec::new();
+            for slot in &dynamic_slots {
+                let name_expr = slot.dynamic_name_expr.as_deref().unwrap_or("\"default\"");
+                let params = slot.params.as_deref().unwrap_or("");
+                dyn_entries.push(format!(
+                    "() => ({{\n{}  name: {},\n{}  fn: ({}) => {{\n{}{}\n{}  }}\n{}}})",
+                    indent, name_expr, indent, params, indent, slot.body, indent, indent
+                ));
+            }
+            parts.push(format!("$: [{}]", dyn_entries.join(", ")));
+        }
+
+        if parts.is_empty() {
+            "null".to_string()
+        } else {
+            format!(
+                "{{\n{}  {}\n{}}}",
+                indent,
+                parts.join(&format!(",\n{}  ", indent)),
+                indent
+            )
+        }
+    }
+
+    /// Build a `_createSlot(...)` call for `<slot>` outlets.
+    fn build_slot_outlet_call(&mut self, _state: &VaporElementState) -> String {
+        self.imports.add(VaporImportDependencies::CREATE_SLOT);
+        let slot_name = "\"default\""; // TODO: extract from name prop
+        format!("_createSlot({}, null)", slot_name)
+    }
+
+    /// Build a `_createDynamicComponent(...)` call.
+    fn build_dynamic_component_call(&self, state: &VaporElementState, _indent: &str) -> String {
+        let is_expr = state.dynamic_is_expr.as_deref().unwrap_or("undefined");
+        format!(
+            "_createDynamicComponent(() => ({}), null, null, true)",
+            is_expr
+        )
     }
 
     // ── Props processing ────────────────────────────────────────────────
@@ -1446,4 +2330,38 @@ fn is_simple_identifier(s: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
+}
+
+/// Parse an effect string like `_setProp(n0, "attr", expr)` or `_setClass(n0, expr)`
+/// into a component prop entry like `attr: () => (expr)`.
+fn parse_effect_as_component_prop(effect: &str) -> Option<String> {
+    // _setProp(n{X}, "attr", expr)
+    if let Some(rest) = effect.strip_prefix("_setProp(") {
+        let rest = rest.strip_suffix(')')?.to_string();
+        // Split: n{X}, "attr", expr
+        let first_comma = rest.find(", ")?;
+        let after_first = &rest[first_comma + 2..];
+        // Find the attr name in quotes.
+        if let Some(stripped) = after_first.strip_prefix('"') {
+            let end_quote = stripped.find('"')?;
+            let attr_name = &stripped[..end_quote];
+            let expr = stripped[end_quote + 3..].to_string(); // skip `", `
+            return Some(format!("{}: () => ({})", attr_name, expr));
+        }
+    }
+    // _setClass(n{X}, expr)
+    if let Some(rest) = effect.strip_prefix("_setClass(") {
+        let rest = rest.strip_suffix(')')?.to_string();
+        let first_comma = rest.find(", ")?;
+        let expr = &rest[first_comma + 2..];
+        return Some(format!("class: () => ({})", expr));
+    }
+    // _setStyle(n{X}, expr)
+    if let Some(rest) = effect.strip_prefix("_setStyle(") {
+        let rest = rest.strip_suffix(')')?.to_string();
+        let first_comma = rest.find(", ")?;
+        let expr = &rest[first_comma + 2..];
+        return Some(format!("style: () => ({})", expr));
+    }
+    None
 }

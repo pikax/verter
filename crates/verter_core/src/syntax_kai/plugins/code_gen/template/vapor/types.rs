@@ -40,6 +40,34 @@ pub(crate) struct VaporElementState {
     /// Whether a text/interpolation child has been started (to coalesce consecutive
     /// text + interpolation into one DOM child node for `child_count`).
     pub text_child_started: bool,
+
+    // ── Structural directive fields ─────────────────────────────────────
+    /// Whether this element is a Vue component (PascalCase, kebab-case component, etc.).
+    pub is_component: bool,
+    /// Whether this is a `<slot>` outlet element.
+    pub is_slot_outlet: bool,
+    /// Whether this is a `<component :is="...">` dynamic component.
+    pub is_dynamic_component: bool,
+    /// Whether this is a `<template>` wrapper element (for `<template v-if>`, etc.).
+    pub is_template_element: bool,
+    /// Resolved component variable name (e.g., `_component_MyComp`).
+    pub component_var: Option<String>,
+    /// The `:is` expression for dynamic components.
+    pub dynamic_is_expr: Option<String>,
+
+    /// Structural directive scope info extracted from `ElementScope` variants.
+    pub scope: Option<VaporScopeKind>,
+
+    /// Collected slot content for component children.
+    /// Key = slot name, Value = slot info.
+    pub slot_children: Vec<VaporSlotInfo>,
+
+    /// Whether this component uses `_withVaporCtx` for its default slot
+    /// (KeepAlive, Suspense).
+    pub needs_vapor_ctx: bool,
+
+    /// Collected structural child output (v-if/v-for blocks) as statements.
+    pub structural_children: Vec<String>,
 }
 
 /// Part of a `_setText` call's arguments.
@@ -48,6 +76,63 @@ pub(crate) enum VaporTextPart {
     Static(String),
     /// Dynamic expression: `_toDisplayString(_ctx.count)`
     Dynamic(String),
+}
+
+/// Structural directive scope kind for an element.
+pub(crate) enum VaporScopeKind {
+    If {
+        condition: String,
+    },
+    ElseIf {
+        condition: String,
+    },
+    Else,
+    For {
+        iterable: String,
+        /// Callback parameter names: `_for_item0`, `_for_key0`, etc.
+        callback_params: Vec<String>,
+        /// Original parameter names from the template (for key function).
+        #[allow(dead_code)] // Used in future phases for v-for local mapping
+        original_params: Vec<String>,
+        /// Key function expression (from `:key` prop), if any.
+        key_fn: Option<String>,
+        /// Nesting depth (0 for outermost v-for).
+        #[allow(dead_code)] // Used in future phases for nested v-for
+        depth: u32,
+    },
+}
+
+/// Info about a slot being collected for a component.
+pub(crate) struct VaporSlotInfo {
+    /// Slot name (e.g., "default", "header").
+    pub name: String,
+    /// Whether the slot name is dynamic (`#[expr]`).
+    pub is_dynamic: bool,
+    /// Dynamic name expression (for `#[expr]`).
+    pub dynamic_name_expr: Option<String>,
+    /// Slot function parameter (e.g., `_slotProps0`), if scoped.
+    pub params: Option<String>,
+    /// The generated body of the slot function.
+    pub body: String,
+}
+
+/// State for tracking a v-if chain across sibling elements.
+pub(crate) struct VaporVIfChainState {
+    /// The node reference for the `_createIf` result.
+    pub node_ref: u32,
+    /// Current branch index (0, 1, 2, ...).
+    pub branch_index: u32,
+    /// Accumulated code for the v-if chain so far.
+    pub code: String,
+    /// Number of unclosed `_createIf(` calls (for closing parens).
+    pub open_parens: u32,
+    /// Source position where the chain started (for code_transform).
+    pub chain_start: u32,
+    /// Source position where the last branch ended.
+    pub chain_end: u32,
+    /// The child_index in the parent where this v-if chain sits.
+    #[allow(dead_code)] // Used in future phases for nested v-if insertion state
+    pub child_index: u32,
 }
 
 impl VaporElementState {
@@ -79,6 +164,16 @@ impl VaporElementState {
             var_name: None,
             last_nav_child_var: None,
             text_child_started: false,
+            is_component: false,
+            is_slot_outlet: false,
+            is_dynamic_component: false,
+            is_template_element: false,
+            component_var: None,
+            dynamic_is_expr: None,
+            scope: None,
+            slot_children: Vec::new(),
+            needs_vapor_ctx: false,
+            structural_children: Vec::new(),
         }
     }
 }

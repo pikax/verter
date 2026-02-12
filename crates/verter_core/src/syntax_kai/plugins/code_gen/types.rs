@@ -258,6 +258,14 @@ impl VaporImportDependencies {
     pub const CREATE_TEMPLATE_REF_SETTER: u64 = 1 << 42;
     pub const WITH_VAPOR_DIRECTIVES: u64 = 1 << 43;
 
+    // ── Structural (Phase 4+) ──────────────────────────────────────────
+    pub const CREATE_COMPONENT_WITH_FALLBACK: u64 = 1 << 44;
+    pub const SET_INSERTION_STATE: u64 = 1 << 45;
+    pub const WITH_VAPOR_CTX: u64 = 1 << 46;
+    pub const VAPOR_TELEPORT: u64 = 1 << 47;
+    pub const VAPOR_TRANSITION: u64 = 1 << 48;
+    pub const VAPOR_TRANSITION_GROUP: u64 = 1 << 49;
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.0 == 0
@@ -411,6 +419,24 @@ impl VaporImportDependencies {
         }
         if self.contains(Self::WITH_VAPOR_DIRECTIVES) {
             imports.push("withVaporDirectives as _withVaporDirectives");
+        }
+        if self.contains(Self::CREATE_COMPONENT_WITH_FALLBACK) {
+            imports.push("createComponentWithFallback as _createComponentWithFallback");
+        }
+        if self.contains(Self::SET_INSERTION_STATE) {
+            imports.push("setInsertionState as _setInsertionState");
+        }
+        if self.contains(Self::WITH_VAPOR_CTX) {
+            imports.push("withVaporCtx as _withVaporCtx");
+        }
+        if self.contains(Self::VAPOR_TELEPORT) {
+            imports.push("VaporTeleport as _VaporTeleport");
+        }
+        if self.contains(Self::VAPOR_TRANSITION) {
+            imports.push("VaporTransition as _VaporTransition");
+        }
+        if self.contains(Self::VAPOR_TRANSITION_GROUP) {
+            imports.push("VaporTransitionGroup as _VaporTransitionGroup");
         }
 
         imports.join(",")

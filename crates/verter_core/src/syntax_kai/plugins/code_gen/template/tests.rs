@@ -3629,3 +3629,265 @@ fn test_vapor_custom_directive() {
         code
     );
 }
+
+// =========================================================================
+// Vapor: v-if / v-else-if / v-else
+// =========================================================================
+
+/// @ai-generated — Vapor: simple v-if produces _createIf
+#[test]
+fn test_vapor_vif_simple() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div v-if="show">yes</div></template>"#);
+    assert!(
+        code.contains("_createIf("),
+        "Should contain _createIf, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_ctx.show"),
+        "Should prefix condition with _ctx, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_template("),
+        "Should hoist template, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-if/v-else produces _createIf with else branch
+#[test]
+fn test_vapor_vif_else() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div v-if="show">yes</div><div v-else>no</div></template>"#,
+    );
+    assert!(
+        code.contains("_createIf("),
+        "Should contain _createIf, got:\n{}",
+        code
+    );
+    // Should have two template hoists (one per branch).
+    let t0_count = code.matches("_template(").count();
+    assert!(
+        t0_count >= 2,
+        "Should have at least 2 _template() calls (one per branch), got {} in:\n{}",
+        t0_count,
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-if/v-else-if/v-else produces nested _createIf
+#[test]
+fn test_vapor_vif_elseif_else() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div v-if="a">A</div><div v-else-if="b">B</div><div v-else>C</div></template>"#,
+    );
+    // Should have nested _createIf calls.
+    let create_if_count = code.matches("_createIf(").count();
+    assert!(
+        create_if_count >= 2,
+        "Should have at least 2 nested _createIf calls, got {} in:\n{}",
+        create_if_count,
+        code
+    );
+    assert!(
+        code.contains("_ctx.a"),
+        "Should prefix first condition, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_ctx.b"),
+        "Should prefix second condition, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-if with script setup bindings
+#[test]
+fn test_vapor_vif_with_setup() {
+    let code = gen_vapor_and_validate(
+        r#"<script setup>const show = ref(true)</script><template vapor><div v-if="show">yes</div></template>"#,
+    );
+    assert!(
+        code.contains("_createIf("),
+        "Should contain _createIf, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Vapor: v-for
+// =========================================================================
+
+/// @ai-generated — Vapor: simple v-for produces _createFor
+#[test]
+fn test_vapor_vfor_simple() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div v-for="item in items">text</div></template>"#,
+    );
+    assert!(
+        code.contains("_createFor("),
+        "Should contain _createFor, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_ctx.items"),
+        "Should prefix iterable with _ctx, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_for_item0"),
+        "Should use _for_item0 callback param, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-for with :key produces key function
+#[test]
+fn test_vapor_vfor_keyed() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div v-for="item in items" :key="item">{{ item }}</div></template>"#,
+    );
+    assert!(
+        code.contains("_createFor("),
+        "Should contain _createFor, got:\n{}",
+        code
+    );
+    // Key function should use original param name.
+    assert!(
+        code.contains("(item) => (item)"),
+        "Should have key function with original param name, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-for with index
+#[test]
+fn test_vapor_vfor_index() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div v-for="(item, index) in items" :key="index">{{ item }}</div></template>"#,
+    );
+    assert!(
+        code.contains("_for_item0"),
+        "Should use _for_item0, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_for_key0"),
+        "Should use _for_key0 for index, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Vapor: Components
+// =========================================================================
+
+/// @ai-generated — Vapor: simple component produces _resolveComponent + _createComponentWithFallback
+#[test]
+fn test_vapor_component_simple() {
+    let code = gen_vapor_and_validate(r#"<template vapor><MyComponent/></template>"#);
+    assert!(
+        code.contains("_resolveComponent(\"MyComponent\")"),
+        "Should resolve component, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createComponentWithFallback("),
+        "Should use _createComponentWithFallback, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: component with dynamic prop
+#[test]
+fn test_vapor_component_props() {
+    let code = gen_vapor_and_validate(r#"<template vapor><MyComp :msg="hello"/></template>"#);
+    assert!(
+        code.contains("_resolveComponent(\"MyComp\")"),
+        "Should resolve component, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createComponentWithFallback("),
+        "Should use _createComponentWithFallback, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("msg:"),
+        "Should have msg prop, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: dynamic component <component :is="comp">
+#[test]
+fn test_vapor_dynamic_component() {
+    let code = gen_vapor_and_validate(r#"<template vapor><component :is="comp"/></template>"#);
+    assert!(
+        code.contains("_createDynamicComponent("),
+        "Should use _createDynamicComponent, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_ctx.comp"),
+        "Should prefix :is expression, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: slot outlet <slot/>
+#[test]
+fn test_vapor_slot_outlet() {
+    let code = gen_vapor_and_validate(r#"<template vapor><slot/></template>"#);
+    assert!(
+        code.contains("_createSlot("),
+        "Should use _createSlot, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("\"default\""),
+        "Should use default slot name, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Vapor: Built-in Components
+// =========================================================================
+
+/// @ai-generated — Vapor: <teleport> uses _createComponent + _VaporTeleport
+#[test]
+fn test_vapor_teleport() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><teleport to="body"><div>modal</div></teleport></template>"#,
+    );
+    assert!(
+        code.contains("_VaporTeleport"),
+        "Should import _VaporTeleport, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createComponent("),
+        "Should use _createComponent for teleport, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: <transition> uses _createComponent + _VaporTransition
+#[test]
+fn test_vapor_transition() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><transition><div v-if="show">content</div></transition></template>"#,
+    );
+    assert!(
+        code.contains("_VaporTransition"),
+        "Should import _VaporTransition, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createComponent("),
+        "Should use _createComponent for transition, got:\n{}",
+        code
+    );
+}

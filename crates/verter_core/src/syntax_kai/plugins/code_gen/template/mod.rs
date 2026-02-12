@@ -28,6 +28,7 @@ pub(crate) mod vdom;
 use vapor::VaporTemplateGenerator;
 use vdom::VdomTemplateGenerator;
 
+#[allow(clippy::large_enum_variant)]
 enum Backend<'alloc> {
     Uninitialized,
     Vdom(VdomTemplateGenerator<'alloc>),
