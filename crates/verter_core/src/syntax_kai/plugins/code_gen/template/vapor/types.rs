@@ -68,6 +68,19 @@ pub(crate) struct VaporElementState {
 
     /// Collected structural child output (v-if/v-for blocks) as statements.
     pub structural_children: Vec<String>,
+
+    /// Active v-for variable mappings: original name → `_for_item{N}.value`.
+    /// Inherited from parent + own v-for scope.
+    pub for_var_mappings: Vec<(String, String)>,
+
+    /// Slot name for `<template #name>` children of components.
+    pub slot_name: Option<String>,
+    /// Whether the slot name is dynamic (`#[expr]`).
+    pub slot_name_is_dynamic: bool,
+    /// Dynamic slot name expression.
+    pub slot_dynamic_name_expr: Option<String>,
+    /// Slot params string for scoped slots (e.g., `_slotProps0`).
+    pub slot_params: Option<String>,
 }
 
 /// Part of a `_setText` call's arguments.
@@ -92,12 +105,11 @@ pub(crate) enum VaporScopeKind {
         /// Callback parameter names: `_for_item0`, `_for_key0`, etc.
         callback_params: Vec<String>,
         /// Original parameter names from the template (for key function).
-        #[allow(dead_code)] // Used in future phases for v-for local mapping
         original_params: Vec<String>,
         /// Key function expression (from `:key` prop), if any.
         key_fn: Option<String>,
         /// Nesting depth (0 for outermost v-for).
-        #[allow(dead_code)] // Used in future phases for nested v-for
+        #[allow(dead_code)]
         depth: u32,
     },
 }
@@ -174,6 +186,11 @@ impl VaporElementState {
             slot_children: Vec::new(),
             needs_vapor_ctx: false,
             structural_children: Vec::new(),
+            for_var_mappings: Vec::new(),
+            slot_name: None,
+            slot_name_is_dynamic: false,
+            slot_dynamic_name_expr: None,
+            slot_params: None,
         }
     }
 }

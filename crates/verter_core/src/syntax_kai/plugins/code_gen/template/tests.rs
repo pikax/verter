@@ -3891,3 +3891,159 @@ fn test_vapor_transition() {
         code
     );
 }
+
+// =========================================================================
+// Vapor: v-for variable mapping
+// =========================================================================
+
+/// @ai-generated — Vapor: v-for interpolation maps `item` to `_for_item0.value`
+#[test]
+fn test_vapor_vfor_interpolation_mapping() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div v-for="item in items">{{ item }}</div></template>"#,
+    );
+    assert!(
+        code.contains("_for_item0.value"),
+        "Should map `item` to `_for_item0.value` in interpolation, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_toDisplayString(_for_item0.value)"),
+        "Should wrap in _toDisplayString, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-for with index maps both item and index
+#[test]
+fn test_vapor_vfor_index_mapping() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div v-for="(item, index) in items">{{ index }}: {{ item }}</div></template>"#,
+    );
+    assert!(
+        code.contains("_for_item0.value"),
+        "Should map `item` to `_for_item0.value`, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_for_key0.value"),
+        "Should map `index` to `_for_key0.value`, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Vapor: _setInsertionState for nested structural directives
+// =========================================================================
+
+/// @ai-generated — Vapor: nested v-if inside element emits _setInsertionState
+#[test]
+fn test_vapor_nested_vif_insertion_state() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div><span v-if="show">inner</span></div></template>"#,
+    );
+    assert!(
+        code.contains("_setInsertionState("),
+        "Should emit _setInsertionState for nested v-if, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createIf("),
+        "Should contain _createIf, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: nested v-for inside element emits _setInsertionState
+#[test]
+fn test_vapor_nested_vfor_insertion_state() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div><span v-for="item in items">text</span></div></template>"#,
+    );
+    assert!(
+        code.contains("_setInsertionState("),
+        "Should emit _setInsertionState for nested v-for, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createFor("),
+        "Should contain _createFor, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Vapor: Named slots
+// =========================================================================
+
+/// @ai-generated — Vapor: component with named slot via <template #header>
+#[test]
+fn test_vapor_component_named_slot() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><MyComp><template #header><div>Header</div></template></MyComp></template>"#,
+    );
+    assert!(
+        code.contains("\"header\""),
+        "Should have 'header' slot name, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createComponentWithFallback("),
+        "Should use _createComponentWithFallback, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: component with default slot content
+#[test]
+fn test_vapor_component_default_slot_content() {
+    let code =
+        gen_vapor_and_validate(r#"<template vapor><MyComp><div>content</div></MyComp></template>"#);
+    assert!(
+        code.contains("\"default\""),
+        "Should have 'default' slot, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Vapor: Scoped slots
+// =========================================================================
+
+/// @ai-generated — Vapor: scoped slot with v-slot="{ item }" uses _slotProps0
+#[test]
+fn test_vapor_scoped_slot() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><MyComp v-slot="{ item }"><div>{{ item }}</div></MyComp></template>"#,
+    );
+    assert!(
+        code.contains("_slotProps0"),
+        "Should use _slotProps0 for scoped slot, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_slotProps0.item"),
+        "Should access slot prop as _slotProps0.item, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Vapor: <slot> outlet with name/props
+// =========================================================================
+
+/// @ai-generated — Vapor: <slot name="header"/> uses named slot
+#[test]
+fn test_vapor_slot_outlet_named() {
+    let code = gen_vapor_and_validate(r#"<template vapor><slot name="header"/></template>"#);
+    assert!(
+        code.contains("_createSlot("),
+        "Should use _createSlot, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("\"header\""),
+        "Should use 'header' slot name, got:\n{}",
+        code
+    );
+}

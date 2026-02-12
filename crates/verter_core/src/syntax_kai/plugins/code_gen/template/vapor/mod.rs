@@ -151,7 +151,6 @@ pub(crate) struct VaporTemplateGenerator<'alloc> {
     for_depth: u32,
 
     /// Counter for `_slotProps0`, `_slotProps1` naming.
-    #[allow(dead_code)] // Used in future phases for scoped slots
     slot_props_counter: u32,
 }
 
@@ -632,8 +631,29 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         state.is_dynamic_component = is_dynamic_component;
         state.is_template_element = is_template_element;
 
-        // Process structural scopes.
+        // Inherit v-for variable mappings from parent.
+        if let Some(parent) = self.stack.last() {
+            state.for_var_mappings = parent.for_var_mappings.clone();
+        }
+
+        // Process structural scopes (may add own v-for/v-slot mappings).
         self.process_scopes(ev, ctx, &mut state);
+
+        // If this element has a v-for scope, add its variable mappings.
+        if let Some(VaporScopeKind::For {
+            ref callback_params,
+            ref original_params,
+            ..
+        }) = state.scope
+        {
+            for (i, orig) in original_params.iter().enumerate() {
+                if let Some(cb_param) = callback_params.get(i) {
+                    state
+                        .for_var_mappings
+                        .push((orig.clone(), format!("{}.value", cb_param)));
+                }
+            }
+        }
 
         // Detect built-in components and register component resolution.
         if is_component || is_dynamic_component {
@@ -680,8 +700,15 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         self.stack.push(state);
 
         // Process props: classify static vs dynamic.
-        if !is_slot_outlet {
-            self.process_props(ev, ctx);
+        // For slot outlets, we process props to extract name and slot props.
+        self.process_props(ev, ctx);
+
+        // For slot outlets, extract static `name` attribute.
+        if is_slot_outlet {
+            let name = Self::find_static_attr_value("name", ev, ctx);
+            if let Some(name) = name {
+                self.stack.last_mut().unwrap().slot_name = Some(name);
+            }
         }
 
         // Void/self-closing elements: complete immediately.
@@ -737,6 +764,12 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             return;
         }
 
+        // Handle <template #name> children of components → collect as named slot.
+        if state.is_template_element && state.slot_name.is_some() {
+            self.complete_slot_template_close(&mut state, close_tag);
+            return;
+        }
+
         // Handle HTML content and close tag for native elements.
         if state.has_dynamic_children {
             self.append_html(" ");
@@ -765,6 +798,42 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         }
     }
 
+    /// Build a `_setInsertionState(parentVar, null, childIndex, true)` call
+    /// if this structural element is nested inside a native element.
+    fn build_insertion_state(&mut self, state: &VaporElementState) -> String {
+        // Only emit for non-root structural elements inside native elements.
+        if state.is_root || self.stack.is_empty() {
+            return String::new();
+        }
+        let parent = self.stack.last().unwrap();
+        // Don't emit for children of components (they become slots).
+        if parent.is_component || parent.is_dynamic_component || parent.is_slot_outlet {
+            return String::new();
+        }
+
+        // Ensure parent has a var_name for navigation.
+        let parent_var = if let Some(ref v) = parent.var_name {
+            v.clone()
+        } else if parent.is_root {
+            format!("n{}", parent.node_ref)
+        } else {
+            // Non-root parent without var_name — need to ensure ancestors have var_names.
+            self.ensure_ancestor_var_names();
+            if let Some(ref v) = self.stack.last().unwrap().var_name {
+                v.clone()
+            } else {
+                return String::new();
+            }
+        };
+
+        self.imports
+            .add(VaporImportDependencies::SET_INSERTION_STATE);
+        format!(
+            "  _setInsertionState({}, null, {}, true)\n",
+            parent_var, state.child_index
+        )
+    }
+
     /// Complete a structural element close (v-if, v-else-if, v-else, v-for).
     fn complete_structural_element_close(
         &mut self,
@@ -778,13 +847,16 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             VaporScopeKind::If { condition } => {
                 self.imports.add(VaporImportDependencies::CREATE_IF);
 
+                // Emit _setInsertionState for nested v-if inside native elements.
+                let insertion_state = self.build_insertion_state(state);
+
                 // Build the block body for this branch.
                 let body = self.build_block_body(state, close_tag, "    ");
 
                 let node_ref = state.node_ref;
                 let code = format!(
-                    "  const n{} = _createIf(() => ({}), () => {{\n{}  }}",
-                    node_ref, condition, body
+                    "{}  const n{} = _createIf(() => ({}), () => {{\n{}  }}",
+                    insertion_state, node_ref, condition, body
                 );
 
                 // Start a new v-if chain.
@@ -877,6 +949,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             } => {
                 self.imports.add(VaporImportDependencies::CREATE_FOR);
 
+                // Emit _setInsertionState for nested v-for inside native elements.
+                let insertion_state = self.build_insertion_state(state);
+
                 // Build the block body.
                 let body = self.build_block_body(state, close_tag, "    ");
 
@@ -884,8 +959,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 let node_ref = state.node_ref;
 
                 let mut code = format!(
-                    "  const n{} = _createFor(() => ({}), ({}) => {{\n{}  }}",
-                    node_ref, iterable, params_str, body
+                    "{}  const n{} = _createFor(() => ({}), ({}) => {{\n{}  }}",
+                    insertion_state, node_ref, iterable, params_str, body
                 );
 
                 // Add key function if present.
@@ -960,6 +1035,72 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         }
     }
 
+    /// Complete a native element child of a component: build as slot content block.
+    fn complete_component_child_close(
+        &mut self,
+        state: &mut VaporElementState,
+        close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
+    ) {
+        let close_end = close_tag.map(|ct| ct.end).unwrap_or(state.open_tag_end);
+
+        // Build a block body for this element (it becomes slot content).
+        let body = self.build_block_body(state, close_tag, "    ");
+        let code = body;
+
+        // Add to parent's structural_children (will be collected as default slot).
+        if let Some(parent) = self.stack.last_mut() {
+            parent.structural_children.push(code);
+        }
+
+        // Remove source from code_transform.
+        let code_transform = &mut self.code_transform.borrow_mut();
+        code_transform.overwrite(state.open_tag_start, close_end, "");
+    }
+
+    /// Complete a `<template #name>` close: collect as a named slot on the parent component.
+    fn complete_slot_template_close(
+        &mut self,
+        state: &mut VaporElementState,
+        close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
+    ) {
+        let close_end = close_tag.map(|ct| ct.end).unwrap_or(state.open_tag_end);
+        let slot_name = state
+            .slot_name
+            .take()
+            .unwrap_or_else(|| "default".to_string());
+        let is_dynamic = state.slot_name_is_dynamic;
+        let dynamic_name_expr = state.slot_dynamic_name_expr.take();
+        let slot_params = state.slot_params.take();
+
+        // Build the slot body from structural children.
+        let mut slot_body = String::new();
+        for child in state.structural_children.drain(..) {
+            slot_body.push_str(&child);
+        }
+
+        // If there are no structural children but there are text parts, build a block body.
+        if slot_body.is_empty() {
+            // Build a block body for the template content.
+            let body = self.build_block_body(state, close_tag, "    ");
+            slot_body = body;
+        }
+
+        // Add this slot to the parent component's slot_children.
+        if let Some(parent) = self.stack.last_mut() {
+            parent.slot_children.push(VaporSlotInfo {
+                name: slot_name,
+                is_dynamic,
+                dynamic_name_expr,
+                params: slot_params,
+                body: slot_body,
+            });
+        }
+
+        // Remove source from code_transform.
+        let code_transform = &mut self.code_transform.borrow_mut();
+        code_transform.overwrite(state.open_tag_start, close_end, "");
+    }
+
     /// Complete a root element close: finalize HTML, emit template + navigation + effects.
     fn complete_root_element_close(
         &mut self,
@@ -1024,6 +1165,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             }
         }
 
+        // Emit structural children (nested v-if/v-for blocks).
+        for child in state.structural_children.drain(..) {
+            close_code.push_str(&child);
+        }
+
         // Collect all statements: root's own + nested.
         for stmt in &state.statements {
             close_code.push_str(&format!("  {}\n", stmt));
@@ -1063,6 +1209,16 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         state: &mut VaporElementState,
         close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
     ) {
+        // If parent is a component, build this element as a slot content block.
+        let parent_is_component = self
+            .stack
+            .last()
+            .map(|p| p.is_component || p.is_dynamic_component)
+            .unwrap_or(false);
+        if parent_is_component {
+            self.complete_component_child_close(state, close_tag);
+            return;
+        }
         let has_own_dynamic = !state.effects.is_empty()
             || !state.statements.is_empty()
             || (state.has_dynamic_children && !state.text_parts.is_empty());
@@ -1108,6 +1264,15 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             }
             for stmt in state.statements.drain(..) {
                 self.pending_nested_statements.push(stmt);
+            }
+        }
+
+        // Pass structural children up to the parent.
+        if !state.structural_children.is_empty() {
+            if let Some(parent) = self.stack.last_mut() {
+                for child in state.structural_children.drain(..) {
+                    parent.structural_children.push(child);
+                }
             }
         }
 
@@ -1157,13 +1322,18 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         let trimmed_start = ev.content.start + leading_ws as u32;
         let trimmed_end = ev.content.end - trailing_ws as u32;
         let expr_text = &_ctx.input[trimmed_start as usize..trimmed_end as usize];
-        let prefixed = build_prefixed_value(
+        let mut prefixed = build_prefixed_value(
             expr_text,
             trimmed_start,
             &ev.bindings,
             &self.bindings,
             false,
         );
+
+        // Apply v-for / v-slot variable mappings (e.g., `item` → `_for_item0.value`).
+        if let Some(state) = self.stack.last() {
+            prefixed = apply_var_mappings(&prefixed, &state.for_var_mappings);
+        }
 
         self.imports.add(VaporImportDependencies::TO_DISPLAY_STRING);
         let display_expr = format!("_toDisplayString({})", prefixed);
@@ -1300,8 +1470,81 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     });
                     self.for_depth += 1;
                 }
-                ElementScope::SlotElement(_) | ElementScope::SlotTemplate(_) => {
-                    // Slots are handled during component close.
+                ElementScope::SlotElement(slot) => {
+                    // v-slot on a component element itself: <MyComp v-slot="{ item }">
+                    let slot_name = if let Some(ref arg) = slot.event.arg {
+                        let name = &ctx.input[arg.start as usize..arg.end as usize];
+                        name.to_string()
+                    } else {
+                        "default".to_string()
+                    };
+                    state.slot_name = Some(slot_name);
+                    state.slot_name_is_dynamic = slot.event.has_dynamic_arg;
+                    if slot.event.has_dynamic_arg {
+                        if let Some(ref arg) = slot.event.arg {
+                            let name_expr = &ctx.input[arg.start as usize..arg.end as usize];
+                            let prefixed = build_prefixed_value(
+                                name_expr,
+                                arg.start,
+                                &None,
+                                &self.bindings,
+                                false,
+                            );
+                            state.slot_dynamic_name_expr = Some(prefixed);
+                        }
+                    }
+                    // Set up scoped slot params if the slot has params.
+                    if !slot.parsed.locals.is_empty() {
+                        let slot_props_var = format!("_slotProps{}", self.slot_props_counter);
+                        self.slot_props_counter += 1;
+                        state.slot_params = Some(slot_props_var.clone());
+                        // Build for_var_mappings for slot params:
+                        // each local like `item` maps to `_slotProps0.item`
+                        for local_span in &slot.parsed.locals {
+                            let local_name = ctx.input
+                                [local_span.start as usize..local_span.end as usize]
+                                .to_string();
+                            let mapped = format!("{}.{}", slot_props_var, local_name);
+                            state.for_var_mappings.push((local_name, mapped));
+                        }
+                    }
+                }
+                ElementScope::SlotTemplate(slot) => {
+                    // v-slot on a <template> child: <template #header="{ item }">
+                    let slot_name = if let Some(ref arg) = slot.event.arg {
+                        let name = &ctx.input[arg.start as usize..arg.end as usize];
+                        name.to_string()
+                    } else {
+                        "default".to_string()
+                    };
+                    state.slot_name = Some(slot_name);
+                    state.slot_name_is_dynamic = slot.event.has_dynamic_arg;
+                    if slot.event.has_dynamic_arg {
+                        if let Some(ref arg) = slot.event.arg {
+                            let name_expr = &ctx.input[arg.start as usize..arg.end as usize];
+                            let prefixed = build_prefixed_value(
+                                name_expr,
+                                arg.start,
+                                &None,
+                                &self.bindings,
+                                false,
+                            );
+                            state.slot_dynamic_name_expr = Some(prefixed);
+                        }
+                    }
+                    // Set up scoped slot params.
+                    if !slot.parsed.locals.is_empty() {
+                        let slot_props_var = format!("_slotProps{}", self.slot_props_counter);
+                        self.slot_props_counter += 1;
+                        state.slot_params = Some(slot_props_var.clone());
+                        for local_span in &slot.parsed.locals {
+                            let local_name = ctx.input
+                                [local_span.start as usize..local_span.end as usize]
+                                .to_string();
+                            let mapped = format!("{}.{}", slot_props_var, local_name);
+                            state.for_var_mappings.push((local_name, mapped));
+                        }
+                    }
                 }
                 ElementScope::Once(_) => {
                     // v-once not yet handled in vapor.
@@ -1747,10 +1990,54 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
     }
 
     /// Build a `_createSlot(...)` call for `<slot>` outlets.
-    fn build_slot_outlet_call(&mut self, _state: &VaporElementState) -> String {
+    fn build_slot_outlet_call(&mut self, state: &VaporElementState) -> String {
         self.imports.add(VaporImportDependencies::CREATE_SLOT);
-        let slot_name = "\"default\""; // TODO: extract from name prop
-        format!("_createSlot({}, null)", slot_name)
+
+        // Extract slot name from the `name` static attribute or `:name` binding.
+        let mut slot_name = "\"default\"".to_string();
+        let mut slot_props: Vec<String> = Vec::new();
+
+        for effect in &state.effects {
+            // Check for _setProp(n{X}, "name", expr) → dynamic slot name
+            if let Some(prop_entry) = parse_effect_as_component_prop(effect) {
+                if prop_entry.starts_with("name:") {
+                    // Extract the expression from `name: () => (expr)`
+                    if let Some(expr) = prop_entry.strip_prefix("name: () => (") {
+                        if let Some(expr) = expr.strip_suffix(')') {
+                            slot_name = expr.to_string();
+                        }
+                    }
+                } else {
+                    slot_props.push(prop_entry);
+                }
+            }
+        }
+
+        // Check static attributes for name="..."
+        // The name is stored in slot_name field if set via process_scopes,
+        // but for <slot name="header">, it's a static prop in the HTML.
+        // We need to check the tag_name context — for slot outlets,
+        // the static `name` attribute was already baked into HTML (but shouldn't be).
+        // Actually, for <slot>, we skip HTML building, so static props aren't in HTML.
+        // We need to check statements for static name.
+        if slot_name == "\"default\"" {
+            // Check if there's a static name in the statements (from Value prop processing).
+            // Actually, static `name` on <slot> is handled differently — it's a Prop::Value
+            // that we need to extract. But since we skip process_props for slot outlets,
+            // we need to handle it here. Let's check the state's tag_name context.
+            // For now, the slot_name from the slot_name field takes precedence.
+            if let Some(ref sn) = state.slot_name {
+                slot_name = format!("\"{}\"", sn);
+            }
+        }
+
+        let props_str = if slot_props.is_empty() {
+            "null".to_string()
+        } else {
+            format!("{{ {} }}", slot_props.join(", "))
+        };
+
+        format!("_createSlot({}, {})", slot_name, props_str)
     }
 
     /// Build a `_createDynamicComponent(...)` call.
@@ -2330,6 +2617,54 @@ fn is_simple_identifier(s: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$' || c == '.')
+}
+
+/// Apply v-for / v-slot variable mappings to an expression string.
+/// Replaces standalone occurrences of original variable names with their mapped values.
+/// E.g., `item` → `_for_item0.value`, `data` → `_slotProps0.data`.
+fn apply_var_mappings(expr: &str, mappings: &[(String, String)]) -> String {
+    if mappings.is_empty() {
+        return expr.to_string();
+    }
+    let mut result = expr.to_string();
+    // Apply mappings in reverse order of name length (longest first) to avoid
+    // partial replacements (e.g., `item` matching inside `itemCount`).
+    let mut sorted: Vec<&(String, String)> = mappings.iter().collect();
+    sorted.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    for (orig, mapped) in sorted {
+        // Replace whole-word occurrences only.
+        // Use a simple boundary check: the char before/after must not be alphanumeric or _.
+        let mut new_result = String::new();
+        let mut remaining = result.as_str();
+        while let Some(pos) = remaining.find(orig.as_str()) {
+            // Check left boundary.
+            let left_ok = if pos == 0 {
+                true
+            } else {
+                let prev = remaining.as_bytes()[pos - 1];
+                !prev.is_ascii_alphanumeric() && prev != b'_' && prev != b'$' && prev != b'.'
+            };
+            // Check right boundary.
+            let end = pos + orig.len();
+            let right_ok = if end >= remaining.len() {
+                true
+            } else {
+                let next = remaining.as_bytes()[end];
+                !next.is_ascii_alphanumeric() && next != b'_' && next != b'$'
+            };
+            if left_ok && right_ok {
+                new_result.push_str(&remaining[..pos]);
+                new_result.push_str(mapped);
+                remaining = &remaining[end..];
+            } else {
+                new_result.push_str(&remaining[..end]);
+                remaining = &remaining[end..];
+            }
+        }
+        new_result.push_str(remaining);
+        result = new_result;
+    }
+    result
 }
 
 /// Parse an effect string like `_setProp(n0, "attr", expr)` or `_setClass(n0, expr)`
