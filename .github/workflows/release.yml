@@ -328,3 +328,14 @@ jobs:
             $ASSETS
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Integration Tests (after successful release)
+  # ---------------------------------------------------------------------------
+  integration-test:
+    name: Run Integration Tests
+    needs: [validate, publish-npm]
+    uses: ./.github/workflows/integration-test.yml
+    with:
+      source: npm
+      dist-tag: ${{ needs.validate.outputs.dist-tag }}

@@ -304,6 +304,13 @@ pnpm vitest --run path/to/test.spec.ts     # Specific file
 # Rust tests
 cargo test --workspace --verbose
 cargo test --package verter_core test_name  # Specific test
+
+# Integration tests (CI only)
+# Tests Verter against real-world Vue projects (Vuetify, PrimeVue, etc.)
+# Trigger via GitHub Actions:
+# - Manual: Actions → Integration Test → Run workflow
+# - PR comment: Comment "/integration" on any PR
+# See .github/INTEGRATION_TEST.md for details
 ```
 
 Test files are co-located with source files as `*.spec.ts`.

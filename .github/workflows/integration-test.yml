@@ -1,0 +1,881 @@
+name: Integration Test
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      source:
+        description: 'Plugin source: "npm" for published version, "artifact" for PR build'
+        required: true
+        default: 'artifact'
+        type: choice
+        options:
+          - artifact
+          - npm
+      dist-tag:
+        description: 'NPM dist-tag (only used when source is npm)'
+        required: false
+        default: 'alpha'
+        type: string
+      projects:
+        description: 'Projects to test (comma-separated, or "all" for default set)'
+        required: false
+        default: 'all'
+        type: string
+
+  # Called by release workflow
+  workflow_call:
+    inputs:
+      source:
+        description: 'Plugin source'
+        required: true
+        type: string
+      dist-tag:
+        description: 'NPM dist-tag'
+        required: false
+        type: string
+        default: 'alpha'
+
+  # PR comment trigger (/integration)
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: integration-test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  checks: write
+
+jobs:
+  # Check if workflow should run (for PR comment trigger)
+  check-trigger:
+    name: Check Trigger
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issue_comment'
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run }}
+      pr-number: ${{ steps.check.outputs.pr-number }}
+      pr-sha: ${{ steps.check.outputs.pr-sha }}
+    steps:
+      - name: Check comment trigger
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment.body.toLowerCase();
+            const isPR = !!context.payload.issue.pull_request;
+            const hasIntegrationCommand = comment.includes('/integration');
+            
+            if (!hasIntegrationCommand) {
+              console.log('Not a PR comment with /integration command');
+              core.setOutput('should-run', 'false');
+              return;
+            }
+            
+            // Check if user has write permission
+            try {
+              const { data: permission } = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: context.payload.comment.user.login
+              });
+              
+              const hasPermission = ['admin', 'write'].includes(permission.permission);
+              
+              if (!hasPermission) {
+                await github.rest.reactions.createForIssueComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: context.payload.comment.id,
+                  content: '-1'
+                });
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.payload.issue.number,
+                  body: '❌ Only users with write permission can trigger integration tests.'
+                });
+                core.setOutput('should-run', 'false');
+                return;
+              }
+            } catch (error) {
+              console.log('Permission check failed:', error);
+              core.setOutput('should-run', 'false');
+              return;
+            }
+            
+            // Get PR details
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.issue.number
+            });
+            
+            // React with eyes to acknowledge
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'eyes'
+            });
+            
+            core.setOutput('should-run', 'true');
+            core.setOutput('pr-number', context.payload.issue.number);
+            core.setOutput('pr-sha', pr.head.sha);
+
+  # Setup and build (if source is artifact)
+  setup:
+    name: Setup Verter
+    runs-on: ubuntu-latest
+    if: |
+      always() &&
+      (github.event_name != 'issue_comment' || 
+       (needs.check-trigger.result != 'skipped' && needs.check-trigger.outputs.should-run == 'true'))
+    needs: [check-trigger]
+    steps:
+      - name: Determine source
+        id: source
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "source=${{ inputs.source }}" >> $GITHUB_OUTPUT
+            echo "dist-tag=${{ inputs.dist-tag }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "workflow_call" ]; then
+            echo "source=${{ inputs.source }}" >> $GITHUB_OUTPUT
+            echo "dist-tag=${{ inputs.dist-tag }}" >> $GITHUB_OUTPUT
+          else
+            # PR comment trigger - build from artifact
+            echo "source=artifact" >> $GITHUB_OUTPUT
+            echo "dist-tag=alpha" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout PR
+        if: github.event_name == 'issue_comment'
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ needs.check-trigger.outputs.pr-number }}/head
+
+      - name: Checkout
+        if: github.event_name != 'issue_comment'
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        if: steps.source.outputs.source == 'artifact'
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        if: steps.source.outputs.source == 'artifact'
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+
+      - name: Install Rust
+        if: steps.source.outputs.source == 'artifact'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        if: steps.source.outputs.source == 'artifact'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install dependencies
+        if: steps.source.outputs.source == 'artifact'
+        run: pnpm install --frozen-lockfile
+
+      - name: Build native
+        if: steps.source.outputs.source == 'artifact'
+        run: pnpm run build:native
+
+      - name: Build WASM
+        if: steps.source.outputs.source == 'artifact'
+        run: |
+          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          pnpm run build:wasm
+
+      - name: Build TypeScript packages
+        if: steps.source.outputs.source == 'artifact'
+        run: pnpm run build:ts
+
+      - name: Create local registry tarball
+        if: steps.source.outputs.source == 'artifact'
+        run: |
+          mkdir -p dist
+          # Pack packages
+          cd packages/native && pnpm pack --pack-destination ../../dist && cd ../..
+          cd packages/vite-plugin && pnpm pack --pack-destination ../../dist && cd ../..
+          
+          echo "✅ Packages packed:"
+          ls -lh dist/*.tgz
+
+      - name: Upload Verter packages artifact
+        if: steps.source.outputs.source == 'artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: verter-packages
+          path: dist/*.tgz
+          if-no-files-found: error
+          
+      - name: Upload workspace artifact for artifact-based testing
+        if: steps.source.outputs.source == 'artifact'
+        uses: actions/upload-artifact@v4
+        with:
+          name: verter-workspace  
+          path: |
+            packages/native/
+            packages/vite-plugin/
+            !**/.turbo
+            !**/node_modules
+          if-no-files-found: error
+
+      - name: Save source info
+        run: |
+          echo "source=${{ steps.source.outputs.source }}" >> source-info.txt
+          echo "dist-tag=${{ steps.source.outputs.dist-tag }}" >> source-info.txt
+
+      - name: Upload source info
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-info
+          path: source-info.txt
+
+  # Test matrix for real-world Vue projects
+  test-project:
+    name: Test ${{ matrix.project.name }}
+    runs-on: ubuntu-latest
+    needs: [setup]
+    if: always() && needs.setup.result != 'cancelled'
+    strategy:
+      fail-fast: false
+      matrix:
+        project:
+          - name: vuetify
+            repo: https://github.com/vuetifyjs/vuetify.git
+            branch: master
+            build-cmd: pnpm run build
+            test-cmd: pnpm run test:unit
+            vite-config-path: packages/vuetify
+            package-manager: pnpm
+          - name: primevue
+            repo: https://github.com/primefaces/primevue.git
+            branch: master
+            build-cmd: pnpm run build:lib
+            test-cmd: pnpm run test:unit
+            vite-config-path: .
+            package-manager: pnpm
+          - name: element-plus
+            repo: https://github.com/element-plus/element-plus.git
+            branch: dev
+            build-cmd: pnpm run build
+            test-cmd: pnpm run test
+            vite-config-path: .
+            package-manager: pnpm
+          - name: shadcn-vue
+            repo: https://github.com/unovue/shadcn-vue.git
+            branch: dev
+            build-cmd: pnpm run build
+            test-cmd: pnpm run test
+            vite-config-path: .
+            package-manager: pnpm
+
+    steps:
+      - name: Download source info
+        uses: actions/download-artifact@v4
+        with:
+          name: source-info
+
+      - name: Read source info
+        id: source
+        run: |
+          source source-info.txt
+          echo "source=$source" >> $GITHUB_OUTPUT
+          echo "dist-tag=$dist-tag" >> $GITHUB_OUTPUT
+
+      - name: Checkout test project
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.project.repo }}
+          ref: ${{ matrix.project.branch }}
+          path: test-project
+          fetch-depth: 1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: ${{ matrix.project.package-manager }}
+          cache-dependency-path: test-project/**/pnpm-lock.yaml
+
+      - name: Install project dependencies
+        working-directory: test-project
+        run: |
+          ${{ matrix.project.package-manager }} install
+
+      - name: Find Vite config
+        id: find-config
+        working-directory: test-project/${{ matrix.project.vite-config-path }}
+        run: |
+          if [ -f "vite.config.ts" ]; then
+            echo "config-file=vite.config.ts" >> $GITHUB_OUTPUT
+          elif [ -f "vite.config.js" ]; then
+            echo "config-file=vite.config.js" >> $GITHUB_OUTPUT
+          elif [ -f "vite.config.mts" ]; then
+            echo "config-file=vite.config.mts" >> $GITHUB_OUTPUT
+          elif [ -f "vite.config.mjs" ]; then
+            echo "config-file=vite.config.mjs" >> $GITHUB_OUTPUT
+          else
+            echo "❌ No vite.config found"
+            echo "config-file=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Baseline - Build with Vue
+        id: baseline-build
+        working-directory: test-project
+        continue-on-error: true
+        run: |
+          START=$(date +%s)
+          ${{ matrix.project.build-cmd }} 2>&1 | tee ../baseline-build.log
+          END=$(date +%s)
+          DURATION=$((END - START))
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+          echo "✅ Baseline build completed in ${DURATION}s"
+
+      - name: Baseline - Run tests with Vue
+        id: baseline-test
+        working-directory: test-project
+        continue-on-error: true
+        run: |
+          if [ -z "${{ matrix.project.test-cmd }}" ]; then
+            echo "No test command specified"
+            echo "duration=0" >> $GITHUB_OUTPUT
+            echo "status=skipped" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          START=$(date +%s)
+          if ${{ matrix.project.test-cmd }} 2>&1 | tee ../baseline-test.log; then
+            TEST_STATUS="passed"
+            echo "status=passed" >> $GITHUB_OUTPUT
+          else
+            TEST_STATUS="failed"
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+          END=$(date +%s)
+          DURATION=$((END - START))
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+          echo "Tests completed in ${DURATION}s with status: ${TEST_STATUS}"
+
+      - name: Download Verter workspace artifact
+        if: steps.source.outputs.source == 'artifact'
+        uses: actions/download-artifact@v4
+        with:
+          name: verter-workspace
+          path: verter-workspace
+
+      - name: Install Verter packages (from artifact/workspace)
+        if: steps.source.outputs.source == 'artifact'
+        working-directory: test-project
+        run: |
+          # Use file: protocol to install from local workspace builds
+          # This avoids npm registry lookups and preserves dependencies
+          echo "📦 Installing Verter from workspace builds"
+          ${{ matrix.project.package-manager }} add ../verter-workspace/packages/native ../verter-workspace/packages/vite-plugin
+          
+          echo "✅ Verter packages installed from workspace"
+
+      - name: Install Verter vite-plugin (from npm)
+        if: steps.source.outputs.source == 'npm'
+        working-directory: test-project
+        run: |
+          echo "Installing from npm with dist-tag: ${{ steps.source.outputs.dist-tag }}"
+          ${{ matrix.project.package-manager }} add @verter/vite-plugin@${{ steps.source.outputs.dist-tag }}
+
+      - name: Backup original Vite config
+        working-directory: test-project/${{ matrix.project.vite-config-path }}
+        run: |
+          if [ -n "${{ steps.find-config.outputs.config-file }}" ]; then
+            cp ${{ steps.find-config.outputs.config-file }} ${{ steps.find-config.outputs.config-file }}.backup
+          fi
+
+      - name: Replace vue() with verter() in Vite config
+        working-directory: test-project/${{ matrix.project.vite-config-path }}
+        run: |
+          CONFIG_FILE="${{ steps.find-config.outputs.config-file }}"
+          
+          if [ -z "$CONFIG_FILE" ]; then
+            echo "❌ No config file to modify"
+            exit 1
+          fi
+          
+          echo "📝 Modifying $CONFIG_FILE"
+          cat "$CONFIG_FILE"
+          echo "---"
+          
+          # Check if vue plugin is actually used
+          if ! grep -q "@vitejs/plugin-vue" "$CONFIG_FILE" && ! grep -q "from.*vue" "$CONFIG_FILE"; then
+            echo "⚠️ Warning: No Vue plugin import found in config. Attempting replacement anyway..."
+          fi
+          
+          # Replace import statement
+          sed -i "s|from '@vitejs/plugin-vue'|from '@verter/vite-plugin'|g" "$CONFIG_FILE"
+          sed -i 's|import vue from|import verter from|g' "$CONFIG_FILE"
+          
+          # Replace function call
+          sed -i 's|vue(|verter(|g' "$CONFIG_FILE"
+          
+          echo "📝 Modified config:"
+          cat "$CONFIG_FILE"
+
+      - name: Verter - Build with Verter
+        id: verter-build
+        working-directory: test-project
+        continue-on-error: true
+        run: |
+          START=$(date +%s)
+          ${{ matrix.project.build-cmd }} 2>&1 | tee ../verter-build.log
+          END=$(date +%s)
+          DURATION=$((END - START))
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+          
+          if [ $? -eq 0 ]; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✅ Verter build completed in ${DURATION}s"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "❌ Verter build failed after ${DURATION}s"
+          fi
+
+      - name: Verter - Run tests with Verter
+        id: verter-test
+        working-directory: test-project
+        continue-on-error: true
+        run: |
+          if [ -z "${{ matrix.project.test-cmd }}" ]; then
+            echo "No test command specified"
+            echo "duration=0" >> $GITHUB_OUTPUT
+            echo "status=skipped" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          START=$(date +%s)
+          if ${{ matrix.project.test-cmd }} 2>&1 | tee ../verter-test.log; then
+            echo "status=passed" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+          END=$(date +%s)
+          DURATION=$((END - START))
+          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+
+      - name: Generate project report
+        if: always()
+        run: |
+          TEST_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          cat > report-${{ matrix.project.name }}.md << 'EOF'
+          # Integration Test Report: ${{ matrix.project.name }}
+          
+          **Repository:** ${{ matrix.project.repo }}  
+          **Branch:** ${{ matrix.project.branch }}  
+          **Test Date:** TEST_DATE_PLACEHOLDER  
+          **Plugin Source:** ${{ steps.source.outputs.source }}  
+          
+          ## Build Comparison
+          
+          | Compiler | Build Time | Status |
+          |----------|-----------|--------|
+          | Vue (baseline) | ${{ steps.baseline-build.outputs.duration }}s | ${{ steps.baseline-build.outcome }} |
+          | Verter | ${{ steps.verter-build.outputs.duration }}s | ${{ steps.verter-build.outputs.status }} |
+          
+          **Build Time Delta:** 
+          EOF
+          
+          # Replace placeholder with actual date
+          sed -i "s/TEST_DATE_PLACEHOLDER/$TEST_DATE/" report-${{ matrix.project.name }}.md
+          EOF
+          
+          BASELINE="${{ steps.baseline-build.outputs.duration }}"
+          VERTER="${{ steps.verter-build.outputs.duration }}"
+          
+          if [ -n "$BASELINE" ] && [ -n "$VERTER" ] && [ "$BASELINE" -gt 0 ] && [ "$VERTER" -gt 0 ]; then
+            DIFF=$((VERTER - BASELINE))
+            PERCENT=$((DIFF * 100 / BASELINE))
+            if [ $DIFF -gt 0 ]; then
+              echo "🔴 +${DIFF}s (+${PERCENT}%) slower" >> report-${{ matrix.project.name }}.md
+            elif [ $DIFF -lt 0 ]; then
+              DIFF_ABS=$((DIFF * -1))
+              PERCENT_ABS=$((PERCENT * -1))
+              echo "🟢 -${DIFF_ABS}s (-${PERCENT_ABS}%) faster" >> report-${{ matrix.project.name }}.md
+            else
+              echo "⚪ Same build time" >> report-${{ matrix.project.name }}.md
+            fi
+          else
+            echo "N/A (build failed)" >> report-${{ matrix.project.name }}.md
+          fi
+          
+          cat >> report-${{ matrix.project.name }}.md << 'EOF'
+          
+          ## Test Comparison
+          
+          | Compiler | Test Time | Status |
+          |----------|-----------|--------|
+          | Vue (baseline) | ${{ steps.baseline-test.outputs.duration }}s | ${{ steps.baseline-test.outputs.status }} |
+          | Verter | ${{ steps.verter-test.outputs.duration }}s | ${{ steps.verter-test.outputs.status }} |
+          
+          ## Build Logs
+          
+          <details>
+          <summary>Baseline Build Log (Vue)</summary>
+          
+          ```
+          EOF
+          
+          if [ -f baseline-build.log ]; then
+            tail -n 100 baseline-build.log >> report-${{ matrix.project.name }}.md
+          fi
+          
+          cat >> report-${{ matrix.project.name }}.md << 'EOF'
+          ```
+          
+          </details>
+          
+          <details>
+          <summary>Verter Build Log</summary>
+          
+          ```
+          EOF
+          
+          if [ -f verter-build.log ]; then
+            tail -n 100 verter-build.log >> report-${{ matrix.project.name }}.md
+          fi
+          
+          cat >> report-${{ matrix.project.name }}.md << 'EOF'
+          ```
+          
+          </details>
+          
+          ---
+          
+          **Conclusion:** 
+          EOF
+          
+          # Determine overall status: pass (green), warning (yellow), or fail (red)
+          BUILD_STATUS="${{ steps.verter-build.outputs.status }}"
+          TEST_STATUS="${{ steps.verter-test.outputs.status }}"
+          BASELINE_BUILD="${{ steps.baseline-build.outputs.duration }}"
+          VERTER_BUILD="${{ steps.verter-build.outputs.duration }}"
+          BASELINE_TEST="${{ steps.baseline-test.outputs.duration }}"
+          VERTER_TEST="${{ steps.verter-test.outputs.duration }}"
+          
+          # Create status metadata file
+          mkdir -p status
+          echo "project=${{ matrix.project.name }}" > status/status.txt
+          echo "build_status=$BUILD_STATUS" >> status/status.txt
+          echo "test_status=$TEST_STATUS" >> status/status.txt
+          echo "baseline_build=$BASELINE_BUILD" >> status/status.txt
+          echo "verter_build=$VERTER_BUILD" >> status/status.txt
+          echo "baseline_test=$BASELINE_TEST" >> status/status.txt
+          echo "verter_test=$VERTER_TEST" >> status/status.txt
+          
+          # Calculate overall status
+          OVERALL_STATUS="fail"
+          CONCLUSION_MSG=""
+          
+          if [ "$BUILD_STATUS" != "success" ]; then
+            OVERALL_STATUS="fail"
+            CONCLUSION_MSG="❌ **Failed** - Verter build failed"
+          elif [ "$TEST_STATUS" = "failed" ]; then
+            OVERALL_STATUS="fail"
+            CONCLUSION_MSG="❌ **Failed** - Verter tests failed"
+          else
+            # Build and tests passed, check performance
+            BUILD_SLOWER=false
+            TEST_SLOWER=false
+            
+            if [ -n "$BASELINE_BUILD" ] && [ -n "$VERTER_BUILD" ] && [ "$BASELINE_BUILD" -gt 0 ] && [ "$VERTER_BUILD" -gt "$BASELINE_BUILD" ]; then
+              BUILD_SLOWER=true
+            fi
+            
+            if [ -n "$BASELINE_TEST" ] && [ -n "$VERTER_TEST" ] && [ "$BASELINE_TEST" -gt 0 ] && [ "$VERTER_TEST" -gt "$BASELINE_TEST" ]; then
+              TEST_SLOWER=true
+            fi
+            
+            if [ "$BUILD_SLOWER" = true ] || [ "$TEST_SLOWER" = true ]; then
+              OVERALL_STATUS="warning"
+              CONCLUSION_MSG="⚠️ **Warning** - Verter is slower than Vue"
+              if [ "$BUILD_SLOWER" = true ] && [ "$TEST_SLOWER" = true ]; then
+                CONCLUSION_MSG="$CONCLUSION_MSG (build and tests)"
+              elif [ "$BUILD_SLOWER" = true ]; then
+                CONCLUSION_MSG="$CONCLUSION_MSG (build only)"
+              else
+                CONCLUSION_MSG="$CONCLUSION_MSG (tests only)"
+              fi
+            else
+              OVERALL_STATUS="pass"
+              CONCLUSION_MSG="✅ **Passed** - Verter is faster or equal to Vue"
+            fi
+          fi
+          
+          echo "overall_status=$OVERALL_STATUS" >> status/status.txt
+          echo "$CONCLUSION_MSG" >> report-${{ matrix.project.name }}.md
+
+      - name: Upload project report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ matrix.project.name }}
+          path: |
+            report-${{ matrix.project.name }}.md
+            status/status.txt
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.project.name }}
+          path: |
+            baseline-build.log
+            baseline-test.log
+            verter-build.log
+            verter-test.log
+          if-no-files-found: ignore
+
+      - name: Add to job summary
+        if: always()
+        run: |
+          cat report-${{ matrix.project.name }}.md >> $GITHUB_STEP_SUMMARY
+
+  # Aggregate results and create final summary
+  summary:
+    name: Generate Summary
+    runs-on: ubuntu-latest
+    needs: [test-project]
+    if: always()
+    steps:
+      - name: Download all reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: report-*
+          path: reports
+
+      - name: Generate aggregate summary
+        run: |
+          SUMMARY_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          cat > integration-test-summary.md << 'EOF'
+          # 🧪 Verter Integration Test Summary
+          
+          **Workflow Run:** ${{ github.run_number }}  
+          **Trigger:** ${{ github.event_name }}  
+          **Date:** SUMMARY_DATE_PLACEHOLDER  
+          
+          ## Overview
+          
+          EOF
+          
+          # Replace placeholder with actual date
+          sed -i "s/SUMMARY_DATE_PLACEHOLDER/$SUMMARY_DATE/" integration-test-summary.md
+          
+          TOTAL=0
+          PASSED=0
+          WARNING=0
+          FAILED=0
+          
+          for report_dir in reports/report-*; do
+            if [ -d "$report_dir" ]; then
+              TOTAL=$((TOTAL + 1))
+              PROJECT=$(basename "$report_dir" | sed 's/report-//')
+              
+              # Read status file if it exists
+              if [ -f "$report_dir/status/status.txt" ]; then
+                source "$report_dir/status/status.txt"
+                
+                if [ "$overall_status" = "pass" ]; then
+                  PASSED=$((PASSED + 1))
+                  echo "- ✅ **$PROJECT** - Passed (faster or equal)" >> integration-test-summary.md
+                elif [ "$overall_status" = "warning" ]; then
+                  WARNING=$((WARNING + 1))
+                  echo "- ⚠️ **$PROJECT** - Warning (slower than Vue)" >> integration-test-summary.md
+                else
+                  FAILED=$((FAILED + 1))
+                  echo "- ❌ **$PROJECT** - Failed (build or tests failed)" >> integration-test-summary.md
+                fi
+              else
+                # Fallback to old logic
+                if grep -q "✅ \*\*Passed\*\*" "$report_dir"/*.md 2>/dev/null; then
+                  PASSED=$((PASSED + 1))
+                  echo "- ✅ **$PROJECT** - Passed" >> integration-test-summary.md
+                elif grep -q "⚠️ \*\*Warning\*\*" "$report_dir"/*.md 2>/dev/null; then
+                  WARNING=$((WARNING + 1))
+                  echo "- ⚠️ **$PROJECT** - Warning" >> integration-test-summary.md
+                else
+                  FAILED=$((FAILED + 1))
+                  echo "- ❌ **$PROJECT** - Failed" >> integration-test-summary.md
+                fi
+              fi
+            fi
+          done
+          
+          # Determine overall workflow status
+          WORKFLOW_STATUS="✅ Passed"
+          if [ "$FAILED" -gt 0 ]; then
+            WORKFLOW_STATUS="❌ Failed"
+          elif [ "$WARNING" -gt 0 ]; then
+            WORKFLOW_STATUS="⚠️ Warning"
+          fi
+          
+          # Add summary stats
+          cat >> integration-test-summary.md << EOF
+          
+          **Results:** $PASSED passed, $WARNING warnings, $FAILED failed (total: $TOTAL)  
+          **Overall Status:** $WORKFLOW_STATUS
+          
+          ## Detailed Reports
+          
+          EOF
+          
+          # Store overall status for PR comment check
+          echo "$WORKFLOW_STATUS" > overall-status.txt
+          echo "$FAILED" > failed-count.txt
+          
+          # Append individual reports
+          for report_dir in reports/report-*; do
+            if [ -d "$report_dir" ]; then
+              cat "$report_dir"/*.md >> integration-test-summary.md
+              echo "" >> integration-test-summary.md
+              echo "---" >> integration-test-summary.md
+              echo "" >> integration-test-summary.md
+            fi
+          done
+          
+          cat >> integration-test-summary.md << 'EOF'
+          
+          ## Next Steps
+          
+          - Review failing projects and identify common issues
+          - Update Verter compiler to fix compatibility problems
+          - Re-run tests after fixes
+          
+          EOF
+
+      - name: Upload aggregate summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-test-summary
+          path: integration-test-summary.md
+
+      - name: Add to workflow summary
+        run: |
+          cat integration-test-summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Post PR comment (if triggered from PR)
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const summary = fs.readFileSync('integration-test-summary.md', 'utf8');
+            const overallStatus = fs.readFileSync('overall-status.txt', 'utf8').trim();
+            const failedCount = parseInt(fs.readFileSync('failed-count.txt', 'utf8').trim());
+            
+            // Get PR details to get the head SHA
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.issue.number
+            });
+            
+            // Determine check status based on failures
+            let checkConclusion = 'success';
+            let checkTitle = 'Integration Tests Passed';
+            
+            if (failedCount > 0) {
+              checkConclusion = 'failure';
+              checkTitle = `Integration Tests Failed (${failedCount} project(s))`;
+            } else if (overallStatus.includes('⚠️')) {
+              checkConclusion = 'neutral';
+              checkTitle = 'Integration Tests Passed with Warnings';
+            }
+            
+            // Create a check run for the PR
+            try {
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'Verter Integration Tests',
+                head_sha: pr.head.sha,
+                status: 'completed',
+                conclusion: checkConclusion,
+                output: {
+                  title: checkTitle,
+                  summary: summary,
+                  text: `Full results: ${context.payload.repository.html_url}/actions/runs/${context.runId}`
+                }
+              });
+            } catch (error) {
+              console.log('Failed to create check run:', error.message);
+              // Continue with comment posting even if check creation fails
+            }
+            
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.issue.number
+            });
+            
+            // Find existing bot comment
+            const botComment = comments.find(c => 
+              c.user.login === 'github-actions[bot]' && 
+              c.body.includes('🧪 Verter Integration Test Summary')
+            );
+            
+            const commentBody = summary + `\n\n---\n**Status:** ${overallStatus}\n\n[View Full Details](${context.payload.repository.html_url}/actions/runs/${context.runId})`;
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.issue.number,
+                body: commentBody
+              });
+            }
+                body: commentBody
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.payload.issue.number,
+                body: commentBody
+              });
+            }
+            
+            // React with checkmark to original comment
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: '+1'
+            });
