@@ -15,6 +15,13 @@ use super::{ChildInfo, ChildKind, StateStack};
 /// retroactively inserts separators based on the full children list.
 ///
 /// For source like `hello` between elements, this produces `"hello"`.
+///
+/// # Ordering Invariant
+///
+/// This function must NOT call `prepend_left(ev.start, ...)`. The opening `"`
+/// quote is deferred to the parent's close phase via `ChildKind::Text.content_prefix()`.
+/// Only `append_left(ev.end, "\"")` is safe here because it operates at `ev.end`,
+/// a different position from the separator insertion point (`ev.start`).
 pub(crate) fn handle_text<'alloc>(
     code_transform: &mut CodeTransform<'alloc>,
     ev: &Text,

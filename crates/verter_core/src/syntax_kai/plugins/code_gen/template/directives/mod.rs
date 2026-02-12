@@ -35,6 +35,13 @@ use super::{ScopeClose, StateStack};
 /// **Exception**: v-else-if emits its condition directly via `prepend_left` because
 /// v-else-if elements are NOT registered as parent children (they're continuations
 /// of the v-if chain), so there's no separator FIFO conflict.
+///
+/// # Ordering Invariant
+///
+/// The returned prefix string must NOT be emitted here via `prepend_left`.
+/// It must be stored in `ChildInfo.scope_prefix` and emitted by the parent's
+/// close phase as part of the combined separator+scope+content `prepend_left`.
+/// Violation produces incorrect output due to CodeTransform FIFO semantics.
 pub(crate) fn process_scope_opens<'alloc>(
     code_transform: &mut CodeTransform<'alloc>,
     scopes: &[ElementScope<'alloc>],

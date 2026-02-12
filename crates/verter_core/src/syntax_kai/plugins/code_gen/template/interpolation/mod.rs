@@ -8,6 +8,17 @@ use crate::{
     },
 };
 
+/// Handle an interpolation expression `{{ expr }}`.
+///
+/// Applies binding prefixes to identifiers within the expression, then
+/// transforms `{{ expr }}` → `(expr)` using `overwrite`.
+///
+/// # Ordering Invariant
+///
+/// The `_toDisplayString` prefix is NOT emitted here. It is deferred to the
+/// parent's close phase via `ChildKind::Interpolation.content_prefix()`.
+/// The `overwrite` calls are safe because they replace existing content at
+/// fixed positions, not inserting at the child's start position.
 pub fn handle_interpolation<'alloc>(
     code_transform: &mut CodeTransform<'alloc>,
     ev: &OxcInterpolation<'alloc>,
