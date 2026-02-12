@@ -2,13 +2,14 @@
 
 ## Overview
 
-Verter uses three GitHub Actions workflows:
+Verter uses four GitHub Actions workflows:
 
-| Workflow                    | Trigger                              | Purpose                                                                             |
-| --------------------------- | ------------------------------------ | ----------------------------------------------------------------------------------- |
-| **CI** (`ci.yml`)           | Push to `main`, PRs                  | Lint, test, build verification                                                      |
-| **Nightly** (`nightly.yml`) | Push to `main` (crates/wasm changes) | Build WASM, upload to GH Release                                                    |
-| **Release** (`release.yml`) | Push tag `v*`                        | Build all platforms, publish to npm/crates.io, deploy playground, create GH Release |
+| Workflow                             | Trigger                              | Purpose                                                                             |
+| ------------------------------------ | ------------------------------------ | ----------------------------------------------------------------------------------- |
+| **CI** (`ci.yml`)                    | Push to `main`, PRs                  | Lint, test, build verification                                                      |
+| **Nightly** (`nightly.yml`)          | Push to `main` (crates/wasm changes) | Build WASM, upload to GH Release                                                    |
+| **Release** (`release.yml`)          | Push tag `v*`                        | Build all platforms, publish to npm/crates.io, deploy playground, create GH Release |
+| **Integration Test** (`integration-test.yml`) | Manual, after release, PR comment `/integration` | Test Verter against real-world Vue projects |
 
 ## CI Workflow
 
@@ -106,6 +107,63 @@ The release workflow:
 1. Runs `git-cliff --latest --strip header` for release notes
 2. Creates the GitHub Release with the generated notes
 3. Pre-release tags (`-alpha`, `-beta`, `-rc`) are marked as prerelease
+
+## Integration Test Workflow
+
+**File:** `.github/workflows/integration-test.yml`  
+**Detailed Documentation:** `.github/INTEGRATION_TEST.md`
+
+Tests Verter against real-world open-source Vue projects to validate compatibility and track performance.
+
+### Trigger Methods
+
+1. **Manual** (`workflow_dispatch`): Via Actions tab, select source (artifact/npm) and projects
+2. **After Release** (`workflow_call`): Automatically triggered after successful npm publish
+3. **PR Comment**: Comment `/integration` on any PR (requires write permission)
+
+### Test Matrix
+
+Currently tests 4 popular Vue projects in parallel:
+
+- **Vuetify** - Material Design component framework
+- **PrimeVue** - Rich UI component library
+- **Element Plus** - Enterprise-grade components
+- **Shadcn-vue** - Modern UI components
+
+### Test Process
+
+For each project:
+
+1. **Baseline** - Build and test with standard Vue compiler, record timing
+2. **Verter** - Replace `vue()` with `verter()` in Vite config, rebuild and retest
+3. **Compare** - Generate performance and compatibility comparison report
+
+### Outputs
+
+- **Aggregate Summary** - Overall compatibility rate, performance metrics
+- **Project Reports** - Detailed per-project build logs and comparisons
+- **Artifacts** - Downloadable reports and logs for debugging
+- **PR Comments** - Results posted directly to PR (when triggered by comment)
+
+### Comparison Mode
+
+Tests run in **non-blocking comparison mode** during alpha:
+
+- Failures are recorded but don't fail the workflow
+- Tracks compatibility progress without blocking releases
+- Can switch to strict mode when Verter reaches maturity
+
+### Usage Examples
+
+```bash
+# Manual trigger via gh CLI
+gh workflow run integration-test.yml -f source=artifact -f projects=vuetify,primevue
+
+# Trigger from PR comment
+# Comment: /integration
+```
+
+See [.github/INTEGRATION_TEST.md](../.github/INTEGRATION_TEST.md) for detailed documentation.
 
 ## Versioning
 

@@ -1,0 +1,21 @@
+{
+  "name": "@verter/benchmark",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Performance benchmarks comparing Vue and Verter compilation",
+  "scripts": {
+    "bench": "node --import tsx src/index.ts",
+    "bench:json": "node --import tsx src/index.ts --json"
+  },
+  "dependencies": {
+    "@verter/native": "workspace:*",
+    "@vue/compiler-sfc": "^3.5.27",
+    "tinybench": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3"
+  }
+}

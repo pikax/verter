@@ -295,6 +295,8 @@ cargo clippy --workspace
 
 ## Testing
 
+### Unit & Component Tests
+
 ```bash
 # TypeScript tests (Vitest)
 pnpm test
@@ -307,6 +309,42 @@ cargo test --package verter_core test_name  # Specific test
 ```
 
 Test files are co-located with source files as `*.spec.ts`.
+
+### Benchmarks
+
+Performance benchmarks comparing Vue vs Verter compilation:
+
+```bash
+# Run benchmarks (8 fixtures + 20k file stress test)
+pnpm --filter @verter/benchmark bench
+
+# Run with JSON output (for CI)
+pnpm --filter @verter/benchmark bench:json
+```
+
+**Latest Benchmark Results**: Generated in CI; see the "Benchmark" workflow run artifacts for up-to-date numbers.
+
+**Benchmark Details**:
+- **Fixtures**: 8 Vue SFCs ranging from 45 bytes (tiny-template) to 27.76 KB (kitchen-sink)
+- **Metrics**: Compilation time, throughput (MB/s), memory usage, speedup relative to Vue, status (pass/warning/fail)
+- **Stress Test**: ~20,000 files created by repeating all fixtures
+- **CI Integration**: Triggered via PR comment `/benchmark` → posts results as PR comment
+- **Status Criteria**:
+  - ✅ **Pass**: Verter ≥ Vue performance (speedup ≥ 1.0x)
+  - ⚠️ **Warning**: Verter 50-99% of Vue (speedup 0.5-1.0x)
+  - ❌ **Fail**: Verter < 50% of Vue (speedup < 0.5x)
+
+### Integration Tests
+
+Tests Verter against real-world Vue projects (Vuetify, PrimeVue, etc.) to ensure compilation correctness:
+
+```bash
+# Manual trigger via GitHub Actions
+# - Actions tab → Integration Test → Run workflow
+# - Or comment "/integration" on any PR
+```
+
+See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 
 ## Documentation
 
