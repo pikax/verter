@@ -4,7 +4,7 @@ import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { compileVue } from './compilers/vue'
 import { compileVerter } from './compilers/verter'
-import { calculateStats, calculateThroughput, calculateSpeedup, formatMemory } from './utils/stats'
+import { calculateThroughput, calculateSpeedup, formatMemory } from './utils/stats'
 import { 
   generateMarkdownReport, 
   generateJsonReport, 

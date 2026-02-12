@@ -1,5 +1,5 @@
 import type { BenchmarkStats } from './stats'
-import { formatDuration, formatBytes, formatMemory, calculateSpeedup, calculateThroughput } from './stats'
+import { formatDuration, formatBytes, formatMemory } from './stats'
 
 export interface FixtureResult {
   name: string

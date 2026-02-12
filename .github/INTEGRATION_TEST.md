@@ -17,7 +17,6 @@ The workflow currently tests against 4 major Vue projects:
 
 For each test project, the workflow:
 
-For each test project, the workflow:
 
 1. **Baseline Testing (Vue)**
    - Clones the project repository

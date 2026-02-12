@@ -322,7 +322,7 @@ pnpm --filter @verter/benchmark bench
 pnpm --filter @verter/benchmark bench:json
 ```
 
-**Latest Benchmark Results**: [packages/benchmark/benchmark-results/results.md](./packages/benchmark/benchmark-results/results.md)
+**Latest Benchmark Results**: Generated in CI; see the "Benchmark" workflow run artifacts for up-to-date numbers.
 
 **Benchmark Details**:
 - **Fixtures**: 8 Vue SFCs ranging from 45 bytes (tiny-template) to 27.76 KB (kitchen-sink)

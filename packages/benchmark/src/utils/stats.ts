@@ -6,7 +6,7 @@ export interface BenchmarkStats {
   min: number
   max: number
   stdDev: number
-  heapUsedMB: number // Peak heap memory used (MB)
+  heapUsedMB: number // Change in heap memory used (MB)
 }
 
 /**
