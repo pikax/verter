@@ -2766,3 +2766,695 @@ fn test_dynamic_event_arg_prefix() {
         code
     );
 }
+
+// =========================================================================
+// Vapor Mode Tests
+// =========================================================================
+
+/// Generate vapor code AND validate it is valid JS.
+fn gen_vapor_and_validate(input: &str) -> String {
+    let code = gen(input);
+    assert_valid_js(&code, input);
+    code
+}
+
+/// @ai-generated — Vapor: static element produces _template + node creation
+#[test]
+fn test_vapor_static_element() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div>hello</div></template>"#);
+    assert!(
+        code.contains("_template("),
+        "Should contain _template(), got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("const n0 = t0()"),
+        "Should create node n0 from template t0, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("return n0"),
+        "Should return n0, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("export function render(_ctx)"),
+        "Should have render function, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("from 'vue'"),
+        "Should import from 'vue', got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: static class is baked into template HTML
+#[test]
+fn test_vapor_static_class() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div class="foo">hi</div></template>"#);
+    // The template HTML should include the static class.
+    assert!(
+        code.contains("class="),
+        "Template HTML should include static class, got:\n{}",
+        code
+    );
+    // Should NOT have _setClass (no dynamic class).
+    assert!(
+        !code.contains("_setClass"),
+        "Should NOT have _setClass for static class, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: dynamic class uses _setClass in _renderEffect
+#[test]
+fn test_vapor_dynamic_class() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div :class="cls">hi</div></template>"#);
+    assert!(
+        code.contains("_setClass(n0, _ctx.cls)"),
+        "Should have _setClass with _ctx prefix, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_renderEffect("),
+        "Should wrap in _renderEffect, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: dynamic style uses _setStyle
+#[test]
+fn test_vapor_dynamic_style() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div :style="sty">hi</div></template>"#);
+    assert!(
+        code.contains("_setStyle(n0, _ctx.sty)"),
+        "Should have _setStyle, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_renderEffect("),
+        "Should wrap in _renderEffect, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: interpolation uses _txt + _setText + _renderEffect
+#[test]
+fn test_vapor_interpolation() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div>{{ msg }}</div></template>"#);
+    assert!(
+        code.contains("_txt(n0)"),
+        "Should create text node ref with _txt, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_setText(x0,"),
+        "Should have _setText call, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_toDisplayString(_ctx.msg)"),
+        "Should use _toDisplayString with _ctx prefix, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_renderEffect("),
+        "Should wrap in _renderEffect, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: text + interpolation combined in _setText
+#[test]
+fn test_vapor_text_and_interpolation() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div>hello {{ msg }}</div></template>"#);
+    assert!(
+        code.contains("_setText(x0,"),
+        "Should have _setText, got:\n{}",
+        code
+    );
+    // Should combine static text and dynamic expression.
+    assert!(
+        code.contains("\"hello \"") || code.contains("\"hello  \""),
+        "Should include static text part, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_toDisplayString(_ctx.msg)"),
+        "Should include dynamic expression, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: multiple interpolations combined
+#[test]
+fn test_vapor_multiple_interpolations() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div>{{ a }}{{ b }}</div></template>"#);
+    assert!(
+        code.contains("_toDisplayString(_ctx.a)"),
+        "Should have first interpolation, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_toDisplayString(_ctx.b)"),
+        "Should have second interpolation, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: event click uses delegation
+#[test]
+fn test_vapor_event_click() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><button @click="handler">click</button></template>"#,
+    );
+    assert!(
+        code.contains("_delegateEvents("),
+        "Should have _delegateEvents, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("$evtclick"),
+        "Should assign to $evtclick, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createInvoker("),
+        "Should use _createInvoker, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: event with capture modifier uses _on
+#[test]
+fn test_vapor_event_capture() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div @click.capture="handler">click</div></template>"#,
+    );
+    assert!(
+        code.contains("_on(n0,"),
+        "Should use _on for capture modifier, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("capture: true"),
+        "Should have capture option, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: event with stop modifier uses withModifiers + delegation
+#[test]
+fn test_vapor_event_stop_modifier() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><button @click.stop="handler">click</button></template>"#,
+    );
+    assert!(
+        code.contains("_withModifiers("),
+        "Should use _withModifiers, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("\"stop\""),
+        "Should include 'stop' modifier, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: combined dynamic class + style in single _renderEffect
+#[test]
+fn test_vapor_combined_effects() {
+    let code =
+        gen_vapor_and_validate(r#"<template vapor><div :class="c" :style="s">hi</div></template>"#);
+    assert!(
+        code.contains("_setClass(n0, _ctx.c)"),
+        "Should have _setClass, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_setStyle(n0, _ctx.s)"),
+        "Should have _setStyle, got:\n{}",
+        code
+    );
+    // Should combine into a single _renderEffect with block body.
+    assert!(
+        code.contains("_renderEffect(() => {"),
+        "Should combine into block _renderEffect, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: nested static elements are part of template HTML
+#[test]
+fn test_vapor_nested_static() {
+    let code =
+        gen_vapor_and_validate(r#"<template vapor><div><span>inner</span></div></template>"#);
+    // Only one template and one node creation — the whole tree is static.
+    assert!(
+        code.contains("const n0 = t0()"),
+        "Should create single node, got:\n{}",
+        code
+    );
+    // Should NOT have _child navigation (no dynamic content in nested elements).
+    assert!(
+        !code.contains("_child("),
+        "Should NOT need _child navigation for static nested, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: comment is baked into template HTML
+#[test]
+fn test_vapor_comment() {
+    let code =
+        gen_vapor_and_validate(r#"<template vapor><div><!-- my comment --></div></template>"#);
+    // The comment should be in the template HTML string.
+    assert!(
+        code.contains("<!-- my comment -->")
+            || code.contains("<!--my comment-->")
+            || code.contains("&lt;!-- my comment --&gt;")
+            || code.contains("<!-- my comment -->"),
+        "Template should contain comment, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: void element (self-closing)
+#[test]
+fn test_vapor_void_element() {
+    let code = gen_vapor_and_validate(r#"<template vapor><input></template>"#);
+    assert!(
+        code.contains("_template("),
+        "Should have _template, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("return n0"),
+        "Should return n0, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: self-closing br element
+#[test]
+fn test_vapor_self_closing_br() {
+    let code = gen_vapor_and_validate(r#"<template vapor><br/></template>"#);
+    assert!(
+        code.contains("_template("),
+        "Should have _template, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("return n0"),
+        "Should return n0, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: dynamic bind uses _setProp
+#[test]
+fn test_vapor_dynamic_bind() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div :title="t">hi</div></template>"#);
+    assert!(
+        code.contains("_setProp(n0, \"title\", _ctx.t)"),
+        "Should use _setProp, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: script setup bindings get correct prefixes
+#[test]
+fn test_vapor_with_script_setup() {
+    let code = gen_vapor_and_validate(
+        r#"<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+</script>
+<template vapor><div>{{ count }}</div></template>"#,
+    );
+    assert!(
+        code.contains("_template("),
+        "Should have vapor template, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_setText("),
+        "Should have _setText for interpolation, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Vapor Phase 2 Tests — Nested Navigation, Directives, Multi-root
+// =========================================================================
+
+/// @ai-generated — Vapor: nested element with interpolation uses _child navigation
+#[test]
+fn test_vapor_nested_interpolation() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div><p>{{ msg }}</p></div></template>"#);
+    assert!(
+        code.contains("_child("),
+        "Should use _child for nested navigation, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_txt("),
+        "Should use _txt for text node ref, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_setText("),
+        "Should use _setText, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_renderEffect("),
+        "Should wrap in _renderEffect, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: deep nesting with chained _child and path variables
+#[test]
+fn test_vapor_deep_nested_interpolation() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div><span><em>{{ msg }}</em></span></div></template>"#,
+    );
+    // Should have TWO _child calls: one for span (path), one for em (node).
+    let child_count = code.matches("_child(").count();
+    assert!(
+        child_count >= 2,
+        "Should have at least 2 _child calls for deep nesting, got {} in:\n{}",
+        child_count,
+        code
+    );
+    // Should have path variable (p0)
+    assert!(
+        code.contains("const p0"),
+        "Should have path variable p0, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_txt("),
+        "Should use _txt for text node ref, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: sibling navigation with _next when second child is dynamic
+#[test]
+fn test_vapor_sibling_dynamic_class() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div><span>static</span><em :class="c">text</em></div></template>"#,
+    );
+    assert!(
+        code.contains("_next("),
+        "Should use _next for sibling navigation, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_setClass("),
+        "Should have _setClass for dynamic class, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: sibling navigation with events on second child
+#[test]
+fn test_vapor_sibling_event() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div><input><button @click="handler">go</button></div></template>"#,
+    );
+    assert!(
+        code.contains("_next("),
+        "Should use _next for second sibling, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("$evtclick"),
+        "Should have event on nested button, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: two dynamic siblings both get navigation
+#[test]
+fn test_vapor_two_dynamic_siblings() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div><p>{{ a }}</p><p>{{ b }}</p></div></template>"#,
+    );
+    assert!(
+        code.contains("_child("),
+        "Should have _child for first sibling, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_next("),
+        "Should have _next for second sibling, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_toDisplayString(_ctx.a)"),
+        "Should have first interpolation, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_toDisplayString(_ctx.b)"),
+        "Should have second interpolation, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: nested element with dynamic prop (no text)
+#[test]
+fn test_vapor_nested_dynamic_prop() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div><span :title="t">text</span></div></template>"#,
+    );
+    assert!(
+        code.contains("_child("),
+        "Should use _child for nested element, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_setProp("),
+        "Should have _setProp on nested element, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-html directive generates _setHtml effect
+#[test]
+fn test_vapor_v_html() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div v-html="rawHtml"></div></template>"#);
+    assert!(
+        code.contains("_setHtml(n0, _ctx.rawHtml)"),
+        "Should have _setHtml, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_renderEffect("),
+        "Should wrap in _renderEffect, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-text directive generates _txt + _setText
+#[test]
+fn test_vapor_v_text() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div v-text="msg"></div></template>"#);
+    assert!(code.contains("_txt(n0)"), "Should use _txt, got:\n{}", code);
+    assert!(
+        code.contains("_setText(x0,"),
+        "Should use _setText, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_toDisplayString(_ctx.msg)"),
+        "Should use _toDisplayString, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-show generates _applyVShow statement
+#[test]
+fn test_vapor_v_show() {
+    let code =
+        gen_vapor_and_validate(r#"<template vapor><div v-show="visible">content</div></template>"#);
+    assert!(
+        code.contains("_applyVShow(n0, () => (_ctx.visible))"),
+        "Should have _applyVShow, got:\n{}",
+        code
+    );
+    // v-show should NOT be inside _renderEffect.
+    assert!(
+        !code.contains("_renderEffect(() => _applyVShow"),
+        "v-show should NOT be in _renderEffect, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-show + dynamic class on same element
+#[test]
+fn test_vapor_v_show_with_class() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div v-show="visible" :class="c">text</div></template>"#,
+    );
+    assert!(
+        code.contains("_applyVShow("),
+        "Should have _applyVShow, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_setClass("),
+        "Should have _setClass, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-model on input generates _applyTextModel
+#[test]
+fn test_vapor_v_model_input() {
+    let code = gen_vapor_and_validate(r#"<template vapor><input v-model="text"></template>"#);
+    assert!(
+        code.contains("_applyTextModel(n0,"),
+        "Should have _applyTextModel, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("() => (_ctx.text)"),
+        "Should have getter, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_value => (_ctx.text = _value)"),
+        "Should have setter, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-model on textarea generates _applyTextModel
+#[test]
+fn test_vapor_v_model_textarea() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><textarea v-model="text"></textarea></template>"#,
+    );
+    assert!(
+        code.contains("_applyTextModel(n0,"),
+        "Should have _applyTextModel for textarea, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-model on checkbox generates _applyCheckboxModel
+#[test]
+fn test_vapor_v_model_checkbox() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><input type="checkbox" v-model="checked"></template>"#,
+    );
+    assert!(
+        code.contains("_applyCheckboxModel(n0,"),
+        "Should have _applyCheckboxModel, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-model on radio generates _applyRadioModel
+#[test]
+fn test_vapor_v_model_radio() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><input type="radio" v-model="picked" value="a"></template>"#,
+    );
+    assert!(
+        code.contains("_applyRadioModel(n0,"),
+        "Should have _applyRadioModel, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-model on select generates _applySelectModel
+#[test]
+fn test_vapor_v_model_select() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><select v-model="selected"><option>A</option></select></template>"#,
+    );
+    assert!(
+        code.contains("_applySelectModel(n0,"),
+        "Should have _applySelectModel, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-model.trim modifier
+#[test]
+fn test_vapor_v_model_trim() {
+    let code = gen_vapor_and_validate(r#"<template vapor><input v-model.trim="text"></template>"#);
+    assert!(
+        code.contains("_applyTextModel(n0,"),
+        "Should have _applyTextModel, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("trim: true"),
+        "Should have trim modifier, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-model.lazy.number multiple modifiers
+#[test]
+fn test_vapor_v_model_lazy_number() {
+    let code =
+        gen_vapor_and_validate(r#"<template vapor><input v-model.lazy.number="text"></template>"#);
+    assert!(
+        code.contains("lazy: true"),
+        "Should have lazy modifier, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("number: true"),
+        "Should have number modifier, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: multi-root template returns array
+#[test]
+fn test_vapor_multi_root() {
+    let code = gen_vapor_and_validate(r#"<template vapor><div>a</div><div>b</div></template>"#);
+    assert!(
+        code.contains("return [n0, n1]"),
+        "Should return array of roots, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("const t0 = _template("),
+        "Should have first template, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("const t1 = _template("),
+        "Should have second template, got:\n{}",
+        code
+    );
+    // Multi-root should NOT have ", true" in _template calls.
+    assert!(
+        !code.contains(", true)"),
+        "Multi-root should NOT pass true to _template, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: three root elements
+#[test]
+fn test_vapor_three_roots() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div>a</div><div>b</div><div>c</div></template>"#,
+    );
+    assert!(
+        code.contains("return [n0, n1, n2]"),
+        "Should return array of 3 roots, got:\n{}",
+        code
+    );
+}

@@ -244,6 +244,18 @@ impl VaporImportDependencies {
     pub const NORMALIZE_CLASS: u64 = 1 << 30;
     pub const NORMALIZE_STYLE: u64 = 1 << 31;
 
+    // ── Vue 3.6 vapor helpers ──────────────────────────────────────────
+    pub const TXT: u64 = 1 << 32;
+    pub const CREATE_INVOKER: u64 = 1 << 33;
+    pub const CHILD: u64 = 1 << 34;
+    pub const NEXT: u64 = 1 << 35;
+    pub const APPLY_V_SHOW: u64 = 1 << 36;
+    pub const APPLY_TEXT_MODEL: u64 = 1 << 37;
+    pub const APPLY_CHECKBOX_MODEL: u64 = 1 << 38;
+    pub const APPLY_RADIO_MODEL: u64 = 1 << 39;
+    pub const APPLY_SELECT_MODEL: u64 = 1 << 40;
+    pub const SET_VALUE: u64 = 1 << 41;
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.0 == 0
@@ -361,6 +373,36 @@ impl VaporImportDependencies {
         }
         if self.contains(Self::NORMALIZE_STYLE) {
             imports.push("normalizeStyle as _normalizeStyle");
+        }
+        if self.contains(Self::TXT) {
+            imports.push("txt as _txt");
+        }
+        if self.contains(Self::CREATE_INVOKER) {
+            imports.push("createInvoker as _createInvoker");
+        }
+        if self.contains(Self::CHILD) {
+            imports.push("child as _child");
+        }
+        if self.contains(Self::NEXT) {
+            imports.push("next as _next");
+        }
+        if self.contains(Self::APPLY_V_SHOW) {
+            imports.push("applyVShow as _applyVShow");
+        }
+        if self.contains(Self::APPLY_TEXT_MODEL) {
+            imports.push("applyTextModel as _applyTextModel");
+        }
+        if self.contains(Self::APPLY_CHECKBOX_MODEL) {
+            imports.push("applyCheckboxModel as _applyCheckboxModel");
+        }
+        if self.contains(Self::APPLY_RADIO_MODEL) {
+            imports.push("applyRadioModel as _applyRadioModel");
+        }
+        if self.contains(Self::APPLY_SELECT_MODEL) {
+            imports.push("applySelectModel as _applySelectModel");
+        }
+        if self.contains(Self::SET_VALUE) {
+            imports.push("setValue as _setValue");
         }
 
         imports.join(",")

@@ -523,7 +523,7 @@ const cases = [
 // Compile
 // =============================================================================
 
-function compileTemplateCase(template, isProd) {
+function compileTemplateCase(template, isProd, vapor = false) {
   try {
     const result = compileTemplate({
       source: template,
@@ -531,6 +531,7 @@ function compileTemplateCase(template, isProd) {
       id: "test",
       isProd,
       ssr: false,
+      vapor,
       compilerOptions: {
         mode: "module",
         hoistStatic: false,
@@ -552,6 +553,8 @@ const output = {};
 for (const c of cases) {
   const dev = compileTemplateCase(c.template, false);
   const prod = compileTemplateCase(c.template, true);
+  const vaporDev = compileTemplateCase(c.template, false, true);
+  const vaporProd = compileTemplateCase(c.template, true, true);
 
   output[c.name] = {
     template: c.template,
@@ -559,10 +562,17 @@ for (const c of cases) {
     dev_errors: dev.errors.length > 0 ? dev.errors : undefined,
     prod: prod.code,
     prod_errors: prod.errors.length > 0 ? prod.errors : undefined,
+    vapor_dev: vaporDev.code,
+    vapor_dev_errors: vaporDev.errors.length > 0 ? vaporDev.errors : undefined,
+    vapor_prod: vaporProd.code,
+    vapor_prod_errors: vaporProd.errors.length > 0 ? vaporProd.errors : undefined,
   };
 
   if (dev.errors.length > 0) {
     console.error(`  WARN [${c.name}] dev errors:`, dev.errors);
+  }
+  if (vaporDev.errors.length > 0) {
+    console.error(`  WARN [${c.name}] vapor dev errors:`, vaporDev.errors);
   }
 }
 
