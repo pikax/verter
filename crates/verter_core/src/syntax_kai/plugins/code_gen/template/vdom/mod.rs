@@ -43,7 +43,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     code_transform::CodeTransform,
@@ -87,11 +87,15 @@ pub(crate) struct VdomTemplateGenerator<'alloc> {
     /// Position of the template open tag — hoisted constants are emitted here.
     template_start_pos: u32,
 
-    /// Component tag names that need `_resolveComponent` declarations.
+    /// Component tag names that need `_resolveComponent` declarations (ordered for deterministic output).
     resolved_components: Vec<String>,
+    /// Fast lookup set for `resolved_components` deduplication.
+    resolved_components_set: FxHashSet<String>,
 
-    /// Custom directive names that need `_resolveDirective` declarations.
+    /// Custom directive names that need `_resolveDirective` declarations (ordered for deterministic output).
     resolved_directives: Vec<String>,
+    /// Fast lookup set for `resolved_directives` deduplication.
+    resolved_directives_set: FxHashSet<String>,
 }
 
 impl<'alloc> VdomTemplateGenerator<'alloc> {
@@ -110,7 +114,9 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             hoisted_constants: Vec::new(),
             template_start_pos: 0,
             resolved_components: Vec::new(),
+            resolved_components_set: FxHashSet::default(),
             resolved_directives: Vec::new(),
+            resolved_directives_set: FxHashSet::default(),
         }
     }
 
@@ -430,18 +436,17 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         }
 
         // Element VNode open
-        element::handle_element_open(
-            &mut code_transform,
-            ev,
-            ctx,
-            &self.bindings,
-            self.is_production,
-            &mut state,
-            &mut self.imports,
-            &mut self.resolved_components,
-            &mut self.resolved_directives,
-            &mut self.hoisted_constants,
-        );
+        let mut ectx = element::ElementOpenContext {
+            bindings: &self.bindings,
+            is_production: self.is_production,
+            imports: &mut self.imports,
+            resolved_components: &mut self.resolved_components,
+            resolved_components_set: &mut self.resolved_components_set,
+            resolved_directives: &mut self.resolved_directives,
+            resolved_directives_set: &mut self.resolved_directives_set,
+            hoisted_constants: &mut self.hoisted_constants,
+        };
+        element::handle_element_open(&mut code_transform, ev, ctx, &mut state, &mut ectx);
 
         // Void/self-closing elements
         let open_tag_end = &ev.event.event_open_tag_end;

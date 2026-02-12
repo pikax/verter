@@ -2,7 +2,7 @@ mod close;
 pub(crate) use close::{handle_element_close, handle_element_close_self_closing};
 
 use oxc_ast::ast::Expression;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     code_transform::CodeTransform,
@@ -22,6 +22,21 @@ use crate::{
 };
 
 use super::{DirectiveEntry, StateStack};
+
+/// Bundles generator-level mutable state passed to `handle_element_open`.
+///
+/// This avoids the need to pass 8+ individual parameters through the function signature.
+/// The struct borrows from `VdomTemplateGenerator` fields for the duration of element processing.
+pub(crate) struct ElementOpenContext<'a, 'alloc> {
+    pub bindings: &'a FxHashMap<&'alloc str, BindingType>,
+    pub is_production: bool,
+    pub imports: &'a mut TemplateImportDependencies,
+    pub resolved_components: &'a mut Vec<String>,
+    pub resolved_components_set: &'a mut FxHashSet<String>,
+    pub resolved_directives: &'a mut Vec<String>,
+    pub resolved_directives_set: &'a mut FxHashSet<String>,
+    pub hoisted_constants: &'a mut Vec<String>,
+}
 
 /// Check whether an event handler expression needs wrapping in `$event => (...)`.
 ///
@@ -52,19 +67,21 @@ fn needs_event_handler_wrap(exp: &Option<oxc_ast::ast::Expression>) -> bool {
 /// retroactively via `prepend_left`.
 ///
 /// Mutates `state`: sets `is_component`, `patch_flag`, `dynamic_props`, `open_tag_end`.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_element_open<'alloc>(
     code_transform: &mut CodeTransform<'alloc>,
     ev: &OxcCompiledElementStart<'alloc>,
     ctx: &SyntaxPluginContext<'alloc>,
-    bindings: &FxHashMap<&'alloc str, BindingType>,
-    is_production: bool,
     state: &mut StateStack,
-    imports: &mut TemplateImportDependencies,
-    resolved_components: &mut Vec<String>,
-    resolved_directives: &mut Vec<String>,
-    hoisted_constants: &mut Vec<String>,
+    ectx: &mut ElementOpenContext<'_, 'alloc>,
 ) {
+    let bindings = ectx.bindings;
+    let is_production = ectx.is_production;
+    let imports = &mut *ectx.imports;
+    let resolved_components = &mut *ectx.resolved_components;
+    let resolved_components_set = &mut *ectx.resolved_components_set;
+    let resolved_directives = &mut *ectx.resolved_directives;
+    let resolved_directives_set = &mut *ectx.resolved_directives_set;
+    let hoisted_constants = &mut *ectx.hoisted_constants;
     let open_tag = &ev.event.event_open_tag;
     let open_tag_end = &ev.event.event_open_tag_end;
     let is_component = open_tag.kind.is_component();
@@ -84,7 +101,7 @@ pub(crate) fn handle_element_open<'alloc>(
     // Then reference _component_MyComponent in _createBlock/_createVNode calls.
     let component_var = if is_component {
         let var_name = format!("_component_{}", tag_name);
-        if !resolved_components.contains(&tag_name.to_string()) {
+        if resolved_components_set.insert(tag_name.to_string()) {
             resolved_components.push(tag_name.to_string());
             imports.add(TemplateImportDependencies::RESOLVE_COMPONENT);
         }
@@ -928,7 +945,7 @@ pub(crate) fn handle_element_open<'alloc>(
                         let dir_name = dir_raw_name.strip_prefix("v-").unwrap_or(dir_raw_name);
                         let dir_var = format!("_directive_{}", dir_name.replace('-', "_"));
                         // Register for _resolveDirective declaration (deduped)
-                        if !resolved_directives.contains(&dir_name.to_string()) {
+                        if resolved_directives_set.insert(dir_name.to_string()) {
                             resolved_directives.push(dir_name.to_string());
                         }
                         imports.add(TemplateImportDependencies::RESOLVE_DIRECTIVE);

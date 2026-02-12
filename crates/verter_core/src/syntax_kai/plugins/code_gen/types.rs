@@ -269,6 +269,7 @@ impl VaporImportDependencies {
     pub const VAPOR_TELEPORT: u64 = 1 << 47;
     pub const VAPOR_TRANSITION: u64 = 1 << 48;
     pub const VAPOR_TRANSITION_GROUP: u64 = 1 << 49;
+    pub const TO_HANDLERS: u64 = 1 << 50;
 
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -441,6 +442,9 @@ impl VaporImportDependencies {
         }
         if self.contains(Self::VAPOR_TRANSITION_GROUP) {
             imports.push("VaporTransitionGroup as _VaporTransitionGroup");
+        }
+        if self.contains(Self::TO_HANDLERS) {
+            imports.push("toHandlers as _toHandlers");
         }
 
         imports.join(",")

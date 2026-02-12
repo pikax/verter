@@ -200,7 +200,6 @@ impl StateStack {
     pub fn create_child(&mut self, element_id: u32) -> Self {
         Self {
             id: element_id,
-            has_all_static_props: true,
             ..Self::default()
         }
     }

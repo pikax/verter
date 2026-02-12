@@ -33,6 +33,19 @@ pub(crate) fn is_simple_identifier(s: &str) -> bool {
 /// Apply v-for / v-slot variable mappings to an expression string.
 /// Replaces standalone occurrences of original variable names with their mapped values.
 /// E.g., `item` → `_for_item0.value`, `data` → `_slotProps0.data`.
+///
+/// # Limitations
+///
+/// This uses naive word-boundary string replacement rather than AST-based rewriting.
+/// Known limitations:
+/// - **Unicode identifiers**: only ASCII alphanumeric + `_` + `$` are recognized as
+///   word boundaries. ES2015+ unicode identifiers (e.g. `café`) may not be handled.
+/// - **String literals**: variable names inside string literals (`"item"`) will be
+///   incorrectly replaced. The caller should ensure expressions don't embed the
+///   variable name in string contexts.
+/// - **Performance**: the replacement loop rebuilds the string for each mapping.
+///   For templates with many v-for variables, consider using the OXC-parsed bindings
+///   approach (as `patch_bindings` does for VDOM) for correctness and efficiency.
 pub(crate) fn apply_var_mappings(expr: &str, mappings: &[(String, String)]) -> String {
     if mappings.is_empty() {
         return expr.to_string();

@@ -6,7 +6,8 @@ use crate::{
         binding_types::BindingType,
         plugin::SyntaxPluginContext,
         plugins::code_gen::{
-            template::shared::helper::build_prefixed_value, types::TemplateImportDependencies,
+            template::shared::helper::{build_prefixed_value, prefix_vfor_references},
+            types::TemplateImportDependencies,
         },
         types::ElementScope,
     },
@@ -137,25 +138,15 @@ pub(crate) fn process_scope_opens<'alloc>(
 
                 let iterable = if let Some(val) = vfor.event.value {
                     let val_text = &ctx.input[val.start as usize..val.end as usize];
-                    // v-for references are in `parsed.references` (Vec<Span>), not
-                    // BindingExtractionResult. Apply prefixes manually.
-                    let mut result_str = val_text.to_string();
-                    // Apply _ctx. prefix to external references (in reverse order to preserve offsets)
-                    let mut refs: Vec<_> = vfor.parsed.references.iter().collect();
-                    refs.sort_by(|a, b| b.start.cmp(&a.start));
-                    for r in refs {
-                        let offset = (r.start - val.start) as usize;
-                        let name = &ctx.input[r.start as usize..r.end as usize];
-                        let prefix = if let Some(bt) = bindings.get(name) {
-                            bt.accessor_prefix(is_production)
-                        } else {
-                            "_ctx."
-                        };
-                        if !prefix.is_empty() {
-                            result_str.insert_str(offset, prefix);
-                        }
-                    }
-                    result_str
+                    prefix_vfor_references(
+                        val_text,
+                        val.start,
+                        &vfor.parsed.references,
+                        None,
+                        ctx.input,
+                        bindings,
+                        is_production,
+                    )
                 } else {
                     "[]".to_string()
                 };

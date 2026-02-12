@@ -998,7 +998,8 @@ fn test_v_if_ternary() {
 /// @ai-generated — v-if/v-else produces both branches
 #[test]
 fn test_v_if_else() {
-    let code = gen_and_validate(r#"<template><div v-if="show">yes</div><div v-else>no</div></template>"#);
+    let code =
+        gen_and_validate(r#"<template><div v-if="show">yes</div><div v-else>no</div></template>"#);
     assert!(
         code.contains("(_ctx.show) ? ("),
         "Should have v-if ternary, got:\n{}",
@@ -1103,7 +1104,8 @@ fn test_v_if_prod_empty_comment() {
 /// @ai-generated — v-for produces _renderList with Fragment wrapping
 #[test]
 fn test_v_for_render_list() {
-    let code = gen_and_validate(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
+    let code =
+        gen_and_validate(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
     assert!(
         code.contains("_renderList("),
         "v-for should produce _renderList, got:\n{}",
@@ -1124,8 +1126,9 @@ fn test_v_for_render_list() {
 /// @ai-generated — Keyed v-for uses KEYED_FRAGMENT (128)
 #[test]
 fn test_v_for_keyed_fragment() {
-    let code =
-        gen_and_validate(r#"<template><div v-for="item in items" :key="item">{{ item }}</div></template>"#);
+    let code = gen_and_validate(
+        r#"<template><div v-for="item in items" :key="item">{{ item }}</div></template>"#,
+    );
     assert!(
         code.contains("128 /* KEYED_FRAGMENT */"),
         "Keyed v-for should use 128 KEYED_FRAGMENT, got:\n{}",
@@ -1154,7 +1157,8 @@ fn test_v_for_with_index() {
 /// @ai-generated — v-for removes directive from output
 #[test]
 fn test_v_for_removes_directive() {
-    let code = gen_and_validate(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
+    let code =
+        gen_and_validate(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
     assert!(
         !code.contains("v-for"),
         "v-for directive should be removed from output, got:\n{}",
@@ -1703,7 +1707,9 @@ fn test_mixed_text_and_element() {
 /// @ai-generated — Comment with elements: mixed children
 #[test]
 fn test_comment_with_elements() {
-    let code = gen_and_validate(r#"<template><div><span>a</span><!-- mid --><span>b</span></div></template>"#);
+    let code = gen_and_validate(
+        r#"<template><div><span>a</span><!-- mid --><span>b</span></div></template>"#,
+    );
     assert!(
         code.contains("_createCommentVNode"),
         "Should have comment VNode, got:\n{}",
@@ -1900,7 +1906,8 @@ fn test_v_if_with_sibling_elements() {
 /// @ai-generated — v-for items should be block roots
 #[test]
 fn test_v_for_item_is_block_root() {
-    let code = gen_and_validate(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
+    let code =
+        gen_and_validate(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
     // Inside the renderList callback, the div should use _createElementBlock
     assert!(
         code.contains("_createElementBlock(\"div\""),
@@ -2775,6 +2782,7 @@ fn test_dynamic_event_arg_prefix() {
 fn gen_vapor_and_validate(input: &str) -> String {
     let code = gen(input);
     assert_valid_js(&code, input);
+    assert_no_invalid_patterns(&code, input);
     code
 }
 
@@ -4044,6 +4052,45 @@ fn test_vapor_slot_outlet_named() {
     assert!(
         code.contains("\"header\""),
         "Should use 'header' slot name, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Vapor v-once
+// =========================================================================
+
+/// @ai-generated — Vapor v-once: effects are emitted as direct statements, not wrapped in _renderEffect
+#[test]
+fn test_vapor_v_once_skips_render_effect() {
+    let code =
+        gen_vapor_and_validate(r#"<template vapor><div v-once :id="foo">text</div></template>"#);
+    // v-once should NOT use _renderEffect — effects become one-time statements
+    assert!(
+        !code.contains("_renderEffect"),
+        "v-once should NOT wrap effects in _renderEffect, got:\n{}",
+        code
+    );
+    // The prop effect should still be set
+    assert!(
+        code.contains("_setAttr(") || code.contains("_setProp("),
+        "v-once should still set the prop, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Vapor v-on spread
+// =========================================================================
+
+/// @ai-generated — Vapor v-on="handlers" should use _toHandlers
+#[test]
+fn test_vapor_von_spread_uses_to_handlers() {
+    let code =
+        gen_vapor_and_validate(r#"<template vapor><div v-on="handlers">text</div></template>"#);
+    assert!(
+        code.contains("_toHandlers("),
+        "Vapor v-on spread should use _toHandlers, got:\n{}",
         code
     );
 }

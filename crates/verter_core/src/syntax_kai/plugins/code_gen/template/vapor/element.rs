@@ -3,8 +3,7 @@
 use crate::syntax_kai::{
     plugin::SyntaxPluginContext,
     plugins::code_gen::{
-        template::shared::helper::build_prefixed_value,
-        types::VaporImportDependencies,
+        template::shared::helper::build_prefixed_value, types::VaporImportDependencies,
     },
     types::{ElementKind, ElementScope, OxcCompiledElementClosed, OxcCompiledElementStart},
 };
@@ -472,15 +471,22 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         all_effects.append(&mut self.pending_nested_effects);
 
         if !all_effects.is_empty() {
-            self.imports.add(VaporImportDependencies::RENDER_EFFECT);
-            if all_effects.len() == 1 {
-                close_code.push_str(&format!("  _renderEffect(() => {})\n", all_effects[0]));
-            } else {
-                close_code.push_str("  _renderEffect(() => {\n");
+            if state.is_once {
+                // v-once: emit effects as direct statements (no _renderEffect wrapping).
                 for effect in &all_effects {
-                    close_code.push_str(&format!("    {}\n", effect));
+                    close_code.push_str(&format!("  {}\n", effect));
                 }
-                close_code.push_str("  })\n");
+            } else {
+                self.imports.add(VaporImportDependencies::RENDER_EFFECT);
+                if all_effects.len() == 1 {
+                    close_code.push_str(&format!("  _renderEffect(() => {})\n", all_effects[0]));
+                } else {
+                    close_code.push_str("  _renderEffect(() => {\n");
+                    for effect in &all_effects {
+                        close_code.push_str(&format!("    {}\n", effect));
+                    }
+                    close_code.push_str("  })\n");
+                }
             }
         }
 
@@ -723,18 +729,25 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         all_effects.append(&mut self.pending_nested_effects);
 
         if !all_effects.is_empty() {
-            self.imports.add(VaporImportDependencies::RENDER_EFFECT);
-            if all_effects.len() == 1 {
-                body.push_str(&format!(
-                    "{}_renderEffect(() => {})\n",
-                    indent, all_effects[0]
-                ));
-            } else {
-                body.push_str(&format!("{}_renderEffect(() => {{\n", indent));
+            if state.is_once {
+                // v-once: emit effects as direct statements (no _renderEffect wrapping).
                 for effect in &all_effects {
-                    body.push_str(&format!("{}  {}\n", indent, effect));
+                    body.push_str(&format!("{}{}\n", indent, effect));
                 }
-                body.push_str(&format!("{}}})\n", indent));
+            } else {
+                self.imports.add(VaporImportDependencies::RENDER_EFFECT);
+                if all_effects.len() == 1 {
+                    body.push_str(&format!(
+                        "{}_renderEffect(() => {})\n",
+                        indent, all_effects[0]
+                    ));
+                } else {
+                    body.push_str(&format!("{}_renderEffect(() => {{\n", indent));
+                    for effect in &all_effects {
+                        body.push_str(&format!("{}  {}\n", indent, effect));
+                    }
+                    body.push_str(&format!("{}}})\n", indent));
+                }
             }
         }
 
@@ -808,7 +821,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             trimmed_start,
             &ev.bindings,
             &self.bindings,
-            false,
+            self.is_production,
         );
 
         // Apply v-for / v-slot variable mappings (e.g., `item` → `_for_item0.value`).

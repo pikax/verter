@@ -3,7 +3,8 @@
 use crate::syntax_kai::{
     plugin::SyntaxPluginContext,
     plugins::code_gen::{
-        template::shared::helper::build_prefixed_value, types::VaporImportDependencies,
+        template::shared::helper::{build_prefixed_value, prefix_vfor_references},
+        types::VaporImportDependencies,
     },
     types::{ElementScope, OxcCompiledElementStart},
 };
@@ -29,7 +30,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             val_span.start,
                             &cond.bindings,
                             &self.bindings,
-                            false,
+                            self.is_production,
                         )
                     } else {
                         "true".to_string()
@@ -44,7 +45,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             val_span.start,
                             &cond.bindings,
                             &self.bindings,
-                            false,
+                            self.is_production,
                         )
                     } else {
                         "true".to_string()
@@ -62,27 +63,15 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     let iterable = if let Some(val) = val_span {
                         let right_offset = vfor.parsed.right_offset();
                         let iterable_raw = &ctx.input[right_offset as usize..val.end as usize];
-                        // Apply _ctx. prefix to external references manually
-                        // (same approach as VDOM backend).
-                        let mut result_str = iterable_raw.to_string();
-                        let mut refs: Vec<_> = vfor.parsed.references.iter().collect();
-                        refs.sort_by(|a, b| b.start.cmp(&a.start));
-                        for r in refs {
-                            // Only apply to references within the iterable range.
-                            if r.start >= right_offset && r.end <= val.end {
-                                let offset = (r.start - right_offset) as usize;
-                                let name = &ctx.input[r.start as usize..r.end as usize];
-                                let prefix = if let Some(bt) = self.bindings.get(name) {
-                                    bt.accessor_prefix(false)
-                                } else {
-                                    "_ctx."
-                                };
-                                if !prefix.is_empty() {
-                                    result_str.insert_str(offset, prefix);
-                                }
-                            }
-                        }
-                        result_str
+                        prefix_vfor_references(
+                            iterable_raw,
+                            right_offset,
+                            &vfor.parsed.references,
+                            Some((right_offset, val.end)),
+                            ctx.input,
+                            &self.bindings,
+                            self.is_production,
+                        )
                     } else {
                         "[]".to_string()
                     };
@@ -135,7 +124,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     );
                 }
                 ElementScope::Once(_) => {
-                    // v-once not yet handled in vapor.
+                    state.is_once = true;
                 }
             }
         }
@@ -166,7 +155,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     arg.start,
                     &None,
                     &self.bindings,
-                    false,
+                    self.is_production,
                 );
                 state.slot_dynamic_name_expr = Some(prefixed);
             }

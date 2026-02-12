@@ -55,6 +55,10 @@ pub(crate) struct VaporElementState {
     /// The `:is` expression for dynamic components.
     pub dynamic_is_expr: Option<String>,
 
+    /// Whether this element has `v-once` — effects are emitted as direct statements
+    /// instead of being wrapped in `_renderEffect`.
+    pub is_once: bool,
+
     /// Structural directive scope info extracted from `ElementScope` variants.
     pub scope: Option<VaporScopeKind>,
 
@@ -182,6 +186,7 @@ impl VaporElementState {
             is_template_element: false,
             component_var: None,
             dynamic_is_expr: None,
+            is_once: false,
             scope: None,
             slot_children: Vec::new(),
             needs_vapor_ctx: false,

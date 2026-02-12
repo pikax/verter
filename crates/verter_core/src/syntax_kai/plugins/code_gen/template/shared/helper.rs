@@ -1,7 +1,7 @@
 use rustc_hash::FxHashMap;
 
 use crate::{
-    code_transform::CodeTransform, syntax_kai::binding_types::BindingType,
+    code_transform::CodeTransform, common::Span, syntax_kai::binding_types::BindingType,
     utils::oxc::BindingExtractionResult,
 };
 
@@ -89,6 +89,11 @@ pub fn apply_dynamic_arg_prefix(
 ///
 /// This reads binding positions relative to `val_start` in the original source and inserts
 /// accessor prefixes at the corresponding offsets in the value text.
+///
+/// Shares the same implementation as [`apply_dynamic_arg_prefix`] because both need to
+/// insert prefixes at binding offsets within a string. The separate function exists for
+/// semantic clarity: `apply_dynamic_arg_prefix` is for dynamic arg expressions like `[foo]`,
+/// while this function is for value expressions in overwrite contexts.
 pub fn build_prefixed_value(
     val_text: &str,
     val_start: u32,
@@ -99,10 +104,56 @@ pub fn build_prefixed_value(
     apply_dynamic_arg_prefix(val_text, val_start, bindings_result, map, is_inline)
 }
 
+/// Apply accessor prefixes (`_ctx.`, `$setup.`, etc.) to external references
+/// in a v-for iterable expression.
+///
+/// Used by both VDOM and Vapor backends to prefix references in v-for right-hand
+/// side expressions. References are processed in reverse order to preserve offsets.
+///
+/// - `text`: the expression string to prefix (may be the full v-for value or just the iterable)
+/// - `base_offset`: absolute source offset of the start of `text`
+/// - `references`: spans of external references from v-for parsing
+/// - `filter_range`: if `Some((start, end))`, only prefix references within this absolute range
+/// - `input`: full source input (for extracting reference names)
+/// - `bindings`: binding map for determining accessor prefix
+/// - `is_production`: controls accessor prefix style (inline vs setup)
+pub fn prefix_vfor_references(
+    text: &str,
+    base_offset: u32,
+    references: &[Span],
+    filter_range: Option<(u32, u32)>,
+    input: &str,
+    bindings: &FxHashMap<&str, BindingType>,
+    is_production: bool,
+) -> String {
+    let mut result_str = text.to_string();
+    let mut refs: Vec<_> = references.iter().collect();
+    refs.sort_by(|a, b| b.start.cmp(&a.start));
+    for r in refs {
+        if let Some((range_start, range_end)) = filter_range {
+            if r.start < range_start || r.end > range_end {
+                continue;
+            }
+        }
+        let offset = (r.start - base_offset) as usize;
+        let name = &input[r.start as usize..r.end as usize];
+        let prefix = if let Some(bt) = bindings.get(name) {
+            bt.accessor_prefix(is_production)
+        } else {
+            "_ctx."
+        };
+        if !prefix.is_empty() {
+            result_str.insert_str(offset, prefix);
+        }
+    }
+    result_str
+}
+
 /// Escape a string for use inside a JavaScript string literal (double-quoted).
 ///
 /// Handles backslash, double-quote, common whitespace escapes, null bytes,
-/// and other ASCII control characters (U+0000–U+001F) via `\xNN` notation.
+/// ASCII control characters (U+0000–U+001F) via `\xNN` notation, and
+/// U+2028/U+2029 (JS line terminators in pre-ES2019) via `\uXXXX` notation.
 pub fn escape_js_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -113,6 +164,11 @@ pub fn escape_js_string(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             '\0' => out.push_str("\\0"),
+            // U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are valid
+            // in JSON but are line terminators in JS (pre-ES2019). Escape them
+            // to ensure valid JS string literals in all runtimes.
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
             // Other ASCII control characters → \xNN
             c if c.is_ascii_control() => {
                 out.push_str(&format!("\\x{:02X}", c as u32));
@@ -152,6 +208,8 @@ mod tests {
         assert_eq!(escape_js_string("a\0b"), "a\\0b");
         assert_eq!(escape_js_string("a\x01b"), "a\\x01b");
         assert_eq!(escape_js_string("a\x1Fb"), "a\\x1Fb");
+        assert_eq!(escape_js_string("a\u{2028}b"), "a\\u2028b");
+        assert_eq!(escape_js_string("a\u{2029}b"), "a\\u2029b");
     }
 
     #[test]

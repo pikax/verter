@@ -1,4 +1,4 @@
-﻿//! Vapor template code generation.
+//! Vapor template code generation.
 //!
 //! Vapor mode compiles `<template vapor>` to direct DOM manipulation code:
 //! - Static HTML is hoisted into `_template()` constants
@@ -46,9 +46,9 @@ mod helpers;
 mod props;
 pub(crate) mod types;
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::LazyLock};
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     code_transform::CodeTransform,
@@ -67,40 +67,41 @@ use crate::syntax_kai::plugins::code_gen::types::VaporImportDependencies;
 use types::{VaporElementState, VaporTextPart, VaporVIfChainState};
 
 /// Events that can be delegated (handled via event delegation at document level).
-const DELEGATABLE_EVENTS: &[&str] = &[
-    "auxclick",
-    "click",
-    "contextmenu",
-    "dblclick",
-    "focusin",
-    "focusout",
-    "input",
-    "keydown",
-    "keyup",
-    "mousedown",
-    "mouseenter",
-    "mouseleave",
-    "mousemove",
-    "mouseout",
-    "mouseover",
-    "mouseup",
-    "pointerdown",
-    "pointerenter",
-    "pointerleave",
-    "pointermove",
-    "pointerout",
-    "pointerover",
-    "pointerup",
-    "submit",
-    "touchend",
-    "touchmove",
-    "touchstart",
-];
+static DELEGATABLE_EVENTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    HashSet::from([
+        "auxclick",
+        "click",
+        "contextmenu",
+        "dblclick",
+        "focusin",
+        "focusout",
+        "input",
+        "keydown",
+        "keyup",
+        "mousedown",
+        "mouseenter",
+        "mouseleave",
+        "mousemove",
+        "mouseout",
+        "mouseover",
+        "mouseup",
+        "pointerdown",
+        "pointerenter",
+        "pointerleave",
+        "pointermove",
+        "pointerout",
+        "pointerover",
+        "pointerup",
+        "submit",
+        "touchend",
+        "touchmove",
+        "touchstart",
+    ])
+});
 
 pub(crate) struct VaporTemplateGenerator<'alloc> {
     code_transform: Rc<RefCell<CodeTransform<'alloc>>>,
     bindings: FxHashMap<&'alloc str, BindingType>,
-    #[allow(dead_code)] // Used in future phases for production optimizations
     is_production: bool,
     imports: VaporImportDependencies,
 
@@ -130,6 +131,8 @@ pub(crate) struct VaporTemplateGenerator<'alloc> {
 
     /// Delegated event names (unique, for `_delegateEvents(...)` call).
     delegated_events: Vec<String>,
+    /// Hash set for O(1) delegated event dedup lookups.
+    delegated_events_set: FxHashSet<String>,
 
     /// Collected navigation instructions for the current root element.
     pending_nav: Vec<String>,
@@ -144,6 +147,8 @@ pub(crate) struct VaporTemplateGenerator<'alloc> {
     has_template_ref: bool,
     /// Resolved custom directive names for deduplication.
     resolved_directives: Vec<String>,
+    /// Hash set for O(1) directive dedup lookups.
+    resolved_directives_set: FxHashSet<String>,
     /// Resolved directive declarations to emit at top of render function.
     resolved_directive_decls: Vec<String>,
 
@@ -152,6 +157,8 @@ pub(crate) struct VaporTemplateGenerator<'alloc> {
     // â”€â”€ Structural directive state â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     /// Resolved component names for `_resolveComponent` declarations (deduped).
     resolved_components: Vec<String>,
+    /// Hash set for O(1) component dedup lookups.
+    resolved_components_set: FxHashSet<String>,
     /// Resolved component declarations to emit before render function.
     resolved_component_decls: Vec<String>,
 
@@ -187,15 +194,18 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             template_start_pos: 0,
             root_nodes: Vec::new(),
             delegated_events: Vec::new(),
+            delegated_events_set: FxHashSet::default(),
             pending_nav: Vec::new(),
             pending_text_creations: Vec::new(),
             pending_nested_effects: Vec::new(),
             pending_nested_statements: Vec::new(),
             has_template_ref: false,
             resolved_directives: Vec::new(),
+            resolved_directives_set: FxHashSet::default(),
             resolved_directive_decls: Vec::new(),
             inside_template: false,
             resolved_components: Vec::new(),
+            resolved_components_set: FxHashSet::default(),
             resolved_component_decls: Vec::new(),
             pending_vif_chains: Vec::new(),
             for_depth: 0,
@@ -451,7 +461,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
     // â”€â”€ Event handling helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     pub(super) fn is_delegatable(event_name: &str) -> bool {
-        DELEGATABLE_EVENTS.contains(&event_name)
+        DELEGATABLE_EVENTS.contains(event_name)
     }
 
     pub(super) fn has_non_delegatable_modifier(
@@ -579,4 +589,3 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         }
     }
 }
-

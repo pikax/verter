@@ -47,7 +47,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     .add(VaporImportDependencies::CREATE_COMPONENT_WITH_FALLBACK);
                 self.imports.add(VaporImportDependencies::WITH_VAPOR_CTX);
                 let comp_var = format!("_component_{}", tag_name.replace('-', "_"));
-                if !self.resolved_components.contains(&tag_name.to_string()) {
+                if self.resolved_components_set.insert(tag_name.to_string()) {
                     self.resolved_components.push(tag_name.to_string());
                     self.resolved_component_decls.push(format!(
                         "const {} = _resolveComponent(\"{}\")",
@@ -64,7 +64,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     .add(VaporImportDependencies::CREATE_COMPONENT_WITH_FALLBACK);
                 self.imports.add(VaporImportDependencies::WITH_VAPOR_CTX);
                 let comp_var = format!("_component_{}", tag_name.replace('-', "_"));
-                if !self.resolved_components.contains(&tag_name.to_string()) {
+                if self.resolved_components_set.insert(tag_name.to_string()) {
                     self.resolved_components.push(tag_name.to_string());
                     self.resolved_component_decls.push(format!(
                         "const {} = _resolveComponent(\"{}\")",
@@ -93,7 +93,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                                         exp.start,
                                         &exp.bindings,
                                         &self.bindings,
-                                        false,
+                                        self.is_production,
                                     );
                                     state.dynamic_is_expr = Some(prefixed);
                                 }
@@ -108,7 +108,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 self.imports
                     .add(VaporImportDependencies::CREATE_COMPONENT_WITH_FALLBACK);
                 let comp_var = format!("_component_{}", tag_name.replace('-', "_"));
-                if !self.resolved_components.contains(&tag_name.to_string()) {
+                if self.resolved_components_set.insert(tag_name.to_string()) {
                     self.resolved_components.push(tag_name.to_string());
                     self.resolved_component_decls.push(format!(
                         "const {} = _resolveComponent(\"{}\")",
