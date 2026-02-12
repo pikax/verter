@@ -1,0 +1,344 @@
+name: Benchmark Workflow
+
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or commit to benchmark'
+        required: false
+        default: 'main'
+
+  # PR comment trigger: /benchmark
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+
+jobs:
+  # Check if workflow should run (for PR comments)
+  check-trigger:
+    if: github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(github.event.comment.body, '/benchmark')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    outputs:
+      should-run: ${{ steps.check.outputs.should-run }}
+      pr-number: ${{ steps.get-pr.outputs.pr-number }}
+      pr-sha: ${{ steps.get-pr.outputs.pr-sha }}
+      pr-ref: ${{ steps.get-pr.outputs.pr-ref }}
+    steps:
+      - name: Check comment author
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment;
+            const commentBody = comment.body.trim();
+            
+            // Check if comment is exactly "/benchmark" or starts with "/benchmark "
+            if (!commentBody.startsWith('/benchmark')) {
+              console.log('Comment does not start with /benchmark');
+              core.setOutput('should-run', 'false');
+              return;
+            }
+            
+            // Check if commenter has write access
+            const { data: collaborator } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: comment.user.login
+            });
+            
+            const hasPermission = ['admin', 'write'].includes(collaborator.permission);
+            core.setOutput('should-run', hasPermission ? 'true' : 'false');
+            
+            if (!hasPermission) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: `@${comment.user.login} Sorry, you don't have permission to trigger benchmarks. Only collaborators with write access can use this command.`
+              });
+            } else {
+              await github.rest.reactions.createForIssueComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: comment.id,
+                content: 'rocket'
+              });
+            }
+
+      - name: Get PR details
+        if: steps.check.outputs.should-run == 'true'
+        id: get-pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            
+            core.setOutput('pr-number', context.issue.number);
+            core.setOutput('pr-sha', pr.head.sha);
+            core.setOutput('pr-ref', pr.head.ref);
+
+  # Run benchmarks
+  benchmark:
+    needs: check-trigger
+    if: |
+      always() && 
+      (github.event_name == 'workflow_dispatch' || 
+       (github.event_name == 'issue_comment' && needs.check-trigger.outputs.should-run == 'true'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+    outputs:
+      result-json: ${{ steps.run-bench.outputs.result-json }}
+      overall-status: ${{ steps.run-bench.outputs.overall-status }}
+    steps:
+      - name: Determine checkout ref
+        id: checkout-ref
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "ref=${{ github.event.inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "ref=${{ needs.check-trigger.outputs.pr-ref }}" >> $GITHUB_OUTPUT
+          else
+            echo "ref=main" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.checkout-ref.outputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 8
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.pnpm-store
+          key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-pnpm-
+
+      - name: Cache Rust build
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/
+            ~/.cargo/registry/
+            ~/.cargo/git/
+          key: ${{ runner.os }}-rust-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-rust-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build native package
+        run: pnpm --filter @verter/native build
+
+      - name: Build benchmark package
+        run: pnpm --filter @verter/benchmark install
+
+      - name: Run benchmarks
+        id: run-bench
+        run: |
+          echo "Running benchmarks..."
+          
+          # Run benchmark with JSON output
+          pnpm --filter @verter/benchmark bench:json > benchmark-output.json
+          
+          # Extract results
+          RESULT_JSON=$(cat benchmark-output.json)
+          OVERALL_STATUS=$(echo "$RESULT_JSON" | jq -r '.summary.overallStatus')
+          
+          # Save for artifact
+          echo "$RESULT_JSON" > benchmark-results.json
+          
+          # Set outputs (escape for GitHub Actions)
+          echo "result-json<<EOF" >> $GITHUB_OUTPUT
+          echo "$RESULT_JSON" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "overall-status=$OVERALL_STATUS" >> $GITHUB_OUTPUT
+          
+          echo "Benchmark complete: $OVERALL_STATUS"
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            benchmark-results.json
+            benchmark-results/
+          retention-days: 30
+
+  # Post results to PR
+  report:
+    needs: [check-trigger, benchmark]
+    if: |
+      always() && 
+      needs.benchmark.result != 'cancelled' &&
+      (github.event_name == 'workflow_dispatch' || 
+       (github.event_name == 'issue_comment' && needs.check-trigger.outputs.should-run == 'true'))
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      checks: write
+    steps:
+      - name: Generate PR comment
+        id: generate-comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const resultJson = ${{ needs.benchmark.outputs.result-json }};
+            const overallStatus = '${{ needs.benchmark.outputs.overall-status }}';
+            
+            const statusEmoji = {
+              pass: '✅',
+              warning: '⚠️',
+              fail: '❌'
+            };
+            
+            const statusColor = {
+              pass: '🟢',
+              warning: '🟡',
+              fail: '🔴'
+            };
+            
+            let comment = `## ${statusEmoji[overallStatus]} Benchmark Results\n\n`;
+            comment += `**Overall Status:** ${statusColor[overallStatus]} **${overallStatus.toUpperCase()}**\n\n`;
+            
+            const { summary } = resultJson;
+            comment += `### Summary\n\n`;
+            comment += `- Total Fixtures: ${summary.totalFixtures}\n`;
+            comment += `- ${statusEmoji.pass} Passed: ${summary.passed}\n`;
+            comment += `- ${statusEmoji.warning} Warnings: ${summary.warnings}\n`;
+            comment += `- ${statusEmoji.fail} Failed: ${summary.failed}\n`;
+            comment += `- Average Speedup: **${summary.avgSpeedup.toFixed(2)}x**\n\n`;
+            
+            comment += `### Detailed Results\n\n`;
+            comment += `| Fixture | Size | Vue (ms) | Verter (ms) | Speedup | Throughput | Status |\n`;
+            comment += `|---------|------|----------|-------------|---------|------------|--------|\n`;
+            
+            for (const fixture of resultJson.fixtures) {
+              const vueMean = fixture.vue.stats.mean.toFixed(2);
+              const verterMean = fixture.verter.stats.mean.toFixed(2);
+              const speedup = fixture.speedup.toFixed(2);
+              const throughput = fixture.verter.throughputMBs.toFixed(2);
+              const status = statusEmoji[fixture.status];
+              
+              const sizeKB = (fixture.size / 1024).toFixed(2);
+              comment += `| ${fixture.name} | ${sizeKB} KB | ${vueMean} | ${verterMean} | ${speedup}x | ${throughput} MB/s | ${status} |\n`;
+            }
+            
+            comment += `\n`;
+            comment += `<details>\n`;
+            comment += `<summary>Performance Details</summary>\n\n`;
+            
+            for (const fixture of resultJson.fixtures) {
+              comment += `#### ${fixture.name}\n\n`;
+              comment += `**Vue:**\n`;
+              comment += `- Mean: ${fixture.vue.stats.mean.toFixed(2)} ms\n`;
+              comment += `- Median (p50): ${fixture.vue.stats.median.toFixed(2)} ms\n`;
+              comment += `- p95: ${fixture.vue.stats.p95.toFixed(2)} ms\n`;
+              comment += `- Ops/sec: ${fixture.vue.opsPerSec.toFixed(0)}\n\n`;
+              
+              comment += `**Verter:**\n`;
+              comment += `- Mean: ${fixture.verter.stats.mean.toFixed(2)} ms\n`;
+              comment += `- Median (p50): ${fixture.verter.stats.median.toFixed(2)} ms\n`;
+              comment += `- p95: ${fixture.verter.stats.p95.toFixed(2)} ms\n`;
+              comment += `- Ops/sec: ${fixture.verter.opsPerSec.toFixed(0)}\n`;
+              comment += `- Throughput: ${fixture.verter.throughputMBs.toFixed(2)} MB/s\n\n`;
+              
+              comment += `**Speedup:** ${fixture.speedup.toFixed(2)}x (${statusEmoji[fixture.status]} ${fixture.status})\n\n`;
+            }
+            
+            comment += `</details>\n\n`;
+            
+            comment += `---\n\n`;
+            comment += `**Status Criteria:**\n`;
+            comment += `- ${statusEmoji.pass} **Pass**: Verter ≥ 100% of Vue performance (speedup ≥ 1.0x)\n`;
+            comment += `- ${statusEmoji.warning} **Warning**: Verter 50-99% of Vue performance (0.5x ≤ speedup < 1.0x)\n`;
+            comment += `- ${statusEmoji.fail} **Fail**: Verter < 50% of Vue performance (speedup < 0.5x)\n`;
+            
+            core.setOutput('comment', comment);
+
+      - name: Post PR comment
+        if: github.event_name == 'issue_comment' && needs.check-trigger.outputs.pr-number
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = `${{ steps.generate-comment.outputs.comment }}`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ needs.check-trigger.outputs.pr-number }},
+              body: comment
+            });
+
+      - name: Create check run
+        if: github.event_name == 'issue_comment' && needs.check-trigger.outputs.pr-sha
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const overallStatus = '${{ needs.benchmark.outputs.overall-status }}';
+            const resultJson = ${{ needs.benchmark.outputs.result-json }};
+            
+            const conclusion = overallStatus === 'pass' ? 'success' : 
+                              overallStatus === 'warning' ? 'neutral' : 
+                              'failure';
+            
+            const title = overallStatus === 'pass' ? 
+              `✅ All benchmarks passed (avg ${resultJson.summary.avgSpeedup.toFixed(2)}x speedup)` :
+              overallStatus === 'warning' ?
+              `⚠️ Benchmarks passed with warnings (avg ${resultJson.summary.avgSpeedup.toFixed(2)}x speedup)` :
+              `❌ Some benchmarks failed (avg ${resultJson.summary.avgSpeedup.toFixed(2)}x speedup)`;
+            
+            let summary = `Benchmark Results:\n`;
+            summary += `- Passed: ${resultJson.summary.passed}\n`;
+            summary += `- Warnings: ${resultJson.summary.warnings}\n`;
+            summary += `- Failed: ${resultJson.summary.failed}\n`;
+            summary += `- Average Speedup: ${resultJson.summary.avgSpeedup.toFixed(2)}x\n`;
+            
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'Benchmark Results',
+              head_sha: '${{ needs.check-trigger.outputs.pr-sha }}',
+              status: 'completed',
+              conclusion: conclusion,
+              output: {
+                title: title,
+                summary: summary,
+                text: `${{ steps.generate-comment.outputs.comment }}`
+              }
+            });
+
+      - name: Summary
+        run: |
+          echo "### Benchmark Complete 🎯" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ needs.benchmark.outputs.overall-status }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "See PR comment for detailed results." >> $GITHUB_STEP_SUMMARY
