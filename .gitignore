@@ -31,3 +31,4 @@ CLAUDE.md
 
 # Benchmark results (generated artifacts)
 packages/bench/results/
+packages/benchmark/benchmark-results/
