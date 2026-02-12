@@ -249,9 +249,7 @@ impl VaporEffect {
         match self {
             VaporEffect::SetClass { expr, .. } => Some(format!("class: () => ({})", expr)),
             VaporEffect::SetStyle { expr, .. } => Some(format!("style: () => ({})", expr)),
-            VaporEffect::SetProp { attr, expr, .. } => {
-                Some(format!("{}: () => ({})", attr, expr))
-            }
+            VaporEffect::SetProp { attr, expr, .. } => Some(format!("{}: () => ({})", attr, expr)),
             // SetDynamicProps, SetHtml, OnDynamic, Raw don't map to simple component props.
             _ => None,
         }
@@ -338,10 +336,7 @@ mod tests {
     #[test]
     fn test_effect_raw_ignores_override() {
         let effect = VaporEffect::Raw("_setText(x0, _ctx.msg)".to_string());
-        assert_eq!(
-            effect.to_code_string(Some(99)),
-            "_setText(x0, _ctx.msg)"
-        );
+        assert_eq!(effect.to_code_string(Some(99)), "_setText(x0, _ctx.msg)");
     }
 
     // ── VaporEffect::to_component_prop tests ────────────────────────────

@@ -69,7 +69,10 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             .last_mut()
                             .expect("process_props: stack empty for ClassBind")
                             .effects
-                            .push(VaporEffect::SetClass { node_ref, expr: prefixed });
+                            .push(VaporEffect::SetClass {
+                                node_ref,
+                                expr: prefixed,
+                            });
                     }
                 }
 
@@ -88,7 +91,10 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             .last_mut()
                             .expect("process_props: stack empty for StyleBind")
                             .effects
-                            .push(VaporEffect::SetStyle { node_ref, expr: prefixed });
+                            .push(VaporEffect::SetStyle {
+                                node_ref,
+                                expr: prefixed,
+                            });
                     }
                 }
 
@@ -121,7 +127,10 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                                 .last_mut()
                                 .expect("process_props: stack empty for dynamic Bind")
                                 .effects
-                                .push(VaporEffect::SetDynamicProps { node_ref, expr: dynamic_expr });
+                                .push(VaporEffect::SetDynamicProps {
+                                    node_ref,
+                                    expr: dynamic_expr,
+                                });
                         } else {
                             let attr_name = if let Some(ref arg) = prop.arg {
                                 ctx.input[arg.start as usize..arg.end as usize].to_string()
@@ -134,7 +143,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                                 .last_mut()
                                 .expect("process_props: stack empty for Bind")
                                 .effects
-                                .push(VaporEffect::SetProp { node_ref, attr: attr_name, expr: prefixed });
+                                .push(VaporEffect::SetProp {
+                                    node_ref,
+                                    attr: attr_name,
+                                    expr: prefixed,
+                                });
                         }
                     }
                 }
@@ -155,7 +168,10 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             .last_mut()
                             .expect("process_props: stack empty for BindSpread")
                             .effects
-                            .push(VaporEffect::SetDynamicProps { node_ref, expr: prefixed });
+                            .push(VaporEffect::SetDynamicProps {
+                                node_ref,
+                                expr: prefixed,
+                            });
                     }
                 }
 
@@ -182,7 +198,10 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             .last_mut()
                             .expect("process_props: stack empty for OnSpread")
                             .effects
-                            .push(VaporEffect::SetDynamicProps { node_ref, expr: dynamic_expr });
+                            .push(VaporEffect::SetDynamicProps {
+                                node_ref,
+                                expr: dynamic_expr,
+                            });
                     }
                 }
 
@@ -201,7 +220,10 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             .last_mut()
                             .expect("process_props: stack empty for Html")
                             .effects
-                            .push(VaporEffect::SetHtml { node_ref, expr: prefixed });
+                            .push(VaporEffect::SetHtml {
+                                node_ref,
+                                expr: prefixed,
+                            });
                     }
                 }
 

@@ -9,7 +9,9 @@ use crate::syntax_kai::{
 };
 
 use super::helpers::{apply_var_mappings, build_set_text_call, replace_node_ref};
-use super::types::{VaporEffect, VaporElementKind, VaporElementState, VaporScopeKind, VaporSlotInfo, VaporTextPart};
+use super::types::{
+    VaporEffect, VaporElementKind, VaporElementState, VaporScopeKind, VaporSlotInfo, VaporTextPart,
+};
 use super::VaporTemplateGenerator;
 
 impl<'alloc> VaporTemplateGenerator<'alloc> {
@@ -191,10 +193,14 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         if is_slot_outlet {
             let name = Self::find_static_attr_value("name", ev, ctx);
             if let Some(name) = name {
-                let top = self.stack
+                let top = self
+                    .stack
                     .last_mut()
                     .expect("handle_element_start: stack empty after slot outlet name extraction");
-                if let VaporElementKind::SlotOutlet { ref mut slot_name, .. } = top.kind {
+                if let VaporElementKind::SlotOutlet {
+                    ref mut slot_name, ..
+                } = top.kind
+                {
                     *slot_name = Some(name);
                 }
             }
@@ -254,7 +260,15 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         }
 
         // Handle <template #name> children of components → collect as named slot.
-        if state.is_template_element() && matches!(state.kind, VaporElementKind::TemplateWrapper { slot_name: Some(_), .. }) {
+        if state.is_template_element()
+            && matches!(
+                state.kind,
+                VaporElementKind::TemplateWrapper {
+                    slot_name: Some(_),
+                    ..
+                }
+            )
+        {
             self.complete_slot_template_close(&mut state, close_tag);
             return;
         }
@@ -340,7 +354,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         let close_end = close_tag.map(|ct| ct.end).unwrap_or(state.open_tag_end);
 
         // Extract slot_params from Component kind (set by v-slot on the component itself).
-        let component_slot_params = if let VaporElementKind::Component { ref mut slot_params, .. } = state.kind {
+        let component_slot_params = if let VaporElementKind::Component {
+            ref mut slot_params,
+            ..
+        } = state.kind
+        {
             slot_params.take()
         } else {
             None
@@ -353,15 +371,22 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 slot_body.push_str(&child);
             }
             // Check if there's already a default slot.
-            let has_default = state.kind.slot_children().map_or(false, |sc| sc.iter().any(|s| s.name == "default"));
+            let has_default = state
+                .kind
+                .slot_children()
+                .is_some_and(|sc| sc.iter().any(|s| s.name == "default"));
             if !has_default && !slot_body.is_empty() {
-                state.kind.slot_children_mut().expect("complete_component_element_close: kind must have slot_children").push(VaporSlotInfo {
-                    name: "default".to_string(),
-                    is_dynamic: false,
-                    dynamic_name_expr: None,
-                    params: component_slot_params,
-                    body: slot_body,
-                });
+                state
+                    .kind
+                    .slot_children_mut()
+                    .expect("complete_component_element_close: kind must have slot_children")
+                    .push(VaporSlotInfo {
+                        name: "default".to_string(),
+                        is_dynamic: false,
+                        dynamic_name_expr: None,
+                        params: component_slot_params,
+                        body: slot_body,
+                    });
             }
         }
 
@@ -413,22 +438,30 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
     ) {
         let close_end = close_tag.map(|ct| ct.end).unwrap_or(state.open_tag_end);
-        let slot_name = if let VaporElementKind::TemplateWrapper { ref mut slot_name, .. } = state.kind {
+        let slot_name = if let VaporElementKind::TemplateWrapper {
+            ref mut slot_name, ..
+        } = state.kind
+        {
             slot_name.take().unwrap_or_else(|| "default".to_string())
         } else {
             "default".to_string()
         };
-        let (is_dynamic, dynamic_name_expr, slot_params) = if let VaporElementKind::TemplateWrapper {
-            slot_name_is_dynamic,
-            ref mut slot_dynamic_name_expr,
-            ref mut slot_params,
-            ..
-        } = state.kind
-        {
-            (slot_name_is_dynamic, slot_dynamic_name_expr.take(), slot_params.take())
-        } else {
-            (false, None, None)
-        };
+        let (is_dynamic, dynamic_name_expr, slot_params) =
+            if let VaporElementKind::TemplateWrapper {
+                slot_name_is_dynamic,
+                ref mut slot_dynamic_name_expr,
+                ref mut slot_params,
+                ..
+            } = state.kind
+            {
+                (
+                    slot_name_is_dynamic,
+                    slot_dynamic_name_expr.take(),
+                    slot_params.take(),
+                )
+            } else {
+                (false, None, None)
+            };
 
         // Build the slot body from structural children.
         let mut slot_body = String::new();
@@ -445,7 +478,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         // Add this slot to the parent component's slot_children.
         if let Some(parent) = self.stack.last_mut() {
-            parent.kind.slot_children_mut()
+            parent
+                .kind
+                .slot_children_mut()
                 .expect("complete_slot_template_close: parent kind must have slot_children")
                 .push(VaporSlotInfo {
                     name: slot_name,
@@ -518,7 +553,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         if !all_effects.is_empty() {
             // Render all effects to code strings (no node_ref override for root).
-            let rendered: Vec<String> = all_effects.iter().map(|e| e.to_code_string(None)).collect();
+            let rendered: Vec<String> =
+                all_effects.iter().map(|e| e.to_code_string(None)).collect();
             if state.is_once {
                 // v-once: emit effects as direct statements (no _renderEffect wrapping).
                 for effect in &rendered {
@@ -789,10 +825,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             } else {
                 self.imports.add(VaporImportDependencies::RENDER_EFFECT);
                 if rendered.len() == 1 {
-                    body.push_str(&format!(
-                        "{}_renderEffect(() => {})\n",
-                        indent, rendered[0]
-                    ));
+                    body.push_str(&format!("{}_renderEffect(() => {})\n", indent, rendered[0]));
                 } else {
                     body.push_str(&format!("{}_renderEffect(() => {{\n", indent));
                     for effect in &rendered {

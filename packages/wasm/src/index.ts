@@ -1,26 +1,11 @@
-export interface FeatureFlags {
-  /** Enable Options API support (default: true) */
-  optionsApi?: boolean;
-  /** Enable reactive destructure for defineProps (default: true) */
-  propsDestructure?: boolean;
-}
-
 export interface CodegenOptions {
   /** The filename for source map generation */
   filename?: string;
-  /** Whether to include source content in the source map */
-  includeSourceContent?: boolean;
-  /** SSR mode */
-  ssr?: boolean;
   /** Production mode - affects component ID generation and optimizations */
   isProduction?: boolean;
   /** Custom component ID (overrides auto-generation from filename) */
   componentId?: string;
-  /** Feature flags for codegen */
-  features?: FeatureFlags;
-  /** When true (default), preserve TypeScript syntax in output. Set to false to strip types. */
-  keepTs?: boolean;
-  /** When true, generate TSX output via the syntax_kai pipeline. Default: false. */
+  /** When true, generate TSX output. Default: false. */
   includeTsx?: boolean;
 }
 
@@ -41,13 +26,6 @@ export interface CodegenResult {
   tsxDurationMs: number;
 }
 
-export interface KaiCodegenResult {
-  /** The generated code (VDOM or Vapor render function) */
-  code: string;
-  /** Time taken for the Rust pipeline in milliseconds */
-  durationMs: number;
-}
-
 export interface StripTypesResult {
   /** The JavaScript output with TypeScript syntax removed */
   code: string;
@@ -59,13 +37,11 @@ export type WasmInput = string | Uint8Array;
 
 type WasmCompileFn = (input: string, options?: unknown) => CodegenResult;
 type WasmCompileBytesFn = (input: Uint8Array, options?: unknown) => CodegenResult;
-type WasmGenerateKaiFn = (input: string, options?: unknown) => KaiCodegenResult;
 type WasmStripTypesFn = (source: string) => StripTypesResult;
 type WasmInitFn = () => Promise<unknown>;
 
 let wasmCompile: WasmCompileFn | null = null;
 let wasmCompileBytes: WasmCompileBytesFn | null = null;
-let wasmGenerateKai: WasmGenerateKaiFn | null = null;
 let wasmStripTypes: WasmStripTypesFn | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
@@ -92,7 +68,6 @@ export async function initialize(): Promise<void> {
     await (wasm.default as WasmInitFn)();
     wasmCompile = wasm.compile as WasmCompileFn;
     wasmCompileBytes = (wasm.compileBytes as WasmCompileBytesFn) ?? null;
-    wasmGenerateKai = (wasm.generateKai as WasmGenerateKaiFn) ?? null;
     wasmStripTypes = (wasm.stripTypes as WasmStripTypesFn) ?? null;
     initialized = true;
   })();
@@ -187,38 +162,4 @@ export function stripTypesSync(source: string): StripTypesResult {
   }
 
   return wasmStripTypes(source);
-}
-
-/**
- * Compile a Vue SFC using the syntax_kai pipeline (VDOM/Vapor codegen).
- *
- * @param input - The Vue SFC source code
- * @param options - Optional compilation options
- * @returns The compiled result with code and timing info
- * @throws If the WASM module has not been initialized or generateKai not available
- */
-export async function generateKai(input: string, options?: CodegenOptions): Promise<KaiCodegenResult> {
-  await initialize();
-
-  if (!wasmGenerateKai) {
-    throw new Error("WASM module not initialized or generateKai not available");
-  }
-
-  return wasmGenerateKai(input, options);
-}
-
-/**
- * Synchronous generateKai - requires initialize() to have been called first.
- *
- * @param input - The Vue SFC source code
- * @param options - Optional compilation options
- * @returns The compiled result with code and timing info
- * @throws If the WASM module has not been initialized
- */
-export function generateKaiSync(input: string, options?: CodegenOptions): KaiCodegenResult {
-  if (!initialized || !wasmGenerateKai) {
-    throw new Error("WASM module not initialized. Call initialize() first.");
-  }
-
-  return wasmGenerateKai(input, options);
 }

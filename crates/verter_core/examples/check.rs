@@ -7,9 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use verter_core::builder::codegen::{
-    generate, generate_for_vite, get_hash, CodegenOptions, ViteCodegenOptions,
-};
+use verter_core::builder::codegen::{compile, CodegenOptions};
 use walkdir::WalkDir;
 
 fn find_vue_files(dir: &Path) -> Vec<PathBuf> {
@@ -119,12 +117,10 @@ fn main() {
         match fs::read_to_string(file_path) {
             Ok(source) => {
                 let allocator = oxc_allocator::Allocator::new();
-                let options = CodegenOptions::new()
-                    .with_filename(file_name.to_string())
-                    .include_source_content(true);
+                let options = CodegenOptions::new().with_filename(file_name.to_string());
 
                 let codegen_start = Instant::now();
-                let result = generate(&source, &options, &allocator);
+                let result = compile(&source, &options, &allocator);
                 total_codegen_ms.fetch_add(
                     codegen_start.elapsed().as_millis() as u64,
                     Ordering::Relaxed,
@@ -140,81 +136,6 @@ fn main() {
             Err(err) => {
                 eprintln!("  Error reading file {}: {}", file_path.display(), err);
                 errored_files.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    });
-
-    // ========================================================================
-    // Per-block generation (Vite-style: dev / prod / ssr) - parallel
-    // ========================================================================
-    let modes: &[(&str, bool, bool)] = &[
-        ("dev", false, false), // (label, is_production, ssr)
-        ("prod", true, false),
-        ("ssr", false, true),
-    ];
-
-    vue_files.par_iter().for_each(|file_path| {
-        let file_name = file_path.file_name().unwrap().to_string_lossy();
-        let base_name = file_path.file_stem().unwrap().to_string_lossy();
-        // Use the source-dir-relative filepath to match check.js's filePath
-        let filepath_str = file_path.to_string_lossy().replace('\\', "/");
-
-        let source = match fs::read_to_string(file_path) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-
-        for &(mode, is_production, ssr) in modes {
-            let component_id = if is_production {
-                get_hash(&filepath_str)
-            } else {
-                get_hash(&format!("{}{}", filepath_str, source))
-            };
-
-            let allocator = oxc_allocator::Allocator::new();
-            let options = ViteCodegenOptions {
-                filename: Some(file_name.to_string()),
-                is_production,
-                ssr,
-                component_id: Some(component_id),
-                sourcemap: false,
-            };
-
-            let codegen_start = Instant::now();
-            let result = generate_for_vite(&source, &options, &allocator);
-            total_codegen_ms.fetch_add(
-                codegen_start.elapsed().as_millis() as u64,
-                Ordering::Relaxed,
-            );
-
-            // script block
-            if let Some(ref block) = result.script {
-                let out = generated_dir.join(format!("{}.script.{}.verter.js", base_name, mode));
-                let _ = fs::write(&out, &block.code);
-                total_size_bytes.fetch_add(block.code.len() as u64, Ordering::Relaxed);
-            }
-
-            // template / render block
-            if let Some(ref block) = result.template {
-                let out = generated_dir.join(format!("{}.render.{}.verter.js", base_name, mode));
-                let _ = fs::write(&out, &block.code);
-                total_size_bytes.fetch_add(block.code.len() as u64, Ordering::Relaxed);
-            }
-
-            // style blocks
-            for (i, style) in result.styles.iter().enumerate() {
-                let out =
-                    generated_dir.join(format!("{}.style{}.{}.verter.js", base_name, i, mode));
-                let _ = fs::write(&out, &style.code);
-                total_size_bytes.fetch_add(style.code.len() as u64, Ordering::Relaxed);
-            }
-
-            // custom blocks
-            for custom in &result.custom {
-                let out =
-                    generated_dir.join(format!("{}.{}.{}.verter.js", base_name, custom.tag, mode));
-                let _ = fs::write(&out, &custom.content);
-                total_size_bytes.fetch_add(custom.content.len() as u64, Ordering::Relaxed);
             }
         }
     });

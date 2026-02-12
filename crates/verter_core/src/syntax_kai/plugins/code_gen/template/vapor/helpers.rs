@@ -232,10 +232,7 @@ mod tests {
 
     #[test]
     fn test_replace_node_ref_at_end_of_string() {
-        assert_eq!(
-            replace_node_ref("ref = n1", 1, 5),
-            "ref = n5"
-        );
+        assert_eq!(replace_node_ref("ref = n1", 1, 5), "ref = n5");
     }
 
     #[test]

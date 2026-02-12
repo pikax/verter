@@ -1,20 +1,6 @@
 export type InputBuffer = string | Uint8Array;
 
 /**
- * Feature flags for Vue compilation
- */
-export interface FeatureFlags {
-  /**
-   * Enable Options API support (default: true)
-   */
-  options_api?: boolean;
-  /**
-   * Enable reactive destructure for defineProps (default: true)
-   */
-  props_destructure?: boolean;
-}
-
-/**
  * Options for compiling Vue SFC to JavaScript
  */
 export interface CodegenOptions {
@@ -23,14 +9,6 @@ export interface CodegenOptions {
    */
   filename?: string;
   /**
-   * Whether to include source content in the source map
-   */
-  include_source_content?: boolean;
-  /**
-   * SSR mode
-   */
-  ssr?: boolean;
-  /**
    * Production mode - affects component ID generation and optimizations
    */
   is_production?: boolean;
@@ -38,10 +16,6 @@ export interface CodegenOptions {
    * Custom component ID (overrides auto-generation from filename)
    */
   component_id?: string;
-  /**
-   * Feature flags for codegen
-   */
-  features?: FeatureFlags;
 }
 
 /**
@@ -200,15 +174,6 @@ export interface ViteCodegenResult {
  * @returns The compiled result with code, source map, and code with inline source map
  */
 export declare function compile(input: InputBuffer, options?: CodegenOptions): CodegenResult;
-
-/**
- * Synchronous version of compile (same as compile, kept for API compatibility)
- *
- * @param input - The Vue SFC source code (string or Buffer)
- * @param options - Optional compilation options
- * @returns The compiled result with code, source map, and code with inline source map
- */
-export declare function compileSync(input: InputBuffer, options?: CodegenOptions): CodegenResult;
 
 /**
  * Compile a Vue SFC for Vite plugin usage.

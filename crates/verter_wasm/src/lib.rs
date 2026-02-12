@@ -1,9 +1,6 @@
 use serde::{Deserialize, Serialize};
 use verter_core::builder::codegen::{
-    generate as core_generate, CodegenOptions as CoreOptions, FeatureFlags as CoreFeatures,
-};
-use verter_core::builder::codegen_kai::{
-    generate_kai as core_generate_kai, generate_with_tsx_kai, KaiCodegenOptions,
+    compile as core_compile, compile_with_tsx, CodegenOptions as CoreOptions,
 };
 use verter_core::strip_types::strip_types as core_strip_types;
 use wasm_bindgen::prelude::*;
@@ -14,44 +11,16 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct FeatureFlags {
-    /// Enable Options API support (default: true)
-    #[serde(default = "default_true")]
-    pub options_api: bool,
-    /// Enable reactive destructure for defineProps (default: true)
-    #[serde(default = "default_true")]
-    pub props_destructure: bool,
-}
-
 #[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CodegenOptions {
     /// The filename for source map generation
     pub filename: Option<String>,
-    /// Whether to include source content in the source map
-    #[serde(default)]
-    pub include_source_content: bool,
-    /// SSR mode
-    #[serde(default)]
-    pub ssr: bool,
     /// Production mode - affects component ID generation and optimizations
     #[serde(default)]
     pub is_production: bool,
     /// Custom component ID (overrides auto-generation from filename)
     pub component_id: Option<String>,
-    /// Feature flags for codegen
-    #[serde(default)]
-    pub features: FeatureFlags,
-    /// When true (default), preserve TypeScript syntax in output.
-    /// Set to false to strip type annotations for browser execution (playground).
-    #[serde(default = "default_true")]
-    pub keep_ts: bool,
     /// When true, generate TSX output via the syntax_kai pipeline.
     /// Default: false (skip TSX generation to save time).
     #[serde(default)]
@@ -78,8 +47,6 @@ pub struct CodegenResult {
 }
 
 fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
-    // Create allocator internally - this is critical for memory safety
-    // The allocator manages memory for the OXC AST and cannot cross the WASM boundary
     let allocator = oxc_allocator::Allocator::new();
 
     let opts: CodegenOptions = if options.is_undefined() || options.is_null() {
@@ -89,33 +56,18 @@ fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
             .map_err(|e| JsValue::from_str(&format!("Invalid options: {}", e)))?
     };
 
-    // Build kai options before moving opts fields into core_options
-    let kai_options = KaiCodegenOptions {
+    let core_options = CoreOptions {
         filename: opts.filename.clone(),
         is_production: opts.is_production,
         component_id: opts.component_id.clone(),
         include_tsx: opts.include_tsx,
     };
 
-    let core_options = CoreOptions {
-        filename: opts.filename,
-        include_source_content: opts.include_source_content,
-        ssr: opts.ssr,
-        is_production: opts.is_production,
-        component_id: opts.component_id,
-        features: CoreFeatures {
-            options_api: opts.features.options_api,
-            props_destructure: opts.features.props_destructure,
-        },
-        keep_ts: opts.keep_ts,
-    };
+    let result = core_compile(input, &core_options, &allocator);
 
-    let result = core_generate(input, &core_options, &allocator);
-
-    // Run the syntax_kai pipeline — always produces compiled CSS,
-    // optionally produces TSX (controlled by kai_options.include_tsx)
+    // Run TSX pipeline
     let tsx_allocator = oxc_allocator::Allocator::new();
-    let tsx_result = generate_with_tsx_kai(input, &kai_options, &tsx_allocator);
+    let tsx_result = compile_with_tsx(input, &core_options, &tsx_allocator);
 
     let js_result = CodegenResult {
         code: result.code,
@@ -151,53 +103,6 @@ pub fn compile_bytes(input: &[u8], options: JsValue) -> Result<JsValue, JsValue>
     let input_str = std::str::from_utf8(input)
         .map_err(|e| JsValue::from_str(&format!("input must be valid UTF-8: {}", e)))?;
     compile_inner(input_str, options)
-}
-
-// =============================================================================
-// Kai Codegen (VDOM/Vapor)
-// =============================================================================
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KaiCodegenResult {
-    /// The generated code (VDOM or Vapor render function)
-    pub code: String,
-    /// Time taken for the Rust pipeline in milliseconds
-    pub duration_ms: f64,
-}
-
-/// Compile a Vue SFC using the syntax_kai pipeline (VDOM/Vapor codegen).
-///
-/// @param input - The Vue SFC source code
-/// @param options - Optional compilation options (as JS object)
-/// @returns The compiled result with code and timing info
-#[wasm_bindgen(js_name = generateKai)]
-pub fn generate_kai(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
-    let allocator = oxc_allocator::Allocator::new();
-
-    let opts: CodegenOptions = if options.is_undefined() || options.is_null() {
-        CodegenOptions::default()
-    } else {
-        serde_wasm_bindgen::from_value(options)
-            .map_err(|e| JsValue::from_str(&format!("Invalid options: {}", e)))?
-    };
-
-    let kai_options = KaiCodegenOptions {
-        filename: opts.filename,
-        is_production: opts.is_production,
-        component_id: opts.component_id,
-        include_tsx: false,
-    };
-
-    let result = core_generate_kai(input, &kai_options, &allocator);
-
-    let js_result = KaiCodegenResult {
-        code: result.code,
-        duration_ms: result.duration_ms,
-    };
-
-    serde_wasm_bindgen::to_value(&js_result)
-        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
 }
 
 // =============================================================================

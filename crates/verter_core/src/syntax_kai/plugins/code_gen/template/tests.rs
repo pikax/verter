@@ -1,4 +1,4 @@
-use crate::builder::codegen_kai::{generate_kai, KaiCodegenOptions};
+use crate::builder::codegen::{compile, CodegenOptions};
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -10,17 +10,17 @@ use oxc_span::SourceType;
 /// Run the full pipeline (tokenizer → syntax_kai → codegen) in dev mode.
 fn gen(input: &str) -> String {
     let allocator = Allocator::new();
-    let options = KaiCodegenOptions::new().with_filename("test.vue");
-    generate_kai(input, &options, &allocator).code
+    let options = CodegenOptions::new().with_filename("test.vue");
+    compile(input, &options, &allocator).code
 }
 
 /// Run the full pipeline in production mode.
 fn gen_prod(input: &str) -> String {
     let allocator = Allocator::new();
-    let options = KaiCodegenOptions::new()
+    let options = CodegenOptions::new()
         .with_filename("test.vue")
         .with_production(true);
-    generate_kai(input, &options, &allocator).code
+    compile(input, &options, &allocator).code
 }
 
 /// Validate that generated code is syntactically valid JavaScript.

@@ -99,8 +99,8 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`);
 }
 
-const { compile, compileSync, compileForVite } = nativeBinding;
+const { compile, compileForVite, processStyle } = nativeBinding;
 
 module.exports.compile = compile;
-module.exports.compileSync = compileSync;
 module.exports.compileForVite = compileForVite;
+module.exports.processStyle = processStyle;

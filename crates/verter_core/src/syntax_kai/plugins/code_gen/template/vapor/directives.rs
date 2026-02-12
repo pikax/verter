@@ -175,9 +175,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     self.slot_props_counter += 1;
                     *sp = Some(slot_props_var.clone());
                     for local_span in locals {
-                        let local_name =
-                            ctx.input[local_span.start as usize..local_span.end as usize]
-                                .to_string();
+                        let local_name = ctx.input
+                            [local_span.start as usize..local_span.end as usize]
+                            .to_string();
                         let mapped = format!("{}.{}", slot_props_var, local_name);
                         state.for_var_mappings.push((local_name, mapped));
                     }
@@ -194,9 +194,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     self.slot_props_counter += 1;
                     *sp = Some(slot_props_var.clone());
                     for local_span in locals {
-                        let local_name =
-                            ctx.input[local_span.start as usize..local_span.end as usize]
-                                .to_string();
+                        let local_name = ctx.input
+                            [local_span.start as usize..local_span.end as usize]
+                            .to_string();
                         let mapped = format!("{}.{}", slot_props_var, local_name);
                         state.for_var_mappings.push((local_name, mapped));
                     }

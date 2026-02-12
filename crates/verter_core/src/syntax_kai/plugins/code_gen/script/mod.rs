@@ -114,7 +114,7 @@ impl<'alloc> SyntaxPlugin<'alloc> for ScriptGeneratorPlugin<'alloc> {
 
 #[cfg(test)]
 mod tests {
-    use crate::builder::codegen_kai::{generate_kai, KaiCodegenOptions};
+    use crate::builder::codegen::{compile, CodegenOptions};
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
@@ -125,22 +125,22 @@ mod tests {
 
     fn gen(input: &str) -> String {
         let allocator = Allocator::new();
-        let options = KaiCodegenOptions::new().with_filename("test.vue");
-        generate_kai(input, &options, &allocator).code
+        let options = CodegenOptions::new().with_filename("test.vue");
+        compile(input, &options, &allocator).code
     }
 
     fn gen_prod(input: &str) -> String {
         let allocator = Allocator::new();
-        let options = KaiCodegenOptions::new()
+        let options = CodegenOptions::new()
             .with_filename("test.vue")
             .with_production(true);
-        generate_kai(input, &options, &allocator).code
+        compile(input, &options, &allocator).code
     }
 
     fn gen_with_filename(input: &str, filename: &str) -> String {
         let allocator = Allocator::new();
-        let options = KaiCodegenOptions::new().with_filename(filename);
-        generate_kai(input, &options, &allocator).code
+        let options = CodegenOptions::new().with_filename(filename);
+        compile(input, &options, &allocator).code
     }
 
     fn assert_valid_js(code: &str, context: &str) {
@@ -217,7 +217,7 @@ mod tests {
     }
 
     /// @ai-generated — Production mode emits production template but script remains dev
-    /// NOTE: generate_kai currently hardcodes is_production=false for ScriptGeneratorPlugin.
+    /// NOTE: compile currently hardcodes is_production=false for ScriptGeneratorPlugin.
     /// The template correctly uses production mode. This test verifies current behavior.
     #[test]
     fn test_script_setup_prod_template() {
@@ -485,7 +485,7 @@ mod tests {
 
     // =========================================================================
     // TypeScript vs JavaScript Wrapping (inline)
-    // NOTE: generate_kai does not call plugin.end(), so script imports
+    // NOTE: compile does not call plugin.end(), so script imports
     // (defineComponent, useSlots, mergeModels) are not emitted as import
     // statements. These tests verify the inline helper usage.
     // =========================================================================

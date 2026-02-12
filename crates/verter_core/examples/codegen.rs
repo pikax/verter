@@ -10,7 +10,7 @@
 
 use std::fs;
 use std::path::Path;
-use verter_core::builder::codegen::{generate, CodegenOptions};
+use verter_core::builder::codegen::{compile, CodegenOptions};
 use vize_atelier_sfc::{compile_sfc, parse_sfc, SfcCompileOptions, SfcParseOptions};
 
 fn main() {
@@ -96,11 +96,9 @@ fn process_files(vue_files: &[std::fs::DirEntry], generated_dir: &Path) {
             Ok(source) => {
                 // Verter codegen
                 let allocator = oxc_allocator::Allocator::new();
-                let options = CodegenOptions::new()
-                    .with_filename(file_name.to_string())
-                    .include_source_content(true);
+                let options = CodegenOptions::new().with_filename(file_name.to_string());
 
-                let result = generate(&source, &options, &allocator);
+                let result = compile(&source, &options, &allocator);
 
                 // Write the output with inline source map
                 fs::write(&output_path, &result.code_with_source_map)
