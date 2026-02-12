@@ -34,7 +34,6 @@ pub(crate) fn handle_text<'alloc>(
         kind: ChildKind::Text,
         scope_prefix: String::new(),
     });
-    state.children_count += 1;
 
     // TODO: handle has_entity (HTML entity decoding) — overwrite with decoded string
     // For now, add only the closing quote. The opening quote is added by the

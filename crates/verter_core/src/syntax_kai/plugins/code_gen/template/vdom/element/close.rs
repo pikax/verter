@@ -2,7 +2,7 @@ use crate::{
     code_transform::CodeTransform,
     syntax_kai::{
         plugins::code_gen::{
-            template::helper::build_patch_flag_suffix, types::TemplateImportDependencies,
+            template::vdom::helper::build_patch_flag_suffix, types::TemplateImportDependencies,
         },
         types::OxcCompiledElementClosed,
     },
@@ -172,17 +172,6 @@ pub(crate) fn handle_element_close(
     }
 
     // Normal (non-slot) children handling
-    //
-    // Each child's content_prefix() returns the text that needs to appear
-    // immediately before the child's overwritten/original content:
-    //   Text → `"` (opening quote; closing quote already added by text handler)
-    //   Interpolation → `_toDisplayString` (function name; overwrites handle parens)
-    //   Element/Comment → `` (overwrite already includes the full call prefix)
-    //
-    // Each child's scope_prefix contains any v-if/v-for prefix (e.g. `(show) ? `).
-    //
-    // We combine separator + scope_prefix + content_prefix into a single prepend_left
-    // to ensure correct ordering (separator before scope before content).
     if has_children {
         if all_text_like {
             // Concatenation mode: join with " + "
@@ -244,25 +233,11 @@ pub(crate) fn handle_element_close(
 }
 
 /// Emit the `, [[...]])` suffix for runtime directives.
-///
-/// # Split Emission Pattern
-///
-/// The `_withDirectives(` prefix was already embedded in the element's open tag
-/// `overwrite` (see `handle_element_open`, `wd_prefix` variable).
-/// This function emits only the closing directive array suffix.
-///
-/// This split is safe because `overwrite` replaces a source range atomically —
-/// there is no `prepend_left` conflict. The suffix uses `append_left(close_pos, ...)`
-/// which appears after the VNode's closing paren.
 fn emit_with_directives(code_transform: &mut CodeTransform, state: &StateStack, close_pos: u32) {
     if state.runtime_directives.is_empty() {
         return;
     }
 
-    // `_withDirectives(` prefix is already incorporated into the VNode open overwrite
-    // (see handle_element_open pre-scan). Here we only emit the directive array suffix.
-
-    // Build the directive array: `, [[dir, val, arg, mods], ...])`
     let mut dirs = String::from(", [");
     for (i, dir) in state.runtime_directives.iter().enumerate() {
         if i > 0 {
@@ -294,7 +269,6 @@ fn emit_with_directives(code_transform: &mut CodeTransform, state: &StateStack, 
     }
     dirs.push_str("])");
 
-    // Append after the VNode close
     code_transform.append_left(close_pos, &dirs);
 }
 

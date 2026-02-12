@@ -3,7 +3,7 @@ use rustc_hash::FxHashMap;
 use crate::{
     code_transform::CodeTransform,
     syntax_kai::{
-        binding_types::BindingType, plugins::code_gen::template::helper::patch_bindings,
+        binding_types::BindingType, plugins::code_gen::template::shared::helper::patch_bindings,
         types::OxcInterpolation,
     },
 };
@@ -19,17 +19,15 @@ use crate::{
 /// parent's close phase via `ChildKind::Interpolation.content_prefix()`.
 /// The `overwrite` calls are safe because they replace existing content at
 /// fixed positions, not inserting at the child's start position.
-pub fn handle_interpolation<'alloc>(
+pub(crate) fn handle_interpolation<'alloc>(
     code_transform: &mut CodeTransform<'alloc>,
     ev: &OxcInterpolation<'alloc>,
     map: &FxHashMap<&'alloc str, BindingType>,
     is_inline: bool,
 ) {
-    // Example: transform {{ msg }} to {{ msg.toUpperCase() }}
-    // ctx.code_transform.append_right(ev.expression.end, ".toUpperCase()");
     patch_bindings(code_transform, &ev.bindings, map, is_inline);
 
-    // convert {{ to _toDisplayString(
+    // convert {{ to (
     // Note: the `_toDisplayString` prefix is NOT prepended here — it's added by
     // the close phase as part of the separator insertion (see ChildKind::content_prefix).
     // This avoids FIFO ordering issues with prepend_left at the same position.

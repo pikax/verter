@@ -10,7 +10,7 @@ use crate::{
         binding_types::BindingType,
         plugin::SyntaxPluginContext,
         plugins::code_gen::{
-            template::helper::{
+            template::shared::helper::{
                 apply_dynamic_arg_prefix, build_prefixed_value, capitalize_first, escape_js_string,
                 patch_bindings,
             },

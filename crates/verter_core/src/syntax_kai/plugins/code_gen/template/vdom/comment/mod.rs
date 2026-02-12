@@ -25,7 +25,6 @@ pub(crate) fn handle_comment<'alloc>(
         kind: ChildKind::Comment,
         scope_prefix: String::new(),
     });
-    state.children_count += 1;
 
     imports.add(TemplateImportDependencies::CREATE_COMMENT_VNODE);
 

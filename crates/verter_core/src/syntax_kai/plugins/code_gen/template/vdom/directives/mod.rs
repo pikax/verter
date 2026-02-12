@@ -6,7 +6,7 @@ use crate::{
         binding_types::BindingType,
         plugin::SyntaxPluginContext,
         plugins::code_gen::{
-            template::helper::build_prefixed_value, types::TemplateImportDependencies,
+            template::shared::helper::build_prefixed_value, types::TemplateImportDependencies,
         },
         types::ElementScope,
     },
@@ -58,7 +58,6 @@ pub(crate) fn process_scope_opens<'alloc>(
     for scope in scopes {
         match scope {
             ElementScope::If(cond) => {
-                state.has_condition = true;
                 state.is_block_root = true;
 
                 // Assign v-if branch key (new chain starts at 0)
@@ -91,7 +90,6 @@ pub(crate) fn process_scope_opens<'alloc>(
             }
 
             ElementScope::ElseIf(cond) => {
-                state.has_condition = true;
                 state.is_block_root = true;
 
                 // Assign v-else-if branch key (continues chain)

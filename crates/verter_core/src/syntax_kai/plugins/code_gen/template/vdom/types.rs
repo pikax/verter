@@ -1,7 +1,7 @@
 use crate::utils::vue::PatchFlag;
 
 /// Kind of child node — used by close-phase to decide separator strategy.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ChildKind {
     Text,
     Interpolation,
@@ -36,6 +36,7 @@ impl ChildKind {
 /// into a single `prepend_left(start, ...)` call. This is the ONLY
 /// `prepend_left` permitted at `self.start`. If any other code calls
 /// `prepend_left` at the same position, the FIFO ordering will break.
+#[derive(Debug)]
 pub(crate) struct ChildInfo {
     /// Start position in source — used for retroactive separator insertion via prepend_left.
     pub start: u32,
@@ -48,6 +49,7 @@ pub(crate) struct ChildInfo {
 }
 
 /// Stored scope close token — emitted after the element VNode call closes.
+#[derive(Debug)]
 pub(crate) enum ScopeClose {
     /// `) : _createCommentVNode("v-if", true)`
     IfTernary,
@@ -63,6 +65,7 @@ pub(crate) enum ScopeClose {
 /// A runtime directive entry for `_withDirectives(vnode, [[dir, val, arg, mods], ...])`.
 ///
 /// Each entry corresponds to one directive on the element.
+#[derive(Debug)]
 pub(crate) struct DirectiveEntry {
     /// The directive identifier (e.g. `_vModelText`, `_vShow`, `_directive_focus`)
     pub directive: String,
@@ -74,21 +77,9 @@ pub(crate) struct DirectiveEntry {
     pub modifiers: String,
 }
 
+#[derive(Debug)]
 pub(crate) struct StateStack {
     pub id: u32,
-    #[allow(dead_code)]
-    pub parent_id: u32,
-
-    pub no_tracking: bool,
-
-    pub has_once: bool,
-    pub has_condition: bool,
-
-    pub is_once: bool,
-
-    pub children_count: u16,
-    #[allow(dead_code)]
-    pub children_patch_flag: PatchFlag,
 
     /// Child nodes recorded during processing — close phase uses this to decide
     /// separators (concatenation vs array), TEXT patch flag, etc.
@@ -154,9 +145,6 @@ pub(crate) struct StateStack {
     /// Whether this element has any props at all.
     pub has_props: bool,
 
-    /// Whether this element has any scope directives (v-if, v-for, v-once, etc.).
-    pub has_scope_directives: bool,
-
     // -- Slot fields --
     /// Slot parameters text (from v-slot="params"). When Some, component children
     /// are wrapped in `{ slotName: _withCtx((params) => [...]), _: 1 }`.
@@ -180,15 +168,6 @@ impl StateStack {
     pub fn new() -> Self {
         Self {
             id: 0,
-            parent_id: 0,
-            no_tracking: false,
-            has_once: false,
-            has_condition: false,
-
-            is_once: false,
-
-            children_count: 0,
-            children_patch_flag: PatchFlag::empty(),
             children: Vec::new(),
             cache_id: None,
 
@@ -204,7 +183,7 @@ impl StateStack {
             vif_branch_key: None,
             has_all_static_props: true,
             has_props: false,
-            has_scope_directives: false,
+
             slot_params: None,
             slot_name: None,
             slot_is_dynamic: false,
@@ -213,19 +192,8 @@ impl StateStack {
     }
 
     pub fn create_child(&mut self, element_id: u32) -> Self {
-        self.children_count += 1;
-
         Self {
             id: element_id,
-            parent_id: self.id,
-            no_tracking: self.no_tracking,
-            has_once: self.has_once || self.is_once,
-            has_condition: self.has_condition,
-
-            is_once: false,
-
-            children_count: 0,
-            children_patch_flag: PatchFlag::empty(),
             children: Vec::new(),
             cache_id: None,
 
@@ -241,7 +209,7 @@ impl StateStack {
             vif_branch_key: None,
             has_all_static_props: true,
             has_props: false,
-            has_scope_directives: false,
+
             slot_params: None,
             slot_name: None,
             slot_is_dynamic: false,
