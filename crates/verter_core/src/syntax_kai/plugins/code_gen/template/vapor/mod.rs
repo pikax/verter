@@ -64,7 +64,7 @@ use crate::{
 use super::shared::helper::escape_js_string;
 use crate::syntax_kai::plugins::code_gen::types::VaporImportDependencies;
 
-use types::{VaporElementState, VaporTextPart, VaporVIfChainState};
+use types::{VaporEffect, VaporElementState, VaporTextPart, VaporVIfChainState};
 
 /// Events that can be delegated (handled via event delegation at document level).
 static DELEGATABLE_EVENTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
@@ -139,7 +139,7 @@ pub(crate) struct VaporTemplateGenerator<'alloc> {
     /// Collected text node creations (`const x{N} = _txt(n{X})`).
     pending_text_creations: Vec<String>,
     /// Collected effects from nested dynamic descendants.
-    pending_nested_effects: Vec<String>,
+    pending_nested_effects: Vec<VaporEffect>,
     /// Collected statements from nested dynamic descendants.
     pending_nested_statements: Vec<String>,
 

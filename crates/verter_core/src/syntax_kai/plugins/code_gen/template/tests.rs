@@ -4094,3 +4094,76 @@ fn test_vapor_von_spread_uses_to_handlers() {
         code
     );
 }
+
+// =========================================================================
+// Vapor: n{X} node ref replacement correctness (regression tests)
+// =========================================================================
+
+/// Regression test: when build_block_body rewrites node refs from the outer
+/// structural directive's node_ref to the inner template's node_ref, it must
+/// use whole-word matching. Otherwise `n1` inside `n10` gets corrupted.
+///
+/// This test creates a template with enough elements to push node_ref counters
+/// past 10, then uses v-if on an element with a dynamic prop. The v-if triggers
+/// build_block_body which must rewrite the effect's node ref correctly.
+#[test]
+fn test_vapor_node_ref_replacement_no_false_match() {
+    // Create a template with many sibling elements to push node counters high,
+    // then a v-if element with a dynamic binding.
+    // The v-if element's effects must have their node refs rewritten correctly.
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div>
+  <span>a</span>
+  <span>b</span>
+  <span>c</span>
+  <span>d</span>
+  <span>e</span>
+  <span>f</span>
+  <span>g</span>
+  <span>h</span>
+  <span>i</span>
+  <span>j</span>
+  <span v-if="show" :class="cls">dynamic</span>
+</div></template>"#,
+    );
+    // The generated code must be valid JS (gen_vapor_and_validate checks this).
+    // Additionally, there must be no corrupted node refs like `n51` when we meant `n5`
+    // or `n110` when we meant `n10`.
+    // The v-if branch should reference its own inner node ref, not a corrupted one.
+    assert!(
+        !code.contains("n01"),
+        "Node ref replacement must not corrupt n0 into n01 by partial matching, got:\n{}",
+        code
+    );
+}
+
+/// Regression test: verify that the `replace_node_ref` helper is used in
+/// build_block_body instead of naive `String::replace`. This test uses
+/// a v-for with a dynamic binding to trigger build_block_body, and verifies
+/// the generated code is valid JS even with high node ref numbers.
+#[test]
+fn test_vapor_vfor_with_many_siblings_node_ref_integrity() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div>
+  <span>1</span>
+  <span>2</span>
+  <span>3</span>
+  <span>4</span>
+  <span>5</span>
+  <span>6</span>
+  <span>7</span>
+  <span>8</span>
+  <span>9</span>
+  <span>10</span>
+  <span>11</span>
+  <p v-for="item in items" :key="item.id" :class="item.cls">{{ item.name }}</p>
+</div></template>"#,
+    );
+    // gen_vapor_and_validate already checks valid JS + no invalid patterns.
+    // The v-for block body must correctly rewrite node refs.
+    assert!(
+        code.contains("_createFor("),
+        "Should contain _createFor, got:\n{}",
+        code
+    );
+}

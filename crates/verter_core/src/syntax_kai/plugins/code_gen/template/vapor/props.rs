@@ -11,7 +11,7 @@ use crate::syntax_kai::{
 };
 
 use super::helpers::is_simple_identifier;
-use super::types::VaporTextPart;
+use super::types::{VaporEffect, VaporTextPart};
 use super::VaporTemplateGenerator;
 
 impl<'alloc> VaporTemplateGenerator<'alloc> {
@@ -65,12 +65,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             self.is_production,
                         );
                         self.imports.add(VaporImportDependencies::SET_CLASS);
-                        let effect = format!("_setClass(n{}, {})", node_ref, prefixed);
                         self.stack
                             .last_mut()
                             .expect("process_props: stack empty for ClassBind")
                             .effects
-                            .push(effect);
+                            .push(VaporEffect::SetClass { node_ref, expr: prefixed });
                     }
                 }
 
@@ -85,12 +84,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             self.is_production,
                         );
                         self.imports.add(VaporImportDependencies::SET_STYLE);
-                        let effect = format!("_setStyle(n{}, {})", node_ref, prefixed);
                         self.stack
                             .last_mut()
                             .expect("process_props: stack empty for StyleBind")
                             .effects
-                            .push(effect);
+                            .push(VaporEffect::SetStyle { node_ref, expr: prefixed });
                     }
                 }
 
@@ -118,15 +116,12 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                                 self.is_production,
                             );
                             self.imports.add(VaporImportDependencies::SET_DYNAMIC_PROPS);
-                            let effect = format!(
-                                "_setDynamicProps(n{}, [{{ [{}]: {} }}])",
-                                node_ref, arg_prefixed, prefixed
-                            );
+                            let dynamic_expr = format!("{{ [{}]: {} }}", arg_prefixed, prefixed);
                             self.stack
                                 .last_mut()
                                 .expect("process_props: stack empty for dynamic Bind")
                                 .effects
-                                .push(effect);
+                                .push(VaporEffect::SetDynamicProps { node_ref, expr: dynamic_expr });
                         } else {
                             let attr_name = if let Some(ref arg) = prop.arg {
                                 ctx.input[arg.start as usize..arg.end as usize].to_string()
@@ -135,13 +130,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             };
 
                             self.imports.add(VaporImportDependencies::SET_PROP);
-                            let effect =
-                                format!("_setProp(n{}, \"{}\", {})", node_ref, attr_name, prefixed);
                             self.stack
                                 .last_mut()
                                 .expect("process_props: stack empty for Bind")
                                 .effects
-                                .push(effect);
+                                .push(VaporEffect::SetProp { node_ref, attr: attr_name, expr: prefixed });
                         }
                     }
                 }
@@ -158,12 +151,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             self.is_production,
                         );
                         self.imports.add(VaporImportDependencies::SET_DYNAMIC_PROPS);
-                        let effect = format!("_setDynamicProps(n{}, [{}])", node_ref, prefixed);
                         self.stack
                             .last_mut()
                             .expect("process_props: stack empty for BindSpread")
                             .effects
-                            .push(effect);
+                            .push(VaporEffect::SetDynamicProps { node_ref, expr: prefixed });
                     }
                 }
 
@@ -185,15 +177,12 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                         );
                         self.imports.add(VaporImportDependencies::SET_DYNAMIC_PROPS);
                         self.imports.add(VaporImportDependencies::TO_HANDLERS);
-                        let effect = format!(
-                            "_setDynamicProps(n{}, [_toHandlers({})])",
-                            node_ref, prefixed
-                        );
+                        let dynamic_expr = format!("_toHandlers({})", prefixed);
                         self.stack
                             .last_mut()
                             .expect("process_props: stack empty for OnSpread")
                             .effects
-                            .push(effect);
+                            .push(VaporEffect::SetDynamicProps { node_ref, expr: dynamic_expr });
                     }
                 }
 
@@ -208,12 +197,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             self.is_production,
                         );
                         self.imports.add(VaporImportDependencies::SET_HTML);
-                        let effect = format!("_setHtml(n{}, {})", node_ref, prefixed);
                         self.stack
                             .last_mut()
                             .expect("process_props: stack empty for Html")
                             .effects
-                            .push(effect);
+                            .push(VaporEffect::SetHtml { node_ref, expr: prefixed });
                     }
                 }
 
@@ -378,15 +366,15 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 self.is_production,
             );
             self.imports.add(VaporImportDependencies::ON);
-            let effect = format!(
-                "_on(n{}, {}, {}, {{\n      effect: true\n    }})",
-                node_ref, arg_prefixed, invoker_expr
-            );
             self.stack
                 .last_mut()
                 .expect("process_event: stack empty for dynamic event")
                 .effects
-                .push(effect);
+                .push(VaporEffect::OnDynamic {
+                    node_ref,
+                    event_expr: arg_prefixed,
+                    handler: invoker_expr,
+                });
         } else {
             let non_delegatable = Self::has_non_delegatable_modifier(&prop.modifiers, ctx);
 

@@ -9,7 +9,7 @@ use crate::syntax_kai::{
     types::{ElementScope, OxcCompiledElementStart},
 };
 
-use super::types::{VaporElementState, VaporScopeKind, VaporVIfChainState};
+use super::types::{VaporElementKind, VaporElementState, VaporScopeKind, VaporVIfChainState};
 use super::VaporTemplateGenerator;
 
 impl<'alloc> VaporTemplateGenerator<'alloc> {
@@ -145,34 +145,64 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         } else {
             "default".to_string()
         };
-        state.slot_name = Some(slot_name);
-        state.slot_name_is_dynamic = has_dynamic_arg;
-        if has_dynamic_arg {
-            if let Some(arg) = arg {
-                let name_expr = &ctx.input[arg.start as usize..arg.end as usize];
-                let prefixed = build_prefixed_value(
-                    name_expr,
-                    arg.start,
-                    &None,
-                    &self.bindings,
-                    self.is_production,
-                );
-                state.slot_dynamic_name_expr = Some(prefixed);
+        // Set slot name and params based on element kind.
+        // v-slot can appear on both <template #name> (TemplateWrapper) and
+        // directly on components like <MyComp v-slot="{ item }"> (Component).
+        match &mut state.kind {
+            VaporElementKind::TemplateWrapper {
+                slot_name: ref mut sn,
+                slot_name_is_dynamic: ref mut sn_dyn,
+                slot_dynamic_name_expr: ref mut sn_dyn_expr,
+                slot_params: ref mut sp,
+            } => {
+                *sn = Some(slot_name);
+                *sn_dyn = has_dynamic_arg;
+                if has_dynamic_arg {
+                    if let Some(arg) = arg {
+                        let name_expr = &ctx.input[arg.start as usize..arg.end as usize];
+                        let prefixed = build_prefixed_value(
+                            name_expr,
+                            arg.start,
+                            &None,
+                            &self.bindings,
+                            self.is_production,
+                        );
+                        *sn_dyn_expr = Some(prefixed);
+                    }
+                }
+                if !locals.is_empty() {
+                    let slot_props_var = format!("_slotProps{}", self.slot_props_counter);
+                    self.slot_props_counter += 1;
+                    *sp = Some(slot_props_var.clone());
+                    for local_span in locals {
+                        let local_name =
+                            ctx.input[local_span.start as usize..local_span.end as usize]
+                                .to_string();
+                        let mapped = format!("{}.{}", slot_props_var, local_name);
+                        state.for_var_mappings.push((local_name, mapped));
+                    }
+                }
             }
-        }
-        // Set up scoped slot params if the slot has params.
-        if !locals.is_empty() {
-            let slot_props_var = format!("_slotProps{}", self.slot_props_counter);
-            self.slot_props_counter += 1;
-            state.slot_params = Some(slot_props_var.clone());
-            // Build for_var_mappings for slot params:
-            // each local like `item` maps to `_slotProps0.item`
-            for local_span in locals {
-                let local_name =
-                    ctx.input[local_span.start as usize..local_span.end as usize].to_string();
-                let mapped = format!("{}.{}", slot_props_var, local_name);
-                state.for_var_mappings.push((local_name, mapped));
+            VaporElementKind::Component {
+                slot_name: ref mut sn,
+                slot_params: ref mut sp,
+                ..
+            } => {
+                *sn = Some(slot_name);
+                if !locals.is_empty() {
+                    let slot_props_var = format!("_slotProps{}", self.slot_props_counter);
+                    self.slot_props_counter += 1;
+                    *sp = Some(slot_props_var.clone());
+                    for local_span in locals {
+                        let local_name =
+                            ctx.input[local_span.start as usize..local_span.end as usize]
+                                .to_string();
+                        let mapped = format!("{}.{}", slot_props_var, local_name);
+                        state.for_var_mappings.push((local_name, mapped));
+                    }
+                }
             }
+            _ => {}
         }
     }
 

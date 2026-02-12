@@ -8,8 +8,7 @@ use crate::syntax_kai::{
     types::{OxcCompiledElementStart, PropKind},
 };
 
-use super::helpers::parse_effect_as_component_prop;
-use super::types::VaporElementState;
+use super::types::{VaporEffect, VaporElementKind, VaporElementState};
 use super::VaporTemplateGenerator;
 
 impl<'alloc> VaporTemplateGenerator<'alloc> {
@@ -27,18 +26,24 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             "teleport" => {
                 self.imports.add(VaporImportDependencies::VAPOR_TELEPORT);
                 self.imports.add(VaporImportDependencies::CREATE_COMPONENT);
-                state.component_var = Some("_VaporTeleport".to_string());
+                if let VaporElementKind::Component { component_var, .. } = &mut state.kind {
+                    *component_var = "_VaporTeleport".to_string();
+                }
             }
             "transition" => {
                 self.imports.add(VaporImportDependencies::VAPOR_TRANSITION);
                 self.imports.add(VaporImportDependencies::CREATE_COMPONENT);
-                state.component_var = Some("_VaporTransition".to_string());
+                if let VaporElementKind::Component { component_var, .. } = &mut state.kind {
+                    *component_var = "_VaporTransition".to_string();
+                }
             }
             "transition-group" | "transitiongroup" => {
                 self.imports
                     .add(VaporImportDependencies::VAPOR_TRANSITION_GROUP);
                 self.imports.add(VaporImportDependencies::CREATE_COMPONENT);
-                state.component_var = Some("_VaporTransitionGroup".to_string());
+                if let VaporElementKind::Component { component_var, .. } = &mut state.kind {
+                    *component_var = "_VaporTransitionGroup".to_string();
+                }
             }
             "keep-alive" | "keepalive" => {
                 // KeepAlive uses _resolveComponent + _createComponentWithFallback.
@@ -54,8 +59,10 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                         comp_var, tag_name
                     ));
                 }
-                state.component_var = Some(comp_var);
-                state.needs_vapor_ctx = true;
+                if let VaporElementKind::Component { component_var, needs_vapor_ctx, .. } = &mut state.kind {
+                    *component_var = comp_var;
+                    *needs_vapor_ctx = true;
+                }
             }
             "suspense" => {
                 // Suspense uses _resolveComponent + _createComponentWithFallback.
@@ -71,10 +78,12 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                         comp_var, tag_name
                     ));
                 }
-                state.component_var = Some(comp_var);
-                state.needs_vapor_ctx = true;
+                if let VaporElementKind::Component { component_var, needs_vapor_ctx, .. } = &mut state.kind {
+                    *component_var = comp_var;
+                    *needs_vapor_ctx = true;
+                }
             }
-            _ if state.is_dynamic_component => {
+            _ if state.is_dynamic_component() => {
                 // <component :is="expr"> → _createDynamicComponent
                 self.imports
                     .add(VaporImportDependencies::CREATE_DYNAMIC_COMPONENT);
@@ -95,7 +104,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                                         &self.bindings,
                                         self.is_production,
                                     );
-                                    state.dynamic_is_expr = Some(prefixed);
+                                    if let VaporElementKind::DynamicComponent { dynamic_is_expr, .. } = &mut state.kind {
+                                        *dynamic_is_expr = Some(prefixed);
+                                    }
                                 }
                             }
                         }
@@ -115,7 +126,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                         comp_var, tag_name
                     ));
                 }
-                state.component_var = Some(comp_var);
+                if let VaporElementKind::Component { component_var, .. } = &mut state.kind {
+                    *component_var = comp_var;
+                }
             }
         }
     }
@@ -126,19 +139,19 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         state: &mut VaporElementState,
         indent: &str,
     ) -> String {
-        if state.is_slot_outlet {
+        if state.is_slot_outlet() {
             return self.build_slot_outlet_call(state);
         }
 
-        if state.is_dynamic_component {
+        if state.is_dynamic_component() {
             return self.build_dynamic_component_call(state, indent);
         }
 
-        let comp_var = state
-            .component_var
-            .as_ref()
-            .expect("build_component_call: component_var must be set")
-            .clone();
+        let comp_var = if let VaporElementKind::Component { ref component_var, .. } = state.kind {
+            component_var.clone()
+        } else {
+            panic!("build_component_call: kind must be Component")
+        };
 
         // Determine if this uses _createComponent or _createComponentWithFallback.
         let is_builtin_create = comp_var.starts_with("_Vapor");
@@ -162,18 +175,16 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
     /// Build props object for a component call.
     pub(super) fn build_component_props(&self, state: &VaporElementState) -> String {
-        // Collect effects as reactive props: each effect like `_setProp(n{X}, "attr", expr)`
-        // becomes `attr: () => (expr)` in the props object.
-        // For components, effects are actually prop bindings.
+        // Collect effects as reactive props using structured VaporEffect data.
+        // Each effect like SetProp { attr: "title", expr: "_ctx.msg" }
+        // becomes `title: () => (_ctx.msg)` in the props object.
         if state.effects.is_empty() {
             return "null".to_string();
         }
 
         let mut entries = Vec::new();
         for effect in &state.effects {
-            // Parse effect strings to extract prop name and value.
-            // Effects for components look like: `_setProp(n{X}, "attr", expr)`
-            if let Some(prop_entry) = parse_effect_as_component_prop(effect) {
+            if let Some(prop_entry) = effect.to_component_prop() {
                 entries.push(prop_entry);
             }
         }
@@ -191,12 +202,12 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         state: &mut VaporElementState,
         indent: &str,
     ) -> String {
-        if state.slot_children.is_empty() {
+        if state.kind.slot_children().map_or(true, |sc| sc.is_empty()) {
             return "null".to_string();
         }
 
-        let slots = std::mem::take(&mut state.slot_children);
-        let needs_vapor_ctx = state.needs_vapor_ctx;
+        let slots = std::mem::take(state.kind.slot_children_mut().expect("build_component_slots: kind must have slot_children"));
+        let needs_vapor_ctx = matches!(state.kind, VaporElementKind::Component { needs_vapor_ctx: true, .. });
 
         let mut static_slots = Vec::new();
         let mut dynamic_slots = Vec::new();
@@ -263,18 +274,17 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         let mut slot_props: Vec<String> = Vec::new();
 
         for effect in &state.effects {
-            // Check for _setProp(n{X}, "name", expr) → dynamic slot name
-            if let Some(prop_entry) = parse_effect_as_component_prop(effect) {
-                if prop_entry.starts_with("name:") {
-                    // Extract the expression from `name: () => (expr)`
-                    if let Some(expr) = prop_entry.strip_prefix("name: () => (") {
-                        if let Some(expr) = expr.strip_suffix(')') {
-                            slot_name = expr.to_string();
-                        }
-                    }
+            // Check for SetProp { attr: "name", .. } → dynamic slot name
+            if let VaporEffect::SetProp { attr, expr, .. } = effect {
+                if attr == "name" {
+                    slot_name = expr.clone();
                 } else {
-                    slot_props.push(prop_entry);
+                    if let Some(prop_entry) = effect.to_component_prop() {
+                        slot_props.push(prop_entry);
+                    }
                 }
+            } else if let Some(prop_entry) = effect.to_component_prop() {
+                slot_props.push(prop_entry);
             }
         }
 
@@ -291,7 +301,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             // that we need to extract. But since we skip process_props for slot outlets,
             // we need to handle it here. Let's check the state's tag_name context.
             // For now, the slot_name from the slot_name field takes precedence.
-            if let Some(ref sn) = state.slot_name {
+            if let VaporElementKind::SlotOutlet { slot_name: Some(ref sn), .. } = state.kind {
                 slot_name = format!("\"{}\"", sn);
             }
         }
@@ -311,7 +321,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         state: &VaporElementState,
         _indent: &str,
     ) -> String {
-        let is_expr = state.dynamic_is_expr.as_deref().unwrap_or("undefined");
+        let is_expr = if let VaporElementKind::DynamicComponent { ref dynamic_is_expr, .. } = state.kind {
+            dynamic_is_expr.as_deref().unwrap_or("undefined")
+        } else {
+            "undefined"
+        };
         format!(
             "_createDynamicComponent(() => ({}), null, null, true)",
             is_expr

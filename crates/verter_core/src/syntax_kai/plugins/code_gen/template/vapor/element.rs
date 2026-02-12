@@ -8,8 +8,8 @@ use crate::syntax_kai::{
     types::{ElementKind, ElementScope, OxcCompiledElementClosed, OxcCompiledElementStart},
 };
 
-use super::helpers::{apply_var_mappings, build_set_text_call};
-use super::types::{VaporElementState, VaporScopeKind, VaporSlotInfo, VaporTextPart};
+use super::helpers::{apply_var_mappings, build_set_text_call, replace_node_ref};
+use super::types::{VaporEffect, VaporElementKind, VaporElementState, VaporScopeKind, VaporSlotInfo, VaporTextPart};
 use super::VaporTemplateGenerator;
 
 impl<'alloc> VaporTemplateGenerator<'alloc> {
@@ -84,10 +84,36 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             open_tag_end.end,
         );
 
-        state.is_component = is_component;
-        state.is_slot_outlet = is_slot_outlet;
-        state.is_dynamic_component = is_dynamic_component;
-        state.is_template_element = is_template_element;
+        // Check is_dynamic_component before is_component because
+        // ElementKind::is_component() returns true for DynamicComponent too.
+        state.kind = if is_dynamic_component {
+            VaporElementKind::DynamicComponent {
+                dynamic_is_expr: None,
+                slot_children: Vec::new(),
+            }
+        } else if is_component {
+            VaporElementKind::Component {
+                component_var: String::new(),
+                slot_children: Vec::new(),
+                needs_vapor_ctx: false,
+                slot_name: None,
+                slot_params: None,
+            }
+        } else if is_slot_outlet {
+            VaporElementKind::SlotOutlet {
+                slot_name: None,
+                slot_children: Vec::new(),
+            }
+        } else if is_template_element {
+            VaporElementKind::TemplateWrapper {
+                slot_name: None,
+                slot_name_is_dynamic: false,
+                slot_dynamic_name_expr: None,
+                slot_params: None,
+            }
+        } else {
+            VaporElementKind::Native
+        };
 
         // Inherit v-for variable mappings from parent.
         if let Some(parent) = self.stack.last() {
@@ -165,10 +191,12 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         if is_slot_outlet {
             let name = Self::find_static_attr_value("name", ev, ctx);
             if let Some(name) = name {
-                self.stack
+                let top = self.stack
                     .last_mut()
-                    .expect("handle_element_start: stack empty after slot outlet name extraction")
-                    .slot_name = Some(name);
+                    .expect("handle_element_start: stack empty after slot outlet name extraction");
+                if let VaporElementKind::SlotOutlet { ref mut slot_name, .. } = top.kind {
+                    *slot_name = Some(name);
+                }
             }
         }
 
@@ -210,8 +238,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             .expect("Element close without matching open");
 
         let is_structural = state.scope.is_some();
-        let is_component = state.is_component || state.is_dynamic_component;
-        let is_slot_outlet = state.is_slot_outlet;
+        let is_component = state.is_component() || state.is_dynamic_component();
+        let is_slot_outlet = state.is_slot_outlet();
 
         // Handle structural elements (v-if, v-for).
         if is_structural {
@@ -226,7 +254,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         }
 
         // Handle <template #name> children of components → collect as named slot.
-        if state.is_template_element && state.slot_name.is_some() {
+        if state.is_template_element() && matches!(state.kind, VaporElementKind::TemplateWrapper { slot_name: Some(_), .. }) {
             self.complete_slot_template_close(&mut state, close_tag);
             return;
         }
@@ -271,7 +299,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             .last()
             .expect("build_insertion_state: stack must not be empty");
         // Don't emit for children of components (they become slots).
-        if parent.is_component || parent.is_dynamic_component || parent.is_slot_outlet {
+        if parent.is_component() || parent.is_dynamic_component() || parent.is_slot_outlet() {
             return String::new();
         }
 
@@ -311,6 +339,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
     ) {
         let close_end = close_tag.map(|ct| ct.end).unwrap_or(state.open_tag_end);
 
+        // Extract slot_params from Component kind (set by v-slot on the component itself).
+        let component_slot_params = if let VaporElementKind::Component { ref mut slot_params, .. } = state.kind {
+            slot_params.take()
+        } else {
+            None
+        };
+
         // Collect default slot from children if any structural children exist.
         if !state.structural_children.is_empty() {
             let mut slot_body = String::new();
@@ -318,13 +353,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 slot_body.push_str(&child);
             }
             // Check if there's already a default slot.
-            let has_default = state.slot_children.iter().any(|s| s.name == "default");
+            let has_default = state.kind.slot_children().map_or(false, |sc| sc.iter().any(|s| s.name == "default"));
             if !has_default && !slot_body.is_empty() {
-                state.slot_children.push(VaporSlotInfo {
+                state.kind.slot_children_mut().expect("complete_component_element_close: kind must have slot_children").push(VaporSlotInfo {
                     name: "default".to_string(),
                     is_dynamic: false,
                     dynamic_name_expr: None,
-                    params: None,
+                    params: component_slot_params,
                     body: slot_body,
                 });
             }
@@ -378,13 +413,22 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         close_tag: Option<&crate::syntax_kai::types::ElementCloseTag>,
     ) {
         let close_end = close_tag.map(|ct| ct.end).unwrap_or(state.open_tag_end);
-        let slot_name = state
-            .slot_name
-            .take()
-            .unwrap_or_else(|| "default".to_string());
-        let is_dynamic = state.slot_name_is_dynamic;
-        let dynamic_name_expr = state.slot_dynamic_name_expr.take();
-        let slot_params = state.slot_params.take();
+        let slot_name = if let VaporElementKind::TemplateWrapper { ref mut slot_name, .. } = state.kind {
+            slot_name.take().unwrap_or_else(|| "default".to_string())
+        } else {
+            "default".to_string()
+        };
+        let (is_dynamic, dynamic_name_expr, slot_params) = if let VaporElementKind::TemplateWrapper {
+            slot_name_is_dynamic,
+            ref mut slot_dynamic_name_expr,
+            ref mut slot_params,
+            ..
+        } = state.kind
+        {
+            (slot_name_is_dynamic, slot_dynamic_name_expr.take(), slot_params.take())
+        } else {
+            (false, None, None)
+        };
 
         // Build the slot body from structural children.
         let mut slot_body = String::new();
@@ -401,13 +445,15 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         // Add this slot to the parent component's slot_children.
         if let Some(parent) = self.stack.last_mut() {
-            parent.slot_children.push(VaporSlotInfo {
-                name: slot_name,
-                is_dynamic,
-                dynamic_name_expr,
-                params: slot_params,
-                body: slot_body,
-            });
+            parent.kind.slot_children_mut()
+                .expect("complete_slot_template_close: parent kind must have slot_children")
+                .push(VaporSlotInfo {
+                    name: slot_name,
+                    is_dynamic,
+                    dynamic_name_expr,
+                    params: slot_params,
+                    body: slot_body,
+                });
         }
 
         // Remove source from code_transform.
@@ -465,24 +511,26 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 .text_node_ref
                 .expect("root element with dynamic text must have text_node_ref for setText");
             let set_text = build_set_text_call(text_ref, &state.text_parts);
-            all_effects.push(set_text);
+            all_effects.push(VaporEffect::Raw(set_text));
         }
 
         all_effects.append(&mut self.pending_nested_effects);
 
         if !all_effects.is_empty() {
+            // Render all effects to code strings (no node_ref override for root).
+            let rendered: Vec<String> = all_effects.iter().map(|e| e.to_code_string(None)).collect();
             if state.is_once {
                 // v-once: emit effects as direct statements (no _renderEffect wrapping).
-                for effect in &all_effects {
+                for effect in &rendered {
                     close_code.push_str(&format!("  {}\n", effect));
                 }
             } else {
                 self.imports.add(VaporImportDependencies::RENDER_EFFECT);
-                if all_effects.len() == 1 {
-                    close_code.push_str(&format!("  _renderEffect(() => {})\n", all_effects[0]));
+                if rendered.len() == 1 {
+                    close_code.push_str(&format!("  _renderEffect(() => {})\n", rendered[0]));
                 } else {
                     close_code.push_str("  _renderEffect(() => {\n");
-                    for effect in &all_effects {
+                    for effect in &rendered {
                         close_code.push_str(&format!("    {}\n", effect));
                     }
                     close_code.push_str("  })\n");
@@ -538,7 +586,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         let parent_is_component = self
             .stack
             .last()
-            .map(|p| p.is_component || p.is_dynamic_component)
+            .map(|p| p.is_component() || p.is_dynamic_component())
             .unwrap_or(false);
         if parent_is_component {
             self.complete_component_child_close(state, close_tag);
@@ -586,7 +634,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
                 self.imports.add(VaporImportDependencies::SET_TEXT);
                 let set_text = build_set_text_call(text_ref, &state.text_parts);
-                self.pending_nested_effects.push(set_text);
+                self.pending_nested_effects.push(VaporEffect::Raw(set_text));
             }
 
             // Effects and statements.
@@ -633,11 +681,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         // The outer `state.node_ref` is used for the structural directive result.
         let inner_ref = self.next_node_ref();
 
-        if state.is_component || state.is_dynamic_component || state.is_slot_outlet {
+        if state.is_component() || state.is_dynamic_component() || state.is_slot_outlet() {
             // Component/slot outlet: build the component call.
             let comp_code = self.build_component_call(state, indent);
             body.push_str(&format!("{}const n{} = {}\n", indent, inner_ref, comp_code));
-        } else if state.is_template_element {
+        } else if state.is_template_element() {
             // <template v-if/v-for>: children are the block body directly.
             // Structural children from nested v-if/v-for.
             for child in state.structural_children.drain(..) {
@@ -710,13 +758,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             }
         }
 
-        // Effects — rewrite node_ref references from state.node_ref to inner_ref.
+        // Effects — render with inner_ref override so structured effects use the
+        // inner template's node ref instead of the outer structural directive's ref.
+        // This is safe because VaporEffect stores the node_ref structurally — no
+        // string replacement needed, eliminating the n1-inside-n10 corruption bug.
         let mut all_effects = std::mem::take(&mut state.effects);
-        let old_ref = format!("n{}", state.node_ref);
-        let new_ref = format!("n{}", inner_ref);
-        for effect in &mut all_effects {
-            *effect = effect.replace(&old_ref, &new_ref);
-        }
 
         if state.has_dynamic_children && !state.text_parts.is_empty() {
             self.imports.add(VaporImportDependencies::SET_TEXT);
@@ -724,26 +770,32 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 .text_node_ref
                 .expect("block body with dynamic text must have text_node_ref for setText");
             let set_text = build_set_text_call(text_ref, &state.text_parts);
-            all_effects.push(set_text);
+            all_effects.push(VaporEffect::Raw(set_text));
         }
         all_effects.append(&mut self.pending_nested_effects);
 
         if !all_effects.is_empty() {
+            // Render effects with node_ref override for this element's own effects.
+            // Nested effects (from pending_nested_effects) are Raw and ignore the override.
+            let rendered: Vec<String> = all_effects
+                .iter()
+                .map(|e| e.to_code_string(Some(inner_ref)))
+                .collect();
             if state.is_once {
                 // v-once: emit effects as direct statements (no _renderEffect wrapping).
-                for effect in &all_effects {
+                for effect in &rendered {
                     body.push_str(&format!("{}{}\n", indent, effect));
                 }
             } else {
                 self.imports.add(VaporImportDependencies::RENDER_EFFECT);
-                if all_effects.len() == 1 {
+                if rendered.len() == 1 {
                     body.push_str(&format!(
                         "{}_renderEffect(() => {})\n",
-                        indent, all_effects[0]
+                        indent, rendered[0]
                     ));
                 } else {
                     body.push_str(&format!("{}_renderEffect(() => {{\n", indent));
-                    for effect in &all_effects {
+                    for effect in &rendered {
                         body.push_str(&format!("{}  {}\n", indent, effect));
                     }
                     body.push_str(&format!("{}}})\n", indent));
@@ -752,10 +804,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         }
 
         // Statements — rewrite node_ref references.
+        // Uses whole-word boundary matching to avoid corrupting n1 inside n10, n11, etc.
         let mut all_stmts: Vec<String> = state
             .statements
             .drain(..)
-            .map(|s| s.replace(&old_ref, &new_ref))
+            .map(|s| replace_node_ref(&s, state.node_ref, inner_ref))
             .collect();
         for stmt in self.pending_nested_statements.drain(..) {
             all_stmts.push(stmt);

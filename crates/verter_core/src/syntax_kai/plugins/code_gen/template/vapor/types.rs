@@ -1,3 +1,88 @@
+/// Discriminated element kind — groups element-kind-specific fields so that
+/// invalid states are unrepresentable. A native `<div>` cannot have a
+/// `component_var`, and a `<slot>` outlet cannot have `needs_vapor_ctx`.
+pub(crate) enum VaporElementKind {
+    /// Plain HTML element (`<div>`, `<span>`, etc.).
+    Native,
+    /// Vue component (`<MyComp>`, `<my-comp>`, built-in like `<Teleport>`).
+    Component {
+        /// Resolved component variable name (e.g., `_component_MyComp`, `_VaporTeleport`).
+        component_var: String,
+        /// Collected slot content for component children.
+        slot_children: Vec<VaporSlotInfo>,
+        /// Whether this component uses `_withVaporCtx` for its default slot
+        /// (KeepAlive, Suspense).
+        needs_vapor_ctx: bool,
+        /// Slot name from `v-slot:name` on the component itself.
+        slot_name: Option<String>,
+        /// Slot params from `v-slot="{ item }"` on the component itself.
+        slot_params: Option<String>,
+    },
+    /// `<component :is="expr">` dynamic component.
+    DynamicComponent {
+        /// The `:is` expression.
+        dynamic_is_expr: Option<String>,
+        /// Collected slot content for component children.
+        slot_children: Vec<VaporSlotInfo>,
+    },
+    /// `<slot>` outlet element.
+    SlotOutlet {
+        /// Static slot name from `<slot name="header">`.
+        slot_name: Option<String>,
+        /// Collected slot content (fallback content).
+        slot_children: Vec<VaporSlotInfo>,
+    },
+    /// `<template>` wrapper element (for `<template v-if>`, `<template #name>`, etc.).
+    TemplateWrapper {
+        /// Slot name for `<template #name>` children of components.
+        slot_name: Option<String>,
+        /// Whether the slot name is dynamic (`#[expr]`).
+        slot_name_is_dynamic: bool,
+        /// Dynamic slot name expression.
+        slot_dynamic_name_expr: Option<String>,
+        /// Slot params string for scoped slots (e.g., `_slotProps0`).
+        slot_params: Option<String>,
+    },
+}
+
+impl VaporElementKind {
+    pub fn is_component(&self) -> bool {
+        matches!(self, VaporElementKind::Component { .. })
+    }
+
+    pub fn is_dynamic_component(&self) -> bool {
+        matches!(self, VaporElementKind::DynamicComponent { .. })
+    }
+
+    pub fn is_slot_outlet(&self) -> bool {
+        matches!(self, VaporElementKind::SlotOutlet { .. })
+    }
+
+    pub fn is_template_element(&self) -> bool {
+        matches!(self, VaporElementKind::TemplateWrapper { .. })
+    }
+
+    /// Get a mutable reference to slot_children (available on Component, DynamicComponent, SlotOutlet).
+    pub fn slot_children_mut(&mut self) -> Option<&mut Vec<VaporSlotInfo>> {
+        match self {
+            VaporElementKind::Component { slot_children, .. }
+            | VaporElementKind::DynamicComponent { slot_children, .. }
+            | VaporElementKind::SlotOutlet { slot_children, .. } => Some(slot_children),
+            _ => None,
+        }
+    }
+
+    /// Get a reference to slot_children.
+    pub fn slot_children(&self) -> Option<&Vec<VaporSlotInfo>> {
+        match self {
+            VaporElementKind::Component { slot_children, .. }
+            | VaporElementKind::DynamicComponent { slot_children, .. }
+            | VaporElementKind::SlotOutlet { slot_children, .. } => Some(slot_children),
+            _ => None,
+        }
+    }
+}
+
 /// Per-element state on the vapor element stack.
 pub(crate) struct VaporElementState {
     /// This element's node reference index (for `n{X}` variable name).
@@ -17,8 +102,9 @@ pub(crate) struct VaporElementState {
     /// Whether any direct text child is dynamic (interpolation present).
     pub has_dynamic_children: bool,
     /// Accumulated effect bodies for `_renderEffect`.
-    /// Each entry is a single setter call (e.g., `_setClass(n0, _ctx.cls)`).
-    pub effects: Vec<String>,
+    /// Each entry is a structured setter call that can render to code or extract
+    /// component prop entries without string parsing.
+    pub effects: Vec<VaporEffect>,
     /// Direct statements that don't need `_renderEffect` wrapping
     /// (e.g., event assignments like `n0.$evtclick = ...`).
     pub statements: Vec<String>,
@@ -41,19 +127,8 @@ pub(crate) struct VaporElementState {
     /// text + interpolation into one DOM child node for `child_count`).
     pub text_child_started: bool,
 
-    // ── Structural directive fields ─────────────────────────────────────
-    /// Whether this element is a Vue component (PascalCase, kebab-case component, etc.).
-    pub is_component: bool,
-    /// Whether this is a `<slot>` outlet element.
-    pub is_slot_outlet: bool,
-    /// Whether this is a `<component :is="...">` dynamic component.
-    pub is_dynamic_component: bool,
-    /// Whether this is a `<template>` wrapper element (for `<template v-if>`, etc.).
-    pub is_template_element: bool,
-    /// Resolved component variable name (e.g., `_component_MyComp`).
-    pub component_var: Option<String>,
-    /// The `:is` expression for dynamic components.
-    pub dynamic_is_expr: Option<String>,
+    /// Element kind — discriminated union of kind-specific fields.
+    pub kind: VaporElementKind,
 
     /// Whether this element has `v-once` — effects are emitted as direct statements
     /// instead of being wrapped in `_renderEffect`.
@@ -62,29 +137,12 @@ pub(crate) struct VaporElementState {
     /// Structural directive scope info extracted from `ElementScope` variants.
     pub scope: Option<VaporScopeKind>,
 
-    /// Collected slot content for component children.
-    /// Key = slot name, Value = slot info.
-    pub slot_children: Vec<VaporSlotInfo>,
-
-    /// Whether this component uses `_withVaporCtx` for its default slot
-    /// (KeepAlive, Suspense).
-    pub needs_vapor_ctx: bool,
-
     /// Collected structural child output (v-if/v-for blocks) as statements.
     pub structural_children: Vec<String>,
 
     /// Active v-for variable mappings: original name → `_for_item{N}.value`.
     /// Inherited from parent + own v-for scope.
     pub for_var_mappings: Vec<(String, String)>,
-
-    /// Slot name for `<template #name>` children of components.
-    pub slot_name: Option<String>,
-    /// Whether the slot name is dynamic (`#[expr]`).
-    pub slot_name_is_dynamic: bool,
-    /// Dynamic slot name expression.
-    pub slot_dynamic_name_expr: Option<String>,
-    /// Slot params string for scoped slots (e.g., `_slotProps0`).
-    pub slot_params: Option<String>,
 }
 
 /// Part of a `_setText` call's arguments.
@@ -93,6 +151,283 @@ pub(crate) enum VaporTextPart {
     Static(String),
     /// Dynamic expression: `_toDisplayString(_ctx.count)`
     Dynamic(String),
+}
+
+/// Structured representation of a vapor effect (setter call inside `_renderEffect`).
+///
+/// Instead of storing effects as opaque strings and re-parsing them later
+/// (e.g., in `build_component_props`), this enum carries the structured data
+/// needed to render the effect code and extract component prop entries.
+///
+/// This eliminates the fragile `parse_effect_as_component_prop` string parser
+/// and makes node_ref rewriting safe (no string replacement needed).
+pub(crate) enum VaporEffect {
+    /// `_setClass(n{node_ref}, {expr})`
+    SetClass { node_ref: u32, expr: String },
+    /// `_setStyle(n{node_ref}, {expr})`
+    SetStyle { node_ref: u32, expr: String },
+    /// `_setProp(n{node_ref}, "{attr}", {expr})`
+    SetProp {
+        node_ref: u32,
+        attr: String,
+        expr: String,
+    },
+    /// `_setDynamicProps(n{node_ref}, [{expr}])`
+    SetDynamicProps { node_ref: u32, expr: String },
+    /// `_setHtml(n{node_ref}, {expr})`
+    SetHtml { node_ref: u32, expr: String },
+    /// `_on(n{node_ref}, {event_expr}, {handler}, {{ effect: true }})`
+    OnDynamic {
+        node_ref: u32,
+        event_expr: String,
+        handler: String,
+    },
+    /// A raw effect string for cases not covered by the structured variants
+    /// (e.g., `_setText` calls generated from text parts).
+    Raw(String),
+}
+
+impl VaporEffect {
+    /// Render this effect as a code string, optionally overriding the node_ref.
+    ///
+    /// When `node_ref_override` is `Some(new_ref)`, the effect is rendered with
+    /// `n{new_ref}` instead of its original node_ref. This is used by
+    /// `build_block_body` to rewrite structural directive node refs to inner
+    /// template node refs — safely, without string replacement.
+    pub fn to_code_string(&self, node_ref_override: Option<u32>) -> String {
+        match self {
+            VaporEffect::SetClass { node_ref, expr } => {
+                let nr = node_ref_override.unwrap_or(*node_ref);
+                format!("_setClass(n{}, {})", nr, expr)
+            }
+            VaporEffect::SetStyle { node_ref, expr } => {
+                let nr = node_ref_override.unwrap_or(*node_ref);
+                format!("_setStyle(n{}, {})", nr, expr)
+            }
+            VaporEffect::SetProp {
+                node_ref,
+                attr,
+                expr,
+            } => {
+                let nr = node_ref_override.unwrap_or(*node_ref);
+                format!("_setProp(n{}, \"{}\", {})", nr, attr, expr)
+            }
+            VaporEffect::SetDynamicProps { node_ref, expr } => {
+                let nr = node_ref_override.unwrap_or(*node_ref);
+                format!("_setDynamicProps(n{}, [{}])", nr, expr)
+            }
+            VaporEffect::SetHtml { node_ref, expr } => {
+                let nr = node_ref_override.unwrap_or(*node_ref);
+                format!("_setHtml(n{}, {})", nr, expr)
+            }
+            VaporEffect::OnDynamic {
+                node_ref,
+                event_expr,
+                handler,
+            } => {
+                let nr = node_ref_override.unwrap_or(*node_ref);
+                format!(
+                    "_on(n{}, {}, {}, {{\n      effect: true\n    }})",
+                    nr, event_expr, handler
+                )
+            }
+            VaporEffect::Raw(s) => {
+                // Raw effects don't support node_ref override — they're already
+                // fully rendered (e.g., _setText calls from pending_nested_effects).
+                s.clone()
+            }
+        }
+    }
+
+    /// Extract a component prop entry from this effect.
+    ///
+    /// Returns `Some("attr: () => (expr)")` for effects that represent component
+    /// prop bindings, or `None` for effects that don't map to props (e.g., `_setHtml`).
+    ///
+    /// This replaces the fragile `parse_effect_as_component_prop` string parser.
+    pub fn to_component_prop(&self) -> Option<String> {
+        match self {
+            VaporEffect::SetClass { expr, .. } => Some(format!("class: () => ({})", expr)),
+            VaporEffect::SetStyle { expr, .. } => Some(format!("style: () => ({})", expr)),
+            VaporEffect::SetProp { attr, expr, .. } => {
+                Some(format!("{}: () => ({})", attr, expr))
+            }
+            // SetDynamicProps, SetHtml, OnDynamic, Raw don't map to simple component props.
+            _ => None,
+        }
+    }
+
+    /// Get the node_ref from this effect, if it has one.
+    #[allow(dead_code)]
+    pub fn node_ref(&self) -> Option<u32> {
+        match self {
+            VaporEffect::SetClass { node_ref, .. }
+            | VaporEffect::SetStyle { node_ref, .. }
+            | VaporEffect::SetProp { node_ref, .. }
+            | VaporEffect::SetDynamicProps { node_ref, .. }
+            | VaporEffect::SetHtml { node_ref, .. }
+            | VaporEffect::OnDynamic { node_ref, .. } => Some(*node_ref),
+            VaporEffect::Raw(_) => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── VaporEffect::to_code_string tests ───────────────────────────────
+
+    #[test]
+    fn test_effect_set_class_to_code() {
+        let effect = VaporEffect::SetClass {
+            node_ref: 0,
+            expr: "_ctx.cls".to_string(),
+        };
+        assert_eq!(effect.to_code_string(None), "_setClass(n0, _ctx.cls)");
+    }
+
+    #[test]
+    fn test_effect_set_class_with_override() {
+        let effect = VaporEffect::SetClass {
+            node_ref: 5,
+            expr: "_ctx.cls".to_string(),
+        };
+        assert_eq!(effect.to_code_string(Some(12)), "_setClass(n12, _ctx.cls)");
+    }
+
+    #[test]
+    fn test_effect_set_prop_to_code() {
+        let effect = VaporEffect::SetProp {
+            node_ref: 3,
+            attr: "title".to_string(),
+            expr: "_ctx.msg".to_string(),
+        };
+        assert_eq!(
+            effect.to_code_string(None),
+            "_setProp(n3, \"title\", _ctx.msg)"
+        );
+    }
+
+    #[test]
+    fn test_effect_set_prop_with_override() {
+        let effect = VaporEffect::SetProp {
+            node_ref: 1,
+            attr: "title".to_string(),
+            expr: "fn(a, b)".to_string(),
+        };
+        // This is the key test: nested parens in expr are preserved correctly
+        assert_eq!(
+            effect.to_code_string(Some(20)),
+            "_setProp(n20, \"title\", fn(a, b))"
+        );
+    }
+
+    #[test]
+    fn test_effect_set_dynamic_props_to_code() {
+        let effect = VaporEffect::SetDynamicProps {
+            node_ref: 0,
+            expr: "{ [_ctx.attr]: _ctx.val }".to_string(),
+        };
+        assert_eq!(
+            effect.to_code_string(None),
+            "_setDynamicProps(n0, [{ [_ctx.attr]: _ctx.val }])"
+        );
+    }
+
+    #[test]
+    fn test_effect_raw_ignores_override() {
+        let effect = VaporEffect::Raw("_setText(x0, _ctx.msg)".to_string());
+        assert_eq!(
+            effect.to_code_string(Some(99)),
+            "_setText(x0, _ctx.msg)"
+        );
+    }
+
+    // ── VaporEffect::to_component_prop tests ────────────────────────────
+
+    #[test]
+    fn test_effect_set_class_to_component_prop() {
+        let effect = VaporEffect::SetClass {
+            node_ref: 0,
+            expr: "_ctx.cls".to_string(),
+        };
+        assert_eq!(
+            effect.to_component_prop(),
+            Some("class: () => (_ctx.cls)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_effect_set_style_to_component_prop() {
+        let effect = VaporEffect::SetStyle {
+            node_ref: 0,
+            expr: "_ctx.sty".to_string(),
+        };
+        assert_eq!(
+            effect.to_component_prop(),
+            Some("style: () => (_ctx.sty)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_effect_set_prop_to_component_prop() {
+        let effect = VaporEffect::SetProp {
+            node_ref: 0,
+            attr: "title".to_string(),
+            expr: "_ctx.msg".to_string(),
+        };
+        assert_eq!(
+            effect.to_component_prop(),
+            Some("title: () => (_ctx.msg)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_effect_set_prop_nested_parens_to_component_prop() {
+        let effect = VaporEffect::SetProp {
+            node_ref: 0,
+            attr: "title".to_string(),
+            expr: "fn(a, b)".to_string(),
+        };
+        // Structured data preserves nested parens correctly — no string parsing needed
+        assert_eq!(
+            effect.to_component_prop(),
+            Some("title: () => (fn(a, b))".to_string())
+        );
+    }
+
+    #[test]
+    fn test_effect_set_html_no_component_prop() {
+        let effect = VaporEffect::SetHtml {
+            node_ref: 0,
+            expr: "_ctx.html".to_string(),
+        };
+        assert_eq!(effect.to_component_prop(), None);
+    }
+
+    #[test]
+    fn test_effect_raw_no_component_prop() {
+        let effect = VaporEffect::Raw("_setText(x0, _ctx.msg)".to_string());
+        assert_eq!(effect.to_component_prop(), None);
+    }
+
+    // ── VaporEffect::node_ref tests ─────────────────────────────────────
+
+    #[test]
+    fn test_effect_node_ref() {
+        let effect = VaporEffect::SetClass {
+            node_ref: 42,
+            expr: "x".to_string(),
+        };
+        assert_eq!(effect.node_ref(), Some(42));
+    }
+
+    #[test]
+    fn test_effect_raw_no_node_ref() {
+        let effect = VaporEffect::Raw("something".to_string());
+        assert_eq!(effect.node_ref(), None);
+    }
 }
 
 /// Structural directive scope kind for an element.
@@ -180,22 +515,29 @@ impl VaporElementState {
             var_name: None,
             last_nav_child_var: None,
             text_child_started: false,
-            is_component: false,
-            is_slot_outlet: false,
-            is_dynamic_component: false,
-            is_template_element: false,
-            component_var: None,
-            dynamic_is_expr: None,
+            kind: VaporElementKind::Native,
             is_once: false,
             scope: None,
-            slot_children: Vec::new(),
-            needs_vapor_ctx: false,
             structural_children: Vec::new(),
             for_var_mappings: Vec::new(),
-            slot_name: None,
-            slot_name_is_dynamic: false,
-            slot_dynamic_name_expr: None,
-            slot_params: None,
         }
+    }
+
+    // ── Kind convenience accessors ──────────────────────────────────────
+
+    pub fn is_component(&self) -> bool {
+        self.kind.is_component()
+    }
+
+    pub fn is_dynamic_component(&self) -> bool {
+        self.kind.is_dynamic_component()
+    }
+
+    pub fn is_slot_outlet(&self) -> bool {
+        self.kind.is_slot_outlet()
+    }
+
+    pub fn is_template_element(&self) -> bool {
+        self.kind.is_template_element()
     }
 }
