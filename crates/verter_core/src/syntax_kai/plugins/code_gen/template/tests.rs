@@ -3458,3 +3458,174 @@ fn test_vapor_three_roots() {
         code
     );
 }
+
+// =========================================================================
+// Phase 3: Dynamic bind/events, _withKeys, refs, custom directives
+// =========================================================================
+
+/// @ai-generated — Vapor: v-bind="obj" spread → _setDynamicProps
+#[test]
+fn test_vapor_bind_spread() {
+    let code = gen_vapor_and_validate(
+        r#"<script setup>const attrs = {}</script><template vapor><div v-bind="attrs">hi</div></template>"#,
+    );
+    assert!(
+        code.contains("_setDynamicProps(n0,"),
+        "Should use _setDynamicProps for v-bind spread, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_renderEffect("),
+        "Should wrap _setDynamicProps in _renderEffect, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: :[dynamic]="val" → _setDynamicProps with computed key
+#[test]
+fn test_vapor_dynamic_attr() {
+    let code = gen_vapor_and_validate(
+        r#"<script setup>const attrName = 'id'; const value = '1'</script><template vapor><div :[attrName]="value">content</div></template>"#,
+    );
+    assert!(
+        code.contains("_setDynamicProps(n0,"),
+        "Should use _setDynamicProps for dynamic attr, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("attrName]"),
+        "Should use computed property key for dynamic attr, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: @[eventName]="handler" → _on with effect:true in renderEffect
+#[test]
+fn test_vapor_dynamic_event() {
+    let code = gen_vapor_and_validate(
+        r#"<script setup>const eventName = 'click'; function handler() {}</script><template vapor><button @[eventName]="handler">click</button></template>"#,
+    );
+    assert!(
+        code.contains("_on(n0,"),
+        "Should use _on for dynamic event, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("effect: true"),
+        "Should pass effect: true for dynamic event, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_renderEffect("),
+        "Dynamic event should be in _renderEffect, got:\n{}",
+        code
+    );
+    // Dynamic events should NOT use delegation
+    assert!(
+        !code.contains("_delegateEvents("),
+        "Dynamic events should NOT use delegation, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: @keyup.enter="handler" → _withKeys
+#[test]
+fn test_vapor_key_modifier() {
+    let code = gen_vapor_and_validate(
+        r#"<script setup>function submit() {}</script><template vapor><input @keyup.enter="submit"></template>"#,
+    );
+    assert!(
+        code.contains("_withKeys("),
+        "Should use _withKeys for key modifier, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("[\"enter\"]"),
+        "Should include enter in key modifiers array, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createInvoker(_withKeys("),
+        "Should wrap _withKeys in _createInvoker, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: @keydown.ctrl.enter → _withModifiers + _withKeys
+#[test]
+fn test_vapor_key_and_runtime_modifiers() {
+    let code = gen_vapor_and_validate(
+        r#"<script setup>function submit() {}</script><template vapor><input @keydown.ctrl.enter="submit"></template>"#,
+    );
+    assert!(
+        code.contains("_withModifiers("),
+        "Should use _withModifiers for ctrl, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_withKeys("),
+        "Should use _withKeys for enter, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("[\"ctrl\"]"),
+        "Should include ctrl in runtime modifiers, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("[\"enter\"]"),
+        "Should include enter in key modifiers, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: ref="myDiv" → _createTemplateRefSetter + _setTemplateRef
+#[test]
+fn test_vapor_template_ref() {
+    let code =
+        gen_vapor_and_validate(r#"<template vapor><div ref="myDiv">content</div></template>"#);
+    assert!(
+        code.contains("_createTemplateRefSetter()"),
+        "Should create template ref setter, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_setTemplateRef(n0, \"myDiv\")"),
+        "Should call _setTemplateRef with ref name, got:\n{}",
+        code
+    );
+    // ref should NOT be in the template HTML
+    assert!(
+        !code.contains("ref=\"myDiv\""),
+        "ref attr should be removed from template HTML, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: v-custom:arg.mod="expr" → _resolveDirective + _withVaporDirectives
+#[test]
+fn test_vapor_custom_directive() {
+    let code = gen_vapor_and_validate(
+        r#"<script setup>const value = 1</script><template vapor><div v-custom:arg.mod="value">hi</div></template>"#,
+    );
+    assert!(
+        code.contains("_resolveDirective(\"custom\")"),
+        "Should resolve custom directive, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_withVaporDirectives(n0,"),
+        "Should call _withVaporDirectives, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("\"arg\""),
+        "Should include arg in directive entry, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("mod: true"),
+        "Should include modifier in directive entry, got:\n{}",
+        code
+    );
+}

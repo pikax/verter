@@ -255,6 +255,8 @@ impl VaporImportDependencies {
     pub const APPLY_RADIO_MODEL: u64 = 1 << 39;
     pub const APPLY_SELECT_MODEL: u64 = 1 << 40;
     pub const SET_VALUE: u64 = 1 << 41;
+    pub const CREATE_TEMPLATE_REF_SETTER: u64 = 1 << 42;
+    pub const WITH_VAPOR_DIRECTIVES: u64 = 1 << 43;
 
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -403,6 +405,12 @@ impl VaporImportDependencies {
         }
         if self.contains(Self::SET_VALUE) {
             imports.push("setValue as _setValue");
+        }
+        if self.contains(Self::CREATE_TEMPLATE_REF_SETTER) {
+            imports.push("createTemplateRefSetter as _createTemplateRefSetter");
+        }
+        if self.contains(Self::WITH_VAPOR_DIRECTIVES) {
+            imports.push("withVaporDirectives as _withVaporDirectives");
         }
 
         imports.join(",")
