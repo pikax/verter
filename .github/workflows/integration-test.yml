@@ -389,16 +389,19 @@ jobs:
           echo "$CONFIG_FILES"
           echo "---"
 
-          # Link @verter into nested packages so they can resolve it
+          # Link @verter into ALL nested package node_modules
           # pnpm strict isolation means only declared deps are visible per-package
+          # A config might not directly import @vitejs/plugin-vue but inherit it
+          # from a shared config, so we must cover every workspace package
           ROOT_NM="$(pwd)/node_modules"
-          for CONFIG_FILE in $CONFIG_FILES; do
-            DIR=$(dirname "$CONFIG_FILE")
-            if [ "$DIR" != "." ] && [ -d "$DIR/node_modules" ] && [ ! -e "$DIR/node_modules/@verter" ]; then
-              echo "🔗 Linking @verter into $DIR/node_modules/"
-              ln -sfn "$ROOT_NM/@verter" "$DIR/node_modules/@verter"
-            fi
-          done
+          if [ -d "$ROOT_NM/@verter" ]; then
+            find . -name "node_modules" -type d -not -path "*/node_modules/*" | while read NM_DIR; do
+              if [ "$NM_DIR" != "./node_modules" ] && [ ! -e "$NM_DIR/@verter" ]; then
+                echo "🔗 Linking @verter into $NM_DIR/"
+                ln -sfn "$ROOT_NM/@verter" "$NM_DIR/@verter"
+              fi
+            done
+          fi
 
           for CONFIG_FILE in $CONFIG_FILES; do
             echo "📝 Modifying $CONFIG_FILE"
