@@ -293,9 +293,10 @@ jobs:
       - name: Configure hoist pattern for Verter
         working-directory: test-project
         run: |
-          # Use flat node_modules so nested workspace packages can resolve @verter/*
-          # pnpm strict isolation + ESM prevents nested packages from finding hoisted deps
-          echo 'node-linker=hoisted' >> .npmrc
+          # Hoist @verter/* to root node_modules so all workspace packages can resolve it
+          # Using public-hoist-pattern instead of node-linker=hoisted to preserve
+          # pnpm's per-package isolation (some projects use ./node_modules/ paths in build scripts)
+          echo 'public-hoist-pattern[]=@verter/*' >> .npmrc
 
       - name: Install project dependencies
         working-directory: test-project
