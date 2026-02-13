@@ -179,33 +179,24 @@ jobs:
 
       - name: Cache Rust dependencies
         if: steps.source.outputs.source == 'artifact'
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+          shared-key: napi-release
 
       - name: Install dependencies
         if: steps.source.outputs.source == 'artifact'
         run: pnpm install --frozen-lockfile
 
-      - name: Build native
+      - name: Build native (fast CI profile)
         if: steps.source.outputs.source == 'artifact'
+        env:
+          CARGO_PROFILE_RELEASE_LTO: 'false'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
         run: pnpm run build:native
 
-      - name: Build WASM
+      - name: Build vite-plugin
         if: steps.source.outputs.source == 'artifact'
-        run: |
-          curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-          pnpm run build:wasm
-
-      - name: Build TypeScript packages
-        if: steps.source.outputs.source == 'artifact'
-        run: pnpm run build:ts
+        run: pnpm --filter @verter/vite-plugin build
 
       - name: Create local registry tarball
         if: steps.source.outputs.source == 'artifact'
@@ -264,21 +255,18 @@ jobs:
             branch: master
             build-cmd: pnpm run build
             test-cmd: pnpm --filter vuetify test:unit
-            vite-config-path: packages/vuetify
             package-manager: pnpm
           - name: oku-primitives
             repo: oku-ui/primitives
             branch: main
             build-cmd: pnpm run build
             test-cmd: pnpm run test
-            vite-config-path: .
             package-manager: pnpm
           - name: hoppscotch
             repo: hoppscotch/hoppscotch
             branch: main
-            build-cmd: pnpm run generate
-            test-cmd: pnpm run test
-            vite-config-path: packages/hoppscotch-selfhost-web
+            build-cmd: pnpm --filter @hoppscotch/selfhost-web build
+            test-cmd: pnpm --filter @hoppscotch/common test
             package-manager: pnpm
 
     steps:
@@ -319,59 +307,8 @@ jobs:
         run: |
           ${{ matrix.project.package-manager }} install --no-frozen-lockfile
 
-      - name: Find Vite config
-        id: find-config
-        working-directory: test-project/${{ matrix.project.vite-config-path }}
-        run: |
-          if [ -f "vite.config.ts" ]; then
-            echo "config-file=vite.config.ts" >> $GITHUB_OUTPUT
-          elif [ -f "vite.config.js" ]; then
-            echo "config-file=vite.config.js" >> $GITHUB_OUTPUT
-          elif [ -f "vite.config.mts" ]; then
-            echo "config-file=vite.config.mts" >> $GITHUB_OUTPUT
-          elif [ -f "vite.config.mjs" ]; then
-            echo "config-file=vite.config.mjs" >> $GITHUB_OUTPUT
-          else
-            echo "❌ No vite.config found"
-            echo "config-file=" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Baseline - Build with Vue
-        id: baseline-build
-        working-directory: test-project
-        continue-on-error: true
-        run: |
-          START=$(date +%s)
-          ${{ matrix.project.build-cmd }} 2>&1 | tee ../baseline-build.log
-          END=$(date +%s)
-          DURATION=$((END - START))
-          echo "duration=$DURATION" >> $GITHUB_OUTPUT
-          echo "✅ Baseline build completed in ${DURATION}s"
-
-      - name: Baseline - Run tests with Vue
-        id: baseline-test
-        working-directory: test-project
-        continue-on-error: true
-        run: |
-          if [ -z "${{ matrix.project.test-cmd }}" ]; then
-            echo "No test command specified"
-            echo "duration=0" >> $GITHUB_OUTPUT
-            echo "status=skipped" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          START=$(date +%s)
-          if ${{ matrix.project.test-cmd }} 2>&1 | tee ../baseline-test.log; then
-            TEST_STATUS="passed"
-            echo "status=passed" >> $GITHUB_OUTPUT
-          else
-            TEST_STATUS="failed"
-            echo "status=failed" >> $GITHUB_OUTPUT
-          fi
-          END=$(date +%s)
-          DURATION=$((END - START))
-          echo "duration=$DURATION" >> $GITHUB_OUTPUT
-          echo "Tests completed in ${DURATION}s with status: ${TEST_STATUS}"
+      - name: Create baseline copy
+        run: cp -al test-project test-baseline
 
       - name: Download Verter workspace artifact
         if: steps.source.outputs.source == 'artifact'
@@ -380,15 +317,19 @@ jobs:
           name: verter-workspace
           path: verter-workspace
 
+      - name: Hoist Verter packages for subpackage resolution
+        working-directory: test-project
+        run: |
+          # pnpm strict isolation prevents subpackages from resolving workspace-root deps
+          # Hoist @verter/* so vite configs in nested packages can import them
+          echo 'public-hoist-pattern[]=@verter/*' >> .npmrc
+
       - name: Install Verter packages (from artifact/workspace)
         if: steps.source.outputs.source == 'artifact'
         working-directory: test-project
         run: |
-          # Use file: protocol to install from local workspace builds
-          # This avoids npm registry lookups and preserves dependencies
           echo "📦 Installing Verter from workspace builds"
           ${{ matrix.project.package-manager }} add -w ../verter-workspace/packages/native ../verter-workspace/packages/vite-plugin
-
           echo "✅ Verter packages installed from workspace"
 
       - name: Install Verter vite-plugin (from npm)
@@ -396,75 +337,113 @@ jobs:
         working-directory: test-project
         run: |
           echo "Installing from npm with dist-tag: ${{ steps.source.outputs.dist-tag }}"
-          ${{ matrix.project.package-manager }} add @verter/vite-plugin@${{ steps.source.outputs.dist-tag }}
+          ${{ matrix.project.package-manager }} add -w @verter/vite-plugin@${{ steps.source.outputs.dist-tag }}
 
-      - name: Backup original Vite config
-        working-directory: test-project/${{ matrix.project.vite-config-path }}
+      - name: Replace vue() with verter() in all Vite/Vitest configs
+        working-directory: test-project
         run: |
-          if [ -n "${{ steps.find-config.outputs.config-file }}" ]; then
-            cp ${{ steps.find-config.outputs.config-file }} ${{ steps.find-config.outputs.config-file }}.backup
-          fi
+          # Find all vite and vitest config files that reference @vitejs/plugin-vue
+          CONFIG_FILES=$(grep -rl "@vitejs/plugin-vue" --include="vite.config.*" --include="vitest.config.*" . || true)
 
-      - name: Replace vue() with verter() in Vite config
-        working-directory: test-project/${{ matrix.project.vite-config-path }}
-        run: |
-          CONFIG_FILE="${{ steps.find-config.outputs.config-file }}"
-          
-          if [ -z "$CONFIG_FILE" ]; then
-            echo "❌ No config file to modify"
+          if [ -z "$CONFIG_FILES" ]; then
+            echo "❌ No config files with @vitejs/plugin-vue found"
             exit 1
           fi
-          
-          echo "📝 Modifying $CONFIG_FILE"
-          cat "$CONFIG_FILE"
-          echo "---"
-          
-          # Check if vue plugin is actually used
-          if ! grep -q "@vitejs/plugin-vue" "$CONFIG_FILE" && ! grep -q "from.*vue" "$CONFIG_FILE"; then
-            echo "⚠️ Warning: No Vue plugin import found in config. Attempting replacement anyway..."
-          fi
-          
-          # Replace import statement
-          sed -i "s|from '@vitejs/plugin-vue'|from '@verter/vite-plugin'|g" "$CONFIG_FILE"
-          sed -i 's|import vue from|import verter from|g' "$CONFIG_FILE"
-          
-          # Replace function call
-          sed -i 's|vue(|verter(|g' "$CONFIG_FILE"
-          
-          echo "📝 Modified config:"
-          cat "$CONFIG_FILE"
 
-      - name: Verter - Build with Verter
-        id: verter-build
-        working-directory: test-project
+          echo "📝 Found config files to modify:"
+          echo "$CONFIG_FILES"
+          echo "---"
+
+          for CONFIG_FILE in $CONFIG_FILES; do
+            echo "📝 Modifying $CONFIG_FILE"
+            cat "$CONFIG_FILE"
+            echo "---"
+
+            sed -i "s|from '@vitejs/plugin-vue'|from '@verter/vite-plugin'|g" "$CONFIG_FILE"
+            sed -i "s|from \"@vitejs/plugin-vue\"|from \"@verter/vite-plugin\"|g" "$CONFIG_FILE"
+            sed -i 's|import vue from|import verter from|g' "$CONFIG_FILE"
+            sed -i 's|import Vue from|import verter from|g' "$CONFIG_FILE"
+            sed -i 's|vue(|verter(|g' "$CONFIG_FILE"
+            sed -i 's|Vue(|verter(|g' "$CONFIG_FILE"
+
+            echo "📝 Modified:"
+            cat "$CONFIG_FILE"
+            echo "==="
+          done
+
+      - name: Build baseline and Verter in parallel
+        id: parallel-build
         continue-on-error: true
         run: |
+          # Run both builds concurrently
+          (
+            set -o pipefail
+            START=$(date +%s)
+            cd test-baseline && ${{ matrix.project.build-cmd }} > ../baseline-build.log 2>&1
+            echo "$?:$(($(date +%s) - START))" > ../baseline-result.txt
+          ) &
+          BASELINE_PID=$!
+
+          (
+            set -o pipefail
+            START=$(date +%s)
+            cd test-project && ${{ matrix.project.build-cmd }} > ../verter-build.log 2>&1
+            echo "$?:$(($(date +%s) - START))" > ../verter-result.txt
+          ) &
+          VERTER_PID=$!
+
+          # Wait for both builds to finish
+          wait $BASELINE_PID || true
+          wait $VERTER_PID || true
+
+          # Parse results (exit_code:duration)
+          IFS=':' read B_EXIT B_DUR < baseline-result.txt
+          IFS=':' read V_EXIT V_DUR < verter-result.txt
+
+          echo "baseline_duration=$B_DUR" >> $GITHUB_OUTPUT
+          echo "baseline_outcome=$([ "$B_EXIT" = "0" ] && echo success || echo failure)" >> $GITHUB_OUTPUT
+          echo "verter_duration=$V_DUR" >> $GITHUB_OUTPUT
+          echo "verter_status=$([ "$V_EXIT" = "0" ] && echo success || echo failed)" >> $GITHUB_OUTPUT
+
+          echo "Baseline: ${B_DUR}s (exit $B_EXIT) | Verter: ${V_DUR}s (exit $V_EXIT)"
+
+      - name: Baseline tests
+        id: baseline-test
+        working-directory: test-baseline
+        continue-on-error: true
+        run: |
+          if [ -z "${{ matrix.project.test-cmd }}" ]; then
+            echo "duration=0" >> $GITHUB_OUTPUT
+            echo "status=skipped" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           START=$(date +%s)
-          ${{ matrix.project.build-cmd }} 2>&1 | tee ../verter-build.log
-          END=$(date +%s)
-          DURATION=$((END - START))
-          echo "duration=$DURATION" >> $GITHUB_OUTPUT
-          
-          if [ $? -eq 0 ]; then
-            echo "status=success" >> $GITHUB_OUTPUT
-            echo "✅ Verter build completed in ${DURATION}s"
+          if ${{ matrix.project.test-cmd }} 2>&1 | tee ../baseline-test.log; then
+            echo "status=passed" >> $GITHUB_OUTPUT
           else
             echo "status=failed" >> $GITHUB_OUTPUT
-            echo "❌ Verter build failed after ${DURATION}s"
           fi
+          END=$(date +%s)
+          echo "duration=$((END - START))" >> $GITHUB_OUTPUT
 
-      - name: Verter - Run tests with Verter
+          # Extract test counts (vitest/jest: "Tests  42 passed | 3 failed (45)")
+          TP=$(grep -oE '[0-9]+ passed' ../baseline-test.log | tail -1 | grep -oE '[0-9]+' || true)
+          TF=$(grep -oE '[0-9]+ failed' ../baseline-test.log | tail -1 | grep -oE '[0-9]+' || true)
+          echo "test_passed=${TP:-0}" >> $GITHUB_OUTPUT
+          echo "test_failed=${TF:-0}" >> $GITHUB_OUTPUT
+
+      - name: Verter tests
         id: verter-test
         working-directory: test-project
         continue-on-error: true
         run: |
           if [ -z "${{ matrix.project.test-cmd }}" ]; then
-            echo "No test command specified"
             echo "duration=0" >> $GITHUB_OUTPUT
             echo "status=skipped" >> $GITHUB_OUTPUT
+            echo "test_passed=0" >> $GITHUB_OUTPUT
+            echo "test_failed=0" >> $GITHUB_OUTPUT
             exit 0
           fi
-          
           START=$(date +%s)
           if ${{ matrix.project.test-cmd }} 2>&1 | tee ../verter-test.log; then
             echo "status=passed" >> $GITHUB_OUTPUT
@@ -472,8 +451,13 @@ jobs:
             echo "status=failed" >> $GITHUB_OUTPUT
           fi
           END=$(date +%s)
-          DURATION=$((END - START))
-          echo "duration=$DURATION" >> $GITHUB_OUTPUT
+          echo "duration=$((END - START))" >> $GITHUB_OUTPUT
+
+          # Extract test counts (vitest/jest: "Tests  42 passed | 3 failed (45)")
+          TP=$(grep -oE '[0-9]+ passed' ../verter-test.log | tail -1 | grep -oE '[0-9]+' || true)
+          TF=$(grep -oE '[0-9]+ failed' ../verter-test.log | tail -1 | grep -oE '[0-9]+' || true)
+          echo "test_passed=${TP:-0}" >> $GITHUB_OUTPUT
+          echo "test_failed=${TF:-0}" >> $GITHUB_OUTPUT
 
       - name: Generate project report
         if: always()
@@ -492,8 +476,8 @@ jobs:
           
           | Compiler | Build Time | Status |
           |----------|-----------|--------|
-          | Vue (baseline) | ${{ steps.baseline-build.outputs.duration }}s | ${{ steps.baseline-build.outcome }} |
-          | Verter | ${{ steps.verter-build.outputs.duration }}s | ${{ steps.verter-build.outputs.status }} |
+          | Vue (baseline) | ${{ steps.parallel-build.outputs.baseline_duration }}s | ${{ steps.parallel-build.outputs.baseline_outcome }} |
+          | Verter | ${{ steps.parallel-build.outputs.verter_duration }}s | ${{ steps.parallel-build.outputs.verter_status }} |
           
           **Build Time Delta:** 
           EOF
@@ -501,8 +485,8 @@ jobs:
           # Replace placeholder with actual date
           sed -i "s/TEST_DATE_PLACEHOLDER/$TEST_DATE/" report-${{ matrix.project.name }}.md
           
-          BASELINE="${{ steps.baseline-build.outputs.duration }}"
-          VERTER="${{ steps.verter-build.outputs.duration }}"
+          BASELINE="${{ steps.parallel-build.outputs.baseline_duration }}"
+          VERTER="${{ steps.parallel-build.outputs.verter_duration }}"
           
           if [ -n "$BASELINE" ] && [ -n "$VERTER" ] && [ "$BASELINE" -gt 0 ] && [ "$VERTER" -gt 0 ]; then
             DIFF=$((VERTER - BASELINE))
@@ -567,10 +551,10 @@ jobs:
           EOF
           
           # Determine overall status: pass (green), warning (yellow), or fail (red)
-          BUILD_STATUS="${{ steps.verter-build.outputs.status }}"
+          BUILD_STATUS="${{ steps.parallel-build.outputs.verter_status }}"
           TEST_STATUS="${{ steps.verter-test.outputs.status }}"
-          BASELINE_BUILD="${{ steps.baseline-build.outputs.duration }}"
-          VERTER_BUILD="${{ steps.verter-build.outputs.duration }}"
+          BASELINE_BUILD="${{ steps.parallel-build.outputs.baseline_duration }}"
+          VERTER_BUILD="${{ steps.parallel-build.outputs.verter_duration }}"
           BASELINE_TEST="${{ steps.baseline-test.outputs.duration }}"
           VERTER_TEST="${{ steps.verter-test.outputs.duration }}"
           
@@ -583,6 +567,11 @@ jobs:
           echo "verter_build=$VERTER_BUILD" >> status/status.txt
           echo "baseline_test=$BASELINE_TEST" >> status/status.txt
           echo "verter_test=$VERTER_TEST" >> status/status.txt
+          echo "baseline_test_passed=${{ steps.baseline-test.outputs.test_passed }}" >> status/status.txt
+          echo "baseline_test_failed=${{ steps.baseline-test.outputs.test_failed }}" >> status/status.txt
+          echo "baseline_test_status=${{ steps.baseline-test.outputs.status }}" >> status/status.txt
+          echo "verter_test_passed=${{ steps.verter-test.outputs.test_passed }}" >> status/status.txt
+          echo "verter_test_failed=${{ steps.verter-test.outputs.test_failed }}" >> status/status.txt
           
           # Calculate overall status
           OVERALL_STATUS="fail"
@@ -668,61 +657,99 @@ jobs:
       - name: Generate aggregate summary
         run: |
           SUMMARY_DATE=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          
-          cat > integration-test-summary.md << 'EOF'
-          # 🧪 Verter Integration Test Summary
-          
-          **Workflow Run:** ${{ github.run_number }}  
-          **Trigger:** ${{ github.event_name }}  
-          **Date:** SUMMARY_DATE_PLACEHOLDER  
-          
-          ## Overview
-          
+
+          cat > integration-test-summary.md << 'HEADER'
+          # Verter Integration Test Summary
+
+          HEADER
+
+          # Replace placeholder metadata inline
+          cat >> integration-test-summary.md << EOF
+          **Workflow Run:** ${{ github.run_number }} | **Trigger:** ${{ github.event_name }} | **Date:** $SUMMARY_DATE
+
           EOF
-          
-          # Replace placeholder with actual date
-          sed -i "s/SUMMARY_DATE_PLACEHOLDER/$SUMMARY_DATE/" integration-test-summary.md
-          
+
           TOTAL=0
           PASSED=0
           WARNING=0
           FAILED=0
-          
+
+          # First pass: collect data for the summary table
+          TABLE_ROWS=""
+
           for report_dir in reports/report-*; do
-            if [ -d "$report_dir" ]; then
+            if [ -d "$report_dir" ] && [ -f "$report_dir/status/status.txt" ]; then
               TOTAL=$((TOTAL + 1))
-              PROJECT=$(basename "$report_dir" | sed 's/report-//')
-              
-              # Read status file if it exists
-              if [ -f "$report_dir/status/status.txt" ]; then
-                source "$report_dir/status/status.txt"
-                
-                if [ "$overall_status" = "pass" ]; then
-                  PASSED=$((PASSED + 1))
-                  echo "- ✅ **$PROJECT** - Passed (faster or equal)" >> integration-test-summary.md
-                elif [ "$overall_status" = "warning" ]; then
-                  WARNING=$((WARNING + 1))
-                  echo "- ⚠️ **$PROJECT** - Warning (slower than Vue)" >> integration-test-summary.md
-                else
-                  FAILED=$((FAILED + 1))
-                  echo "- ❌ **$PROJECT** - Failed (build or tests failed)" >> integration-test-summary.md
-                fi
+
+              # Reset variables before sourcing
+              project="" build_status="" test_status="" overall_status=""
+              baseline_build="" verter_build="" baseline_test="" verter_test=""
+              baseline_test_passed="" baseline_test_failed="" baseline_test_status=""
+              verter_test_passed="" verter_test_failed=""
+
+              source "$report_dir/status/status.txt"
+
+              PROJECT="$project"
+
+              # Status icon
+              if [ "$overall_status" = "pass" ]; then
+                PASSED=$((PASSED + 1))
+                STATUS_ICON="✅"
+              elif [ "$overall_status" = "warning" ]; then
+                WARNING=$((WARNING + 1))
+                STATUS_ICON="⚠️"
               else
-                # Fallback to old logic
-                if grep -q "✅ \*\*Passed\*\*" "$report_dir"/*.md 2>/dev/null; then
-                  PASSED=$((PASSED + 1))
-                  echo "- ✅ **$PROJECT** - Passed" >> integration-test-summary.md
-                elif grep -q "⚠️ \*\*Warning\*\*" "$report_dir"/*.md 2>/dev/null; then
-                  WARNING=$((WARNING + 1))
-                  echo "- ⚠️ **$PROJECT** - Warning" >> integration-test-summary.md
+                FAILED=$((FAILED + 1))
+                STATUS_ICON="❌"
+              fi
+
+              # Build delta
+              BUILD_DELTA="N/A"
+              if [ -n "$baseline_build" ] && [ -n "$verter_build" ] && [ "$baseline_build" -gt 0 ] && [ "$verter_build" -gt 0 ]; then
+                DIFF=$((verter_build - baseline_build))
+                PCT=$((DIFF * 100 / baseline_build))
+                if [ $DIFF -gt 0 ]; then
+                  BUILD_DELTA="+${DIFF}s (+${PCT}%)"
+                elif [ $DIFF -lt 0 ]; then
+                  BUILD_DELTA="${DIFF}s (${PCT}%)"
                 else
-                  FAILED=$((FAILED + 1))
-                  echo "- ❌ **$PROJECT** - Failed" >> integration-test-summary.md
+                  BUILD_DELTA="same"
                 fi
               fi
+
+              # Vue test summary
+              VUE_TESTS="—"
+              if [ "$baseline_test_status" = "skipped" ]; then
+                VUE_TESTS="skipped"
+              elif [ "${baseline_test_failed:-0}" -gt 0 ] 2>/dev/null; then
+                VUE_TESTS="❌ ${baseline_test_failed} failed / $((baseline_test_passed + baseline_test_failed))"
+              elif [ "${baseline_test_passed:-0}" -gt 0 ] 2>/dev/null; then
+                VUE_TESTS="✅ ${baseline_test_passed} passed"
+              elif [ "$baseline_test_status" = "passed" ]; then
+                VUE_TESTS="✅ passed"
+              elif [ "$baseline_test_status" = "failed" ]; then
+                VUE_TESTS="❌ failed"
+              fi
+
+              # Verter test summary
+              VERTER_TESTS="—"
+              if [ "$test_status" = "skipped" ]; then
+                VERTER_TESTS="skipped"
+              elif [ "${verter_test_failed:-0}" -gt 0 ] 2>/dev/null; then
+                VERTER_TESTS="❌ ${verter_test_failed} failed / $((verter_test_passed + verter_test_failed))"
+              elif [ "${verter_test_passed:-0}" -gt 0 ] 2>/dev/null; then
+                VERTER_TESTS="✅ ${verter_test_passed} passed"
+              elif [ "$test_status" = "passed" ]; then
+                VERTER_TESTS="✅ passed"
+              elif [ "$test_status" = "failed" ]; then
+                VERTER_TESTS="❌ failed"
+              fi
+
+              TABLE_ROWS="${TABLE_ROWS}| **${PROJECT}** | ${baseline_build:-—}s | ${VUE_TESTS} | ${verter_build:-—}s | ${VERTER_TESTS} | ${BUILD_DELTA} | ${STATUS_ICON} |
+          "
             fi
           done
-          
+
           # Determine overall workflow status
           WORKFLOW_STATUS="✅ Passed"
           if [ "$FAILED" -gt 0 ]; then
@@ -730,40 +757,35 @@ jobs:
           elif [ "$WARNING" -gt 0 ]; then
             WORKFLOW_STATUS="⚠️ Warning"
           fi
-          
-          # Add summary stats
+
+          # Write summary table
           cat >> integration-test-summary.md << EOF
-          
-          **Results:** $PASSED passed, $WARNING warnings, $FAILED failed (total: $TOTAL)  
-          **Overall Status:** $WORKFLOW_STATUS
-          
+          | Project | Vue Build | Vue Tests | Verter Build | Verter Tests | Build Delta | Status |
+          |---------|-----------|-----------|--------------|--------------|-------------|--------|
+          ${TABLE_ROWS}
+          **Results:** ${PASSED} passed, ${WARNING} warnings, ${FAILED} failed (total: ${TOTAL}) | **Overall:** ${WORKFLOW_STATUS}
+
+          ---
+
           ## Detailed Reports
-          
+
           EOF
-          
+
           # Store overall status for PR comment check
           echo "$WORKFLOW_STATUS" > overall-status.txt
           echo "$FAILED" > failed-count.txt
-          
+
           # Append individual reports
           for report_dir in reports/report-*; do
             if [ -d "$report_dir" ]; then
-              cat "$report_dir"/*.md >> integration-test-summary.md
+              for md_file in "$report_dir"/*.md; do
+                [ -f "$md_file" ] && cat "$md_file" >> integration-test-summary.md
+              done
               echo "" >> integration-test-summary.md
               echo "---" >> integration-test-summary.md
               echo "" >> integration-test-summary.md
             fi
           done
-          
-          cat >> integration-test-summary.md << 'EOF'
-          
-          ## Next Steps
-          
-          - Review failing projects and identify common issues
-          - Update Verter compiler to fix compatibility problems
-          - Re-run tests after fixes
-          
-          EOF
 
       - name: Upload aggregate summary
         uses: actions/upload-artifact@v4

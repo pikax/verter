@@ -144,15 +144,9 @@ jobs:
             ${{ runner.os }}-pnpm-
 
       - name: Cache Rust build
-        uses: actions/cache@v4
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            target/
-            ~/.cargo/registry/
-            ~/.cargo/git/
-          key: ${{ runner.os }}-rust-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-
+          shared-key: napi-release
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

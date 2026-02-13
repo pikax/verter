@@ -298,31 +298,30 @@ async function main() {
   // Output console summary
   console.log(generateConsoleOutput(report))
 
-  if (jsonOutput) {
-    // Write JSON report directly to stdout for CI
-    process.stdout.write(generateJsonReport(report) + '\n')
-  } else {
-    // Write markdown report to file
-    const outputDir = join(process.cwd(), 'benchmark-results')
-    const markdownPath = join(outputDir, 'results.md')
-    const jsonPath = join(outputDir, 'results.json')
+  // Always write reports to files (used as CI artifacts)
+  const outputDir = join(process.cwd(), 'benchmark-results')
+  const markdownPath = join(outputDir, 'results.md')
+  const jsonPath = join(outputDir, 'results.json')
 
-    try {
-      // Create output directory if it doesn't exist
-      const { mkdirSync, existsSync } = await import('fs')
-      if (!existsSync(outputDir)) {
-        mkdirSync(outputDir, { recursive: true })
-      }
-
-      writeFileSync(markdownPath, generateMarkdownReport(report))
-      writeFileSync(jsonPath, generateJsonReport(report))
-
-      console.log(`\n📊 Reports saved:`)
-      console.log(`   - ${markdownPath}`)
-      console.log(`   - ${jsonPath}`)
-    } catch (error) {
-      console.error('Failed to write reports:', error)
+  try {
+    const { mkdirSync, existsSync } = await import('fs')
+    if (!existsSync(outputDir)) {
+      mkdirSync(outputDir, { recursive: true })
     }
+
+    writeFileSync(markdownPath, generateMarkdownReport(report))
+    writeFileSync(jsonPath, generateJsonReport(report))
+
+    console.log(`\n📊 Reports saved:`)
+    console.log(`   - ${markdownPath}`)
+    console.log(`   - ${jsonPath}`)
+  } catch (error) {
+    console.error('Failed to write reports:', error)
+  }
+
+  if (jsonOutput) {
+    // Also write JSON to stdout for CI pipeline consumption
+    process.stdout.write(generateJsonReport(report) + '\n')
   }
 
   // Exit with code 0 (don't fail CI on performance issues)
