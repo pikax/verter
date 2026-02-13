@@ -263,29 +263,22 @@ jobs:
             repo: vuetifyjs/vuetify
             branch: master
             build-cmd: pnpm run build
-            test-cmd: pnpm run test:unit
+            test-cmd: pnpm --filter vuetify test:unit
             vite-config-path: packages/vuetify
             package-manager: pnpm
-          - name: primevue
-            repo: primefaces/primevue
-            branch: master
-            build-cmd: pnpm run build:lib
-            test-cmd: pnpm run test:unit
-            vite-config-path: .
-            package-manager: pnpm
-          - name: element-plus
-            repo: element-plus/element-plus
-            branch: dev
+          - name: oku-primitives
+            repo: oku-ui/primitives
+            branch: main
             build-cmd: pnpm run build
             test-cmd: pnpm run test
             vite-config-path: .
             package-manager: pnpm
-          - name: shadcn-vue
-            repo: unovue/shadcn-vue
-            branch: dev
-            build-cmd: pnpm run build
+          - name: hoppscotch
+            repo: hoppscotch/hoppscotch
+            branch: main
+            build-cmd: pnpm run generate
             test-cmd: pnpm run test
-            vite-config-path: .
+            vite-config-path: packages/hoppscotch-selfhost-web
             package-manager: pnpm
 
     steps:

@@ -18,6 +18,15 @@ import {
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
+// When --json flag is present, redirect console.log to stderr
+// so only the final JSON report goes to stdout
+const jsonOutput = process.argv.includes('--json')
+if (jsonOutput) {
+  console.log = (...args: unknown[]) => {
+    process.stderr.write(args.map(String).join(' ') + '\n')
+  }
+}
+
 // Fixture files
 const FIXTURES = [
   'tiny-template.vue',
@@ -289,12 +298,9 @@ async function main() {
   // Output console summary
   console.log(generateConsoleOutput(report))
 
-  // Check if --json flag is provided
-  const jsonOutput = process.argv.includes('--json')
-
   if (jsonOutput) {
-    // Write JSON report to stdout for CI
-    console.log(generateJsonReport(report))
+    // Write JSON report directly to stdout for CI
+    process.stdout.write(generateJsonReport(report) + '\n')
   } else {
     // Write markdown report to file
     const outputDir = join(process.cwd(), 'benchmark-results')
