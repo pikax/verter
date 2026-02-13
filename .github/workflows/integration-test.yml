@@ -254,34 +254,34 @@ jobs:
     name: Test ${{ matrix.project.name }}
     runs-on: ubuntu-latest
     needs: [setup]
-    if: always() && needs.setup.result != 'cancelled'
+    if: always() && needs.setup.result == 'success'
     strategy:
       fail-fast: false
       matrix:
         project:
           - name: vuetify
-            repo: https://github.com/vuetifyjs/vuetify.git
+            repo: vuetifyjs/vuetify
             branch: master
             build-cmd: pnpm run build
             test-cmd: pnpm run test:unit
             vite-config-path: packages/vuetify
             package-manager: pnpm
           - name: primevue
-            repo: https://github.com/primefaces/primevue.git
+            repo: primefaces/primevue
             branch: master
             build-cmd: pnpm run build:lib
             test-cmd: pnpm run test:unit
             vite-config-path: .
             package-manager: pnpm
           - name: element-plus
-            repo: https://github.com/element-plus/element-plus.git
+            repo: element-plus/element-plus
             branch: dev
             build-cmd: pnpm run build
             test-cmd: pnpm run test
             vite-config-path: .
             package-manager: pnpm
           - name: shadcn-vue
-            repo: https://github.com/unovue/shadcn-vue.git
+            repo: unovue/shadcn-vue
             branch: dev
             build-cmd: pnpm run build
             test-cmd: pnpm run test
@@ -507,7 +507,6 @@ jobs:
           
           # Replace placeholder with actual date
           sed -i "s/TEST_DATE_PLACEHOLDER/$TEST_DATE/" report-${{ matrix.project.name }}.md
-          EOF
           
           BASELINE="${{ steps.baseline-build.outputs.duration }}"
           VERTER="${{ steps.verter-build.outputs.duration }}"
@@ -851,16 +850,6 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 comment_id: botComment.id,
-                body: commentBody
-              });
-            } else {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.issue.number,
-                body: commentBody
-              });
-            }
                 body: commentBody
               });
             } else {

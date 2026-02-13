@@ -209,13 +209,13 @@ jobs:
       - name: Generate PR comment
         id: generate-comment
         uses: actions/github-script@v7
+        env:
+          RESULT_JSON: ${{ needs.benchmark.outputs.result-json }}
         with:
           script: |
             const resultJson = JSON.parse(process.env.RESULT_JSON);
             const overallStatus = '${{ needs.benchmark.outputs.overall-status }}';
-            
-        env:
-          RESULT_JSON: ${{ needs.benchmark.outputs.result-json }}
+
             const statusEmoji = {
               pass: '✅',
               warning: '⚠️',
