@@ -18,6 +18,15 @@ import {
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
+// When --json flag is present, redirect console.log to stderr
+// so only the final JSON report goes to stdout
+const jsonOutput = process.argv.includes('--json')
+if (jsonOutput) {
+  console.log = (...args: unknown[]) => {
+    process.stderr.write(args.map(String).join(' ') + '\n')
+  }
+}
+
 // Fixture files
 const FIXTURES = [
   'tiny-template.vue',
@@ -289,34 +298,30 @@ async function main() {
   // Output console summary
   console.log(generateConsoleOutput(report))
 
-  // Check if --json flag is provided
-  const jsonOutput = process.argv.includes('--json')
+  // Always write reports to files (used as CI artifacts)
+  const outputDir = join(process.cwd(), 'benchmark-results')
+  const markdownPath = join(outputDir, 'results.md')
+  const jsonPath = join(outputDir, 'results.json')
+
+  try {
+    const { mkdirSync, existsSync } = await import('fs')
+    if (!existsSync(outputDir)) {
+      mkdirSync(outputDir, { recursive: true })
+    }
+
+    writeFileSync(markdownPath, generateMarkdownReport(report))
+    writeFileSync(jsonPath, generateJsonReport(report))
+
+    console.log(`\n📊 Reports saved:`)
+    console.log(`   - ${markdownPath}`)
+    console.log(`   - ${jsonPath}`)
+  } catch (error) {
+    console.error('Failed to write reports:', error)
+  }
 
   if (jsonOutput) {
-    // Write JSON report to stdout for CI
-    console.log(generateJsonReport(report))
-  } else {
-    // Write markdown report to file
-    const outputDir = join(process.cwd(), 'benchmark-results')
-    const markdownPath = join(outputDir, 'results.md')
-    const jsonPath = join(outputDir, 'results.json')
-
-    try {
-      // Create output directory if it doesn't exist
-      const { mkdirSync, existsSync } = await import('fs')
-      if (!existsSync(outputDir)) {
-        mkdirSync(outputDir, { recursive: true })
-      }
-
-      writeFileSync(markdownPath, generateMarkdownReport(report))
-      writeFileSync(jsonPath, generateJsonReport(report))
-
-      console.log(`\n📊 Reports saved:`)
-      console.log(`   - ${markdownPath}`)
-      console.log(`   - ${jsonPath}`)
-    } catch (error) {
-      console.error('Failed to write reports:', error)
-    }
+    // Also write JSON to stdout for CI pipeline consumption
+    process.stdout.write(generateJsonReport(report) + '\n')
   }
 
   // Exit with code 0 (don't fail CI on performance issues)
