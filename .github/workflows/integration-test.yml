@@ -241,7 +241,7 @@ jobs:
       - name: Save source info
         run: |
           echo "source=${{ steps.source.outputs.source }}" >> source-info.txt
-          echo "dist-tag=${{ steps.source.outputs.dist-tag }}" >> source-info.txt
+          echo "dist_tag=${{ steps.source.outputs.dist-tag }}" >> source-info.txt
 
       - name: Upload source info
         uses: actions/upload-artifact@v4
@@ -299,7 +299,7 @@ jobs:
         run: |
           source source-info.txt
           echo "source=$source" >> $GITHUB_OUTPUT
-          echo "dist-tag=$dist-tag" >> $GITHUB_OUTPUT
+          echo "dist-tag=$dist_tag" >> $GITHUB_OUTPUT
 
       - name: Checkout test project
         uses: actions/checkout@v4
