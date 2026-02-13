@@ -357,7 +357,24 @@ jobs:
           PLUGIN_TGZ=$(ls ../verter-packages/verter-vite-plugin-*.tgz)
           echo "  native: $NATIVE_TGZ"
           echo "  vite-plugin: $PLUGIN_TGZ"
-          ${{ matrix.project.package-manager }} add -w "$NATIVE_TGZ" "$PLUGIN_TGZ"
+
+          # 1. Install @verter/native first
+          ${{ matrix.project.package-manager }} add -w "$NATIVE_TGZ"
+
+          # 2. Add pnpm override so vite-plugin's transitive @verter/native dep
+          #    resolves from root dependencies instead of hitting the npm registry
+          #    (the package is not published yet)
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.pnpm = pkg.pnpm || {};
+            pkg.pnpm.overrides = pkg.pnpm.overrides || {};
+            pkg.pnpm.overrides['@verter/native'] = '\$@verter/native';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+          # 3. Install @verter/vite-plugin (override ensures @verter/native resolves locally)
+          ${{ matrix.project.package-manager }} add -w "$PLUGIN_TGZ"
           echo "✅ Verter packages installed from tarballs"
 
       - name: Install Verter vite-plugin (from npm)
