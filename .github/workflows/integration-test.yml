@@ -324,7 +324,7 @@ jobs:
       - name: Install project dependencies
         working-directory: test-project
         run: |
-          ${{ matrix.project.package-manager }} install
+          ${{ matrix.project.package-manager }} install --no-frozen-lockfile
 
       - name: Find Vite config
         id: find-config
@@ -394,8 +394,8 @@ jobs:
           # Use file: protocol to install from local workspace builds
           # This avoids npm registry lookups and preserves dependencies
           echo "📦 Installing Verter from workspace builds"
-          ${{ matrix.project.package-manager }} add ../verter-workspace/packages/native ../verter-workspace/packages/vite-plugin
-          
+          ${{ matrix.project.package-manager }} add -w ../verter-workspace/packages/native ../verter-workspace/packages/vite-plugin --no-frozen-lockfile
+
           echo "✅ Verter packages installed from workspace"
 
       - name: Install Verter vite-plugin (from npm)

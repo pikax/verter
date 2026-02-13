@@ -169,7 +169,7 @@ jobs:
           echo "Running benchmarks..."
           
           # Run benchmark with JSON output
-          pnpm --filter @verter/benchmark bench:json > benchmark-output.json
+          pnpm --silent --filter @verter/benchmark bench:json > benchmark-output.json
           
           # Extract results
           RESULT_JSON=$(cat benchmark-output.json)
