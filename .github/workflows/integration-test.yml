@@ -305,9 +305,9 @@ jobs:
       - name: Configure hoist pattern for Verter
         working-directory: test-project
         run: |
-          # Must be set BEFORE pnpm install so modules dir is created with this pattern
-          # Otherwise pnpm add later fails with ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF
-          echo 'public-hoist-pattern[]=@verter/*' >> .npmrc
+          # Use flat node_modules so nested workspace packages can resolve @verter/*
+          # pnpm strict isolation + ESM prevents nested packages from finding hoisted deps
+          echo 'node-linker=hoisted' >> .npmrc
 
       - name: Install project dependencies
         working-directory: test-project
@@ -388,20 +388,6 @@ jobs:
           echo "📝 Found config files to modify:"
           echo "$CONFIG_FILES"
           echo "---"
-
-          # Link @verter into ALL nested package node_modules
-          # pnpm strict isolation means only declared deps are visible per-package
-          # A config might not directly import @vitejs/plugin-vue but inherit it
-          # from a shared config, so we must cover every workspace package
-          ROOT_NM="$(pwd)/node_modules"
-          if [ -d "$ROOT_NM/@verter" ]; then
-            find . -name "node_modules" -type d -not -path "*/node_modules/*" | while read NM_DIR; do
-              if [ "$NM_DIR" != "./node_modules" ] && [ ! -e "$NM_DIR/@verter" ]; then
-                echo "🔗 Linking @verter into $NM_DIR/"
-                ln -sfn "$ROOT_NM/@verter" "$NM_DIR/@verter"
-              fi
-            done
-          fi
 
           for CONFIG_FILE in $CONFIG_FILES; do
             echo "📝 Modifying $CONFIG_FILE"
@@ -525,6 +511,12 @@ jobs:
             CONCLUSION="❌ **Failed** — Verter build failed"
           elif [ "$V_TEST_ST" = "failed" ]; then
             CONCLUSION="❌ **Failed** — Verter tests failed"
+          elif [ "$B_TEST_ST" != "skipped" ] && [ "${B_TEST_P:-0}" -gt 0 ] && [ "${V_TEST_P:-0}" -eq 0 ]; then
+            # Baseline had passing tests but Verter reported zero — tests likely crashed
+            CONCLUSION="❌ **Failed** — Verter tests did not produce results (baseline had ${B_TEST_P} passing)"
+          elif [ "${V_TEST_F:-0}" -gt 0 ] && [ "${V_TEST_F:-0}" -gt "${B_TEST_F:-0}" ]; then
+            # Verter introduced new test failures
+            CONCLUSION="❌ **Failed** — Verter has more test failures (${V_TEST_F} vs baseline ${B_TEST_F})"
           else
             SLOWER=""
             [ -n "$B_BUILD" ] && [ -n "$V_BUILD" ] && [ "$B_BUILD" -gt 0 ] && [ "$V_BUILD" -gt "$B_BUILD" ] && SLOWER="build"
