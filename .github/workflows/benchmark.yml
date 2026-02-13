@@ -8,13 +8,18 @@ on:
         description: 'Branch or commit to benchmark'
         required: false
         default: 'main'
+      save-results:
+        description: 'Commit results to benchmark-results branch for tracking'
+        required: false
+        default: false
+        type: boolean
 
   # PR comment trigger: /benchmark
   issue_comment:
     types: [created]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   # Check if workflow should run (for PR comments)
@@ -96,7 +101,7 @@ jobs:
        (github.event_name == 'issue_comment' && needs.check-trigger.outputs.should-run == 'true'))
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       pull-requests: write
       checks: write
     outputs:
@@ -109,7 +114,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "ref=${{ github.event.inputs.ref || 'main' }}" >> $GITHUB_OUTPUT
           elif [ "${{ github.event_name }}" = "issue_comment" ]; then
-            echo "ref=${{ needs.check-trigger.outputs.pr-ref }}" >> $GITHUB_OUTPUT
+            echo "ref=refs/pull/${{ needs.check-trigger.outputs.pr-number }}/head" >> $GITHUB_OUTPUT
           else
             echo "ref=main" >> $GITHUB_OUTPUT
           fi
@@ -192,6 +197,26 @@ jobs:
             benchmark-results.json
             benchmark-results/
           retention-days: 30
+
+      - name: Save results to branch
+        if: inputs.save-results == true
+        run: |
+          REF="${{ steps.checkout-ref.outputs.ref }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          cp benchmark-results.json benchmark-results-backup.json
+
+          # Commit to the checked-out branch with --amend to always reuse the same commit
+          git add -f benchmark-results.json
+          if git log -1 --pretty=%s | grep -q "^ci: benchmark results$"; then
+            git commit --amend --no-edit -- benchmark-results.json
+            git push --force-with-lease origin "$REF"
+          else
+            git commit -m "ci: benchmark results" -- benchmark-results.json
+            git push origin "$REF"
+          fi
 
   # Post results to PR
   report:

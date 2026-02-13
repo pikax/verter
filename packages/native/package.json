@@ -11,8 +11,8 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build:types": "pnpm exec tsc --declaration --emitDeclarationOnly --outDir dist index.ts",
-    "build": "pnpm run build:types && napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml",
-    "build:debug": "pnpm run build:types && napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml",
+    "build": "napi build -o dist --platform --release --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
+    "build:debug": "napi build -o dist --platform --manifest-path ../../crates/verter_napi/Cargo.toml && pnpm run build:types",
     "prepublishOnly": "napi prepublish -t npm",
     "artifacts": "napi artifacts",
     "test": "vitest run"
