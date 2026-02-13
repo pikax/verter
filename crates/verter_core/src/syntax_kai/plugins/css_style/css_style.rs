@@ -145,8 +145,8 @@ impl<'alloc> SyntaxPlugin<'alloc> for CssStylePlugin {
     ) -> SyntaxResult<Event<'alloc>> {
         match event {
             Event::CssParsedStyle(parsed) => {
-                let processed = self.process_parsed_style(parsed, ctx);
-                SyntaxResult::Replace(Event::ProcessedStyle(processed))
+                let processed = self.process_parsed_style(*parsed, ctx);
+                SyntaxResult::Replace(Event::ProcessedStyle(Box::new(processed)))
             }
             other => SyntaxResult::Keep(other),
         }

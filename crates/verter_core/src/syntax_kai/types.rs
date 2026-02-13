@@ -971,22 +971,15 @@ pub enum Event<'alloc> {
     CompiledUnknownEnd(CompiledRootUnknownEnd),
 
     // Compiled elements (emitted by element_compiler)
-    ElementStart(CompiledElementStart),
+    ElementStart(Box<CompiledElementStart>),
     ElementClosed(CompiledElementClosed),
 
     // OXC-parsed events (emitted by oxc_parser)
-    OxcScript(OxcScript<'alloc>),
-    OxcProp(OxcProp<'alloc>),
-    OxcInterpolation(OxcInterpolation<'alloc>),
-    OxcVFor(OxcVFor<'alloc>),
-    OxcVSlotElement(OxcVSlotElement<'alloc>),
-    OxcVSlotTemplate(OxcVSlotTemplate<'alloc>),
-    OxcIfCondition(OxcIfCondition<'alloc>),
-    OxcElseIfCondition(OxcElseIfCondition<'alloc>),
-    OxcElseCondition(OxcElseCondition),
+    OxcScript(Box<OxcScript<'alloc>>),
+    OxcInterpolation(Box<OxcInterpolation<'alloc>>),
 
     // OXC-compiled elements (emitted by oxc_parser after element_compiler)
-    OxcCompiledElementStart(OxcCompiledElementStart<'alloc>),
+    OxcCompiledElementStart(Box<OxcCompiledElementStart<'alloc>>),
     OxcCompiledElementClosed(OxcCompiledElementClosed),
 
     // // Scopes (raw, emitted by Syntax)
@@ -998,9 +991,9 @@ pub enum Event<'alloc> {
     // ScopeSlotTemplate(ElementScopeSlotTemplate),
 
     // CSS parsed style (emitted by css_parser plugin)
-    CssParsedStyle(CssParsedStyleBlock),
+    CssParsedStyle(Box<CssParsedStyleBlock>),
 
     // CSS processed style (emitted by css_style plugin)
-    ProcessedStyle(ProcessedStyleBlock),
+    ProcessedStyle(Box<ProcessedStyleBlock>),
     // (ScriptBindings removed — bindings now live in OxcScript.result.bindings)
 }

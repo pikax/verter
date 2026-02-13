@@ -79,7 +79,7 @@ pub(crate) struct VdomTemplateGenerator<'alloc> {
 
     imports: TemplateImportDependencies,
 
-    stack: Vec<StateStack>,
+    stack: Vec<StateStack<'alloc>>,
 
     cache_id_counter: u16,
 
@@ -90,14 +90,36 @@ pub(crate) struct VdomTemplateGenerator<'alloc> {
     template_start_pos: u32,
 
     /// Component tag names that need `_resolveComponent` declarations (ordered for deterministic output).
-    resolved_components: Vec<String>,
+    resolved_components: Vec<&'alloc str>,
     /// Fast lookup set for `resolved_components` deduplication.
-    resolved_components_set: FxHashSet<String>,
+    resolved_components_set: FxHashSet<&'alloc str>,
 
     /// Custom directive names that need `_resolveDirective` declarations (ordered for deterministic output).
-    resolved_directives: Vec<String>,
+    resolved_directives: Vec<&'alloc str>,
     /// Fast lookup set for `resolved_directives` deduplication.
-    resolved_directives_set: FxHashSet<String>,
+    resolved_directives_set: FxHashSet<&'alloc str>,
+
+    /// Deferred prepend_left operations collected during template codegen.
+    /// Includes binding patches (_ctx., $setup., etc.) and close-phase child
+    /// separators. Applied in a single O(n+m) pass via `batch_prepend_left_static`.
+    pending_prepend_lefts: Vec<(u32, &'alloc str)>,
+
+    /// Deferred overwrite operations. Applied in a single O(n+m) pass via `batch_overwrite`.
+    pending_overwrites: Vec<(u32, u32, &'alloc str)>,
+
+    /// Deferred append_left operations. Applied in a single O(n+m) pass via `batch_prepend_left_static`.
+    pending_append_lefts: Vec<(u32, &'alloc str)>,
+
+    /// Reusable String buffer — avoids per-element heap allocations.
+    /// Taken via `std::mem::take()` before element processing, put back after.
+    buf: String,
+
+    /// Reusable buffer for merged append+prepend operations in `finalize()`.
+    combined_buffer: Vec<(u32, &'alloc str)>,
+
+    /// Pool of recycled StateStack objects — avoids re-allocating inner Vecs
+    /// on every element open/close cycle.
+    state_pool: Vec<StateStack<'alloc>>,
 }
 
 impl<'alloc> VdomTemplateGenerator<'alloc> {
@@ -119,6 +141,12 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             resolved_components_set: FxHashSet::default(),
             resolved_directives: Vec::new(),
             resolved_directives_set: FxHashSet::default(),
+            pending_prepend_lefts: Vec::with_capacity(256),
+            pending_overwrites: Vec::with_capacity(512),
+            pending_append_lefts: Vec::with_capacity(64),
+            buf: String::with_capacity(128),
+            combined_buffer: Vec::with_capacity(320),
+            state_pool: Vec::with_capacity(16),
         }
     }
 
@@ -127,12 +155,69 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         self.bindings = bindings;
     }
 
+    /// Take a StateStack from the pool (or create a new one), reset for the given element ID.
+    #[inline]
+    fn take_state(&mut self, element_id: u32) -> StateStack<'alloc> {
+        if let Some(mut state) = self.state_pool.pop() {
+            state.reset(element_id);
+            state
+        } else {
+            StateStack {
+                id: element_id,
+                ..StateStack::default()
+            }
+        }
+    }
+
+    /// Return a used StateStack to the pool for later reuse.
+    #[inline]
+    fn return_state(&mut self, state: StateStack<'alloc>) {
+        self.state_pool.push(state);
+    }
+
+    /// Flush all deferred operations into the shared CodeTransform.
+    ///
+    /// Applies three O(n+m) batch passes in order:
+    /// 1. **Overwrites** — split Original chunks and insert Edited replacements
+    /// 2. **Append-lefts** — insert content at boundary positions (after overwrites)
+    /// 3. **Prepend-lefts** — insert content at positions (binding patches, separators)
+    ///
+    /// Must be called before reading the CodeTransform directly (e.g. in `compile()`).
+    pub(crate) fn finalize(&mut self) {
+        let mut ct = self.code_transform.borrow_mut();
+
+        // Phase 1: apply all overwrites (already in document order — no sort needed)
+        if !self.pending_overwrites.is_empty() {
+            debug_assert!(
+                self.pending_overwrites.windows(2).all(|w| w[0].0 <= w[1].0),
+                "INVARIANT VIOLATED: pending_overwrites not in document order"
+            );
+            ct.batch_overwrite(&self.pending_overwrites);
+            self.pending_overwrites.clear();
+        }
+
+        // Phase 2+3 merged: append_lefts + prepend_lefts in a single batch pass.
+        // Append_lefts are placed first so that stable sort keeps them before
+        // prepend_lefts at the same position (correct: suffixes before prefixes).
+        let append_count = self.pending_append_lefts.len();
+        let prepend_count = self.pending_prepend_lefts.len();
+        if append_count > 0 || prepend_count > 0 {
+            self.combined_buffer.clear();
+            self.combined_buffer.append(&mut self.pending_append_lefts);
+            self.combined_buffer.append(&mut self.pending_prepend_lefts);
+            self.combined_buffer.sort_by_key(|(pos, _)| *pos);
+            ct.batch_prepend_left_static(&self.combined_buffer);
+        }
+    }
+
     /// Get the transformed code.
-    pub(crate) fn get_code(&self) -> String {
+    pub(crate) fn get_code(&mut self) -> String {
+        self.finalize();
         self.code_transform.borrow().to_string()
     }
 
-    pub(crate) fn generate_source_map(&self) -> String {
+    pub(crate) fn generate_source_map(&mut self) -> String {
+        self.finalize();
         self.code_transform
             .borrow()
             .generate_map_json(Default::default())
@@ -147,7 +232,8 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         ev: &CompiledRootTemplateStart,
         _ctx: &SyntaxPluginContext<'alloc>,
     ) -> TemplateCodeGenResult {
-        self.stack.push(StateStack::new());
+        let root_state = self.take_state(0);
+        self.stack.push(root_state);
         self.template_start_pos = ev.tag_open.start;
 
         let code_transform = &mut self.code_transform.borrow_mut();
@@ -178,22 +264,36 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
 
         // Emit hoisted constants before the render function.
         if !self.hoisted_constants.is_empty() {
-            let mut hoist_str = String::new();
+            // Pre-calculate total size: "const _hoisted_N = ...;\n" per entry
+            let total_size: usize = self
+                .hoisted_constants
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    // "const _hoisted_" + digits + " = " + constant + ";\n"
+                    16 + num_digits(i + 1) + 3 + c.len() + 2
+                })
+                .sum();
+            let mut hoist_str = String::with_capacity(total_size);
             for (i, constant) in self.hoisted_constants.iter().enumerate() {
-                hoist_str.push_str(&format!("const _hoisted_{} = {};\n", i + 1, constant));
+                hoist_str.push_str("const _hoisted_");
+                helper::push_u32(&mut hoist_str, (i + 1) as u32);
+                hoist_str.push_str(" = ");
+                hoist_str.push_str(constant);
+                hoist_str.push_str(";\n");
             }
             code_transform.prepend_left(self.template_start_pos, &hoist_str);
         }
 
         let extra_return = if let Some(state) = self.stack.pop() {
-            // Emit pending v-if fallback comments for root-level children.
+            // Defer pending v-if fallback comments for root-level children.
             for &fallback_pos in &state.pending_vif_fallbacks {
                 let comment = if self.is_production {
                     "_createCommentVNode(\"\", true)"
                 } else {
                     "_createCommentVNode(\"v-if\", true)"
                 };
-                code_transform.append_left(fallback_pos, comment);
+                self.pending_append_lefts.push((fallback_pos, comment));
             }
             if !state.pending_vif_fallbacks.is_empty() {
                 self.imports
@@ -204,22 +304,40 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                 "return null"
             } else {
                 // Build _resolveComponent and _resolveDirective declarations.
-                let mut resolve_decls = String::new();
+                // Pre-calculate size: "const _component_X = _resolveComponent("X");\n"
+                let resolve_size: usize = self
+                    .resolved_components
+                    .iter()
+                    .map(|n| 17 + n.len() + 22 + n.len() + 3) // const _component_ + name + = _resolveComponent(" + name + ");\n
+                    .chain(self.resolved_directives.iter().map(|n| {
+                        17 + n.len() + 22 + n.len() + 3 // const _directive_ + name + = _resolveDirective(" + name + ");\n
+                    }))
+                    .sum();
+                let mut resolve_decls = String::with_capacity(resolve_size);
                 for comp_name in &self.resolved_components {
-                    resolve_decls.push_str(&format!(
-                        "const _component_{} = _resolveComponent(\"{}\");\n",
-                        comp_name, comp_name
-                    ));
+                    resolve_decls.push_str("const _component_");
+                    resolve_decls.push_str(comp_name);
+                    resolve_decls.push_str(" = _resolveComponent(\"");
+                    resolve_decls.push_str(comp_name);
+                    resolve_decls.push_str("\");\n");
                 }
                 for dir_name in &self.resolved_directives {
-                    let var_name = dir_name.replace('-', "_");
-                    resolve_decls.push_str(&format!(
-                        "const _directive_{} = _resolveDirective(\"{}\");\n",
-                        var_name, dir_name
-                    ));
+                    resolve_decls.push_str("const _directive_");
+                    for ch in dir_name.chars() {
+                        if ch == '-' {
+                            resolve_decls.push('_');
+                        } else {
+                            resolve_decls.push(ch);
+                        }
+                    }
+                    resolve_decls.push_str(" = _resolveDirective(\"");
+                    resolve_decls.push_str(dir_name);
+                    resolve_decls.push_str("\");\n");
                 }
 
                 let is_multi_root = state.children.len() > 1;
+
+                let mut buf = String::with_capacity(128);
 
                 if is_multi_root {
                     self.imports.add(TemplateImportDependencies::OPEN_BLOCK);
@@ -228,32 +346,26 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                     self.imports.add(TemplateImportDependencies::FRAGMENT);
 
                     let first = &state.children[0];
-                    code_transform.prepend_left(
-                        first.start,
-                        &format!(
-                            "{}return (_openBlock(), _createElementBlock(_Fragment, null, [{}{}",
-                            resolve_decls,
-                            first.scope_prefix,
-                            first.kind.content_prefix()
-                        ),
-                    );
+                    buf.push_str(&resolve_decls);
+                    buf.push_str("return (_openBlock(), _createElementBlock(_Fragment, null, [");
+                    buf.push_str(first.scope_prefix);
+                    buf.push_str(first.kind.content_prefix());
+                    code_transform.prepend_left(first.start, &buf);
+
                     for child in state.children.iter().skip(1) {
-                        code_transform.prepend_left(
-                            child.start,
-                            &format!(", {}{}", child.scope_prefix, child.kind.content_prefix()),
-                        );
+                        buf.clear();
+                        buf.push_str(", ");
+                        buf.push_str(child.scope_prefix);
+                        buf.push_str(child.kind.content_prefix());
+                        code_transform.prepend_left(child.start, &buf);
                     }
                 } else {
                     let first = &state.children[0];
-                    code_transform.prepend_left(
-                        first.start,
-                        &format!(
-                            "{}return {}{}",
-                            resolve_decls,
-                            first.scope_prefix,
-                            first.kind.content_prefix()
-                        ),
-                    );
+                    buf.push_str(&resolve_decls);
+                    buf.push_str("return ");
+                    buf.push_str(first.scope_prefix);
+                    buf.push_str(first.kind.content_prefix());
+                    code_transform.prepend_left(first.start, &buf);
                 }
 
                 if is_multi_root {
@@ -270,14 +382,14 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             "return null"
         };
 
+        let mut close_buf = String::with_capacity(extra_return.len() + 1);
+        close_buf.push_str(extra_return);
+        close_buf.push('}');
+
         if let Some(close) = &ev.tag_close {
-            code_transform.replace(
-                close.start,
-                close.end,
-                format!("{}}}", extra_return).as_str(),
-            );
+            code_transform.replace(close.start, close.end, &close_buf);
         } else {
-            code_transform.append_right(ev.end, format!("{}}}", extra_return).as_str());
+            code_transform.append_right(ev.end, &close_buf);
         }
 
         Ok(())
@@ -306,47 +418,120 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             parent.children.push(ChildInfo {
                 start: ev.event.event_open_tag.start,
                 kind: ChildKind::Element,
-                scope_prefix: String::new(),
+                scope_prefix: "",
             });
         }
 
         let mut parent_vif_key_counter = parent.vif_key_counter;
 
-        let mut state = parent.create_child(ev.event.element_id);
+        let mut state = self.take_state(ev.event.element_id);
 
         if self.stack.len() == 1 {
             state.is_block_root = true;
         }
 
-        // --- Phase 1: CodeTransform operations (scope directives + v-once remove) ---
-        let scope_prefix;
-        let mut vonce_remove_span: Option<(u32, u32)> = None;
+        // Pre-allocate cache_id for v-once before borrowing code_transform
+        let vonce_cache_id = ev.scopes.iter().find_map(|s| {
+            if matches!(s, ElementScope::Once(_)) {
+                Some(self.allocate_cache_id())
+            } else {
+                None
+            }
+        });
 
-        {
-            let mut code_transform = self.code_transform.borrow_mut();
+        // Take the reusable buffer — avoids per-element heap allocation.
+        let mut buf = std::mem::take(&mut self.buf);
 
-            scope_prefix = directives::process_scope_opens(
-                &mut code_transform,
-                &ev.scopes,
-                ctx,
-                &self.bindings,
-                self.is_production,
-                &mut state,
-                &mut self.imports,
-                &mut parent_vif_key_counter,
-            );
+        // All CodeTransform operations are deferred to pending vecs.
+        // Only a single immutable borrow is needed for alloc_str().
+        let code_transform = self.code_transform.borrow();
 
-            for scope in &ev.scopes {
-                if let ElementScope::Once(prop) = scope {
-                    state.is_block_root = false;
-                    code_transform.remove(prop.start, prop.end);
-                    vonce_remove_span = Some((prop.start, prop.end));
-                }
+        // Scope directives (v-if, v-else-if, v-else, v-for)
+        let scope_prefix = directives::process_scope_opens(
+            &code_transform,
+            &ev.scopes,
+            ctx,
+            &self.bindings,
+            self.is_production,
+            &mut state,
+            &mut self.imports,
+            &mut parent_vif_key_counter,
+            &mut self.pending_prepend_lefts,
+            &mut buf,
+        );
+
+        // v-once: set up cache (no remove needed — handle_element_open covers the region)
+        for scope in &ev.scopes {
+            if let ElementScope::Once(_) = scope {
+                state.is_block_root = false;
             }
         }
 
-        // --- Phase 2: Stack + self mutations (no code_transform borrow needed) ---
+        // Handle v-slot
+        for scope in &ev.scopes {
+            let (event, parsed, slot_name, is_dynamic) = match scope {
+                ElementScope::SlotElement(s) => {
+                    let name: Option<&'alloc str> = s
+                        .event
+                        .arg
+                        .as_ref()
+                        .map(|arg| &ctx.input[arg.start as usize..arg.end as usize]);
+                    (&s.event, &s.parsed, name, s.event.has_dynamic_arg)
+                }
+                ElementScope::SlotTemplate(s) => {
+                    let name: Option<&'alloc str> = s
+                        .event
+                        .arg
+                        .as_ref()
+                        .map(|arg| &ctx.input[arg.start as usize..arg.end as usize]);
+                    (&s.event, &s.parsed, name, s.event.has_dynamic_arg)
+                }
+                _ => continue,
+            };
 
+            // No remove needed — handle_element_open covers name_end..open_tag_end.
+
+            let params: &'alloc str = if let Some(val) = event.value {
+                &ctx.input[val.start as usize..val.end as usize]
+            } else if !parsed.locals.is_empty() {
+                let joined = parsed
+                    .locals
+                    .iter()
+                    .map(|span| &ctx.input[span.start as usize..span.end as usize])
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                code_transform.alloc_str(&joined)
+            } else {
+                ""
+            };
+
+            state.slot_params = Some(params);
+            state.slot_name = if is_dynamic {
+                slot_name.map(|name| {
+                    let inner = name
+                        .strip_prefix('[')
+                        .and_then(|s| s.strip_suffix(']'))
+                        .unwrap_or(name);
+                    buf.clear();
+                    buf.push('[');
+                    if let Some(bt) = self.bindings.get(inner) {
+                        buf.push_str(bt.accessor_prefix(false));
+                    } else {
+                        buf.push_str("_ctx.");
+                    }
+                    buf.push_str(inner);
+                    buf.push(']');
+                    code_transform.alloc_str(&buf)
+                })
+            } else {
+                slot_name
+            };
+            state.slot_is_dynamic = is_dynamic;
+
+            self.imports.add(TemplateImportDependencies::WITH_CTX);
+        }
+
+        // Stack + self mutations
         if let Some(parent) = self.stack.last_mut() {
             parent.vif_key_counter = parent_vif_key_counter;
         }
@@ -359,88 +544,29 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             }
         }
 
-        if vonce_remove_span.is_some() {
-            let cache_id = self.allocate_cache_id();
+        if let Some(cache_id) = vonce_cache_id {
             state.cache_id = Some(cache_id);
 
             self.imports
                 .add(TemplateImportDependencies::SET_BLOCK_TRACKING);
 
-            let vonce_prefix = format!(
-                "_cache[{}] || (_setBlockTracking(-1, true), (_cache[{}] = ",
-                cache_id, cache_id
-            );
+            // Build vonce prefix using shared buf (save/truncate pattern)
+            let saved = buf.len();
+            buf.push_str("_cache[");
+            helper::push_u32(&mut buf, cache_id as u32);
+            buf.push_str("] || (_setBlockTracking(-1, true), (_cache[");
+            helper::push_u32(&mut buf, cache_id as u32);
+            buf.push_str("] = ");
 
             if !is_vif_continuation {
                 if let Some(parent) = self.stack.last_mut() {
                     if let Some(last_child) = parent.children.last_mut() {
-                        last_child.scope_prefix =
-                            format!("{}{}", vonce_prefix, last_child.scope_prefix);
+                        buf.push_str(last_child.scope_prefix);
+                        last_child.scope_prefix = code_transform.alloc_str(&buf[saved..]);
                     }
                 }
             }
-        }
-
-        // --- Phase 3: Remaining CodeTransform operations ---
-
-        let mut code_transform = self.code_transform.borrow_mut();
-
-        // Handle v-slot
-        for scope in &ev.scopes {
-            let (event, parsed, slot_name, is_dynamic) =
-                match scope {
-                    ElementScope::SlotElement(s) => {
-                        let name =
-                            s.event.arg.as_ref().map(|arg| {
-                                ctx.input[arg.start as usize..arg.end as usize].to_string()
-                            });
-                        (&s.event, &s.parsed, name, s.event.has_dynamic_arg)
-                    }
-                    ElementScope::SlotTemplate(s) => {
-                        let name =
-                            s.event.arg.as_ref().map(|arg| {
-                                ctx.input[arg.start as usize..arg.end as usize].to_string()
-                            });
-                        (&s.event, &s.parsed, name, s.event.has_dynamic_arg)
-                    }
-                    _ => continue,
-                };
-
-            code_transform.remove(event.start, event.end);
-
-            let params = if let Some(val) = event.value {
-                ctx.input[val.start as usize..val.end as usize].to_string()
-            } else if !parsed.locals.is_empty() {
-                parsed
-                    .locals
-                    .iter()
-                    .map(|span| &ctx.input[span.start as usize..span.end as usize])
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            } else {
-                String::new()
-            };
-
-            state.slot_params = Some(params);
-            state.slot_name = if is_dynamic {
-                slot_name.map(|name| {
-                    let inner = name
-                        .strip_prefix('[')
-                        .and_then(|s| s.strip_suffix(']'))
-                        .unwrap_or(&name);
-                    if let Some(bt) = self.bindings.get(inner) {
-                        let prefix = bt.accessor_prefix(false);
-                        format!("[{}{}]", prefix, inner)
-                    } else {
-                        format!("[_ctx.{}]", inner)
-                    }
-                })
-            } else {
-                slot_name
-            };
-            state.slot_is_dynamic = is_dynamic;
-
-            self.imports.add(TemplateImportDependencies::WITH_CTX);
+            buf.truncate(saved);
         }
 
         // Element VNode open
@@ -454,31 +580,47 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             resolved_directives_set: &mut self.resolved_directives_set,
             hoisted_constants: &mut self.hoisted_constants,
         };
-        element::handle_element_open(&mut code_transform, ev, ctx, &mut state, &mut ectx);
+        element::handle_element_open(
+            &code_transform,
+            ev,
+            ctx,
+            &mut state,
+            &mut ectx,
+            &mut self.pending_prepend_lefts,
+            &mut self.pending_overwrites,
+            &mut buf,
+        );
 
         // Void/self-closing elements
         let open_tag_end = &ev.event.event_open_tag_end;
         if open_tag_end.is_self_closing || open_tag_end.is_void_element {
             element::handle_element_close_self_closing(
-                &mut code_transform,
+                &code_transform,
                 &state,
                 self.is_production,
+                &mut self.pending_append_lefts,
+                &mut buf,
             );
 
             let close_pos = state.open_tag_end;
             let had_vif_close = directives::process_scope_closes(
-                &mut code_transform,
+                &code_transform,
                 &state.pending_scope_closes,
                 close_pos,
                 self.is_production,
+                &mut self.pending_append_lefts,
+                &mut buf,
             );
 
             if let Some(cache_id) = state.cache_id {
-                let close_str = format!(
-                    ").cacheIndex = {}, _setBlockTracking(1), _cache[{}])",
-                    cache_id, cache_id
-                );
-                code_transform.append_left(close_pos, &close_str);
+                buf.clear();
+                buf.push_str(").cacheIndex = ");
+                helper::push_u32(&mut buf, cache_id as u32);
+                buf.push_str(", _setBlockTracking(1), _cache[");
+                helper::push_u32(&mut buf, cache_id as u32);
+                buf.push_str("])");
+                let s = code_transform.alloc_str(&buf);
+                self.pending_append_lefts.push((close_pos, s));
             }
 
             drop(code_transform);
@@ -488,9 +630,15 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                     parent.pending_vif_fallbacks.push(close_pos);
                 }
             }
+
+            // Return state to pool — inner Vecs retain capacity for reuse.
+            self.return_state(state);
         } else {
             self.stack.push(state);
         }
+
+        // Return the reusable buffer (retains capacity for next element).
+        self.buf = buf;
 
         Ok(())
     }
@@ -507,7 +655,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                 "element close must have matching open",
             ))?;
 
-        let mut code_transform = self.code_transform.borrow_mut();
+        let code_transform = self.code_transform.borrow();
 
         for &fallback_pos in &state.pending_vif_fallbacks {
             let comment = if self.is_production {
@@ -515,7 +663,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             } else {
                 "_createCommentVNode(\"v-if\", true)"
             };
-            code_transform.append_left(fallback_pos, comment);
+            self.pending_append_lefts.push((fallback_pos, comment));
         }
         if !state.pending_vif_fallbacks.is_empty() {
             self.imports
@@ -523,11 +671,15 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         }
 
         element::handle_element_close(
-            &mut code_transform,
+            &code_transform,
             ev,
             &state,
             self.is_production,
             &mut self.imports,
+            &mut self.pending_prepend_lefts,
+            &mut self.pending_overwrites,
+            &mut self.pending_append_lefts,
+            &mut self.buf,
         );
 
         let close_pos = ev
@@ -538,10 +690,12 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             .unwrap_or(state.open_tag_end);
 
         let had_vif_close = directives::process_scope_closes(
-            &mut code_transform,
+            &code_transform,
             &state.pending_scope_closes,
             close_pos,
             self.is_production,
+            &mut self.pending_append_lefts,
+            &mut self.buf,
         );
 
         if had_vif_close {
@@ -551,12 +705,21 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         }
 
         if let Some(cache_id) = state.cache_id {
-            let close_str = format!(
-                ").cacheIndex = {}, _setBlockTracking(1), _cache[{}])",
-                cache_id, cache_id
-            );
-            code_transform.append_left(close_pos, &close_str);
+            self.buf.clear();
+            self.buf.push_str(").cacheIndex = ");
+            helper::push_u32(&mut self.buf, cache_id as u32);
+            self.buf.push_str(", _setBlockTracking(1), _cache[");
+            helper::push_u32(&mut self.buf, cache_id as u32);
+            self.buf.push_str("])");
+            let s = code_transform.alloc_str(&self.buf);
+            self.pending_append_lefts.push((close_pos, s));
         }
+
+        // Drop code_transform borrow before mutating self.
+        drop(code_transform);
+
+        // Return state to pool — inner Vecs retain capacity for reuse.
+        self.return_state(state);
 
         Ok(())
     }
@@ -573,11 +736,11 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                 "comment inside template must have stack",
             ))?;
         comment::handle_comment(
-            &mut self.code_transform.borrow_mut(),
             ev,
             ctx,
             state,
             &mut self.imports,
+            &mut self.pending_overwrites,
         );
 
         Ok(())
@@ -595,11 +758,13 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                 "text inside template must have stack",
             ))?;
         text::handle_text(
-            &mut self.code_transform.borrow_mut(),
+            &self.code_transform.borrow(),
             ev,
             ctx,
             state,
             &mut self.imports,
+            &mut self.pending_overwrites,
+            &mut self.pending_append_lefts,
         );
 
         Ok(())
@@ -619,16 +784,15 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         state.children.push(ChildInfo {
             start: ev.start,
             kind: ChildKind::Interpolation,
-            scope_prefix: String::new(),
+            scope_prefix: "",
         });
 
-        let mut code_transform = self.code_transform.borrow_mut();
-
         interpolation::handle_interpolation(
-            &mut code_transform,
             ev,
             &self.bindings,
             self.is_production,
+            &mut self.pending_prepend_lefts,
+            &mut self.pending_overwrites,
         );
 
         self.imports
@@ -641,5 +805,20 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         let cache_id = self.cache_id_counter;
         self.cache_id_counter = self.cache_id_counter.wrapping_add(1);
         cache_id
+    }
+}
+
+/// Count decimal digits in a positive number (for pre-allocation).
+#[inline]
+fn num_digits(n: usize) -> usize {
+    if n < 10 {
+        1
+    } else if n < 100 {
+        2
+    } else if n < 1000 {
+        3
+    } else {
+        // Fallback for very large numbers (unlikely in practice)
+        ((n as f64).log10().floor() as usize) + 1
     }
 }

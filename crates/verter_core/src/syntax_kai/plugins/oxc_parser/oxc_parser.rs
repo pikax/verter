@@ -58,7 +58,7 @@ impl<'alloc> SyntaxPlugin<'alloc> for OxcParserPlugin<'alloc> {
                     .map_or(&[], |v| v.as_slice());
 
                 let oxc_compiled = parse_element_props(
-                    compiled,
+                    *compiled,
                     ctx.input,
                     self.alloc,
                     self.source_type,
@@ -68,7 +68,7 @@ impl<'alloc> SyntaxPlugin<'alloc> for OxcParserPlugin<'alloc> {
                 self.stack_provided_bindings
                     .push(oxc_compiled.provided_locals.clone());
 
-                SyntaxResult::Replace(Event::OxcCompiledElementStart(oxc_compiled))
+                SyntaxResult::Replace(Event::OxcCompiledElementStart(Box::new(oxc_compiled)))
             }
 
             Event::ElementClosed(closed) => {
@@ -90,7 +90,7 @@ impl<'alloc> SyntaxPlugin<'alloc> for OxcParserPlugin<'alloc> {
                     self.source_type,
                     current_bindings,
                 );
-                SyntaxResult::Replace(Event::OxcInterpolation(oxc_interp))
+                SyntaxResult::Replace(Event::OxcInterpolation(Box::new(oxc_interp)))
             }
 
             Event::CompiledScriptStart(start) => {
@@ -102,7 +102,7 @@ impl<'alloc> SyntaxPlugin<'alloc> for OxcParserPlugin<'alloc> {
             Event::CompiledScriptEnd(end) => {
                 if let Some(start) = self.current_script_start.take() {
                     let script = parse_script(start, end, ctx.input, self.alloc, self.source_type);
-                    SyntaxResult::Replace(Event::OxcScript(script))
+                    SyntaxResult::Replace(Event::OxcScript(Box::new(script)))
                 } else {
                     SyntaxResult::Keep(Event::CompiledScriptEnd(end))
                 }

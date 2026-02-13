@@ -213,10 +213,13 @@ pub fn process_script_event<'alloc>(
             code_transform.prepend_left(script.tag_open_end, "{\n");
         }
     }
-    code_transform.prepend_left(
-        script.tag_open_end,
-        format!("__name: '{}',", opts.component_name).as_str(),
-    );
+    {
+        let mut buf = String::with_capacity(opts.component_name.len() + 12);
+        buf.push_str("__name: '");
+        buf.push_str(opts.component_name);
+        buf.push_str("',");
+        code_transform.prepend_left(script.tag_open_end, &buf);
+    }
 
     // Process props and emits sections
     let insert_pos = script.tag_open_end;
@@ -234,28 +237,20 @@ pub fn process_script_event<'alloc>(
     let needs_emit_in_signature = has_emit_declarator;
 
     if needs_expose_in_signature || needs_emit_in_signature {
-        // Full signature with destructured context
-        code_transform.prepend_left(
-            script.tag_open_end,
-            format!(
-                "setup(__props,{{{}{}}}){{",
-                if needs_expose_in_signature {
-                    "expose:__expose"
-                } else {
-                    ""
-                },
-                if needs_emit_in_signature {
-                    if needs_expose_in_signature {
-                        ",emit:__emit"
-                    } else {
-                        "emit:__emit"
-                    }
-                } else {
-                    ""
-                }
-            )
-            .as_str(),
-        );
+        let mut buf = String::with_capacity(48);
+        buf.push_str("setup(__props,{");
+        if needs_expose_in_signature {
+            buf.push_str("expose:__expose");
+        }
+        if needs_emit_in_signature {
+            if needs_expose_in_signature {
+                buf.push_str(",emit:__emit");
+            } else {
+                buf.push_str("emit:__emit");
+            }
+        }
+        buf.push_str("}){");
+        code_transform.prepend_left(script.tag_open_end, &buf);
     } else {
         // Minimal signature for production
         code_transform.prepend_left(script.tag_open_end, "setup(__props){");
@@ -276,27 +271,24 @@ pub fn process_script_event<'alloc>(
     // Build closing text and apply it. The closing text is also returned so callers
     // can re-overwrite it with modifications (e.g. adding ")" for dual-script Object.assign).
     let closing_text = if opts.is_production && opts.inline_template {
-        // Production inline mode: leave setup OPEN for finalize_template()
-        // to insert `return (_ctx, _cache) => { ... }` as the setup return value.
         "\n".to_string()
-    } else if opts.is_production {
-        // Production mode (standalone template): close setup with return statement.
-        format!(
-            "\nreturn {{{}}}\n}}}}{};\n",
-            returned.join(", "),
-            closing_paren,
-        )
     } else {
-        // Development mode: emit __returned__ object and close setup
-        format!(
-            r#"
-const __returned__={{{}}}
-Object.defineProperty(__returned__, '__isScriptSetup', {{ enumerable: false, value: true }})
-return __returned__
-}}}}{};"#,
-            returned.join(", "),
-            closing_paren,
-        )
+        let joined = returned.join(", ");
+        let mut buf = String::with_capacity(joined.len() + 128);
+        if opts.is_production {
+            buf.push_str("\nreturn {");
+            buf.push_str(&joined);
+            buf.push_str("}\n}}");
+            buf.push_str(closing_paren);
+            buf.push_str(";\n");
+        } else {
+            buf.push_str("\nconst __returned__={");
+            buf.push_str(&joined);
+            buf.push_str("}\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true })\nreturn __returned__\n}}");
+            buf.push_str(closing_paren);
+            buf.push(';');
+        }
+        buf
     };
 
     code_transform.overwrite(script.tag_close_start, script.tag_close_end, &closing_text);

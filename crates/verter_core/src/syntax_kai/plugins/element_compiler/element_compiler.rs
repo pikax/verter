@@ -270,7 +270,7 @@ impl<'alloc> SyntaxPlugin<'alloc> for ElementCompilerPlugin {
                         event_open_tag_end: open_tag_end,
                         props: el.props,
                     };
-                    SyntaxResult::Replace(Event::ElementStart(compiled))
+                    SyntaxResult::Replace(Event::ElementStart(Box::new(compiled)))
                 } else {
                     // No matching OpenTag — keep as-is (error recovery)
                     SyntaxResult::Keep(Event::OpenTagEnd(open_tag_end))

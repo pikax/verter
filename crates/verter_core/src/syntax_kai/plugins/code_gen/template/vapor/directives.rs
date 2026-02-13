@@ -25,7 +25,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 ElementScope::If(cond) => {
                     let condition = if let Some(ref val_span) = cond.event.value {
                         let raw = &ctx.input[val_span.start as usize..val_span.end as usize];
-                        self.prefix_expr(raw, val_span.start, &cond.bindings)
+                        self.prefix_expr(raw, val_span.start, cond.bindings.as_ref())
                     } else {
                         "true".to_string()
                     };
@@ -34,7 +34,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 ElementScope::ElseIf(cond) => {
                     let condition = if let Some(ref val_span) = cond.event.value {
                         let raw = &ctx.input[val_span.start as usize..val_span.end as usize];
-                        self.prefix_expr(raw, val_span.start, &cond.bindings)
+                        self.prefix_expr(raw, val_span.start, cond.bindings.as_ref())
                     } else {
                         "true".to_string()
                     };
@@ -148,7 +148,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 if has_dynamic_arg {
                     if let Some(arg) = arg {
                         let name_expr = &ctx.input[arg.start as usize..arg.end as usize];
-                        let prefixed = self.prefix_expr(name_expr, arg.start, &None);
+                        let prefixed = self.prefix_expr(name_expr, arg.start, None);
                         *sn_dyn_expr = Some(prefixed);
                     }
                 }

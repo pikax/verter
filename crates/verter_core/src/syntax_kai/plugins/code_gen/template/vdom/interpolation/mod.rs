@@ -1,17 +1,13 @@
 use rustc_hash::FxHashMap;
 
-use crate::{
-    code_transform::CodeTransform,
-    syntax_kai::{
-        binding_types::BindingType, plugins::code_gen::template::shared::helper::patch_bindings,
-        types::OxcInterpolation,
-    },
+use crate::syntax_kai::{
+    binding_types::BindingType,
+    plugins::code_gen::template::shared::helper::collect_binding_patches, types::OxcInterpolation,
 };
 
 /// Handle an interpolation expression `{{ expr }}`.
 ///
-/// Applies binding prefixes to identifiers within the expression, then
-/// transforms `{{ expr }}` → `(expr)` using `overwrite`.
+/// Collects binding patches (deferred) and transforms `{{ expr }}` → `(expr)`.
 ///
 /// # Ordering Invariant
 ///
@@ -20,19 +16,20 @@ use crate::{
 /// The `overwrite` calls are safe because they replace existing content at
 /// fixed positions, not inserting at the child's start position.
 pub(crate) fn handle_interpolation<'alloc>(
-    code_transform: &mut CodeTransform<'alloc>,
     ev: &OxcInterpolation<'alloc>,
     map: &FxHashMap<&'alloc str, BindingType>,
     is_inline: bool,
+    binding_patches: &mut Vec<(u32, &'alloc str)>,
+    pending_overwrites: &mut Vec<(u32, u32, &'alloc str)>,
 ) {
-    patch_bindings(code_transform, &ev.bindings, map, is_inline);
+    collect_binding_patches(ev.bindings.as_ref(), map, is_inline, binding_patches);
 
     // convert {{ to (
     // Note: the `_toDisplayString` prefix is NOT prepended here — it's added by
     // the close phase as part of the separator insertion (see ChildKind::content_prefix).
     // This avoids FIFO ordering issues with prepend_left at the same position.
-    code_transform.overwrite(ev.start, ev.content.start, "(");
+    pending_overwrites.push((ev.start, ev.content.start, "("));
 
     // convert }} to )
-    code_transform.overwrite(ev.content.end, ev.end, ")");
+    pending_overwrites.push((ev.content.end, ev.end, ")"));
 }

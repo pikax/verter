@@ -107,8 +107,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                                 if let Some(ref exp) = oxc_prop.exp {
                                     let expr_text =
                                         &ctx.input[exp.start as usize..exp.end as usize];
-                                    let prefixed =
-                                        self.prefix_expr(expr_text, exp.start, &exp.bindings);
+                                    let prefixed = self.prefix_expr(
+                                        expr_text,
+                                        exp.start,
+                                        exp.bindings.as_ref(),
+                                    );
                                     if let VaporElementKind::DynamicComponent {
                                         dynamic_is_expr,
                                         ..

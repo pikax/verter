@@ -82,7 +82,7 @@ impl<'alloc> SyntaxPlugin<'alloc> for CssParserPlugin {
                         compiled_end: end,
                     };
 
-                    SyntaxResult::Replace(Event::CssParsedStyle(parsed))
+                    SyntaxResult::Replace(Event::CssParsedStyle(Box::new(parsed)))
                 } else {
                     SyntaxResult::Keep(Event::CompiledStyleEnd(end))
                 }
@@ -144,7 +144,7 @@ mod tests {
         let mut parsed_blocks = Vec::new();
         for event in result_events {
             if let Event::CssParsedStyle(block) = event {
-                parsed_blocks.push(block);
+                parsed_blocks.push(*block);
             }
         }
         parsed_blocks

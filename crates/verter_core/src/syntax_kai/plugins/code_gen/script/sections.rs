@@ -122,25 +122,34 @@ pub fn emit_emits_section<'a>(
         }
 
         if !models.is_empty() {
+            // Batch all model emit entries + close into a single prepend_left.
+            // prepend_left is LIFO, so batching preserves order and avoids N+1 Vec::insert calls.
+            let mut buf = String::new();
             for model in models.iter().flatten() {
                 if let Some((_span, name)) = &model.overwrite_span {
-                    code_transform
-                        .prepend_left(insert_pos, format!("\"update:{}\",", name).as_str());
+                    buf.push_str("\"update:");
+                    buf.push_str(name);
+                    buf.push_str("\",");
                 }
             }
-            code_transform.prepend_left(insert_pos, "]),");
+            buf.push_str("]),");
+            code_transform.prepend_left(insert_pos, &buf);
         }
     }
 
     // Handle models-only emits (no defineEmits but has defineModel)
     if !processed && !models.is_empty() {
-        code_transform.prepend_left(insert_pos, "emits:[");
+        // Batch all emits into a single prepend_left to avoid multiple Vec::insert calls
+        let mut buf = String::from("emits:[");
         for model in models.into_iter().flatten() {
             if let Some((_span, name)) = model.overwrite_span {
-                code_transform.prepend_left(insert_pos, format!("\"update:{}\",", name).as_str());
+                buf.push_str("\"update:");
+                buf.push_str(&name);
+                buf.push_str("\",");
             }
         }
-        code_transform.prepend_left(insert_pos, "],");
+        buf.push_str("],");
+        code_transform.prepend_left(insert_pos, &buf);
     }
 
     needs_merge_models

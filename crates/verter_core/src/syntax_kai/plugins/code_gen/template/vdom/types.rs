@@ -37,7 +37,7 @@ impl ChildKind {
 /// `prepend_left` permitted at `self.start`. If any other code calls
 /// `prepend_left` at the same position, the FIFO ordering will break.
 #[derive(Debug)]
-pub(crate) struct ChildInfo {
+pub(crate) struct ChildInfo<'alloc> {
     /// Start position in source — used for retroactive separator insertion via prepend_left.
     pub start: u32,
     /// What kind of child this is.
@@ -45,7 +45,7 @@ pub(crate) struct ChildInfo {
     /// Scope open prefix text (e.g. `"(show) ? "` for v-if, renderList wrapper for v-for).
     /// Emitted by the close phase as part of the separator prepend_left call, ensuring correct
     /// ordering: separator THEN scope prefix THEN child content.
-    pub scope_prefix: String,
+    pub scope_prefix: &'alloc str,
 }
 
 /// Stored scope close token — emitted after the element VNode call closes.
@@ -66,24 +66,24 @@ pub(crate) enum ScopeClose {
 ///
 /// Each entry corresponds to one directive on the element.
 #[derive(Debug)]
-pub(crate) struct DirectiveEntry {
+pub(crate) struct DirectiveEntry<'alloc> {
     /// The directive identifier (e.g. `_vModelText`, `_vShow`, `_directive_focus`)
-    pub directive: String,
+    pub directive: &'alloc str,
     /// The bound value expression (e.g. `_ctx.msg`), or empty if none.
-    pub value: String,
+    pub value: &'alloc str,
     /// The argument string (e.g. `"arg"`), or empty if none.
-    pub arg: String,
+    pub arg: &'alloc str,
     /// Modifier object (e.g. `{ trim: true, number: true }`), or empty if none.
-    pub modifiers: String,
+    pub modifiers: &'alloc str,
 }
 
 #[derive(Debug)]
-pub(crate) struct StateStack {
+pub(crate) struct StateStack<'alloc> {
     pub id: u32,
 
     /// Child nodes recorded during processing — close phase uses this to decide
     /// separators (concatenation vs array), TEXT patch flag, etc.
-    pub children: Vec<ChildInfo>,
+    pub children: Vec<ChildInfo<'alloc>>,
 
     pub cache_id: Option<u16>,
 
@@ -101,7 +101,7 @@ pub(crate) struct StateStack {
     pub patch_flag: PatchFlag,
 
     /// Dynamic prop names for the PROPS patch flag.
-    pub dynamic_props: Vec<String>,
+    pub dynamic_props: Vec<&'alloc str>,
 
     /// Scope closes to emit after the element VNode call.
     pub pending_scope_closes: Vec<ScopeClose>,
@@ -149,11 +149,11 @@ pub(crate) struct StateStack {
     /// Slot parameters text (from v-slot="params"). When Some, component children
     /// are wrapped in `{ slotName: _withCtx((params) => [...]), _: 1 }`.
     /// None means no v-slot directive → children are passed as normal args.
-    pub slot_params: Option<String>,
+    pub slot_params: Option<&'alloc str>,
     /// Slot name (from v-slot:name). None → "default".
     /// For dynamic slots (`v-slot:[expr]`), stored as the expression text and
     /// `slot_is_dynamic` is true.
-    pub slot_name: Option<String>,
+    pub slot_name: Option<&'alloc str>,
     /// Whether the slot name is dynamic (`v-slot:[expr]`).
     pub slot_is_dynamic: bool,
 
@@ -161,10 +161,10 @@ pub(crate) struct StateStack {
     /// Runtime directives that need `_withDirectives()` wrapping.
     /// Populated during element open for v-model (native), v-show, and custom directives.
     /// The close phase emits `_withDirectives(vnode, [...])`.
-    pub runtime_directives: Vec<DirectiveEntry>,
+    pub runtime_directives: Vec<DirectiveEntry<'alloc>>,
 }
 
-impl Default for StateStack {
+impl Default for StateStack<'_> {
     fn default() -> Self {
         Self {
             id: 0,
@@ -192,15 +192,29 @@ impl Default for StateStack {
     }
 }
 
-impl StateStack {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn create_child(&mut self, element_id: u32) -> Self {
-        Self {
-            id: element_id,
-            ..Self::default()
-        }
+impl StateStack<'_> {
+    /// Reset all fields to defaults while retaining Vec capacities.
+    ///
+    /// Used by the StateStack pool to avoid re-allocating inner Vecs.
+    pub fn reset(&mut self, element_id: u32) {
+        self.id = element_id;
+        self.children.clear();
+        self.cache_id = None;
+        self.is_component = false;
+        self.open_tag_start = 0;
+        self.open_tag_end = 0;
+        self.patch_flag = PatchFlag::empty();
+        self.dynamic_props.clear();
+        self.pending_scope_closes.clear();
+        self.is_block_root = false;
+        self.pending_vif_fallbacks.clear();
+        self.vif_key_counter = 0;
+        self.vif_branch_key = None;
+        self.has_all_static_props = true;
+        self.has_props = false;
+        self.slot_params = None;
+        self.slot_name = None;
+        self.slot_is_dynamic = false;
+        self.runtime_directives.clear();
     }
 }

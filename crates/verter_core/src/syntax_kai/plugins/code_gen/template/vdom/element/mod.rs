@@ -12,7 +12,8 @@ use crate::{
         plugin::SyntaxPluginContext,
         plugins::code_gen::{
             template::shared::helper::{
-                apply_dynamic_arg_prefix, build_prefixed_value, escape_js_string, patch_bindings,
+                build_prefixed_value_into, collect_binding_patches, escape_js_string,
+                escape_js_string_in_place,
             },
             types::TemplateImportDependencies,
         },
@@ -31,10 +32,10 @@ pub(crate) struct ElementOpenContext<'a, 'alloc> {
     pub bindings: &'a FxHashMap<&'alloc str, BindingType>,
     pub is_production: bool,
     pub imports: &'a mut TemplateImportDependencies,
-    pub resolved_components: &'a mut Vec<String>,
-    pub resolved_components_set: &'a mut FxHashSet<String>,
-    pub resolved_directives: &'a mut Vec<String>,
-    pub resolved_directives_set: &'a mut FxHashSet<String>,
+    pub resolved_components: &'a mut Vec<&'alloc str>,
+    pub resolved_components_set: &'a mut FxHashSet<&'alloc str>,
+    pub resolved_directives: &'a mut Vec<&'alloc str>,
+    pub resolved_directives_set: &'a mut FxHashSet<&'alloc str>,
     pub hoisted_constants: &'a mut Vec<String>,
 }
 
@@ -68,11 +69,14 @@ pub(super) fn needs_event_handler_wrap(exp: &Option<oxc_ast::ast::Expression>) -
 ///
 /// Mutates `state`: sets `is_component`, `patch_flag`, `dynamic_props`, `open_tag_end`.
 pub(crate) fn handle_element_open<'alloc>(
-    code_transform: &mut CodeTransform<'alloc>,
+    code_transform: &CodeTransform<'alloc>,
     ev: &OxcCompiledElementStart<'alloc>,
     ctx: &SyntaxPluginContext<'alloc>,
-    state: &mut StateStack,
+    state: &mut StateStack<'alloc>,
     ectx: &mut ElementOpenContext<'_, 'alloc>,
+    binding_patches: &mut Vec<(u32, &'alloc str)>,
+    pending_overwrites: &mut Vec<(u32, u32, &'alloc str)>,
+    buf: &mut String,
 ) {
     let bindings = ectx.bindings;
     let is_production = ectx.is_production;
@@ -99,10 +103,13 @@ pub(crate) fn handle_element_open<'alloc>(
     // For components, register for _resolveComponent and use the resolved variable name.
     // Vue pattern: const _component_MyComponent = _resolveComponent("MyComponent")
     // Then reference _component_MyComponent in _createBlock/_createVNode calls.
-    let component_var = if is_component {
-        let var_name = format!("_component_{}", tag_name);
-        if resolved_components_set.insert(tag_name.to_string()) {
-            resolved_components.push(tag_name.to_string());
+    let component_var: Option<&'alloc str> = if is_component {
+        buf.clear();
+        buf.push_str("_component_");
+        buf.push_str(tag_name);
+        let var_name = code_transform.alloc_str(buf);
+        if resolved_components_set.insert(tag_name) {
+            resolved_components.push(tag_name);
             imports.add(TemplateImportDependencies::RESOLVE_COMPONENT);
         }
         Some(var_name)
@@ -130,53 +137,55 @@ pub(crate) fn handle_element_open<'alloc>(
     if state.is_block_root {
         // Block root: (_openBlock(), _createElementBlock("tag" or _createBlock(_component_Tag
         imports.add(TemplateImportDependencies::OPEN_BLOCK);
-        if let Some(ref var) = component_var {
+        if let Some(var) = component_var {
             imports.add(TemplateImportDependencies::CREATE_BLOCK);
-            code_transform.overwrite(
-                open_tag.start,
-                open_tag.name_end,
-                &format!("{}(_openBlock(), _createBlock({}", wd_prefix, var),
-            );
+            buf.clear();
+            buf.push_str(wd_prefix);
+            buf.push_str("(_openBlock(), _createBlock(");
+            buf.push_str(var);
+            let s = code_transform.alloc_str(buf);
+            pending_overwrites.push((open_tag.start, open_tag.name_end, s));
         } else {
             imports.add(TemplateImportDependencies::CREATE_ELEMENT_BLOCK);
-            code_transform.overwrite(
-                open_tag.start,
-                open_tag.name_end,
-                &format!(
-                    "{}(_openBlock(), _createElementBlock(\"{}\"",
-                    wd_prefix, tag_name
-                ),
-            );
+            buf.clear();
+            buf.push_str(wd_prefix);
+            buf.push_str("(_openBlock(), _createElementBlock(\"");
+            buf.push_str(tag_name);
+            buf.push('"');
+            let s = code_transform.alloc_str(buf);
+            pending_overwrites.push((open_tag.start, open_tag.name_end, s));
         }
-    } else if let Some(ref var) = component_var {
+    } else if let Some(var) = component_var {
         imports.add(TemplateImportDependencies::CREATE_VNODE);
-        code_transform.overwrite(
-            open_tag.start,
-            open_tag.name_end,
-            &format!("{}_createVNode({}", wd_prefix, var),
-        );
+        buf.clear();
+        buf.push_str(wd_prefix);
+        buf.push_str("_createVNode(");
+        buf.push_str(var);
+        let s = code_transform.alloc_str(buf);
+        pending_overwrites.push((open_tag.start, open_tag.name_end, s));
     } else {
         imports.add(TemplateImportDependencies::CREATE_ELEMENT_VNODE);
-        code_transform.overwrite(
-            open_tag.start,
-            open_tag.name_end,
-            &format!("{}_createElementVNode(\"{}\"", wd_prefix, tag_name),
-        );
+        buf.clear();
+        buf.push_str(wd_prefix);
+        buf.push_str("_createElementVNode(\"");
+        buf.push_str(tag_name);
+        buf.push('"');
+        let s = code_transform.alloc_str(buf);
+        pending_overwrites.push((open_tag.start, open_tag.name_end, s));
     }
 
     // -- Props --
-    let vif_key_prop = state.vif_branch_key.map(|k| format!("key: {}", k));
-
     if ev.props.is_empty() {
         // Replace with `, null` or `, { key: N }` for v-if branches
-        if let Some(ref key_prop) = vif_key_prop {
-            code_transform.overwrite(
-                open_tag.name_end,
-                open_tag_end.end,
-                &format!(", {{ {} }}", key_prop),
-            );
+        if let Some(k) = state.vif_branch_key {
+            buf.clear();
+            buf.push_str(", { key: ");
+            super::helper::push_u32(buf, k);
+            buf.push_str(" }");
+            let s = code_transform.alloc_str(buf);
+            pending_overwrites.push((open_tag.name_end, open_tag_end.end, s));
         } else {
-            code_transform.overwrite(open_tag.name_end, open_tag_end.end, ", null");
+            pending_overwrites.push((open_tag.name_end, open_tag_end.end, ", null"));
         }
     } else {
         state.has_props = true;
@@ -203,13 +212,17 @@ pub(crate) fn handle_element_open<'alloc>(
                     PropKind::ClassValue => {
                         if let Some(val_span) = prop.event.value {
                             let val = &ctx.input[val_span.start as usize..val_span.end as usize];
-                            props_str.push_str(&format!("class: \"{}\"", escape_js_string(val)));
+                            props_str.push_str("class: \"");
+                            props_str.push_str(&escape_js_string(val));
+                            props_str.push('"');
                         }
                     }
                     PropKind::StyleValue => {
                         if let Some(val_span) = prop.event.value {
                             let val = &ctx.input[val_span.start as usize..val_span.end as usize];
-                            props_str.push_str(&format!("style: \"{}\"", escape_js_string(val)));
+                            props_str.push_str("style: \"");
+                            props_str.push_str(&escape_js_string(val));
+                            props_str.push('"');
                         }
                     }
                     PropKind::Value => {
@@ -217,9 +230,13 @@ pub(crate) fn handle_element_open<'alloc>(
                             &ctx.input[prop.event.start as usize..prop.event.name_end as usize];
                         if let Some(val_span) = prop.event.value {
                             let val = &ctx.input[val_span.start as usize..val_span.end as usize];
-                            props_str.push_str(&format!("{}: \"{}\"", name, escape_js_string(val)));
+                            props_str.push_str(name);
+                            props_str.push_str(": \"");
+                            props_str.push_str(&escape_js_string(val));
+                            props_str.push('"');
                         } else {
-                            props_str.push_str(&format!("{}: \"\"", name));
+                            props_str.push_str(name);
+                            props_str.push_str(": \"\"");
                         }
                     }
                     _ => unreachable!("all_static check guarantees only static prop kinds"),
@@ -234,11 +251,11 @@ pub(crate) fn handle_element_open<'alloc>(
 
             // Overwrite entire props region (from after tag name to open_tag_end)
             // with `, _hoisted_N`
-            code_transform.overwrite(
-                open_tag.name_end,
-                open_tag_end.end,
-                &format!(", _hoisted_{}", hoist_id),
-            );
+            buf.clear();
+            buf.push_str(", _hoisted_");
+            super::helper::push_u32(buf, hoist_id as u32);
+            let s = code_transform.alloc_str(buf);
+            pending_overwrites.push((open_tag.name_end, open_tag_end.end, s));
         } else {
             state.has_all_static_props = false;
 
@@ -279,16 +296,17 @@ pub(crate) fn handle_element_open<'alloc>(
             // Normal inline props processing
             let first_prop_start = ev.props[0].event.start;
             if is_spread_only {
-                code_transform.overwrite(open_tag.name_end, first_prop_start, ", ");
-            } else if let Some(ref key_prop) = vif_key_prop {
+                pending_overwrites.push((open_tag.name_end, first_prop_start, ", "));
+            } else if let Some(k) = state.vif_branch_key {
                 // Inject v-if branch key at the beginning of the props object
-                code_transform.overwrite(
-                    open_tag.name_end,
-                    first_prop_start,
-                    &format!(", {{{}, ", key_prop),
-                );
+                buf.clear();
+                buf.push_str(", {key: ");
+                super::helper::push_u32(buf, k);
+                buf.push_str(", ");
+                let s = code_transform.alloc_str(buf);
+                pending_overwrites.push((open_tag.name_end, first_prop_start, s));
             } else {
-                code_transform.overwrite(open_tag.name_end, first_prop_start, ", {");
+                pending_overwrites.push((open_tag.name_end, first_prop_start, ", {"));
             }
 
             // Track how many props we've actually written (for separator logic).
@@ -299,11 +317,11 @@ pub(crate) fn handle_element_open<'alloc>(
                 // When merging, skip the static ClassValue/StyleValue — they're folded
                 // into the ClassBind/StyleBind handler below.
                 if merge_class && prop.event.kind == PropKind::ClassValue {
-                    code_transform.overwrite(prop.event.start, prop.event.end, "");
+                    pending_overwrites.push((prop.event.start, prop.event.end, ""));
                     continue;
                 }
                 if merge_style && prop.event.kind == PropKind::StyleValue {
-                    code_transform.overwrite(prop.event.start, prop.event.end, "");
+                    pending_overwrites.push((prop.event.start, prop.event.end, ""));
                     continue;
                 }
 
@@ -315,19 +333,28 @@ pub(crate) fn handle_element_open<'alloc>(
                         let name =
                             &ctx.input[prop.event.start as usize..prop.event.name_end as usize];
                         if let Some(val_span) = prop.event.value {
-                            let val = &ctx.input[val_span.start as usize..val_span.end as usize];
-                            let escaped = escape_js_string(val);
-                            code_transform.overwrite(
-                                prop.event.start,
-                                prop.event.end,
-                                &format!("{}{}: \"{}\"", sep, name, escaped),
+                            // Split overwrite: prefix before value, escape value in-place, suffix after
+                            buf.clear();
+                            buf.push_str(sep);
+                            buf.push_str(name);
+                            buf.push_str(": \"");
+                            let s = code_transform.alloc_str(buf);
+                            pending_overwrites.push((prop.event.start, val_span.start, s));
+                            escape_js_string_in_place(
+                                code_transform,
+                                val_span.start,
+                                val_span.end,
+                                ctx.input,
+                                pending_overwrites,
                             );
+                            pending_overwrites.push((val_span.end, prop.event.end, "\""));
                         } else {
-                            code_transform.overwrite(
-                                prop.event.start,
-                                prop.event.end,
-                                &format!("{}{}: \"\"", sep, name),
-                            );
+                            buf.clear();
+                            buf.push_str(sep);
+                            buf.push_str(name);
+                            buf.push_str(": \"\"");
+                            let s = code_transform.alloc_str(buf);
+                            pending_overwrites.push((prop.event.start, prop.event.end, s));
                         }
                         written += 1;
                     }
@@ -335,13 +362,19 @@ pub(crate) fn handle_element_open<'alloc>(
                     PropKind::ClassValue => {
                         // Static class (no merging — merge_class is false here)
                         if let Some(val_span) = prop.event.value {
-                            let val = &ctx.input[val_span.start as usize..val_span.end as usize];
-                            let escaped = escape_js_string(val);
-                            code_transform.overwrite(
-                                prop.event.start,
-                                prop.event.end,
-                                &format!("{}class: \"{}\"", sep, escaped),
+                            buf.clear();
+                            buf.push_str(sep);
+                            buf.push_str("class: \"");
+                            let s = code_transform.alloc_str(buf);
+                            pending_overwrites.push((prop.event.start, val_span.start, s));
+                            escape_js_string_in_place(
+                                code_transform,
+                                val_span.start,
+                                val_span.end,
+                                ctx.input,
+                                pending_overwrites,
                             );
+                            pending_overwrites.push((val_span.end, prop.event.end, "\""));
                         }
                         written += 1;
                     }
@@ -349,60 +382,73 @@ pub(crate) fn handle_element_open<'alloc>(
                     PropKind::StyleValue => {
                         // Static style (no merging — merge_style is false here)
                         if let Some(val_span) = prop.event.value {
-                            let val = &ctx.input[val_span.start as usize..val_span.end as usize];
-                            let escaped = escape_js_string(val);
-                            code_transform.overwrite(
-                                prop.event.start,
-                                prop.event.end,
-                                &format!("{}style: \"{}\"", sep, escaped),
+                            buf.clear();
+                            buf.push_str(sep);
+                            buf.push_str("style: \"");
+                            let s = code_transform.alloc_str(buf);
+                            pending_overwrites.push((prop.event.start, val_span.start, s));
+                            escape_js_string_in_place(
+                                code_transform,
+                                val_span.start,
+                                val_span.end,
+                                ctx.input,
+                                pending_overwrites,
                             );
+                            pending_overwrites.push((val_span.end, prop.event.end, "\""));
                         }
                         written += 1;
                     }
 
                     PropKind::Bind => {
                         // :prop="expr" → prop_name: expr
-                        let prop_name = if let Some(arg_span) = prop.event.arg {
-                            let raw = ctx.input[arg_span.start as usize..arg_span.end as usize]
-                                .to_string();
+                        let prop_name: &'alloc str = if let Some(arg_span) = prop.event.arg {
+                            let raw = &ctx.input[arg_span.start as usize..arg_span.end as usize];
                             if prop.event.has_dynamic_arg {
                                 // Dynamic arg: :[foo]="value" → [_ctx.foo]: value
-                                apply_dynamic_arg_prefix(
-                                    &raw,
+                                let saved = buf.len();
+                                build_prefixed_value_into(
+                                    buf,
+                                    raw,
                                     arg_span.start,
-                                    &prop.arg.as_ref().and_then(|a| a.bindings.clone()),
+                                    prop.arg.as_ref().and_then(|a| a.bindings.as_ref()),
                                     bindings,
                                     is_production,
-                                )
+                                    &[],
+                                );
+                                let result = code_transform.alloc_str(&buf[saved..]);
+                                buf.truncate(saved);
+                                result
                             } else {
                                 raw
                             }
                         } else {
-                            "unknown".to_string()
+                            "unknown"
                         };
 
                         if let Some(val_span) = prop.event.value {
-                            code_transform.overwrite(
-                                prop.event.start,
-                                val_span.start,
-                                &format!("{}{}: ", sep, prop_name),
-                            );
-                            code_transform.overwrite(val_span.end, prop.event.end, "");
+                            buf.clear();
+                            buf.push_str(sep);
+                            buf.push_str(prop_name);
+                            buf.push_str(": ");
+                            let s = code_transform.alloc_str(buf);
+                            pending_overwrites.push((prop.event.start, val_span.start, s));
+                            pending_overwrites.push((val_span.end, prop.event.end, ""));
 
                             if let Some(exp) = &prop.exp {
-                                patch_bindings(
-                                    code_transform,
-                                    &exp.bindings,
+                                collect_binding_patches(
+                                    exp.bindings.as_ref(),
                                     bindings,
                                     is_production,
+                                    binding_patches,
                                 );
                             }
                         } else {
-                            code_transform.overwrite(
-                                prop.event.start,
-                                prop.event.end,
-                                &format!("{}{}: undefined", sep, prop_name),
-                            );
+                            buf.clear();
+                            buf.push_str(sep);
+                            buf.push_str(prop_name);
+                            buf.push_str(": undefined");
+                            let s = code_transform.alloc_str(buf);
+                            pending_overwrites.push((prop.event.start, prop.event.end, s));
                         }
 
                         // If this is a :key prop inside a v-for, mark the fragment as keyed
@@ -429,6 +475,9 @@ pub(crate) fn handle_element_open<'alloc>(
                             bindings,
                             is_production,
                             imports,
+                            buf,
+                            binding_patches,
+                            pending_overwrites,
                         );
                     }
 
@@ -440,27 +489,29 @@ pub(crate) fn handle_element_open<'alloc>(
                         if let Some(val_span) = prop.event.value {
                             if merge_class {
                                 let static_val = static_class.as_ref().unwrap();
-                                code_transform.overwrite(
-                                    prop.event.start,
-                                    val_span.start,
-                                    &format!("{}class: _normalizeClass([\"{}\", ", sep, static_val),
-                                );
-                                code_transform.overwrite(val_span.end, prop.event.end, "])");
+                                buf.clear();
+                                buf.push_str(sep);
+                                buf.push_str("class: _normalizeClass([\"");
+                                buf.push_str(static_val);
+                                buf.push_str("\", ");
+                                let s = code_transform.alloc_str(buf);
+                                pending_overwrites.push((prop.event.start, val_span.start, s));
+                                pending_overwrites.push((val_span.end, prop.event.end, "])"));
                             } else {
-                                code_transform.overwrite(
-                                    prop.event.start,
-                                    val_span.start,
-                                    &format!("{}class: _normalizeClass(", sep),
-                                );
-                                code_transform.overwrite(val_span.end, prop.event.end, ")");
+                                buf.clear();
+                                buf.push_str(sep);
+                                buf.push_str("class: _normalizeClass(");
+                                let s = code_transform.alloc_str(buf);
+                                pending_overwrites.push((prop.event.start, val_span.start, s));
+                                pending_overwrites.push((val_span.end, prop.event.end, ")"));
                             }
 
                             if let Some(exp) = &prop.exp {
-                                patch_bindings(
-                                    code_transform,
-                                    &exp.bindings,
+                                collect_binding_patches(
+                                    exp.bindings.as_ref(),
                                     bindings,
                                     is_production,
+                                    binding_patches,
                                 );
                             }
                         }
@@ -477,27 +528,29 @@ pub(crate) fn handle_element_open<'alloc>(
                         if let Some(val_span) = prop.event.value {
                             if merge_style {
                                 let static_val = static_style.as_ref().unwrap();
-                                code_transform.overwrite(
-                                    prop.event.start,
-                                    val_span.start,
-                                    &format!("{}style: _normalizeStyle([\"{}\", ", sep, static_val),
-                                );
-                                code_transform.overwrite(val_span.end, prop.event.end, "])");
+                                buf.clear();
+                                buf.push_str(sep);
+                                buf.push_str("style: _normalizeStyle([\"");
+                                buf.push_str(static_val);
+                                buf.push_str("\", ");
+                                let s = code_transform.alloc_str(buf);
+                                pending_overwrites.push((prop.event.start, val_span.start, s));
+                                pending_overwrites.push((val_span.end, prop.event.end, "])"));
                             } else {
-                                code_transform.overwrite(
-                                    prop.event.start,
-                                    val_span.start,
-                                    &format!("{}style: _normalizeStyle(", sep),
-                                );
-                                code_transform.overwrite(val_span.end, prop.event.end, ")");
+                                buf.clear();
+                                buf.push_str(sep);
+                                buf.push_str("style: _normalizeStyle(");
+                                let s = code_transform.alloc_str(buf);
+                                pending_overwrites.push((prop.event.start, val_span.start, s));
+                                pending_overwrites.push((val_span.end, prop.event.end, ")"));
                             }
 
                             if let Some(exp) = &prop.exp {
-                                patch_bindings(
-                                    code_transform,
-                                    &exp.bindings,
+                                collect_binding_patches(
+                                    exp.bindings.as_ref(),
                                     bindings,
                                     is_production,
+                                    binding_patches,
                                 );
                             }
                         }
@@ -519,6 +572,8 @@ pub(crate) fn handle_element_open<'alloc>(
                             tag_name,
                             is_component,
                             &ev.props,
+                            buf,
+                            pending_overwrites,
                         );
                     }
 
@@ -531,49 +586,55 @@ pub(crate) fn handle_element_open<'alloc>(
                         if let Some(val_span) = prop.event.value {
                             let val_text =
                                 &ctx.input[val_span.start as usize..val_span.end as usize];
-                            let prefixed_val = if let Some(exp) = &prop.exp {
-                                build_prefixed_value(
+                            let prefixed_val: &'alloc str = if let Some(exp) = &prop.exp {
+                                let saved = buf.len();
+                                build_prefixed_value_into(
+                                    buf,
                                     val_text,
                                     val_span.start,
-                                    &exp.bindings,
+                                    exp.bindings.as_ref(),
                                     bindings,
                                     is_production,
-                                )
+                                    &[],
+                                );
+                                let result = code_transform.alloc_str(&buf[saved..]);
+                                buf.truncate(saved);
+                                result
                             } else {
-                                val_text.to_string()
+                                val_text
                             };
 
                             state.runtime_directives.push(DirectiveEntry {
-                                directive: "_vShow".to_string(),
+                                directive: "_vShow",
                                 value: prefixed_val,
-                                arg: String::new(),
-                                modifiers: String::new(),
+                                arg: "",
+                                modifiers: "",
                             });
                         }
                         // Remove v-show from props output
-                        code_transform.overwrite(prop.event.start, prop.event.end, "");
+                        pending_overwrites.push((prop.event.start, prop.event.end, ""));
                         state.patch_flag = state.patch_flag.add(PatchFlags::NeedPatch);
                     }
 
                     PropKind::Html => {
                         // v-html="expr" → innerHTML: expr (as prop, no directive)
                         if let Some(val_span) = prop.event.value {
-                            code_transform.overwrite(
-                                prop.event.start,
-                                val_span.start,
-                                &format!("{}innerHTML: ", sep),
-                            );
-                            code_transform.overwrite(val_span.end, prop.event.end, "");
+                            buf.clear();
+                            buf.push_str(sep);
+                            buf.push_str("innerHTML: ");
+                            let s = code_transform.alloc_str(buf);
+                            pending_overwrites.push((prop.event.start, val_span.start, s));
+                            pending_overwrites.push((val_span.end, prop.event.end, ""));
                             if let Some(exp) = &prop.exp {
-                                patch_bindings(
-                                    code_transform,
-                                    &exp.bindings,
+                                collect_binding_patches(
+                                    exp.bindings.as_ref(),
                                     bindings,
                                     is_production,
+                                    binding_patches,
                                 );
                             }
                         }
-                        state.dynamic_props.push("innerHTML".to_string());
+                        state.dynamic_props.push("innerHTML");
                         state.patch_flag = state.patch_flag.add(PatchFlags::Props);
                         written += 1;
                     }
@@ -582,22 +643,22 @@ pub(crate) fn handle_element_open<'alloc>(
                         // v-text="expr" → textContent: _toDisplayString(expr)
                         imports.add(TemplateImportDependencies::TO_DISPLAY_STRING);
                         if let Some(val_span) = prop.event.value {
-                            code_transform.overwrite(
-                                prop.event.start,
-                                val_span.start,
-                                &format!("{}textContent: _toDisplayString(", sep),
-                            );
-                            code_transform.overwrite(val_span.end, prop.event.end, ")");
+                            buf.clear();
+                            buf.push_str(sep);
+                            buf.push_str("textContent: _toDisplayString(");
+                            let s = code_transform.alloc_str(buf);
+                            pending_overwrites.push((prop.event.start, val_span.start, s));
+                            pending_overwrites.push((val_span.end, prop.event.end, ")"));
                             if let Some(exp) = &prop.exp {
-                                patch_bindings(
-                                    code_transform,
-                                    &exp.bindings,
+                                collect_binding_patches(
+                                    exp.bindings.as_ref(),
                                     bindings,
                                     is_production,
+                                    binding_patches,
                                 );
                             }
                         }
-                        state.dynamic_props.push("textContent".to_string());
+                        state.dynamic_props.push("textContent");
                         state.patch_flag = state.patch_flag.add(PatchFlags::Props);
                         written += 1;
                     }
@@ -610,18 +671,18 @@ pub(crate) fn handle_element_open<'alloc>(
                         // We mark this and handle it specially after the loop.
                         // For now: overwrite with _normalizeProps wrapper
                         if let Some(val_span) = prop.event.value {
-                            code_transform.overwrite(
-                                prop.event.start,
-                                val_span.start,
-                                &format!("{}_normalizeProps(_guardReactiveProps(", sep),
-                            );
-                            code_transform.overwrite(val_span.end, prop.event.end, "))");
+                            buf.clear();
+                            buf.push_str(sep);
+                            buf.push_str("_normalizeProps(_guardReactiveProps(");
+                            let s = code_transform.alloc_str(buf);
+                            pending_overwrites.push((prop.event.start, val_span.start, s));
+                            pending_overwrites.push((val_span.end, prop.event.end, "))"));
                             if let Some(exp) = &prop.exp {
-                                patch_bindings(
-                                    code_transform,
-                                    &exp.bindings,
+                                collect_binding_patches(
+                                    exp.bindings.as_ref(),
                                     bindings,
                                     is_production,
+                                    binding_patches,
                                 );
                             }
                         }
@@ -633,18 +694,18 @@ pub(crate) fn handle_element_open<'alloc>(
                         // v-on="handlers" → _toHandlers(expr, true)
                         imports.add(TemplateImportDependencies::TO_HANDLERS);
                         if let Some(val_span) = prop.event.value {
-                            code_transform.overwrite(
-                                prop.event.start,
-                                val_span.start,
-                                &format!("{}_toHandlers(", sep),
-                            );
-                            code_transform.overwrite(val_span.end, prop.event.end, ", true)");
+                            buf.clear();
+                            buf.push_str(sep);
+                            buf.push_str("_toHandlers(");
+                            let s = code_transform.alloc_str(buf);
+                            pending_overwrites.push((prop.event.start, val_span.start, s));
+                            pending_overwrites.push((val_span.end, prop.event.end, ", true)"));
                             if let Some(exp) = &prop.exp {
-                                patch_bindings(
-                                    code_transform,
-                                    &exp.bindings,
+                                collect_binding_patches(
+                                    exp.bindings.as_ref(),
                                     bindings,
                                     is_production,
+                                    binding_patches,
                                 );
                             }
                         }
@@ -663,13 +724,15 @@ pub(crate) fn handle_element_open<'alloc>(
                             imports,
                             resolved_directives,
                             resolved_directives_set,
+                            buf,
+                            pending_overwrites,
                         );
                     }
 
                     // v-if, v-else-if, v-else, v-for, v-slot, v-once are handled
                     // as scopes in directives/mod.rs, not as prop kinds here.
                     _ => {
-                        code_transform.overwrite(prop.event.start, prop.event.end, "");
+                        pending_overwrites.push((prop.event.start, prop.event.end, ""));
                     }
                 }
             }
@@ -677,9 +740,9 @@ pub(crate) fn handle_element_open<'alloc>(
             // Close the props object: overwrite `>` with `}` (or empty for spread-only)
             let last_prop_end = ev.props.last().unwrap().event.end;
             if is_spread_only {
-                code_transform.overwrite(last_prop_end, open_tag_end.end, "");
+                pending_overwrites.push((last_prop_end, open_tag_end.end, ""));
             } else {
-                code_transform.overwrite(last_prop_end, open_tag_end.end, "}");
+                pending_overwrites.push((last_prop_end, open_tag_end.end, "}"));
             }
         }
     }

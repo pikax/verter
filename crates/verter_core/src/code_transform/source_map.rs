@@ -1,3 +1,5 @@
+use memchr::memchr_iter;
+
 use super::code_transform::CodeTransform;
 use oxc_sourcemap::{SourceMap, SourceMapBuilder};
 
@@ -82,22 +84,29 @@ impl<'a> CodeTransform<'a> {
             builder.set_file(&file);
         }
 
+        // Build line-starts table once: line_starts[i] = byte offset of line i.
+        // Line 0 always starts at offset 0.
+        let original_bytes = self.original().as_bytes();
+        let line_starts = {
+            let mut starts = Vec::with_capacity(original_bytes.len() / 40 + 1);
+            starts.push(0u32);
+            for pos in memchr_iter(b'\n', original_bytes) {
+                starts.push((pos + 1) as u32);
+            }
+            starts
+        };
+
         let mut generated_line = 0u32;
         let mut generated_column = 0u32;
 
         // Add intro (no source mapping for inserted content)
         if !self.intro().is_empty() {
-            // Add unmapped token to break any potential mapping chain
             builder.add_token(generated_line, generated_column, 0, 0, None, None);
-
-            for ch in self.intro().chars() {
-                if ch == '\n' {
-                    generated_line += 1;
-                    generated_column = 0;
-                } else {
-                    generated_column += 1;
-                }
-            }
+            Self::advance_generated_position(
+                self.intro().as_bytes(),
+                &mut generated_line,
+                &mut generated_column,
+            );
         }
 
         // Process chunks
@@ -106,13 +115,12 @@ impl<'a> CodeTransform<'a> {
 
             match chunk {
                 Chunk::Original { start, end } => {
-                    // Original content - create mappings at each line boundary
                     if let Some(source_id) = source_id {
-                        let source_slice = self.slice(*start, *end);
+                        let slice_bytes = &original_bytes[*start as usize..*end as usize];
                         let (mut source_line, mut source_column) =
-                            self.calculate_line_column(*start);
+                            Self::offset_to_line_column(&line_starts, *start);
 
-                        // Add mapping for the start of this chunk
+                        // Map start of chunk
                         builder.add_token(
                             generated_line,
                             generated_column,
@@ -122,35 +130,38 @@ impl<'a> CodeTransform<'a> {
                             None,
                         );
 
-                        // Process each character, adding mappings at line boundaries
-                        // but NOT after the final newline (to avoid mapping unmapped content)
-                        let chars: Vec<char> = source_slice.chars().collect();
-                        let len = chars.len();
+                        // Scan for newlines using memchr — only newlines matter for mappings
+                        let mut prev = 0usize;
+                        let slice_len = slice_bytes.len();
+                        for nl_pos in memchr_iter(b'\n', slice_bytes) {
+                            // Characters before this newline advance column
+                            let chars_before = nl_pos - prev;
+                            generated_column += chars_before as u32;
+                            source_column += chars_before as u32;
 
-                        for (i, ch) in chars.into_iter().enumerate() {
-                            if ch == '\n' {
-                                generated_line += 1;
-                                generated_column = 0;
-                                source_line += 1;
-                                source_column = 0;
+                            // Newline
+                            generated_line += 1;
+                            generated_column = 0;
+                            source_line += 1;
+                            source_column = 0;
+                            prev = nl_pos + 1;
 
-                                // Only add mapping if this is NOT the last character
-                                // (don't map the line after final newline)
-                                if i + 1 < len {
-                                    builder.add_token(
-                                        generated_line,
-                                        generated_column,
-                                        source_line,
-                                        source_column,
-                                        Some(source_id),
-                                        None,
-                                    );
-                                }
-                            } else {
-                                generated_column += 1;
-                                source_column += 1;
+                            // Only add mapping if this is NOT the last byte
+                            if prev < slice_len {
+                                builder.add_token(
+                                    generated_line,
+                                    generated_column,
+                                    source_line,
+                                    source_column,
+                                    Some(source_id),
+                                    None,
+                                );
                             }
                         }
+
+                        // Remaining chars after last newline (or all chars if no newlines)
+                        let remaining = slice_len - prev;
+                        generated_column += remaining as u32;
                     }
                 }
                 Chunk::Edited {
@@ -163,7 +174,6 @@ impl<'a> CodeTransform<'a> {
                         continue;
                     }
 
-                    // Check if this has original position info
                     let has_original = original_start.is_some() && original_end.is_some();
 
                     if has_original {
@@ -171,58 +181,14 @@ impl<'a> CodeTransform<'a> {
                         let orig_end = original_end.unwrap();
                         let original_slice = self.slice(orig_start, orig_end);
 
-                        // Check if this is a move (content matches original) or overwrite (content differs)
                         let is_move = *content == original_slice;
 
                         if is_move {
-                            // Moved content - create line-by-line mappings like Original chunks
+                            // Moved content — line-by-line mappings like Original chunks
                             if let Some(source_id) = source_id {
+                                let content_bytes = content.as_bytes();
                                 let (mut source_line, mut source_column) =
-                                    self.calculate_line_column(orig_start);
-
-                                // Add mapping for the start of this chunk
-                                builder.add_token(
-                                    generated_line,
-                                    generated_column,
-                                    source_line,
-                                    source_column,
-                                    Some(source_id),
-                                    None,
-                                );
-
-                                // Process each character, adding mappings at line boundaries
-                                let chars: Vec<char> = content.chars().collect();
-                                let len = chars.len();
-
-                                for (i, ch) in chars.into_iter().enumerate() {
-                                    if ch == '\n' {
-                                        generated_line += 1;
-                                        generated_column = 0;
-                                        source_line += 1;
-                                        source_column = 0;
-
-                                        // Only add mapping if this is NOT the last character
-                                        if i + 1 < len {
-                                            builder.add_token(
-                                                generated_line,
-                                                generated_column,
-                                                source_line,
-                                                source_column,
-                                                Some(source_id),
-                                                None,
-                                            );
-                                        }
-                                    } else {
-                                        generated_column += 1;
-                                        source_column += 1;
-                                    }
-                                }
-                            }
-                        } else {
-                            // Overwritten content - only map start position
-                            if let Some(source_id) = source_id {
-                                let (source_line, source_column) =
-                                    self.calculate_line_column(orig_start);
+                                    Self::offset_to_line_column(&line_starts, orig_start);
 
                                 builder.add_token(
                                     generated_line,
@@ -232,76 +198,111 @@ impl<'a> CodeTransform<'a> {
                                     Some(source_id),
                                     None,
                                 );
-                            }
 
-                            // Update generated position
-                            for ch in content.chars() {
-                                if ch == '\n' {
+                                let mut prev = 0usize;
+                                let content_len = content_bytes.len();
+                                for nl_pos in memchr_iter(b'\n', content_bytes) {
+                                    let chars_before = nl_pos - prev;
+                                    generated_column += chars_before as u32;
+                                    source_column += chars_before as u32;
+
                                     generated_line += 1;
                                     generated_column = 0;
-                                } else {
-                                    generated_column += 1;
+                                    source_line += 1;
+                                    source_column = 0;
+                                    prev = nl_pos + 1;
+
+                                    if prev < content_len {
+                                        builder.add_token(
+                                            generated_line,
+                                            generated_column,
+                                            source_line,
+                                            source_column,
+                                            Some(source_id),
+                                            None,
+                                        );
+                                    }
                                 }
+
+                                let remaining = content_len - prev;
+                                generated_column += remaining as u32;
                             }
+                        } else {
+                            // Overwritten content — only map start position
+                            if let Some(source_id) = source_id {
+                                let (source_line, source_column) =
+                                    Self::offset_to_line_column(&line_starts, orig_start);
+
+                                builder.add_token(
+                                    generated_line,
+                                    generated_column,
+                                    source_line,
+                                    source_column,
+                                    Some(source_id),
+                                    None,
+                                );
+                            }
+
+                            Self::advance_generated_position(
+                                content.as_bytes(),
+                                &mut generated_line,
+                                &mut generated_column,
+                            );
                         }
                     } else {
-                        // Pure insertion - add unmapped token to break mapping chain
+                        // Pure insertion — unmapped
                         builder.add_token(generated_line, generated_column, 0, 0, None, None);
 
-                        // Update generated position
-                        for ch in content.chars() {
-                            if ch == '\n' {
-                                generated_line += 1;
-                                generated_column = 0;
-                            } else {
-                                generated_column += 1;
-                            }
-                        }
+                        Self::advance_generated_position(
+                            content.as_bytes(),
+                            &mut generated_line,
+                            &mut generated_column,
+                        );
                     }
                 }
             }
         }
 
-        // Add outro (no source mapping for inserted content)
+        // Add outro (no source mapping)
         if !self.outro().is_empty() {
-            // Add unmapped token to break any mapping chain from previous content
             builder.add_token(generated_line, generated_column, 0, 0, None, None);
-
-            for ch in self.outro().chars() {
-                if ch == '\n' {
-                    generated_line += 1;
-                    generated_column = 0;
-                } else {
-                    generated_column += 1;
-                }
-            }
+            Self::advance_generated_position(
+                self.outro().as_bytes(),
+                &mut generated_line,
+                &mut generated_column,
+            );
         }
 
         builder.into_sourcemap()
     }
 
-    /// Calculate line and column from byte offset
-    fn calculate_line_column(&self, offset: u32) -> (u32, u32) {
-        let mut line = 0u32;
-        let mut column = 0u32;
-        let mut current = 0u32;
+    /// Binary-search the line-starts table to convert a byte offset
+    /// into (line, column) in O(log N) time.
+    #[inline]
+    fn offset_to_line_column(line_starts: &[u32], offset: u32) -> (u32, u32) {
+        // partition_point returns the first index where line_starts[i] > offset,
+        // so line = that index - 1.
+        let line = line_starts.partition_point(|&s| s <= offset);
+        let line = if line > 0 { line - 1 } else { 0 };
+        let column = offset - line_starts[line];
+        (line as u32, column)
+    }
 
-        for ch in self.original().chars() {
-            if current >= offset {
-                break;
-            }
-
-            if ch == '\n' {
-                line += 1;
-                column = 0;
-            } else {
-                column += 1;
-            }
-
-            current += ch.len_utf8() as u32;
+    /// Advance generated line/column position through a byte slice using memchr.
+    #[inline]
+    fn advance_generated_position(bytes: &[u8], line: &mut u32, column: &mut u32) {
+        let mut prev = 0usize;
+        for nl_pos in memchr_iter(b'\n', bytes) {
+            *line += 1;
+            prev = nl_pos + 1;
         }
-
-        (line, column)
+        if prev == 0 {
+            // No newlines at all — just advance column by byte count
+            *column += bytes.len() as u32;
+        } else {
+            // Column is distance from last newline to end
+            *column = (bytes.len() - prev) as u32;
+        }
     }
 
     /// Generate source map and return as JSON string
@@ -355,12 +356,28 @@ mod tests {
 
     #[test]
     fn test_line_column_calculation() {
-        let allocator = Allocator::default();
-        let ct = CodeTransform::new("Hello\nWorld\nTest", &allocator);
+        let source = "Hello\nWorld\nTest";
+        let bytes = source.as_bytes();
+        let mut line_starts = vec![0u32];
+        for pos in memchr_iter(b'\n', bytes) {
+            line_starts.push((pos + 1) as u32);
+        }
 
-        assert_eq!(ct.calculate_line_column(0), (0, 0)); // H
-        assert_eq!(ct.calculate_line_column(5), (0, 5)); // \n
-        assert_eq!(ct.calculate_line_column(6), (1, 0)); // W
-        assert_eq!(ct.calculate_line_column(12), (2, 0)); // T
+        assert_eq!(
+            CodeTransform::offset_to_line_column(&line_starts, 0),
+            (0, 0)
+        ); // H
+        assert_eq!(
+            CodeTransform::offset_to_line_column(&line_starts, 5),
+            (0, 5)
+        ); // \n
+        assert_eq!(
+            CodeTransform::offset_to_line_column(&line_starts, 6),
+            (1, 0)
+        ); // W
+        assert_eq!(
+            CodeTransform::offset_to_line_column(&line_starts, 12),
+            (2, 0)
+        ); // T
     }
 }

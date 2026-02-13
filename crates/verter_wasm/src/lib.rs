@@ -61,6 +61,7 @@ fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
         is_production: opts.is_production,
         component_id: opts.component_id.clone(),
         include_tsx: opts.include_tsx,
+        skip_source_map: false,
     };
 
     let result = core_compile(input, &core_options, &allocator);

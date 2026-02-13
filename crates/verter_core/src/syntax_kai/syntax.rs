@@ -231,10 +231,8 @@ impl<'alloc> Syntax<'alloc> {
 
     pub fn events(&mut self) -> Vec<Event<'alloc>> {
         let mut out = Vec::with_capacity(self.root_script_events.len() + self.events.len());
-
         out.append(&mut self.root_script_events);
         out.append(&mut self.events);
-
         out
     }
 
@@ -248,7 +246,7 @@ impl<'alloc> Syntax<'alloc> {
             last_event_open_tag: None,
             current_prop: None,
             parent_stack: Vec::with_capacity(32),
-            events: Vec::with_capacity(50),
+            events: Vec::with_capacity(256),
             root_script_events: Vec::with_capacity(6),
 
             scripts_found: 0,

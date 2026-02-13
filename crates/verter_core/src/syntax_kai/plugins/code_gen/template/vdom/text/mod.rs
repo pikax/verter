@@ -3,7 +3,7 @@ use crate::{
     syntax_kai::{
         plugin::SyntaxPluginContext,
         plugins::code_gen::{
-            template::shared::helper::escape_js_string, types::TemplateImportDependencies,
+            template::shared::helper::escape_js_string_in_place, types::TemplateImportDependencies,
         },
         types::Text,
     },
@@ -28,34 +28,30 @@ use super::{ChildInfo, ChildKind, StateStack};
 /// Only `append_left(ev.end, "\"")` is safe here because it operates at `ev.end`,
 /// a different position from the separator insertion point (`ev.start`).
 pub(crate) fn handle_text<'alloc>(
-    code_transform: &mut CodeTransform<'alloc>,
+    code_transform: &CodeTransform<'alloc>,
     ev: &Text,
     ctx: &SyntaxPluginContext<'alloc>,
-    state: &mut StateStack,
+    state: &mut StateStack<'alloc>,
     _imports: &mut TemplateImportDependencies,
+    pending_overwrites: &mut Vec<(u32, u32, &'alloc str)>,
+    pending_append_lefts: &mut Vec<(u32, &'alloc str)>,
 ) {
     state.children.push(ChildInfo {
         start: ev.start,
         kind: ChildKind::Text,
-        scope_prefix: String::new(),
+        scope_prefix: "",
     });
 
-    // Escape the text content for use inside a JS string literal.
-    // Characters like `"`, `\`, newlines, etc. must be escaped.
-    let raw_text = &ctx.input[ev.start as usize..ev.end as usize];
-    let escaped = escape_js_string(raw_text);
-
-    if escaped != raw_text {
-        // Text needs escaping — overwrite with escaped version.
-        // The opening quote is added by the close phase via ChildKind::content_prefix().
-        code_transform.overwrite(ev.start, ev.end, &format!("{}\"", escaped));
-    } else {
-        // No escaping needed — just add the closing quote.
-        // The opening quote is added by the close phase as part of the separator
-        // insertion (see ChildKind::content_prefix). This is necessary because
-        // prepend_left is FIFO at the same position — if we prepend `"` here and
-        // the close phase later prepends `, `, the quote would appear first:
-        // `", hello"` instead of `, "hello"`.
-        code_transform.append_left(ev.end, "\"");
-    }
+    // Escape the text content in-place for use inside a JS string literal.
+    // Characters like `"`, `\`, newlines, etc. are individually overwritten.
+    // Characters that don't need escaping stay in place (preserving source positions).
+    escape_js_string_in_place(
+        code_transform,
+        ev.start,
+        ev.end,
+        ctx.input,
+        pending_overwrites,
+    );
+    // The opening quote is added by the close phase via ChildKind::content_prefix().
+    pending_append_lefts.push((ev.end, "\""));
 }

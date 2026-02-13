@@ -188,17 +188,26 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
         }
     }
 
+    /// Flush all deferred operations into the shared CodeTransform.
+    /// Must be called before reading the CodeTransform directly.
+    pub fn finalize(&mut self) {
+        match &mut self.backend {
+            Backend::Vdom(gen) => gen.finalize(),
+            Backend::Vapor(_) | Backend::Uninitialized => {}
+        }
+    }
+
     /// Get the transformed code (template block only).
-    pub fn get_code(&self) -> String {
-        match &self.backend {
+    pub fn get_code(&mut self) -> String {
+        match &mut self.backend {
             Backend::Vdom(gen) => gen.get_code(),
             Backend::Vapor(gen) => gen.get_code(),
             Backend::Uninitialized => self.code_transform.borrow().to_string(),
         }
     }
 
-    pub fn generate_source_map(&self) -> String {
-        match &self.backend {
+    pub fn generate_source_map(&mut self) -> String {
+        match &mut self.backend {
             Backend::Vdom(gen) => gen.generate_source_map(),
             Backend::Vapor(gen) => gen.generate_source_map(),
             Backend::Uninitialized => self

@@ -61,6 +61,7 @@ pub fn compile(
         is_production: opts.is_production.unwrap_or(false),
         component_id: opts.component_id,
         include_tsx: false,
+        skip_source_map: false,
     };
 
     let result = with_input_str(input, |input| {
@@ -172,6 +173,7 @@ pub fn compile_for_vite(
         is_production: opts.is_production.unwrap_or(false),
         component_id: opts.component_id,
         include_tsx: false,
+        skip_source_map: false,
     };
 
     let result = with_input_str(input, |input| {

@@ -91,5 +91,37 @@ fn bench_large_sfc(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_simple_sfc, bench_medium_sfc, bench_large_sfc);
+fn bench_kitchen_sink(c: &mut Criterion) {
+    let source = load_fixture("kitchen-sink");
+    let mut group = c.benchmark_group("kitchen_sink");
+
+    group.bench_function("compile", |b| {
+        b.iter(|| {
+            let allocator = Allocator::new();
+            let options = CodegenOptions::new().with_filename("kitchen-sink.vue");
+            let result = compile(black_box(&source), black_box(&options), &allocator);
+            black_box(result.code);
+        });
+    });
+
+    group.bench_function("compile_no_sourcemap", |b| {
+        b.iter(|| {
+            let allocator = Allocator::new();
+            let mut options = CodegenOptions::new().with_filename("kitchen-sink.vue");
+            options.skip_source_map = true;
+            let result = compile(black_box(&source), black_box(&options), &allocator);
+            black_box(result.code);
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_simple_sfc,
+    bench_medium_sfc,
+    bench_large_sfc,
+    bench_kitchen_sink
+);
 criterion_main!(benches);

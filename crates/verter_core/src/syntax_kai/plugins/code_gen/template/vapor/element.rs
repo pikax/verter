@@ -848,7 +848,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         let trimmed_start = ev.content.start + leading_ws as u32;
         let trimmed_end = ev.content.end - trailing_ws as u32;
         let expr_text = &_ctx.input[trimmed_start as usize..trimmed_end as usize];
-        let prefixed = self.prefix_expr(expr_text, trimmed_start, &ev.bindings);
+        let prefixed = self.prefix_expr(expr_text, trimmed_start, ev.bindings.as_ref());
 
         self.imports.add(VaporImportDependencies::TO_DISPLAY_STRING);
         let display_expr = format!("_toDisplayString({})", prefixed);

@@ -219,7 +219,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         &self,
         val_text: &str,
         val_start: u32,
-        bindings_result: &Option<crate::utils::oxc::BindingExtractionResult>,
+        bindings_result: Option<&crate::utils::oxc::BindingExtractionResult>,
     ) -> String {
         let var_mappings = self
             .stack

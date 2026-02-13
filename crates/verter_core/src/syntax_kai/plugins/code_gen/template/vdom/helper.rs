@@ -6,57 +6,102 @@ use crate::utils::vue::{PatchFlag, PatchFlags};
 /// if the patch flag is zero.
 pub fn build_patch_flag_suffix(
     patch_flag: PatchFlag,
-    dynamic_props: &[String],
+    dynamic_props: &[&str],
     is_production: bool,
 ) -> String {
     if patch_flag.0 == 0 {
         return String::new();
     }
-
     let mut suffix = String::new();
-    suffix.push_str(", ");
+    write_patch_flag_suffix(&mut suffix, patch_flag, dynamic_props, is_production);
+    suffix
+}
 
-    // Numeric value
-    suffix.push_str(&patch_flag.0.to_string());
+/// Append the patch flag + dynamic props suffix into an existing buffer.
+/// Avoids allocating a new String when the caller already has a buffer.
+pub fn write_patch_flag_suffix(
+    buf: &mut String,
+    patch_flag: PatchFlag,
+    dynamic_props: &[&str],
+    is_production: bool,
+) {
+    if patch_flag.0 == 0 {
+        return;
+    }
+
+    buf.push_str(", ");
+
+    // Numeric value — inline formatting avoids std::fmt machinery overhead.
+    push_i16(buf, patch_flag.0);
 
     // Dev-mode comment with flag names
     if !is_production {
-        suffix.push_str(" /* ");
-        let names = patch_flag_names(patch_flag);
-        suffix.push_str(&names.join(", "));
-        suffix.push_str(" */");
+        buf.push_str(" /* ");
+        let mut first = true;
+        for name in patch_flag_names_iter(patch_flag) {
+            if !first {
+                buf.push_str(", ");
+            }
+            buf.push_str(name);
+            first = false;
+        }
+        buf.push_str(" */");
     }
 
     // Dynamic props array
     if !dynamic_props.is_empty() {
-        suffix.push_str(", [");
+        buf.push_str(", [");
         for (i, prop) in dynamic_props.iter().enumerate() {
             if i > 0 {
-                suffix.push_str(", ");
+                buf.push_str(", ");
             }
             // Dynamic arg expressions (e.g. `"on" + _ctx.event`) already start
             // with `"` — emit them verbatim without extra quoting.
             if prop.starts_with('"') {
-                suffix.push_str(prop);
+                buf.push_str(prop);
             } else {
-                suffix.push('"');
-                suffix.push_str(prop);
-                suffix.push('"');
+                buf.push('"');
+                buf.push_str(prop);
+                buf.push('"');
             }
         }
-        suffix.push(']');
+        buf.push(']');
     }
-
-    suffix
 }
 
-/// Returns the list of flag names set in a PatchFlag bitmask.
-fn patch_flag_names(flag: PatchFlag) -> Vec<&'static str> {
-    if flag.is_special() {
-        return vec![flag.name()];
+/// Fast signed integer-to-string append without std::fmt overhead.
+#[inline]
+fn push_i16(buf: &mut String, n: i16) {
+    if n < 0 {
+        buf.push('-');
+        push_u32(buf, (-(n as i32)) as u32);
+    } else {
+        push_u32(buf, n as u32);
     }
+}
 
-    let all_flags = [
+/// Fast unsigned integer-to-string append without std::fmt overhead.
+#[inline]
+pub(crate) fn push_u32(buf: &mut String, mut n: u32) {
+    if n == 0 {
+        buf.push('0');
+        return;
+    }
+    // Max u32 is 4294967295 (10 digits)
+    let mut tmp = [0u8; 10];
+    let mut i = tmp.len();
+    while n > 0 {
+        i -= 1;
+        tmp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    // SAFETY: digits are always valid ASCII
+    buf.push_str(unsafe { std::str::from_utf8_unchecked(&tmp[i..]) });
+}
+
+/// Iterate flag names without Vec allocation.
+fn patch_flag_names_iter(flag: PatchFlag) -> impl Iterator<Item = &'static str> {
+    const ALL_FLAGS: [PatchFlags; 12] = [
         PatchFlags::Text,
         PatchFlags::Class,
         PatchFlags::Style,
@@ -71,13 +116,17 @@ fn patch_flag_names(flag: PatchFlag) -> Vec<&'static str> {
         PatchFlags::DevRootFragment,
     ];
 
-    let mut names = Vec::new();
-    for f in all_flags {
-        if flag.contains(f) {
-            names.push(f.name());
-        }
-    }
-    names
+    let is_special = flag.is_special();
+    let special_name = flag.name();
+
+    std::iter::once(special_name)
+        .take(if is_special { 1 } else { 0 })
+        .chain(
+            ALL_FLAGS
+                .iter()
+                .filter(move |f| !is_special && flag.contains(**f))
+                .map(|f| f.name()),
+        )
 }
 
 #[cfg(test)]
@@ -99,14 +148,14 @@ mod tests {
     #[test]
     fn test_build_patch_flag_suffix_combined_dev() {
         let flag = PatchFlags::Text.into_flag().add(PatchFlags::Props);
-        let result = build_patch_flag_suffix(flag, &["id".to_string()], false);
+        let result = build_patch_flag_suffix(flag, &["id"], false);
         assert_eq!(result, ", 9 /* TEXT, PROPS */, [\"id\"]");
     }
 
     #[test]
     fn test_build_patch_flag_suffix_production() {
         let flag = PatchFlags::Text.into_flag().add(PatchFlags::Props);
-        let result = build_patch_flag_suffix(flag, &["id".to_string()], true);
+        let result = build_patch_flag_suffix(flag, &["id"], true);
         assert_eq!(result, ", 9, [\"id\"]");
     }
 }

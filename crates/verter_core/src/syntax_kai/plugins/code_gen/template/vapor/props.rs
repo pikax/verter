@@ -4,7 +4,7 @@
 use crate::syntax_kai::{
     plugin::SyntaxPluginContext,
     plugins::code_gen::{
-        template::shared::helper::apply_dynamic_arg_prefix,
+        template::shared::helper::build_prefixed_value_with_var_mappings,
         types::{TemplateCodeGenError, TemplateCodeGenResult, VaporImportDependencies},
     },
     types::{OxcCompiledElementStart, PropKind},
@@ -62,7 +62,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 PropKind::ClassBind => {
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
+                        let prefixed =
+                            self.prefix_expr(expr_text, exp.start, exp.bindings.as_ref());
                         self.imports.add(VaporImportDependencies::SET_CLASS);
                         self.stack
                             .last_mut()
@@ -80,7 +81,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 PropKind::StyleBind => {
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
+                        let prefixed =
+                            self.prefix_expr(expr_text, exp.start, exp.bindings.as_ref());
                         self.imports.add(VaporImportDependencies::SET_STYLE);
                         self.stack
                             .last_mut()
@@ -98,7 +100,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 PropKind::Bind => {
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
+                        let prefixed =
+                            self.prefix_expr(expr_text, exp.start, exp.bindings.as_ref());
 
                         if prop.has_dynamic_arg {
                             // :[attrName]="value" → _setDynamicProps(n{X}, [{ [expr]: value }])
@@ -107,12 +110,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             ))?;
                             let arg_raw =
                                 &ctx.input[arg_span.start as usize..arg_span.end as usize];
-                            let arg_prefixed = apply_dynamic_arg_prefix(
+                            let arg_prefixed = build_prefixed_value_with_var_mappings(
                                 arg_raw,
                                 arg_span.start,
-                                &oxc_prop.arg.as_ref().and_then(|a| a.bindings.clone()),
+                                oxc_prop.arg.as_ref().and_then(|a| a.bindings.as_ref()),
                                 &self.bindings,
                                 self.is_production,
+                                &[],
                             );
                             self.imports.add(VaporImportDependencies::SET_DYNAMIC_PROPS);
                             let dynamic_expr = format!("{{ [{}]: {} }}", arg_prefixed, prefixed);
@@ -153,7 +157,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     // v-bind="obj" → _setDynamicProps(n{X}, [expr])
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
+                        let prefixed =
+                            self.prefix_expr(expr_text, exp.start, exp.bindings.as_ref());
                         self.imports.add(VaporImportDependencies::SET_DYNAMIC_PROPS);
                         self.stack
                             .last_mut()
@@ -177,7 +182,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     // Matches Vue's compiler behavior: spread event handlers via _toHandlers.
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
+                        let prefixed =
+                            self.prefix_expr(expr_text, exp.start, exp.bindings.as_ref());
                         self.imports.add(VaporImportDependencies::SET_DYNAMIC_PROPS);
                         self.imports.add(VaporImportDependencies::TO_HANDLERS);
                         let dynamic_expr = format!("_toHandlers({})", prefixed);
@@ -197,7 +203,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 PropKind::Html => {
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
+                        let prefixed =
+                            self.prefix_expr(expr_text, exp.start, exp.bindings.as_ref());
                         self.imports.add(VaporImportDependencies::SET_HTML);
                         self.stack
                             .last_mut()
@@ -215,7 +222,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 PropKind::Text => {
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
+                        let prefixed =
+                            self.prefix_expr(expr_text, exp.start, exp.bindings.as_ref());
                         self.imports.add(VaporImportDependencies::TO_DISPLAY_STRING);
                         let display_expr = format!("_toDisplayString({})", prefixed);
 
@@ -238,7 +246,8 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 PropKind::Show => {
                     if let Some(ref exp) = oxc_prop.exp {
                         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-                        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
+                        let prefixed =
+                            self.prefix_expr(expr_text, exp.start, exp.bindings.as_ref());
                         self.imports.add(VaporImportDependencies::APPLY_V_SHOW);
                         let stmt = format!("_applyVShow(n{}, () => ({}))", node_ref, prefixed);
                         self.stack
@@ -287,7 +296,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
 
         let handler_expr = if let Some(ref exp) = oxc_prop.exp {
             let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-            let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
+            let prefixed = self.prefix_expr(expr_text, exp.start, exp.bindings.as_ref());
 
             let trimmed = prefixed.trim();
             if is_member_expression(trimmed) {
@@ -353,12 +362,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 "dynamic On prop must have arg span",
             ))?;
             let arg_raw = &ctx.input[arg_span.start as usize..arg_span.end as usize];
-            let arg_prefixed = apply_dynamic_arg_prefix(
+            let arg_prefixed = build_prefixed_value_with_var_mappings(
                 arg_raw,
                 arg_span.start,
-                &oxc_prop.arg.as_ref().and_then(|a| a.bindings.clone()),
+                oxc_prop.arg.as_ref().and_then(|a| a.bindings.as_ref()),
                 &self.bindings,
                 self.is_production,
+                &[],
             );
             self.imports.add(VaporImportDependencies::ON);
             self.stack
@@ -428,7 +438,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         };
 
         let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-        let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
+        let prefixed = self.prefix_expr(expr_text, exp.start, exp.bindings.as_ref());
 
         let tag_name = &self
             .stack
@@ -536,7 +546,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         // Build value expression.
         let value = if let Some(ref exp) = oxc_prop.exp {
             let expr_text = &ctx.input[exp.start as usize..exp.end as usize];
-            let prefixed = self.prefix_expr(expr_text, exp.start, &exp.bindings);
+            let prefixed = self.prefix_expr(expr_text, exp.start, exp.bindings.as_ref());
             format!("() => {}", prefixed)
         } else {
             String::new()
@@ -548,12 +558,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             .map(|arg_span| {
                 let raw = &ctx.input[arg_span.start as usize..arg_span.end as usize];
                 if prop.has_dynamic_arg {
-                    apply_dynamic_arg_prefix(
+                    build_prefixed_value_with_var_mappings(
                         raw,
                         arg_span.start,
-                        &oxc_prop.arg.as_ref().and_then(|a| a.bindings.clone()),
+                        oxc_prop.arg.as_ref().and_then(|a| a.bindings.as_ref()),
                         &self.bindings,
                         self.is_production,
+                        &[],
                     )
                 } else {
                     format!("\"{}\"", raw)
