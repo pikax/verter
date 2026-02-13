@@ -232,76 +232,40 @@ jobs:
           script: |
             const resultJson = JSON.parse(process.env.RESULT_JSON);
             const overallStatus = '${{ needs.benchmark.outputs.overall-status }}';
-
-            const statusEmoji = {
-              pass: '✅',
-              warning: '⚠️',
-              fail: '❌'
-            };
-            
-            const statusColor = {
-              pass: '🟢',
-              warning: '🟡',
-              fail: '🔴'
-            };
-            
-            let comment = `## ${statusEmoji[overallStatus]} Benchmark Results\n\n`;
-            comment += `**Overall Status:** ${statusColor[overallStatus]} **${overallStatus.toUpperCase()}**\n\n`;
-            
+            const icon = { pass: '✅', warning: '⚠️', fail: '❌' };
             const { summary } = resultJson;
-            comment += `### Summary\n\n`;
-            comment += `- Total Fixtures: ${summary.totalFixtures}\n`;
-            comment += `- ${statusEmoji.pass} Passed: ${summary.passed}\n`;
-            comment += `- ${statusEmoji.warning} Warnings: ${summary.warnings}\n`;
-            comment += `- ${statusEmoji.fail} Failed: ${summary.failed}\n`;
-            comment += `- Average Speedup: **${summary.avgSpeedup.toFixed(2)}x**\n\n`;
-            
-            comment += `### Detailed Results\n\n`;
-            comment += `| Fixture | Size | Vue (ms) | Verter (ms) | Speedup | Throughput | Status |\n`;
-            comment += `|---------|------|----------|-------------|---------|------------|--------|\n`;
-            
-            for (const fixture of resultJson.fixtures) {
-              const vueMean = fixture.vue.stats.mean.toFixed(2);
-              const verterMean = fixture.verter.stats.mean.toFixed(2);
-              const speedup = fixture.speedup.toFixed(2);
-              const throughput = fixture.verter.throughputMBs.toFixed(2);
-              const status = statusEmoji[fixture.status];
-              
-              const sizeKB = (fixture.size / 1024).toFixed(2);
-              comment += `| ${fixture.name} | ${sizeKB} KB | ${vueMean} | ${verterMean} | ${speedup}x | ${throughput} MB/s | ${status} |\n`;
+
+            const fmtSize = (bytes) => bytes > 1024 * 1024
+              ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+              : `${(bytes / 1024).toFixed(1)} KB`;
+
+            let c = `## Benchmark Results\n\n`;
+            c += `${icon[overallStatus]} **${overallStatus.toUpperCase()}** — `;
+            c += `**${summary.passed}** passed, **${summary.warnings}** warnings, **${summary.failed}** failed — `;
+            c += `avg **${summary.avgSpeedup.toFixed(2)}x** speedup\n\n`;
+
+            c += `| Fixture | Size | Vue | Verter | Speedup | |\n`;
+            c += `|---------|------|-----|--------|---------|---|\n`;
+
+            for (const f of resultJson.fixtures) {
+              const vue = `${f.vue.stats.mean.toFixed(2)} ms`;
+              const verter = `${f.verter.stats.mean.toFixed(2)} ms`;
+              c += `| ${f.name} | ${fmtSize(f.size)} | ${vue} | ${verter} (${f.verter.throughputMBs.toFixed(1)} MB/s) | **${f.speedup.toFixed(2)}x** | ${icon[f.status]} |\n`;
             }
-            
-            comment += `\n`;
-            comment += `<details>\n`;
-            comment += `<summary>Performance Details</summary>\n\n`;
-            
-            for (const fixture of resultJson.fixtures) {
-              comment += `#### ${fixture.name}\n\n`;
-              comment += `**Vue:**\n`;
-              comment += `- Mean: ${fixture.vue.stats.mean.toFixed(2)} ms\n`;
-              comment += `- Median (p50): ${fixture.vue.stats.median.toFixed(2)} ms\n`;
-              comment += `- p95: ${fixture.vue.stats.p95.toFixed(2)} ms\n`;
-              comment += `- Ops/sec: ${fixture.vue.opsPerSec.toFixed(0)}\n\n`;
-              
-              comment += `**Verter:**\n`;
-              comment += `- Mean: ${fixture.verter.stats.mean.toFixed(2)} ms\n`;
-              comment += `- Median (p50): ${fixture.verter.stats.median.toFixed(2)} ms\n`;
-              comment += `- p95: ${fixture.verter.stats.p95.toFixed(2)} ms\n`;
-              comment += `- Ops/sec: ${fixture.verter.opsPerSec.toFixed(0)}\n`;
-              comment += `- Throughput: ${fixture.verter.throughputMBs.toFixed(2)} MB/s\n\n`;
-              
-              comment += `**Speedup:** ${fixture.speedup.toFixed(2)}x (${statusEmoji[fixture.status]} ${fixture.status})\n\n`;
+
+            c += `\n<details>\n<summary>Detailed statistics</summary>\n\n`;
+            c += `| Fixture | Vue (mean ± σ) | Verter (mean ± σ) | Vue ops/s | Verter ops/s |\n`;
+            c += `|---------|----------------|-------------------|-----------|-------------|\n`;
+
+            for (const f of resultJson.fixtures) {
+              const vueSig = f.vue.stats.stdDev.toFixed(2);
+              const verterSig = f.verter.stats.stdDev.toFixed(2);
+              c += `| ${f.name} | ${f.vue.stats.mean.toFixed(2)} ± ${vueSig} ms | ${f.verter.stats.mean.toFixed(2)} ± ${verterSig} ms | ${f.vue.opsPerSec.toFixed(0)} | ${f.verter.opsPerSec.toFixed(0)} |\n`;
             }
-            
-            comment += `</details>\n\n`;
-            
-            comment += `---\n\n`;
-            comment += `**Status Criteria:**\n`;
-            comment += `- ${statusEmoji.pass} **Pass**: Verter ≥ 100% of Vue performance (speedup ≥ 1.0x)\n`;
-            comment += `- ${statusEmoji.warning} **Warning**: Verter 50-99% of Vue performance (0.5x ≤ speedup < 1.0x)\n`;
-            comment += `- ${statusEmoji.fail} **Fail**: Verter < 50% of Vue performance (speedup < 0.5x)\n`;
-            
-            core.setOutput('comment', comment);
+
+            c += `\n</details>\n`;
+
+            core.setOutput('comment', c);
 
       - name: Post PR comment
         if: github.event_name == 'issue_comment' && needs.check-trigger.outputs.pr-number
@@ -324,23 +288,14 @@ jobs:
           script: |
             const overallStatus = '${{ needs.benchmark.outputs.overall-status }}';
             const resultJson = ${{ needs.benchmark.outputs.result-json }};
-            
-            const conclusion = overallStatus === 'pass' ? 'success' : 
-                              overallStatus === 'warning' ? 'neutral' : 
-                              'failure';
-            
-            const title = overallStatus === 'pass' ? 
-              `✅ All benchmarks passed (avg ${resultJson.summary.avgSpeedup.toFixed(2)}x speedup)` :
-              overallStatus === 'warning' ?
-              `⚠️ Benchmarks passed with warnings (avg ${resultJson.summary.avgSpeedup.toFixed(2)}x speedup)` :
-              `❌ Some benchmarks failed (avg ${resultJson.summary.avgSpeedup.toFixed(2)}x speedup)`;
-            
-            let summary = `Benchmark Results:\n`;
-            summary += `- Passed: ${resultJson.summary.passed}\n`;
-            summary += `- Warnings: ${resultJson.summary.warnings}\n`;
-            summary += `- Failed: ${resultJson.summary.failed}\n`;
-            summary += `- Average Speedup: ${resultJson.summary.avgSpeedup.toFixed(2)}x\n`;
-            
+            const icon = { pass: '✅', warning: '⚠️', fail: '❌' };
+            const s = resultJson.summary;
+
+            const conclusion = overallStatus === 'pass' ? 'success' :
+                              overallStatus === 'warning' ? 'neutral' : 'failure';
+
+            const title = `${icon[overallStatus]} ${s.passed} passed, ${s.warnings} warnings, ${s.failed} failed — avg ${s.avgSpeedup.toFixed(2)}x`;
+
             await github.rest.checks.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -350,15 +305,10 @@ jobs:
               conclusion: conclusion,
               output: {
                 title: title,
-                summary: summary,
-                text: `${{ steps.generate-comment.outputs.comment }}`
+                summary: `${{ steps.generate-comment.outputs.comment }}`
               }
             });
 
       - name: Summary
         run: |
-          echo "### Benchmark Complete 🎯" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Status:** ${{ needs.benchmark.outputs.overall-status }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "See PR comment for detailed results." >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.generate-comment.outputs.comment }}" >> $GITHUB_STEP_SUMMARY
