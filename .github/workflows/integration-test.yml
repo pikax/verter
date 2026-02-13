@@ -302,6 +302,13 @@ jobs:
           cache: ${{ matrix.project.package-manager }}
           cache-dependency-path: test-project/**/pnpm-lock.yaml
 
+      - name: Configure hoist pattern for Verter
+        working-directory: test-project
+        run: |
+          # Must be set BEFORE pnpm install so modules dir is created with this pattern
+          # Otherwise pnpm add later fails with ERR_PNPM_PUBLIC_HOIST_PATTERN_DIFF
+          echo 'public-hoist-pattern[]=@verter/*' >> .npmrc
+
       - name: Install project dependencies
         working-directory: test-project
         run: |
@@ -316,13 +323,6 @@ jobs:
         with:
           name: verter-workspace
           path: verter-workspace
-
-      - name: Hoist Verter packages for subpackage resolution
-        working-directory: test-project
-        run: |
-          # pnpm strict isolation prevents subpackages from resolving workspace-root deps
-          # Hoist @verter/* so vite configs in nested packages can import them
-          echo 'public-hoist-pattern[]=@verter/*' >> .npmrc
 
       - name: Install Verter packages (from artifact/workspace)
         if: steps.source.outputs.source == 'artifact'
