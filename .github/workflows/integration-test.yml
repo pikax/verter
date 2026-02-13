@@ -216,18 +216,6 @@ jobs:
           name: verter-packages
           path: dist/*.tgz
           if-no-files-found: error
-          
-      - name: Upload workspace artifact for artifact-based testing
-        if: steps.source.outputs.source == 'artifact'
-        uses: actions/upload-artifact@v4
-        with:
-          name: verter-workspace  
-          path: |
-            packages/native/
-            packages/vite-plugin/
-            !**/.turbo
-            !**/node_modules
-          if-no-files-found: error
 
       - name: Save source info
         run: |
@@ -353,20 +341,24 @@ jobs:
           echo "test_passed=${TP:-0}" >> $GITHUB_OUTPUT
           echo "test_failed=${TF:-0}" >> $GITHUB_OUTPUT
 
-      - name: Download Verter workspace artifact
+      - name: Download Verter packages
         if: steps.source.outputs.source == 'artifact'
         uses: actions/download-artifact@v4
         with:
-          name: verter-workspace
-          path: verter-workspace
+          name: verter-packages
+          path: verter-packages
 
-      - name: Install Verter packages (from artifact/workspace)
+      - name: Install Verter packages (from tarballs)
         if: steps.source.outputs.source == 'artifact'
         working-directory: test-project
         run: |
-          echo "📦 Installing Verter from workspace builds"
-          ${{ matrix.project.package-manager }} add -w ../verter-workspace/packages/native ../verter-workspace/packages/vite-plugin
-          echo "✅ Verter packages installed from workspace"
+          echo "📦 Installing Verter from tarballs (workspace:* resolved by pnpm pack)"
+          NATIVE_TGZ=$(ls ../verter-packages/verter-native-*.tgz)
+          PLUGIN_TGZ=$(ls ../verter-packages/verter-vite-plugin-*.tgz)
+          echo "  native: $NATIVE_TGZ"
+          echo "  vite-plugin: $PLUGIN_TGZ"
+          ${{ matrix.project.package-manager }} add -w "$NATIVE_TGZ" "$PLUGIN_TGZ"
+          echo "✅ Verter packages installed from tarballs"
 
       - name: Install Verter vite-plugin (from npm)
         if: steps.source.outputs.source == 'npm'
