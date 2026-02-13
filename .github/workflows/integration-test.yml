@@ -389,6 +389,17 @@ jobs:
           echo "$CONFIG_FILES"
           echo "---"
 
+          # Link @verter into nested packages so they can resolve it
+          # pnpm strict isolation means only declared deps are visible per-package
+          ROOT_NM="$(pwd)/node_modules"
+          for CONFIG_FILE in $CONFIG_FILES; do
+            DIR=$(dirname "$CONFIG_FILE")
+            if [ "$DIR" != "." ] && [ -d "$DIR/node_modules" ] && [ ! -e "$DIR/node_modules/@verter" ]; then
+              echo "🔗 Linking @verter into $DIR/node_modules/"
+              ln -sfn "$ROOT_NM/@verter" "$DIR/node_modules/@verter"
+            fi
+          done
+
           for CONFIG_FILE in $CONFIG_FILES; do
             echo "📝 Modifying $CONFIG_FILE"
             cat "$CONFIG_FILE"
