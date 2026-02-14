@@ -52,6 +52,22 @@ pub struct CodegenOptions {
 }
 
 #[napi(object)]
+pub struct JsCompiledStyleBlock {
+    /// Compiled CSS code (scoped selectors, v-bind replacements, module hashing applied)
+    pub code: String,
+    /// Whether this style block is scoped
+    pub scoped: bool,
+    /// Style language (css, scss, less, stylus)
+    pub lang: Option<String>,
+    /// Whether this is a CSS module block
+    pub is_module: bool,
+    /// CSS module class mappings (each entry is [original, hashed])
+    pub module_classes: Vec<Vec<String>>,
+    /// CSS processing errors
+    pub errors: Vec<String>,
+}
+
+#[napi(object)]
 pub struct CodegenResult {
     /// The transformed code
     pub code: String,
@@ -59,6 +75,8 @@ pub struct CodegenResult {
     pub source_map: String,
     /// The transformed code with inline source map appended
     pub code_with_source_map: String,
+    /// Compiled CSS blocks from `<style>` tags
+    pub styles: Vec<JsCompiledStyleBlock>,
     /// Time taken for the Rust pipeline in milliseconds
     pub duration_ms: f64,
 }
@@ -113,10 +131,43 @@ pub fn compile(
         core_compile(input, &core_options, &allocator)
     })?;
 
+    let styles = result
+        .styles
+        .into_iter()
+        .map(|s| {
+            let module_classes = s
+                .module
+                .as_ref()
+                .map(|m| {
+                    m.classes
+                        .iter()
+                        .map(|c| vec![String::new(), c.hashed.clone()])
+                        .collect()
+                })
+                .unwrap_or_default();
+            JsCompiledStyleBlock {
+                code: s.code,
+                scoped: s.scoped,
+                lang: s.lang.map(|l| match l {
+                    verter_core::syntax_kai::types::StyleLang::Css => "css".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Scss => "scss".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Sass => "sass".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Less => "less".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Stylus => "stylus".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Unknown => "unknown".to_string(),
+                }),
+                is_module: s.module.is_some(),
+                module_classes,
+                errors: s.errors,
+            }
+        })
+        .collect();
+
     Ok(CodegenResult {
         code: result.code,
         source_map: result.source_map,
         code_with_source_map: result.code_with_source_map,
+        styles,
         duration_ms: result.duration_ms,
     })
 }
@@ -226,6 +277,44 @@ pub fn compile_for_vite(
         core_compile(input, &core_options, &allocator)
     })?;
 
+    let styles = result
+        .styles
+        .into_iter()
+        .map(|s| {
+            let module_classes = s
+                .module
+                .as_ref()
+                .map(|m| {
+                    m.classes
+                        .iter()
+                        .map(|c| vec![String::new(), c.hashed.clone()])
+                        .collect()
+                })
+                .unwrap_or_default();
+            let module_name = s.module.as_ref().map(|m| {
+                m.custom_name
+                    .map(|_span| "custom".to_string())
+                    .unwrap_or_else(|| "$style".to_string())
+            });
+            JsStyleBlock {
+                code: s.code,
+                source_map: None,
+                scoped: s.scoped,
+                is_module: s.module.is_some(),
+                lang: s.lang.map(|l| match l {
+                    verter_core::syntax_kai::types::StyleLang::Css => "css".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Scss => "scss".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Sass => "sass".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Less => "less".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Stylus => "stylus".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Unknown => "unknown".to_string(),
+                }),
+                module_name,
+                module_classes,
+            }
+        })
+        .collect();
+
     Ok(ViteCodegenResult {
         script: Some(JsBlockOutput {
             code: result.code,
@@ -234,7 +323,7 @@ pub fn compile_for_vite(
             body_start_utf16: 0,
         }),
         template: None,
-        styles: vec![],
+        styles,
         duration_ms: result.duration_ms,
     })
 }

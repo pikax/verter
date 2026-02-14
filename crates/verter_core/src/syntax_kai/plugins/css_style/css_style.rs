@@ -4,10 +4,30 @@ use crate::{
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxResult},
         types::{
             CssModuleClassMapping, CssModuleInfo, CssParsedStyleBlock, Event, ProcessedCssVBind,
-            ProcessedStyleBlock,
+            ProcessedStyleBlock, StyleLang,
         },
     },
 };
+
+/// Compiled CSS output for a single `<style>` block.
+///
+/// Produced by [`CssStylePlugin`] after processing scoped selectors, v-bind
+/// replacement, and CSS module hashing.
+#[derive(Debug, Clone)]
+pub struct CssStyleOutput {
+    /// Compiled CSS code. For transformed blocks this includes scoped selectors,
+    /// v-bind replacements, and module-hashed class names. For plain unscoped
+    /// blocks this is the original CSS content.
+    pub code: String,
+    /// Whether this block has the `scoped` attribute.
+    pub scoped: bool,
+    /// Style language (css, scss, less, stylus).
+    pub lang: Option<StyleLang>,
+    /// CSS module info (class name mappings). None if not a module block.
+    pub module: Option<CssModuleInfo>,
+    /// CSS processing errors (e.g., lightningcss parse failures).
+    pub errors: Vec<String>,
+}
 
 /// CSS style plugin for the syntax_kai pipeline.
 ///
@@ -22,6 +42,8 @@ pub struct CssStylePlugin {
     scope_id: Option<[u8; 8]>,
     /// Component ID for CSS module class hashing.
     component_id: Option<[u8; 8]>,
+    /// Collected CSS outputs for all processed style blocks.
+    styles: Vec<CssStyleOutput>,
 }
 
 impl Default for CssStylePlugin {
@@ -35,6 +57,7 @@ impl CssStylePlugin {
         Self {
             scope_id: None,
             component_id: None,
+            styles: Vec::new(),
         }
     }
 
@@ -44,6 +67,11 @@ impl CssStylePlugin {
 
     pub fn set_component_id(&mut self, component_id: [u8; 8]) {
         self.component_id = Some(component_id);
+    }
+
+    /// Take the collected CSS outputs, leaving the internal buffer empty.
+    pub fn take_styles(&mut self) -> Vec<CssStyleOutput> {
+        std::mem::take(&mut self.styles)
     }
 
     fn process_parsed_style(
@@ -145,7 +173,27 @@ impl<'alloc> SyntaxPlugin<'alloc> for CssStylePlugin {
     ) -> SyntaxResult<Event<'alloc>> {
         match event {
             Event::CssParsedStyle(parsed) => {
+                let content_span = parsed.content;
+                let lang = parsed.lang;
                 let processed = self.process_parsed_style(*parsed, ctx);
+
+                // Collect CSS output: use transformed CSS if available, else original content
+                let code = if let Some(ref css) = processed.transformed_css {
+                    String::from_utf8_lossy(css).to_string()
+                } else if let Some(span) = content_span {
+                    ctx.input[span.start as usize..span.end as usize].to_string()
+                } else {
+                    String::new()
+                };
+
+                self.styles.push(CssStyleOutput {
+                    code,
+                    scoped: processed.scoped,
+                    lang,
+                    module: processed.module.clone(),
+                    errors: processed.errors.clone(),
+                });
+
                 SyntaxResult::Replace(Event::ProcessedStyle(Box::new(processed)))
             }
             other => SyntaxResult::Keep(other),

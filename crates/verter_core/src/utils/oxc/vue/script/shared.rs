@@ -87,9 +87,7 @@ pub fn process_import<'a>(
 }
 
 /// Process a named export declaration and return a ScriptExport item
-pub fn process_named_export<'a>(
-    export: &ExportNamedDeclaration<'a>,
-) -> ScriptExport<'a> {
+pub fn process_named_export<'a>(export: &ExportNamedDeclaration<'a>) -> ScriptExport<'a> {
     let mut bindings = Vec::new();
 
     // Extract bindings from export specifiers: export { a, b as c }
@@ -148,10 +146,7 @@ pub fn process_all_export<'a>(
 }
 
 /// Extract bindings from a declaration (for export declarations)
-fn extract_declaration_bindings<'a>(
-    decl: &Declaration<'a>,
-    bindings: &mut Vec<ScriptBinding<'a>>,
-) {
+fn extract_declaration_bindings<'a>(decl: &Declaration<'a>, bindings: &mut Vec<ScriptBinding<'a>>) {
     match decl {
         Declaration::VariableDeclaration(var_decl) => {
             for declarator in &var_decl.declarations {

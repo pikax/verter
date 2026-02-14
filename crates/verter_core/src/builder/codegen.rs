@@ -13,12 +13,15 @@ use std::{cell::RefCell, rc::Rc};
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
+pub use crate::syntax_kai::plugins::css_style::CssStyleOutput;
 use crate::{
     code_transform::{CodeTransform, SourceMapOptions},
     syntax_kai::{
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxPluginOptions, SyntaxResult},
         plugins::{
             code_gen::{script::ScriptGeneratorPlugin, template::TemplateGeneratorPlugin},
+            css_parser::CssParserPlugin,
+            css_style::CssStylePlugin,
             element_compiler::element_compiler::ElementCompilerPlugin,
             oxc_parser::oxc_parser::OxcParserPlugin,
         },
@@ -153,6 +156,8 @@ pub struct CodegenResult {
     pub source_map: String,
     /// The transformed code with inline source map appended.
     pub code_with_source_map: String,
+    /// Compiled CSS blocks from `<style>` tags (scoped, v-bind, modules applied).
+    pub styles: Vec<CssStyleOutput>,
     /// Time taken in milliseconds.
     pub duration_ms: f64,
 }
@@ -201,7 +206,6 @@ fn run_pipeline<'a>(
 // =============================================================================
 
 /// SHA-256 hash → 8 hex chars (first 4 bytes).
-#[allow(dead_code)] // used by compute_scope_id; will be needed for scoped styles
 pub(crate) fn get_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
@@ -219,7 +223,6 @@ fn extract_component_name(filename: &str) -> String {
 }
 
 /// Compute scope_id as 8 hex chars from component name.
-#[allow(dead_code)] // will be needed for scoped styles
 fn compute_scope_id(component_name: &str) -> [u8; 8] {
     let hash = get_hash(component_name);
     let hash_bytes = hash.as_bytes();
@@ -289,6 +292,21 @@ pub fn compile(
 
     let code_transform = Rc::new(RefCell::new(CodeTransform::new(input, allocator)));
 
+    // CSS plugins — scope_id from custom component_id or hashed component name
+    let scope_id = if let Some(ref id) = options.component_id {
+        let mut bytes = [b'0'; 8];
+        let id_bytes = id.as_bytes();
+        let len = id_bytes.len().min(8);
+        bytes[..len].copy_from_slice(&id_bytes[..len]);
+        bytes
+    } else {
+        compute_scope_id(&component_name)
+    };
+    let mut css_parser = CssParserPlugin::new();
+    let mut css_style = CssStylePlugin::new();
+    css_style.set_scope_id(scope_id);
+    css_style.set_component_id(scope_id);
+
     // codegen plugins
     let mut code_gen_script = ScriptGeneratorPlugin::new(
         Rc::clone(&code_transform),
@@ -320,6 +338,8 @@ pub fn compile(
 
         let pipeline: &mut [&mut dyn SyntaxPlugin] = &mut [
             &mut script_ec,
+            &mut css_parser,
+            &mut css_style,
             &mut script_oxc,
             &mut code_gen_script,
             &mut code_gen_template,
@@ -336,6 +356,7 @@ pub fn compile(
     code_gen_script.end(&ctx);
 
     let code = code_transform.borrow().build_string();
+    let styles = css_style.take_styles();
 
     let (source_map, code_with_source_map) = if options.skip_source_map {
         (String::new(), String::new())
@@ -376,6 +397,7 @@ pub fn compile(
         code,
         source_map,
         code_with_source_map,
+        styles,
         duration_ms,
     }
 }
@@ -496,6 +518,106 @@ const count = ref(0)
         let result = compile(input, &options, &allocator);
 
         assert!(!result.code.is_empty(), "Should produce output");
+        assert_eq!(result.styles.len(), 1, "Should have one style block");
+        assert!(result.styles[0].scoped, "Style should be scoped");
+        assert!(
+            result.styles[0].code.contains("[data-v-"),
+            "Scoped CSS should contain [data-v-] attribute selector, got: {}",
+            result.styles[0].code
+        );
+        assert!(
+            result.styles[0].errors.is_empty(),
+            "Should have no CSS errors"
+        );
+    }
+
+    #[test]
+    fn test_pipeline_plain_style() {
+        let input = r#"<template><div>hi</div></template>
+<style>.box { color: red; }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("Plain.vue");
+
+        let result = compile(input, &options, &allocator);
+
+        assert_eq!(result.styles.len(), 1, "Should have one style block");
+        assert!(!result.styles[0].scoped, "Style should not be scoped");
+        assert!(
+            result.styles[0].code.contains(".box"),
+            "Plain CSS should preserve selectors, got: {}",
+            result.styles[0].code
+        );
+    }
+
+    #[test]
+    fn test_pipeline_multiple_style_blocks() {
+        let input = r#"<template><div>hi</div></template>
+<style scoped>.a { color: red; }</style>
+<style>.b { color: blue; }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("Multi.vue");
+
+        let result = compile(input, &options, &allocator);
+
+        assert_eq!(result.styles.len(), 2, "Should have two style blocks");
+        assert!(result.styles[0].scoped, "First block should be scoped");
+        assert!(
+            !result.styles[1].scoped,
+            "Second block should not be scoped"
+        );
+    }
+
+    #[test]
+    fn test_pipeline_scoped_v_bind() {
+        let input = r#"<template><div>hi</div></template>
+<style scoped>.box { color: v-bind(color); }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("VBind.vue");
+
+        let result = compile(input, &options, &allocator);
+
+        assert_eq!(result.styles.len(), 1);
+        assert!(
+            result.styles[0].code.contains("var(--"),
+            "v-bind should be replaced with CSS variable, got: {}",
+            result.styles[0].code
+        );
+    }
+
+    #[test]
+    fn test_pipeline_css_modules() {
+        let input = r#"<template><div>hi</div></template>
+<style module>.btn { color: red; }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("Modules.vue");
+
+        let result = compile(input, &options, &allocator);
+
+        assert_eq!(result.styles.len(), 1);
+        assert!(result.styles[0].module.is_some(), "Should have module info");
+        let module = result.styles[0].module.as_ref().unwrap();
+        assert!(!module.classes.is_empty(), "Should have class mappings");
+        assert!(
+            result.styles[0].code.contains(".btn_"),
+            "Module classes should be hashed, got: {}",
+            result.styles[0].code
+        );
+    }
+
+    #[test]
+    fn test_pipeline_no_style() {
+        let input = r#"<template><div>hi</div></template>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new();
+
+        let result = compile(input, &options, &allocator);
+
+        assert!(result.styles.is_empty(), "Should have no style blocks");
     }
 
     #[test]

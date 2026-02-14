@@ -47,6 +47,23 @@ pub struct CodegenOptions {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CompiledStyleBlock {
+    /// Compiled CSS code (scoped selectors, v-bind replacements, module hashing applied)
+    pub code: String,
+    /// Whether this style block is scoped
+    pub scoped: bool,
+    /// Style language (css, scss, less, stylus)
+    pub lang: Option<String>,
+    /// Whether this is a CSS module block
+    pub is_module: bool,
+    /// CSS module class mappings (each entry is [original, hashed])
+    pub module_classes: Vec<Vec<String>>,
+    /// CSS processing errors
+    pub errors: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodegenResult {
     /// The transformed code
     pub code: String,
@@ -54,11 +71,13 @@ pub struct CodegenResult {
     pub source_map: String,
     /// The transformed code with inline source map appended
     pub code_with_source_map: String,
+    /// Compiled CSS blocks from `<style>` tags
+    pub styles: Vec<CompiledStyleBlock>,
     /// Time taken for the Rust pipeline in milliseconds
     pub duration_ms: f64,
     /// The generated TSX code (all blocks: script + template JSX + commented styles)
     pub tsx: String,
-    /// Compiled CSS (scoped selectors applied, v-bind replaced)
+    /// Compiled CSS (scoped selectors applied, v-bind replaced) — deprecated, use `styles`
     pub css: String,
     /// Time taken for TSX generation in milliseconds
     pub tsx_duration_ms: f64,
@@ -104,10 +123,43 @@ fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
     let tsx_allocator = oxc_allocator::Allocator::new();
     let tsx_result = compile_with_tsx(input, &core_options, &tsx_allocator);
 
+    let styles: Vec<CompiledStyleBlock> = result
+        .styles
+        .iter()
+        .map(|s| {
+            let module_classes = s
+                .module
+                .as_ref()
+                .map(|m| {
+                    m.classes
+                        .iter()
+                        .map(|c| vec![String::new(), c.hashed.clone()])
+                        .collect()
+                })
+                .unwrap_or_default();
+            CompiledStyleBlock {
+                code: s.code.clone(),
+                scoped: s.scoped,
+                lang: s.lang.map(|l| match l {
+                    verter_core::syntax_kai::types::StyleLang::Css => "css".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Scss => "scss".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Sass => "sass".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Less => "less".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Stylus => "stylus".to_string(),
+                    verter_core::syntax_kai::types::StyleLang::Unknown => "unknown".to_string(),
+                }),
+                is_module: s.module.is_some(),
+                module_classes,
+                errors: s.errors.clone(),
+            }
+        })
+        .collect();
+
     let js_result = CodegenResult {
         code: result.code,
         source_map: result.source_map,
         code_with_source_map: result.code_with_source_map,
+        styles,
         duration_ms: result.duration_ms,
         tsx: tsx_result.tsx,
         css: tsx_result.css,
