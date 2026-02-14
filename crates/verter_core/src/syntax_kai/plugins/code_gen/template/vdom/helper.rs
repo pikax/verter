@@ -4,6 +4,7 @@ use crate::utils::vue::{PatchFlag, PatchFlags};
 ///
 /// Returns something like `, 9 /* TEXT, PROPS */, ["id"]` or an empty string
 /// if the patch flag is zero.
+#[allow(dead_code)] // retained for standalone usage; prefer write_patch_flag_suffix for perf
 pub fn build_patch_flag_suffix(
     patch_flag: PatchFlag,
     dynamic_props: &[&str],

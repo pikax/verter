@@ -25,12 +25,22 @@ use crate::{
         syntax::Syntax,
         types::*,
     },
-    tokenizer::byte::tokenize,
+    tokenizer::byte::{tokenize, tokenize_with_delimiters},
 };
 
 // =============================================================================
 // Options and Result Types
 // =============================================================================
+
+/// Whitespace handling strategy for template compilation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhitespaceStrategy {
+    /// Condense whitespace (Vue default): collapse consecutive whitespace to a single space,
+    /// remove whitespace-only text nodes between elements.
+    Condense,
+    /// Preserve all whitespace as-is.
+    Preserve,
+}
 
 /// Options for the codegen process.
 #[derive(Debug, Clone, Default)]
@@ -47,6 +57,34 @@ pub struct CodegenOptions {
     /// When true, skip source map generation and base64 encoding.
     /// Returns empty strings for `source_map` and `code_with_source_map`.
     pub skip_source_map: bool,
+
+    // -- Vue compiler parity options --
+    /// Custom interpolation delimiters. Default: `("{{", "}}")`.
+    pub delimiters: Option<(String, String)>,
+    /// Tag name prefixes treated as custom elements (skip component resolution).
+    /// E.g. `["ion-", "my-"]` matches `<ion-button>`, `<my-card>`.
+    pub custom_elements: Option<Vec<String>>,
+    /// Whether to preserve HTML comments in output.
+    /// `None` = `!is_production` (comments in dev, stripped in prod).
+    pub comments: Option<bool>,
+    /// Runtime module name to import helpers from. Default: `"vue"`.
+    pub runtime_module_name: Option<String>,
+    /// Hoist static VNodes/props to constants outside the render function.
+    /// `None` = `true`.
+    pub hoist_static: Option<bool>,
+    /// Whitespace handling strategy. `None` = `Condense`.
+    pub whitespace: Option<WhitespaceStrategy>,
+    /// Cache event handler expressions. `None` = `false`.
+    pub cache_handlers: Option<bool>,
+    /// Inline the render function inside `setup()`.
+    /// `None` = `is_production`.
+    pub inline: Option<bool>,
+    /// Indicates the SFC uses `:slotted()` in styles.
+    /// `None` = `true`.
+    pub slotted: Option<bool>,
+    /// Add `_ctx.`/`$setup.` prefix to template identifiers.
+    /// `None` = `true`.
+    pub prefix_identifiers: Option<bool>,
 }
 
 impl CodegenOptions {
@@ -62,6 +100,48 @@ impl CodegenOptions {
     pub fn with_production(mut self, is_production: bool) -> Self {
         self.is_production = is_production;
         self
+    }
+
+    // -- Resolved accessors (apply defaults) --
+
+    /// Whether to preserve HTML comments in output.
+    pub fn resolve_comments(&self) -> bool {
+        self.comments.unwrap_or(!self.is_production)
+    }
+
+    /// Whether to hoist static VNodes/props.
+    pub fn resolve_hoist_static(&self) -> bool {
+        self.hoist_static.unwrap_or(true)
+    }
+
+    /// Whitespace handling strategy.
+    pub fn resolve_whitespace(&self) -> WhitespaceStrategy {
+        self.whitespace.unwrap_or(WhitespaceStrategy::Condense)
+    }
+
+    /// Whether to cache event handlers.
+    pub fn resolve_cache_handlers(&self) -> bool {
+        self.cache_handlers.unwrap_or(false)
+    }
+
+    /// Whether to inline the render function.
+    pub fn resolve_inline(&self) -> bool {
+        self.inline.unwrap_or(self.is_production)
+    }
+
+    /// Whether the SFC uses `:slotted()`.
+    pub fn resolve_slotted(&self) -> bool {
+        self.slotted.unwrap_or(true)
+    }
+
+    /// Whether to prefix template identifiers.
+    pub fn resolve_prefix_identifiers(&self) -> bool {
+        self.prefix_identifiers.unwrap_or(true)
+    }
+
+    /// Runtime module name for helper imports.
+    pub fn resolve_runtime_module_name(&self) -> &str {
+        self.runtime_module_name.as_deref().unwrap_or("vue")
     }
 }
 
@@ -121,6 +201,7 @@ fn run_pipeline<'a>(
 // =============================================================================
 
 /// SHA-256 hash → 8 hex chars (first 4 bytes).
+#[allow(dead_code)] // used by compute_scope_id; will be needed for scoped styles
 pub(crate) fn get_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
@@ -138,6 +219,7 @@ fn extract_component_name(filename: &str) -> String {
 }
 
 /// Compute scope_id as 8 hex chars from component name.
+#[allow(dead_code)] // will be needed for scoped styles
 fn compute_scope_id(component_name: &str) -> [u8; 8] {
     let hash = get_hash(component_name);
     let hash_bytes = hash.as_bytes();
@@ -166,23 +248,44 @@ pub fn compile(
     let start = Instant::now();
     let bytes = input.as_bytes();
 
-    let syntax_options = SyntaxPluginOptions::default();
+    let syntax_options = if let Some(ref prefixes) = options.custom_elements {
+        let prefixes = prefixes.clone();
+        SyntaxPluginOptions {
+            is_custom_element: Box::new(move |tag_name: &[u8]| {
+                prefixes
+                    .iter()
+                    .any(|prefix| tag_name.starts_with(prefix.as_bytes()))
+            }),
+            ..SyntaxPluginOptions::default()
+        }
+    } else {
+        SyntaxPluginOptions::default()
+    };
     let mut ctx = SyntaxPluginContext {
         input,
         bytes,
         options: &syntax_options,
     };
 
-    let mut syntax = Syntax::new(false);
-    tokenize(bytes, |e| syntax.handle(&e, &ctx));
-
-    let events = syntax.events();
-
     let component_name = options
         .filename
         .as_ref()
         .map(|f| extract_component_name(f))
         .unwrap_or_else(|| "App".to_string());
+
+    let mut syntax = Syntax::new(false);
+    if let Some((ref open, ref close)) = options.delimiters {
+        tokenize_with_delimiters(
+            bytes,
+            |e| syntax.handle(&e, &ctx),
+            open.as_bytes(),
+            close.as_bytes(),
+        );
+    } else {
+        tokenize(bytes, |e| syntax.handle(&e, &ctx));
+    }
+
+    let events = syntax.events();
 
     let code_transform = Rc::new(RefCell::new(CodeTransform::new(input, allocator)));
 
@@ -193,10 +296,22 @@ pub fn compile(
         false,
         false,
         false,
-    );
+    )
+    .with_inline_template(options.resolve_inline())
+    .with_runtime_module_name(options.resolve_runtime_module_name().to_string());
 
+    use crate::syntax_kai::plugins::code_gen::template::TemplateOptions;
+    let template_options = TemplateOptions {
+        is_production: options.is_production,
+        inline: options.resolve_inline(),
+        comments: options.resolve_comments(),
+        hoist_static: options.resolve_hoist_static(),
+        cache_handlers: options.resolve_cache_handlers(),
+        runtime_module_name: options.resolve_runtime_module_name().to_string(),
+        prefix_identifiers: options.resolve_prefix_identifiers(),
+    };
     let mut code_gen_template =
-        TemplateGeneratorPlugin::new(Rc::clone(&code_transform), options.is_production);
+        TemplateGeneratorPlugin::with_options(Rc::clone(&code_transform), template_options);
 
     {
         // transient plugins
@@ -216,7 +331,11 @@ pub fn compile(
     // Flush deferred operations (e.g. batched binding patches) before reading.
     code_gen_template.finalize();
 
-    let code = code_transform.borrow().to_string();
+    // Emit generated import statements (template helpers + script helpers).
+    code_gen_template.emit_imports();
+    code_gen_script.end(&ctx);
+
+    let code = code_transform.borrow().build_string();
 
     let (source_map, code_with_source_map) = if options.skip_source_map {
         (String::new(), String::new())
@@ -505,6 +624,189 @@ const count = ref(0)
         assert_ne!(id1, id3);
     }
 
+    // ==================== Compiler Options Tests ====================
+
+    /// @ai-generated — Custom delimiters compile interpolations correctly
+    #[test]
+    fn test_option_delimiters() {
+        let input = r#"<template><div>{{{ msg }}}</div></template>"#;
+        let allocator = Allocator::new();
+        let options = CodegenOptions {
+            delimiters: Some(("{{{".to_string(), "}}}".to_string())),
+            ..CodegenOptions::new()
+        };
+
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.code.contains("_toDisplayString"),
+            "Custom delimiters should trigger interpolation, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Default delimiters (None) still work
+    #[test]
+    fn test_option_delimiters_default() {
+        let input = r#"<template><div>{{ msg }}</div></template>"#;
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new();
+
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.code.contains("_toDisplayString"),
+            "Default delimiters should work, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Custom elements skip _resolveComponent
+    #[test]
+    fn test_option_custom_elements() {
+        let input = r#"<template><ion-button>click</ion-button></template>"#;
+        let allocator = Allocator::new();
+
+        // Without custom_elements: treated as component, emits _resolveComponent
+        let result_default = compile(input, &CodegenOptions::new(), &allocator);
+
+        let allocator2 = Allocator::new();
+        // With custom_elements: treated as native element, no _resolveComponent
+        let options = CodegenOptions {
+            custom_elements: Some(vec!["ion-".to_string()]),
+            ..CodegenOptions::new()
+        };
+        let result_custom = compile(input, &options, &allocator2);
+
+        assert!(
+            result_default.code.contains("_resolveComponent"),
+            "Default should resolve ion-button as component, got:\n{}",
+            result_default.code
+        );
+        assert!(
+            !result_custom.code.contains("_resolveComponent"),
+            "With custom_elements, ion-button should NOT resolve as component, got:\n{}",
+            result_custom.code
+        );
+    }
+
+    /// @ai-generated — comments: false strips HTML comments
+    #[test]
+    fn test_option_comments_false() {
+        let input = r#"<template><div><!-- hello --><span>text</span></div></template>"#;
+        let allocator = Allocator::new();
+        let options = CodegenOptions {
+            comments: Some(false),
+            ..CodegenOptions::new()
+        };
+
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            !result.code.contains("_createCommentVNode"),
+            "comments: false should strip comment VNodes, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — comments: true preserves HTML comments
+    #[test]
+    fn test_option_comments_true() {
+        let input = r#"<template><div><!-- hello --><span>text</span></div></template>"#;
+        let allocator = Allocator::new();
+        let options = CodegenOptions {
+            comments: Some(true),
+            ..CodegenOptions::new()
+        };
+
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.code.contains("_createCommentVNode"),
+            "comments: true should preserve comment VNodes, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — runtime_module_name changes the import source
+    #[test]
+    fn test_option_runtime_module_name() {
+        let input = r#"<script setup>const x = 1</script><template><div>{{ x }}</div></template>"#;
+        let allocator = Allocator::new();
+        let options = CodegenOptions {
+            runtime_module_name: Some("vue/dist/vue.esm-bundler.js".to_string()),
+            ..CodegenOptions::new()
+        };
+
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.code.contains("from 'vue/dist/vue.esm-bundler.js'"),
+            "Should import from custom module name, got:\n{}",
+            result.code
+        );
+        assert!(
+            !result.code.contains("from 'vue';"),
+            "Should NOT import from default 'vue', got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — hoist_static: false prevents static prop hoisting
+    #[test]
+    fn test_option_hoist_static_false() {
+        let input = r#"<template><div><span id="foo">text</span></div></template>"#;
+        let allocator = Allocator::new();
+        let options = CodegenOptions {
+            hoist_static: Some(false),
+            ..CodegenOptions::new()
+        };
+
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            !result.code.contains("_hoisted_"),
+            "hoist_static: false should NOT hoist, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — hoist_static: true (default) hoists static props
+    #[test]
+    fn test_option_hoist_static_true() {
+        let input = r#"<template><div><span id="foo">text</span></div></template>"#;
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new();
+
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.code.contains("_hoisted_"),
+            "Default should hoist static props, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — inline option decouples from is_production
+    #[test]
+    fn test_option_inline_explicit() {
+        let input = r#"<script setup>const x = 1</script><template><div>{{ x }}</div></template>"#;
+
+        // inline: true in dev mode
+        let allocator = Allocator::new();
+        let options = CodegenOptions {
+            inline: Some(true),
+            is_production: false,
+            ..CodegenOptions::new()
+        };
+        let result = compile(input, &options, &allocator);
+        assert!(
+            result.code.contains("(_ctx,_cache) => {"),
+            "inline: true should produce arrow function even in dev, got:\n{}",
+            result.code
+        );
+    }
+
     #[test]
     #[ignore = "profiling helper — run with --nocapture --ignored"]
     fn profile_pipeline_stages() {
@@ -728,7 +1030,7 @@ const count = ref(0)
 
         let ct = code_transform.borrow();
         let chunk_count = ct.chunk_count();
-        let code = ct.to_string();
+        let code = ct.build_string();
 
         eprintln!("\n=== Chunk Diagnostics (kitchen-sink.vue) ===");
         eprintln!("  Input size:     {} bytes", input.len());
@@ -739,5 +1041,124 @@ const count = ref(0)
             "  Bytes/chunk:    {:.1}",
             code.len() as f64 / chunk_count.max(1) as f64
         );
+    }
+
+    #[test]
+    #[ignore] // Run manually: cargo test --release -p verter_core -- profile_template_heavy --nocapture
+    fn profile_template_heavy_phases() {
+        let input = include_str!("../../../../packages/benchmark/src/fixtures/template-heavy.vue");
+        let iterations = 5000;
+
+        // Warmup
+        for _ in 0..100 {
+            let alloc = Allocator::new();
+            let mut opts = CodegenOptions::new().with_filename("template-heavy.vue");
+            opts.skip_source_map = true;
+            let _ = compile(input, &opts, &alloc);
+        }
+
+        // Phase 1: Tokenize + Syntax only
+        let t = Instant::now();
+        for _ in 0..iterations {
+            let bytes = input.as_bytes();
+            let syntax_options = SyntaxPluginOptions::default();
+            let ctx = SyntaxPluginContext {
+                input,
+                bytes,
+                options: &syntax_options,
+            };
+            let mut syntax = Syntax::new(false);
+            tokenize(bytes, |e| syntax.handle(&e, &ctx));
+            std::hint::black_box(syntax.events());
+        }
+        let tokenize_us = t.elapsed().as_micros() as f64 / iterations as f64;
+
+        // Phase 2a: Tokenize + EC + OXC only (no codegen)
+        let t = Instant::now();
+        for _ in 0..iterations {
+            let alloc = Allocator::new();
+            let bytes = input.as_bytes();
+            let syntax_options = SyntaxPluginOptions::default();
+            let mut ctx = SyntaxPluginContext {
+                input,
+                bytes,
+                options: &syntax_options,
+            };
+            let mut syntax = Syntax::new(false);
+            tokenize(bytes, |e| syntax.handle(&e, &ctx));
+            let events = syntax.events();
+
+            let code_transform = Rc::new(RefCell::new(CodeTransform::new(input, &alloc)));
+            let mut cgs =
+                ScriptGeneratorPlugin::new(Rc::clone(&code_transform), "App", false, false, false);
+            let mut ec = ElementCompilerPlugin::new();
+            let mut oxc = OxcParserPlugin::new(&alloc);
+            let pipeline: &mut [&mut dyn SyntaxPlugin] = &mut [&mut ec, &mut oxc, &mut cgs];
+            run_pipeline(events, pipeline, &mut ctx);
+            std::hint::black_box(&ec);
+        }
+        let ec_oxc_us = t.elapsed().as_micros() as f64 / iterations as f64;
+        let ec_oxc_only = ec_oxc_us - tokenize_us;
+
+        // Phase 2b: Full pipeline (tokenize + EC + OXC + codegen)
+        let t = Instant::now();
+        for _ in 0..iterations {
+            let alloc = Allocator::new();
+            let bytes = input.as_bytes();
+            let syntax_options = SyntaxPluginOptions::default();
+            let mut ctx = SyntaxPluginContext {
+                input,
+                bytes,
+                options: &syntax_options,
+            };
+            let mut syntax = Syntax::new(false);
+            tokenize(bytes, |e| syntax.handle(&e, &ctx));
+            let events = syntax.events();
+
+            let code_transform = Rc::new(RefCell::new(CodeTransform::new(input, &alloc)));
+            let mut cgs =
+                ScriptGeneratorPlugin::new(Rc::clone(&code_transform), "App", false, false, false);
+            let mut cgt = TemplateGeneratorPlugin::new(Rc::clone(&code_transform), false);
+            let mut ec = ElementCompilerPlugin::new();
+            let mut oxc = OxcParserPlugin::new(&alloc);
+            let pipeline: &mut [&mut dyn SyntaxPlugin] =
+                &mut [&mut ec, &mut oxc, &mut cgs, &mut cgt];
+            run_pipeline(events, pipeline, &mut ctx);
+            std::hint::black_box(&cgt);
+        }
+        let pipeline_us = t.elapsed().as_micros() as f64 / iterations as f64;
+        let run_pipeline_us = pipeline_us - tokenize_us;
+        let codegen_only = run_pipeline_us - ec_oxc_only;
+
+        // Phase 3: Full compile (tokenize + pipeline + finalize + to_string)
+        let t = Instant::now();
+        for _ in 0..iterations {
+            let alloc = Allocator::new();
+            let mut opts = CodegenOptions::new().with_filename("template-heavy.vue");
+            opts.skip_source_map = true;
+            let result = compile(input, &opts, &alloc);
+            std::hint::black_box(&result.code);
+        }
+        let total_us = t.elapsed().as_micros() as f64 / iterations as f64;
+        let finalize_tostring_us = total_us - pipeline_us;
+
+        eprintln!("\n=== Template-Heavy Phase Breakdown ({iterations} iterations) ===");
+        eprintln!(
+            "  Tokenize + Syntax:    {tokenize_us:.1}μs ({:.0}%)",
+            tokenize_us / total_us * 100.0
+        );
+        eprintln!(
+            "  EC + OXC:             {ec_oxc_only:.1}μs ({:.0}%)",
+            ec_oxc_only / total_us * 100.0
+        );
+        eprintln!(
+            "  Template Codegen:     {codegen_only:.1}μs ({:.0}%)",
+            codegen_only / total_us * 100.0
+        );
+        eprintln!(
+            "  finalize + to_string: {finalize_tostring_us:.1}μs ({:.0}%)",
+            finalize_tostring_us / total_us * 100.0
+        );
+        eprintln!("  Total:                {total_us:.1}μs");
     }
 }

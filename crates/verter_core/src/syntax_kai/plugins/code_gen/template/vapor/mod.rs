@@ -183,7 +183,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
     }
 
     pub(crate) fn get_code(&self) -> String {
-        self.code_transform.borrow().to_string()
+        self.code_transform.borrow().build_string()
     }
 
     pub(crate) fn generate_source_map(&self) -> String {
@@ -362,15 +362,16 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
     ) -> String {
         let mut html = format!("<{}", tag_name);
 
-        for prop in &ev.event.props {
-            match prop.kind {
+        for prop in &ev.props {
+            match prop.event.kind {
                 PropKind::Value | PropKind::ClassValue | PropKind::StyleValue => {
-                    let attr_name = &ctx.input[prop.start as usize..prop.name_end as usize];
-                    // Skip `ref` â€” handled at runtime via _setTemplateRef.
+                    let attr_name =
+                        &ctx.input[prop.event.start as usize..prop.event.name_end as usize];
+                    // Skip `ref` â€" handled at runtime via _setTemplateRef.
                     if attr_name == "ref" {
                         continue;
                     }
-                    if let Some(ref val) = prop.value {
+                    if let Some(ref val) = prop.event.value {
                         let attr_val = &ctx.input[val.start as usize..val.end as usize];
                         html.push_str(&format!(" {}=\"{}\"", attr_name, attr_val));
                     } else {

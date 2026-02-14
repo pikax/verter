@@ -27,6 +27,7 @@ use crate::syntax_kai::plugins::code_gen::types::TemplateImportDependencies;
 /// Processes event modifiers (runtime, key filters, listener options),
 /// builds event name with suffix, wraps handler with `_withModifiers`/`_withKeys`
 /// as needed, and adds the event to dynamic props.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_prop_on<'alloc>(
     code_transform: &CodeTransform<'alloc>,
     prop: &OxcProp<'alloc>,
@@ -203,6 +204,7 @@ pub(super) fn handle_prop_on<'alloc>(
 ///
 /// Component v-model: prop-based (`modelValue` + `onUpdate:modelValue` props).
 /// Native v-model: directive-based (`withDirectives` + `vModel*` directive).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_prop_model<'alloc>(
     code_transform: &CodeTransform<'alloc>,
     prop: &OxcProp<'alloc>,
@@ -395,6 +397,7 @@ pub(super) fn handle_prop_model<'alloc>(
 ///
 /// Resolves the directive name, extracts arg and modifiers, and adds
 /// a `DirectiveEntry` to `state.runtime_directives` for `_withDirectives` wrapping.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn handle_prop_directive<'alloc>(
     code_transform: &CodeTransform<'alloc>,
     prop: &OxcProp<'alloc>,

@@ -1,19 +1,29 @@
 use crate::{syntax_kai::types::Event, utils::vue::is_void_tag};
 
-#[derive(Debug)]
+/// Predicate for checking whether a tag is a custom element.
+pub type IsCustomElementFn = Box<dyn Fn(&[u8]) -> bool>;
+
 pub struct SyntaxPluginOptions {
     // if the tag does not need a closing tag
     pub is_void_tag: fn(&[u8]) -> bool,
     // if the tag is a custom element
-    pub is_custom_element: fn(&[u8]) -> bool,
+    pub is_custom_element: IsCustomElementFn,
+}
+
+impl std::fmt::Debug for SyntaxPluginOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyntaxPluginOptions")
+            .field("is_void_tag", &"fn(&[u8]) -> bool")
+            .field("is_custom_element", &"Box<dyn Fn(&[u8]) -> bool>")
+            .finish()
+    }
 }
 
 impl std::default::Default for SyntaxPluginOptions {
     fn default() -> Self {
         Self {
             is_void_tag,
-
-            is_custom_element: |_tag_name: &[u8]| false,
+            is_custom_element: Box::new(|_tag_name: &[u8]| false),
         }
     }
 }

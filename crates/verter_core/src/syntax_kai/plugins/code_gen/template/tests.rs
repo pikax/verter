@@ -4214,3 +4214,81 @@ fn test_vapor_vif_nested_child_effects_keep_node_ref() {
         code
     );
 }
+
+// =========================================================================
+// Performance: static-only props fast path (iteration 1)
+// =========================================================================
+
+/// @ai-generated - Verify output unchanged after parse_element_props fast path for static-only attrs.
+#[test]
+fn perf_static_only_props_output_unchanged() {
+    // Template with only static attrs (class, id, style) — no directives, no bindings
+    let code = gen_and_validate(
+        r#"<template><div class="container" id="main" style="color: red"><span class="inner">text</span></div></template>"#,
+    );
+    assert!(
+        code.contains("_hoisted_"),
+        "Static props should be hoisted, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createElementVNode"),
+        "Should use _createElementVNode, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Verify mixed directive + static props still work after fast path.
+#[test]
+fn perf_mixed_directive_static_props_still_work() {
+    let code = gen_and_validate(
+        r#"<template><div v-if="show" class="box" id="test">content</div></template>"#,
+    );
+    // v-if should produce a ternary
+    assert!(
+        code.contains("? "),
+        "v-if should produce ternary, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Performance: merged overwrites (iterations 4-5)
+// =========================================================================
+
+/// @ai-generated - Verify hoisted props output is correct after overwrite merging.
+#[test]
+fn perf_hoisted_props_merged_overwrite() {
+    let code = gen_and_validate(r#"<template><div class="a" id="b">hello</div></template>"#);
+    assert!(
+        code.contains("_hoisted_"),
+        "Static props should be hoisted, got:\n{}",
+        code
+    );
+    // Ensure the _createElementBlock call is well-formed
+    assert!(
+        code.contains("_createElementBlock(\"div\", _hoisted_"),
+        "Block root should have merged tag+hoisted props, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Verify no-props element output is correct after overwrite merging.
+#[test]
+fn perf_no_props_element_output_unchanged() {
+    let code = gen_and_validate(r#"<template><div><span>text</span></div></template>"#);
+    assert!(
+        code.contains("_createElementVNode(\"span\", null"),
+        "No-props child should use 'null' for props, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Verify deeply nested static elements work after merging.
+#[test]
+fn perf_nested_static_elements_valid() {
+    let code = gen_and_validate(
+        r#"<template><div class="outer"><div class="middle"><span class="inner">text</span></div></div></template>"#,
+    );
+    assert_valid_js(&code, "nested static elements");
+}

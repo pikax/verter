@@ -25,6 +25,24 @@ pub struct CodegenOptions {
     /// Default: false (skip TSX generation to save time).
     #[serde(default)]
     pub include_tsx: bool,
+    /// Custom interpolation delimiters [open, close]. Default: ["{{", "}}"]
+    pub delimiters: Option<(String, String)>,
+    /// Tag name prefixes treated as custom elements (skip component resolution).
+    pub custom_elements: Option<Vec<String>>,
+    /// Whether to preserve HTML comments in output. Default: !isProduction
+    pub comments: Option<bool>,
+    /// Runtime module name to import helpers from. Default: "vue"
+    pub runtime_module_name: Option<String>,
+    /// Hoist static VNodes/props to constants. Default: true
+    pub hoist_static: Option<bool>,
+    /// Whitespace handling: "condense" or "preserve". Default: "condense"
+    pub whitespace: Option<String>,
+    /// Cache event handler expressions. Default: false
+    pub cache_handlers: Option<bool>,
+    /// Inline render function in setup(). Default: isProduction
+    pub inline: Option<bool>,
+    /// Indicates SFC uses :slotted() in styles. Default: true
+    pub slotted: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -56,12 +74,28 @@ fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
             .map_err(|e| JsValue::from_str(&format!("Invalid options: {}", e)))?
     };
 
+    let whitespace = opts.whitespace.and_then(|w| match w.as_str() {
+        "preserve" => Some(verter_core::builder::codegen::WhitespaceStrategy::Preserve),
+        "condense" => Some(verter_core::builder::codegen::WhitespaceStrategy::Condense),
+        _ => None,
+    });
+
     let core_options = CoreOptions {
         filename: opts.filename.clone(),
         is_production: opts.is_production,
         component_id: opts.component_id.clone(),
         include_tsx: opts.include_tsx,
         skip_source_map: false,
+        delimiters: opts.delimiters,
+        custom_elements: opts.custom_elements,
+        comments: opts.comments,
+        runtime_module_name: opts.runtime_module_name,
+        hoist_static: opts.hoist_static,
+        whitespace,
+        cache_handlers: opts.cache_handlers,
+        inline: opts.inline,
+        slotted: opts.slotted,
+        prefix_identifiers: None,
     };
 
     let result = core_compile(input, &core_options, &allocator);

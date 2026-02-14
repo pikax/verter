@@ -171,9 +171,36 @@ impl<'alloc> Backend<'alloc> {
     }
 }
 
+/// Options for template code generation, threaded from `CodegenOptions`.
+#[derive(Debug, Clone)]
+pub struct TemplateOptions {
+    pub is_production: bool,
+    pub inline: bool,
+    pub comments: bool,
+    pub hoist_static: bool,
+    pub cache_handlers: bool,
+    pub runtime_module_name: String,
+    pub prefix_identifiers: bool,
+}
+
+impl TemplateOptions {
+    /// Create from an `is_production` flag with all defaults.
+    pub fn from_production(is_production: bool) -> Self {
+        Self {
+            is_production,
+            inline: is_production,
+            comments: !is_production,
+            hoist_static: true,
+            cache_handlers: false,
+            runtime_module_name: "vue".to_string(),
+            prefix_identifiers: true,
+        }
+    }
+}
+
 pub struct TemplateGeneratorPlugin<'alloc> {
     code_transform: Rc<RefCell<CodeTransform<'alloc>>>,
-    is_production: bool,
+    options: TemplateOptions,
     bindings: FxHashMap<&'alloc str, BindingType>,
     backend: Backend<'alloc>,
 }
@@ -182,7 +209,19 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
     pub fn new(code_transform: Rc<RefCell<CodeTransform<'alloc>>>, is_production: bool) -> Self {
         Self {
             code_transform,
-            is_production,
+            options: TemplateOptions::from_production(is_production),
+            bindings: FxHashMap::default(),
+            backend: Backend::Uninitialized,
+        }
+    }
+
+    pub fn with_options(
+        code_transform: Rc<RefCell<CodeTransform<'alloc>>>,
+        options: TemplateOptions,
+    ) -> Self {
+        Self {
+            code_transform,
+            options,
             bindings: FxHashMap::default(),
             backend: Backend::Uninitialized,
         }
@@ -197,12 +236,20 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
         }
     }
 
+    /// Emit `import { ... } from '<runtime>'` for template helpers.
+    pub fn emit_imports(&self) {
+        match &self.backend {
+            Backend::Vdom(gen) => gen.emit_imports(),
+            Backend::Vapor(_) | Backend::Uninitialized => {}
+        }
+    }
+
     /// Get the transformed code (template block only).
     pub fn get_code(&mut self) -> String {
         match &mut self.backend {
             Backend::Vdom(gen) => gen.get_code(),
             Backend::Vapor(gen) => gen.get_code(),
-            Backend::Uninitialized => self.code_transform.borrow().to_string(),
+            Backend::Uninitialized => self.code_transform.borrow().build_string(),
         }
     }
 
@@ -222,12 +269,12 @@ impl<'alloc> TemplateGeneratorPlugin<'alloc> {
         self.backend = if is_vapor {
             Backend::Vapor(Box::new(VaporTemplateGenerator::new(
                 Rc::clone(&self.code_transform),
-                self.is_production,
+                self.options.is_production,
             )))
         } else {
-            Backend::Vdom(Box::new(VdomTemplateGenerator::new(
+            Backend::Vdom(Box::new(VdomTemplateGenerator::with_options(
                 Rc::clone(&self.code_transform),
-                self.is_production,
+                &self.options,
             )))
         };
 

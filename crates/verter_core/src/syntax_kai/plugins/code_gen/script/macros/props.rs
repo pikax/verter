@@ -17,6 +17,7 @@ use crate::utils::oxc::vue::{
 ///
 /// Transforms TypeScript type parameters into Vue runtime prop definitions.
 /// Each property `foo: string` becomes `foo: { type: String, required: true }`.
+#[allow(clippy::too_many_arguments)]
 pub fn process_define_props<'a>(
     span: &Span,
     _declarator: &Option<MacroDeclarator<'a>>,

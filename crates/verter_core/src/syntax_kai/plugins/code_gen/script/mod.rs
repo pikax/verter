@@ -24,6 +24,8 @@ pub struct ScriptGeneratorPlugin<'alloc> {
 
     keep_ts_types: bool,
     is_production: bool,
+    inline_template: bool,
+    runtime_module_name: String,
 
     imports: ScriptSetupImportDependencies,
 }
@@ -42,14 +44,28 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
             is_multi_script,
             keep_ts_types,
             is_production,
+            inline_template: is_production,
+            runtime_module_name: "vue".to_string(),
 
             imports: ScriptSetupImportDependencies::default(),
         }
     }
 
+    /// Set inline template mode (decoupled from is_production).
+    pub fn with_inline_template(mut self, inline: bool) -> Self {
+        self.inline_template = inline;
+        self
+    }
+
+    /// Set the runtime module name for helper imports.
+    pub fn with_runtime_module_name(mut self, name: String) -> Self {
+        self.runtime_module_name = name;
+        self
+    }
+
     /// Get the transformed code (script block only).
     pub fn get_code(&self) -> String {
-        self.code_transform.borrow().to_string()
+        self.code_transform.borrow().build_string()
     }
 
     /// Generate source map JSON string.
@@ -74,7 +90,7 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
                 component_name: self.component_name,
                 keep_ts_types: self.keep_ts_types,
                 is_production: self.is_production,
-                inline_template: self.is_production,
+                inline_template: self.inline_template,
             },
         );
 
@@ -92,8 +108,9 @@ impl<'alloc> SyntaxPlugin<'alloc> for ScriptGeneratorPlugin<'alloc> {
         if !self.imports.is_empty() {
             self.code_transform.borrow_mut().prepend(
                 format!(
-                    "import {{{}}} from 'vue';\n",
-                    self.imports.to_import_string()
+                    "import {{{}}} from '{}';\n",
+                    self.imports.to_import_string(),
+                    self.runtime_module_name,
                 )
                 .as_str(),
             );

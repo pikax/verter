@@ -45,7 +45,7 @@ pub fn strip_types<'a>(source: &'a str, allocator: &'a Allocator) -> StripTypesR
     strip_typescript_types(&parse_result.program, &mut code_transform, 0, source);
 
     StripTypesResult {
-        code: code_transform.to_string(),
+        code: code_transform.build_string(),
         errors,
     }
 }

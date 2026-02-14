@@ -49,10 +49,7 @@ impl ElementKind {
     /// plain HTML element, slot outlet, or template wrapper).
     #[inline]
     pub fn is_component(&self) -> bool {
-        matches!(
-            self,
-            ElementKind::Component | ElementKind::DynamicComponent | ElementKind::CustomComponent
-        )
+        matches!(self, ElementKind::Component | ElementKind::DynamicComponent)
     }
 }
 

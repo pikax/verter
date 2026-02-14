@@ -25,7 +25,7 @@ use oxc_allocator::Allocator;
 /// let allocator = Allocator::default();
 /// let mut ct = CodeTransform::new("Hello World", &allocator);
 /// ct.overwrite(6, 11, "Rust");
-/// assert_eq!(ct.to_string(), "Hello Rust");
+/// assert_eq!(ct.build_string(), "Hello Rust");
 /// ```
 pub struct CodeTransform<'a> {
     /// The original source text (never modified)
@@ -522,7 +522,7 @@ impl<'a> CodeTransform<'a> {
     /// let allocator = Allocator::default();
     /// let mut ct = CodeTransform::new("ABCDEF", &allocator);
     /// ct.move_slice(2, 4, 0); // Move "CD" to the beginning
-    /// assert_eq!(ct.to_string(), "CDABEF");
+    /// assert_eq!(ct.build_string(), "CDABEF");
     /// ```
     pub fn move_slice(&mut self, start: u32, end: u32, target_index: u32) -> &mut Self {
         if start >= end {
@@ -651,7 +651,7 @@ impl<'a> CodeTransform<'a> {
     /// let allocator = Allocator::default();
     /// let mut ct = CodeTransform::new("ABCDEF", &allocator);
     /// ct.move_with_prefix(2, 4, 0, ">>"); // Move "CD" to beginning with prefix
-    /// assert_eq!(ct.to_string(), ">>CDABEF");
+    /// assert_eq!(ct.build_string(), ">>CDABEF");
     /// ```
     pub fn move_with_prefix(
         &mut self,
@@ -673,7 +673,7 @@ impl<'a> CodeTransform<'a> {
     /// let allocator = Allocator::default();
     /// let mut ct = CodeTransform::new("ABCDEF", &allocator);
     /// ct.move_with_suffix(2, 4, 0, "<<"); // Move "CD" to beginning with suffix
-    /// assert_eq!(ct.to_string(), "CD<<ABEF");
+    /// assert_eq!(ct.build_string(), "CD<<ABEF");
     /// ```
     pub fn move_with_suffix(
         &mut self,
@@ -695,7 +695,7 @@ impl<'a> CodeTransform<'a> {
     /// let allocator = Allocator::default();
     /// let mut ct = CodeTransform::new("ABCDEF", &allocator);
     /// ct.move_wrapped(2, 4, 0, "{", "}"); // Move "CD" wrapped with braces
-    /// assert_eq!(ct.to_string(), "{CD}ABEF");
+    /// assert_eq!(ct.build_string(), "{CD}ABEF");
     /// ```
     pub fn move_wrapped(
         &mut self,
@@ -1009,7 +1009,7 @@ impl<'a> CodeTransform<'a> {
 
 impl<'a> CodeTransform<'a> {
     /// Build the final output string with pre-allocated capacity.
-    pub fn to_string(&self) -> String {
+    pub fn build_string(&self) -> String {
         // Compute exact length to avoid reallocation during build.
         let mut total_len = self.intro.len() + self.outro.len();
         for chunk in &self.chunks {

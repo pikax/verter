@@ -259,6 +259,16 @@ export const MyPlugin = definePlugin({
 | `crates/verter_core/src/codegen/vue/template/element.rs` | Element open/close processing |
 | `crates/verter_core/src/builder/codegen.rs` | Pipeline setup, E2E tests |
 
+## Rust Performance
+
+See [.claude/performance-guide.md](.claude/performance-guide.md) for Rust performance patterns including:
+
+- **Batch over incremental** — collect mutations, apply in single O(n+m) passes
+- **Allocation hierarchy** — `&'static str` > bump `&'alloc str` > `&str` > reusable buffer > `String`
+- **Reusable buffer** — `std::mem::take` pattern to thread a single `String` through processing
+- **Object pooling** — recycle structs with `.clear()` to retain Vec capacities
+- **Reduce work** — skip expensive operations for trivial cases, cache repeated computations
+
 ## Dependencies Policy
 
 - Keep dependencies at their latest versions

@@ -629,11 +629,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         ev: &OxcCompiledElementStart<'alloc>,
         ctx: &SyntaxPluginContext<'alloc>,
     ) -> Option<String> {
-        for prop in &ev.event.props {
-            if prop.kind == PropKind::Value {
-                let name = &ctx.input[prop.start as usize..prop.name_end as usize];
+        for prop in &ev.props {
+            if prop.event.kind == PropKind::Value {
+                let name = &ctx.input[prop.event.start as usize..prop.event.name_end as usize];
                 if name == attr_name {
-                    if let Some(ref val) = prop.value {
+                    if let Some(ref val) = prop.event.value {
                         return Some(ctx.input[val.start as usize..val.end as usize].to_string());
                     }
                 }

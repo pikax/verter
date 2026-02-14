@@ -13,7 +13,7 @@ use crate::{
         plugins::code_gen::{
             template::shared::helper::{
                 build_prefixed_value_into, collect_binding_patches, escape_js_string,
-                escape_js_string_in_place,
+                escape_js_string_in_place, escape_js_string_into,
             },
             types::TemplateImportDependencies,
         },
@@ -31,12 +31,13 @@ use super::{DirectiveEntry, StateStack};
 pub(crate) struct ElementOpenContext<'a, 'alloc> {
     pub bindings: &'a FxHashMap<&'alloc str, BindingType>,
     pub is_production: bool,
+    pub hoist_static: bool,
     pub imports: &'a mut TemplateImportDependencies,
     pub resolved_components: &'a mut Vec<&'alloc str>,
     pub resolved_components_set: &'a mut FxHashSet<&'alloc str>,
     pub resolved_directives: &'a mut Vec<&'alloc str>,
     pub resolved_directives_set: &'a mut FxHashSet<&'alloc str>,
-    pub hoisted_constants: &'a mut Vec<String>,
+    pub hoisted_constants: &'a mut Vec<&'alloc str>,
 }
 
 /// Check whether an event handler expression needs wrapping in `$event => (...)`.
@@ -68,6 +69,7 @@ pub(super) fn needs_event_handler_wrap(exp: &Option<oxc_ast::ast::Expression>) -
 /// retroactively via `prepend_left`.
 ///
 /// Mutates `state`: sets `is_component`, `patch_flag`, `dynamic_props`, `open_tag_end`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_element_open<'alloc>(
     code_transform: &CodeTransform<'alloc>,
     ev: &OxcCompiledElementStart<'alloc>,
@@ -133,7 +135,7 @@ pub(crate) fn handle_element_open<'alloc>(
         ""
     };
 
-    // Build the VNode call prefix (no parent separator — close phase handles it)
+    // Build the VNode call prefix into buf (deferred — may merge with props overwrite)
     if state.is_block_root {
         // Block root: (_openBlock(), _createElementBlock("tag" or _createBlock(_component_Tag
         imports.add(TemplateImportDependencies::OPEN_BLOCK);
@@ -143,8 +145,6 @@ pub(crate) fn handle_element_open<'alloc>(
             buf.push_str(wd_prefix);
             buf.push_str("(_openBlock(), _createBlock(");
             buf.push_str(var);
-            let s = code_transform.alloc_str(buf);
-            pending_overwrites.push((open_tag.start, open_tag.name_end, s));
         } else {
             imports.add(TemplateImportDependencies::CREATE_ELEMENT_BLOCK);
             buf.clear();
@@ -152,8 +152,6 @@ pub(crate) fn handle_element_open<'alloc>(
             buf.push_str("(_openBlock(), _createElementBlock(\"");
             buf.push_str(tag_name);
             buf.push('"');
-            let s = code_transform.alloc_str(buf);
-            pending_overwrites.push((open_tag.start, open_tag.name_end, s));
         }
     } else if let Some(var) = component_var {
         imports.add(TemplateImportDependencies::CREATE_VNODE);
@@ -161,8 +159,6 @@ pub(crate) fn handle_element_open<'alloc>(
         buf.push_str(wd_prefix);
         buf.push_str("_createVNode(");
         buf.push_str(var);
-        let s = code_transform.alloc_str(buf);
-        pending_overwrites.push((open_tag.start, open_tag.name_end, s));
     } else {
         imports.add(TemplateImportDependencies::CREATE_ELEMENT_VNODE);
         buf.clear();
@@ -170,30 +166,32 @@ pub(crate) fn handle_element_open<'alloc>(
         buf.push_str("_createElementVNode(\"");
         buf.push_str(tag_name);
         buf.push('"');
-        let s = code_transform.alloc_str(buf);
-        pending_overwrites.push((open_tag.start, open_tag.name_end, s));
     }
 
     // -- Props --
+    // For empty or all-static props, merge the tag prefix + props into a single
+    // overwrite spanning (start, open_tag_end.end), halving deferred-op count
+    // for the ~100 static elements in template-heavy.
     if ev.props.is_empty() {
-        // Replace with `, null` or `, { key: N }` for v-if branches
+        // Merge tag prefix + `, null` or `, { key: N }` into one overwrite
         if let Some(k) = state.vif_branch_key {
-            buf.clear();
             buf.push_str(", { key: ");
             super::helper::push_u32(buf, k);
             buf.push_str(" }");
-            let s = code_transform.alloc_str(buf);
-            pending_overwrites.push((open_tag.name_end, open_tag_end.end, s));
         } else {
-            pending_overwrites.push((open_tag.name_end, open_tag_end.end, ", null"));
+            buf.push_str(", null");
         }
+        let s = code_transform.alloc_str(buf);
+        pending_overwrites.push((open_tag.start, open_tag_end.end, s));
     } else {
         state.has_props = true;
 
         // Check if ALL props are static (hoistable).
         // Static prop kinds: Value, ClassValue, StyleValue.
         // Components never get props hoisted (Vue rule).
-        let all_static = !is_component
+        // Hoisting can be disabled via the hoist_static option.
+        let all_static = ectx.hoist_static
+            && !is_component
             && ev.props.iter().all(|p| {
                 matches!(
                     p.event.kind,
@@ -202,27 +200,29 @@ pub(crate) fn handle_element_open<'alloc>(
             });
 
         if all_static {
-            // Build the props object string for hoisting.
-            let mut props_str = String::from("{ ");
+            // Build the props object string for hoisting into the shared buf.
+            // Uses save/truncate pattern to avoid a separate String allocation.
+            let saved = buf.len();
+            buf.push_str("{ ");
             for (i, prop) in ev.props.iter().enumerate() {
                 if i > 0 {
-                    props_str.push_str(", ");
+                    buf.push_str(", ");
                 }
                 match &prop.event.kind {
                     PropKind::ClassValue => {
                         if let Some(val_span) = prop.event.value {
                             let val = &ctx.input[val_span.start as usize..val_span.end as usize];
-                            props_str.push_str("class: \"");
-                            props_str.push_str(&escape_js_string(val));
-                            props_str.push('"');
+                            buf.push_str("class: \"");
+                            escape_js_string_into(buf, val);
+                            buf.push('"');
                         }
                     }
                     PropKind::StyleValue => {
                         if let Some(val_span) = prop.event.value {
                             let val = &ctx.input[val_span.start as usize..val_span.end as usize];
-                            props_str.push_str("style: \"");
-                            props_str.push_str(&escape_js_string(val));
-                            props_str.push('"');
+                            buf.push_str("style: \"");
+                            escape_js_string_into(buf, val);
+                            buf.push('"');
                         }
                     }
                     PropKind::Value => {
@@ -230,33 +230,37 @@ pub(crate) fn handle_element_open<'alloc>(
                             &ctx.input[prop.event.start as usize..prop.event.name_end as usize];
                         if let Some(val_span) = prop.event.value {
                             let val = &ctx.input[val_span.start as usize..val_span.end as usize];
-                            props_str.push_str(name);
-                            props_str.push_str(": \"");
-                            props_str.push_str(&escape_js_string(val));
-                            props_str.push('"');
+                            buf.push_str(name);
+                            buf.push_str(": \"");
+                            escape_js_string_into(buf, val);
+                            buf.push('"');
                         } else {
-                            props_str.push_str(name);
-                            props_str.push_str(": \"\"");
+                            buf.push_str(name);
+                            buf.push_str(": \"\"");
                         }
                     }
                     _ => unreachable!("all_static check guarantees only static prop kinds"),
                 }
             }
-            props_str.push_str(" }");
+            buf.push_str(" }");
 
-            // Add to hoisted constants and emit reference.
+            // Bump-allocate the props string and add to hoisted constants.
+            let props_str = code_transform.alloc_str(&buf[saved..]);
+            buf.truncate(saved);
             hoisted_constants.push(props_str);
             let hoist_id = hoisted_constants.len(); // 1-indexed
             state.has_all_static_props = true;
 
-            // Overwrite entire props region (from after tag name to open_tag_end)
-            // with `, _hoisted_N`
-            buf.clear();
+            // Merge tag prefix + `, _hoisted_N` into one overwrite
             buf.push_str(", _hoisted_");
             super::helper::push_u32(buf, hoist_id as u32);
             let s = code_transform.alloc_str(buf);
-            pending_overwrites.push((open_tag.name_end, open_tag_end.end, s));
+            pending_overwrites.push((open_tag.start, open_tag_end.end, s));
         } else {
+            // Dynamic props can't be merged — push tag prefix as separate overwrite
+            let tag_s = code_transform.alloc_str(buf);
+            pending_overwrites.push((open_tag.start, open_tag.name_end, tag_s));
+
             state.has_all_static_props = false;
 
             // Pre-scan for class/style merging:

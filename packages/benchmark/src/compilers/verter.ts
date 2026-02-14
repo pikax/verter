@@ -15,7 +15,8 @@ export function compileVerter(source: string, filename: string = 'anonymous.vue'
   
   try {
     const result = compile(source, {
-      filename
+      filename,
+      skipSourceMap: true
     })
     
     // Verter returns duration_ms from Rust layer

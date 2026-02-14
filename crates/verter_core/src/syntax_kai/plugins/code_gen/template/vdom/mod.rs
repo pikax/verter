@@ -76,6 +76,14 @@ pub(crate) struct VdomTemplateGenerator<'alloc> {
     bindings: FxHashMap<&'alloc str, BindingType>,
 
     is_production: bool,
+    inline: bool,
+    comments: bool,
+    hoist_static: bool,
+    #[allow(dead_code)] // wired in API, behavioral implementation deferred
+    cache_handlers: bool,
+    runtime_module_name: String,
+    #[allow(dead_code)] // wired in API, behavioral implementation deferred
+    prefix_identifiers: bool,
 
     imports: TemplateImportDependencies,
 
@@ -84,7 +92,8 @@ pub(crate) struct VdomTemplateGenerator<'alloc> {
     cache_id_counter: u16,
 
     /// Hoisted constants emitted before the render function.
-    hoisted_constants: Vec<String>,
+    /// Bump-allocated strings to avoid per-element heap allocation.
+    hoisted_constants: Vec<&'alloc str>,
 
     /// Position of the template open tag — hoisted constants are emitted here.
     template_start_pos: u32,
@@ -123,13 +132,20 @@ pub(crate) struct VdomTemplateGenerator<'alloc> {
 }
 
 impl<'alloc> VdomTemplateGenerator<'alloc> {
-    pub(crate) fn new(
+    /// Create with explicit template options.
+    pub(crate) fn with_options(
         code_transform: Rc<RefCell<CodeTransform<'alloc>>>,
-        is_production: bool,
+        options: &super::TemplateOptions,
     ) -> Self {
         Self {
             code_transform,
-            is_production,
+            is_production: options.is_production,
+            inline: options.inline,
+            comments: options.comments,
+            hoist_static: options.hoist_static,
+            cache_handlers: options.cache_handlers,
+            runtime_module_name: options.runtime_module_name.clone(),
+            prefix_identifiers: options.prefix_identifiers,
 
             imports: TemplateImportDependencies::default(),
             bindings: FxHashMap::default(),
@@ -210,10 +226,21 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         }
     }
 
+    /// Prepend the `import { ... } from '<runtime>'` statement for template helpers.
+    pub(crate) fn emit_imports(&self) {
+        if !self.imports.is_empty() {
+            self.code_transform.borrow_mut().prepend(&format!(
+                "import {{{}}} from '{}';\n",
+                self.imports.to_import_string(),
+                self.runtime_module_name,
+            ));
+        }
+    }
+
     /// Get the transformed code.
     pub(crate) fn get_code(&mut self) -> String {
         self.finalize();
-        self.code_transform.borrow().to_string()
+        self.code_transform.borrow().build_string()
     }
 
     pub(crate) fn generate_source_map(&mut self) -> String {
@@ -238,7 +265,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
 
         let code_transform = &mut self.code_transform.borrow_mut();
 
-        if self.is_production {
+        if self.inline {
             code_transform.replace(
                 ev.tag_open.start,
                 ev.tag_open.end,
@@ -573,6 +600,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         let mut ectx = element::ElementOpenContext {
             bindings: &self.bindings,
             is_production: self.is_production,
+            hoist_static: self.hoist_static,
             imports: &mut self.imports,
             resolved_components: &mut self.resolved_components,
             resolved_components_set: &mut self.resolved_components_set,
@@ -741,6 +769,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             state,
             &mut self.imports,
             &mut self.pending_overwrites,
+            self.comments,
         );
 
         Ok(())

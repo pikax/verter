@@ -5,6 +5,7 @@ use crate::{
     utils::oxc::BindingExtractionResult,
 };
 
+#[allow(dead_code)] // retained for non-batched fallback path
 pub fn patch_bindings<'alloc>(
     code_transform: &mut CodeTransform<'alloc>,
     bindings: Option<&BindingExtractionResult<'alloc>>,
@@ -297,6 +298,7 @@ pub fn build_prefixed_value_into(
 
 /// Like `prefix_vfor_references` but appends into an existing buffer.
 /// Avoids allocating a new String — the caller provides the buffer.
+#[allow(clippy::too_many_arguments)]
 pub fn prefix_vfor_references_into(
     buf: &mut String,
     text: &str,
@@ -353,7 +355,7 @@ pub fn escape_js_string_in_place<'a>(
     input: &str,
     pending_overwrites: &mut Vec<(u32, u32, &'a str)>,
 ) {
-    let bytes = input[start as usize..end as usize].as_bytes();
+    let bytes = &input.as_bytes()[start as usize..end as usize];
 
     // Fast path: check if any escaping is needed at all.
     // Most attribute values contain no special characters.
@@ -416,33 +418,99 @@ pub fn capitalize_first_in_place(code_transform: &mut CodeTransform, start: u32,
     }
 }
 
-/// Escape a string for use inside a JavaScript string literal (double-quoted).
+/// Escape a string for use inside a JavaScript string literal (double-quoted),
+/// appending the result to an existing buffer.
 ///
 /// Handles backslash, double-quote, common whitespace escapes, null bytes,
 /// ASCII control characters (U+0000–U+001F) via `\xNN` notation, and
 /// U+2028/U+2029 (JS line terminators in pre-ES2019) via `\uXXXX` notation.
+///
+/// Uses bulk-copy pattern: tracks unmodified regions and copies via `push_str`
+/// for better performance than char-by-char iteration.
+pub fn escape_js_string_into(out: &mut String, s: &str) {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut copy_start = 0;
+
+    while i < len {
+        let b = bytes[i];
+        // Fast path: most bytes don't need escaping
+        if b >= 0x20 && b != b'"' && b != b'\\' && b < 0x80 {
+            i += 1;
+            continue;
+        }
+        // Handle multi-byte UTF-8 (check for U+2028/U+2029)
+        if b >= 0x80 {
+            // Check for U+2028 (E2 80 A8) and U+2029 (E2 80 A9)
+            if b == 0xE2 && i + 2 < len && bytes[i + 1] == 0x80 {
+                if bytes[i + 2] == 0xA8 {
+                    out.push_str(&s[copy_start..i]);
+                    out.push_str("\\u2028");
+                    i += 3;
+                    copy_start = i;
+                    continue;
+                } else if bytes[i + 2] == 0xA9 {
+                    out.push_str(&s[copy_start..i]);
+                    out.push_str("\\u2029");
+                    i += 3;
+                    copy_start = i;
+                    continue;
+                }
+            }
+            // Other multi-byte: skip all continuation bytes
+            i += 1;
+            while i < len && bytes[i] & 0xC0 == 0x80 {
+                i += 1;
+            }
+            continue;
+        }
+        // ASCII special characters
+        let replacement = match b {
+            b'\\' => "\\\\",
+            b'"' => "\\\"",
+            b'\n' => "\\n",
+            b'\r' => "\\r",
+            b'\t' => "\\t",
+            0 => "\\0",
+            // Other ASCII control characters
+            _ => {
+                out.push_str(&s[copy_start..i]);
+                out.push_str("\\x");
+                let hi = b >> 4;
+                let lo = b & 0x0F;
+                out.push(if hi < 10 {
+                    (b'0' + hi) as char
+                } else {
+                    (b'A' + hi - 10) as char
+                });
+                out.push(if lo < 10 {
+                    (b'0' + lo) as char
+                } else {
+                    (b'A' + lo - 10) as char
+                });
+                i += 1;
+                copy_start = i;
+                continue;
+            }
+        };
+        out.push_str(&s[copy_start..i]);
+        out.push_str(replacement);
+        i += 1;
+        copy_start = i;
+    }
+    // Flush remaining unmodified region
+    if copy_start < len {
+        out.push_str(&s[copy_start..]);
+    }
+}
+
+/// Escape a string for use inside a JavaScript string literal (double-quoted).
+///
+/// Convenience wrapper around [`escape_js_string_into`] that allocates and returns a new String.
 pub fn escape_js_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    for ch in s.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\0' => out.push_str("\\0"),
-            // U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR are valid
-            // in JSON but are line terminators in JS (pre-ES2019). Escape them
-            // to ensure valid JS string literals in all runtimes.
-            '\u{2028}' => out.push_str("\\u2028"),
-            '\u{2029}' => out.push_str("\\u2029"),
-            // Other ASCII control characters → \xNN
-            c if c.is_ascii_control() => {
-                out.push_str(&format!("\\x{:02X}", c as u32));
-            }
-            _ => out.push(ch),
-        }
-    }
+    escape_js_string_into(&mut out, s);
     out
 }
 
@@ -470,6 +538,7 @@ pub fn classify_modifier(name: &str) -> ModifierKind {
 }
 
 /// Capitalize the first ASCII character of a string (e.g., `click` → `Click`).
+#[allow(dead_code)] // used by capitalize_first_into callers; retained for standalone usage
 pub fn capitalize_first(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     capitalize_first_into(s, &mut out);
@@ -507,7 +576,7 @@ mod tests {
             pending.sort_unstable_by_key(|(s, _, _)| *s);
             ct.batch_overwrite(&pending);
         }
-        ct.to_string()
+        ct.build_string()
     }
 
     #[test]
@@ -629,7 +698,7 @@ mod tests {
         let alloc = Allocator::default();
         let mut ct = crate::code_transform::CodeTransform::new(input, &alloc);
         capitalize_first_in_place(&mut ct, 0, input);
-        assert_eq!(ct.to_string(), "Click");
+        assert_eq!(ct.build_string(), "Click");
     }
 
     #[test]
@@ -638,7 +707,7 @@ mod tests {
         let alloc = Allocator::default();
         let mut ct = crate::code_transform::CodeTransform::new(input, &alloc);
         capitalize_first_in_place(&mut ct, 0, input);
-        assert_eq!(ct.to_string(), "Click");
+        assert_eq!(ct.build_string(), "Click");
     }
 
     #[test]
@@ -647,7 +716,7 @@ mod tests {
         let alloc = Allocator::default();
         let mut ct = crate::code_transform::CodeTransform::new(input, &alloc);
         capitalize_first_in_place(&mut ct, 3, input);
-        assert_eq!(ct.to_string(), "on-Click");
+        assert_eq!(ct.build_string(), "on-Click");
     }
 
     #[test]
@@ -657,7 +726,7 @@ mod tests {
         let mut ct = crate::code_transform::CodeTransform::new(input, &alloc);
         capitalize_first_in_place(&mut ct, 0, input);
         // '4' is not ascii_lowercase, so no change
-        assert_eq!(ct.to_string(), "42abc");
+        assert_eq!(ct.build_string(), "42abc");
     }
 
     #[test]
@@ -713,7 +782,7 @@ mod tests {
         let br = make_bindings(&[("show", 0, 4, false), ("visible", 8, 15, false)]);
         let map = FxHashMap::default(); // empty → all get _ctx.
         patch_bindings_with_var_mappings(&mut ct, Some(&br), &map, false, &[]);
-        assert_eq!(ct.to_string(), "_ctx.show && _ctx.visible");
+        assert_eq!(ct.build_string(), "_ctx.show && _ctx.visible");
     }
 
     #[test]
@@ -727,7 +796,7 @@ mod tests {
         let map = FxHashMap::default();
         let var_mappings = vec![("item".to_string(), "_for_item0.value".to_string())];
         patch_bindings_with_var_mappings(&mut ct, Some(&br), &map, false, &var_mappings);
-        assert_eq!(ct.to_string(), "_for_item0.value.name");
+        assert_eq!(ct.build_string(), "_for_item0.value.name");
     }
 
     #[test]
@@ -741,7 +810,7 @@ mod tests {
         let map = FxHashMap::default();
         let var_mappings = vec![("item".to_string(), "_for_item0.value".to_string())];
         patch_bindings_with_var_mappings(&mut ct, Some(&br), &map, false, &var_mappings);
-        assert_eq!(ct.to_string(), "_for_item0.value + _ctx.count");
+        assert_eq!(ct.build_string(), "_for_item0.value + _ctx.count");
     }
 
     #[test]
@@ -750,7 +819,7 @@ mod tests {
         let alloc = Allocator::default();
         let mut ct = crate::code_transform::CodeTransform::new(input, &alloc);
         patch_bindings_with_var_mappings(&mut ct, None, &FxHashMap::default(), false, &[]);
-        assert_eq!(ct.to_string(), "42");
+        assert_eq!(ct.build_string(), "42");
     }
 
     #[test]
@@ -761,7 +830,7 @@ mod tests {
         let mut ct = crate::code_transform::CodeTransform::new(input, &alloc);
         let br = make_bindings(&[("x", 0, 1, true)]);
         patch_bindings_with_var_mappings(&mut ct, Some(&br), &FxHashMap::default(), false, &[]);
-        assert_eq!(ct.to_string(), "x");
+        assert_eq!(ct.build_string(), "x");
     }
 
     #[test]
@@ -775,7 +844,7 @@ mod tests {
         let mut map = FxHashMap::default();
         map.insert("count" as &str, BindingType::SetupRef);
         patch_bindings_with_var_mappings(&mut ct, Some(&br), &map, false, &[]);
-        assert_eq!(ct.to_string(), "$setup.count");
+        assert_eq!(ct.build_string(), "$setup.count");
     }
 
     // ── patch_vfor_references tests ─────────────────────────────────────
@@ -788,7 +857,7 @@ mod tests {
         let mut ct = crate::code_transform::CodeTransform::new(&input, &alloc);
         let refs = vec![Span { start: 10, end: 15 }];
         patch_vfor_references(&mut ct, &refs, None, &input, &FxHashMap::default(), false);
-        assert_eq!(&ct.to_string()[10..], "_ctx.items");
+        assert_eq!(&ct.build_string()[10..], "_ctx.items");
     }
 
     #[test]
@@ -810,7 +879,7 @@ mod tests {
             &FxHashMap::default(),
             false,
         );
-        let result = ct.to_string();
+        let result = ct.build_string();
         assert!(result.contains("_ctx.items"));
         assert!(!result.contains("_ctx.other"));
     }
@@ -821,7 +890,7 @@ mod tests {
         let alloc = Allocator::default();
         let mut ct = crate::code_transform::CodeTransform::new(input, &alloc);
         patch_vfor_references(&mut ct, &[], None, input, &FxHashMap::default(), false);
-        assert_eq!(ct.to_string(), "hello");
+        assert_eq!(ct.build_string(), "hello");
     }
 
     #[test]
@@ -834,7 +903,7 @@ mod tests {
         let mut bindings = FxHashMap::default();
         bindings.insert("items" as &str, BindingType::SetupRef);
         patch_vfor_references(&mut ct, &refs, None, input, &bindings, false);
-        assert_eq!(&ct.to_string()[10..], "$setup.items");
+        assert_eq!(&ct.build_string()[10..], "$setup.items");
     }
 
     #[test]

@@ -27,6 +27,7 @@ use super::super::{ChildInfo, ChildKind, StateStack};
 /// Text+interpolation children use `_createTextVNode(...)` inside slots.
 ///
 /// Then emits patch flags, dynamic props, and closing paren.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_element_close<'alloc>(
     code_transform: &CodeTransform<'alloc>,
     ev: &OxcCompiledElementClosed,
@@ -221,25 +222,39 @@ pub(crate) fn handle_element_close<'alloc>(
 
     // Build the closing string: optional array close + suffix + closing paren.
     // Block roots need an extra `)` to close the outer `(_openBlock(), ...)` grouping.
-    buf.clear();
-    if needs_array {
-        buf.push(']');
-    }
-    write_patch_flag_suffix(buf, patch_flag, &state.dynamic_props, is_production);
-    buf.push(')');
-    if state.is_block_root {
+    // Fast path: use &'static str for common close strings to avoid bump allocation.
+    let close_str: &'alloc str = if patch_flag.0 == 0 && !state.is_block_root {
+        if needs_array {
+            "])"
+        } else {
+            ")"
+        }
+    } else if patch_flag.0 == 0 && state.is_block_root {
+        if needs_array {
+            "]))"
+        } else {
+            "))"
+        }
+    } else {
+        buf.clear();
+        if needs_array {
+            buf.push(']');
+        }
+        write_patch_flag_suffix(buf, patch_flag, &state.dynamic_props, is_production);
         buf.push(')');
-    }
+        if state.is_block_root {
+            buf.push(')');
+        }
+        code_transform.alloc_str(buf)
+    };
 
     let close_pos = if let Some(close_tag) = &ev.event.event_close_tag {
         // Overwrite `</tagname>` with the close string
-        let s = code_transform.alloc_str(buf);
-        pending_overwrites.push((close_tag.start, close_tag.end, s));
+        pending_overwrites.push((close_tag.start, close_tag.end, close_str));
         close_tag.end
     } else {
         // Non-void element without close tag (shouldn't normally happen)
-        let s = code_transform.alloc_str(buf);
-        pending_append_lefts.push((state.open_tag_end, s));
+        pending_append_lefts.push((state.open_tag_end, close_str));
         state.open_tag_end
     };
 
@@ -349,13 +364,22 @@ pub(crate) fn handle_element_close_self_closing<'alloc>(
     pending_append_lefts: &mut Vec<(u32, &'alloc str)>,
     buf: &mut String,
 ) {
-    buf.clear();
-    write_patch_flag_suffix(buf, state.patch_flag, &state.dynamic_props, is_production);
-    buf.push(')');
-    if state.is_block_root {
+    // Fast path: use &'static str for common close strings (no patch flags).
+    let s: &'alloc str = if state.patch_flag.0 == 0 {
+        if state.is_block_root {
+            "))"
+        } else {
+            ")"
+        }
+    } else {
+        buf.clear();
+        write_patch_flag_suffix(buf, state.patch_flag, &state.dynamic_props, is_production);
         buf.push(')');
-    }
-    let s = code_transform.alloc_str(buf);
+        if state.is_block_root {
+            buf.push(')');
+        }
+        code_transform.alloc_str(buf)
+    };
     pending_append_lefts.push((state.open_tag_end, s));
 
     // withDirectives wrapping for self-closing elements (e.g., <input v-model="msg" />)

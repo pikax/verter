@@ -28,6 +28,27 @@ pub struct CodegenOptions {
     pub is_production: Option<bool>,
     /// Custom component ID (overrides auto-generation from filename)
     pub component_id: Option<String>,
+    /// Skip source map generation for faster compilation
+    pub skip_source_map: Option<bool>,
+    /// Custom interpolation delimiters [open, close]. Default: ["{{", "}}"]
+    pub delimiters: Option<Vec<String>>,
+    /// Tag name prefixes treated as custom elements (skip component resolution).
+    /// E.g. ["ion-", "my-"] matches <ion-button>, <my-card>
+    pub custom_elements: Option<Vec<String>>,
+    /// Whether to preserve HTML comments in output. Default: !isProduction
+    pub comments: Option<bool>,
+    /// Runtime module name to import helpers from. Default: "vue"
+    pub runtime_module_name: Option<String>,
+    /// Hoist static VNodes/props to constants. Default: true
+    pub hoist_static: Option<bool>,
+    /// Whitespace handling: "condense" or "preserve". Default: "condense"
+    pub whitespace: Option<String>,
+    /// Cache event handler expressions. Default: false
+    pub cache_handlers: Option<bool>,
+    /// Inline render function in setup(). Default: isProduction
+    pub inline: Option<bool>,
+    /// Indicates SFC uses :slotted() in styles. Default: true
+    pub slotted: Option<bool>,
 }
 
 #[napi(object)]
@@ -56,12 +77,36 @@ pub fn compile(
 
     let opts = options.unwrap_or_default();
 
+    let delimiters = opts.delimiters.and_then(|d| {
+        if d.len() == 2 {
+            Some((d[0].clone(), d[1].clone()))
+        } else {
+            None
+        }
+    });
+
+    let whitespace = opts.whitespace.and_then(|w| match w.as_str() {
+        "preserve" => Some(verter_core::builder::codegen::WhitespaceStrategy::Preserve),
+        "condense" => Some(verter_core::builder::codegen::WhitespaceStrategy::Condense),
+        _ => None,
+    });
+
     let core_options = CoreOptions {
         filename: opts.filename,
         is_production: opts.is_production.unwrap_or(false),
         component_id: opts.component_id,
         include_tsx: false,
-        skip_source_map: false,
+        skip_source_map: opts.skip_source_map.unwrap_or(false),
+        delimiters,
+        custom_elements: opts.custom_elements,
+        comments: opts.comments,
+        runtime_module_name: opts.runtime_module_name,
+        hoist_static: opts.hoist_static,
+        whitespace,
+        cache_handlers: opts.cache_handlers,
+        inline: opts.inline,
+        slotted: opts.slotted,
+        prefix_identifiers: None,
     };
 
     let result = with_input_str(input, |input| {
@@ -174,6 +219,7 @@ pub fn compile_for_vite(
         component_id: opts.component_id,
         include_tsx: false,
         skip_source_map: false,
+        ..Default::default()
     };
 
     let result = with_input_str(input, |input| {

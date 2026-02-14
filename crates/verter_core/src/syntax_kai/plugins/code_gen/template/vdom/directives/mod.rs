@@ -26,6 +26,7 @@ use super::{ScopeClose, StateStack};
 /// **Exception**: v-else-if emits its condition directly via `prepend_left` because
 /// v-else-if elements are NOT registered as parent children (they're continuations
 /// of the v-if chain), so there's no separator FIFO conflict.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn process_scope_opens<'alloc>(
     code_transform: &CodeTransform<'alloc>,
     scopes: &[ElementScope<'alloc>],

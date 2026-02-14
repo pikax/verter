@@ -31,7 +31,7 @@ fn prop_priority(kind: &PropKind) -> u8 {
 /// Each structural directive accumulates its local bindings into `local_ignored`
 /// so that later directives and regular props can see them.
 pub fn parse_element_props<'alloc>(
-    event: CompiledElementStart,
+    mut event: CompiledElementStart,
     input: &'alloc str,
     alloc: &'alloc Allocator,
     source_type: SourceType,
@@ -46,6 +46,44 @@ pub fn parse_element_props<'alloc>(
     let mut once_scope = None;
 
     let is_template = event.event_open_tag.kind == ElementKind::Template;
+
+    // Fast path: when ALL props are regular (non-structural, non-directive),
+    // skip the sorted_indices Vec allocation, sort, and local_ignored clone.
+    // This is the overwhelmingly common case for static HTML elements
+    // (Value, ClassValue, StyleValue props only).
+    let all_regular = event
+        .props
+        .iter()
+        .all(|p| prop_priority(&p.kind) == 3 && !p.is_directive && !p.has_dynamic_arg);
+    if all_regular {
+        // Drain props from event to move (not clone) each Prop into OxcProp.
+        // This avoids ~300 Prop clones for template-heavy's ~100 static elements.
+        // Downstream code reads props from OxcProp.event, not from event.props.
+        let oxc_props: Vec<OxcProp<'alloc>> = event
+            .props
+            .drain(..)
+            .map(|prop| {
+                let element_id = prop.element_id;
+                let start = prop.start;
+                let name_end = prop.name_end;
+                OxcProp {
+                    element_id,
+                    start,
+                    name_end,
+                    arg: None,
+                    exp: None,
+                    modifiers: prop.modifiers.clone(),
+                    event: prop,
+                }
+            })
+            .collect();
+        return OxcCompiledElementStart {
+            props: oxc_props,
+            scopes: Vec::new(),
+            event,
+            provided_locals: ignored.to_vec(),
+        };
+    }
 
     // Build a sorted index so we process props in priority order
     // without moving them out of the Vec.

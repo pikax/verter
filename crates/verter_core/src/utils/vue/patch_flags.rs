@@ -390,6 +390,12 @@ impl PatchFlag {
      * ```rust,ignore
      * PatchFlag(self.0 | (flag as i16))
      * ```
+     *
+     * # Safety
+     *
+     * The caller must ensure `flag` is a positive (non-special) `PatchFlags`
+     * variant. This is a logical invariant only — the operation is a plain
+     * bitwise OR on an `i16` with no memory unsafety.
      */
     #[inline(always)]
     pub const unsafe fn add_unchecked(self, flag: PatchFlags) -> Self {
@@ -401,6 +407,12 @@ impl PatchFlag {
      *
      * Fastest version (AND + NOT), intended for hot paths with the same invariants
      * as `add_unchecked`.
+     *
+     * # Safety
+     *
+     * The caller must ensure `flag` is a positive (non-special) `PatchFlags`
+     * variant. This is a logical invariant only — the operation is a plain
+     * bitwise AND+NOT on an `i16` with no memory unsafety.
      */
     #[inline(always)]
     pub const unsafe fn remove_unchecked(self, flag: PatchFlags) -> Self {
@@ -412,6 +424,12 @@ impl PatchFlag {
      *
      * Like `remove_unchecked` but accepts a pre-combined `PatchFlag` mask,
      * allowing multiple flags to be cleared in a single operation.
+     *
+     * # Safety
+     *
+     * The caller must ensure `mask` contains only positive (non-special)
+     * flag bits. This is a logical invariant only — the operation is a plain
+     * bitwise AND+NOT on an `i16` with no memory unsafety.
      */
     #[inline(always)]
     pub const unsafe fn remove_mask_unchecked(self, mask: PatchFlag) -> Self {
@@ -423,6 +441,12 @@ impl PatchFlag {
      *
      * Fastest version (AND + compare), intended for hot paths where `self.0 > 0`
      * and `flag` is positive.
+     *
+     * # Safety
+     *
+     * The caller must ensure `self.0 > 0` and `flag` is a positive
+     * (non-special) `PatchFlags` variant. This is a logical invariant only —
+     * the operation is a plain bitwise AND on an `i16` with no memory unsafety.
      */
     #[inline(always)]
     pub const unsafe fn contains_unchecked(self, flag: PatchFlags) -> bool {

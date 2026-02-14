@@ -5,7 +5,7 @@ use oxc_allocator::Allocator;
 fn test_new() {
     let allocator = Allocator::default();
     let ms = CodeTransform::new("Hello World", &allocator);
-    assert_eq!(ms.to_string(), "Hello World");
+    assert_eq!(ms.build_string(), "Hello World");
     assert_eq!(ms.original(), "Hello World");
     assert!(!ms.is_modified());
 }
@@ -14,7 +14,7 @@ fn test_new() {
 fn test_empty_string() {
     let allocator = Allocator::default();
     let ms = CodeTransform::new("", &allocator);
-    assert_eq!(ms.to_string(), "");
+    assert_eq!(ms.build_string(), "");
     assert!(!ms.is_modified());
 }
 
@@ -23,7 +23,7 @@ fn test_append() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Hello", &allocator);
     ms.append(" World");
-    assert_eq!(ms.to_string(), "Hello World");
+    assert_eq!(ms.build_string(), "Hello World");
     assert!(ms.is_modified());
 }
 
@@ -32,7 +32,7 @@ fn test_prepend() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("World", &allocator);
     ms.prepend("Hello ");
-    assert_eq!(ms.to_string(), "Hello World");
+    assert_eq!(ms.build_string(), "Hello World");
     assert!(ms.is_modified());
 }
 
@@ -42,7 +42,7 @@ fn test_append_multiple() {
     let mut ms = CodeTransform::new("Hello", &allocator);
     ms.append(" World");
     ms.append("!");
-    assert_eq!(ms.to_string(), "Hello World!");
+    assert_eq!(ms.build_string(), "Hello World!");
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn test_prepend_multiple() {
     let mut ms = CodeTransform::new("World", &allocator);
     ms.prepend(" ");
     ms.prepend("Hello");
-    assert_eq!(ms.to_string(), "Hello World");
+    assert_eq!(ms.build_string(), "Hello World");
 }
 
 #[test]
@@ -59,7 +59,7 @@ fn test_overwrite_simple() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Hello World", &allocator);
     ms.overwrite(6, 11, "Rust");
-    assert_eq!(ms.to_string(), "Hello Rust");
+    assert_eq!(ms.build_string(), "Hello Rust");
     assert!(ms.is_modified());
 }
 
@@ -68,7 +68,7 @@ fn test_overwrite_beginning() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Hello World", &allocator);
     ms.overwrite(0, 5, "Hi");
-    assert_eq!(ms.to_string(), "Hi World");
+    assert_eq!(ms.build_string(), "Hi World");
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn test_overwrite_end() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Hello World", &allocator);
     ms.overwrite(6, 11, "Everyone");
-    assert_eq!(ms.to_string(), "Hello Everyone");
+    assert_eq!(ms.build_string(), "Hello Everyone");
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn test_overwrite_entire() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Hello World", &allocator);
     ms.overwrite(0, 11, "Goodbye");
-    assert_eq!(ms.to_string(), "Goodbye");
+    assert_eq!(ms.build_string(), "Goodbye");
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn test_overwrite_multiple_non_overlapping() {
     let mut ms = CodeTransform::new("Hello World Test", &allocator);
     ms.overwrite(0, 5, "Hi");
     ms.overwrite(12, 16, "Case");
-    assert_eq!(ms.to_string(), "Hi World Case");
+    assert_eq!(ms.build_string(), "Hi World Case");
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn test_overwrite_with_empty() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Hello World", &allocator);
     ms.overwrite(5, 6, "");
-    assert_eq!(ms.to_string(), "HelloWorld");
+    assert_eq!(ms.build_string(), "HelloWorld");
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn test_replace_alias() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Hello World", &allocator);
     ms.replace(6, 11, "Rust");
-    assert_eq!(ms.to_string(), "Hello Rust");
+    assert_eq!(ms.build_string(), "Hello Rust");
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn test_remove() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Hello World", &allocator);
     ms.remove(5, 6);
-    assert_eq!(ms.to_string(), "HelloWorld");
+    assert_eq!(ms.build_string(), "HelloWorld");
 }
 
 #[test]
@@ -125,7 +125,7 @@ fn test_remove_range() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Hello Beautiful World", &allocator);
     ms.remove(6, 16);
-    assert_eq!(ms.to_string(), "Hello World");
+    assert_eq!(ms.build_string(), "Hello World");
 }
 
 #[test]
@@ -135,7 +135,7 @@ fn test_combined_operations() {
     ms.prepend("(");
     ms.append(")");
     ms.overwrite(6, 11, "Rust");
-    assert_eq!(ms.to_string(), "(Hello Rust)");
+    assert_eq!(ms.build_string(), "(Hello Rust)");
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn test_chaining() {
     ms.prepend("Start: ")
         .overwrite(6, 11, "Rust")
         .append(" - End");
-    assert_eq!(ms.to_string(), "Start: Hello Rust - End");
+    assert_eq!(ms.build_string(), "Start: Hello Rust - End");
 }
 
 #[test]
@@ -153,7 +153,7 @@ fn test_multiline_overwrite() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Line 1\nLine 2\nLine 3", &allocator);
     ms.overwrite(7, 13, "Middle");
-    assert_eq!(ms.to_string(), "Line 1\nMiddle\nLine 3");
+    assert_eq!(ms.build_string(), "Line 1\nMiddle\nLine 3");
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn test_prepend_left() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Hello World", &allocator);
     ms.prepend_left(6, "Beautiful ");
-    assert_eq!(ms.to_string(), "Hello Beautiful World");
+    assert_eq!(ms.build_string(), "Hello Beautiful World");
 }
 
 #[test]
@@ -177,14 +177,14 @@ fn test_append_left() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Hello World", &allocator);
     ms.append_left(5, ",");
-    assert_eq!(ms.to_string(), "Hello, World");
+    assert_eq!(ms.build_string(), "Hello, World");
 }
 
 #[test]
 fn test_from_str() {
     let allocator = Allocator::default();
     let ms = CodeTransform::new("Hello", &allocator);
-    assert_eq!(ms.to_string(), "Hello");
+    assert_eq!(ms.build_string(), "Hello");
 }
 
 #[test]
@@ -192,7 +192,7 @@ fn test_from_string() {
     let allocator = Allocator::default();
     let hello = String::from("Hello");
     let ms = CodeTransform::new(&hello, &allocator);
-    assert_eq!(ms.to_string(), "Hello");
+    assert_eq!(ms.build_string(), "Hello");
 }
 
 #[test]
@@ -230,7 +230,7 @@ const y = "updated value";
 console.log(x, y);
 export { x, y };"#;
 
-    assert_eq!(ms.to_string(), expected);
+    assert_eq!(ms.build_string(), expected);
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn test_unicode_handling() {
     let mut ms = CodeTransform::new("Hello 🦀 World", &allocator);
     // Note: emoji is 4 bytes in UTF-8
     ms.overwrite(6, 10, "🎉");
-    assert_eq!(ms.to_string(), "Hello 🎉 World");
+    assert_eq!(ms.build_string(), "Hello 🎉 World");
 }
 
 #[test]
@@ -248,7 +248,7 @@ fn test_empty_operations() {
     let mut ms = CodeTransform::new("Hello", &allocator);
     ms.append("");
     ms.prepend("");
-    assert_eq!(ms.to_string(), "Hello");
+    assert_eq!(ms.build_string(), "Hello");
     assert!(!ms.is_modified());
 }
 
@@ -257,7 +257,7 @@ fn test_overwrite_invalid_range() {
     let allocator = Allocator::default();
     let mut ms = CodeTransform::new("Hello World", &allocator);
     ms.overwrite(5, 5, "X"); // Empty range
-    assert_eq!(ms.to_string(), "Hello World"); // Should be unchanged
+    assert_eq!(ms.build_string(), "Hello World"); // Should be unchanged
 }
 
 #[test]
@@ -312,11 +312,11 @@ fn test_overlapping_overwrites() {
 
     // First overwrite
     ct.overwrite(6, 11, "Rust");
-    assert_eq!(ct.to_string(), "Hello Rust Test");
+    assert_eq!(ct.build_string(), "Hello Rust Test");
 
     // Second overwrite overlapping the first
     ct.overwrite(6, 11, "Java");
-    assert_eq!(ct.to_string(), "Hello Java Test");
+    assert_eq!(ct.build_string(), "Hello Java Test");
 }
 
 #[test]
@@ -329,7 +329,7 @@ fn test_multiple_inserts_same_position() {
     ct.prepend_left(6, "Very ");
 
     // The second insert comes first because it's inserted at the same position
-    assert_eq!(ct.to_string(), "Hello Beautiful Very World");
+    assert_eq!(ct.build_string(), "Hello Beautiful Very World");
 }
 
 #[test]
@@ -338,7 +338,7 @@ fn test_insert_at_position_zero() {
     let mut ct = CodeTransform::new("World", &allocator);
 
     ct.prepend_left(0, "Hello ");
-    assert_eq!(ct.to_string(), "Hello World");
+    assert_eq!(ct.build_string(), "Hello World");
 }
 
 #[test]
@@ -348,7 +348,7 @@ fn test_insert_at_end() {
     let len = "Hello".len() as u32;
 
     ct.prepend_left(len, " World");
-    assert_eq!(ct.to_string(), "Hello World");
+    assert_eq!(ct.build_string(), "Hello World");
 }
 
 #[test]
@@ -357,7 +357,7 @@ fn test_remove_everything() {
     let mut ct = CodeTransform::new("Hello World", &allocator);
 
     ct.remove(0, 11);
-    assert_eq!(ct.to_string(), "");
+    assert_eq!(ct.build_string(), "");
 }
 
 #[test]
@@ -394,7 +394,7 @@ fn test_move_slice_to_beginning() {
     let allocator = Allocator::default();
     let mut ct = CodeTransform::new("ABCDEF", &allocator);
     ct.move_slice(2, 4, 0); // Move "CD" to the beginning
-    assert_eq!(ct.to_string(), "CDABEF");
+    assert_eq!(ct.build_string(), "CDABEF");
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn test_move_slice_to_end() {
     let allocator = Allocator::default();
     let mut ct = CodeTransform::new("ABCDEF", &allocator);
     ct.move_slice(0, 2, 6); // Move "AB" to the end
-    assert_eq!(ct.to_string(), "CDEFAB");
+    assert_eq!(ct.build_string(), "CDEFAB");
 }
 
 #[test]
@@ -410,7 +410,7 @@ fn test_move_slice_to_middle() {
     let allocator = Allocator::default();
     let mut ct = CodeTransform::new("ABCDEF", &allocator);
     ct.move_slice(4, 6, 2); // Move "EF" to after "AB"
-    assert_eq!(ct.to_string(), "ABEFCD");
+    assert_eq!(ct.build_string(), "ABEFCD");
 }
 
 #[test]
@@ -418,7 +418,7 @@ fn test_move_slice_same_position() {
     let allocator = Allocator::default();
     let mut ct = CodeTransform::new("ABCDEF", &allocator);
     ct.move_slice(2, 4, 2); // Move "CD" to its own position
-    assert_eq!(ct.to_string(), "ABCDEF");
+    assert_eq!(ct.build_string(), "ABCDEF");
 }
 
 #[test]
@@ -426,7 +426,7 @@ fn test_move_slice_empty_range() {
     let allocator = Allocator::default();
     let mut ct = CodeTransform::new("ABCDEF", &allocator);
     ct.move_slice(2, 2, 0); // Empty range
-    assert_eq!(ct.to_string(), "ABCDEF");
+    assert_eq!(ct.build_string(), "ABCDEF");
 }
 
 #[test]
@@ -437,7 +437,7 @@ fn test_move_slice_preserves_source_mapping() {
 
     // Move "World" to the beginning
     ct.move_slice(6, 11, 0);
-    assert_eq!(ct.to_string(), "WorldHello ");
+    assert_eq!(ct.build_string(), "WorldHello ");
 
     // Generate source map and verify it's valid
     let options = SourceMapOptions::new()
@@ -456,14 +456,14 @@ fn test_move_slice_with_insertions() {
 
     // Insert "X" at position 4 (between D and E)
     ct.append_left(4, "X");
-    assert_eq!(ct.to_string(), "ABCDXEFGH");
+    assert_eq!(ct.build_string(), "ABCDXEFGH");
 
     // Now move slice 2-6 (which includes "CD", the inserted "X", and "EF") to position 0
     ct.move_slice(2, 6, 0);
 
     // Expected: "CDXEF" moves to beginning, leaving "AB" and "GH"
     // Result should be: "CDXEFABGH"
-    assert_eq!(ct.to_string(), "CDXEFABGH");
+    assert_eq!(ct.build_string(), "CDXEFABGH");
 }
 
 #[test]
@@ -474,13 +474,13 @@ fn test_move_slice_with_multiple_insertions() {
     // Insert at multiple positions within the range we'll move
     ct.append_left(3, "1");
     ct.append_left(5, "2");
-    assert_eq!(ct.to_string(), "ABC1DE2FGH");
+    assert_eq!(ct.build_string(), "ABC1DE2FGH");
 
     // Move slice 2-6 to end (position 8)
     ct.move_slice(2, 6, 8);
 
     // "C1DE2F" should move to end
-    assert_eq!(ct.to_string(), "ABGHC1DE2F");
+    assert_eq!(ct.build_string(), "ABGHC1DE2F");
 }
 
 // ============================================================================
@@ -492,7 +492,7 @@ fn test_move_with_prefix() {
     let allocator = Allocator::default();
     let mut ct = CodeTransform::new("ABCDEF", &allocator);
     ct.move_with_prefix(2, 4, 0, ">>"); // Move "CD" to beginning with prefix
-    assert_eq!(ct.to_string(), ">>CDABEF");
+    assert_eq!(ct.build_string(), ">>CDABEF");
 }
 
 #[test]
@@ -500,7 +500,7 @@ fn test_move_with_suffix() {
     let allocator = Allocator::default();
     let mut ct = CodeTransform::new("ABCDEF", &allocator);
     ct.move_with_suffix(2, 4, 0, "<<"); // Move "CD" to beginning with suffix
-    assert_eq!(ct.to_string(), "CD<<ABEF");
+    assert_eq!(ct.build_string(), "CD<<ABEF");
 }
 
 #[test]
@@ -508,7 +508,7 @@ fn test_move_wrapped() {
     let allocator = Allocator::default();
     let mut ct = CodeTransform::new("ABCDEF", &allocator);
     ct.move_wrapped(2, 4, 0, "{", "}"); // Move "CD" wrapped with braces
-    assert_eq!(ct.to_string(), "{CD}ABEF");
+    assert_eq!(ct.build_string(), "{CD}ABEF");
 }
 
 #[test]
@@ -516,7 +516,7 @@ fn test_move_wrapped_to_end() {
     let allocator = Allocator::default();
     let mut ct = CodeTransform::new("ABCDEF", &allocator);
     ct.move_wrapped(0, 2, 6, "(", ")"); // Move "AB" to end wrapped
-    assert_eq!(ct.to_string(), "CDEF(AB)");
+    assert_eq!(ct.build_string(), "CDEF(AB)");
 }
 
 #[test]
@@ -527,7 +527,7 @@ fn test_move_with_prefix_preserves_source_mapping() {
 
     // Move "World" to beginning with prefix
     ct.move_with_prefix(6, 11, 0, "// ");
-    assert_eq!(ct.to_string(), "// WorldHello ");
+    assert_eq!(ct.build_string(), "// WorldHello ");
 
     // Generate source map and verify it's valid
     let options = SourceMapOptions::new()
@@ -546,7 +546,7 @@ fn test_move_wrapped_multiline() {
     // Move "const y = 2;\n" (positions 13-26) to beginning, wrapped
     ct.move_wrapped(13, 26, 0, "/* moved */\n", "/* end */\n");
     assert_eq!(
-        ct.to_string(),
+        ct.build_string(),
         "/* moved */\nconst y = 2;\n/* end */\nconst x = 1;\nconst z = 3;"
     );
 }
@@ -556,7 +556,7 @@ fn test_move_with_prefix_empty_prefix() {
     let allocator = Allocator::default();
     let mut ct = CodeTransform::new("ABCDEF", &allocator);
     ct.move_with_prefix(2, 4, 0, ""); // Empty prefix should work like regular move
-    assert_eq!(ct.to_string(), "CDABEF");
+    assert_eq!(ct.build_string(), "CDABEF");
 }
 
 #[test]
@@ -566,11 +566,11 @@ fn test_move_wrapped_with_insertions() {
 
     // Insert "X" at position 4
     ct.append_left(4, "X");
-    assert_eq!(ct.to_string(), "ABCDXEFGH");
+    assert_eq!(ct.build_string(), "ABCDXEFGH");
 
     // Move slice 2-6 with wrapping - insertion should come along
     ct.move_wrapped(2, 6, 0, "[", "]");
-    assert_eq!(ct.to_string(), "[CDXEF]ABGH");
+    assert_eq!(ct.build_string(), "[CDXEF]ABGH");
 }
 
 // ============================================================================
@@ -589,7 +589,7 @@ fn test_overwrite_after_move_wrapped_does_not_affect_moved_chunk() {
     // First, move the type params "{title: string}" (positions 26-41) to beginning
     ct.move_wrapped(26, 41, 0, "props:", ",\n");
     assert_eq!(
-        ct.to_string(),
+        ct.build_string(),
         "props:{title: string},\nconst props = defineProps<>();"
     );
 
@@ -597,7 +597,7 @@ fn test_overwrite_after_move_wrapped_does_not_affect_moved_chunk() {
     // This should NOT be affected by the moved chunk's original positions
     ct.overwrite(14, 26, "_props");
     assert_eq!(
-        ct.to_string(),
+        ct.build_string(),
         "props:{title: string},\nconst props = _props>();"
     );
 }
@@ -613,12 +613,12 @@ fn test_overwrite_position_not_affected_by_moved_chunks() {
 
     // Move "[content]" (positions 2-11) to the end
     ct.move_slice(2, 11, 22);
-    assert_eq!(ct.to_string(), "ABCD[other]EF[content]");
+    assert_eq!(ct.build_string(), "ABCD[other]EF[content]");
 
     // Now overwrite "CD" (positions 11-13 in original)
     // The moved chunk's original position (2-11) should not affect this
     ct.overwrite(11, 13, "XX");
-    assert_eq!(ct.to_string(), "ABXX[other]EF[content]");
+    assert_eq!(ct.build_string(), "ABXX[other]EF[content]");
 }
 
 #[test]
@@ -629,11 +629,11 @@ fn test_move_then_overwrite_within_remaining_content() {
 
     // Move "MOVE_ME_" (positions 6-14) to position 0
     ct.move_wrapped(6, 14, 0, "[", "]");
-    assert_eq!(ct.to_string(), "[MOVE_ME_]START_END_REST");
+    assert_eq!(ct.build_string(), "[MOVE_ME_]START_END_REST");
 
     // Overwrite "END_" (positions 14-18 in original) with "XXX"
     ct.overwrite(14, 18, "XXX");
-    assert_eq!(ct.to_string(), "[MOVE_ME_]START_XXXREST");
+    assert_eq!(ct.build_string(), "[MOVE_ME_]START_XXXREST");
 }
 
 #[test]
@@ -643,15 +643,15 @@ fn test_multiple_moves_then_overwrite() {
 
     // Move "ONE_" to beginning
     ct.move_wrapped(2, 6, 0, "(1:", ")");
-    assert_eq!(ct.to_string(), "(1:ONE_)A_B_TWO_C_THREE_D");
+    assert_eq!(ct.build_string(), "(1:ONE_)A_B_TWO_C_THREE_D");
 
     // Move "TWO_" to beginning - moves are appended, so second move comes after first
     ct.move_wrapped(8, 12, 0, "(2:", ")");
-    assert_eq!(ct.to_string(), "(1:ONE_)(2:TWO_)A_B_C_THREE_D");
+    assert_eq!(ct.build_string(), "(1:ONE_)(2:TWO_)A_B_C_THREE_D");
 
     // Now overwrite "THREE_" (positions 14-20 in original)
     ct.overwrite(14, 20, "3");
-    assert_eq!(ct.to_string(), "(1:ONE_)(2:TWO_)A_B_C_3D");
+    assert_eq!(ct.build_string(), "(1:ONE_)(2:TWO_)A_B_C_3D");
 }
 
 #[test]
@@ -663,15 +663,15 @@ fn test_overwrite_between_moved_chunks_original_positions() {
 
     // Move "AA_" to end
     ct.move_slice(0, 3, 13);
-    assert_eq!(ct.to_string(), "BBB_CC_ENDAA_");
+    assert_eq!(ct.build_string(), "BBB_CC_ENDAA_");
 
     // Move "CC_" to end
     ct.move_slice(7, 10, 13);
-    assert_eq!(ct.to_string(), "BBB_ENDAA_CC_");
+    assert_eq!(ct.build_string(), "BBB_ENDAA_CC_");
 
     // Overwrite "BBB_" (positions 3-7 in original) - should still work correctly
     ct.overwrite(3, 7, "XXX");
-    assert_eq!(ct.to_string(), "XXXENDAA_CC_");
+    assert_eq!(ct.build_string(), "XXXENDAA_CC_");
 }
 
 #[test]
@@ -695,7 +695,7 @@ fn test_vue_sfc_style_transformation() {
     // 3. Remove ">()" (positions 37-40)
     ct.remove(37, 40);
 
-    let result = ct.to_string();
+    let result = ct.build_string();
 
     // Verify the transformation
     assert!(
@@ -732,11 +732,11 @@ fn test_move_wrapped_overwritten_chunk_then_prepend_left() {
 
     // Overwrite "TYPE_CONTENT" with transformed content (like process_define_emits does)
     ct.overwrite(6, 18, "[\"transformed\"]");
-    assert_eq!(ct.to_string(), "START_[\"transformed\"]_END");
+    assert_eq!(ct.build_string(), "START_[\"transformed\"]_END");
 
     // Move the overwritten span to position 0 with wrapping (like emit_emits_section does)
     ct.move_wrapped(6, 18, 0, "emits:", ",\n");
-    assert_eq!(ct.to_string(), "emits:[\"transformed\"],\nSTART__END");
+    assert_eq!(ct.build_string(), "emits:[\"transformed\"],\nSTART__END");
 
     // Prepend at position 0 (like the setup function declaration)
     ct.prepend_left(0, "setup(){");
@@ -744,7 +744,7 @@ fn test_move_wrapped_overwritten_chunk_then_prepend_left() {
     // BUG: Without fix, this would be "emits:setup(){[\"transformed\"]..."
     // EXPECTED: setup should appear AFTER emits
     assert_eq!(
-        ct.to_string(),
+        ct.build_string(),
         "emits:[\"transformed\"],\nsetup(){START__END"
     );
 }
@@ -769,7 +769,7 @@ fn test_multiple_move_wrapped_then_prepend_left_ordering() {
 
     // Expected order: props, emits, setup, body
     // setup should be LAST in the inserted content before the body
-    let result = ct.to_string();
+    let result = ct.build_string();
     let props_pos = result.find("props:").unwrap();
     let emits_pos = result.find("emits:").unwrap();
     let setup_pos = result.find("setup(){").unwrap();
@@ -796,7 +796,7 @@ fn test_append_left_prepend_left_ordering_after_move_wrapped() {
     ct.prepend_left(0, "PREPEND");
 
     // Order: moved content, then APPEND, then PREPEND, then original "_REST"
-    assert_eq!(ct.to_string(), "[moved]APPENDPREPEND_REST");
+    assert_eq!(ct.build_string(), "[moved]APPENDPREPEND_REST");
 }
 
 #[test]
@@ -822,7 +822,7 @@ fn test_mixed_operations_same_position() {
     // Prepend at 0
     ct.prepend_left(0, "BEFORE_ORIGINAL");
 
-    let result = ct.to_string();
+    let result = ct.build_string();
 
     // All moves should come first, then append, then prepend, then original content
     assert!(
@@ -840,15 +840,15 @@ fn test_move_slice_overwritten_chunk_then_prepend_left() {
 
     // Overwrite "CONTENT" with transformed content
     ct.overwrite(6, 13, "MOVED");
-    assert_eq!(ct.to_string(), "START_MOVED_END");
+    assert_eq!(ct.build_string(), "START_MOVED_END");
 
     // Move the overwritten span to position 0
     ct.move_slice(6, 13, 0);
-    assert_eq!(ct.to_string(), "MOVEDSTART__END");
+    assert_eq!(ct.build_string(), "MOVEDSTART__END");
 
     // Prepend at position 0
     ct.prepend_left(0, "PREFIX:");
 
     // PREFIX: should appear AFTER the moved content
-    assert_eq!(ct.to_string(), "MOVEDPREFIX:START__END");
+    assert_eq!(ct.build_string(), "MOVEDPREFIX:START__END");
 }
