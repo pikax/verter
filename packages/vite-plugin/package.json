@@ -17,12 +17,12 @@
     }
   },
   "scripts": {
-    "build": "tsdown src/index.ts --format cjs,esm --dts",
-    "dev": "tsdown src/index.ts --format cjs,esm --dts --watch",
+    "build": "tsdown src/index.ts --format cjs,esm --dts --unbundle",
+    "dev": "tsdown src/index.ts --format cjs,esm --dts --unbundle --watch",
     "test": "vitest run"
   },
   "dependencies": {
-    "@verter/native": "workspace:*"
+    "@verter/unplugin": "workspace:*"
   },
   "devDependencies": {
     "tsdown": "^0.12.4",

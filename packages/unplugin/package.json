@@ -1,0 +1,77 @@
+{
+  "name": "@verter/unplugin",
+  "version": "0.0.1-alpha.1",
+  "description": "Universal Vue SFC compiler plugin for all bundlers (Vite, Rollup, webpack, esbuild, etc.)",
+  "license": "MIT",
+  "files": [
+    "dist"
+  ],
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.mjs",
+      "require": "./dist/vite.js"
+    },
+    "./rollup": {
+      "types": "./dist/rollup.d.ts",
+      "import": "./dist/rollup.mjs",
+      "require": "./dist/rollup.js"
+    },
+    "./webpack": {
+      "types": "./dist/webpack.d.ts",
+      "import": "./dist/webpack.mjs",
+      "require": "./dist/webpack.js"
+    },
+    "./esbuild": {
+      "types": "./dist/esbuild.d.ts",
+      "import": "./dist/esbuild.mjs",
+      "require": "./dist/esbuild.js"
+    },
+    "./rspack": {
+      "types": "./dist/rspack.d.ts",
+      "import": "./dist/rspack.mjs",
+      "require": "./dist/rspack.js"
+    },
+    "./rolldown": {
+      "types": "./dist/rolldown.d.ts",
+      "import": "./dist/rolldown.mjs",
+      "require": "./dist/rolldown.js"
+    },
+    "./farm": {
+      "types": "./dist/farm.d.ts",
+      "import": "./dist/farm.mjs",
+      "require": "./dist/farm.js"
+    }
+  },
+  "scripts": {
+    "build": "tsdown src/index.ts src/vite.ts src/rollup.ts src/webpack.ts src/esbuild.ts src/rspack.ts src/rolldown.ts src/farm.ts --format cjs,esm --dts --unbundle",
+    "dev": "tsdown src/index.ts src/vite.ts src/rollup.ts src/webpack.ts src/esbuild.ts src/rspack.ts src/rolldown.ts src/farm.ts --format cjs,esm --dts --unbundle --watch",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@verter/native": "workspace:*",
+    "unplugin": "^2.3.2"
+  },
+  "devDependencies": {
+    "tsdown": "^0.12.4",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "vitest": "^4.0.18"
+  },
+  "peerDependencies": {
+    "vite": "^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0"
+  },
+  "peerDependenciesMeta": {
+    "vite": {
+      "optional": true
+    }
+  }
+}

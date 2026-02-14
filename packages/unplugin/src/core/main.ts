@@ -1,7 +1,7 @@
 import type { ViteCodegenResult } from "@verter/native";
+import type { HmrStrategy } from "./types";
 import { basename } from "path";
-
-const EXPORT_HELPER_ID = "\0plugin-vue:export-helper";
+import { EXPORT_HELPER_ID } from "./constants";
 
 /**
  * Extract component name from filename and sanitize to a valid JS identifier.
@@ -10,43 +10,30 @@ const EXPORT_HELPER_ID = "\0plugin-vue:export-helper";
  */
 function extractComponentName(filename: string): string {
   let name = basename(filename).replace(/\.vue$/, "");
-  // Replace any character that isn't a valid JS identifier char with underscore
   name = name.replace(/[^a-zA-Z0-9_$]/g, "_");
-  // Prefix with underscore if starts with a digit
   if (/^[0-9]/.test(name)) {
     name = "_" + name;
   }
   return name;
 }
 
-/**
- * Options for main module generation
- */
 export interface MainModuleOptions {
   filename: string;
   scopeId: string;
   ssr: boolean;
   isProd: boolean;
+  hmr: HmrStrategy;
 }
 
 /**
  * Generate the main module output by assembling split blocks.
- *
- * This generates the compiled Vue component with:
- * 1. Style virtual module imports (so Vite processes CSS)
- * 2. Script code (component definition with `export default` → `const _sfc_main =`)
- * 3. Template code (render function)
- * 4. `_sfc_main.render = render` attachment
- * 5. Metadata (__scopeId, __file, __hmrId)
- * 6. HMR setup in development
- * 7. Export _sfc_main
  */
 export function generateMainModule(result: ViteCodegenResult, options: MainModuleOptions): string {
-  const { filename, scopeId, ssr, isProd } = options;
+  const { filename, scopeId, ssr, isProd, hmr } = options;
 
   const lines: string[] = [];
 
-  // 1. Import styles as virtual modules (Vite processes these through CSS pipeline)
+  // 1. Import styles as virtual modules
   result.styles.forEach((style, index) => {
     const query = new URLSearchParams();
     query.set("vue", "");
@@ -56,7 +43,6 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
     if (style.scoped) query.set("scoped", "true");
     if (style.isModule) query.set("module", "true");
 
-    // Append &lang.css (or &lang.scss etc.) so Vite routes this through the CSS pipeline
     const lang = style.lang || "css";
     lines.push(`import "${filename}?${query.toString()}&lang.${lang}"`);
   });
@@ -70,7 +56,6 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
   if (result.script) {
     let scriptCode = result.script.code;
 
-    // Replace "export default" with a variable assignment so we can add HMR/render
     hasDefaultExport = scriptCode.includes("export default");
     if (hasDefaultExport) {
       scriptCode = scriptCode.replace(/export default\s+/, "const _sfc_main = ");
@@ -102,8 +87,6 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
     metadataProps.push(`["__file", ${JSON.stringify(filename)}]`);
   }
 
-  // Use _export_sfc helper when there are metadata props to apply
-  // This matches @vitejs/plugin-vue's behavior
   if (metadataProps.length > 0 && hasDefaultExport) {
     lines.push(`import _export_sfc from "${EXPORT_HELPER_ID}"`);
     const componentName = extractComponentName(filename);
@@ -114,33 +97,52 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
 
   // 6. HMR setup (development only)
   if (!isProd && !ssr && hasDefaultExport) {
-    lines.push("");
-    lines.push(`/* Hot Module Replacement */`);
-    lines.push(`if (import.meta.hot) {`);
-    lines.push(`  _sfc_main.__hmrId = "${scopeId}"`);
-    lines.push(`  const __VUE_HMR_RUNTIME__ = globalThis.__VUE_HMR_RUNTIME__`);
-    lines.push(`  if (__VUE_HMR_RUNTIME__) {`);
-    lines.push(`    if (!__VUE_HMR_RUNTIME__.createRecord("${scopeId}", _sfc_main)) {`);
-    lines.push(`      __VUE_HMR_RUNTIME__.reload("${scopeId}", _sfc_main)`);
-    lines.push(`    }`);
-    lines.push(`  }`);
-    lines.push(`  import.meta.hot.accept((mod) => {`);
-    lines.push(`    if (!mod) return`);
-    lines.push(`    const { default: updated, _rerender_only } = mod`);
-    lines.push(`    if (_rerender_only) {`);
-    lines.push(`      __VUE_HMR_RUNTIME__?.rerender("${scopeId}", updated.render)`);
-    lines.push(`    } else {`);
-    lines.push(`      __VUE_HMR_RUNTIME__?.reload("${scopeId}", updated)`);
-    lines.push(`    }`);
-    lines.push(`  })`);
-    lines.push(`}`);
+    if (hmr === "vite") {
+      lines.push("");
+      lines.push(`/* Hot Module Replacement */`);
+      lines.push(`if (import.meta.hot) {`);
+      lines.push(`  _sfc_main.__hmrId = "${scopeId}"`);
+      lines.push(`  const __VUE_HMR_RUNTIME__ = globalThis.__VUE_HMR_RUNTIME__`);
+      lines.push(`  if (__VUE_HMR_RUNTIME__) {`);
+      lines.push(`    if (!__VUE_HMR_RUNTIME__.createRecord("${scopeId}", _sfc_main)) {`);
+      lines.push(`      __VUE_HMR_RUNTIME__.reload("${scopeId}", _sfc_main)`);
+      lines.push(`    }`);
+      lines.push(`  }`);
+      lines.push(`  import.meta.hot.accept((mod) => {`);
+      lines.push(`    if (!mod) return`);
+      lines.push(`    const { default: updated, _rerender_only } = mod`);
+      lines.push(`    if (_rerender_only) {`);
+      lines.push(`      __VUE_HMR_RUNTIME__?.rerender("${scopeId}", updated.render)`);
+      lines.push(`    } else {`);
+      lines.push(`      __VUE_HMR_RUNTIME__?.reload("${scopeId}", updated)`);
+      lines.push(`    }`);
+      lines.push(`  })`);
+      lines.push(`}`);
+    } else if (hmr === "webpack") {
+      lines.push("");
+      lines.push(`/* Hot Module Replacement */`);
+      lines.push(`if (module.hot) {`);
+      lines.push(`  _sfc_main.__hmrId = "${scopeId}"`);
+      lines.push(`  const __VUE_HMR_RUNTIME__ = globalThis.__VUE_HMR_RUNTIME__`);
+      lines.push(`  if (__VUE_HMR_RUNTIME__) {`);
+      lines.push(`    if (!__VUE_HMR_RUNTIME__.createRecord("${scopeId}", _sfc_main)) {`);
+      lines.push(`      __VUE_HMR_RUNTIME__.reload("${scopeId}", _sfc_main)`);
+      lines.push(`    }`);
+      lines.push(`  }`);
+      lines.push(`  module.hot.accept((err) => {`);
+      lines.push(`    if (err) {`);
+      lines.push(`      __VUE_HMR_RUNTIME__?.reload("${scopeId}", _sfc_main)`);
+      lines.push(`    }`);
+      lines.push(`  })`);
+      lines.push(`}`);
+    }
+    // hmr === "none" — skip HMR code entirely
   }
 
   // 7. Export the component
   if (hasDefaultExport) {
     lines.push("");
     if (metadataProps.length > 0) {
-      // Export with named component (matches @vitejs/plugin-vue behavior)
       const componentName = extractComponentName(filename);
       lines.push(`export default ${componentName}`);
     } else {

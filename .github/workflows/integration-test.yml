@@ -194,6 +194,10 @@ jobs:
           CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
         run: pnpm run build:native
 
+      - name: Build unplugin
+        if: steps.source.outputs.source == 'artifact'
+        run: pnpm --filter @verter/unplugin build
+
       - name: Build vite-plugin
         if: steps.source.outputs.source == 'artifact'
         run: pnpm --filter @verter/vite-plugin build
@@ -204,8 +208,9 @@ jobs:
           mkdir -p dist
           # Pack packages
           cd packages/native && pnpm pack --pack-destination ../../dist && cd ../..
+          cd packages/unplugin && pnpm pack --pack-destination ../../dist && cd ../..
           cd packages/vite-plugin && pnpm pack --pack-destination ../../dist && cd ../..
-          
+
           echo "✅ Packages packed:"
           ls -lh dist/*.tgz
 
@@ -244,18 +249,28 @@ jobs:
             build-cmd: pnpm run build
             test-cmd: pnpm --filter vuetify test:unit
             package-manager: pnpm
+            bundler: vite
           - name: oku-primitives
             repo: oku-ui/primitives
             branch: main
             build-cmd: pnpm run build
             test-cmd: pnpm run test
             package-manager: pnpm
+            bundler: vite
           - name: hoppscotch
             repo: hoppscotch/hoppscotch
             branch: main
             build-cmd: pnpm --filter @hoppscotch/selfhost-web build
             test-cmd: pnpm --filter @hoppscotch/common test
             package-manager: pnpm
+            bundler: vite
+          - name: element-plus
+            repo: element-plus/element-plus
+            branch: dev
+            build-cmd: pnpm run build
+            test-cmd: ""
+            package-manager: pnpm
+            bundler: rollup
 
     steps:
       - name: Download source info
@@ -293,10 +308,11 @@ jobs:
       - name: Configure hoist pattern for Verter
         working-directory: test-project
         run: |
-          # Hoist @verter/* to root node_modules so all workspace packages can resolve it
+          # Hoist @verter/* and unplugin to root node_modules so all workspace packages can resolve it
           # Using public-hoist-pattern instead of node-linker=hoisted to preserve
           # pnpm's per-package isolation (some projects use ./node_modules/ paths in build scripts)
           echo 'public-hoist-pattern[]=@verter/*' >> .npmrc
+          echo 'public-hoist-pattern[]=unplugin' >> .npmrc
 
       - name: Install project dependencies
         working-directory: test-project
@@ -355,66 +371,105 @@ jobs:
         run: |
           echo "📦 Installing Verter from tarballs (workspace:* resolved by pnpm pack)"
           NATIVE_TGZ=$(ls ../verter-packages/verter-native-*.tgz)
-          PLUGIN_TGZ=$(ls ../verter-packages/verter-vite-plugin-*.tgz)
+          UNPLUGIN_TGZ=$(ls ../verter-packages/verter-unplugin-*.tgz)
           echo "  native: $NATIVE_TGZ"
-          echo "  vite-plugin: $PLUGIN_TGZ"
+          echo "  unplugin: $UNPLUGIN_TGZ"
 
           # 1. Install @verter/native first
           ${{ matrix.project.package-manager }} add -w "$NATIVE_TGZ"
 
-          # 2. Add pnpm override so vite-plugin's transitive @verter/native dep
-          #    resolves from root dependencies instead of hitting the npm registry
-          #    (the package is not published yet)
+          # 2. Add pnpm overrides so transitive deps resolve locally
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             pkg.pnpm = pkg.pnpm || {};
             pkg.pnpm.overrides = pkg.pnpm.overrides || {};
             pkg.pnpm.overrides['@verter/native'] = '\$@verter/native';
+            pkg.pnpm.overrides['@verter/unplugin'] = '\$@verter/unplugin';
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
-          # 3. Install @verter/vite-plugin (override ensures @verter/native resolves locally)
-          ${{ matrix.project.package-manager }} add -w "$PLUGIN_TGZ"
+          # 3. Install @verter/unplugin (override ensures @verter/native resolves locally)
+          ${{ matrix.project.package-manager }} add -w "$UNPLUGIN_TGZ"
           echo "✅ Verter packages installed from tarballs"
 
-      - name: Install Verter vite-plugin (from npm)
+      - name: Install Verter unplugin (from npm)
         if: steps.source.outputs.source == 'npm'
         working-directory: test-project
         run: |
           echo "Installing from npm with dist-tag: ${{ steps.source.outputs.dist-tag }}"
-          ${{ matrix.project.package-manager }} add -w @verter/vite-plugin@${{ steps.source.outputs.dist-tag }}
+          ${{ matrix.project.package-manager }} add -w @verter/unplugin@${{ steps.source.outputs.dist-tag }}
 
-      - name: Replace vue() with verter() in all Vite/Vitest configs
+      - name: Replace vue plugin with verter in build configs
         working-directory: test-project
         run: |
-          CONFIG_FILES=$(grep -rl "@vitejs/plugin-vue" --include="vite.config.*" --include="vitest.config.*" . || true)
+          BUNDLER="${{ matrix.project.bundler }}"
 
-          if [ -z "$CONFIG_FILES" ]; then
-            echo "❌ No config files with @vitejs/plugin-vue found"
-            exit 1
-          fi
+          if [ "$BUNDLER" = "rollup" ]; then
+            # For Rollup-based projects: replace in rollup configs and build scripts
+            CONFIG_FILES=$(grep -rl "@vitejs/plugin-vue\|rollup-plugin-vue" --include="*.config.*" --include="*.ts" --include="*.js" --include="*.mjs" . \
+              | grep -v node_modules || true)
 
-          echo "📝 Found config files to modify:"
-          echo "$CONFIG_FILES"
-          echo "---"
+            if [ -z "$CONFIG_FILES" ]; then
+              echo "⚠️ No config files with vue plugin found for rollup bundler"
+              exit 0
+            fi
 
-          for CONFIG_FILE in $CONFIG_FILES; do
-            echo "📝 Modifying $CONFIG_FILE"
-            cat "$CONFIG_FILE"
+            echo "📝 Found config files to modify (rollup):"
+            echo "$CONFIG_FILES"
             echo "---"
 
-            sed -i "s|from '@vitejs/plugin-vue'|from '@verter/vite-plugin'|g" "$CONFIG_FILE"
-            sed -i "s|from \"@vitejs/plugin-vue\"|from \"@verter/vite-plugin\"|g" "$CONFIG_FILE"
-            sed -i 's|import vue from|import verter from|g' "$CONFIG_FILE"
-            sed -i 's|import Vue from|import verter from|g' "$CONFIG_FILE"
-            sed -i 's|vue(|verter(|g' "$CONFIG_FILE"
-            sed -i 's|Vue(|verter(|g' "$CONFIG_FILE"
+            for CONFIG_FILE in $CONFIG_FILES; do
+              echo "📝 Modifying $CONFIG_FILE"
 
-            echo "📝 Modified:"
-            cat "$CONFIG_FILE"
-            echo "==="
-          done
+              # Replace rollup-plugin-vue imports
+              sed -i "s|from 'rollup-plugin-vue'|from '@verter/unplugin/rollup'|g" "$CONFIG_FILE"
+              sed -i 's|from "rollup-plugin-vue"|from "@verter/unplugin/rollup"|g' "$CONFIG_FILE"
+
+              # Replace @vitejs/plugin-vue imports (some rollup projects use it)
+              sed -i "s|from '@vitejs/plugin-vue'|from '@verter/unplugin/rollup'|g" "$CONFIG_FILE"
+              sed -i 's|from "@vitejs/plugin-vue"|from "@verter/unplugin/rollup"|g' "$CONFIG_FILE"
+
+              # Rename the imported function
+              sed -i 's|import vue from|import verter from|g' "$CONFIG_FILE"
+              sed -i 's|import Vue from|import verter from|g' "$CONFIG_FILE"
+              sed -i 's|vue(|verter(|g' "$CONFIG_FILE"
+              sed -i 's|Vue(|verter(|g' "$CONFIG_FILE"
+
+              echo "📝 Modified:"
+              cat "$CONFIG_FILE"
+              echo "==="
+            done
+          else
+            # For Vite-based projects: replace in vite/vitest configs
+            CONFIG_FILES=$(grep -rl "@vitejs/plugin-vue" --include="vite.config.*" --include="vitest.config.*" . || true)
+
+            if [ -z "$CONFIG_FILES" ]; then
+              echo "❌ No config files with @vitejs/plugin-vue found"
+              exit 1
+            fi
+
+            echo "📝 Found config files to modify (vite):"
+            echo "$CONFIG_FILES"
+            echo "---"
+
+            for CONFIG_FILE in $CONFIG_FILES; do
+              echo "📝 Modifying $CONFIG_FILE"
+              cat "$CONFIG_FILE"
+              echo "---"
+
+              sed -i "s|from '@vitejs/plugin-vue'|from '@verter/unplugin/vite'|g" "$CONFIG_FILE"
+              sed -i "s|from \"@vitejs/plugin-vue\"|from \"@verter/unplugin/vite\"|g" "$CONFIG_FILE"
+              sed -i 's|import vue from|import verter from|g' "$CONFIG_FILE"
+              sed -i 's|import Vue from|import verter from|g' "$CONFIG_FILE"
+              sed -i 's|vue(|verter(|g' "$CONFIG_FILE"
+              sed -i 's|Vue(|verter(|g' "$CONFIG_FILE"
+
+              echo "📝 Modified:"
+              cat "$CONFIG_FILE"
+              echo "==="
+            done
+          fi
 
       - name: Verter build
         id: verter-build
