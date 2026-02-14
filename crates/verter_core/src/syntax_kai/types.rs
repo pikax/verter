@@ -860,28 +860,11 @@ pub struct CssParsedStyleBlock {
 
 // /CSS parsed types
 
-// CSS processed types (emitted by css_style plugin)
-
-/// Processed v-bind() expression extracted from CSS.
-/// `v-bind(expr)` → `var(--{scope_id}-{sanitized})`.
-#[derive(Debug, Clone)]
-pub struct ProcessedCssVBind {
-    /// Span of the original expression inside v-bind(...) in SFC source.
-    pub expression: Span,
-    /// Generated CSS variable name bytes (e.g., b"--a4f2eed6-color").
-    /// Owned because it is computed, not a source slice.
-    pub var_name: String,
-    /// Byte offset of `v-bind(` in original SFC source.
-    pub css_start: u32,
-    /// Byte offset of closing `)` + 1 in original SFC source.
-    pub css_end: u32,
-}
-
 /// A single CSS module class mapping: original class name → hashed class name.
 #[derive(Debug, Clone)]
 pub struct CssModuleClassMapping {
-    /// Original class name span in source (e.g., "btn").
-    pub original: Span,
+    /// Original class name (e.g., "btn"). Owned, from process_style result.
+    pub original: String,
     /// Hashed class name (e.g., "btn_a4f2eed6_0"). Owned, computed.
     pub hashed: String,
 }
@@ -894,48 +877,6 @@ pub struct CssModuleInfo {
     /// Class name mappings (original → hashed).
     pub classes: Vec<CssModuleClassMapping>,
 }
-
-#[derive(Debug, Clone)]
-pub struct CssEarlyBinding {
-    pub bindings: Vec<()>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CssBind {
-    pub name: Span,
-
-    pub start: u32,
-    pub end: u32,
-}
-
-/// Result of CSS processing for a single `<style>` block.
-/// Emitted as `Event::ProcessedStyle` by the css_style plugin.
-#[derive(Debug)]
-pub struct ProcessedStyleBlock {
-    /// Style language (css, scss, sass, less, stylus).
-    pub lang: Option<StyleLang>,
-    /// Whether this block is scoped.
-    pub scoped: bool,
-    /// CSS module info (None if not a module block).
-    pub module: Option<CssModuleInfo>,
-
-    /// Transformed CSS bytes (scoped selectors applied, v-bind replaced, modules hashed).
-    /// None if no transformation was needed (plain unscoped style).
-    pub transformed_css: Option<Vec<u8>>,
-    /// v-bind() expressions extracted from this style block.
-    pub v_bind_expressions: Vec<ProcessedCssVBind>,
-
-    /// CSS processing errors (e.g., lightningcss parse failures).
-    /// Non-empty when CSS transformation was attempted but failed.
-    pub errors: Vec<String>,
-
-    /// Original compiled start event (preserves source positions and attributes).
-    pub compiled_start: CompiledRootStyleStart,
-    /// Original compiled end event (preserves content span and close tag positions).
-    pub compiled_end: CompiledRootStyleEnd,
-}
-
-// /CSS processed types
 
 // /Bindings (BindingMetadata removed — bindings now live in ScriptParseResult)
 
@@ -989,8 +930,5 @@ pub enum Event<'alloc> {
 
     // CSS parsed style (emitted by css_parser plugin)
     CssParsedStyle(Box<CssParsedStyleBlock>),
-
-    // CSS processed style (emitted by css_style plugin)
-    ProcessedStyle(Box<ProcessedStyleBlock>),
     // (ScriptBindings removed — bindings now live in OxcScript.result.bindings)
 }

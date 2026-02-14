@@ -133,7 +133,7 @@ fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
                 .map(|m| {
                     m.classes
                         .iter()
-                        .map(|c| vec![String::new(), c.hashed.clone()])
+                        .map(|c| vec![c.original.clone(), c.hashed.clone()])
                         .collect()
                 })
                 .unwrap_or_default();

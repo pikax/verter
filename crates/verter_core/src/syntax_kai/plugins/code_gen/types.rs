@@ -43,6 +43,7 @@ impl ScriptSetupImportDependencies {
     pub const DEFINE_COMPONENT: u8 = 1 << 0;
     pub const USE_SLOTS: u8 = 1 << 1;
     pub const MERGE_MODELS: u8 = 1 << 2;
+    pub const USE_CSS_VARS: u8 = 1 << 3;
 
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -69,6 +70,9 @@ impl ScriptSetupImportDependencies {
         }
         if self.contains(Self::MERGE_MODELS) {
             imports.push("mergeModels as _mergeModels");
+        }
+        if self.contains(Self::USE_CSS_VARS) {
+            imports.push("useCssVars as _useCssVars");
         }
         imports.join(",")
     }

@@ -41,7 +41,7 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
     query.set("index", String(index));
     if (style.lang) query.set("lang", style.lang);
     if (style.scoped) query.set("scoped", "true");
-    if (style.isModule) query.set("module", "true");
+    if (style.is_module) query.set("module", "true");
 
     const lang = style.lang || "css";
     lines.push(`import "${filename}?${query.toString()}&lang.${lang}"`);
@@ -85,6 +85,22 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
   }
   if (!isProd && hasDefaultExport) {
     metadataProps.push(`["__file", ${JSON.stringify(filename)}]`);
+  }
+
+  // CSS Modules: inject __cssModules for useCssModule() runtime support
+  const moduleStyles = result.styles.filter(
+    (s) => s.is_module && s.module_classes.length > 0,
+  );
+  if (moduleStyles.length > 0) {
+    lines.push(`const __cssModules = {}`);
+    for (const style of moduleStyles) {
+      const moduleName = style.module_name || "$style";
+      const classesObj = style.module_classes
+        .map(([orig, hashed]) => `"${orig}":"${hashed}"`)
+        .join(",");
+      lines.push(`__cssModules["${moduleName}"] = {${classesObj}}`);
+    }
+    metadataProps.push(`["__cssModules", __cssModules]`);
   }
 
   if (metadataProps.length > 0 && hasDefaultExport) {

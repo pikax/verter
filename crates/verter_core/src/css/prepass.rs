@@ -181,7 +181,7 @@ fn transform_v_bind(css: &str, start: usize, scope_id: &str) -> Option<(String, 
 ///
 /// Matches Vue's upstream behavior: replaces non-word characters (except hyphens)
 /// with `_`. Word characters are ASCII `[a-zA-Z0-9_]`.
-fn generate_var_name(scope_id: &str, expr: &str) -> String {
+pub fn generate_var_name(scope_id: &str, expr: &str) -> String {
     let mut sanitized = String::with_capacity(expr.len());
     for c in expr.chars() {
         if c.is_ascii_alphanumeric() || c == '_' || c == '-' {

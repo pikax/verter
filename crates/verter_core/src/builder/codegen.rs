@@ -13,15 +13,17 @@ use std::{cell::RefCell, rc::Rc};
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-pub use crate::syntax_kai::plugins::css_style::CssStyleOutput;
+pub use crate::syntax_kai::plugins::code_gen::css::CssStyleOutput;
 use crate::{
     code_transform::{CodeTransform, SourceMapOptions},
     syntax_kai::{
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxPluginOptions, SyntaxResult},
         plugins::{
-            code_gen::{script::ScriptGeneratorPlugin, template::TemplateGeneratorPlugin},
+            code_gen::{
+                css::CssGeneratorPlugin, script::ScriptGeneratorPlugin,
+                template::TemplateGeneratorPlugin,
+            },
             css_parser::CssParserPlugin,
-            css_style::CssStylePlugin,
             element_compiler::element_compiler::ElementCompilerPlugin,
             oxc_parser::oxc_parser::OxcParserPlugin,
         },
@@ -302,12 +304,11 @@ pub fn compile(
     } else {
         compute_scope_id(&component_name)
     };
+    // Parser plugins
     let mut css_parser = CssParserPlugin::new();
-    let mut css_style = CssStylePlugin::new();
-    css_style.set_scope_id(scope_id);
-    css_style.set_component_id(scope_id);
 
-    // codegen plugins
+    // Code generation plugins
+    let mut code_gen_css = CssGeneratorPlugin::new(Rc::clone(&code_transform), scope_id);
     let mut code_gen_script = ScriptGeneratorPlugin::new(
         Rc::clone(&code_transform),
         &component_name,
@@ -315,6 +316,7 @@ pub fn compile(
         false,
         false,
     )
+    .with_scope_id(scope_id)
     .with_inline_template(options.resolve_inline())
     .with_runtime_module_name(options.resolve_runtime_module_name().to_string());
 
@@ -336,11 +338,12 @@ pub fn compile(
         let mut script_ec = ElementCompilerPlugin::new();
         let mut script_oxc = OxcParserPlugin::new(allocator);
 
+        // Pipeline: parsers first, code_gen last (code_gen order independent)
         let pipeline: &mut [&mut dyn SyntaxPlugin] = &mut [
             &mut script_ec,
             &mut css_parser,
-            &mut css_style,
             &mut script_oxc,
+            &mut code_gen_css,
             &mut code_gen_script,
             &mut code_gen_template,
         ];
@@ -356,7 +359,7 @@ pub fn compile(
     code_gen_script.end(&ctx);
 
     let code = code_transform.borrow().build_string();
-    let styles = css_style.take_styles();
+    let styles = code_gen_css.take_styles();
 
     let (source_map, code_with_source_map) = if options.skip_source_map {
         (String::new(), String::new())
@@ -618,6 +621,302 @@ const count = ref(0)
         let result = compile(input, &options, &allocator);
 
         assert!(result.styles.is_empty(), "Should have no style blocks");
+    }
+
+    // ==================== code_gen/css: Style tag removal ====================
+
+    /// @ai-generated — Style tags should be removed from JS output
+    #[test]
+    fn test_codegen_css_removes_style_tags() {
+        let input = r#"<script setup>const x = 1</script>
+<template><div>hi</div></template>
+<style scoped>.box { color: red; }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            !result.code.contains("<style"),
+            "Style tags should be removed from JS output, got:\n{}",
+            result.code
+        );
+        assert!(
+            !result.code.contains("</style>"),
+            "Style closing tags should be removed from JS output, got:\n{}",
+            result.code
+        );
+        assert!(
+            !result.code.contains(".box"),
+            "CSS content should not appear in JS output, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Style tags removed but CSS preserved in styles field
+    #[test]
+    fn test_codegen_css_styles_field_preserved() {
+        let input = r#"<script setup>const x = 1</script>
+<template><div>hi</div></template>
+<style scoped>.box { color: red; }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert_eq!(
+            result.styles.len(),
+            1,
+            "Should have one style in styles field"
+        );
+        assert!(result.styles[0].scoped, "Style should be marked scoped");
+        assert!(
+            result.styles[0].code.contains("[data-v-"),
+            "CSS should have scope attribute, got: {}",
+            result.styles[0].code
+        );
+    }
+
+    /// @ai-generated — Multiple style blocks all removed from JS
+    #[test]
+    fn test_codegen_css_multiple_styles_removed() {
+        let input = r#"<script setup>const x = 1</script>
+<template><div>hi</div></template>
+<style scoped>.a { color: red; }</style>
+<style>.b { color: blue; }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            !result.code.contains("<style"),
+            "All style tags should be removed, got:\n{}",
+            result.code
+        );
+        assert_eq!(
+            result.styles.len(),
+            2,
+            "Should have two styles in styles field"
+        );
+    }
+
+    /// @ai-generated — JS output is valid after style tag removal
+    #[test]
+    fn test_codegen_css_valid_js_after_removal() {
+        let input = r#"<script setup>const x = 1</script>
+<template><div>{{ x }}</div></template>
+<style scoped>.box { color: red; }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        // Validate JS syntax
+        let js_allocator = Allocator::default();
+        let source_type = oxc_span::SourceType::mjs();
+        let parser_result =
+            oxc_parser::Parser::new(&js_allocator, &result.code, source_type).parse();
+        assert!(
+            parser_result.errors.is_empty(),
+            "JS output should be valid after style removal.\nErrors: {:?}\nCode:\n{}",
+            parser_result.errors,
+            result.code
+        );
+    }
+
+    /// @ai-generated — :deep() transformation preserved in styles output
+    #[test]
+    fn test_codegen_css_deep_transform() {
+        let input = r#"<template><div>hi</div></template>
+<style scoped>:deep(.inner) { color: red; }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert_eq!(result.styles.len(), 1);
+        assert!(
+            result.styles[0].code.contains(".inner"),
+            ":deep inner selector should be present, got: {}",
+            result.styles[0].code
+        );
+        assert!(
+            result.styles[0].code.contains("[data-v-"),
+            "Scope attribute should be present, got: {}",
+            result.styles[0].code
+        );
+        // Inner should NOT have scope attr
+        assert!(
+            !result.styles[0].code.contains(".inner[data-v-"),
+            ":deep inner should not be scoped, got: {}",
+            result.styles[0].code
+        );
+    }
+
+    // ==================== useCssVars: Script injection ====================
+
+    /// @ai-generated — v-bind in CSS injects useCssVars in script
+    #[test]
+    fn test_use_css_vars_single() {
+        let input = r#"<script setup>
+import { ref } from 'vue'
+const color = ref('red')
+</script>
+<template><div class="box">hi</div></template>
+<style scoped>.box { color: v-bind(color); }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.code.contains("_useCssVars"),
+            "Should inject useCssVars call, got:\n{}",
+            result.code
+        );
+        assert!(
+            result.code.contains("_ctx.color"),
+            "Should reference color via _ctx, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Multiple v-bind expressions in useCssVars
+    #[test]
+    fn test_use_css_vars_multiple() {
+        let input = r#"<script setup>
+const color = 'red'
+const size = '16px'
+</script>
+<template><div>hi</div></template>
+<style scoped>.box { color: v-bind(color); font-size: v-bind(size); }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.code.contains("_useCssVars"),
+            "Should inject useCssVars, got:\n{}",
+            result.code
+        );
+        assert!(
+            result.code.contains("_ctx.color") && result.code.contains("_ctx.size"),
+            "Should reference both vars, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — v-bind with dotted expression
+    #[test]
+    fn test_use_css_vars_dotted() {
+        let input = r#"<script setup>
+const theme = { color: 'red' }
+</script>
+<template><div>hi</div></template>
+<style scoped>.box { color: v-bind('theme.color'); }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.code.contains("_useCssVars"),
+            "Should inject useCssVars, got:\n{}",
+            result.code
+        );
+        assert!(
+            result.code.contains("_ctx.theme.color"),
+            "Should reference dotted expression, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — useCssVars adds import statement
+    #[test]
+    fn test_use_css_vars_import() {
+        let input = r#"<script setup>
+const color = 'red'
+</script>
+<template><div>hi</div></template>
+<style scoped>.box { color: v-bind(color); }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.code.contains("useCssVars as _useCssVars"),
+            "Should import useCssVars, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — No v-bind means no useCssVars injection
+    #[test]
+    fn test_use_css_vars_not_injected_without_v_bind() {
+        let input = r#"<script setup>
+const x = 1
+</script>
+<template><div>hi</div></template>
+<style scoped>.box { color: red; }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            !result.code.contains("_useCssVars"),
+            "Should NOT inject useCssVars without v-bind, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — v-bind in non-scoped style still injects useCssVars
+    #[test]
+    fn test_use_css_vars_non_scoped() {
+        let input = r#"<script setup>
+const color = 'red'
+</script>
+<template><div>hi</div></template>
+<style>.box { color: v-bind(color); }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.code.contains("_useCssVars"),
+            "v-bind in non-scoped style should still inject useCssVars, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — useCssVars output is valid JS
+    #[test]
+    fn test_use_css_vars_valid_js() {
+        let input = r#"<script setup>
+const color = 'red'
+const size = '16px'
+</script>
+<template><div>{{ color }}</div></template>
+<style scoped>.box { color: v-bind(color); font-size: v-bind(size); }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        let js_allocator = Allocator::default();
+        let source_type = oxc_span::SourceType::mjs();
+        let parser_result =
+            oxc_parser::Parser::new(&js_allocator, &result.code, source_type).parse();
+        assert!(
+            parser_result.errors.is_empty(),
+            "useCssVars output should be valid JS.\nErrors: {:?}\nCode:\n{}",
+            parser_result.errors,
+            result.code
+        );
     }
 
     #[test]

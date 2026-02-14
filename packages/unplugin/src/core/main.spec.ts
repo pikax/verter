@@ -270,4 +270,142 @@ describe("generateMainModule", () => {
     expect(output).not.toContain("_sfc_main.render");
     expect(output).not.toContain("function render()");
   });
+
+  // ==================== CSS Modules: __cssModules injection ====================
+
+  // @ai-generated - Default CSS module injects __cssModules["$style"]
+  it("injects __cssModules for default module style", () => {
+    const result = makeResult({
+      styles: [
+        {
+          code: ".btn_hash_0 { color: red }",
+          scoped: false,
+          is_module: true,
+          module_classes: [["btn", "btn_hash_0"]],
+        },
+      ],
+    });
+
+    const output = generateMainModule(result, {
+      filename: "/path/to/App.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    expect(output).toContain("__cssModules");
+    expect(output).toContain('"$style"');
+    expect(output).toContain('"btn"');
+    expect(output).toContain('"btn_hash_0"');
+  });
+
+  // @ai-generated - Named CSS module uses custom name
+  it("injects __cssModules with custom module name", () => {
+    const result = makeResult({
+      styles: [
+        {
+          code: ".card_hash_0 { display: flex }",
+          scoped: false,
+          is_module: true,
+          module_classes: [["card", "card_hash_0"]],
+          module_name: "classes",
+        },
+      ],
+    });
+
+    const output = generateMainModule(result, {
+      filename: "/path/to/App.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    expect(output).toContain("__cssModules");
+    expect(output).toContain('"classes"');
+    expect(output).toContain('"card"');
+    expect(output).toContain('"card_hash_0"');
+  });
+
+  // @ai-generated - No module styles means no __cssModules
+  it("does not inject __cssModules without module styles", () => {
+    const result = makeResult({
+      styles: [
+        {
+          code: ".btn { color: red }",
+          scoped: true,
+          is_module: false,
+          module_classes: [],
+        },
+      ],
+    });
+
+    const output = generateMainModule(result, {
+      filename: "/path/to/App.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    expect(output).not.toContain("__cssModules");
+  });
+
+  // @ai-generated - Multiple module styles in __cssModules
+  it("injects multiple modules into __cssModules", () => {
+    const result = makeResult({
+      styles: [
+        {
+          code: ".btn_hash_0 { color: red }",
+          scoped: false,
+          is_module: true,
+          module_classes: [["btn", "btn_hash_0"]],
+        },
+        {
+          code: ".card_hash_0 { display: flex }",
+          scoped: false,
+          is_module: true,
+          module_classes: [["card", "card_hash_0"]],
+          module_name: "classes",
+        },
+      ],
+    });
+
+    const output = generateMainModule(result, {
+      filename: "/path/to/App.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    expect(output).toContain('"$style"');
+    expect(output).toContain('"classes"');
+  });
+
+  // @ai-generated - __cssModules uses _export_sfc metadata prop
+  it("attaches __cssModules via _export_sfc metadata", () => {
+    const result = makeResult({
+      styles: [
+        {
+          code: ".btn_hash_0 { color: red }",
+          scoped: false,
+          is_module: true,
+          module_classes: [["btn", "btn_hash_0"]],
+        },
+      ],
+    });
+
+    const output = generateMainModule(result, {
+      filename: "/path/to/App.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    expect(output).toContain("_export_sfc");
+    expect(output).toContain("__cssModules");
+  });
 });

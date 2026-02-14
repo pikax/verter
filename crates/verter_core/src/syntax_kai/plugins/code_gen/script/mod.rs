@@ -8,7 +8,7 @@ use crate::{
             script::process::{process_script_event, ProcessScriptOptions},
             types::ScriptSetupImportDependencies,
         },
-        types::{Event, OxcScript},
+        types::{CssParsedStyleBlock, Event, OxcScript},
     },
 };
 
@@ -28,6 +28,15 @@ pub struct ScriptGeneratorPlugin<'alloc> {
     runtime_module_name: String,
 
     imports: ScriptSetupImportDependencies,
+
+    /// Scope ID for CSS variable name generation (matches CSS side).
+    scope_id: [u8; 8],
+    /// Collected CSS v-bind expressions: (var_key, expression_text).
+    /// var_key is the CSS variable key without `--` prefix (e.g., "a4f2eed6-color").
+    css_v_binds: Vec<(String, String)>,
+    /// Saved insertion position from OxcScript (tag_open_end).
+    /// Used to inject useCssVars call inside setup().
+    script_insert_pos: Option<u32>,
 }
 
 impl<'alloc> ScriptGeneratorPlugin<'alloc> {
@@ -48,7 +57,16 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
             runtime_module_name: "vue".to_string(),
 
             imports: ScriptSetupImportDependencies::default(),
+            scope_id: [b'0'; 8],
+            css_v_binds: Vec::new(),
+            script_insert_pos: None,
         }
+    }
+
+    /// Set the scope ID for CSS variable name generation.
+    pub fn with_scope_id(mut self, scope_id: [u8; 8]) -> Self {
+        self.scope_id = scope_id;
+        self
     }
 
     /// Set inline template mode (decoupled from is_production).
@@ -81,6 +99,11 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
             );
         }
 
+        // Save the insertion position for useCssVars injection in end()
+        if event.setup.is_some() {
+            self.script_insert_pos = Some(event.tag_open_end);
+        }
+
         // Process the script content with macros and transformations.
         let processed = process_script_event(
             event,
@@ -96,6 +119,62 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
 
         self.imports.add(processed.imports.0);
     }
+
+    fn collect_css_v_binds(
+        &mut self,
+        parsed: &CssParsedStyleBlock,
+        ctx: &SyntaxPluginContext<'alloc>,
+    ) {
+        if parsed.v_binds.is_empty() {
+            return;
+        }
+
+        let scope_id_str = std::str::from_utf8(&self.scope_id).unwrap_or("00000000");
+
+        for vbind in &parsed.v_binds {
+            let expr_text =
+                &ctx.input[vbind.expression.start as usize..vbind.expression.end as usize];
+
+            // Generate the CSS variable name (e.g., "--a4f2eed6-color")
+            let var_name = crate::css::prepass::generate_var_name(scope_id_str, expr_text);
+            // Strip leading "--" to get the JS key (e.g., "a4f2eed6-color")
+            let var_key = var_name[2..].to_string();
+
+            self.css_v_binds.push((var_key, expr_text.to_string()));
+        }
+    }
+
+    fn inject_use_css_vars(&mut self) {
+        if self.css_v_binds.is_empty() {
+            return;
+        }
+
+        let Some(insert_pos) = self.script_insert_pos else {
+            return;
+        };
+
+        self.imports
+            .add(ScriptSetupImportDependencies::USE_CSS_VARS);
+
+        let mut buf = String::with_capacity(64 + self.css_v_binds.len() * 48);
+        buf.push_str("\n_useCssVars(_ctx => ({\n");
+        for (i, (key, expr)) in self.css_v_binds.iter().enumerate() {
+            buf.push_str("  \"");
+            buf.push_str(key);
+            buf.push_str("\": (_ctx.");
+            buf.push_str(expr);
+            buf.push(')');
+            if i < self.css_v_binds.len() - 1 {
+                buf.push(',');
+            }
+            buf.push('\n');
+        }
+        buf.push_str("}))\n");
+
+        self.code_transform
+            .borrow_mut()
+            .prepend_left(insert_pos, &buf);
+    }
 }
 
 impl<'alloc> SyntaxPlugin<'alloc> for ScriptGeneratorPlugin<'alloc> {
@@ -104,7 +183,10 @@ impl<'alloc> SyntaxPlugin<'alloc> for ScriptGeneratorPlugin<'alloc> {
     }
 
     fn end(&mut self, _ctx: &SyntaxPluginContext<'alloc>) {
-        // add imports to the top of the script
+        // Inject useCssVars call inside setup() if v-bind expressions were found
+        self.inject_use_css_vars();
+
+        // Add imports to the top of the script
         if !self.imports.is_empty() {
             self.code_transform.borrow_mut().prepend(
                 format!(
@@ -122,8 +204,14 @@ impl<'alloc> SyntaxPlugin<'alloc> for ScriptGeneratorPlugin<'alloc> {
         event: Event<'alloc>,
         ctx: &mut SyntaxPluginContext<'alloc>,
     ) -> SyntaxResult<Event<'alloc>> {
-        if let Event::OxcScript(script) = &event {
-            self.process_script(script, ctx);
+        match &event {
+            Event::OxcScript(script) => {
+                self.process_script(script, ctx);
+            }
+            Event::CssParsedStyle(parsed) => {
+                self.collect_css_v_binds(parsed, ctx);
+            }
+            _ => {}
         }
         SyntaxResult::Keep(event)
     }

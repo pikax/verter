@@ -141,7 +141,7 @@ pub fn compile(
                 .map(|m| {
                     m.classes
                         .iter()
-                        .map(|c| vec![String::new(), c.hashed.clone()])
+                        .map(|c| vec![c.original.clone(), c.hashed.clone()])
                         .collect()
                 })
                 .unwrap_or_default();
@@ -287,7 +287,7 @@ pub fn compile_for_vite(
                 .map(|m| {
                     m.classes
                         .iter()
-                        .map(|c| vec![String::new(), c.hashed.clone()])
+                        .map(|c| vec![c.original.clone(), c.hashed.clone()])
                         .collect()
                 })
                 .unwrap_or_default();
