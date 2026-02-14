@@ -187,11 +187,8 @@ jobs:
         if: steps.source.outputs.source == 'artifact'
         run: pnpm install --frozen-lockfile
 
-      - name: Build native (fast CI profile)
+      - name: Build native (production)
         if: steps.source.outputs.source == 'artifact'
-        env:
-          CARGO_PROFILE_RELEASE_LTO: 'false'
-          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
         run: pnpm run build:native
 
       - name: Build unplugin

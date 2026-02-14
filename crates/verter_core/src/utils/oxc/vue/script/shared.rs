@@ -12,31 +12,28 @@ use oxc_span::GetSpan;
 use super::types::{ScriptBinding, ScriptExport, ScriptImport, ScriptItem};
 use crate::common::Span;
 
-/// Context for script parsing with offset adjustment
+/// Context for script parsing.
+///
+/// In the `syntax_kai` pipeline, `adjust_program_spans` adjusts statement/expression
+/// spans to SFC coordinates, but does NOT adjust TypeScript type annotation spans
+/// (type_arguments, interface body members, type alias bodies). The `content_offset`
+/// field provides the offset needed to convert those unadjusted spans to SFC coordinates.
 pub struct ScriptParseContext<'a> {
-    /// Base offset to add to all OXC spans
-    /// This is the position where script content starts in the SFC
-    pub base_offset: u32,
+    /// Offset for unadjusted TypeScript type annotation spans.
+    /// In the `syntax_kai` pipeline this is `content_start` (where script content begins in the SFC).
+    /// In direct parsing (tests), this is 0 since spans are already local.
+    pub content_offset: u32,
     /// Source bytes for byte comparisons
     pub source_bytes: &'a [u8],
 }
 
 impl<'a> ScriptParseContext<'a> {
-    /// Create a new parse context
-    pub fn new(base_offset: u32, source_bytes: &'a [u8]) -> Self {
+    /// Create a new parse context.
+    pub fn new(content_offset: u32, source_bytes: &'a [u8]) -> Self {
         Self {
-            base_offset,
+            content_offset,
             source_bytes,
         }
-    }
-
-    /// Convert an OXC span to an SFC-relative span
-    #[inline]
-    pub fn adjust_span(&self, oxc_span: oxc_span::Span) -> Span {
-        Span::new(
-            oxc_span.start + self.base_offset,
-            oxc_span.end + self.base_offset,
-        )
     }
 
     /// Get a slice of the source as str
@@ -50,7 +47,7 @@ impl<'a> ScriptParseContext<'a> {
 /// Process an import declaration and return a ScriptImport item
 pub fn process_import<'a>(
     import: &ImportDeclaration<'a>,
-    ctx: &ScriptParseContext<'a>,
+    _ctx: &ScriptParseContext<'a>,
 ) -> ScriptImport<'a> {
     let mut bindings = Vec::new();
 
@@ -61,19 +58,19 @@ pub fn process_import<'a>(
                 ImportDeclarationSpecifier::ImportSpecifier(s) => {
                     bindings.push(ScriptBinding {
                         name: s.local.name.as_str(),
-                        span: ctx.adjust_span(s.local.span),
+                        span: Span::from(s.local.span),
                     });
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
                     bindings.push(ScriptBinding {
                         name: s.local.name.as_str(),
-                        span: ctx.adjust_span(s.local.span),
+                        span: Span::from(s.local.span),
                     });
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
                     bindings.push(ScriptBinding {
                         name: s.local.name.as_str(),
-                        span: ctx.adjust_span(s.local.span),
+                        span: Span::from(s.local.span),
                     });
                 }
             }
@@ -81,9 +78,9 @@ pub fn process_import<'a>(
     }
 
     ScriptImport {
-        span: ctx.adjust_span(import.span),
+        span: Span::from(import.span),
         source: import.source.value.as_str(),
-        source_span: ctx.adjust_span(import.source.span),
+        source_span: Span::from(import.source.span),
         bindings,
         is_type_only: import.import_kind.is_type(),
     }
@@ -92,7 +89,6 @@ pub fn process_import<'a>(
 /// Process a named export declaration and return a ScriptExport item
 pub fn process_named_export<'a>(
     export: &ExportNamedDeclaration<'a>,
-    ctx: &ScriptParseContext<'a>,
 ) -> ScriptExport<'a> {
     let mut bindings = Vec::new();
 
@@ -106,17 +102,17 @@ pub fn process_named_export<'a>(
         };
         bindings.push(ScriptBinding {
             name,
-            span: ctx.adjust_span(spec.exported.span()),
+            span: Span::from(spec.exported.span()),
         });
     }
 
     // Handle declaration exports: export const foo = 1
     if let Some(decl) = &export.declaration {
-        extract_declaration_bindings(decl, ctx, &mut bindings);
+        extract_declaration_bindings(decl, &mut bindings);
     }
 
     ScriptExport {
-        span: ctx.adjust_span(export.span),
+        span: Span::from(export.span),
         bindings,
         source: export.source.as_ref().map(|s| s.value.as_str()),
         is_type_only: export.export_kind.is_type(),
@@ -126,7 +122,7 @@ pub fn process_named_export<'a>(
 /// Process an export all declaration: export * from 'foo'
 pub fn process_all_export<'a>(
     export: &ExportAllDeclaration<'a>,
-    ctx: &ScriptParseContext<'a>,
+    _ctx: &ScriptParseContext<'a>,
 ) -> ScriptExport<'a> {
     let bindings = if let Some(exported) = &export.exported {
         // export * as foo from 'bar'
@@ -137,14 +133,14 @@ pub fn process_all_export<'a>(
         };
         vec![ScriptBinding {
             name,
-            span: ctx.adjust_span(exported.span()),
+            span: Span::from(exported.span()),
         }]
     } else {
         Vec::new()
     };
 
     ScriptExport {
-        span: ctx.adjust_span(export.span),
+        span: Span::from(export.span),
         bindings,
         source: Some(export.source.value.as_str()),
         is_type_only: export.export_kind.is_type(),
@@ -154,20 +150,19 @@ pub fn process_all_export<'a>(
 /// Extract bindings from a declaration (for export declarations)
 fn extract_declaration_bindings<'a>(
     decl: &Declaration<'a>,
-    ctx: &ScriptParseContext<'a>,
     bindings: &mut Vec<ScriptBinding<'a>>,
 ) {
     match decl {
         Declaration::VariableDeclaration(var_decl) => {
             for declarator in &var_decl.declarations {
-                collect_binding_pattern_names(&declarator.id, ctx, bindings);
+                collect_binding_pattern_names(&declarator.id, bindings);
             }
         }
         Declaration::FunctionDeclaration(func) => {
             if let Some(id) = &func.id {
                 bindings.push(ScriptBinding {
                     name: id.name.as_str(),
-                    span: ctx.adjust_span(id.span),
+                    span: Span::from(id.span),
                 });
             }
         }
@@ -175,7 +170,7 @@ fn extract_declaration_bindings<'a>(
             if let Some(id) = &class.id {
                 bindings.push(ScriptBinding {
                     name: id.name.as_str(),
-                    span: ctx.adjust_span(id.span),
+                    span: Span::from(id.span),
                 });
             }
         }
@@ -192,34 +187,33 @@ fn extract_declaration_bindings<'a>(
 /// Collect binding names from a binding pattern (handles destructuring)
 fn collect_binding_pattern_names<'a>(
     pattern: &BindingPattern<'a>,
-    ctx: &ScriptParseContext<'a>,
     bindings: &mut Vec<ScriptBinding<'a>>,
 ) {
     match pattern {
         BindingPattern::BindingIdentifier(id) => {
             bindings.push(ScriptBinding {
                 name: id.name.as_str(),
-                span: ctx.adjust_span(id.span),
+                span: Span::from(id.span),
             });
         }
         BindingPattern::ObjectPattern(obj) => {
             for prop in &obj.properties {
-                collect_binding_pattern_names(&prop.value, ctx, bindings);
+                collect_binding_pattern_names(&prop.value, bindings);
             }
             if let Some(rest) = &obj.rest {
-                collect_binding_pattern_names(&rest.argument, ctx, bindings);
+                collect_binding_pattern_names(&rest.argument, bindings);
             }
         }
         BindingPattern::ArrayPattern(arr) => {
             for elem in arr.elements.iter().flatten() {
-                collect_binding_pattern_names(elem, ctx, bindings);
+                collect_binding_pattern_names(elem, bindings);
             }
             if let Some(rest) = &arr.rest {
-                collect_binding_pattern_names(&rest.argument, ctx, bindings);
+                collect_binding_pattern_names(&rest.argument, bindings);
             }
         }
         BindingPattern::AssignmentPattern(assign) => {
-            collect_binding_pattern_names(&assign.left, ctx, bindings);
+            collect_binding_pattern_names(&assign.left, bindings);
         }
     }
 }
@@ -244,7 +238,7 @@ pub fn try_process_export<'a>(
 ) -> Option<ScriptItem<'a>> {
     match stmt {
         Statement::ExportNamedDeclaration(export) => {
-            Some(ScriptItem::Export(process_named_export(export, ctx)))
+            Some(ScriptItem::Export(process_named_export(export)))
         }
         Statement::ExportAllDeclaration(export) => {
             Some(ScriptItem::Export(process_all_export(export, ctx)))
@@ -258,11 +252,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_adjust_span() {
+    fn test_span_from_oxc_span() {
+        // Span::from() does a direct conversion without any offset
+        let oxc_span = oxc_span::Span::new(5, 12);
+        let span = Span::from(oxc_span);
+        assert_eq!(span.start, 5);
+        assert_eq!(span.end, 12);
+    }
+
+    #[test]
+    fn test_content_offset_stored() {
         let ctx = ScriptParseContext::new(100, b"const x = 1;");
-        let oxc_span = oxc_span::Span::new(0, 12);
-        let adjusted = ctx.adjust_span(oxc_span);
-        assert_eq!(adjusted.start, 100);
-        assert_eq!(adjusted.end, 112);
+        assert_eq!(ctx.content_offset, 100);
     }
 }

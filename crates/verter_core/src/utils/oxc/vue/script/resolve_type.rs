@@ -280,23 +280,27 @@ pub struct ResolutionDiagnostic {
 
 /// Context for type resolution with available type information.
 /// Uses Span-based lookups with &[u8] comparisons to avoid String allocations.
+///
+/// Two lifetime parameters:
+/// - `'ctx`: borrow lifetime of the program reference (how long we hold references into the AST)
+/// - `'a`: arena allocator lifetime (the AST node types are `TSType<'a>`, etc.)
 #[derive(Debug)]
-pub struct TypeResolutionContext<'a> {
+pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     /// Source bytes for name comparisons
-    pub source: &'a [u8],
+    pub source: &'ctx [u8],
     /// Local type alias declarations: (name_span, type_node)
-    pub type_aliases: Vec<(Span, &'a TSType<'a>)>,
+    pub type_aliases: Vec<(Span, &'ctx TSType<'a>)>,
     /// Local interface declarations: (name_span, interface_body_members)
-    pub interfaces: Vec<(Span, &'a oxc_allocator::Vec<'a, TSSignature<'a>>)>,
+    pub interfaces: Vec<(Span, &'ctx oxc_allocator::Vec<'a, TSSignature<'a>>)>,
     /// Generic type parameters with constraints: (name_span, constraint_type)
-    pub type_params: Vec<(Span, Option<&'a TSType<'a>>)>,
+    pub type_params: Vec<(Span, Option<&'ctx TSType<'a>>)>,
     /// Diagnostics collected during resolution
     pub diagnostics: Vec<ResolutionDiagnostic>,
 }
 
-impl<'a> TypeResolutionContext<'a> {
+impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
     /// Create a new empty context
-    pub fn new(source: &'a [u8]) -> Self {
+    pub fn new(source: &'ctx [u8]) -> Self {
         Self {
             source,
             type_aliases: Vec::new(),
@@ -307,7 +311,7 @@ impl<'a> TypeResolutionContext<'a> {
     }
 
     /// Look up a type alias by comparing spans against source bytes
-    pub fn find_type_alias(&self, name: &[u8]) -> Option<&'a TSType<'a>> {
+    pub fn find_type_alias(&self, name: &[u8]) -> Option<&'ctx TSType<'a>> {
         self.type_aliases
             .iter()
             .find(|(span, _)| &self.source[span.start as usize..span.end as usize] == name)
@@ -318,7 +322,7 @@ impl<'a> TypeResolutionContext<'a> {
     pub fn find_interface(
         &self,
         name: &[u8],
-    ) -> Option<&'a oxc_allocator::Vec<'a, TSSignature<'a>>> {
+    ) -> Option<&'ctx oxc_allocator::Vec<'a, TSSignature<'a>>> {
         self.interfaces
             .iter()
             .find(|(span, _)| &self.source[span.start as usize..span.end as usize] == name)
@@ -326,7 +330,7 @@ impl<'a> TypeResolutionContext<'a> {
     }
 
     /// Look up a type parameter constraint by comparing spans against source bytes
-    pub fn find_type_param(&self, name: &[u8]) -> Option<&'a TSType<'a>> {
+    pub fn find_type_param(&self, name: &[u8]) -> Option<&'ctx TSType<'a>> {
         self.type_params
             .iter()
             .find(|(span, _)| &self.source[span.start as usize..span.end as usize] == name)
@@ -336,29 +340,26 @@ impl<'a> TypeResolutionContext<'a> {
 
 /// Build type resolution context from a parsed program.
 /// Collects type aliases and interfaces for later lookup.
-pub fn build_type_context<'a>(
-    program: &'a Program<'a>,
-    source: &'a [u8],
-    base_offset: u32,
-) -> TypeResolutionContext<'a> {
+pub fn build_type_context<'ctx, 'a: 'ctx>(
+    program: &'ctx Program<'a>,
+    source: &'ctx [u8],
+    _content_offset: u32,
+) -> TypeResolutionContext<'ctx, 'a> {
     let mut ctx = TypeResolutionContext::new(source);
 
     for stmt in &program.body {
         match stmt {
             // Collect type aliases: `type Foo = { bar: string }`
             Statement::TSTypeAliasDeclaration(alias) => {
-                let name_span = Span {
-                    start: alias.id.span.start + base_offset,
-                    end: alias.id.span.end + base_offset,
-                };
+                // alias.id.span is already adjusted by adjust_program_spans() to SFC coordinates,
+                // so we use it directly — no additional offset needed.
+                let name_span = Span::from(alias.id.span);
                 ctx.type_aliases.push((name_span, &alias.type_annotation));
             }
             // Collect interfaces: `interface Foo { bar: string }`
             Statement::TSInterfaceDeclaration(interface) => {
-                let name_span = Span {
-                    start: interface.id.span.start + base_offset,
-                    end: interface.id.span.end + base_offset,
-                };
+                // interface.id.span is already adjusted by adjust_program_spans() to SFC coordinates.
+                let name_span = Span::from(interface.id.span);
                 ctx.interfaces.push((name_span, &interface.body.body));
             }
             _ => {}
@@ -389,10 +390,10 @@ pub fn resolve_type_elements(node: &TSType, base_offset: u32) -> ResolvedElement
 /// * `node` - The TSType node to resolve
 /// * `base_offset` - The document offset to apply to all spans
 /// * `ctx` - Type resolution context with local type definitions
-pub fn resolve_type_elements_with_ctx<'a>(
-    node: &'a TSType<'a>,
+pub fn resolve_type_elements_with_ctx<'ctx, 'a: 'ctx>(
+    node: &'ctx TSType<'a>,
     base_offset: u32,
-    ctx: &mut TypeResolutionContext<'a>,
+    ctx: &mut TypeResolutionContext<'ctx, 'a>,
 ) -> ResolvedElements {
     let mut result = ResolvedElements::default();
     resolve_type_elements_inner_with_ctx(node, base_offset, &mut result, ctx);
@@ -407,10 +408,10 @@ pub fn resolve_type_elements_with_ctx<'a>(
 /// * `node` - The TSType node to resolve
 /// * `base_offset` - The document offset to apply to all spans
 /// * `ctx` - Immutable type resolution context with local type definitions
-pub fn resolve_type_elements_with_ctx_ref<'a>(
-    node: &'a TSType<'a>,
+pub fn resolve_type_elements_with_ctx_ref<'ctx, 'a: 'ctx>(
+    node: &'ctx TSType<'a>,
     base_offset: u32,
-    ctx: &TypeResolutionContext<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
 ) -> ResolvedElements {
     let mut result = ResolvedElements::default();
     resolve_type_elements_inner_with_ctx_ref(node, base_offset, &mut result, ctx);
@@ -460,11 +461,11 @@ fn resolve_type_elements_inner(node: &TSType, base_offset: u32, result: &mut Res
 }
 
 /// Inner resolution function that uses the context for type reference lookup.
-fn resolve_type_elements_inner_with_ctx<'a>(
-    node: &'a TSType<'a>,
+fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
+    node: &'ctx TSType<'a>,
     base_offset: u32,
     result: &mut ResolvedElements,
-    ctx: &mut TypeResolutionContext<'a>,
+    ctx: &mut TypeResolutionContext<'ctx, 'a>,
 ) {
     match node {
         // { prop: Type }
@@ -537,11 +538,11 @@ fn resolve_type_elements_inner_with_ctx<'a>(
 }
 
 /// Inner resolution function that uses an immutable context (doesn't collect diagnostics).
-fn resolve_type_elements_inner_with_ctx_ref<'a>(
-    node: &'a TSType<'a>,
+fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
+    node: &'ctx TSType<'a>,
     base_offset: u32,
     result: &mut ResolvedElements,
-    ctx: &TypeResolutionContext<'a>,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
 ) {
     match node {
         // { prop: Type }

@@ -43,7 +43,7 @@ fn classify_statement<'a>(
 ) {
     match stmt {
         Statement::VariableDeclaration(decl) => {
-            classify_variable_declaration(decl, entries, ctx);
+            classify_variable_declaration(decl, entries);
         }
         Statement::ImportDeclaration(import) => {
             classify_import(import, entries, ctx);
@@ -53,17 +53,17 @@ fn classify_statement<'a>(
         }
         Statement::FunctionDeclaration(func) => {
             if let Some(id) = &func.id {
-                entries.push((ctx.adjust_span(id.span), BindingType::SetupConst));
+                entries.push((Span::from(id.span), BindingType::SetupConst));
             }
         }
         Statement::ClassDeclaration(class) => {
             if let Some(id) = &class.id {
-                entries.push((ctx.adjust_span(id.span), BindingType::SetupConst));
+                entries.push((Span::from(id.span), BindingType::SetupConst));
             }
         }
         Statement::TSEnumDeclaration(e) => {
             // Enums have a runtime JS representation
-            entries.push((ctx.adjust_span(e.id.span), BindingType::SetupConst));
+            entries.push((Span::from(e.id.span), BindingType::SetupConst));
         }
         // TypeScript-only declarations — no runtime binding
         Statement::TSTypeAliasDeclaration(_) | Statement::TSInterfaceDeclaration(_) => {}
@@ -75,7 +75,6 @@ fn classify_statement<'a>(
 fn classify_variable_declaration<'a>(
     decl: &VariableDeclaration<'a>,
     entries: &mut Vec<(Span, BindingType)>,
-    ctx: &ScriptParseContext<'a>,
 ) {
     let is_const = decl.kind == VariableDeclarationKind::Const;
 
@@ -84,7 +83,7 @@ fn classify_variable_declaration<'a>(
         if is_const {
             if let Some(init) = &declarator.init {
                 if is_define_props_call(init) {
-                    extract_destructured_props(&declarator.id, entries, ctx);
+                    extract_destructured_props(&declarator.id, entries);
                     continue;
                 }
             }
@@ -100,7 +99,7 @@ fn classify_variable_declaration<'a>(
             BindingType::SetupLet
         };
 
-        extract_pattern_bindings(&declarator.id, binding_type, entries, ctx);
+        extract_pattern_bindings(&declarator.id, binding_type, entries);
     }
 }
 
@@ -163,19 +162,18 @@ fn is_define_props_call<'a>(expr: &Expression<'a>) -> bool {
 fn extract_destructured_props<'a>(
     pattern: &BindingPattern<'a>,
     entries: &mut Vec<(Span, BindingType)>,
-    ctx: &ScriptParseContext<'a>,
 ) {
     match pattern {
         BindingPattern::ObjectPattern(obj) => {
             for prop in &obj.properties {
-                extract_pattern_bindings(&prop.value, BindingType::PropsAliased, entries, ctx);
+                extract_pattern_bindings(&prop.value, BindingType::PropsAliased, entries);
             }
             if let Some(rest) = &obj.rest {
-                extract_pattern_bindings(&rest.argument, BindingType::PropsAliased, entries, ctx);
+                extract_pattern_bindings(&rest.argument, BindingType::PropsAliased, entries);
             }
         }
         BindingPattern::BindingIdentifier(ident) => {
-            entries.push((ctx.adjust_span(ident.span), BindingType::Props));
+            entries.push((Span::from(ident.span), BindingType::Props));
         }
         _ => {}
     }
@@ -186,30 +184,29 @@ fn extract_pattern_bindings<'a>(
     pattern: &BindingPattern<'a>,
     binding_type: BindingType,
     entries: &mut Vec<(Span, BindingType)>,
-    ctx: &ScriptParseContext<'a>,
 ) {
     match pattern {
         BindingPattern::BindingIdentifier(ident) => {
-            entries.push((ctx.adjust_span(ident.span), binding_type));
+            entries.push((Span::from(ident.span), binding_type));
         }
         BindingPattern::ObjectPattern(obj) => {
             for prop in &obj.properties {
-                extract_pattern_bindings(&prop.value, binding_type, entries, ctx);
+                extract_pattern_bindings(&prop.value, binding_type, entries);
             }
             if let Some(rest) = &obj.rest {
-                extract_pattern_bindings(&rest.argument, binding_type, entries, ctx);
+                extract_pattern_bindings(&rest.argument, binding_type, entries);
             }
         }
         BindingPattern::ArrayPattern(arr) => {
             for elem in arr.elements.iter().flatten() {
-                extract_pattern_bindings(elem, binding_type, entries, ctx);
+                extract_pattern_bindings(elem, binding_type, entries);
             }
             if let Some(rest) = &arr.rest {
-                extract_pattern_bindings(&rest.argument, binding_type, entries, ctx);
+                extract_pattern_bindings(&rest.argument, binding_type, entries);
             }
         }
         BindingPattern::AssignmentPattern(assign) => {
-            extract_pattern_bindings(&assign.left, binding_type, entries, ctx);
+            extract_pattern_bindings(&assign.left, binding_type, entries);
         }
     }
 }
@@ -253,7 +250,13 @@ fn extract_props_from_type_params<'a>(
         for member in &literal.members {
             if let TSSignature::TSPropertySignature(prop) = member {
                 if let PropertyKey::StaticIdentifier(ident) = &prop.key {
-                    entries.push((ctx.adjust_span(ident.span), BindingType::Props));
+                    // Type annotation spans are NOT adjusted by adjust_program_spans(),
+                    // so we add content_offset to convert from local to SFC coordinates.
+                    let offset = ctx.content_offset;
+                    entries.push((
+                        Span::new(ident.span.start + offset, ident.span.end + offset),
+                        BindingType::Props,
+                    ));
                 }
             }
         }
@@ -267,7 +270,7 @@ fn extract_props_from_type_params<'a>(
 fn classify_import<'a>(
     import: &ImportDeclaration<'a>,
     entries: &mut Vec<(Span, BindingType)>,
-    ctx: &ScriptParseContext<'a>,
+    _ctx: &ScriptParseContext<'a>,
 ) {
     // Skip entire type-only imports: `import type { ... } from '...'`
     if import.import_kind.is_type() {
@@ -282,13 +285,13 @@ fn classify_import<'a>(
                     if s.import_kind.is_type() {
                         continue;
                     }
-                    entries.push((ctx.adjust_span(s.local.span), BindingType::SetupConst));
+                    entries.push((Span::from(s.local.span), BindingType::SetupConst));
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
-                    entries.push((ctx.adjust_span(s.local.span), BindingType::SetupConst));
+                    entries.push((Span::from(s.local.span), BindingType::SetupConst));
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
-                    entries.push((ctx.adjust_span(s.local.span), BindingType::SetupConst));
+                    entries.push((Span::from(s.local.span), BindingType::SetupConst));
                 }
             }
         }
@@ -778,21 +781,19 @@ enum Color { Red, Green }
 
     /// @ai-generated
     #[test]
-    fn offset_adjustment() {
+    fn spans_are_local_coordinates() {
+        // Statement/expression spans come directly from OXC.
+        // content_offset only affects TS type annotation spans.
         let source = "const x = ref(0);";
         let alloc = Allocator::default();
         let ret = Parser::new(&alloc, source, SourceType::tsx()).parse();
-        let ctx = ScriptParseContext::new(100, source.as_bytes());
+        let ctx = ScriptParseContext::new(0, source.as_bytes());
         let entries = extract_bindings(&ret.program, &ctx);
         assert_eq!(entries.len(), 1);
-        // Span should be offset by 100
         let (span, bt) = &entries[0];
-        assert!(
-            span.start >= 100,
-            "span start {} should be >= 100",
-            span.start
-        );
-        assert!(span.end > span.start);
+        // 'x' is at position 6 in source
+        assert_eq!(span.start, 6);
+        assert_eq!(span.end, 7);
         assert_eq!(*bt, BindingType::SetupRef);
     }
 

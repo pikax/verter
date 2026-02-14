@@ -16,6 +16,10 @@ pub fn parse_script<'alloc>(
     alloc: &'alloc Allocator,
     source_type: oxc_span::SourceType,
 ) -> OxcScript<'alloc> {
+    // Use the lang from the script tag if available, as it's more reliable
+    // than the Event::Lang which may arrive after the script is parsed.
+    let source_type = start.lang.map_or(source_type, |lang| lang.to_source_type());
+
     let (program, errors) = if let Some(content) = end.content {
         let result = parse_program(content, input, alloc, source_type);
         (result.program, result.errors)
@@ -35,7 +39,7 @@ pub fn parse_script<'alloc>(
         } else {
             ScriptMode::Options
         },
-        0, // No offset needed since we already adjusted spans when parsing the program
+        content_start, // Offset for unadjusted TypeScript type annotation spans
         input,
     );
 

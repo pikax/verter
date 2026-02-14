@@ -10,6 +10,7 @@
 use oxc_ast::ast::*;
 
 use super::macros::is_define_component;
+use super::resolve_type::TypeResolutionContext;
 use super::setup::{process_setup_statements, SetupContext};
 use super::shared::ScriptParseContext;
 use super::types::{
@@ -82,7 +83,7 @@ pub fn process_options_statement<'a>(
             };
 
             for declarator in &var_decl.declarations {
-                collect_declarations_from_pattern(&declarator.id, kind, ctx, items);
+                collect_declarations_from_pattern(&declarator.id, kind, items);
             }
         }
 
@@ -97,9 +98,9 @@ pub fn process_options_statement<'a>(
                 };
 
                 items.push(ScriptItem::Declaration(ScriptDeclaration {
-                    span: ctx.adjust_span(func.span),
+                    span: Span::from(func.span),
                     name: Some(id.name.as_str()),
-                    name_span: Some(ctx.adjust_span(id.span)),
+                    name_span: Some(Span::from(id.span)),
                     kind,
                     is_ref_like: false,
                 }));
@@ -110,9 +111,9 @@ pub fn process_options_statement<'a>(
         Statement::ClassDeclaration(class) => {
             if let Some(id) = &class.id {
                 items.push(ScriptItem::Declaration(ScriptDeclaration {
-                    span: ctx.adjust_span(class.span),
+                    span: Span::from(class.span),
                     name: Some(id.name.as_str()),
-                    name_span: Some(ctx.adjust_span(id.span)),
+                    name_span: Some(Span::from(id.span)),
                     kind: DeclarationKind::Class,
                     is_ref_like: false,
                 }));
@@ -134,7 +135,7 @@ fn process_default_export<'a>(
     errors: &mut Vec<ScriptError>,
     is_async: &mut bool,
 ) -> ScriptDefaultExport<'a> {
-    let span = ctx.adjust_span(export.span);
+    let span = Span::from(export.span);
 
     // Check known declaration types first
     match &export.declaration {
@@ -172,7 +173,7 @@ fn analyze_default_export_expression<'a>(
         // Plain object: export default { ... }
         Expression::ObjectExpression(obj) => {
             let mut default_export = ScriptDefaultExport::new(span, DefaultExportType::Object)
-                .with_object_span(ctx.adjust_span(obj.span));
+                .with_object_span(Span::from(obj.span));
 
             // Look for setup function
             if let Some(setup_body_span) = find_setup_in_object(obj, ctx, items, errors, is_async) {
@@ -196,7 +197,7 @@ fn analyze_default_export_expression<'a>(
                         if let Some(Expression::ObjectExpression(obj)) = arg.as_expression() {
                             let setup_span =
                                 find_setup_in_object(obj, ctx, items, errors, is_async);
-                            (Some(ctx.adjust_span(obj.span)), setup_span)
+                            (Some(Span::from(obj.span)), setup_span)
                         } else {
                             (None, None)
                         }
@@ -286,12 +287,20 @@ fn process_setup_value<'a>(
             }
             if let Some(body) = &func.body {
                 // Process setup body like script setup (but without macros)
+                let empty_type_ctx = TypeResolutionContext::new(ctx.source_bytes);
                 let mut setup_ctx = SetupContext::new();
-                process_setup_statements(&body.statements, ctx, &mut setup_ctx, items, errors);
+                process_setup_statements(
+                    &body.statements,
+                    ctx,
+                    &empty_type_ctx,
+                    &mut setup_ctx,
+                    items,
+                    errors,
+                );
                 if setup_ctx.is_async {
                     *is_async = true;
                 }
-                Some(ctx.adjust_span(body.span))
+                Some(Span::from(body.span))
             } else {
                 None
             }
@@ -307,10 +316,12 @@ fn process_setup_value<'a>(
                 None
             } else {
                 // Block body with statements
+                let empty_type_ctx = TypeResolutionContext::new(ctx.source_bytes);
                 let mut setup_ctx = SetupContext::new();
                 process_setup_statements(
                     &arrow.body.statements,
                     ctx,
+                    &empty_type_ctx,
                     &mut setup_ctx,
                     items,
                     errors,
@@ -318,7 +329,7 @@ fn process_setup_value<'a>(
                 if setup_ctx.is_async {
                     *is_async = true;
                 }
-                Some(ctx.adjust_span(arrow.body.span))
+                Some(Span::from(arrow.body.span))
             }
         }
         _ => None,
@@ -329,37 +340,36 @@ fn process_setup_value<'a>(
 fn collect_declarations_from_pattern<'a>(
     pattern: &BindingPattern<'a>,
     kind: DeclarationKind,
-    ctx: &ScriptParseContext<'a>,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
     match pattern {
         BindingPattern::BindingIdentifier(id) => {
             items.push(ScriptItem::Declaration(ScriptDeclaration {
-                span: ctx.adjust_span(id.span),
+                span: Span::from(id.span),
                 name: Some(id.name.as_str()),
-                name_span: Some(ctx.adjust_span(id.span)),
+                name_span: Some(Span::from(id.span)),
                 kind,
                 is_ref_like: false,
             }));
         }
         BindingPattern::ObjectPattern(obj) => {
             for prop in &obj.properties {
-                collect_declarations_from_pattern(&prop.value, kind, ctx, items);
+                collect_declarations_from_pattern(&prop.value, kind, items);
             }
             if let Some(rest) = &obj.rest {
-                collect_declarations_from_pattern(&rest.argument, kind, ctx, items);
+                collect_declarations_from_pattern(&rest.argument, kind, items);
             }
         }
         BindingPattern::ArrayPattern(arr) => {
             for elem in arr.elements.iter().flatten() {
-                collect_declarations_from_pattern(elem, kind, ctx, items);
+                collect_declarations_from_pattern(elem, kind, items);
             }
             if let Some(rest) = &arr.rest {
-                collect_declarations_from_pattern(&rest.argument, kind, ctx, items);
+                collect_declarations_from_pattern(&rest.argument, kind, items);
             }
         }
         BindingPattern::AssignmentPattern(assign) => {
-            collect_declarations_from_pattern(&assign.left, kind, ctx, items);
+            collect_declarations_from_pattern(&assign.left, kind, items);
         }
     }
 }

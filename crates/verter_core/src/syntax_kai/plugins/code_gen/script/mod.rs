@@ -304,18 +304,120 @@ mod tests {
         );
     }
 
-    /// @ai-generated — defineProps with type params in TypeScript
-    /// NOTE: Typed defineProps with type params is not yet resolved in the syntax_kai pipeline.
-    /// The macro call is left in the output unprocessed. This test documents current behavior.
+    /// @ai-generated — defineProps with inline type literal resolves to runtime props
     #[test]
-    fn test_define_props_typed_unprocessed() {
-        let code = gen(
+    fn test_define_props_typed_inline() {
+        let code = gen_and_validate(
             "<script setup lang=\"ts\">\ndefineProps<{ title: string }>()\n</script>\n<template><div>x</div></template>",
         );
-        // Currently, typed defineProps is left unprocessed in the output
         assert!(
-            code.contains("defineProps<"),
-            "Typed defineProps should be left as-is (not yet resolved), got:\n{}",
+            code.contains("props:"),
+            "Should have props section, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("title:"),
+            "Should have title prop, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("String"),
+            "Should resolve string to String, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("defineProps<"),
+            "Should NOT leave defineProps as-is, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — defineProps with optional typed prop
+    #[test]
+    fn test_define_props_typed_optional() {
+        let code = gen_and_validate(
+            "<script setup lang=\"ts\">\ndefineProps<{ count?: number }>()\n</script>\n<template><div>x</div></template>",
+        );
+        assert!(
+            code.contains("required: false"),
+            "Optional prop should be required: false, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Number"),
+            "Should resolve number to Number, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — defineProps with string literal union type
+    #[test]
+    fn test_define_props_string_literal_union() {
+        let code = gen_and_validate(
+            "<script setup lang=\"ts\">\ndefineProps<{ view?: 'list' | 'board' | 'calendar' }>()\n</script>\n<template><div>x</div></template>",
+        );
+        assert!(
+            code.contains("String"),
+            "String literal union should resolve to String, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — defineProps with SFC-local interface reference
+    #[test]
+    fn test_define_props_interface_ref() {
+        let code = gen_and_validate(
+            "<script setup lang=\"ts\">\ninterface Props { title: string; count?: number }\ndefineProps<Props>()\n</script>\n<template><div>x</div></template>",
+        );
+        assert!(
+            code.contains("props:"),
+            "Should have props section, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("title:"),
+            "Should resolve interface prop 'title', got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("count:"),
+            "Should resolve interface prop 'count', got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — defineProps with SFC-local type alias reference
+    #[test]
+    fn test_define_props_type_alias_ref() {
+        let code = gen_and_validate(
+            "<script setup lang=\"ts\">\ntype MyProps = { message: string }\ndefineProps<MyProps>()\n</script>\n<template><div>x</div></template>",
+        );
+        assert!(
+            code.contains("props:"),
+            "Should have props section, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("message:"),
+            "Should resolve type alias prop 'message', got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — defineProps with unresolvable imported type defaults to empty props
+    #[test]
+    fn test_define_props_unresolvable_type() {
+        let code = gen_and_validate(
+            "<script setup lang=\"ts\">\nimport type { ExternalProps } from './types'\ndefineProps<ExternalProps>()\n</script>\n<template><div>x</div></template>",
+        );
+        assert!(
+            !code.contains("defineProps<"),
+            "Should NOT leave defineProps as-is, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__props"),
+            "Should replace with __props, got:\n{}",
             code
         );
     }
@@ -337,18 +439,49 @@ mod tests {
     // withDefaults
     // =========================================================================
 
-    /// @ai-generated — withDefaults with typed defineProps
-    /// NOTE: Typed defineProps with type params is not yet resolved in the syntax_kai pipeline.
-    /// This test documents current behavior where the macro is left unprocessed.
+    /// @ai-generated — withDefaults with inline typed defineProps
     #[test]
-    fn test_with_defaults_typed_unprocessed() {
-        let code = gen(
+    fn test_with_defaults_typed_inline() {
+        let code = gen_and_validate(
             "<script setup lang=\"ts\">\nconst props = withDefaults(defineProps<{ foo?: string }>(), { foo: 'bar' })\n</script>\n<template><div>x</div></template>",
         );
-        // Currently, withDefaults with typed defineProps is left unprocessed
         assert!(
-            code.contains("withDefaults("),
-            "withDefaults with typed defineProps should be left as-is (not yet resolved), got:\n{}",
+            code.contains("props:"),
+            "Should have props section, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("default:"),
+            "Should have default value, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("withDefaults("),
+            "Should NOT leave withDefaults as-is, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — withDefaults with SFC-local interface reference
+    #[test]
+    fn test_with_defaults_interface_ref() {
+        let code = gen_and_validate(
+            "<script setup lang=\"ts\">\ninterface Props { foo?: string; bar?: number }\nconst props = withDefaults(defineProps<Props>(), { foo: 'hello' })\n</script>\n<template><div>x</div></template>",
+        );
+        assert!(code.contains("props:"), "Should have props, got:\n{}", code);
+        assert!(
+            code.contains("foo:"),
+            "Should have foo prop, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("bar:"),
+            "Should have bar prop, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("default:"),
+            "Should have default for foo, got:\n{}",
             code
         );
     }
@@ -558,18 +691,16 @@ mod tests {
         );
     }
 
-    /// @ai-generated — Type-only import handling
-    /// NOTE: In the current syntax_kai pipeline, type-only imports are not yet
-    /// stripped because OXC parser type categorization is not fully integrated.
+    /// @ai-generated — Type-only imports are stripped from output
     #[test]
-    fn test_type_import_present() {
-        let code = gen(
+    fn test_type_import_stripped() {
+        let code = gen_and_validate(
             "<script setup lang=\"ts\">\nimport type { Ref } from 'vue'\nconst x = 1\n</script>\n<template><div>x</div></template>",
         );
-        // Currently type-only imports are left in the output
+        // Type-only imports should NOT appear in the runtime output
         assert!(
-            code.contains("import type"),
-            "Type-only import should be present (not yet stripped), got:\n{}",
+            !code.contains("import type"),
+            "Type-only import should be stripped, got:\n{}",
             code
         );
     }
