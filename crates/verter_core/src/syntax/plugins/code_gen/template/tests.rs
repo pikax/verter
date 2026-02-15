@@ -1515,6 +1515,41 @@ fn test_component_with_props() {
     );
 }
 
+/// @ai-generated — Component with props but no children needs null children placeholder
+/// before patchFlag in _createVNode/_createBlock argument list.
+/// e.g., _createVNode(Comp, {msg: x}, null, 8, ["msg"]) not _createVNode(Comp, {msg: x}, 8, ["msg"])
+#[test]
+fn test_component_props_no_children_null_placeholder() {
+    let code = gen_and_validate(r#"<template><div><MyComponent :msg="hello"/></div></template>"#);
+    assert!(
+        code.contains(", null, 8"),
+        "Component with props but no children should emit null children before patchFlag, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Self-closing HTML element with dynamic props needs null children placeholder
+#[test]
+fn test_self_closing_element_props_null_placeholder() {
+    let code = gen_and_validate(r#"<template><div><img :src="url"/></div></template>"#);
+    assert!(
+        code.contains(", null, 8"),
+        "Self-closing element with dynamic props should emit null children before patchFlag, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Root component with props but no children needs null placeholder
+#[test]
+fn test_root_component_props_no_children_null_placeholder() {
+    let code = gen_and_validate(r#"<template><MyComponent :msg="hello"/></template>"#);
+    assert!(
+        code.contains(", null, 8"),
+        "Root component with props but no children should emit null children before patchFlag, got:\n{}",
+        code
+    );
+}
+
 /// @ai-generated — Root component with children (slot content)
 #[test]
 fn test_component_with_children() {

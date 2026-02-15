@@ -239,6 +239,11 @@ pub(crate) fn handle_element_close<'alloc>(
         buf.clear();
         if needs_array {
             buf.push(']');
+        } else if !has_children {
+            // When there are no children but we have patchFlag, emit `null` as
+            // the children argument so patchFlag lands in the correct position.
+            // e.g. _createVNode(Comp, props, null, 8, ["msg"])
+            buf.push_str(", null");
         }
         write_patch_flag_suffix(buf, patch_flag, &state.dynamic_props, is_production);
         buf.push(')');
@@ -373,6 +378,10 @@ pub(crate) fn handle_element_close_self_closing<'alloc>(
         }
     } else {
         buf.clear();
+        // Self-closing elements never have children. Emit `null` so patchFlag
+        // lands in the correct argument position.
+        // e.g. _createElementVNode("img", {src: url}, null, 8, ["src"])
+        buf.push_str(", null");
         write_patch_flag_suffix(buf, state.patch_flag, &state.dynamic_props, is_production);
         buf.push(')');
         if state.is_block_root {
