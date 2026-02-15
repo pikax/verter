@@ -6,10 +6,13 @@
 
 use oxc_ast::ast::{
     BindingPattern, CallExpression, Expression, ImportDeclaration, ImportDeclarationSpecifier,
-    PropertyKey, Statement, TSSignature, TSType, TSTypeParameterInstantiation, VariableDeclaration,
-    VariableDeclarationKind,
+    ObjectPropertyKind, PropertyKey, Statement, TSSignature, TSType, TSTypeParameterInstantiation,
+    VariableDeclaration, VariableDeclarationKind,
 };
 
+use super::resolve_type::{
+    build_type_context, resolve_type_elements_with_ctx_ref, TypeResolutionContext,
+};
 use super::shared::ScriptParseContext;
 use crate::common::Span;
 use crate::syntax::binding_types::BindingType;
@@ -27,9 +30,10 @@ pub fn extract_bindings<'a>(
     ctx: &ScriptParseContext<'a>,
 ) -> Vec<(Span, BindingType)> {
     let mut entries = Vec::new();
+    let type_ctx = build_type_context(program, ctx.source_bytes, ctx.content_offset);
 
     for stmt in &program.body {
-        classify_statement(stmt, &mut entries, ctx);
+        classify_statement(stmt, &mut entries, ctx, &type_ctx);
     }
 
     entries
@@ -40,16 +44,17 @@ fn classify_statement<'a>(
     stmt: &Statement<'a>,
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
 ) {
     match stmt {
         Statement::VariableDeclaration(decl) => {
-            classify_variable_declaration(decl, entries);
+            classify_variable_declaration(decl, entries, ctx, type_ctx);
         }
         Statement::ImportDeclaration(import) => {
             classify_import(import, entries, ctx);
         }
         Statement::ExpressionStatement(expr_stmt) => {
-            classify_expression_statement(&expr_stmt.expression, entries, ctx);
+            classify_expression_statement(&expr_stmt.expression, entries, ctx, type_ctx);
         }
         Statement::FunctionDeclaration(func) => {
             if let Some(id) = &func.id {
@@ -75,6 +80,8 @@ fn classify_statement<'a>(
 fn classify_variable_declaration<'a>(
     decl: &VariableDeclaration<'a>,
     entries: &mut Vec<(Span, BindingType)>,
+    ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
 ) {
     let is_const = decl.kind == VariableDeclarationKind::Const;
 
@@ -84,6 +91,9 @@ fn classify_variable_declaration<'a>(
             if let Some(init) = &declarator.init {
                 if is_define_props_call(init) {
                     extract_destructured_props(&declarator.id, entries);
+                    // Also extract individual prop names so the template can use $props.propName
+                    // even when the whole object is assigned to a variable.
+                    extract_individual_props_from_expr(init, entries, ctx, type_ctx);
                     continue;
                 }
             }
@@ -220,22 +230,19 @@ fn classify_expression_statement<'a>(
     expr: &Expression<'a>,
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
 ) {
     if let Expression::CallExpression(call) = expr {
         let callee_name = get_callee_name(&call.callee);
         match callee_name.as_deref() {
             Some("defineProps") => {
-                if let Some(type_args) = &call.type_arguments {
-                    extract_props_from_type_params(type_args, entries, ctx);
-                }
+                extract_props_from_define_props(call, entries, ctx, type_ctx);
             }
             Some("withDefaults") => {
                 if let Some(first_arg) = call.arguments.first() {
                     if let Some(Expression::CallExpression(inner_call)) = first_arg.as_expression()
                     {
-                        if let Some(tp) = &inner_call.type_arguments {
-                            extract_props_from_type_params(tp, entries, ctx);
-                        }
+                        extract_props_from_define_props(inner_call, entries, ctx, type_ctx);
                     }
                 }
             }
@@ -244,26 +251,115 @@ fn classify_expression_statement<'a>(
     }
 }
 
+/// Extract individual prop names from a defineProps() or withDefaults() call expression.
+/// Called for variable declarations (`const props = defineProps<{...}>()`) to ensure
+/// individual prop names are classified as Props alongside the whole-object binding.
+fn extract_individual_props_from_expr<'a>(
+    expr: &Expression<'a>,
+    entries: &mut Vec<(Span, BindingType)>,
+    ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
+) {
+    if let Expression::CallExpression(call) = expr {
+        let callee_name = get_callee_name(&call.callee);
+        match callee_name.as_deref() {
+            Some("defineProps") => {
+                extract_props_from_define_props(call, entries, ctx, type_ctx);
+            }
+            Some("withDefaults") => {
+                if let Some(first_arg) = call.arguments.first() {
+                    if let Some(Expression::CallExpression(inner_call)) = first_arg.as_expression()
+                    {
+                        extract_props_from_define_props(inner_call, entries, ctx, type_ctx);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Extract individual prop names from a `defineProps()` call.
+/// Handles all syntactic variants:
+/// - Type params: `defineProps<{ foo: string }>()` or `defineProps<MyInterface>()`
+/// - Runtime object: `defineProps({ foo: String })`
+/// - Runtime array: `defineProps(['foo', 'bar'])`
+fn extract_props_from_define_props<'a>(
+    call: &CallExpression<'a>,
+    entries: &mut Vec<(Span, BindingType)>,
+    ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
+) {
+    // 1. Type parameters: defineProps<{ foo: string }>() or defineProps<MyInterface>()
+    if let Some(type_args) = &call.type_arguments {
+        extract_props_from_type_params(type_args, entries, ctx, type_ctx);
+        return;
+    }
+
+    // 2. Runtime arguments: defineProps({ foo: String }) or defineProps(['foo'])
+    if let Some(first_arg) = call.arguments.first() {
+        if let Some(expr) = first_arg.as_expression() {
+            extract_props_from_runtime_arg(expr, entries, ctx);
+        }
+    }
+}
+
 /// Extract prop names from TypeScript type parameters of `defineProps`.
+/// Handles inline type literals, type references (interfaces/aliases), and other TS constructs.
 fn extract_props_from_type_params<'a>(
     type_params: &TSTypeParameterInstantiation<'a>,
     entries: &mut Vec<(Span, BindingType)>,
     ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
 ) {
-    if let Some(TSType::TSTypeLiteral(literal)) = type_params.params.first() {
-        for member in &literal.members {
-            if let TSSignature::TSPropertySignature(prop) = member {
-                if let PropertyKey::StaticIdentifier(ident) = &prop.key {
-                    // Type annotation spans are NOT adjusted by adjust_program_spans(),
-                    // so we add content_offset to convert from local to SFC coordinates.
-                    let offset = ctx.content_offset;
+    if let Some(first_param) = type_params.params.first() {
+        // Use the type resolution infrastructure to resolve all type variants:
+        // TSTypeLiteral, TSTypeReference (interfaces/aliases), unions, intersections, etc.
+        let resolved =
+            resolve_type_elements_with_ctx_ref(first_param, ctx.content_offset, type_ctx);
+        for prop in &resolved.props {
+            entries.push((prop.key, BindingType::Props));
+        }
+    }
+}
+
+/// Extract prop names from runtime defineProps arguments.
+/// Handles object syntax `{ foo: String }` and array syntax `['foo', 'bar']`.
+fn extract_props_from_runtime_arg<'a>(
+    expr: &Expression<'a>,
+    entries: &mut Vec<(Span, BindingType)>,
+    ctx: &ScriptParseContext<'a>,
+) {
+    match expr {
+        Expression::ObjectExpression(obj) => {
+            for prop_kind in &obj.properties {
+                if let ObjectPropertyKind::ObjectProperty(p) = prop_kind {
+                    if let PropertyKey::StaticIdentifier(ident) = &p.key {
+                        // StaticIdentifier spans are NOT adjusted by adjust_program_spans()
+                        // (only expression-convertible keys are), so add content_offset.
+                        let offset = ctx.content_offset;
+                        entries.push((
+                            Span::new(ident.span.start + offset, ident.span.end + offset),
+                            BindingType::Props,
+                        ));
+                    }
+                }
+            }
+        }
+        Expression::ArrayExpression(arr) => {
+            for elem in &arr.elements {
+                // Array syntax: defineProps(['foo', 'bar'])
+                // StringLiteral elements ARE adjusted by adjust_program_spans().
+                // Spans include quotes, so adjust +1/-1 to get the bare name.
+                if let Some(Expression::StringLiteral(s)) = elem.as_expression() {
                     entries.push((
-                        Span::new(ident.span.start + offset, ident.span.end + offset),
+                        Span::new(s.span.start + 1, s.span.end - 1),
                         BindingType::Props,
                     ));
                 }
             }
         }
+        _ => {}
     }
 }
 
@@ -579,6 +675,187 @@ mod tests {
     fn standalone_with_defaults_typed() {
         let b = classify("withDefaults(defineProps<{ msg: string }>(), { msg: 'hi' });");
         assert_eq!(find(&b, "msg"), Some(BindingType::Props));
+    }
+
+    // ── Props: runtime object syntax ────────────────────────────────────
+
+    /// @ai-generated — standalone `defineProps({ foo: String })` should extract individual props
+    #[test]
+    fn standalone_define_props_runtime_object() {
+        let b = classify("defineProps({ foo: String, bar: Number });");
+        assert_eq!(
+            find(&b, "foo"),
+            Some(BindingType::Props),
+            "Runtime object prop 'foo' should be Props"
+        );
+        assert_eq!(
+            find(&b, "bar"),
+            Some(BindingType::Props),
+            "Runtime object prop 'bar' should be Props"
+        );
+    }
+
+    /// @ai-generated — runtime object with nested options `{ type: String, required: true }`
+    #[test]
+    fn standalone_define_props_runtime_object_nested() {
+        let b = classify("defineProps({ foo: { type: String, required: true }, bar: Number });");
+        assert_eq!(
+            find(&b, "foo"),
+            Some(BindingType::Props),
+            "Nested runtime prop 'foo' should be Props"
+        );
+        assert_eq!(
+            find(&b, "bar"),
+            Some(BindingType::Props),
+            "Simple runtime prop 'bar' should be Props"
+        );
+    }
+
+    // ── Props: array syntax ─────────────────────────────────────────────
+
+    /// @ai-generated — standalone `defineProps(['foo', 'bar'])` should extract individual props
+    #[test]
+    fn standalone_define_props_array_syntax() {
+        let b = classify("defineProps(['foo', 'bar']);");
+        assert_eq!(
+            find(&b, "foo"),
+            Some(BindingType::Props),
+            "Array syntax prop 'foo' should be Props"
+        );
+        assert_eq!(
+            find(&b, "bar"),
+            Some(BindingType::Props),
+            "Array syntax prop 'bar' should be Props"
+        );
+    }
+
+    // ── Props: type reference (interface / type alias) ──────────────────
+
+    /// @ai-generated — `defineProps<MyInterface>()` with local interface should resolve props
+    #[test]
+    fn standalone_define_props_interface_reference() {
+        let b = classify("interface MyProps { foo: string; bar: number }\ndefineProps<MyProps>();");
+        assert_eq!(
+            find(&b, "foo"),
+            Some(BindingType::Props),
+            "Interface-referenced prop 'foo' should be Props"
+        );
+        assert_eq!(
+            find(&b, "bar"),
+            Some(BindingType::Props),
+            "Interface-referenced prop 'bar' should be Props"
+        );
+    }
+
+    /// @ai-generated — `defineProps<MyType>()` with local type alias should resolve props
+    #[test]
+    fn standalone_define_props_type_alias_reference() {
+        let b = classify("type MyProps = { msg: string }\ndefineProps<MyProps>();");
+        assert_eq!(
+            find(&b, "msg"),
+            Some(BindingType::Props),
+            "Type-alias-referenced prop 'msg' should be Props"
+        );
+    }
+
+    /// @ai-generated — `withDefaults(defineProps<MyInterface>(), {...})` with local interface
+    #[test]
+    fn standalone_with_defaults_interface_reference() {
+        let b = classify(
+            "interface MyProps { foo?: string; bar?: number }\nwithDefaults(defineProps<MyProps>(), { foo: 'hi' });",
+        );
+        assert_eq!(
+            find(&b, "foo"),
+            Some(BindingType::Props),
+            "withDefaults + interface prop 'foo' should be Props"
+        );
+        assert_eq!(
+            find(&b, "bar"),
+            Some(BindingType::Props),
+            "withDefaults + interface prop 'bar' should be Props"
+        );
+    }
+
+    // ── Props: declarator + individual prop extraction ───────────────────
+
+    /// @ai-generated — `const props = defineProps<{ foo: string }>()` should extract
+    /// both `props` as SetupConst AND `foo` as Props
+    #[test]
+    fn const_define_props_typed_also_extracts_individual_props() {
+        let b = classify("const props = defineProps<{ foo: string, bar: number }>();");
+        assert_eq!(
+            find(&b, "props"),
+            Some(BindingType::SetupConst),
+            "Declarator 'props' should be SetupConst"
+        );
+        assert_eq!(
+            find(&b, "foo"),
+            Some(BindingType::Props),
+            "Individual typed prop 'foo' should also be Props"
+        );
+        assert_eq!(
+            find(&b, "bar"),
+            Some(BindingType::Props),
+            "Individual typed prop 'bar' should also be Props"
+        );
+    }
+
+    /// @ai-generated — `const props = defineProps({ foo: String })` should extract
+    /// both `props` as SetupConst AND `foo` as Props
+    #[test]
+    fn const_define_props_runtime_also_extracts_individual_props() {
+        let b = classify("const props = defineProps({ foo: String, bar: Number });");
+        assert_eq!(
+            find(&b, "props"),
+            Some(BindingType::SetupConst),
+            "Declarator 'props' should be SetupConst"
+        );
+        assert_eq!(
+            find(&b, "foo"),
+            Some(BindingType::Props),
+            "Individual runtime prop 'foo' should also be Props"
+        );
+        assert_eq!(
+            find(&b, "bar"),
+            Some(BindingType::Props),
+            "Individual runtime prop 'bar' should also be Props"
+        );
+    }
+
+    /// @ai-generated — `const props = withDefaults(defineProps<{ foo?: string }>(), { foo: 'bar' })`
+    /// should extract both `props` as SetupConst AND `foo` as Props
+    #[test]
+    fn const_with_defaults_typed_also_extracts_individual_props() {
+        let b = classify(
+            "const props = withDefaults(defineProps<{ foo?: string }>(), { foo: 'bar' });",
+        );
+        assert_eq!(
+            find(&b, "props"),
+            Some(BindingType::SetupConst),
+            "Declarator 'props' should be SetupConst"
+        );
+        assert_eq!(
+            find(&b, "foo"),
+            Some(BindingType::Props),
+            "Individual prop 'foo' from withDefaults should also be Props"
+        );
+    }
+
+    /// @ai-generated — `const props = defineProps<MyInterface>()` with local interface
+    #[test]
+    fn const_define_props_interface_ref_also_extracts_individual_props() {
+        let b =
+            classify("interface MyProps { title: string }\nconst props = defineProps<MyProps>();");
+        assert_eq!(
+            find(&b, "props"),
+            Some(BindingType::SetupConst),
+            "Declarator 'props' should be SetupConst"
+        );
+        assert_eq!(
+            find(&b, "title"),
+            Some(BindingType::Props),
+            "Interface prop 'title' should be Props"
+        );
     }
 
     // ── Function / class / enum declarations ─────────────────────────────

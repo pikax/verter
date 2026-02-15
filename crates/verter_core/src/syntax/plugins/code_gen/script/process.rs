@@ -85,6 +85,11 @@ pub fn process_script_event<'alloc>(
                         script.tag_open_start,
                         "\n",
                     );
+                    // Include imported bindings in __returned__ so they're accessible
+                    // via $setup in the render function (components, helpers, constants).
+                    for binding in &event.bindings {
+                        returned.push(binding.name);
+                    }
                 }
             }
             ScriptItem::Declaration(decl) => {

@@ -1002,4 +1002,143 @@ const b = 2
             code
         );
     }
+
+    // =========================================================================
+    // Import bindings in __returned__
+    // =========================================================================
+
+    /// @ai-generated — Imported components must appear in __returned__ so $setup["Comp"] resolves
+    #[test]
+    fn test_imported_component_in_returned() {
+        let code = gen_and_validate(
+            r#"<script setup>
+import MyComp from './MyComp.vue'
+</script>
+<template><MyComp/></template>"#,
+        );
+        // The __returned__ object must include MyComp so the template can access $setup["MyComp"]
+        assert!(
+            code.contains("__returned__") && code.contains("MyComp"),
+            "Imported component should appear in __returned__, got:\n{}",
+            code
+        );
+        // Specifically check it's in the __returned__ object
+        let returned_pos = code
+            .find("__returned__={")
+            .expect("Should have __returned__");
+        let returned_end = code[returned_pos..].find('}').unwrap() + returned_pos;
+        let returned_section = &code[returned_pos..returned_end];
+        assert!(
+            returned_section.contains("MyComp"),
+            "MyComp should be inside __returned__={{...}}, got section: {}",
+            returned_section
+        );
+    }
+
+    /// @ai-generated — Named imports (helpers, constants) must appear in __returned__
+    #[test]
+    fn test_named_import_in_returned() {
+        let code = gen_and_validate(
+            r#"<script setup>
+import { SOME_CONST } from './constants'
+const x = SOME_CONST
+</script>
+<template><div>{{ x }}</div></template>"#,
+        );
+        let returned_pos = code
+            .find("__returned__={")
+            .expect("Should have __returned__");
+        let returned_end = code[returned_pos..].find('}').unwrap() + returned_pos;
+        let returned_section = &code[returned_pos..returned_end];
+        assert!(
+            returned_section.contains("SOME_CONST"),
+            "Named import should be inside __returned__, got section: {}",
+            returned_section
+        );
+    }
+
+    /// @ai-generated — Type-only imports must NOT appear in __returned__
+    #[test]
+    fn test_type_import_not_in_returned() {
+        let code = gen_and_validate(
+            r#"<script setup lang="ts">
+import type { Ref } from 'vue'
+const x = 1
+</script>
+<template><div>{{ x }}</div></template>"#,
+        );
+        // Type-only import should not appear anywhere in the output
+        assert!(
+            !code.contains("Ref"),
+            "Type-only import should NOT appear in output, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Props should NOT appear in __returned__ (accessed via $props)
+    #[test]
+    fn test_props_not_in_returned() {
+        let code = gen_and_validate(
+            r#"<script setup lang="ts">
+defineProps<{ store: any }>()
+const localVar = 'hello'
+</script>
+<template><div>{{ localVar }}</div></template>"#,
+        );
+        let returned_pos = code
+            .find("__returned__={")
+            .expect("Should have __returned__");
+        let returned_end = code[returned_pos..].find('}').unwrap() + returned_pos;
+        let returned_section = &code[returned_pos..returned_end];
+        assert!(
+            returned_section.contains("localVar"),
+            "Local var should be in __returned__, got section: {}",
+            returned_section
+        );
+        // store prop should NOT be in __returned__ (it's accessed via $props.store)
+        assert!(
+            !returned_section.contains("store"),
+            "Props should NOT be in __returned__, got section: {}",
+            returned_section
+        );
+    }
+
+    /// @ai-generated — Multiple imports and declarations all appear in __returned__
+    #[test]
+    fn test_mixed_imports_and_declarations_in_returned() {
+        let code = gen_and_validate(
+            r#"<script setup>
+import Header from './Header.vue'
+import { ref } from 'vue'
+const count = ref(0)
+function increment() {}
+</script>
+<template><Header/><div @click="increment">{{ count }}</div></template>"#,
+        );
+        let returned_pos = code
+            .find("__returned__={")
+            .expect("Should have __returned__");
+        let returned_end = code[returned_pos..].find('}').unwrap() + returned_pos;
+        let returned_section = &code[returned_pos..returned_end];
+        assert!(
+            returned_section.contains("Header"),
+            "Imported component Header should be in __returned__, got: {}",
+            returned_section
+        );
+        assert!(
+            returned_section.contains("ref"),
+            "Imported ref should be in __returned__, got: {}",
+            returned_section
+        );
+        assert!(
+            returned_section.contains("count"),
+            "Declaration count should be in __returned__, got: {}",
+            returned_section
+        );
+        assert!(
+            returned_section.contains("increment"),
+            "Declaration increment should be in __returned__, got: {}",
+            returned_section
+        );
+    }
 }

@@ -2746,6 +2746,250 @@ const props = defineProps({ msg: String })
 }
 
 // =========================================================================
+// Props binding: $props. prefix for all defineProps styles
+// =========================================================================
+
+/// @ai-generated — Standalone typed defineProps: `{{ msg }}` should use `$props.msg`
+#[test]
+fn test_template_props_prefix_typed_standalone() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("$props.msg"),
+        "Typed standalone prop 'msg' should use $props.msg in template, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_ctx.msg"),
+        "Typed standalone prop 'msg' should NOT use _ctx.msg, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Runtime object defineProps: `{{ msg }}` should use `$props.msg`
+#[test]
+fn test_template_props_prefix_runtime_object() {
+    let code = gen_and_validate(
+        r#"<script setup>
+defineProps({ msg: String })
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("$props.msg"),
+        "Runtime object prop 'msg' should use $props.msg in template, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_ctx.msg"),
+        "Runtime object prop 'msg' should NOT use _ctx.msg, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Array syntax defineProps: `{{ foo }}` should use `$props.foo`
+#[test]
+fn test_template_props_prefix_array_syntax() {
+    let code = gen_and_validate(
+        r#"<script setup>
+defineProps(['foo', 'bar'])
+</script>
+<template><div>{{ foo }} {{ bar }}</div></template>"#,
+    );
+    assert!(
+        code.contains("$props.foo"),
+        "Array syntax prop 'foo' should use $props.foo, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("$props.bar"),
+        "Array syntax prop 'bar' should use $props.bar, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — `const props = defineProps<{ msg: string }>()` + `{{ msg }}` should use $props.msg
+#[test]
+fn test_template_props_prefix_declarator_typed() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+const props = defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("$props.msg"),
+        "Declarator + typed prop 'msg' should use $props.msg, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — `const props = defineProps({ msg: String })` + `{{ msg }}` should use $props.msg
+#[test]
+fn test_template_props_prefix_declarator_runtime() {
+    let code = gen_and_validate(
+        r#"<script setup>
+const props = defineProps({ msg: String })
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("$props.msg"),
+        "Declarator + runtime prop 'msg' should use $props.msg, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — `defineProps<MyInterface>()` with local interface: props should use $props.
+#[test]
+fn test_template_props_prefix_interface_reference() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+interface MyProps { title: string; count: number }
+defineProps<MyProps>()
+</script>
+<template><div>{{ title }} {{ count }}</div></template>"#,
+    );
+    assert!(
+        code.contains("$props.title"),
+        "Interface-referenced prop 'title' should use $props.title, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("$props.count"),
+        "Interface-referenced prop 'count' should use $props.count, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — `defineProps<MyType>()` with local type alias: props should use $props.
+#[test]
+fn test_template_props_prefix_type_alias_reference() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+type MyProps = { msg: string }
+defineProps<MyProps>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("$props.msg"),
+        "Type-alias-referenced prop 'msg' should use $props.msg, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — withDefaults with typed props: template should use $props.
+#[test]
+fn test_template_props_prefix_with_defaults() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+withDefaults(defineProps<{ msg?: string }>(), { msg: 'hello' })
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("$props.msg"),
+        "withDefaults prop 'msg' should use $props.msg, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — withDefaults with interface reference: template should use $props.
+#[test]
+fn test_template_props_prefix_with_defaults_interface_ref() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+interface MyProps { msg?: string }
+withDefaults(defineProps<MyProps>(), { msg: 'hello' })
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("$props.msg"),
+        "withDefaults + interface prop 'msg' should use $props.msg, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — `const props = withDefaults(defineProps<...>(), {...})` + `{{ msg }}` uses $props.
+#[test]
+fn test_template_props_prefix_declarator_with_defaults() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+const props = withDefaults(defineProps<{ msg?: string }>(), { msg: 'hi' })
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
+        code.contains("$props.msg"),
+        "Declarator + withDefaults prop 'msg' should use $props.msg, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Local variable with same name as prop should override (use $setup.)
+#[test]
+fn test_template_local_var_overrides_prop() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+defineProps<{ foo: string }>()
+const foo = 'local'
+</script>
+<template><div>{{ foo }}</div></template>"#,
+    );
+    // Local declaration should override the prop binding
+    assert!(
+        !code.contains("$props.foo"),
+        "Local variable should override prop — should NOT use $props.foo, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Multiple props with mixed usage: bound prop vs setup ref
+#[test]
+fn test_template_props_and_setup_mixed() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+defineProps<{ title: string }>()
+const count = ref(0)
+</script>
+<template><div>{{ title }} {{ count }}</div></template>"#,
+    );
+    assert!(
+        code.contains("$props.title"),
+        "Prop 'title' should use $props.title, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("$setup.count"),
+        "Setup ref 'count' should use $setup.count, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Props used in v-bind expression should also use $props.
+#[test]
+fn test_template_props_in_v_bind() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+defineProps<{ className: string }>()
+</script>
+<template><div :class="className">x</div></template>"#,
+    );
+    assert!(
+        code.contains("$props.className"),
+        "Prop in v-bind should use $props.className, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
 // Event Modifiers
 // =========================================================================
 
