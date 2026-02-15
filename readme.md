@@ -91,6 +91,26 @@ const vColor: Directive<HTMLElement, string, "red" | "blue"> = (el, binding) => 
 </template>
 ```
 
+## Performance
+
+Verter's Rust-powered compiler is significantly faster than Vue's JavaScript-based compiler. Benchmarks compare template compilation of real-world Vue SFCs using Verter's native NAPI-RS bindings against `@vue/compiler-sfc`. On average, Verter compiles templates **~9x faster** than Vue.
+
+| Fixture | Size | Vue (ops/s) | Verter (ops/s) | Speedup | Throughput |
+|---|---|---:|---:|---:|---:|
+| tiny-template | 42 B | 21,240 | 112,368 | **5.3x** | 4.50 MB/s |
+| simple-interactive | 242 B | 3,140 | 52,440 | **16.7x** | 12.10 MB/s |
+| list-rendering | 1.3 KB | 1,141 | 15,066 | **13.2x** | 18.85 MB/s |
+| conditional-heavy | 2.0 KB | 1,288 | 14,928 | **11.6x** | 29.27 MB/s |
+| form-component | 4.3 KB | 750 | 7,359 | **9.8x** | 30.58 MB/s |
+| composition-heavy | 9.0 KB | 368 | 3,644 | **9.9x** | 31.86 MB/s |
+| template-heavy | 8.5 KB | 1,077 | 2,914 | **2.7x** | 24.20 MB/s |
+| kitchen-sink | 26.7 KB | 141 | 1,106 | **7.8x** | 28.86 MB/s |
+| **20k files (stress test)** | 127 MB | 30.8s | 5.0s | **6.1x** | 25.16 MB/s |
+
+> **Average speedup: 9.2x** across all fixtures. Throughput scales from ~4.5 MB/s on tiny files to ~32 MB/s on larger components, with memory usage significantly lower than Vue's compiler.
+
+These benchmarks run in CI on every PR (triggered via `/benchmark` comment) and use 8 Vue SFC fixtures ranging from trivial templates to a 27 KB kitchen-sink component, plus a 20,000-file stress test. See the [benchmark package](./packages/benchmark/) for fixture sources and methodology.
+
 ## Why Verter?
 
 Since the Vetur days, Vue has struggled with type safety and tooling quality. Vue 3 and Volar brought significant improvements, but challenges remain. Verter aims to provide the **best possible TypeScript experience for Vue** by converting SFCs into typed TSX representations that TypeScript's language service can analyze directly.
@@ -313,7 +333,7 @@ Test files are co-located with source files as `*.spec.ts`.
 
 ### Benchmarks
 
-Performance benchmarks comparing Vue vs Verter compilation:
+See the [Performance](#performance) section above for latest results. To run benchmarks locally:
 
 ```bash
 # Run benchmarks (8 fixtures + 20k file stress test)
@@ -323,17 +343,7 @@ pnpm --filter @verter/benchmark bench
 pnpm --filter @verter/benchmark bench:json
 ```
 
-**Latest Benchmark Results**: Generated in CI; see the "Benchmark" workflow run artifacts for up-to-date numbers.
-
-**Benchmark Details**:
-- **Fixtures**: 8 Vue SFCs ranging from 45 bytes (tiny-template) to 27.76 KB (kitchen-sink)
-- **Metrics**: Compilation time, throughput (MB/s), memory usage, speedup relative to Vue, status (pass/warning/fail)
-- **Stress Test**: ~20,000 files created by repeating all fixtures
-- **CI Integration**: Triggered via PR comment `/benchmark` → posts results as PR comment
-- **Status Criteria**:
-  - ✅ **Pass**: Verter ≥ Vue performance (speedup ≥ 1.0x)
-  - ⚠️ **Warning**: Verter 50-99% of Vue (speedup 0.5-1.0x)
-  - ❌ **Fail**: Verter < 50% of Vue (speedup < 0.5x)
+Benchmarks are also triggered in CI via `/benchmark` PR comment.
 
 ### Integration Tests
 

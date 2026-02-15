@@ -1,7 +1,7 @@
 {
   "name": "@verter/oxc-bindings",
   "displayName": "Verter OXC bindings",
-  "version": "0.0.1-alpha.1",
+  "version": "0.0.1-alpha.2",
   "description": "Resolves and downloads OXC bindings",
   "main": "dist/index.js",
   "scripts": {

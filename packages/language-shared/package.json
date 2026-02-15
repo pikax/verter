@@ -1,6 +1,6 @@
 {
   "name": "@verter/language-shared",
-  "version": "0.0.1-alpha.1",
+  "version": "0.0.1-alpha.2",
   "description": "Contains shared information between the language server and the language client",
   "keywords": [],
   "license": "MIT",
