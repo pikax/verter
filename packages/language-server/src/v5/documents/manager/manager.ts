@@ -117,19 +117,14 @@ export class DocumentManager implements Disposable {
       return true;
     }
 
-    let cached = this._fileExistsMap.get(filepath);
-    if (cached === undefined) {
-      // normalise path
-      cached = existsSync(uriToPath(filepath));
-      this._fileExistsMap.set(filepath, cached);
+    const cached = this._fileExistsMap.get(filepath);
+    if (cached !== undefined) {
+      return cached;
     }
 
-    // if (filepath.indexOf("vue/runtime-dom") >= 0) {
-    //   const eee = existsSync(filepath);
-    //   console.log("eeer", eee);
-    //   debugger;
-    // }
-    return cached;
+    const exists = existsSync(uriToPath(filepath));
+    this._fileExistsMap.set(filepath, exists);
+    return exists;
   }
 
   readFile(filepath: string, encoding: BufferEncoding = "utf-8") {
@@ -251,7 +246,7 @@ export class DocumentManager implements Disposable {
       case "update": {
         const doc = this.getDocument(path);
         if (!doc) return;
-        return readFile(path, { encoding: "utf-8" }).then((c) => {
+        return readFile(path, { encoding: "utf-8" }).then((c: string) => {
           doc?.update(c);
         });
       }

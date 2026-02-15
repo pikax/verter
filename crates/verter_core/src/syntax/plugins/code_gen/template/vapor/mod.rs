@@ -107,7 +107,7 @@ static DELEGATABLE_EVENTS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
 pub(crate) struct VaporTemplateGenerator<'alloc> {
     code_transform: Rc<RefCell<CodeTransform<'alloc>>>,
     bindings: FxHashMap<&'alloc str, BindingType>,
-    is_production: bool,
+    _is_production: bool,
     imports: VaporImportDependencies,
 
     /// Element stack (depth-first).
@@ -163,7 +163,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         Self {
             code_transform,
             bindings: FxHashMap::default(),
-            is_production,
+            _is_production: is_production,
             imports: VaporImportDependencies::default(),
             stack: Vec::new(),
             templates: Vec::new(),

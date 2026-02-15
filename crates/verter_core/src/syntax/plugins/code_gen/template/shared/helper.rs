@@ -139,42 +139,16 @@ pub fn patch_vfor_references(
     }
 }
 
-/// Build a value string with accessor prefixes AND optional variable replacements applied.
+/// Build a value string with accessor prefixes AND optional variable replacements
+/// applied, for vapor mode.
+///
+/// In vapor, ALL bindings use `_ctx.` prefix and never get `.value` suffix.
 ///
 /// Iterates OXC-parsed bindings directly (already in source order — no sorting needed).
 /// No `Vec`, no `Patch` enum, no `.sort()`. This correctly handles:
 /// - Identifiers inside string literals (won't be in the binding list)
 /// - Unicode identifiers (OXC parser handles these)
 /// - v-for/v-slot variable mappings (e.g., `item` → `_for_item0.value`)
-///
-/// For each OXC-identified binding:
-/// - If it matches a variable mapping key → replace the entire identifier
-/// - If `ignore: true` with no mapping → skip
-/// - Otherwise → insert the accessor prefix
-///
-/// Pass `var_mappings: &[]` when no variable replacements are needed (replaces
-/// the removed `apply_dynamic_arg_prefix` and `build_prefixed_value` functions).
-pub fn build_prefixed_value_with_var_mappings(
-    val_text: &str,
-    val_start: u32,
-    bindings_result: Option<&BindingExtractionResult>,
-    map: &FxHashMap<&str, BindingType>,
-    is_inline: bool,
-    var_mappings: &[(String, String)],
-) -> String {
-    build_prefixed_value_impl(
-        val_text,
-        val_start,
-        bindings_result,
-        map,
-        is_inline,
-        var_mappings,
-        false,
-    )
-}
-
-/// Like [`build_prefixed_value_with_var_mappings`] but for vapor mode.
-/// In vapor, ALL bindings use `_ctx.` prefix and never get `.value` suffix.
 pub fn build_prefixed_value_vapor(
     val_text: &str,
     val_start: u32,
@@ -257,11 +231,10 @@ fn build_prefixed_value_impl(
     result
 }
 
-/// Apply accessor prefixes (`_ctx.`, `$setup.`, etc.) to external references
-/// in a v-for iterable expression.
+/// Apply accessor prefixes to external references in a v-for iterable expression,
+/// for vapor mode — always uses `_ctx.` prefix.
 ///
-/// Used by both VDOM and Vapor backends to prefix references in v-for right-hand
-/// side expressions. References are processed in reverse order to preserve offsets.
+/// References are processed in reverse order to preserve offsets.
 ///
 /// - `text`: the expression string to prefix (may be the full v-for value or just the iterable)
 /// - `base_offset`: absolute source offset of the start of `text`
@@ -269,29 +242,6 @@ fn build_prefixed_value_impl(
 /// - `filter_range`: if `Some((start, end))`, only prefix references within this absolute range
 /// - `input`: full source input (for extracting reference names)
 /// - `bindings`: binding map for determining accessor prefix
-/// - `is_production`: controls accessor prefix style (inline vs setup)
-pub fn prefix_vfor_references(
-    text: &str,
-    base_offset: u32,
-    references: &[Span],
-    filter_range: Option<(u32, u32)>,
-    input: &str,
-    bindings: &FxHashMap<&str, BindingType>,
-    is_production: bool,
-) -> String {
-    prefix_vfor_references_impl(
-        text,
-        base_offset,
-        references,
-        filter_range,
-        input,
-        bindings,
-        is_production,
-        false,
-    )
-}
-
-/// Like [`prefix_vfor_references`] but for vapor mode — always uses `_ctx.` prefix.
 pub fn prefix_vfor_references_vapor(
     text: &str,
     base_offset: u32,
