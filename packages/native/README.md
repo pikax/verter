@@ -19,7 +19,7 @@ graph LR
     B --> C[".node binary<br/><i>platform-specific</i>"]
     C --> D["@verter/native<br/><i>JS loader (index.js)</i>"]
     D --> E["@verter/language-server"]
-    D --> F["@verter/vite-plugin"]
+    D --> F["@verter/unplugin"]
 
     style A fill:#deb887,stroke:#8b6914
     style B fill:#deb887,stroke:#8b6914

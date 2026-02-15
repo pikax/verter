@@ -162,7 +162,7 @@ Deployment happens automatically via:
 | `monaco-editor-core`          | Code editor component                             |
 | `shiki` / `@shikijs/monaco`   | Syntax highlighting                               |
 | `oxc-transform`               | TypeScript transpilation in the browser           |
-| `@verter/vite-plugin`         | Vite plugin for Vue SFC compilation (dev tooling) |
+| `@verter/unplugin`            | Universal bundler plugin for Vue SFC compilation  |
 | `vite` / `@vitejs/plugin-vue` | Build tooling                                     |
 
 ## License

@@ -26,7 +26,7 @@ For each test project, the workflow:
    - Records build time and test results
 
 2. **Verter Testing**
-   - Installs `@verter/native` and `@verter/vite-plugin`
+   - Installs `@verter/native` and `@verter/unplugin`
    - Replaces `vue()` with `verter()` in Vite config
    - Runs build with Verter compiler
    - Runs tests with Verter
@@ -157,7 +157,7 @@ The workflow produces several artifacts:
 1. **`integration-test-summary.md`** - Aggregate report
 2. **`report-{project}`** - Individual project reports
 3. **`logs-{project}`** - Build and test logs
-4. **`verter-vite-plugin`** - Built plugin (artifact mode only)
+4. **`verter-unplugin`** - Built plugin (artifact mode only)
 
 Download from: **Actions** → Workflow Run → **Artifacts** section
 

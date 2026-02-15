@@ -2,7 +2,7 @@
 //!
 //! The [`CodeTransform`] type allows you to make surgical edits to source code while tracking
 //! the original positions for source map generation. Unlike naive string building, it only
-//! constructs the final output when explicitly requested via [`CodeTransform::to_string`].
+//! constructs the final output when explicitly requested via [`CodeTransform::build_string`].
 //!
 //! # Example
 //!
@@ -20,7 +20,7 @@
 //! code.append("\nexport { x, y };");
 //!
 //! // Build the final output (only happens here)
-//! let output = code.to_string();
+//! let output = code.build_string();
 //! assert_eq!(output, "// Generated\nconst x = 'new';\nconst y = 'test';\nexport { x, y };");
 //!
 //! // Generate a source map

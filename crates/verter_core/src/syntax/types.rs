@@ -2,332 +2,447 @@ use crate::{
     common::Span,
     cursor::ScriptLanguage,
     tokenizer::QuoteType,
-    utils::oxc::{
-        vue::{GenericParseResult, ScriptParseResult, VForWithBindings, VSlotWithBindings},
-        BindingExtractionResult,
+    utils::{
+        oxc::{
+            vue::{GenericParseResult, ScriptParseResult, VForWithBindings, VSlotWithBindings},
+            BindingExtractionResult,
+        },
+        vue::PatchFlag,
     },
 };
 
-pub enum SyntaxTypes {
-    ROOT = 0,
-    ELEMENT,
-    Prop,
-    TEXT,
-    COMMENT,
-    INTERPOLATION,
-
-    PropArg,
-    PropValue,
-
-    Expression,
-}
-
-// events
+pub const NO_PARENT: u32 = u32::MAX;
 
 pub trait SyntaxNode {
     fn get_id(&self) -> u32;
 }
+// ROOT
 
-// rootSyntax
-pub struct SyntaxRoot {
-    pub start: u32,
-    pub end: u32,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RootNodeKind {
+    Script,
+    Template,
+    Style,
+    Unknown,
+    // Add more as needed
 }
-impl SyntaxNode for SyntaxRoot {
-    // offset of <template>
-    fn get_id(&self) -> u32 {
-        self.start
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ElementKind {
+    // Component tags (PascalCase or kebab-case with at least one uppercase letter)
+    Component = 0,
+    // HTML tags (lowercase, no uppercase letters)
+    Element,
+    // <slot> with v-bind or # syntax (Vue 3)
+    SlotOutlet,
+    // <template> (when not a slot)
+    Template,
+    // <component is="...">
+    DynamicComponent,
+
+    // Custom component
+    CustomComponent,
+}
+
+impl ElementKind {
+    /// Whether this element kind represents a Vue component (as opposed to a
+    /// plain HTML element, slot outlet, or template wrapper).
+    #[inline]
+    pub fn is_component(&self) -> bool {
+        matches!(self, ElementKind::Component | ElementKind::DynamicComponent)
     }
 }
-// /rootSyntax
-// elementSyntax
-// #[derive(Debug, Clone)]
-// pub struct SyntaxElement {
-//     pub start: u32,
-//     pub end: u32,
 
-//     pub is_self_closing: bool,
-//     // if self-closing, content is None or it's still being processed
-//     pub content: Option<SyntaxElementContentEnd>,
-//     // None is root
-//     pub parent_id: u32,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PropKind {
+    /// Static attribute: foo="foo"
+    Value,
 
-//     // pub props: Option<Vec<SyntaxProp>>,
-//     pub nested_level: usize,
-// }
-// impl SyntaxNode for SyntaxElement {
-//     // offset of `<`
-//     fn get_id(&self) -> u32 {
-//         self.start
-//     }
-// }
+    /// Directive - excluding built-in directives and Class/Style bindings
+    /// Example: v-custom:arg.modifier="expr"
+    Directive,
 
-// #[derive(Debug, Clone)]
-// pub struct SyntaxElementContentEnd {
-//     // offset from `>`
-//     pub start: u32,
-//     // offset to `<`
-//     pub end: u32,
+    // Special props
+    // Class attribute: class="expr"
+    ClassValue,
+    // :class="expr" or v-bind:class="expr"
+    ClassBind,
 
-//     pub closing_tag_start: u32,
-//     pub closing_tag_end: u32,
-// }
+    // Style attribute: style="expr"
+    StyleValue,
+    // :style="expr" or v-bind:style="expr"
+    StyleBind,
 
-/// Sentinel value indicating no parent (root element)
-pub const NO_PARENT: u32 = u32::MAX;
+    // built-in directives
+    /// v-bind: :prop="expr"
+    Bind,
+    /// v-bind spread: v-bind="obj" (no attribute name)
+    BindSpread,
+    /// v-on: @event="handler"
+    On,
+    /// v-on spread: v-on="obj" (no attribute name)
+    OnSpread,
+
+    /// v-model
+    Model,
+    /// v-show: style display toggle
+    Show,
+    /// v-html: innerHTML binding
+    Html,
+    /// v-text: textContent binding
+    Text,
+    /// v-if: conditional rendering
+    If,
+    /// v-else-if: conditional rendering
+    ElseIf,
+    /// v-else: conditional rendering
+    Else,
+    /// v-for: list rendering
+    For,
+    /// v-slot: template slot
+    Slot,
+    /// v-once: render once and never update
+    Once,
+}
 
 #[derive(Debug, Clone)]
-pub struct SyntaxCloseTag {
-    /// The ID of the element being closed (its opening tag's start position)
-    pub element_id: u32,
-    /// The ID of this element's parent (NO_PARENT for root elements)
-    pub parent_id: u32,
+pub struct RootNodeOpenTagStart {
+    pub kind: RootNodeKind,
 
-    pub tag_type: SyntaxTagType,
-
+    // start contains <
     pub start: u32,
+
+    // after name, before attributes, the whitespace after the tag name
     pub name_end: u32,
+}
+#[derive(Debug, Clone)]
+pub struct RootNodeOpenTagEnd {
+    pub kind: RootNodeKind,
+
+    // start contains <
+    pub start: u32,
+    // end contains >
     pub end: u32,
+
+    // after name, before attributes, the whitespace after the tag name
+    pub name_end: u32,
+
+    pub is_self_closing: bool,
+}
+#[derive(Debug, Clone)]
+pub struct RootNodeCloseTag {
+    pub kind: RootNodeKind,
+
+    // start contains <
+    pub start: u32,
+    pub end: u32,
+
+    // after name, before attributes, the whitespace after the tag name
+    pub name_end: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScriptLang {
+    pub lang: ScriptLanguage,
+}
+
+// /ROOT
+
+// Elements
+
+// When the tag is open but before any attributes are parsed
+#[derive(Debug, Clone)]
+pub struct ElementOpenTagStart {
+    pub kind: ElementKind,
+
+    // start contains <
+    pub start: u32,
+    // after name, before attributes, the whitespace after the tag name
+    pub name_end: u32,
+
+    pub parent_id: u32,
 
     pub nested_level: usize,
     pub is_void_element: bool,
+    pub patch_flag: PatchFlag,
+
+    /// Prop names that are dynamic (the `arg` spans from `:prop="expr"` bindings).
+    /// Only populated when PROPS flag is set (not FULL_PROPS, since FULL_PROPS
+    /// implies all props are dynamic and no list is needed).
+    /// Corresponds to Vue's `dynamicProps` array in codegen output.
+    pub dynamic_props: Vec<Span>,
+
+    /// Whether this element has a `ref` attribute (static or dynamic).
+    /// Used for conditional NEED_PATCH at tag close.
+    pub has_ref: bool,
+    /// Whether this element has a `@vnode*` lifecycle hook listener.
+    /// Used for conditional NEED_PATCH at tag close.
+    pub has_vnode_hook: bool,
 }
-impl SyntaxNode for SyntaxCloseTag {
+impl SyntaxNode for ElementOpenTagStart {
     // offset of `</`
     fn get_id(&self) -> u32 {
         self.start
     }
 }
-// /elementSyntax
 
-// nodeProp
 #[derive(Debug, Clone)]
-pub struct SyntaxProp {
-    /// The ID of the element this prop belongs to
-    pub element_id: u32,
-    /// The ID of this element's parent (NO_PARENT for root elements)
-    pub parent_id: u32,
+pub struct ElementOpenTagEnd {
+    pub kind: ElementKind,
 
-    // offset of the attribute/directive name
+    // start contains <
     pub start: u32,
-    // offset of the attribute/directive end
+    // end contains >
     pub end: u32,
 
+    // after name, before attributes, the whitespace after the tag name
     pub name_end: u32,
 
-    pub is_directive: bool,
-
-    pub value: Option<SyntaxPropValue>,
-    pub arg: Option<SyntaxPropArg>,
-
-    pub modifiers: Option<Vec<Span>>,
-    pub quote: Option<QuoteType>,
-}
-impl SyntaxNode for SyntaxProp {
-    // offset of the prop name start
-    fn get_id(&self) -> u32 {
-        self.start
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SyntaxPropValue {
-    pub start: u32,
-    pub end: u32,
-}
-#[derive(Debug, Clone)]
-pub struct SyntaxPropArg {
-    pub start: u32,
-    pub end: u32,
-    pub is_dynamic: bool,
-}
-
-impl SyntaxNode for SyntaxPropValue {
-    // offset of the arg/value start
-    fn get_id(&self) -> u32 {
-        self.start
-    }
-}
-
-impl SyntaxNode for SyntaxPropArg {
-    // offset of the arg/value start
-    fn get_id(&self) -> u32 {
-        self.start
-    }
-}
-
-// /nodeProp
-// textSyntax
-#[derive(Debug, Clone)]
-pub struct SyntaxText {
-    pub parent_id: u32,
-
-    pub start: u32,
-    pub end: u32,
-}
-impl SyntaxNode for SyntaxText {
-    // offset of the text start
-    fn get_id(&self) -> u32 {
-        self.start
-    }
-}
-// /textSyntax
-// interpolationSyntax
-#[derive(Debug, Clone)]
-pub struct SyntaxInterpolation {
-    pub parent_id: u32,
-
-    pub start: u32,
-    pub end: u32,
-
-    // after {{ - may contain whitespace
-    pub content_start: u32,
-    // before }} - may contain whitespace
-    pub content_end: u32,
-}
-impl SyntaxNode for SyntaxInterpolation {
-    // offset of the interpolation start
-    fn get_id(&self) -> u32 {
-        self.start
-    }
-}
-// /interpolationSyntax
-// commentSyntax
-#[derive(Debug, Clone)]
-pub struct SyntaxComment {
-    pub parent_id: u32,
-
-    pub start: u32,
-    pub end: u32,
-}
-impl SyntaxNode for SyntaxComment {
-    // offset of the comment start
-    fn get_id(&self) -> u32 {
-        self.start
-    }
-}
-// /commentSyntax
-
-// Error/Warning
-
-#[derive(Debug)]
-pub enum SyntaxErrorMessages {
-    OpenTagNotFound,
-    UnclosedTag,
-}
-#[derive(Debug)]
-pub enum SyntaxWarningMessages {
-    UnclosedTag,
-}
-#[derive(Debug)]
-pub struct SyntaxError {
-    pub start: u32,
-    pub end: u32,
-
-    pub message: SyntaxErrorMessages,
-}
-
-#[derive(Debug)]
-pub struct SyntaxWarning {
-    pub start: u32,
-    pub end: u32,
-
-    pub message: SyntaxWarningMessages,
-}
-
-// /Error/Warning
-
-// intermediaries
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SyntaxTagType {
-    Element = 0,
-    Component = 1,
-
-    Slot = 2,
-    Template = 3,
-
-    CustomElement = 4,
-
-    /// <component :is="..."> dynamic component
-    DynamicComponent = 5,
-
-    RootScript,
-    RootTemplate,
-    RootStyle,
-    RootUnknown,
-}
-
-#[derive(Debug, Clone)]
-pub struct SyntaxOpenTagStart {
-    pub start: u32,
-    pub name_end: u32,
-
-    pub tag_type: SyntaxTagType,
-    pub element_id: u32,
-
-    /// Parent element ID (NO_PARENT for root elements where nested_level == 0)
     pub parent_id: u32,
 
     pub nested_level: usize,
-
-    /// Some elements do not have a separate end tag
     pub is_void_element: bool,
+    pub is_self_closing: bool,
+
+    pub patch_flag: PatchFlag,
+    pub dynamic_props: Vec<Span>,
+
+    pub has_ref: bool,
+    pub has_vnode_hook: bool,
 }
-impl SyntaxNode for SyntaxOpenTagStart {
+impl SyntaxNode for ElementOpenTagEnd {
     // offset of `<`
     fn get_id(&self) -> u32 {
         self.start
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SyntaxOpenTagEnd {
+#[derive(Debug)]
+pub struct ElementCloseTag {
+    pub kind: ElementKind,
+
+    // start contains <
     pub start: u32,
+    // end contains >
     pub end: u32,
 
+    // after name, before attributes, the whitespace after the tag name
     pub name_end: u32,
 
-    pub tag_type: SyntaxTagType,
-
-    pub element_id: u32,
-    /// Parent element ID (NO_PARENT for root elements where nested_level == 0)
     pub parent_id: u32,
 
-    pub self_closing: bool,
-    // pub content: Option<SyntaxElementContentEnd>,
     pub nested_level: usize,
-
-    /// Some elements do not have a separate end tag
     pub is_void_element: bool,
 }
-impl SyntaxNode for SyntaxOpenTagEnd {
-    // offset of `>`
+impl SyntaxNode for ElementCloseTag {
+    // offset of `<`
     fn get_id(&self) -> u32 {
         self.start
     }
 }
 
-// /intermediaries
+// /Elements
 
-// oxc parsed nodes
+// // Scopes
+
+// #[derive(Debug, Clone)]
+// pub struct ElementScopeConditionIf {
+//     // start of the element that creates the scope.
+//     pub element_start: u32,
+
+//     // start contains v-
+//     pub start: u32,
+//     pub end: u32,
+
+//     pub value: Option<Span>,
+// }
+
+// #[derive(Debug, Clone)]
+// pub struct ElementScopeConditionElseIf {
+//     // start of the element that creates the scope.
+//     pub element_start: u32,
+
+//     // start contains v-
+//     pub start: u32,
+//     pub end: u32,
+
+//     pub value: Option<Span>,
+// }
+
+// #[derive(Debug, Clone)]
+// pub struct ElementScopeConditionElse {
+//     // start of the element that creates the scope.
+//     pub element_start: u32,
+
+//     // start contains v-
+//     pub start: u32,
+//     pub end: u32,
+// }
+
+// #[derive(Debug, Clone)]
+// pub struct ElementScopeFor {
+//     // start of the element that creates the scope.
+//     pub element_start: u32,
+
+//     // start contains v-
+//     pub start: u32,
+//     pub end: u32,
+
+//     // full value span
+//     pub value: Option<Span>,
+
+//     // left of "in" or "of"
+//     pub iterator: Option<Span>,
+//     // right of "in" or "of"
+//     pub iterable: Option<Span>,
+
+//     pub is_of: bool,
+// }
+
+// // When the Slot is in the component <MyComponent v-slot:header="slotProps">, the scope is created by the component, not the <template> element. So we associate the scope with the component element instead of the <template> element.
+// #[derive(Debug, Clone)]
+// pub struct ElementScopeSlotElement {
+//     // start of the element that creates the scope.
+//     pub element_start: u32,
+//     // where tag ends, contains >
+//     pub element_content_start: u32,
+
+//     // start contains v-
+//     pub start: u32,
+//     pub end: u32,
+
+//     pub name: Option<Span>,
+// }
+
+// #[derive(Debug, Clone)]
+// pub struct ElementScopeSlotTemplate {
+//     // start of <template>.
+//     pub element_start: u32,
+
+//     pub start: u32,
+//     pub end: u32,
+
+//     pub name: Option<Span>,
+// }
+
+// // /Scopes
+
+// Props
+
+#[derive(Debug, Clone)]
+pub struct Prop {
+    pub kind: PropKind,
+
+    pub element_id: u32,
+
+    pub is_directive: bool,
+
+    // start of the prop, including directive name if it's a directive
+    pub start: u32,
+    pub end: u32,
+
+    pub name_end: u32,
+
+    pub value: Option<Span>,
+    pub arg: Option<Span>,
+
+    pub modifiers: Option<Vec<Span>>,
+
+    pub quote: Option<QuoteType>,
+    pub has_dynamic_arg: bool,
+}
+
+// /Props
+
+// Content
+
+#[derive(Debug, Clone)]
+pub struct Text {
+    pub parent_id: u32,
+
+    pub start: u32,
+    pub end: u32,
+
+    /// Whether this text span contains an HTML entity (e.g. `&amp;`) that needs decoding.
+    pub has_entity: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct Interpolation {
+    pub parent_id: u32,
+
+    // start contains {{
+    pub start: u32,
+    // end contains }}
+    pub end: u32,
+
+    pub content: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct Comment {
+    pub parent_id: u32,
+
+    // start contains <!--
+    pub start: u32,
+    // end contains -->
+    pub end: u32,
+
+    pub content: Span,
+}
+
+// /Content
+
+// OXC Parsed
+
+#[derive(Debug)]
+pub struct OxcScript<'alloc> {
+    pub start: u32,
+    pub end: u32,
+
+    pub tag_open_start: u32,
+    pub tag_open_end: u32,
+
+    pub tag_close_start: u32,
+    pub tag_close_end: u32,
+
+    pub content_start: u32,
+    pub content_end: u32,
+
+    pub program: oxc_ast::ast::Program<'alloc>,
+    pub errors: Vec<oxc_diagnostics::OxcDiagnostic>,
+
+    pub result: ScriptParseResult<'alloc>,
+
+    pub setup: Option<Span>,
+
+    // lang attribute
+    pub lang: Option<ScriptLanguage>,
+    // generic attribute
+    pub generic: Option<GenericParseResult<'alloc>>,
+    // attrs attributes
+    pub attrs: Option<Span>,
+    // all attributes
+    pub attributes: Vec<Prop>,
+}
 
 #[derive(Debug)]
 pub struct OxcProp<'alloc> {
     /// The ID of the element this prop belongs to
     pub element_id: u32,
-    /// The ID of this element's parent (NO_PARENT for root elements)
-    pub parent_id: u32,
+    // /// The ID of this element's parent (NO_PARENT for root elements)
+    // pub parent_id: u32,
 
     // start of the prop
     pub start: u32,
+    pub name_end: u32,
 
     pub arg: Option<OxcPropProcessed<'alloc>>,
     pub exp: Option<OxcPropProcessed<'alloc>>,
     // // note modifiers are just spans, no expressions
     pub modifiers: Option<Vec<Span>>,
 
-    pub event: SyntaxProp,
+    pub event: Prop,
 }
 
 #[derive(Debug)]
@@ -342,59 +457,6 @@ pub struct OxcPropProcessed<'alloc> {
     pub bindings: Option<BindingExtractionResult<'alloc>>,
 }
 
-impl<'alloc> SyntaxNode for OxcProp<'alloc> {
-    // offset of the prop name start
-    fn get_id(&self) -> u32 {
-        self.start
-    }
-}
-
-#[derive(Debug)]
-pub struct OxcScriptContent<'alloc> {
-    pub element_id: u32,
-    // always root
-    pub parent_id: u32,
-
-    pub tag_open_start: u32,
-    pub tag_open_end: u32,
-
-    pub tag_close_start: u32,
-    pub tag_close_end: u32,
-
-    /// Start position of the script content (after <script>)
-    pub content_start: u32,
-    /// End position of the script content (before </script>)
-    pub content_end: u32,
-
-    pub program: oxc_ast::ast::Program<'alloc>,
-    pub errors: Vec<oxc_diagnostics::OxcDiagnostic>,
-
-    pub setup: Option<Span>,
-
-    // lang attribute
-    pub lang: Option<ScriptLanguage>,
-    // generic attribute
-    pub generic: Option<GenericParseResult<'alloc>>,
-    // attrs attributes
-    pub attrs: Option<Span>,
-    // all attributes
-    pub attributes: Vec<SyntaxProp>,
-}
-impl<'alloc> SyntaxNode for OxcScriptContent<'alloc> {
-    // offset of the prop name start
-    fn get_id(&self) -> u32 {
-        self.content_start
-    }
-}
-
-// #[derive(Debug)]
-// pub struct OxcScriptAttribute {
-//     pub start: u32,
-//     pub end: u32,
-//     pub name_end: u32,
-//     pub value_start: Option<u32>,
-// }
-
 #[derive(Debug)]
 pub struct OxcInterpolation<'a> {
     pub parent_id: u32,
@@ -402,409 +464,471 @@ pub struct OxcInterpolation<'a> {
     pub start: u32,
     pub end: u32,
 
-    pub expression: Option<oxc_ast::ast::Expression<'a>>,
-    pub errors: Option<Vec<oxc_diagnostics::OxcDiagnostic>>,
-
-    pub bindings: Option<BindingExtractionResult<'a>>,
-
-    pub event: SyntaxInterpolation,
-}
-impl<'a> SyntaxNode for OxcInterpolation<'a> {
-    // offset of the interpolation start
-    fn get_id(&self) -> u32 {
-        self.start
-    }
-}
-
-#[derive(Debug)]
-pub struct OxcVForProp<'a> {
-    /// The ID of the element this prop belongs to
-    pub element_id: u32,
-    /// The ID of this element's parent (NO_PARENT for root elements)
-    pub parent_id: u32,
-
-    pub start: u32,
-
-    /// The parsed v-for expression with extracted bindings
-    pub parsed: VForWithBindings<'a>,
-
-    pub event: SyntaxProp,
-}
-
-impl<'a> OxcVForProp<'a> {
-    /// Returns the left side of the v-for expression (iteration variable/pattern)
-    pub fn left(&self) -> Option<&oxc_ast::ast::Expression<'a>> {
-        self.parsed.left()
-    }
-
-    /// Returns the right side of the v-for expression (the iterable)
-    pub fn right(&self) -> Option<&oxc_ast::ast::Expression<'a>> {
-        self.parsed.right()
-    }
-
-    /// Returns whether the expression uses 'of' instead of 'in'
-    pub fn is_of(&self) -> bool {
-        self.parsed.is_of()
-    }
-
-    /// Returns true if there are any parse errors
-    pub fn has_errors(&self) -> bool {
-        self.parsed.has_errors()
-    }
-
-    /// Returns the local binding spans declared by the v-for (iteration variables).
-    /// Use `span.slice(source)` to get the string value.
-    pub fn locals(&self) -> &[Span] {
-        &self.parsed.locals
-    }
-
-    /// Returns the external reference spans used in the v-for expression.
-    /// Use `span.slice(source)` to get the string value.
-    pub fn references(&self) -> &[Span] {
-        &self.parsed.references
-    }
-}
-
-impl<'a> SyntaxNode for OxcVForProp<'a> {
-    // offset of the interpolation start
-    fn get_id(&self) -> u32 {
-        self.start
-    }
-}
-
-#[derive(Debug)]
-pub struct OxcVSlotProp<'a> {
-    /// The ID of the element this prop belongs to
-    pub element_id: u32,
-    /// The ID of this element's parent (NO_PARENT for root elements)
-    pub parent_id: u32,
-
-    pub start: u32,
-
-    /// The parsed v-slot expression with extracted bindings
-    pub parsed: VSlotWithBindings<'a>,
-
-    pub event: SyntaxProp,
-}
-
-impl<'a> OxcVSlotProp<'a> {
-    /// Returns the parsed formal parameters from the slot expression
-    pub fn params(&self) -> Option<&oxc_ast::ast::FormalParameters<'a>> {
-        self.parsed.params()
-    }
-
-    /// Returns true if there are any parse errors
-    pub fn has_errors(&self) -> bool {
-        self.parsed.has_errors()
-    }
-
-    /// Returns true if parsing was successful
-    pub fn is_ok(&self) -> bool {
-        self.parsed.is_ok()
-    }
-
-    /// Returns the local binding spans declared by the slot parameters.
-    /// Use `span.slice(source)` to get the string value.
-    pub fn locals(&self) -> &[Span] {
-        &self.parsed.locals
-    }
-
-    /// Returns the external reference spans used in the slot expression.
-    /// Use `span.slice(source)` to get the string value.
-    pub fn references(&self) -> &[Span] {
-        &self.parsed.references
-    }
-}
-
-impl<'a> SyntaxNode for OxcVSlotProp<'a> {
-    // offset of the interpolation start
-    fn get_id(&self) -> u32 {
-        self.start
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OxcVConditionType {
-    If = 0,
-    ElseIf = 1,
-    Else = 2,
-}
-
-#[derive(Debug)]
-pub struct OxcVConditional<'a> {
-    /// The ID of the element this prop belongs to
-    pub element_id: u32,
-    /// The ID of this element's parent (NO_PARENT for root elements)
-    pub parent_id: u32,
-
-    pub start: u32,
-    pub end: u32,
+    pub content: Span,
 
     pub expression: Option<oxc_ast::ast::Expression<'a>>,
     pub errors: Option<Vec<oxc_diagnostics::OxcDiagnostic>>,
 
     pub bindings: Option<BindingExtractionResult<'a>>,
 
-    pub condition_type: OxcVConditionType,
-
-    pub event: SyntaxProp,
-}
-impl<'a> SyntaxNode for OxcVConditional<'a> {
-    // offset of the interpolation start
-    fn get_id(&self) -> u32 {
-        self.start
-    }
+    pub event: Interpolation,
 }
 
-// #[derive(Debug)]
-// pub enum OxcParsedSyntax<'alloc> {
-//     Prop(OxcProp<'alloc>),
-//     ScriptContent(OxcScriptContent<'alloc>),
-//     Interpolation(OxcInterpolation<'alloc>),
-// }
-
-// /oxc parsed nodes
-
-// Analysis events
-
-#[derive(Debug, Clone)]
-pub enum AnalysisScopeType {
-    /// Conditional scope (v-if/else-if/else) - continual only
-    Conditional,
-    /// Loop scope (v-for) - can provide bindings
-    Loop,
-    /// Slot scope (v-slot) - can provide bindings
-    Slot,
-    /// Directive expression - no provided bindings, but might need type narrowing
-    DirectiveExp,
-    /// Directive argument - no provided bindings, but might need type narrowing
-    DirectiveArg,
-    /// Template interpolation
-    Interpolation,
-}
-
-#[derive(Debug, Clone)]
-pub struct AnalysisProvidedBinding {
-    pub scope_id: u32,
+#[derive(Debug)]
+pub struct OxcVFor<'alloc> {
     pub element_id: u32,
-    pub spans: Vec<Span>,
-}
 
-#[derive(Debug, Clone)]
-pub struct AnalysisScopeStart<'a> {
-    pub id: u32,
-    pub r#type: AnalysisScopeType,
-
-    pub parent_id: u32,
-    pub element_id: u32,
-    pub parent_scope_id: u32,
-
-    pub bindings: BindingExtractionResult<'a>,
-    pub parent_bindings: BindingExtractionResult<'a>,
-    pub provided_bindings: Vec<AnalysisProvidedBinding>,
-
-    pub condition: Option<AnalysisFullScopedCondition>,
-    pub parent_conditions: Vec<AnalysisFullScopedCondition>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct AnalysisScopeCondition {
-    pub condition_type: OxcVConditionType,
     pub start: u32,
     pub end: u32,
-    pub expression_start: u32,
-    pub expression_end: u32,
-}
 
-#[derive(Debug, Clone)]
-pub struct AnalysisFullScopedCondition {
-    pub value: Option<AnalysisScopeCondition>,
-    pub siblings: Vec<AnalysisScopeCondition>,
+    pub parsed: VForWithBindings<'alloc>,
+
+    pub event: Prop,
 }
 
 #[derive(Debug)]
-pub struct AnalysisScopeEventData<'a> {
+pub struct OxcVSlotElement<'alloc> {
+    pub element_id: u32,
+
     pub start: u32,
     pub end: u32,
-    pub r#type: AnalysisScopeType,
 
-    pub parent_id: u32,
+    pub parsed: VSlotWithBindings<'alloc>,
+
+    pub event: Prop,
+}
+
+#[derive(Debug)]
+pub struct OxcVSlotTemplate<'alloc> {
     pub element_id: u32,
-    pub parent_scope_id: u32,
 
-    pub bindings: BindingExtractionResult<'a>,
-    pub condition: Option<AnalysisFullScopedCondition>,
+    pub start: u32,
+    pub end: u32,
 
-    pub parent_bindings: Option<BindingExtractionResult<'a>>,
-    pub provided_bindings: Option<Vec<AnalysisProvidedBinding>>,
-    pub parent_conditions: Vec<AnalysisFullScopedCondition>,
-}
+    pub parsed: VSlotWithBindings<'alloc>,
 
-/// New analysis events
-///
-
-#[derive(Debug)]
-pub struct AnalysedOxcProp<'a> {
-    pub event: OxcProp<'a>,
-    pub arg: Option<AnalysisScopeEventData<'a>>,
-    pub exp: Option<AnalysisScopeEventData<'a>>,
+    pub event: Prop,
 }
 
 #[derive(Debug)]
-pub struct AnalysedOxcInterpolation<'a> {
-    pub event: OxcInterpolation<'a>,
-    pub interpolation: Option<AnalysisScopeEventData<'a>>,
+pub struct OxcIfCondition<'alloc> {
+    pub element_id: u32,
+
+    pub start: u32,
+    pub end: u32,
+
+    pub expression: Option<oxc_ast::ast::Expression<'alloc>>,
+    pub errors: Option<Vec<oxc_diagnostics::OxcDiagnostic>>,
+
+    pub bindings: Option<BindingExtractionResult<'alloc>>,
+
+    pub event: Prop,
 }
 
 #[derive(Debug)]
-pub struct AnalysedStartScopeVConditional<'a> {
-    pub event: OxcVConditional<'a>,
-    pub scope: AnalysisScopeStart<'a>,
+pub struct OxcElseIfCondition<'alloc> {
+    pub element_id: u32,
+    pub start: u32,
+    pub end: u32,
+
+    pub expression: Option<oxc_ast::ast::Expression<'alloc>>,
+    pub errors: Option<Vec<oxc_diagnostics::OxcDiagnostic>>,
+
+    pub bindings: Option<BindingExtractionResult<'alloc>>,
+
+    pub event: Prop,
 }
 
 #[derive(Debug)]
-pub struct AnalysedCloseScopes {
-    pub event: SyntaxCloseTag,
-    pub closed_scope_ids: Vec<u32>,
+pub struct OxcElseCondition {
+    pub element_id: u32,
+    pub start: u32,
+    pub end: u32,
+    pub event: Prop,
+}
+
+// /OXC Parsed
+
+// OXC-Compiled Elements (emitted by oxc_parser after element_compiler)
+
+/// OXC-parsed element start — props are parsed, scopes extracted.
+/// Replaces `Event::ElementStart` after oxc_parser runs.
+#[derive(Debug)]
+pub struct OxcCompiledElementStart<'alloc> {
+    /// Parsed props (non-structural directives).
+    pub props: Vec<OxcProp<'alloc>>,
+    /// Structural directives, ordered by priority: v-if > v-for > v-slot.
+    pub scopes: Vec<ElementScope<'alloc>>,
+    /// Owns the CompiledElementStart this replaces.
+    pub event: CompiledElementStart,
+
+    /// Local bindings provided by structural directives (v-for, v-slot) on this element.
+    /// Includes inherited bindings from parent scopes plus locals from this element's directives.
+    pub provided_locals: Vec<&'alloc str>,
+}
+
+/// OXC-parsed element closed — wraps the original for symmetry and future extension.
+#[derive(Debug)]
+pub struct OxcCompiledElementClosed {
+    pub event: CompiledElementClosed,
+}
+
+/// Structural directive extracted from element props during oxc_parser processing.
+/// Ordered by Vue priority: v-if/else-if/else > v-for > v-slot.
+#[derive(Debug)]
+pub enum ElementScope<'alloc> {
+    If(OxcIfCondition<'alloc>),
+    ElseIf(OxcElseIfCondition<'alloc>),
+    Else(OxcElseCondition),
+    For(OxcVFor<'alloc>),
+    SlotElement(OxcVSlotElement<'alloc>),
+    SlotTemplate(OxcVSlotTemplate<'alloc>),
+    Once(Prop),
+}
+
+// /OXC-Compiled Elements
+
+// Compiled Elements
+
+#[derive(Debug)]
+pub struct CompiledRootScriptStart {
+    pub start: u32,
+    pub name_end: u32,
+
+    pub tag_open: Span,
+
+    pub setup: Option<Span>,
+
+    // lang attribute
+    pub lang: Option<ScriptLanguage>,
+    // generic attribute
+    pub generic: Option<Span>,
+    // attrs attributes
+    pub attrs: Option<Span>,
+    // all attributes
+    pub attributes: Vec<Prop>,
+
+    pub tag_open_event: RootNodeOpenTagStart,
+    pub tag_open_end_event: RootNodeOpenTagEnd,
+}
+#[derive(Debug)]
+pub struct CompiledRootScriptEnd {
+    pub start: u32,
+    pub name_end: u32,
+    pub end: u32,
+
+    // None if self-closing tag
+    pub tag_close: Option<Span>,
+
+    // None is self-closing tag, otherwise content is the full content between open and close tags
+    pub content: Option<Span>,
+
+    pub tag_close_event: Option<RootNodeCloseTag>,
 }
 
 #[derive(Debug)]
-pub struct AnalysedVFor<'a> {
-    pub event: OxcVForProp<'a>,
-    pub scope: AnalysisScopeStart<'a>,
-    pub references: Option<AnalysisScopeEventData<'a>>,
+pub struct CompiledRootTemplateStart {
+    pub start: u32,
+    pub name_end: u32,
+
+    pub tag_open: Span,
+
+    // vapor attribute
+    pub vapor: Option<Span>,
+    // lang attribute
+    pub lang: Option<Span>,
+    // all attributes
+    pub attributes: Vec<Prop>,
+
+    pub tag_open_event: RootNodeOpenTagStart,
+    pub tag_open_end_event: RootNodeOpenTagEnd,
 }
 
 #[derive(Debug)]
-pub struct AnalysedVSlot<'a> {
-    pub event: OxcVSlotProp<'a>,
-    pub scope: AnalysisScopeStart<'a>,
-    pub references: Option<AnalysisScopeEventData<'a>>,
+pub struct CompiledRootTemplateEnd {
+    pub start: u32,
+    pub name_end: u32,
+    pub end: u32,
+
+    // None if self-closing tag
+    pub tag_close: Option<Span>,
+
+    // None is self-closing tag, otherwise content is the full content between open and close tags
+    pub content: Option<Span>,
+
+    pub tag_close_event: Option<RootNodeCloseTag>,
 }
 
 #[derive(Debug)]
-pub struct AnalysedScriptInfo<'a> {
-    pub event: OxcScriptContent<'a>,
-    pub script_info: AnalysisScriptInfo<'a>,
+pub struct CompiledRootStyleStart {
+    pub start: u32,
+    pub name_end: u32,
+
+    pub tag_open: Span,
+
+    // lang attribute
+    pub lang: Option<StyleLang>,
+    // scoped attribute
+    pub scoped: bool,
+    // module attribute
+    pub module: Option<Span>,
+    // all attributes
+    pub attributes: Vec<Prop>,
+
+    pub tag_open_event: RootNodeOpenTagStart,
+    pub tag_open_end_event: RootNodeOpenTagEnd,
+}
+#[derive(Debug)]
+pub struct CompiledRootStyleEnd {
+    pub start: u32,
+    pub name_end: u32,
+    pub end: u32,
+
+    // None if self-closing tag
+    pub tag_close: Option<Span>,
+
+    // None is self-closing tag, otherwise content is the full content between open and close tags
+    pub content: Option<Span>,
+
+    pub tag_close_event: Option<RootNodeCloseTag>,
 }
 
 #[derive(Debug)]
-pub struct AnalysisScriptInfo<'a> {
-    pub event: OxcScriptContent<'a>,
-    pub parsed: ScriptParseResult<'a>,
+pub struct CompiledRootUnknownStart {
+    pub start: u32,
+    pub name_end: u32,
+
+    pub tag_open: Span,
+
+    pub content: Option<Span>,
+
+    // all attributes
+    pub attributes: Vec<Prop>,
+
+    pub tag_open_event: RootNodeOpenTagStart,
+    pub tag_open_end_event: RootNodeOpenTagEnd,
+}
+#[derive(Debug)]
+pub struct CompiledRootUnknownEnd {
+    pub start: u32,
+    pub name_end: u32,
+    pub end: u32,
+
+    // None if self-closing tag
+    pub tag_close: Option<Span>,
+
+    // None is self-closing tag, otherwise content is the full content between open and close tags
+    pub content: Option<Span>,
+
+    pub tag_close_event: Option<RootNodeCloseTag>,
 }
 
-// /Analysis events
+#[derive(Debug)]
+pub struct CompiledElementStart {
+    pub element_id: u32,
+    pub parent_id: u32,
 
-// CSS Style types
+    pub event_open_tag: ElementOpenTagStart,
+    pub event_open_tag_end: ElementOpenTagEnd,
+
+    pub props: Vec<Prop>,
+}
+#[derive(Debug)]
+pub struct CompiledElementClosed {
+    pub element_id: u32,
+    pub parent_id: u32,
+
+    pub event_close_tag: Option<ElementCloseTag>,
+}
+
+// Compiled Elements
+
+// CSS styles
 
 /// Language for style preprocessing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StyleLang {
-    Css,
+    Css = 0,
     Scss,
     Sass,
     Less,
     Stylus,
+    Unknown,
 }
 
-/// Parsed v-bind() expression in CSS
-/// Uses Span to reference source bytes - no allocations
+/// Parsed v-bind() expression in styles, e.g. `color: v-bind(colorVar)`
 #[derive(Debug, Clone)]
-pub struct CssVBindExpression {
-    /// Span for generated CSS variable name (e.g., "--a4f2eed6-color")
-    pub var_name_start: u32,
-    pub var_name_end: u32,
-    /// Span of original expression in source (e.g., "color" or "theme.color")
+pub struct StyleVBind {
+    // start of v-bind(
+    pub start: u32,
+    // end of )
+    pub end: u32,
+
+    pub name_end: u32,
+
+    // content inside v-bind(...)
+    pub content: Span,
+    // todo add parsed results maybe??
+}
+
+// CSS parsed types (emitted by css_parser plugin)
+
+/// Kind of Vue special pseudo-selector in scoped CSS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CssParsedSpecialPseudoKind {
+    /// `:deep(.inner)` — scopes the parent, descends into inner.
+    Deep,
+    /// `:global(.class)` — removes scoping entirely.
+    Global,
+    /// `:slotted(.slot)` — scopes with slot variant.
+    Slotted,
+}
+
+/// A Vue special pseudo-selector found in a CSS selector.
+#[derive(Debug, Clone)]
+pub struct CssParsedSpecialPseudo {
+    pub kind: CssParsedSpecialPseudoKind,
+    /// Span of the full pseudo (e.g., `:deep(.inner)`) in SFC source.
+    pub span: Span,
+    /// Span of the inner content (e.g., `.inner`). None for bare `:deep`.
+    pub inner: Option<Span>,
+}
+
+/// A parsed CSS selector with its span and structural info.
+#[derive(Debug, Clone)]
+pub struct CssParsedSelector {
+    /// Full span of this selector text in SFC source.
+    pub span: Span,
+    /// Parsed special pseudo-selectors (:deep, :global, :slotted) with their spans.
+    pub specials: Vec<CssParsedSpecialPseudo>,
+}
+
+/// A parsed v-bind() function call in CSS.
+#[derive(Debug, Clone)]
+pub struct CssParsedVBind {
+    /// Span of full `v-bind(...)` in SFC source.
+    pub full_span: Span,
+    /// Span of the expression inside v-bind() in SFC source.
     pub expression: Span,
-    /// Start position in CSS content
-    pub css_start: u32,
-    /// End position in CSS content
-    pub css_end: u32,
+    /// Whether the expression was quoted (e.g., `v-bind('foo.bar')`).
+    pub quoted: bool,
 }
 
-/// CSS module class mapping (original name → hashed name)
+/// A class selector found in CSS (for CSS modules).
 #[derive(Debug, Clone)]
-pub struct CssModuleClass {
-    /// Original class name span in source
-    pub original: Span,
-    /// Hashed class name (stored in output buffer)
-    pub hashed_start: u32,
-    pub hashed_end: u32,
+pub struct CssParsedClass {
+    /// Span of the class name (after the `.`) in SFC source.
+    pub name_span: Span,
 }
 
-/// Parsed CSS style content (output of css_parser plugin)
-/// All content referenced via Spans - use span.slice(source) to get &str
+/// A parsed CSS style rule with selectors and declarations metadata.
+#[derive(Debug, Clone)]
+pub struct CssParsedRule {
+    /// Span of the full selector list (before `{`) in SFC source.
+    pub selector_span: Span,
+    /// Individual selectors (split by `,`).
+    pub selectors: Vec<CssParsedSelector>,
+    /// v-bind() calls within this rule's declarations.
+    pub v_binds: Vec<CssParsedVBind>,
+    /// Class selectors found in this rule's selectors (for CSS modules).
+    pub classes: Vec<CssParsedClass>,
+}
+
+/// Result of CSS parsing for a single `<style>` block.
+/// Emitted as `Event::CssParsedStyle` by the css_parser plugin.
 #[derive(Debug)]
-pub struct CssStyleContent {
-    pub element_id: u32,
-    pub parent_id: u32,
-
-    pub tag_open_start: u32,
-    pub tag_open_end: u32,
-    pub tag_close_start: u32,
-    pub tag_close_end: u32,
-
-    pub content_start: u32,
-    pub content_end: u32,
-
-    // Attributes
-    pub scoped: bool,
-    /// None = not module, Some(span) = module name span (default is "$style")
-    pub module: Option<Span>,
+pub struct CssParsedStyleBlock {
+    /// Style language (css, scss, sass, less, stylus).
     pub lang: Option<StyleLang>,
-    pub attributes: Vec<SyntaxProp>,
-
-    // Parsed CSS transformation info
-    pub v_bind_expressions: Vec<CssVBindExpression>,
-    pub css_module_classes: Vec<CssModuleClass>,
+    /// Whether this block has the `scoped` attribute.
+    pub scoped: bool,
+    /// Module attribute span (None if not a module block).
+    pub module: Option<Span>,
+    /// Content span in source (CSS content between `<style>` tags).
+    pub content: Option<Span>,
+    /// Parsed rules with selectors, v-binds, classes.
+    pub rules: Vec<CssParsedRule>,
+    /// All v-bind expressions across all rules (flattened for convenience).
+    pub v_binds: Vec<CssParsedVBind>,
+    /// All class selectors across all rules (flattened for convenience).
+    pub classes: Vec<CssParsedClass>,
+    /// Original compiled start event (preserves source positions and attributes).
+    pub compiled_start: CompiledRootStyleStart,
+    /// Original compiled end event (preserves content span and close tag positions).
+    pub compiled_end: CompiledRootStyleEnd,
 }
 
-// /CSS Style types
+// /CSS parsed types
 
-// Event
-
-#[derive(Debug)]
-pub enum SyntaxEvent<'a> {
-    Prop(SyntaxProp),
-    Text(SyntaxText),
-    Interpolation(SyntaxInterpolation),
-    Comment(SyntaxComment),
-
-    // Element(SyntaxElement),
-    // ElementContentEnd(SyntaxElementContentEnd),
-    OpenTagStart(SyntaxOpenTagStart),
-    OpenTagEnd(SyntaxOpenTagEnd),
-
-    CloseTag(SyntaxCloseTag),
-
-    Error(SyntaxError),
-    Warning(SyntaxWarning),
-
-    // overrides SyntaxProp
-    OxcProp(OxcProp<'a>),
-    // overrides v-for
-    OxcVFor(OxcVForProp<'a>),
-    // overrides v-slot
-    OxcVSlot(OxcVSlotProp<'a>),
-    // overrides v-if / v-else-if / v-else
-    OxcVConditional(OxcVConditional<'a>),
-
-    // Overrides CloseTag in SyntaxElement
-    OxcScriptContent(OxcScriptContent<'a>),
-    // overrides SyntaxInterpolation
-    OxcInterpolation(OxcInterpolation<'a>),
-    // CSS style content (from css_parser plugin)
-    CssStyleContent(CssStyleContent),
-
-    // analysis events
-    AnalysedScript(AnalysisScriptInfo<'a>),
-    AnalysedProp(AnalysedOxcProp<'a>),
-    AnalysedInterpolation(AnalysedOxcInterpolation<'a>),
-    AnalysedCondition(AnalysedStartScopeVConditional<'a>),
-    AnalysedCloseScopes(AnalysedCloseScopes),
-    AnalysedVFor(AnalysedVFor<'a>),
-    AnalysedVSlot(AnalysedVSlot<'a>),
+/// A single CSS module class mapping: original class name → hashed class name.
+#[derive(Debug, Clone)]
+pub struct CssModuleClassMapping {
+    /// Original class name (e.g., "btn"). Owned, from process_style result.
+    pub original: String,
+    /// Hashed class name (e.g., "btn_a4f2eed6_0"). Owned, computed.
+    pub hashed: String,
 }
 
-// /Event
+/// CSS module metadata for a single `<style module>` block.
+#[derive(Debug, Clone)]
+pub struct CssModuleInfo {
+    /// Span of custom module name in source. None for default "$style".
+    pub custom_name: Option<Span>,
+    /// Class name mappings (original → hashed).
+    pub classes: Vec<CssModuleClassMapping>,
+}
+
+// /Bindings (BindingMetadata removed — bindings now live in ScriptParseResult)
+
+pub enum Event<'alloc> {
+    // Raw tokenizer events (emitted by Syntax)
+    RootOpenStart(RootNodeOpenTagStart),
+    RootOpenTagEnd(RootNodeOpenTagEnd),
+    RootCloseTag(RootNodeCloseTag),
+    Lang(ScriptLang),
+
+    // Element
+    OpenTag(ElementOpenTagStart),
+    OpenTagEnd(ElementOpenTagEnd),
+    CloseTag(ElementCloseTag),
+
+    // Content
+    Prop(Prop),
+    Interpolation(Interpolation),
+    Comment(Comment),
+    Text(Text),
+
+    // Compiled root open/close (emitted by element_compiler)
+    CompiledScriptStart(CompiledRootScriptStart),
+    CompiledScriptEnd(CompiledRootScriptEnd),
+    CompiledTemplateStart(CompiledRootTemplateStart),
+    CompiledTemplateEnd(CompiledRootTemplateEnd),
+    CompiledStyleStart(CompiledRootStyleStart),
+    CompiledStyleEnd(CompiledRootStyleEnd),
+    CompiledUnknownStart(CompiledRootUnknownStart),
+    CompiledUnknownEnd(CompiledRootUnknownEnd),
+
+    // Compiled elements (emitted by element_compiler)
+    ElementStart(Box<CompiledElementStart>),
+    ElementClosed(CompiledElementClosed),
+
+    // OXC-parsed events (emitted by oxc_parser)
+    OxcScript(Box<OxcScript<'alloc>>),
+    OxcInterpolation(Box<OxcInterpolation<'alloc>>),
+
+    // OXC-compiled elements (emitted by oxc_parser after element_compiler)
+    OxcCompiledElementStart(Box<OxcCompiledElementStart<'alloc>>),
+    OxcCompiledElementClosed(OxcCompiledElementClosed),
+
+    // // Scopes (raw, emitted by Syntax)
+    // ScopeIf(ElementScopeConditionIf),
+    // ScopeElseIf(ElementScopeConditionElseIf),
+    // ScopeElse(ElementScopeConditionElse),
+    // ScopeFor(ElementScopeFor),
+    // ScopeSlotElement(ElementScopeSlotElement),
+    // ScopeSlotTemplate(ElementScopeSlotTemplate),
+
+    // CSS parsed style (emitted by css_parser plugin)
+    CssParsedStyle(Box<CssParsedStyleBlock>),
+    // (ScriptBindings removed — bindings now live in OxcScript.result.bindings)
+}

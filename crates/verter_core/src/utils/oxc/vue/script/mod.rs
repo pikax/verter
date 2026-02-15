@@ -17,6 +17,7 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+pub mod bindings;
 pub mod macros;
 pub mod options;
 pub mod resolve_type;
@@ -92,7 +93,9 @@ use shared::{try_process_export, try_process_import};
 ///
 /// * `program` - The OXC-parsed program AST
 /// * `mode` - The script mode (Options or Setup)
-/// * `base_offset` - The byte offset where the script content starts in the SFC file
+/// * `content_offset` - The byte offset for unadjusted TypeScript type annotation spans.
+///   In the `syntax` pipeline this is `content_start` (where script content begins in the SFC).
+///   In direct parsing (tests), this is 0 since spans are already local.
 /// * `source` - The source text of the script content
 ///
 /// # Returns
@@ -101,10 +104,10 @@ use shared::{try_process_export, try_process_import};
 pub fn parse_script<'a>(
     program: &Program<'a>,
     mode: ScriptMode,
-    base_offset: u32,
+    content_offset: u32,
     source: &'a str,
 ) -> ScriptParseResult<'a> {
-    let ctx = ScriptParseContext::new(base_offset, source.as_bytes());
+    let ctx = ScriptParseContext::new(content_offset, source.as_bytes());
     let mut items = Vec::new();
     let mut errors = Vec::new();
     let mut is_async = false;
@@ -122,8 +125,16 @@ pub fn parse_script<'a>(
     // Second pass: mode-specific processing
     match mode {
         ScriptMode::Setup => {
+            let type_ctx = build_type_context(program, source.as_bytes(), content_offset);
             let mut setup_ctx = SetupContext::new();
-            process_setup_statements(&program.body, &ctx, &mut setup_ctx, &mut items, &mut errors);
+            process_setup_statements(
+                &program.body,
+                &ctx,
+                &type_ctx,
+                &mut setup_ctx,
+                &mut items,
+                &mut errors,
+            );
             is_async = setup_ctx.is_async;
         }
         ScriptMode::Options => {
@@ -139,10 +150,17 @@ pub fn parse_script<'a>(
         }
     }
 
+    // Extract binding metadata (only for script setup)
+    let bindings = match mode {
+        ScriptMode::Setup => bindings::extract_bindings(program, &ctx),
+        ScriptMode::Options => Vec::new(),
+    };
+
     ScriptParseResult {
         is_async,
         items,
         errors,
+        bindings,
     }
 }
 
@@ -433,7 +451,7 @@ const handler = async () => {
         let source_type = SourceType::tsx();
         let ret = Parser::new(&allocator, source, source_type).parse();
 
-        let result = parse_script(&ret.program, ScriptMode::Setup, 50, source);
+        let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
 
         let async_items: Vec<_> = result
             .items
@@ -448,11 +466,8 @@ const handler = async () => {
             .collect();
 
         assert_eq!(async_items.len(), 1);
-        // Span should be adjusted by base_offset (50)
-        assert!(
-            async_items[0].span.start >= 50,
-            "Span should be adjusted by base_offset"
-        );
+        // Spans are in local coordinates (OXC output); adjust_program_spans handles SFC offset in production
+        assert_eq!(async_items[0].span.start, 0);
         assert!(async_items[0].span.end > async_items[0].span.start);
     }
 
@@ -618,16 +633,16 @@ export default defineComponent({
     }
 
     #[test]
-    fn test_offset_adjustment() {
+    fn test_statement_spans_are_local() {
+        // Statement/expression spans come directly from OXC (in production, they're
+        // pre-adjusted by adjust_program_spans). parse_script does NOT adjust them.
         let source = r#"const x = 1;"#;
         let allocator = Allocator::default();
         let source_type = SourceType::tsx();
         let ret = Parser::new(&allocator, source, source_type).parse();
 
-        // Simulate script starting at offset 100 in the SFC file
-        let result = parse_script(&ret.program, ScriptMode::Setup, 100, source);
+        let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
 
-        // Check that spans are adjusted
         let decls: Vec<_> = result
             .items
             .iter()
@@ -641,8 +656,9 @@ export default defineComponent({
             .collect();
 
         assert_eq!(decls.len(), 1);
-        // The span should start at 100 (base_offset) + 6 (position of 'x')
-        assert!(decls[0].span.start >= 100);
+        // 'x' is at position 6 in the source
+        assert_eq!(decls[0].span.start, 6);
+        assert_eq!(decls[0].span.end, 7);
     }
 
     #[test]

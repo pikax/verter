@@ -11,16 +11,25 @@ const props = defineProps<{
 
 const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "preview", label: "Preview" },
+  { mode: "kai", label: "Kai" },
+  { mode: "tsx", label: "TSX" },
   { mode: "ts", label: "TS" },
   { mode: "js", label: "JS" },
   { mode: "css", label: "CSS" },
 ];
 
-/** Show TS tab only when showTS option is enabled and file contains TypeScript */
+/** Show TS/TSX tabs conditionally based on toggle state */
 const tabs = computed(() => {
   const file = props.store.activeFile;
   const showTSTab = props.store.showTS && (file?.isTS ?? false);
-  return allTabs.filter((tab) => tab.mode !== "ts" || showTSTab);
+  const showTSXTab = props.store.showTSX;
+  const isVue = file?.filename.endsWith(".vue") ?? false;
+  return allTabs.filter((tab) => {
+    if (tab.mode === "ts") return showTSTab;
+    if (tab.mode === "tsx") return showTSXTab;
+    if (tab.mode === "kai") return isVue;
+    return true;
+  });
 });
 
 function openSourceMapVisualization() {
@@ -46,12 +55,16 @@ function openSourceMapVisualization() {
 }
 
 function getTabTiming(mode: OutputMode): string | null {
-  const { verter, stripTypes } = props.store.compileTiming;
+  const { verter, stripTypes, tsx, kai } = props.store.compileTiming;
   switch (mode) {
     case "preview": {
       const total = (verter ?? 0) + (stripTypes ?? 0);
       return total > 0 ? `${total.toFixed(1)}ms` : null;
     }
+    case "kai":
+      return kai !== null ? `${kai.toFixed(1)}ms` : null;
+    case "tsx":
+      return tsx !== null ? `${tsx.toFixed(1)}ms` : null;
     case "ts":
       return verter !== null ? `${verter.toFixed(1)}ms` : null;
     case "js":

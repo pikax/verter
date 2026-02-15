@@ -19,7 +19,7 @@ graph LR
     end
 
     subgraph "Consumers"
-        E["@verter/vite-plugin"] --> A
+        E["@verter/unplugin"] --> A
         F["@verter/language-server"] --> A
     end
 ```

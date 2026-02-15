@@ -1,3 +1,5 @@
+use smallvec::SmallVec;
+
 use super::chunk::Chunk;
 use oxc_allocator::Allocator;
 
@@ -9,6 +11,12 @@ use oxc_allocator::Allocator;
 /// - Efficiently build the final output string only when needed
 /// - Use bump allocation for minimal memory overhead
 ///
+/// # Internal Architecture
+///
+/// The chunks Vec is the primary storage. For forward-progressing access patterns
+/// (the dominant case in template compilation), a cursor_hint accelerates lookups
+/// to amortized O(1).
+///
 /// # Example
 /// ```
 /// use verter_core::code_transform::CodeTransform;
@@ -17,12 +25,14 @@ use oxc_allocator::Allocator;
 /// let allocator = Allocator::default();
 /// let mut ct = CodeTransform::new("Hello World", &allocator);
 /// ct.overwrite(6, 11, "Rust");
-/// assert_eq!(ct.to_string(), "Hello Rust");
+/// assert_eq!(ct.build_string(), "Hello Rust");
 /// ```
 pub struct CodeTransform<'a> {
     /// The original source text (never modified)
     original: &'a str,
-    /// List of chunks representing the output content
+    /// List of chunks representing the output content.
+    /// Positioned chunks (Original and non-moved Edited with original_start)
+    /// maintain monotonically increasing source positions.
     chunks: Vec<Chunk<'a>>,
     /// Content to prepend before everything
     intro: &'a str,
@@ -30,6 +40,9 @@ pub struct CodeTransform<'a> {
     outro: &'a str,
     /// The bump allocator for string allocations
     allocator: &'a Allocator,
+    /// Cursor hint: last known chunk index for a given position.
+    /// Used to accelerate forward-progressing access patterns.
+    cursor_hint: usize,
 }
 
 impl<'a> CodeTransform<'a> {
@@ -37,12 +50,18 @@ impl<'a> CodeTransform<'a> {
     pub fn new(source: &'a str, allocator: &'a Allocator) -> Self {
         let len = source.len() as u32;
 
-        // Start with a single chunk referencing the entire original source
-        let chunks = if len > 0 {
-            vec![Chunk::from_source(0, len)]
+        // Pre-allocate chunks capacity based on source size.
+        // Empirically, kitchen-sink.vue (27370 bytes) produces ~2098 final chunks.
+        // Using /13 avoids a Vec reallocation for typical large files.
+        let estimated_chunks = if len > 0 {
+            (len as usize / 13).max(64)
         } else {
-            vec![]
+            0
         };
+        let mut chunks = Vec::with_capacity(estimated_chunks);
+        if len > 0 {
+            chunks.push(Chunk::from_source(0, len));
+        }
 
         Self {
             original: source,
@@ -50,6 +69,7 @@ impl<'a> CodeTransform<'a> {
             intro: "",
             outro: "",
             allocator,
+            cursor_hint: 0,
         }
     }
 
@@ -58,10 +78,15 @@ impl<'a> CodeTransform<'a> {
         self.original
     }
 
+    /// Allocate a string in the bump allocator, returning a reference with the
+    /// same lifetime as the CodeTransform. Useful for deferring insertions.
+    pub fn alloc_str(&self, s: &str) -> &'a str {
+        self.allocator.alloc_str(s)
+    }
+
     /// Prepend content to the very start
     pub fn prepend(&mut self, content: &str) -> &mut Self {
         if !content.is_empty() {
-            // Allocate new string that combines new content with existing intro
             let new_intro = self
                 .allocator
                 .alloc_str(&format!("{}{}", content, self.intro));
@@ -73,7 +98,6 @@ impl<'a> CodeTransform<'a> {
     /// Append content to the very end
     pub fn append(&mut self, content: &str) -> &mut Self {
         if !content.is_empty() {
-            // Allocate new string that combines existing outro with new content
             let new_outro = self
                 .allocator
                 .alloc_str(&format!("{}{}", self.outro, content));
@@ -84,125 +108,222 @@ impl<'a> CodeTransform<'a> {
 
     /// Prepend content before a specific position (inserts before the position).
     /// Multiple prepend_left calls at the same index stack in reverse order (last call first).
-    /// Example: prepend_left(5, "A"); prepend_left(5, "B"); => "BA" appears before position 5
     pub fn prepend_left(&mut self, index: u32, content: &str) -> &mut Self {
         if !content.is_empty() {
             let content_ref = self.allocator.alloc_str(content);
             let insert_idx = self.find_insert_position_for_prepend(index, false);
             self.chunks.insert(insert_idx, Chunk::inserted(content_ref));
+            if insert_idx <= self.cursor_hint {
+                self.cursor_hint += 1;
+            }
         }
         self
     }
 
     /// Append content before a specific position (inserts before the position).
     /// Multiple append_left calls at the same index stack in order (first call first).
-    /// Example: append_left(5, "A"); append_left(5, "B"); => "AB" appears before position 5
     pub fn append_left(&mut self, index: u32, content: &str) -> &mut Self {
         if !content.is_empty() {
             let content_ref = self.allocator.alloc_str(content);
             let insert_idx = self.find_insert_position_for_append(index, false);
             self.chunks.insert(insert_idx, Chunk::inserted(content_ref));
+            if insert_idx <= self.cursor_hint {
+                self.cursor_hint += 1;
+            }
         }
         self
     }
 
     /// Prepend content after a specific position (inserts after the position).
     /// Multiple prepend_right calls at the same index stack in reverse order (last call first).
-    /// Example: prepend_right(5, "A"); prepend_right(5, "B"); => "BA" appears after position 5
     pub fn prepend_right(&mut self, index: u32, content: &str) -> &mut Self {
         if !content.is_empty() {
             let content_ref = self.allocator.alloc_str(content);
             let insert_idx = self.find_insert_position_for_prepend(index, true);
             self.chunks.insert(insert_idx, Chunk::inserted(content_ref));
+            if insert_idx <= self.cursor_hint {
+                self.cursor_hint += 1;
+            }
         }
         self
     }
 
     /// Append content after a specific position (inserts after the position).
     /// Multiple append_right calls at the same index stack in order (first call first).
-    /// Example: append_right(5, "A"); append_right(5, "B"); => "AB" appears after position 5
     pub fn append_right(&mut self, index: u32, content: &str) -> &mut Self {
         if !content.is_empty() {
             let content_ref = self.allocator.alloc_str(content);
             let insert_idx = self.find_insert_position_for_append(index, true);
             self.chunks.insert(insert_idx, Chunk::inserted(content_ref));
+            if insert_idx <= self.cursor_hint {
+                self.cursor_hint += 1;
+            }
         }
         self
     }
 
-    /// Split chunks at the given index if needed, returns the index where the split occurred
+    /// Get the effective source position of a chunk, if it has one.
+    #[inline]
+    fn chunk_position(chunk: &Chunk) -> Option<u32> {
+        match chunk {
+            Chunk::Original { start, .. } => Some(*start),
+            Chunk::Edited {
+                original_start: Some(s),
+                was_moved: false,
+                ..
+            } => Some(*s),
+            _ => None,
+        }
+    }
+
+    /// Find a good starting index for searching at the given source position.
+    /// Uses the cursor hint to avoid scanning from the beginning when operations
+    /// progress forward through the document (the dominant pattern in template compilation).
+    ///
+    /// SAFETY INVARIANT: The returned index must be <= the index of any chunk whose
+    /// position is >= `index`. This means we may return an index that's slightly before
+    /// the target, but NEVER after it.
+    #[inline]
+    fn search_start_for(&self, index: u32) -> usize {
+        let hint = self.cursor_hint.min(self.chunks.len().saturating_sub(1));
+        if hint == 0 || self.chunks.is_empty() {
+            return 0;
+        }
+        // Check if the hint chunk's position is <= index (forward progress).
+        // Only use the hint if we can confirm it's before or at our target.
+        if let Some(pos) = Self::chunk_position(&self.chunks[hint]) {
+            if pos <= index {
+                return hint;
+            }
+        }
+        // Try the chunk before the hint (common after an insert bumped the cursor)
+        if hint > 0 {
+            if let Some(pos) = Self::chunk_position(&self.chunks[hint - 1]) {
+                if pos <= index {
+                    return hint - 1;
+                }
+            }
+        }
+        // Backward jump or unknown position — must search from beginning
+        // to guarantee we don't skip over affected chunks.
+        0
+    }
+
+    /// Split chunks at the given index if needed
     fn ensure_split_at(&mut self, index: u32) {
-        for i in 0..self.chunks.len() {
+        let start = self.search_start_for(index);
+        for i in start..self.chunks.len() {
             if let Chunk::Original { start, end } = self.chunks[i] {
                 if start < index && index < end {
-                    // Split this chunk into two
                     let first = Chunk::from_source(start, index);
                     let second = Chunk::from_source(index, end);
                     self.chunks[i] = first;
                     self.chunks.insert(i + 1, second);
+                    if i < self.cursor_hint {
+                        self.cursor_hint += 1;
+                    }
+                    return;
+                }
+                if start >= index {
                     return;
                 }
             }
         }
     }
 
-    /// Find position for prepend (inserts BEFORE existing insertions at same position)
+    /// Find position for prepend (inserts BEFORE existing insertions at same position).
+    /// Integrates split-at-index into the same scan to avoid double traversal.
     fn find_insert_position_for_prepend(&mut self, index: u32, after: bool) -> usize {
-        self.ensure_split_at(index);
+        let start = self.search_start_for(index);
 
-        for (i, chunk) in self.chunks.iter().enumerate() {
-            match chunk {
-                Chunk::Original { start, .. } => {
-                    if *start == index {
+        for i in start..self.chunks.len() {
+            match self.chunks[i] {
+                Chunk::Original { start: cs, end: ce } => {
+                    // Split needed: this chunk spans across `index`
+                    if cs < index && index < ce {
+                        self.chunks[i] = Chunk::from_source(cs, index);
+                        self.chunks.insert(i + 1, Chunk::from_source(index, ce));
+                        if i < self.cursor_hint {
+                            self.cursor_hint += 1;
+                        }
+                        // The split produced a chunk at i+1 starting at `index`
+                        self.cursor_hint = i + 1;
+                        return if after { i + 2 } else { i + 1 };
+                    }
+                    if cs == index {
+                        self.cursor_hint = i;
                         return if after { i + 1 } else { i };
                     }
-                    if *start > index {
+                    if cs > index {
+                        self.cursor_hint = i;
                         return i;
                     }
                 }
-                // Edited chunks with original positions should be treated like Original chunks
                 Chunk::Edited {
                     original_start: Some(s),
                     was_moved: false,
                     ..
                 } => {
-                    if *s == index {
+                    if s == index {
+                        self.cursor_hint = i;
                         return if after { i + 1 } else { i };
                     }
-                    if *s > index {
+                    if s > index {
+                        self.cursor_hint = i;
                         return i;
                     }
                 }
-                // Pure insertions and moved chunks - skip
-                Chunk::Edited { .. } => {}
+                _ => {}
             }
         }
 
         self.chunks.len()
     }
 
-    /// Find position for append (inserts AFTER existing insertions at same position)
+    /// Find position for append (inserts AFTER existing insertions at same position).
+    /// Integrates split-at-index into the same scan to avoid double traversal.
     fn find_insert_position_for_append(&mut self, index: u32, after: bool) -> usize {
-        self.ensure_split_at(index);
-
+        let search_start = self.search_start_for(index);
         let mut result = self.chunks.len();
 
-        for (i, chunk) in self.chunks.iter().enumerate() {
-            match chunk {
-                Chunk::Original { start, .. } => {
-                    if *start == index {
-                        // For append with after=false, we want to insert right before this Original chunk
-                        // but after any existing Edited chunks that precede it
+        for i in search_start..self.chunks.len() {
+            match self.chunks[i] {
+                Chunk::Original { start: cs, end: ce } => {
+                    // Split needed: this chunk spans across `index`
+                    if cs < index && index < ce {
+                        self.chunks[i] = Chunk::from_source(cs, index);
+                        self.chunks.insert(i + 1, Chunk::from_source(index, ce));
+                        if i < self.cursor_hint {
+                            self.cursor_hint += 1;
+                        }
+                        // After split, i+1 starts at `index`. For append, look past it.
+                        self.cursor_hint = i + 1;
+                        if !after {
+                            return i + 1;
+                        } else {
+                            // Skip past any pure insertions after the split point
+                            let mut r = i + 2;
+                            for j in (i + 2)..self.chunks.len() {
+                                match &self.chunks[j] {
+                                    Chunk::Edited {
+                                        original_start: None,
+                                        ..
+                                    } => {
+                                        r = j + 1;
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            return r;
+                        }
+                    }
+                    if cs == index {
+                        self.cursor_hint = i;
                         if !after {
                             result = i;
-                            // Continue scanning to skip past any Edited chunks without original_start
-                            // that should come before us
                             break;
                         } else {
-                            // after=true means we want to insert after this position
-                            // Skip past this chunk and any following Edited chunks
                             result = i + 1;
-                            // Continue to find the end of Edited chunks at this position
                             for j in (i + 1)..self.chunks.len() {
                                 match &self.chunks[j] {
                                     Chunk::Edited {
@@ -217,18 +338,18 @@ impl<'a> CodeTransform<'a> {
                             return result;
                         }
                     }
-                    if *start > index {
+                    if cs > index {
+                        self.cursor_hint = i;
                         return i;
                     }
                 }
-                // Edited chunks with original positions should be treated like Original chunks
-                // for position finding purposes (they occupy the same logical position)
                 Chunk::Edited {
                     original_start: Some(s),
                     was_moved: false,
                     ..
                 } => {
-                    if *s == index {
+                    if s == index {
+                        self.cursor_hint = i;
                         if !after {
                             result = i;
                             break;
@@ -248,18 +369,17 @@ impl<'a> CodeTransform<'a> {
                             return result;
                         }
                     }
-                    if *s > index {
+                    if s > index {
+                        self.cursor_hint = i;
                         return i;
                     }
                 }
-                // Pure insertions - append goes after these
                 Chunk::Edited {
                     original_start: None,
                     ..
                 } => {
                     result = i + 1;
                 }
-                // Moved chunks - skip them as they no longer occupy their original position
                 Chunk::Edited {
                     was_moved: true, ..
                 } => {}
@@ -269,133 +389,116 @@ impl<'a> CodeTransform<'a> {
         result
     }
 
-    /// Overwrite a range with new content
+    /// Overwrite a range with new content.
+    ///
+    /// Uses in-place splice instead of drain+rebuild.
     pub fn overwrite(&mut self, start: u32, end: u32, content: &str) -> &mut Self {
         if start >= end {
             return self;
         }
 
-        let content_ref = self.allocator.alloc_str(content);
-        let mut new_chunks = Vec::new();
+        // Avoid bump-allocating empty strings — use a static empty slice.
+        let content_ref = if content.is_empty() {
+            ""
+        } else {
+            self.allocator.alloc_str(content)
+        };
+
+        let search_start = self.search_start_for(start);
+        let mut first_affected: Option<usize> = None;
+        let mut last_affected: Option<usize> = None;
+        let mut replacement_chunks: SmallVec<[Chunk<'a>; 4]> = SmallVec::new();
         let mut handled = false;
 
-        for chunk in self.chunks.drain(..) {
+        for i in search_start..self.chunks.len() {
+            let chunk = self.chunks[i];
             match chunk {
                 Chunk::Original {
                     start: chunk_start,
                     end: chunk_end,
                 } => {
                     if chunk_end <= start {
-                        new_chunks.push(Chunk::Original {
-                            start: chunk_start,
-                            end: chunk_end,
-                        });
                         continue;
                     }
-
                     if chunk_start >= end {
                         if !handled {
-                            new_chunks.push(Chunk::overwritten(start, end, content_ref));
+                            replacement_chunks.push(Chunk::overwritten(start, end, content_ref));
                             handled = true;
                         }
-                        new_chunks.push(Chunk::Original {
-                            start: chunk_start,
-                            end: chunk_end,
-                        });
-                        continue;
+                        break;
                     }
+
+                    if first_affected.is_none() {
+                        first_affected = Some(i);
+                    }
+                    last_affected = Some(i);
 
                     if !handled {
                         if chunk_start < start {
-                            new_chunks.push(Chunk::from_source(chunk_start, start));
+                            replacement_chunks.push(Chunk::from_source(chunk_start, start));
                         }
-
-                        new_chunks.push(Chunk::overwritten(start, end, content_ref));
+                        replacement_chunks.push(Chunk::overwritten(start, end, content_ref));
                         handled = true;
-
                         if chunk_end > end {
-                            new_chunks.push(Chunk::from_source(end, chunk_end));
+                            replacement_chunks.push(Chunk::from_source(end, chunk_end));
                         }
-                    } else {
-                        // Chunk overlaps with already-handled overwrite range
-                        // Preserve content after the overwrite end
-                        if chunk_end > end {
-                            new_chunks.push(Chunk::from_source(end, chunk_end));
-                        }
+                    } else if chunk_end > end {
+                        replacement_chunks.push(Chunk::from_source(end, chunk_end));
                     }
                 }
                 Chunk::Edited {
                     original_start,
                     original_end,
-                    content: old_content,
+                    content: _old_content,
                     was_moved,
                 } => {
-                    // Moved chunks should be passed through without affecting overwrite position
-                    // Their original positions don't reflect their current location in the output
                     if was_moved {
-                        new_chunks.push(Chunk::Edited {
-                            original_start,
-                            original_end,
-                            content: old_content,
-                            was_moved,
-                        });
                         continue;
                     }
 
                     let (chunk_start, chunk_end) = match (original_start, original_end) {
                         (Some(s), Some(e)) => (s, e),
-                        _ => {
-                            new_chunks.push(Chunk::Edited {
-                                original_start,
-                                original_end,
-                                content: old_content,
-                                was_moved,
-                            });
-                            continue;
-                        }
+                        _ => continue,
                     };
 
                     if chunk_end <= start {
-                        new_chunks.push(Chunk::Edited {
-                            original_start,
-                            original_end,
-                            content: old_content,
-                            was_moved,
-                        });
                         continue;
                     }
-
                     if chunk_start >= end {
                         if !handled {
-                            new_chunks.push(Chunk::overwritten(start, end, content_ref));
+                            replacement_chunks.push(Chunk::overwritten(start, end, content_ref));
                             handled = true;
                         }
-                        new_chunks.push(Chunk::Edited {
-                            original_start,
-                            original_end,
-                            content: old_content,
-                            was_moved,
-                        });
-                        continue;
+                        break;
                     }
 
+                    if first_affected.is_none() {
+                        first_affected = Some(i);
+                    }
+                    last_affected = Some(i);
+
                     if !handled {
-                        new_chunks.push(Chunk::overwritten(start, end, content_ref));
+                        replacement_chunks.push(Chunk::overwritten(start, end, content_ref));
                         handled = true;
                     }
-                    // Note: For Edited chunks that overlap with already-handled overwrite range,
-                    // we drop them entirely since we can't easily preserve their suffix content
-                    // (the content is already transformed and may not map cleanly to positions).
-                    // The key fix for script content is in the Original chunk handling above.
                 }
             }
         }
 
-        if !handled {
-            new_chunks.push(Chunk::overwritten(start, end, content_ref));
+        if let (Some(first), Some(last)) = (first_affected, last_affected) {
+            self.chunks.splice(first..=last, replacement_chunks);
+            self.cursor_hint = first;
+        } else if !handled {
+            self.chunks
+                .push(Chunk::overwritten(start, end, content_ref));
+            self.cursor_hint = self.chunks.len() - 1;
+        } else {
+            let insert_at = first_affected.unwrap_or(self.chunks.len());
+            let num = replacement_chunks.len();
+            self.chunks.splice(insert_at..insert_at, replacement_chunks);
+            self.cursor_hint = insert_at + num.saturating_sub(1);
         }
 
-        self.chunks = new_chunks;
         self
     }
 
@@ -411,11 +514,6 @@ impl<'a> CodeTransform<'a> {
 
     /// Move a slice from one position to another, preserving source mapping.
     ///
-    /// This removes content from `start..end` and inserts it at `target_index`.
-    /// The moved content will map back to its original source position.
-    /// Any inserted content (via prepend_left, append_right, etc.) within the range
-    /// will also be moved along with the original content.
-    ///
     /// # Example
     /// ```
     /// use verter_core::code_transform::CodeTransform;
@@ -424,27 +522,23 @@ impl<'a> CodeTransform<'a> {
     /// let allocator = Allocator::default();
     /// let mut ct = CodeTransform::new("ABCDEF", &allocator);
     /// ct.move_slice(2, 4, 0); // Move "CD" to the beginning
-    /// assert_eq!(ct.to_string(), "CDABEF");
+    /// assert_eq!(ct.build_string(), "CDABEF");
     /// ```
     pub fn move_slice(&mut self, start: u32, end: u32, target_index: u32) -> &mut Self {
         if start >= end {
             return self;
         }
 
-        // Ensure splits at boundaries
+        self.cursor_hint = 0;
         self.ensure_split_at(start);
         self.ensure_split_at(end);
 
-        // First pass: identify which chunks to move based on their positions
-        // For Original and Edited with original_start, we use those positions.
-        // For pure insertions, we track position based on the preceding chunk.
         let mut indices_to_move = Vec::new();
         let mut current_pos = 0u32;
 
         for (i, chunk) in self.chunks.iter().enumerate() {
             match chunk {
                 Chunk::Original { start: cs, end: ce } => {
-                    // Check if this Original chunk is within the move range
                     if *cs >= start && *ce <= end {
                         indices_to_move.push(i);
                     }
@@ -456,17 +550,12 @@ impl<'a> CodeTransform<'a> {
                     was_moved,
                     ..
                 } => {
-                    // For already-moved chunks, check based on current_pos (their insertion point)
-                    // rather than original position, so they get included in subsequent moves
-                    // that encompass where they were inserted
                     if *was_moved {
                         if current_pos >= start && current_pos < end {
                             indices_to_move.push(i);
                         }
-                        // Don't update current_pos - moved chunks don't occupy original positions
                         continue;
                     }
-                    // Edited chunk with original position - check if within range
                     if *os >= start && *oe <= end {
                         indices_to_move.push(i);
                     }
@@ -477,12 +566,9 @@ impl<'a> CodeTransform<'a> {
                     original_end: None,
                     ..
                 } => {
-                    // Pure insertion - its position is the end of the previous chunk
-                    // Move it if that position is within the range (exclusive of end)
                     if current_pos >= start && current_pos < end {
                         indices_to_move.push(i);
                     }
-                    // Pure insertions don't change current_pos
                 }
                 Chunk::Edited {
                     original_start: Some(os),
@@ -490,14 +576,12 @@ impl<'a> CodeTransform<'a> {
                     was_moved,
                     ..
                 } => {
-                    // For already-moved chunks, check based on current_pos
                     if *was_moved {
                         if current_pos >= start && current_pos < end {
                             indices_to_move.push(i);
                         }
                         continue;
                     }
-                    // Partial position info - use original_start for position check
                     if *os >= start && *os < end {
                         indices_to_move.push(i);
                     }
@@ -507,7 +591,6 @@ impl<'a> CodeTransform<'a> {
                     original_end: Some(_),
                     ..
                 } => {
-                    // Partial position info - treat like pure insertion
                     if current_pos >= start && current_pos < end {
                         indices_to_move.push(i);
                     }
@@ -519,7 +602,6 @@ impl<'a> CodeTransform<'a> {
             return self;
         }
 
-        // Collect chunks to move, converting Original to Moved and marking Edited as moved
         let mut chunks_to_move = Vec::new();
         for &i in &indices_to_move {
             let chunk = self.chunks[i];
@@ -536,7 +618,6 @@ impl<'a> CodeTransform<'a> {
                     content,
                     ..
                 } => {
-                    // Mark as moved so prepend_left will skip this chunk
                     chunks_to_move.push(Chunk::Edited {
                         original_start,
                         original_end,
@@ -547,16 +628,11 @@ impl<'a> CodeTransform<'a> {
             }
         }
 
-        // Remove chunks in reverse order to maintain indices
         for &i in indices_to_move.iter().rev() {
             self.chunks.remove(i);
         }
 
-        // Find insert position for target - always insert at the left of target position
-        // (so moved content starts at target_index in the original document layout)
         let insert_idx = self.find_insert_position_for_append(target_index, false);
-
-        // Insert all moved chunks at the target position
         let insert_pos = insert_idx.min(self.chunks.len());
         for (i, chunk) in chunks_to_move.into_iter().enumerate() {
             self.chunks.insert(insert_pos + i, chunk);
@@ -567,8 +643,6 @@ impl<'a> CodeTransform<'a> {
 
     /// Move a slice with an unmapped prefix before it.
     ///
-    /// The prefix is NOT source-mapped. Only the moved content maintains its original mapping.
-    ///
     /// # Example
     /// ```
     /// use verter_core::code_transform::CodeTransform;
@@ -577,7 +651,7 @@ impl<'a> CodeTransform<'a> {
     /// let allocator = Allocator::default();
     /// let mut ct = CodeTransform::new("ABCDEF", &allocator);
     /// ct.move_with_prefix(2, 4, 0, ">>"); // Move "CD" to beginning with prefix
-    /// assert_eq!(ct.to_string(), ">>CDABEF");
+    /// assert_eq!(ct.build_string(), ">>CDABEF");
     /// ```
     pub fn move_with_prefix(
         &mut self,
@@ -591,8 +665,6 @@ impl<'a> CodeTransform<'a> {
 
     /// Move a slice with an unmapped suffix after it.
     ///
-    /// The suffix is NOT source-mapped. Only the moved content maintains its original mapping.
-    ///
     /// # Example
     /// ```
     /// use verter_core::code_transform::CodeTransform;
@@ -601,7 +673,7 @@ impl<'a> CodeTransform<'a> {
     /// let allocator = Allocator::default();
     /// let mut ct = CodeTransform::new("ABCDEF", &allocator);
     /// ct.move_with_suffix(2, 4, 0, "<<"); // Move "CD" to beginning with suffix
-    /// assert_eq!(ct.to_string(), "CD<<ABEF");
+    /// assert_eq!(ct.build_string(), "CD<<ABEF");
     /// ```
     pub fn move_with_suffix(
         &mut self,
@@ -615,9 +687,6 @@ impl<'a> CodeTransform<'a> {
 
     /// Move a slice wrapped with unmapped prefix and suffix.
     ///
-    /// The prefix and suffix are NOT source-mapped. Only the moved content maintains
-    /// its original mapping. This is useful for wrapping moved content like `{moved_text}`.
-    ///
     /// # Example
     /// ```
     /// use verter_core::code_transform::CodeTransform;
@@ -626,7 +695,7 @@ impl<'a> CodeTransform<'a> {
     /// let allocator = Allocator::default();
     /// let mut ct = CodeTransform::new("ABCDEF", &allocator);
     /// ct.move_wrapped(2, 4, 0, "{", "}"); // Move "CD" wrapped with braces
-    /// assert_eq!(ct.to_string(), "{CD}ABEF");
+    /// assert_eq!(ct.build_string(), "{CD}ABEF");
     /// ```
     pub fn move_wrapped(
         &mut self,
@@ -640,11 +709,10 @@ impl<'a> CodeTransform<'a> {
             return self;
         }
 
-        // Ensure splits at boundaries
+        self.cursor_hint = 0;
         self.ensure_split_at(start);
         self.ensure_split_at(end);
 
-        // First pass: identify which chunks to move based on their positions
         let mut indices_to_move = Vec::new();
         let mut current_pos = 0u32;
 
@@ -662,12 +730,10 @@ impl<'a> CodeTransform<'a> {
                     was_moved,
                     ..
                 } => {
-                    // For already-moved chunks, check based on current_pos (their insertion point)
                     if *was_moved {
                         if current_pos >= start && current_pos < end {
                             indices_to_move.push(i);
                         }
-                        // Don't update current_pos - moved chunks don't occupy original positions
                         continue;
                     }
                     if *os >= start && *oe <= end {
@@ -690,7 +756,6 @@ impl<'a> CodeTransform<'a> {
                     was_moved,
                     ..
                 } => {
-                    // For already-moved chunks, check based on current_pos
                     if *was_moved {
                         if current_pos >= start && current_pos < end {
                             indices_to_move.push(i);
@@ -717,16 +782,13 @@ impl<'a> CodeTransform<'a> {
             return self;
         }
 
-        // Collect chunks to move, converting Original to Moved and marking Edited as moved
         let mut chunks_to_move = Vec::new();
 
-        // Add prefix as unmapped insertion if present
         if !prefix.is_empty() {
             let prefix_ref = self.allocator.alloc_str(prefix);
             chunks_to_move.push(Chunk::inserted(prefix_ref));
         }
 
-        // Add the actual moved chunks
         for &i in &indices_to_move {
             let chunk = self.chunks[i];
             match chunk {
@@ -742,7 +804,6 @@ impl<'a> CodeTransform<'a> {
                     content,
                     ..
                 } => {
-                    // Mark as moved so prepend_left will skip this chunk
                     chunks_to_move.push(Chunk::Edited {
                         original_start,
                         original_end,
@@ -753,22 +814,16 @@ impl<'a> CodeTransform<'a> {
             }
         }
 
-        // Add suffix as unmapped insertion if present
         if !suffix.is_empty() {
             let suffix_ref = self.allocator.alloc_str(suffix);
             chunks_to_move.push(Chunk::inserted(suffix_ref));
         }
 
-        // Remove chunks in reverse order to maintain indices
         for &i in indices_to_move.iter().rev() {
             self.chunks.remove(i);
         }
 
-        // Find insert position for target - always insert at the left of target position
-        // (so moved content starts at target_index in the original document layout)
         let insert_idx = self.find_insert_position_for_append(target_index, false);
-
-        // Insert all moved chunks at the target position
         let insert_pos = insert_idx.min(self.chunks.len());
         for (i, chunk) in chunks_to_move.into_iter().enumerate() {
             self.chunks.insert(insert_pos + i, chunk);
@@ -794,6 +849,12 @@ impl<'a> CodeTransform<'a> {
         &self.chunks
     }
 
+    /// Get the number of chunks (useful for diagnostics)
+    #[cfg(test)]
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
     /// Get the intro text
     pub(super) fn intro(&self) -> &str {
         self.intro
@@ -802,6 +863,180 @@ impl<'a> CodeTransform<'a> {
     /// Get the outro text
     pub(super) fn outro(&self) -> &str {
         self.outro
+    }
+
+    /// Apply multiple prepend_left operations in a single O(n+m) pass.
+    ///
+    /// `items` must be sorted by position (ascending). Content strings must
+    /// outlive the CodeTransform (e.g. `&'static str` for binding prefixes).
+    ///
+    /// This avoids O(n*m) Vec::insert cost by rebuilding the chunks Vec once.
+    /// Specifically designed for batch-applying binding prefixes (`_ctx.`,
+    /// `$setup.`, etc.) after all overwrites are complete.
+    pub fn batch_prepend_left_static(&mut self, items: &[(u32, &'a str)]) -> &mut Self {
+        if items.is_empty() {
+            return self;
+        }
+
+        let mut result = Vec::with_capacity(self.chunks.len() + items.len() * 2);
+        let mut item_idx = 0;
+
+        for &chunk in &self.chunks {
+            match chunk {
+                Chunk::Original { start: cs, end: ce } => {
+                    // Emit items that fall before this chunk (in gaps between chunks)
+                    while item_idx < items.len() && items[item_idx].0 < cs {
+                        result.push(Chunk::inserted(items[item_idx].1));
+                        item_idx += 1;
+                    }
+
+                    // Items at cs or inside (cs, ce) — split and insert
+                    if item_idx < items.len() && items[item_idx].0 >= cs && items[item_idx].0 < ce {
+                        let mut prev = cs;
+                        while item_idx < items.len() && items[item_idx].0 < ce {
+                            let pos = items[item_idx].0;
+                            if pos > prev {
+                                result.push(Chunk::from_source(prev, pos));
+                            }
+                            while item_idx < items.len() && items[item_idx].0 == pos {
+                                result.push(Chunk::inserted(items[item_idx].1));
+                                item_idx += 1;
+                            }
+                            prev = pos;
+                        }
+                        if prev < ce {
+                            result.push(Chunk::from_source(prev, ce));
+                        }
+                        continue; // Don't add original chunk
+                    }
+
+                    result.push(chunk);
+                }
+                _ => {
+                    // For positioned non-original chunks, emit items at/before position
+                    if let Some(cp) = Self::chunk_position(&chunk) {
+                        while item_idx < items.len() && items[item_idx].0 < cp {
+                            result.push(Chunk::inserted(items[item_idx].1));
+                            item_idx += 1;
+                        }
+                        while item_idx < items.len() && items[item_idx].0 == cp {
+                            result.push(Chunk::inserted(items[item_idx].1));
+                            item_idx += 1;
+                        }
+                    }
+                    result.push(chunk);
+                }
+            }
+        }
+
+        // Remaining items go at the end
+        while item_idx < items.len() {
+            result.push(Chunk::inserted(items[item_idx].1));
+            item_idx += 1;
+        }
+
+        self.chunks = result;
+        self.cursor_hint = 0;
+        self
+    }
+
+    /// Apply multiple overwrite operations in a single O(n+m) pass.
+    ///
+    /// `overwrites` must be sorted by start position (ascending) and non-overlapping.
+    /// Each entry is `(start, end, content)` — replaces source range `[start, end)`.
+    ///
+    /// Only affects `Original` chunks; existing `Edited` chunks pass through unchanged.
+    /// This avoids O(n*m) splice cost by rebuilding the chunks Vec once.
+    pub fn batch_overwrite(&mut self, overwrites: &[(u32, u32, &'a str)]) -> &mut Self {
+        if overwrites.is_empty() {
+            return self;
+        }
+
+        // Each overwrite splits at most 1 Original into up to 3 chunks
+        let mut result = Vec::with_capacity(self.chunks.len() + overwrites.len() * 2);
+        let mut ow_idx = 0;
+
+        for &chunk in &self.chunks {
+            match chunk {
+                Chunk::Original { start: cs, end: ce } => {
+                    // Check if any overwrites fall within [cs, ce)
+                    if ow_idx < overwrites.len() && overwrites[ow_idx].0 < ce {
+                        let mut prev = cs;
+                        while ow_idx < overwrites.len() && overwrites[ow_idx].0 < ce {
+                            let (ow_start, ow_end, ow_content) = overwrites[ow_idx];
+
+                            // Skip overwrites that end before this chunk's start
+                            if ow_end <= cs {
+                                ow_idx += 1;
+                                continue;
+                            }
+
+                            // Emit original content before the overwrite
+                            let effective_start = ow_start.max(prev);
+                            if prev < effective_start {
+                                result.push(Chunk::from_source(prev, effective_start));
+                            }
+
+                            // Emit the overwritten chunk (skip empty-content deletions
+                            // to reduce chunk count — the source range is still removed
+                            // because prev advances past it)
+                            if !ow_content.is_empty() {
+                                result.push(Chunk::overwritten(ow_start, ow_end, ow_content));
+                            }
+                            prev = ow_end;
+                            ow_idx += 1;
+                        }
+
+                        // Emit remaining original content after last overwrite
+                        if prev < ce {
+                            result.push(Chunk::from_source(prev, ce));
+                        }
+                    } else {
+                        result.push(chunk);
+                    }
+                }
+                _ => {
+                    result.push(chunk);
+                }
+            }
+        }
+
+        self.chunks = result;
+        self.cursor_hint = 0;
+        self
+    }
+}
+
+impl<'a> CodeTransform<'a> {
+    /// Build the final output string with pre-allocated capacity.
+    pub fn build_string(&self) -> String {
+        // Compute exact length to avoid reallocation during build.
+        let mut total_len = self.intro.len() + self.outro.len();
+        for chunk in &self.chunks {
+            match chunk {
+                Chunk::Original { start, end } => {
+                    total_len += (*end - *start) as usize;
+                }
+                Chunk::Edited { content, .. } => {
+                    total_len += content.len();
+                }
+            }
+        }
+
+        let mut out = String::with_capacity(total_len);
+        out.push_str(self.intro);
+        for chunk in &self.chunks {
+            match chunk {
+                Chunk::Original { start, end } => {
+                    out.push_str(&self.original[*start as usize..*end as usize]);
+                }
+                Chunk::Edited { content, .. } => {
+                    out.push_str(content);
+                }
+            }
+        }
+        out.push_str(self.outro);
+        out
     }
 }
 

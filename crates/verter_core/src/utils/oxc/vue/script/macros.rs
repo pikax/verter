@@ -22,6 +22,9 @@ pub struct MacroTypeParams {
     pub resolved: ResolvedElements,
     /// Inferred runtime types for the root type parameter (for simple types like `string`)
     pub runtime_types: Vec<RuntimeType>,
+    /// Whether the type parameter was a type reference (e.g., `Props` in `defineProps<Props>()`)
+    /// that could not be resolved. Used to emit "Unresolvable type reference" diagnostics.
+    pub unresolved_type_ref: bool,
 }
 
 /// Object argument info: defineProps({ foo: String })

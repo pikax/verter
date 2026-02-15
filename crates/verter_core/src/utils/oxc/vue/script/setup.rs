@@ -14,7 +14,9 @@ use super::macros::{
     detect_macro_kind, MacroArrayArg, MacroDeclarator, MacroObjectArg, MacroProperty,
     MacroTypeParams, ScriptMacro, VueMacroKind,
 };
-use super::resolve_type::{infer_runtime_type, resolve_type_elements, ResolvedElements};
+use super::resolve_type::{
+    infer_runtime_type, resolve_type_elements_with_ctx_ref, ResolvedElements, TypeResolutionContext,
+};
 use super::shared::ScriptParseContext;
 use super::types::{
     DeclarationKind, ScriptAsync, ScriptBinding, ScriptDeclaration, ScriptError, ScriptErrorKind,
@@ -82,12 +84,13 @@ impl SetupContext {
 pub fn process_setup_statements<'a>(
     statements: &[Statement<'a>],
     ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
     errors: &mut Vec<ScriptError>,
 ) {
     for stmt in statements {
-        process_setup_statement(stmt, ctx, setup_ctx, items, errors);
+        process_setup_statement(stmt, ctx, type_ctx, setup_ctx, items, errors);
     }
 }
 
@@ -95,6 +98,7 @@ pub fn process_setup_statements<'a>(
 pub fn process_setup_statement<'a>(
     stmt: &Statement<'a>,
     ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
     errors: &mut Vec<ScriptError>,
@@ -105,7 +109,7 @@ pub fn process_setup_statement<'a>(
 
         // Variable declarations
         Statement::VariableDeclaration(var_decl) => {
-            process_variable_declaration(var_decl, ctx, setup_ctx, items);
+            process_variable_declaration(var_decl, ctx, type_ctx, setup_ctx, items);
         }
 
         // Function declarations
@@ -118,9 +122,9 @@ pub fn process_setup_statement<'a>(
             if setup_ctx.should_track_declarations() {
                 if let Some(id) = &class.id {
                     items.push(ScriptItem::Declaration(ScriptDeclaration {
-                        span: ctx.adjust_span(class.span),
+                        span: Span::from(class.span),
                         name: Some(id.name.as_str()),
-                        name_span: Some(ctx.adjust_span(id.span)),
+                        name_span: Some(Span::from(id.span)),
                         kind: DeclarationKind::Class,
                         is_ref_like: false,
                     }));
@@ -130,40 +134,40 @@ pub fn process_setup_statement<'a>(
 
         // Expression statements (may contain macro calls, await, etc.)
         Statement::ExpressionStatement(expr_stmt) => {
-            process_expression_statement(expr_stmt, ctx, setup_ctx, items);
+            process_expression_statement(expr_stmt, ctx, type_ctx, setup_ctx, items);
         }
 
         // Block statements that prevent declaration tracking
         Statement::BlockStatement(block) => {
             setup_ctx.enter_block();
-            process_setup_statements(&block.body, ctx, setup_ctx, items, errors);
+            process_setup_statements(&block.body, ctx, type_ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
         Statement::IfStatement(if_stmt) => {
             // Check condition for await
-            check_expression_for_async(&if_stmt.test, ctx, setup_ctx, items);
+            check_expression_for_async(&if_stmt.test, setup_ctx, items);
 
             setup_ctx.enter_block();
-            process_setup_statement(&if_stmt.consequent, ctx, setup_ctx, items, errors);
+            process_setup_statement(&if_stmt.consequent, ctx, type_ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
 
             if let Some(alt) = &if_stmt.alternate {
                 setup_ctx.enter_block();
-                process_setup_statement(alt, ctx, setup_ctx, items, errors);
+                process_setup_statement(alt, ctx, type_ctx, setup_ctx, items, errors);
                 setup_ctx.leave_block();
             }
         }
 
         Statement::ForStatement(for_stmt) => {
             setup_ctx.enter_block();
-            process_setup_statement(&for_stmt.body, ctx, setup_ctx, items, errors);
+            process_setup_statement(&for_stmt.body, ctx, type_ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
         Statement::ForInStatement(for_in) => {
             setup_ctx.enter_block();
-            process_setup_statement(&for_in.body, ctx, setup_ctx, items, errors);
+            process_setup_statement(&for_in.body, ctx, type_ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
@@ -172,23 +176,23 @@ pub fn process_setup_statement<'a>(
             if for_of.r#await {
                 setup_ctx.is_async = true;
                 items.push(ScriptItem::Async(ScriptAsync {
-                    span: ctx.adjust_span(for_of.span),
+                    span: Span::from(for_of.span),
                 }));
             }
             setup_ctx.enter_block();
-            process_setup_statement(&for_of.body, ctx, setup_ctx, items, errors);
+            process_setup_statement(&for_of.body, ctx, type_ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
         Statement::WhileStatement(while_stmt) => {
             setup_ctx.enter_block();
-            process_setup_statement(&while_stmt.body, ctx, setup_ctx, items, errors);
+            process_setup_statement(&while_stmt.body, ctx, type_ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
         Statement::DoWhileStatement(do_while) => {
             setup_ctx.enter_block();
-            process_setup_statement(&do_while.body, ctx, setup_ctx, items, errors);
+            process_setup_statement(&do_while.body, ctx, type_ctx, setup_ctx, items, errors);
             setup_ctx.leave_block();
         }
 
@@ -196,7 +200,7 @@ pub fn process_setup_statement<'a>(
             setup_ctx.enter_block();
             for case in &switch_stmt.cases {
                 for stmt in &case.consequent {
-                    process_setup_statement(stmt, ctx, setup_ctx, items, errors);
+                    process_setup_statement(stmt, ctx, type_ctx, setup_ctx, items, errors);
                 }
             }
             setup_ctx.leave_block();
@@ -204,18 +208,32 @@ pub fn process_setup_statement<'a>(
 
         Statement::TryStatement(try_stmt) => {
             setup_ctx.enter_block();
-            process_setup_statements(&try_stmt.block.body, ctx, setup_ctx, items, errors);
+            process_setup_statements(
+                &try_stmt.block.body,
+                ctx,
+                type_ctx,
+                setup_ctx,
+                items,
+                errors,
+            );
             setup_ctx.leave_block();
 
             if let Some(handler) = &try_stmt.handler {
                 setup_ctx.enter_block();
-                process_setup_statements(&handler.body.body, ctx, setup_ctx, items, errors);
+                process_setup_statements(
+                    &handler.body.body,
+                    ctx,
+                    type_ctx,
+                    setup_ctx,
+                    items,
+                    errors,
+                );
                 setup_ctx.leave_block();
             }
 
             if let Some(finalizer) = &try_stmt.finalizer {
                 setup_ctx.enter_block();
-                process_setup_statements(&finalizer.body, ctx, setup_ctx, items, errors);
+                process_setup_statements(&finalizer.body, ctx, type_ctx, setup_ctx, items, errors);
                 setup_ctx.leave_block();
             }
         }
@@ -223,14 +241,14 @@ pub fn process_setup_statement<'a>(
         // Errors in setup mode
         Statement::ExportDefaultDeclaration(export) => {
             errors.push(ScriptError {
-                span: ctx.adjust_span(export.span),
+                span: Span::from(export.span),
                 message: ScriptErrorKind::ExportDefaultInSetup,
             });
         }
 
         Statement::ReturnStatement(ret) => {
             errors.push(ScriptError {
-                span: ctx.adjust_span(ret.span),
+                span: Span::from(ret.span),
                 message: ScriptErrorKind::ReturnInSetup,
             });
         }
@@ -241,7 +259,7 @@ pub fn process_setup_statement<'a>(
         // TypeScript-only declarations - need to be moved outside the component
         Statement::TSTypeAliasDeclaration(type_alias) => {
             items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                span: ctx.adjust_span(type_alias.span),
+                span: Span::from(type_alias.span),
                 name: Some(type_alias.id.name.as_str()),
                 kind: TypeDeclarationKind::TypeAlias,
             }));
@@ -249,7 +267,7 @@ pub fn process_setup_statement<'a>(
 
         Statement::TSInterfaceDeclaration(interface) => {
             items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                span: ctx.adjust_span(interface.span),
+                span: Span::from(interface.span),
                 name: Some(interface.id.name.as_str()),
                 kind: TypeDeclarationKind::Interface,
             }));
@@ -257,7 +275,7 @@ pub fn process_setup_statement<'a>(
 
         Statement::TSEnumDeclaration(ts_enum) => {
             items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                span: ctx.adjust_span(ts_enum.span),
+                span: Span::from(ts_enum.span),
                 name: Some(ts_enum.id.name.as_str()),
                 kind: TypeDeclarationKind::Enum,
             }));
@@ -269,7 +287,7 @@ pub fn process_setup_statement<'a>(
                 oxc_ast::ast::TSModuleDeclarationName::StringLiteral(s) => Some(s.value.as_str()),
             };
             items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
-                span: ctx.adjust_span(module.span),
+                span: Span::from(module.span),
                 name,
                 kind: TypeDeclarationKind::Module,
             }));
@@ -298,6 +316,7 @@ fn is_ref_creating_call(init: &Expression<'_>) -> bool {
 fn process_variable_declaration<'a>(
     var_decl: &VariableDeclaration<'a>,
     ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
@@ -309,7 +328,7 @@ fn process_variable_declaration<'a>(
         VariableDeclarationKind::AwaitUsing => {
             setup_ctx.is_async = true;
             items.push(ScriptItem::Async(ScriptAsync {
-                span: ctx.adjust_span(var_decl.span),
+                span: Span::from(var_decl.span),
             }));
             DeclarationKind::Const
         }
@@ -326,24 +345,26 @@ fn process_variable_declaration<'a>(
         // Check if init is a macro call
         if let Some(init) = &declarator.init {
             // Check for await in init
-            check_expression_for_async(init, ctx, setup_ctx, items);
+            check_expression_for_async(init, setup_ctx, items);
 
             // Build declarator info for macro
             let macro_declarator = Some(MacroDeclarator {
                 name: extract_binding_name(&declarator.id),
-                binding_span: ctx.adjust_span(declarator.id.span()),
-                statement_span: ctx.adjust_span(var_decl.span),
+                binding_span: Span::from(declarator.id.span()),
+                statement_span: Span::from(var_decl.span),
             });
 
             // Check if init is a macro call
-            if let Some(macro_item) = try_parse_macro_from_expression(init, ctx, macro_declarator) {
+            if let Some(macro_item) =
+                try_parse_macro_from_expression(init, ctx, type_ctx, macro_declarator)
+            {
                 items.push(ScriptItem::Macro(macro_item));
             }
         }
 
         // Track declarations at top level
         if setup_ctx.should_track_declarations() {
-            collect_declarations_from_pattern(&declarator.id, kind, is_ref_like, ctx, items);
+            collect_declarations_from_pattern(&declarator.id, kind, is_ref_like, items);
         }
     }
 }
@@ -373,9 +394,9 @@ fn process_function_declaration<'a>(
             };
 
             items.push(ScriptItem::Declaration(ScriptDeclaration {
-                span: ctx.adjust_span(func.span),
+                span: Span::from(func.span),
                 name: Some(id.name.as_str()),
-                name_span: Some(ctx.adjust_span(id.span)),
+                name_span: Some(Span::from(id.span)),
                 kind,
                 is_ref_like: false,
             }));
@@ -390,14 +411,17 @@ fn process_function_declaration<'a>(
 fn process_expression_statement<'a>(
     expr_stmt: &ExpressionStatement<'a>,
     ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
     // Check for await expressions
-    check_expression_for_async(&expr_stmt.expression, ctx, setup_ctx, items);
+    check_expression_for_async(&expr_stmt.expression, setup_ctx, items);
 
     // Check for macro calls at expression level (no declarator for standalone expressions)
-    if let Some(macro_item) = try_parse_macro_from_expression(&expr_stmt.expression, ctx, None) {
+    if let Some(macro_item) =
+        try_parse_macro_from_expression(&expr_stmt.expression, ctx, type_ctx, None)
+    {
         items.push(ScriptItem::Macro(macro_item));
     }
 }
@@ -405,7 +429,6 @@ fn process_expression_statement<'a>(
 /// Check an expression for await and mark as async if found
 fn check_expression_for_async<'a>(
     expr: &Expression<'a>,
-    ctx: &ScriptParseContext<'a>,
     setup_ctx: &mut SetupContext,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
@@ -413,64 +436,64 @@ fn check_expression_for_async<'a>(
         Expression::AwaitExpression(await_expr) => {
             setup_ctx.is_async = true;
             items.push(ScriptItem::Async(ScriptAsync {
-                span: ctx.adjust_span(await_expr.span),
+                span: Span::from(await_expr.span),
             }));
             // Also check the argument
-            check_expression_for_async(&await_expr.argument, ctx, setup_ctx, items);
+            check_expression_for_async(&await_expr.argument, setup_ctx, items);
         }
         Expression::CallExpression(call) => {
-            check_expression_for_async(&call.callee, ctx, setup_ctx, items);
+            check_expression_for_async(&call.callee, setup_ctx, items);
             for arg in &call.arguments {
                 if let Argument::SpreadElement(spread) = arg {
-                    check_expression_for_async(&spread.argument, ctx, setup_ctx, items);
+                    check_expression_for_async(&spread.argument, setup_ctx, items);
                 } else if let Some(expr) = arg.as_expression() {
-                    check_expression_for_async(expr, ctx, setup_ctx, items);
+                    check_expression_for_async(expr, setup_ctx, items);
                 }
             }
         }
         Expression::BinaryExpression(bin) => {
-            check_expression_for_async(&bin.left, ctx, setup_ctx, items);
-            check_expression_for_async(&bin.right, ctx, setup_ctx, items);
+            check_expression_for_async(&bin.left, setup_ctx, items);
+            check_expression_for_async(&bin.right, setup_ctx, items);
         }
         Expression::ConditionalExpression(cond) => {
-            check_expression_for_async(&cond.test, ctx, setup_ctx, items);
-            check_expression_for_async(&cond.consequent, ctx, setup_ctx, items);
-            check_expression_for_async(&cond.alternate, ctx, setup_ctx, items);
+            check_expression_for_async(&cond.test, setup_ctx, items);
+            check_expression_for_async(&cond.consequent, setup_ctx, items);
+            check_expression_for_async(&cond.alternate, setup_ctx, items);
         }
         Expression::AssignmentExpression(assign) => {
-            check_expression_for_async(&assign.right, ctx, setup_ctx, items);
+            check_expression_for_async(&assign.right, setup_ctx, items);
         }
         Expression::ParenthesizedExpression(paren) => {
-            check_expression_for_async(&paren.expression, ctx, setup_ctx, items);
+            check_expression_for_async(&paren.expression, setup_ctx, items);
         }
         Expression::SequenceExpression(seq) => {
             for expr in &seq.expressions {
-                check_expression_for_async(expr, ctx, setup_ctx, items);
+                check_expression_for_async(expr, setup_ctx, items);
             }
         }
         Expression::UnaryExpression(unary) => {
-            check_expression_for_async(&unary.argument, ctx, setup_ctx, items);
+            check_expression_for_async(&unary.argument, setup_ctx, items);
         }
         Expression::LogicalExpression(logical) => {
-            check_expression_for_async(&logical.left, ctx, setup_ctx, items);
-            check_expression_for_async(&logical.right, ctx, setup_ctx, items);
+            check_expression_for_async(&logical.left, setup_ctx, items);
+            check_expression_for_async(&logical.right, setup_ctx, items);
         }
         Expression::ComputedMemberExpression(computed) => {
-            check_expression_for_async(&computed.object, ctx, setup_ctx, items);
-            check_expression_for_async(&computed.expression, ctx, setup_ctx, items);
+            check_expression_for_async(&computed.object, setup_ctx, items);
+            check_expression_for_async(&computed.expression, setup_ctx, items);
         }
         Expression::StaticMemberExpression(static_member) => {
-            check_expression_for_async(&static_member.object, ctx, setup_ctx, items);
+            check_expression_for_async(&static_member.object, setup_ctx, items);
         }
         Expression::PrivateFieldExpression(private) => {
-            check_expression_for_async(&private.object, ctx, setup_ctx, items);
+            check_expression_for_async(&private.object, setup_ctx, items);
         }
         Expression::ArrayExpression(arr) => {
             for elem in &arr.elements {
                 if let ArrayExpressionElement::SpreadElement(spread) = elem {
-                    check_expression_for_async(&spread.argument, ctx, setup_ctx, items);
+                    check_expression_for_async(&spread.argument, setup_ctx, items);
                 } else if let Some(expr) = elem.as_expression() {
-                    check_expression_for_async(expr, ctx, setup_ctx, items);
+                    check_expression_for_async(expr, setup_ctx, items);
                 }
             }
         }
@@ -478,35 +501,35 @@ fn check_expression_for_async<'a>(
             for prop in &obj.properties {
                 match prop {
                     ObjectPropertyKind::ObjectProperty(p) => {
-                        check_expression_for_async(&p.value, ctx, setup_ctx, items);
+                        check_expression_for_async(&p.value, setup_ctx, items);
                     }
                     ObjectPropertyKind::SpreadProperty(spread) => {
-                        check_expression_for_async(&spread.argument, ctx, setup_ctx, items);
+                        check_expression_for_async(&spread.argument, setup_ctx, items);
                     }
                 }
             }
         }
         Expression::NewExpression(new_expr) => {
-            check_expression_for_async(&new_expr.callee, ctx, setup_ctx, items);
+            check_expression_for_async(&new_expr.callee, setup_ctx, items);
             for arg in &new_expr.arguments {
                 if let Argument::SpreadElement(spread) = arg {
-                    check_expression_for_async(&spread.argument, ctx, setup_ctx, items);
+                    check_expression_for_async(&spread.argument, setup_ctx, items);
                 } else if let Some(expr) = arg.as_expression() {
-                    check_expression_for_async(expr, ctx, setup_ctx, items);
+                    check_expression_for_async(expr, setup_ctx, items);
                 }
             }
         }
         Expression::TaggedTemplateExpression(tagged) => {
-            check_expression_for_async(&tagged.tag, ctx, setup_ctx, items);
+            check_expression_for_async(&tagged.tag, setup_ctx, items);
         }
         Expression::TemplateLiteral(template) => {
             for expr in &template.expressions {
-                check_expression_for_async(expr, ctx, setup_ctx, items);
+                check_expression_for_async(expr, setup_ctx, items);
             }
         }
         Expression::YieldExpression(yield_expr) => {
             if let Some(arg) = &yield_expr.argument {
-                check_expression_for_async(arg, ctx, setup_ctx, items);
+                check_expression_for_async(arg, setup_ctx, items);
             }
         }
         // Don't recurse into function expressions - they have their own async context
@@ -519,10 +542,11 @@ fn check_expression_for_async<'a>(
 fn try_parse_macro_from_expression<'a>(
     expr: &Expression<'a>,
     ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
     declarator: Option<MacroDeclarator<'a>>,
 ) -> Option<ScriptMacro<'a>> {
     match expr {
-        Expression::CallExpression(call) => parse_macro_call(call, ctx, declarator),
+        Expression::CallExpression(call) => parse_macro_call(call, ctx, type_ctx, declarator),
         _ => None,
     }
 }
@@ -531,6 +555,7 @@ fn try_parse_macro_from_expression<'a>(
 pub fn parse_macro_call<'a>(
     call: &CallExpression<'a>,
     ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
     declarator: Option<MacroDeclarator<'a>>,
 ) -> Option<ScriptMacro<'a>> {
     // Get callee name as bytes
@@ -540,13 +565,13 @@ pub fn parse_macro_call<'a>(
     };
 
     let kind = detect_macro_kind(name)?;
-    let span = ctx.adjust_span(call.span);
+    let span = Span::from(call.span);
 
     // Extract type parameters if present
     let type_params = call
         .type_arguments
         .as_ref()
-        .map(|tp| extract_type_params(tp, ctx));
+        .map(|tp| extract_type_params(tp, ctx, type_ctx));
 
     match kind {
         VueMacroKind::DefineProps => {
@@ -589,7 +614,7 @@ pub fn parse_macro_call<'a>(
             // defineModel(name?, options?)
             let name_span = call.arguments.first().and_then(|arg| {
                 if let Some(Expression::StringLiteral(s)) = arg.as_expression() {
-                    Some(ctx.adjust_span(s.span))
+                    Some(Span::from(s.span))
                 } else {
                     None
                 }
@@ -599,7 +624,7 @@ pub fn parse_macro_call<'a>(
             let options_idx = if name_span.is_some() { 1 } else { 0 };
             let options_span = call.arguments.get(options_idx).and_then(|arg| {
                 if let Some(Expression::ObjectExpression(obj)) = arg.as_expression() {
-                    Some(ctx.adjust_span(obj.span))
+                    Some(Span::from(obj.span))
                 } else {
                     None
                 }
@@ -631,11 +656,8 @@ pub fn parse_macro_call<'a>(
                                 let inner_type_params = inner
                                     .type_arguments
                                     .as_ref()
-                                    .map(|tp| extract_type_params(tp, ctx));
-                                return Some((
-                                    Some(ctx.adjust_span(inner.span)),
-                                    inner_type_params,
-                                ));
+                                    .map(|tp| extract_type_params(tp, ctx, type_ctx));
+                                return Some((Some(Span::from(inner.span)), inner_type_params));
                             }
                         }
                     }
@@ -657,28 +679,47 @@ pub fn parse_macro_call<'a>(
     }
 }
 
-/// Extract type parameters from a TSTypeParameterInstantiation
-fn extract_type_params(
-    tp: &TSTypeParameterInstantiation<'_>,
-    ctx: &ScriptParseContext<'_>,
+/// Extract type parameters from a TSTypeParameterInstantiation.
+///
+/// Uses the `TypeResolutionContext` to resolve type references (interfaces, type aliases)
+/// declared in the same SFC. Unresolvable external types produce empty results.
+fn extract_type_params<'a>(
+    tp: &TSTypeParameterInstantiation<'a>,
+    ctx: &ScriptParseContext<'a>,
+    type_ctx: &TypeResolutionContext<'_, 'a>,
 ) -> MacroTypeParams {
     let full_span = tp.span;
+    let offset = ctx.content_offset;
+
+    // Type annotation spans are NOT adjusted by adjust_program_spans(),
+    // so we add content_offset to convert from local to SFC coordinates.
 
     // The < is at the start
-    let lt_span = ctx.adjust_span(oxc_span::Span::new(full_span.start, full_span.start + 1));
+    let lt_span = Span::new(full_span.start + offset, full_span.start + 1 + offset);
 
     // The > is at the end
-    let gt_span = ctx.adjust_span(oxc_span::Span::new(full_span.end - 1, full_span.end));
+    let gt_span = Span::new(full_span.end - 1 + offset, full_span.end + offset);
 
     // The type content is between < and >
-    let type_span = ctx.adjust_span(oxc_span::Span::new(full_span.start + 1, full_span.end - 1));
+    let type_span = Span::new(full_span.start + 1 + offset, full_span.end - 1 + offset);
 
-    // Resolve the type from the first type parameter, passing base_offset for document-bound spans
+    // Resolve the type from the first type parameter using the type context
+    // This enables resolution of SFC-local interfaces and type aliases
     let resolved = tp
         .params
         .first()
-        .map(|ts_type| resolve_type_elements(ts_type, ctx.base_offset))
+        .map(|ts_type| resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, type_ctx))
         .unwrap_or_default();
+
+    // Detect unresolvable type references: the first type param is a TSTypeReference
+    // (e.g., `Props` in `defineProps<Props>()`) but resolution produced empty results.
+    // This distinguishes `defineProps<{}>()` (empty type literal, no error) from
+    // `defineProps<ExternalProps>()` (unresolvable reference, should warn).
+    let is_type_reference = tp
+        .params
+        .first()
+        .is_some_and(|ts_type| matches!(ts_type, TSType::TSTypeReference(_)));
+    let unresolved_type_ref = is_type_reference && resolved.props.is_empty();
 
     // Infer runtime types from the root type (for simple types like `string`, `number`)
     let runtime_types = tp
@@ -693,6 +734,7 @@ fn extract_type_params(
         gt_span,
         resolved,
         runtime_types,
+        unresolved_type_ref,
     }
 }
 
@@ -749,7 +791,7 @@ fn extract_object_arg<'a>(
                 let value_span = if p.shorthand {
                     None
                 } else {
-                    Some(ctx.adjust_span(p.value.span()))
+                    Some(Span::from(p.value.span()))
                 };
                 properties.push(MacroProperty {
                     name,
@@ -761,7 +803,7 @@ fn extract_object_arg<'a>(
     }
 
     MacroObjectArg {
-        span: ctx.adjust_span(obj.span),
+        span: Span::from(obj.span),
         properties,
     }
 }
@@ -772,14 +814,14 @@ fn extract_array_arg(arr: &ArrayExpression<'_>, ctx: &ScriptParseContext<'_>) ->
         .elements
         .iter()
         .filter_map(|elem| match elem {
-            ArrayExpressionElement::SpreadElement(s) => Some(ctx.adjust_span(s.span)),
+            ArrayExpressionElement::SpreadElement(s) => Some(Span::from(s.span)),
             ArrayExpressionElement::Elision(_) => None,
-            _ => elem.as_expression().map(|e| ctx.adjust_span(e.span())),
+            _ => elem.as_expression().map(|e| Span::from(e.span())),
         })
         .collect();
 
     MacroArrayArg {
-        span: ctx.adjust_span(arr.span),
+        span: Span::from(arr.span),
         element_spans,
     }
 }
@@ -790,8 +832,8 @@ fn extract_property_key<'a>(
     ctx: &ScriptParseContext<'a>,
 ) -> Option<(&'a str, Span)> {
     match key {
-        PropertyKey::StaticIdentifier(id) => Some((id.name.as_str(), ctx.adjust_span(id.span))),
-        PropertyKey::StringLiteral(s) => Some((s.value.as_str(), ctx.adjust_span(s.span))),
+        PropertyKey::StaticIdentifier(id) => Some((id.name.as_str(), Span::from(id.span))),
+        PropertyKey::StringLiteral(s) => Some((s.value.as_str(), Span::from(s.span))),
         PropertyKey::NumericLiteral(n) => {
             // For numeric keys, we'd need to convert to string
             // For now, skip these as they're rare in Vue macros
@@ -806,15 +848,14 @@ fn collect_declarations_from_pattern<'a>(
     pattern: &BindingPattern<'a>,
     kind: DeclarationKind,
     is_ref_like: bool,
-    ctx: &ScriptParseContext<'a>,
     items: &mut Vec<ScriptItem<'a>>,
 ) {
     match pattern {
         BindingPattern::BindingIdentifier(id) => {
             items.push(ScriptItem::Declaration(ScriptDeclaration {
-                span: ctx.adjust_span(id.span),
+                span: Span::from(id.span),
                 name: Some(id.name.as_str()),
-                name_span: Some(ctx.adjust_span(id.span)),
+                name_span: Some(Span::from(id.span)),
                 kind,
                 is_ref_like,
             }));
@@ -822,23 +863,23 @@ fn collect_declarations_from_pattern<'a>(
         BindingPattern::ObjectPattern(obj) => {
             // Destructured bindings are never ref-like
             for prop in &obj.properties {
-                collect_declarations_from_pattern(&prop.value, kind, false, ctx, items);
+                collect_declarations_from_pattern(&prop.value, kind, false, items);
             }
             if let Some(rest) = &obj.rest {
-                collect_declarations_from_pattern(&rest.argument, kind, false, ctx, items);
+                collect_declarations_from_pattern(&rest.argument, kind, false, items);
             }
         }
         BindingPattern::ArrayPattern(arr) => {
             // Destructured bindings are never ref-like
             for elem in arr.elements.iter().flatten() {
-                collect_declarations_from_pattern(elem, kind, false, ctx, items);
+                collect_declarations_from_pattern(elem, kind, false, items);
             }
             if let Some(rest) = &arr.rest {
-                collect_declarations_from_pattern(&rest.argument, kind, false, ctx, items);
+                collect_declarations_from_pattern(&rest.argument, kind, false, items);
             }
         }
         BindingPattern::AssignmentPattern(assign) => {
-            collect_declarations_from_pattern(&assign.left, kind, is_ref_like, ctx, items);
+            collect_declarations_from_pattern(&assign.left, kind, is_ref_like, items);
         }
     }
 }
@@ -858,7 +899,7 @@ pub fn check_expression_for_usage<'a>(
     match expr {
         // Track await expressions for before/after context
         Expression::AwaitExpression(await_expr) => {
-            usage_ctx.record_await(ctx.adjust_span(await_expr.span));
+            usage_ctx.record_await(Span::from(await_expr.span));
             // Also check the argument for Vue API calls
             check_expression_for_usage(&await_expr.argument, ctx, usage_ctx, None);
         }
@@ -929,7 +970,7 @@ fn collect_api_usage<'a>(
     usage_ctx: &mut UsageCollector<'a>,
     binding_span: Option<Span>,
 ) {
-    let span = ctx.adjust_span(call.span);
+    let span = Span::from(call.span);
 
     match kind.category() {
         VueApiCategory::DependencyInjection => {
@@ -994,7 +1035,7 @@ fn extract_provide_usage<'a>(
         .arguments
         .get(1)
         .and_then(|a| a.as_expression())
-        .map(|e| ctx.adjust_span(e.span()))?;
+        .map(|e| Span::from(e.span()))?;
 
     Some(ProvideUsage {
         span,
@@ -1034,15 +1075,15 @@ fn extract_provide_key<'a>(
 ) -> Option<ProvideKey> {
     match expr {
         Expression::StringLiteral(s) => Some(ProvideKey {
-            span: ctx.adjust_span(s.span),
+            span: Span::from(s.span),
             kind: ProvideKeyKind::StringLiteral,
         }),
         Expression::Identifier(id) => Some(ProvideKey {
-            span: ctx.adjust_span(id.span),
+            span: Span::from(id.span),
             kind: ProvideKeyKind::Symbol,
         }),
         _ => Some(ProvideKey {
-            span: ctx.adjust_span(expr.span()),
+            span: Span::from(expr.span()),
             kind: ProvideKeyKind::Dynamic,
         }),
     }
@@ -1063,7 +1104,7 @@ fn collect_reactivity_usage<'a>(
                 .arguments
                 .first()
                 .and_then(|a| a.as_expression())
-                .map(|e| ctx.adjust_span(e.span()));
+                .map(|e| Span::from(e.span()));
 
             usage_ctx.record_reactive(ReactiveStateUsage {
                 kind: reactive_kind,
@@ -1088,7 +1129,7 @@ fn collect_lifecycle_usage<'a>(
             .arguments
             .first()
             .and_then(|a| a.as_expression())
-            .map(|e| ctx.adjust_span(e.span()))
+            .map(|e| Span::from(e.span()))
             .unwrap_or(span);
 
         usage_ctx.record_lifecycle(LifecycleUsage {
@@ -1114,14 +1155,14 @@ fn collect_watcher_usage<'a>(
                 .arguments
                 .first()
                 .and_then(|a| a.as_expression())
-                .map(|e| vec![ctx.adjust_span(e.span())])
+                .map(|e| vec![Span::from(e.span())])
                 .unwrap_or_default();
 
             let callback_span = call
                 .arguments
                 .get(1)
                 .and_then(|a| a.as_expression())
-                .map(|e| ctx.adjust_span(e.span()))
+                .map(|e| Span::from(e.span()))
                 .unwrap_or(span);
 
             (callback_span, source_spans)
@@ -1132,7 +1173,7 @@ fn collect_watcher_usage<'a>(
                 .arguments
                 .first()
                 .and_then(|a| a.as_expression())
-                .map(|e| ctx.adjust_span(e.span()))
+                .map(|e| Span::from(e.span()))
                 .unwrap_or(span);
 
             (callback_span, Vec::new())
@@ -1163,7 +1204,7 @@ fn collect_template_util_usage<'a>(
             .and_then(|a| a.as_expression())
             .and_then(|e| {
                 if let Expression::StringLiteral(s) = e {
-                    Some(ctx.adjust_span(s.span))
+                    Some(Span::from(s.span))
                 } else {
                     None
                 }

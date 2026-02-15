@@ -15,8 +15,9 @@
     "vue": "^3.5.27"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@shikijs/monaco": "^3.9.2",
-    "@verter/vite-plugin": "workspace:*",
+    "@verter/unplugin": "workspace:*",
     "@vitejs/plugin-vue": "^6.0.4",
     "monaco-editor-core": "^0.55.1",
     "shiki": "^3.9.2",

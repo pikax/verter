@@ -1,5 +1,5 @@
 import { defineConfig } from "vite";
-import verter from "@verter/vite-plugin";
+import verter from "@verter/unplugin/vite";
 import vue from "@vitejs/plugin-vue";
 import { resolve } from "path";
 import { readFileSync } from "fs";
@@ -11,8 +11,8 @@ export default defineConfig({
     __VERTER_VERSION__: JSON.stringify(pkg.version),
   },
   plugins: [
-    // verter(),
-    vue(),
+    verter(),
+    // vue(),
   ],
   resolve: {
     alias: {

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use verter_core::builder::codegen::{
-    generate as core_generate, CodegenOptions as CoreOptions, FeatureFlags as CoreFeatures,
+    compile as core_compile, compile_with_tsx, CodegenOptions as CoreOptions,
 };
 use verter_core::strip_types::strip_types as core_strip_types;
 use wasm_bindgen::prelude::*;
@@ -11,44 +11,70 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct FeatureFlags {
-    /// Enable Options API support (default: true)
-    #[serde(default = "default_true")]
-    pub options_api: bool,
-    /// Enable reactive destructure for defineProps (default: true)
-    #[serde(default = "default_true")]
-    pub props_destructure: bool,
-}
-
 #[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CodegenOptions {
     /// The filename for source map generation
     pub filename: Option<String>,
-    /// Whether to include source content in the source map
-    #[serde(default)]
-    pub include_source_content: bool,
-    /// SSR mode
-    #[serde(default)]
-    pub ssr: bool,
     /// Production mode - affects component ID generation and optimizations
     #[serde(default)]
     pub is_production: bool,
     /// Custom component ID (overrides auto-generation from filename)
     pub component_id: Option<String>,
-    /// Feature flags for codegen
+    /// When true, generate TSX output via the syntax pipeline.
+    /// Default: false (skip TSX generation to save time).
     #[serde(default)]
-    pub features: FeatureFlags,
-    /// When true (default), preserve TypeScript syntax in output.
-    /// Set to false to strip type annotations for browser execution (playground).
-    #[serde(default = "default_true")]
-    pub keep_ts: bool,
+    pub include_tsx: bool,
+    /// Custom interpolation delimiters [open, close]. Default: ["{{", "}}"]
+    pub delimiters: Option<(String, String)>,
+    /// Tag name prefixes treated as custom elements (skip component resolution).
+    pub custom_elements: Option<Vec<String>>,
+    /// Whether to preserve HTML comments in output. Default: !isProduction
+    pub comments: Option<bool>,
+    /// Runtime module name to import helpers from. Default: "vue"
+    pub runtime_module_name: Option<String>,
+    /// Hoist static VNodes/props to constants. Default: true
+    pub hoist_static: Option<bool>,
+    /// Whitespace handling: "condense" or "preserve". Default: "condense"
+    pub whitespace: Option<String>,
+    /// Cache event handler expressions. Default: false
+    pub cache_handlers: Option<bool>,
+    /// Inline render function in setup(). Default: isProduction
+    pub inline: Option<bool>,
+    /// Indicates SFC uses :slotted() in styles. Default: true
+    pub slotted: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompiledStyleBlock {
+    /// Compiled CSS code (scoped selectors, v-bind replacements, module hashing applied)
+    pub code: String,
+    /// Whether this style block is scoped
+    pub scoped: bool,
+    /// Style language (css, scss, less, stylus)
+    pub lang: Option<String>,
+    /// Whether this is a CSS module block
+    pub is_module: bool,
+    /// CSS module class mappings (each entry is [original, hashed])
+    pub module_classes: Vec<Vec<String>>,
+    /// CSS processing errors
+    pub errors: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WasmDiagnostic {
+    /// Severity level: "error", "warning", or "info"
+    pub severity: String,
+    /// Vue-compatible error code (e.g., "XMissingEndTag", "XInvalidEndTag")
+    pub code: String,
+    /// Human-readable error message
+    pub message: String,
+    /// Optional source span start (byte offset)
+    pub span_start: Option<u32>,
+    /// Optional source span end (byte offset)
+    pub span_end: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -60,13 +86,23 @@ pub struct CodegenResult {
     pub source_map: String,
     /// The transformed code with inline source map appended
     pub code_with_source_map: String,
+    /// Compiled CSS blocks from `<style>` tags
+    pub styles: Vec<CompiledStyleBlock>,
+    /// Scope ID for scoped styles (e.g., "data-v-a4f2eed6"). Empty if no scoped styles.
+    pub scope_id: String,
+    /// Compilation diagnostics (errors, warnings, info)
+    pub errors: Vec<WasmDiagnostic>,
     /// Time taken for the Rust pipeline in milliseconds
     pub duration_ms: f64,
+    /// The generated TSX code (all blocks: script + template JSX + commented styles)
+    pub tsx: String,
+    /// Compiled CSS (scoped selectors applied, v-bind replaced) — deprecated, use `styles`
+    pub css: String,
+    /// Time taken for TSX generation in milliseconds
+    pub tsx_duration_ms: f64,
 }
 
 fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
-    // Create allocator internally - this is critical for memory safety
-    // The allocator manages memory for the OXC AST and cannot cross the WASM boundary
     let allocator = oxc_allocator::Allocator::new();
 
     let opts: CodegenOptions = if options.is_undefined() || options.is_null() {
@@ -76,26 +112,110 @@ fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
             .map_err(|e| JsValue::from_str(&format!("Invalid options: {}", e)))?
     };
 
+    let whitespace = opts.whitespace.and_then(|w| match w.as_str() {
+        "preserve" => Some(verter_core::builder::codegen::WhitespaceStrategy::Preserve),
+        "condense" => Some(verter_core::builder::codegen::WhitespaceStrategy::Condense),
+        _ => None,
+    });
+
     let core_options = CoreOptions {
-        filename: opts.filename,
-        include_source_content: opts.include_source_content,
-        ssr: opts.ssr,
+        filename: opts.filename.clone(),
         is_production: opts.is_production,
-        component_id: opts.component_id,
-        features: CoreFeatures {
-            options_api: opts.features.options_api,
-            props_destructure: opts.features.props_destructure,
-        },
-        keep_ts: opts.keep_ts,
+        component_id: opts.component_id.clone(),
+        include_tsx: opts.include_tsx,
+        skip_source_map: false,
+        delimiters: opts.delimiters,
+        custom_elements: opts.custom_elements,
+        comments: opts.comments,
+        runtime_module_name: opts.runtime_module_name,
+        hoist_static: opts.hoist_static,
+        whitespace,
+        cache_handlers: opts.cache_handlers,
+        inline: opts.inline,
+        slotted: opts.slotted,
+        prefix_identifiers: None,
     };
 
-    let result = core_generate(input, &core_options, &allocator);
+    let result = core_compile(input, &core_options, &allocator);
+
+    // Run TSX pipeline
+    let tsx_allocator = oxc_allocator::Allocator::new();
+    let tsx_result = compile_with_tsx(input, &core_options, &tsx_allocator);
+
+    let styles: Vec<CompiledStyleBlock> = result
+        .styles
+        .iter()
+        .map(|s| {
+            let module_classes = s
+                .module
+                .as_ref()
+                .map(|m| {
+                    m.classes
+                        .iter()
+                        .map(|c| vec![c.original.clone(), c.hashed.clone()])
+                        .collect()
+                })
+                .unwrap_or_default();
+            CompiledStyleBlock {
+                code: s.code.clone(),
+                scoped: s.scoped,
+                lang: s.lang.map(|l| match l {
+                    verter_core::syntax::types::StyleLang::Css => "css".to_string(),
+                    verter_core::syntax::types::StyleLang::Scss => "scss".to_string(),
+                    verter_core::syntax::types::StyleLang::Sass => "sass".to_string(),
+                    verter_core::syntax::types::StyleLang::Less => "less".to_string(),
+                    verter_core::syntax::types::StyleLang::Stylus => "stylus".to_string(),
+                    verter_core::syntax::types::StyleLang::Unknown => "unknown".to_string(),
+                }),
+                is_module: s.module.is_some(),
+                module_classes,
+                errors: s.errors.clone(),
+            }
+        })
+        .collect();
+
+    let errors = result
+        .errors
+        .iter()
+        .map(|d| {
+            let severity = match d.severity {
+                verter_core::builder::codegen::CompileDiagnosticSeverity::Error => "error",
+                verter_core::builder::codegen::CompileDiagnosticSeverity::Warning => "warning",
+                verter_core::builder::codegen::CompileDiagnosticSeverity::Info => "info",
+            };
+            WasmDiagnostic {
+                severity: severity.to_string(),
+                code: d.code.clone(),
+                message: d.message.clone(),
+                span_start: d.span.map(|s| s.start),
+                span_end: d.span.map(|s| s.end),
+            }
+        })
+        .collect();
+
+    // Build css from compiled styles when tsx pipeline hasn't produced CSS
+    let css = if tsx_result.css.is_empty() {
+        result
+            .styles
+            .iter()
+            .map(|s| s.code.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        tsx_result.css
+    };
 
     let js_result = CodegenResult {
         code: result.code,
         source_map: result.source_map,
         code_with_source_map: result.code_with_source_map,
+        styles,
+        scope_id: result.scope_id,
+        errors,
         duration_ms: result.duration_ms,
+        tsx: tsx_result.tsx,
+        css,
+        tsx_duration_ms: tsx_result.duration_ms,
     };
 
     serde_wasm_bindgen::to_value(&js_result)

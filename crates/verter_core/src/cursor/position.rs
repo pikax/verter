@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn test_utf16_offset_ascii_only() {
-        let bump = Bump::new();
+        let _bump = Bump::new();
         let input = "line1\nline2\nline3";
         let line_offsets = find_lines_memchr_bump_vec(input.as_bytes());
         let utf16_offsets = find_utf16_offset_from_vec(input, &line_offsets);
@@ -544,7 +544,7 @@ mod tests {
 
     #[test]
     fn test_utf16_offset_with_emoji() {
-        let bump = Bump::new();
+        let _bump = Bump::new();
         // "a😀b\ncd\ne"
         // Bytes: a(0), 😀(1-4), b(5), \n(6), c(7), d(8), \n(9), e(10)
         // UTF-16: a(1), 😀(2), b(1), \n(1), c(1), d(1), \n(1), e(1)
@@ -562,7 +562,7 @@ mod tests {
 
     #[test]
     fn test_utf16_offset_with_cjk() {
-        let bump = Bump::new();
+        let _bump = Bump::new();
         // "你好\n世界"
         // Bytes: 你(0-2), 好(3-5), \n(6), 世(7-9), 界(10-12)
         // UTF-16: 你(1), 好(1), \n(1), 世(1), 界(1)
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_utf16_offset_mixed_content() {
-        let bump = Bump::new();
+        let _bump = Bump::new();
         // "café\n🎉party"
         // Bytes: c(0), a(1), f(2), é(3-4), \n(5), 🎉(6-9), p(10)...
         // UTF-16: c(1), a(1), f(1), é(1), \n(1), 🎉(2), p(1)...
@@ -596,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_utf16_offset_empty_lines() {
-        let bump = Bump::new();
+        let _bump = Bump::new();
         let input = "a\n\nb";
         let line_offsets = find_lines_memchr_bump_vec(input.as_bytes());
         let utf16_offsets = find_utf16_offset_from_vec(input, &line_offsets);
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn test_utf16_offset_no_newlines() {
-        let bump = Bump::new();
+        let _bump = Bump::new();
         let input = "hello world";
         let line_offsets = find_lines_memchr_bump_vec(input.as_bytes());
         let utf16_offsets = find_utf16_offset_from_vec(input, &line_offsets);
@@ -623,7 +623,7 @@ mod tests {
 
     #[test]
     fn test_utf16_offset_single_emoji_line() {
-        let bump = Bump::new();
+        let _bump = Bump::new();
         let input = "😀😀😀\n";
         let line_offsets = find_lines_memchr_bump_vec(input.as_bytes());
         let utf16_offsets = find_utf16_offset_from_vec(input, &line_offsets);
@@ -639,7 +639,7 @@ mod tests {
 
     #[test]
     fn test_position_resolver_ascii() {
-        let bump = Bump::new();
+        let _bump = Bump::new();
         let input = "line1\nline2\nline3";
         let resolver = PositionResolver::new(input);
 
@@ -655,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_position_resolver_utf16() {
-        let bump = Bump::new();
+        let _bump = Bump::new();
         let input = "a😊b\nc🧪d";
         let resolver = PositionResolver::new(input);
 
@@ -692,7 +692,7 @@ mod tests {
 
     #[test]
     fn test_position_resolver_cjk() {
-        let bump = Bump::new();
+        let _bump = Bump::new();
         let input = "你好\n世界";
         let resolver = PositionResolver::new(input);
 
@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn test_position_resolver_empty_lines() {
-        let bump = Bump::new();
+        let _bump = Bump::new();
         let input = "a\n\nb";
         let resolver = PositionResolver::new(input);
 

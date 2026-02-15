@@ -1,25 +1,41 @@
-export interface FeatureFlags {
-  /** Enable Options API support (default: true) */
-  optionsApi?: boolean;
-  /** Enable reactive destructure for defineProps (default: true) */
-  propsDestructure?: boolean;
-}
-
 export interface CodegenOptions {
   /** The filename for source map generation */
   filename?: string;
-  /** Whether to include source content in the source map */
-  includeSourceContent?: boolean;
-  /** SSR mode */
-  ssr?: boolean;
   /** Production mode - affects component ID generation and optimizations */
   isProduction?: boolean;
   /** Custom component ID (overrides auto-generation from filename) */
   componentId?: string;
-  /** Feature flags for codegen */
-  features?: FeatureFlags;
-  /** When true (default), preserve TypeScript syntax in output. Set to false to strip types. */
-  keepTs?: boolean;
+  /** When true, generate TSX output. Default: false. */
+  includeTsx?: boolean;
+}
+
+export interface CompiledStyleBlock {
+  /** Compiled CSS code (scoped selectors, v-bind replacements, module hashing applied) */
+  code: string;
+  /** Whether this style block is scoped */
+  scoped: boolean;
+  /** Style language (css, scss, less, stylus) */
+  lang: string | null;
+  /** Whether this is a CSS module block */
+  isModule: boolean;
+  /** CSS module class mappings (each entry is [original, hashed]) */
+  moduleClasses: string[][];
+  /** CSS processing errors */
+  errors: string[];
+}
+
+/** A structured diagnostic from the compiler */
+export interface WasmDiagnostic {
+  /** Severity level: "error", "warning", or "info" */
+  severity: string;
+  /** Vue-compatible error code (e.g., "XMissingEndTag") */
+  code: string;
+  /** Human-readable error message */
+  message: string;
+  /** Optional source span start (byte offset) */
+  spanStart?: number;
+  /** Optional source span end (byte offset) */
+  spanEnd?: number;
 }
 
 export interface CodegenResult {
@@ -29,8 +45,20 @@ export interface CodegenResult {
   sourceMap: string;
   /** The transformed code with inline source map appended */
   codeWithSourceMap: string;
+  /** Compiled CSS blocks from `<style>` tags */
+  styles: CompiledStyleBlock[];
+  /** Scope ID for scoped styles (e.g., "data-v-a4f2eed6"). Empty if no scoped styles. */
+  scopeId: string;
+  /** Compilation diagnostics (errors, warnings) */
+  errors: WasmDiagnostic[];
   /** Time taken for the Rust pipeline in milliseconds */
   durationMs: number;
+  /** The generated TSX code (all blocks: script + template JSX + commented styles) */
+  tsx: string;
+  /** Compiled CSS (scoped selectors applied, v-bind replaced) */
+  css: string;
+  /** Time taken for TSX generation in milliseconds */
+  tsxDurationMs: number;
 }
 
 export interface StripTypesResult {

@@ -1,9 +1,9 @@
 /**
  * @ai-generated - Tests for Buffer input support in @verter/native compile functions.
- * Verifies that compile, compileSync, and compileForVite accept both string and Buffer inputs.
+ * Verifies that compile and compileForVite accept both string and Buffer inputs.
  */
 import { describe, it, expect } from "vitest";
-import { compile, compileSync, compileForVite } from "./index.js";
+import { compile, compileForVite } from "./index.js";
 
 const SFC_INPUT = "<template><div>{{ msg }}</div></template>";
 
@@ -39,23 +39,6 @@ describe("Buffer input support", () => {
       const invalidUtf8 = Buffer.from([0x80, 0x81, 0x82]);
 
       expect(() => compile(invalidUtf8)).toThrow("UTF-8");
-    });
-  });
-
-  describe("compileSync", () => {
-    // @ai-generated - compileSync accepts Buffer input
-    it("should produce identical results for string and Buffer input", () => {
-      const stringResult = compileSync(SFC_INPUT, { filename: "Test.vue" });
-      const bufferResult = compileSync(Buffer.from(SFC_INPUT), { filename: "Test.vue" });
-
-      expect(bufferResult.code).toBe(stringResult.code);
-    });
-
-    // @ai-generated - compileSync throws on invalid UTF-8
-    it("should throw on invalid UTF-8 Buffer", () => {
-      const invalidUtf8 = Buffer.from([0x80, 0x81, 0x82]);
-
-      expect(() => compileSync(invalidUtf8)).toThrow("UTF-8");
     });
   });
 

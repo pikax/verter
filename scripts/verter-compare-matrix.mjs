@@ -204,10 +204,10 @@ function preflight(opts) {
     console.warn("Warning: @vitejs/plugin-vue not found. Vue capture may fail.");
   }
 
-  // Check verter vite-plugin is built
-  const verterDist = join(VERTER_ROOT, "packages", "vite-plugin", "dist", "index.js");
+  // Check verter unplugin is built
+  const verterDist = join(VERTER_ROOT, "packages", "unplugin", "dist", "index.mjs");
   if (!existsSync(verterDist)) {
-    throw new Error(`Verter vite-plugin not built. Run 'pnpm run build:ts' in ${VERTER_ROOT}`);
+    throw new Error(`Verter unplugin not built. Run 'pnpm run build:unplugin' in ${VERTER_ROOT}`);
   }
 }
 
@@ -226,9 +226,9 @@ function captureMode(opts, mode, vueFiles, runDir, compiler) {
   const verterPluginPath = join(
     VERTER_ROOT,
     "packages",
-    "vite-plugin",
+    "unplugin",
     "dist",
-    "index.mjs",
+    "vite.mjs",
   ).replace(/\\/g, "/");
 
   // Write a runner script that will execute inside the project's node context

@@ -489,7 +489,6 @@ export function startServer(options: LsConnectionOption = {}) {
       const filename = uriToPath(doc.uri) || doc.uri;
       const compiled = nativeCompile(sourceCode, {
         filename,
-        include_source_content: true,
       });
       wasmResult = {
         code: compiled.code,
