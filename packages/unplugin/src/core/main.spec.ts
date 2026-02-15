@@ -8,7 +8,7 @@ import type { ViteCodegenResult } from "@verter/native";
 function makeResult(overrides: Partial<ViteCodegenResult> = {}): ViteCodegenResult {
   return {
     script: {
-      code: "export default { name: 'App' }",
+      code: "const __sfc__ = { name: 'App' }",
       imports: [],
       body_start_utf16: 0,
     },
@@ -18,6 +18,7 @@ function makeResult(overrides: Partial<ViteCodegenResult> = {}): ViteCodegenResu
       body_start_utf16: 0,
     },
     styles: [],
+    has_default_export: true,
     duration_ms: 1,
     ...overrides,
   };
@@ -242,7 +243,7 @@ describe("generateMainModule", () => {
   });
 
   it("handles result with no script", () => {
-    const result = makeResult({ script: undefined });
+    const result = makeResult({ script: undefined, has_default_export: false });
     const output = generateMainModule(result, {
       filename: "/path/to/App.vue",
       scopeId: "abc12345",
@@ -281,7 +282,6 @@ describe("generateMainModule", () => {
         code: [
           "const __sfc__ = { setup() { return {} } }",
           "function render(_ctx, _cache, $props, $setup) { return null }",
-          "export default __sfc__",
         ].join("\n"),
         imports: [],
         body_start_utf16: 0,
@@ -318,7 +318,7 @@ describe("generateMainModule", () => {
   it("does not attach render when there is no render function", () => {
     const result = makeResult({
       script: {
-        code: "export default { name: 'App' }",
+        code: "const __sfc__ = { name: 'App' }",
         imports: [],
         body_start_utf16: 0,
       },
@@ -339,8 +339,10 @@ describe("generateMainModule", () => {
   // ==================== Duplicate export default regression ====================
 
   // @ai-generated - Reproduces the Preview.vue bug where "export default" in a comment
-  // causes the real export default to be missed, resulting in duplicate exports
-  it("replaces the real export default when 'export default' appears in a comment", () => {
+  // used to cause duplicate exports. With the new __sfc__ approach, `compile_for_vite_impl`
+  // strips `export default __sfc__` and `__sfc__.__scopeId`, so script code arriving here
+  // only contains the `const __sfc__` definition. Comments with "export default" are safe.
+  it("handles 'export default' appearing in a comment without issues", () => {
     const result = makeResult({
       script: {
         code: [
@@ -348,8 +350,6 @@ describe("generateMainModule", () => {
           "  // Transform: export default X -> window.__modules__[name].default = X",
           "  const x = 1",
           "} }",
-          '__sfc__.__scopeId = "data-v-abc12345";',
-          "export default __sfc__",
         ].join("\n"),
         imports: [],
         body_start_utf16: 0,
@@ -366,17 +366,18 @@ describe("generateMainModule", () => {
       hmr: "none",
     });
 
-    // The real "export default __sfc__" statement must be replaced, not the one in the comment
-    expect(output).toContain("const _sfc_main = __sfc__");
-    expect(output).not.toMatch(/^export default __sfc__/m);
+    // __sfc__ is renamed to _sfc_main; comment is left intact
+    expect(output).toContain("const _sfc_main = { setup()");
+    expect(output).toContain("// Transform: export default X ->");
     expect(output).toContain("export default Preview");
   });
 
   // @ai-generated - Script code with "export default" inside a string literal
-  it("replaces the real export default when 'export default' appears in a string literal", () => {
+  // With __sfc__ approach, string content is irrelevant — we only match `const __sfc__`
+  it("handles 'export default' in a string literal without issues", () => {
     const result = makeResult({
       script: {
-        code: 'const msg = "export default something";\nexport default { name: "App" }',
+        code: 'const msg = "export default something";\nconst __sfc__ = { name: "App" }',
         imports: [],
         body_start_utf16: 0,
       },
@@ -391,9 +392,9 @@ describe("generateMainModule", () => {
       hmr: "none",
     });
 
-    // The real "export default" statement must be replaced, not the one in the string literal
+    // __sfc__ renamed, string literal left intact
     expect(output).toContain('const _sfc_main = { name: "App" }');
-    expect(output).not.toMatch(/^export default \{ name/m);
+    expect(output).toContain('"export default something"');
     expect(output).toContain("export default _sfc_main");
   });
 

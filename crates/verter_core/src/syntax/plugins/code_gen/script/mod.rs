@@ -53,6 +53,11 @@ pub struct ScriptGeneratorPlugin<'alloc> {
     /// Whether the template uses vapor mode (`<template vapor>`).
     /// Detected from `CompiledTemplateStart` event, emitted as `__vapor: true` in `end()`.
     is_vapor: bool,
+    /// Whether any `<style scoped>` block was seen. Used to emit `__sfc__.__scopeId`.
+    has_scoped: bool,
+    /// Whether the script has a default export (from `<script setup>` or `export default` in
+    /// regular `<script>`). When true, `end()` appends `export default __sfc__`.
+    has_default_export: bool,
 }
 
 impl<'alloc> ScriptGeneratorPlugin<'alloc> {
@@ -79,6 +84,8 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
             bindings: FxHashMap::default(),
             deferred_inline_closing: None,
             is_vapor: false,
+            has_scoped: false,
+            has_default_export: false,
         }
     }
 
@@ -114,6 +121,12 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
     /// Generate source map JSON string.
     pub fn generate_source_map(&self, options: SourceMapOptions) -> String {
         self.code_transform.borrow().generate_map_json(options)
+    }
+
+    /// Whether this plugin used the `const __sfc__ = ...` + `export default __sfc__` pattern.
+    /// When true, the builder should skip its own scoped-style wrapping.
+    pub fn has_sfc_wrapper(&self) -> bool {
+        self.has_default_export
     }
 
     fn process_script(&mut self, event: &OxcScript<'alloc>, ctx: &mut SyntaxPluginContext<'alloc>) {
@@ -153,6 +166,28 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
         // Save the insertion position for useCssVars injection in end()
         if is_setup {
             self.script_insert_pos = Some(event.tag_open_end);
+            // <script setup> always produces a default export (via const __sfc__ in process.rs)
+            self.has_default_export = true;
+        } else {
+            // For regular <script>, check if it has `export default` via the AST.
+            // Replace it with `const __sfc__ = ` using the known span, so the plugin
+            // controls the export (emitted in end()).
+            use crate::utils::oxc::vue::ScriptItem;
+            for item in &event.result.items {
+                if let ScriptItem::DefaultExport(de) = item {
+                    self.has_default_export = true;
+                    // Use AST span to precisely overwrite "export default " with "const __sfc__ = "
+                    // The span covers the full statement; we only need to replace the
+                    // `export default` keyword prefix (the declaration follows).
+                    let keyword_end = de.span.start + "export default ".len() as u32;
+                    self.code_transform.borrow_mut().overwrite(
+                        de.span.start,
+                        keyword_end,
+                        "const __sfc__ = ",
+                    );
+                    break;
+                }
+            }
         }
 
         // Process the script content with macros and transformations.
@@ -297,6 +332,18 @@ impl<'alloc> SyntaxPlugin<'alloc> for ScriptGeneratorPlugin<'alloc> {
             self.code_transform.borrow_mut().append(closing);
         }
 
+        // Emit __sfc__.__scopeId and export default __sfc__ at the end.
+        // This is done here (not in codegen.rs) because the plugin has AST-level
+        // knowledge of where `export default` was placed, avoiding fragile string matching.
+        if self.has_default_export {
+            let mut ct = self.code_transform.borrow_mut();
+            if self.has_scoped {
+                let hex = std::str::from_utf8(&self.scope_id).unwrap_or("00000000");
+                ct.append(&format!("\n__sfc__.__scopeId = \"data-v-{}\";", hex));
+            }
+            ct.append("\nexport default __sfc__;\n");
+        }
+
         // Add imports to the top of the script
         if !self.imports.is_empty() {
             self.code_transform.borrow_mut().prepend(
@@ -325,6 +372,7 @@ impl<'alloc> SyntaxPlugin<'alloc> for ScriptGeneratorPlugin<'alloc> {
                 self.process_script(script, ctx);
             }
             Event::CssParsedStyle(parsed) => {
+                self.has_scoped |= parsed.scoped;
                 self.collect_css_v_binds(parsed, ctx);
             }
             _ => {}
@@ -453,8 +501,13 @@ const b = 2
             "<script setup>\nconst msg = 'Hello'\n</script>\n<template><div>hi</div></template>",
         );
         assert!(
-            code.contains("export default /*@__PURE__*/"),
-            "Should have export default, got:\n{}",
+            code.contains("const __sfc__ = /*@__PURE__*/"),
+            "Should have const __sfc__ = /*@__PURE__*/, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("export default __sfc__"),
+            "Should export __sfc__ at the end, got:\n{}",
             code
         );
         assert!(
@@ -532,8 +585,13 @@ const b = 2
             code
         );
         assert!(
-            code.contains("export default { name: 'Foo' }"),
-            "Should keep script content, got:\n{}",
+            code.contains("const __sfc__ = { name: 'Foo' }"),
+            "Should replace export default with const __sfc__, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("export default __sfc__"),
+            "Should export __sfc__ at the end, got:\n{}",
             code
         );
     }
@@ -1455,6 +1513,113 @@ const themeColor = ref('red')
         assert!(
             !code.contains("_ctx.themeColor"),
             "Should NOT use _ctx.themeColor for setup ref bindings, got:\n{code}"
+        );
+    }
+
+    // =========================================================================
+    // Scoped Styles: __sfc__ wrapping (AST-based export default)
+    // =========================================================================
+
+    /// @ai-generated — Script setup with scoped style should use const __sfc__ pattern
+    #[test]
+    fn test_scoped_style_uses_sfc_variable() {
+        let code = gen_and_validate(
+            "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>\n<style scoped>\n.red { color: red }\n</style>",
+        );
+        assert!(
+            code.contains("const __sfc__ = /*@__PURE__*/"),
+            "Should use const __sfc__ for scoped styles, got:\n{code}"
+        );
+        assert!(
+            code.contains("__sfc__.__scopeId"),
+            "Should set __scopeId on __sfc__, got:\n{code}"
+        );
+        assert!(
+            code.contains("export default __sfc__"),
+            "Should export __sfc__ at the end, got:\n{code}"
+        );
+        // Must have exactly ONE export default statement
+        let export_count = code.matches("export default ").count();
+        assert_eq!(
+            export_count, 1,
+            "Should have exactly one export default, got {export_count} in:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Regression: script body with "export default" in a comment must
+    /// NOT cause duplicate export default statements in scoped output
+    #[test]
+    fn test_scoped_with_export_default_in_comment() {
+        let code = gen_and_validate(
+            r#"<script setup>
+const msg = 'hi'
+// Transform: export default X -> something
+</script>
+<template><div>{{ msg }}</div></template>
+<style scoped>
+.red { color: red }
+</style>"#,
+        );
+        // The comment text contains "export default" but the output is valid JS
+        // (gen_and_validate already ensures that). Verify the actual export is
+        // the compiler-generated `export default __sfc__` at the end.
+        assert!(
+            code.contains("export default __sfc__"),
+            "Should have export default __sfc__, got:\n{code}"
+        );
+        // Count only export default statements that start a line (not inside comments)
+        let export_stmt_count = code
+            .lines()
+            .filter(|line| line.trim_start().starts_with("export default "))
+            .count();
+        assert_eq!(
+            export_stmt_count, 1,
+            "Should have exactly one export default statement, got {export_stmt_count} in:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Regular <script> with scoped style: export default from AST
+    #[test]
+    fn test_regular_script_scoped_style() {
+        let code = gen_and_validate(
+            "<script>\nexport default { name: 'Foo' }\n</script>\n<template><div>x</div></template>\n<style scoped>\n.red { color: red }\n</style>",
+        );
+        assert!(
+            code.contains("const __sfc__ ="),
+            "Scoped regular script should use const __sfc__, got:\n{code}"
+        );
+        assert!(
+            code.contains("__sfc__.__scopeId"),
+            "Should set __scopeId on __sfc__, got:\n{code}"
+        );
+        assert!(
+            code.contains("export default __sfc__"),
+            "Should export __sfc__ at the end, got:\n{code}"
+        );
+        let export_count = code.matches("export default ").count();
+        assert_eq!(
+            export_count, 1,
+            "Should have exactly one export default, got {export_count} in:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Non-scoped setup should still use __sfc__ + export default pattern
+    #[test]
+    fn test_non_scoped_setup_uses_sfc_variable() {
+        let code = gen_and_validate(
+            "<script setup>\nconst msg = 'hi'\n</script>\n<template><div>{{ msg }}</div></template>",
+        );
+        assert!(
+            code.contains("const __sfc__ = /*@__PURE__*/"),
+            "Should use const __sfc__ pattern, got:\n{code}"
+        );
+        assert!(
+            code.contains("export default __sfc__"),
+            "Should export __sfc__ at the end, got:\n{code}"
+        );
+        assert!(
+            !code.contains("__sfc__.__scopeId"),
+            "Non-scoped should not set __scopeId, got:\n{code}"
         );
     }
 }

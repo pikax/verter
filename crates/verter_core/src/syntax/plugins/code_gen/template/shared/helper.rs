@@ -954,15 +954,16 @@ mod tests {
         );
     }
 
-    /// @ai-generated — build_prefixed_value_with_var_mappings: inline ref adds .value
+    /// @ai-generated — build_prefixed_value_into: inline ref adds .value
     #[test]
     fn test_build_prefixed_value_inline_ref_suffix() {
         use crate::syntax::binding_types::BindingType;
         let br = make_bindings(&[("count", 0, 5, false)]);
         let mut map = FxHashMap::default();
         map.insert("count" as &str, BindingType::SetupRef);
-        let result = build_prefixed_value_with_var_mappings("count", 0, Some(&br), &map, true, &[]);
-        assert_eq!(result, "count.value");
+        let mut buf = String::new();
+        build_prefixed_value_into(&mut buf, "count", 0, Some(&br), &map, true, &[]);
+        assert_eq!(buf, "count.value");
     }
 
     /// @ai-generated — build_prefixed_value_into: inline ref adds .value
@@ -977,7 +978,7 @@ mod tests {
         assert_eq!(buf, "count.value");
     }
 
-    /// @ai-generated — prefix_vfor_references: inline ref in iterable gets .value
+    /// @ai-generated — prefix_vfor_references_into: inline ref in iterable gets .value
     #[test]
     fn test_prefix_vfor_references_inline_ref_suffix() {
         use crate::syntax::binding_types::BindingType;
@@ -985,8 +986,9 @@ mod tests {
         let mut bindings = FxHashMap::default();
         bindings.insert("items" as &str, BindingType::SetupRef);
         let refs = vec![Span { start: 0, end: 5 }];
-        let result = prefix_vfor_references(text, 0, &refs, None, text, &bindings, true);
-        assert_eq!(result, "items.value");
+        let mut buf = String::new();
+        prefix_vfor_references_into(&mut buf, text, 0, &refs, None, text, &bindings, true);
+        assert_eq!(buf, "items.value");
     }
 
     /// @ai-generated — prefix_vfor_references_into: inline ref gets .value

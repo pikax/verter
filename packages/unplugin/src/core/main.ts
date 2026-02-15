@@ -64,7 +64,9 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
   }
 
   // 2. Add script code (component definition)
-  let hasDefaultExport = false;
+  // napi-rs converts snake_case to camelCase at runtime
+  const hasDefaultExport =
+    (result as any).hasDefaultExport ?? (result as any).has_default_export ?? false;
   if (result.script) {
     let scriptCode = result.script.code;
 
@@ -84,9 +86,10 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
       lines.push("");
     }
 
-    hasDefaultExport = scriptCode.includes("export default");
+    // The Rust compiler emits `const __sfc__ = ...` (a compiler-controlled identifier).
+    // Rename it to _sfc_main for the final output.
     if (hasDefaultExport) {
-      scriptCode = scriptCode.replace(/export default\s+/, "const _sfc_main = ");
+      scriptCode = scriptCode.replace(/\bconst __sfc__ = /, "const _sfc_main = ");
     }
 
     // Strip `export` from `export function render(...)` — vapor puts an exported

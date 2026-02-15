@@ -303,6 +303,8 @@ pub struct ViteCodegenResult {
     pub template: Option<JsBlockOutput>,
     /// Style blocks
     pub styles: Vec<JsStyleBlock>,
+    /// Whether the SFC has a default export (script setup or script with export default)
+    pub has_default_export: bool,
     /// Build time in milliseconds
     pub duration_ms: f64,
 }
@@ -367,15 +369,38 @@ fn compile_for_vite_impl(
         })
         .collect();
 
+    // The Rust compiler now emits `const __sfc__ = ...`, `__sfc__.__scopeId = "...";`,
+    // and `export default __sfc__;` at the end.  For the Vite path, strip these lines
+    // so that generateMainModule in TypeScript can handle metadata and export.
+    let mut code = result.code;
+    let mut has_default_export = false;
+
+    if let Some(pos) = code.rfind("\nexport default __sfc__;\n") {
+        code.replace_range(pos..pos + "\nexport default __sfc__;\n".len(), "\n");
+        has_default_export = true;
+    } else if code.ends_with("export default __sfc__;\n") {
+        let pos = code.len() - "export default __sfc__;\n".len();
+        code.truncate(pos);
+        has_default_export = true;
+    }
+
+    // Strip __sfc__.__scopeId line — generateMainModule handles scopeId via metadata
+    if let Some(start) = code.find("\n__sfc__.__scopeId = ") {
+        if let Some(end) = code[start + 1..].find('\n') {
+            code.replace_range(start..start + 1 + end, "");
+        }
+    }
+
     Ok(ViteCodegenResult {
         script: Some(JsBlockOutput {
-            code: result.code,
+            code,
             source_map: Some(result.source_map),
             imports: vec![],
             body_start_utf16: 0,
         }),
         template: None,
         styles,
+        has_default_export,
         duration_ms: result.duration_ms,
     })
 }

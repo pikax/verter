@@ -475,23 +475,16 @@ pub fn compile(
     let code = code_transform.borrow().build_string();
     let styles = code_gen_css.take_styles();
 
-    // Scoped styles: wrap component in __sfc__ variable and set __scopeId
+    // Scoped styles: __sfc__.__scopeId and export default __sfc__ are now emitted
+    // by ScriptGeneratorPlugin::end() using AST-level position info, avoiding fragile
+    // string-based detection of "export default". The scope_id_string is still computed
+    // for the CodegenResult metadata.
     let has_scoped = styles.iter().any(|s| s.scoped);
     let scope_id_string = if has_scoped {
         let hex = std::str::from_utf8(&scope_id).unwrap_or("00000000");
         format!("data-v-{}", hex)
     } else {
         String::new()
-    };
-    let code = if has_scoped {
-        let scope_id_hex = std::str::from_utf8(&scope_id).unwrap_or("00000000");
-        let code = code.replacen("export default ", "const __sfc__ = ", 1);
-        format!(
-            "{}\n__sfc__.__scopeId = \"data-v-{}\";\nexport default __sfc__;\n",
-            code, scope_id_hex
-        )
-    } else {
-        code
     };
 
     let (source_map, code_with_source_map) = if options.skip_source_map {
@@ -1872,7 +1865,7 @@ const x = 1
         );
     }
 
-    /// @ai-generated — Non-scoped styles: no __sfc__ or __scopeId in code
+    /// @ai-generated — Non-scoped styles: __sfc__ pattern used but no __scopeId
     #[test]
     fn test_no_scoped_styles_no_scope_id() {
         let input = r#"<script setup>
@@ -1883,9 +1876,10 @@ const x = 1
 
         let result = gen_result(input);
 
+        // All SFCs now use the __sfc__ pattern (AST-based export default)
         assert!(
-            !result.code.contains("__sfc__"),
-            "Non-scoped SFC should NOT have __sfc__, got:\n{}",
+            result.code.contains("const __sfc__ ="),
+            "Should use const __sfc__ pattern, got:\n{}",
             result.code
         );
         assert!(
@@ -1894,8 +1888,8 @@ const x = 1
             result.code
         );
         assert!(
-            result.code.contains("export default "),
-            "Non-scoped SFC should use normal export default, got:\n{}",
+            result.code.contains("export default __sfc__"),
+            "Non-scoped SFC should export __sfc__, got:\n{}",
             result.code
         );
     }

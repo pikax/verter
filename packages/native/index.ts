@@ -275,6 +275,10 @@ export interface ViteCodegenResult {
    */
   styles: JsStyleBlock[];
   /**
+   * Whether the SFC has a default export (script setup or script with export default)
+   */
+  has_default_export: boolean;
+  /**
    * Build time in milliseconds
    */
   duration_ms: number;

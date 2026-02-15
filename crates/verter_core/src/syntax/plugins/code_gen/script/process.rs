@@ -68,13 +68,15 @@ pub fn process_script_event<'alloc>(
 
     let mut has_emit_declarator = false;
 
-    // Opening tag: always emit simple "export default /*@__PURE__*/".
-    // Dual-script wrapping (Object.assign(__default__, ...)) is handled by the caller
-    // (ScriptCodegenPlugin.end()) which knows whether both script blocks exist.
+    // Opening tag: emit "const __sfc__ = /*@__PURE__*/".
+    // The actual `export default __sfc__` is appended by ScriptGeneratorPlugin::end(),
+    // which also handles __scopeId for scoped styles. Using a variable here instead of
+    // `export default` avoids string-based detection issues (e.g., "export default" in
+    // comments/strings being mistakenly matched by downstream processors).
     code_transform.overwrite(
         script.tag_open_start,
         script.tag_open_end,
-        "export default /*@__PURE__*/",
+        "const __sfc__ = /*@__PURE__*/",
     );
 
     // Process each script item

@@ -450,6 +450,16 @@ test.describe('Verter E2E Tests', () => {
     await expect(page.getByTestId('deep-leaf-value')).toHaveText('leaf-updated')
   })
 
+  // @ai-generated - Regression: scoped component with "export default" in a comment
+  // must compile without duplicate export default errors
+  test('ExportDefaultComment: renders with scoped style and comment containing export default', async ({ page }) => {
+    await expect(page.getByTestId('export-comment-label')).toHaveText('export default in comment')
+    await expect(page.getByTestId('export-comment-count')).toHaveText('0')
+
+    await page.getByTestId('export-comment-btn').click()
+    await expect(page.getByTestId('export-comment-count')).toHaveText('1')
+  })
+
   // ─── Integration ────────────────────────────────────────
 
   test('TodoApp: full CRUD workflow', async ({ page }) => {
