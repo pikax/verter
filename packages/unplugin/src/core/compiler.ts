@@ -13,6 +13,7 @@ export function loadCompiler(): Compiler {
   compiler = {
     compileForVite: (input, opts) => native.compileForVite(input, opts),
     processStyle: (css, opts) => native.processStyle(css, opts),
+    stripTypes: (source) => native.stripTypes(source),
   };
   return compiler;
 }

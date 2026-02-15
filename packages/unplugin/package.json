@@ -54,17 +54,52 @@
   "scripts": {
     "build": "tsdown src/index.ts src/vite.ts src/rollup.ts src/webpack.ts src/esbuild.ts src/rspack.ts src/rolldown.ts src/farm.ts --format cjs,esm --dts --unbundle",
     "dev": "tsdown src/index.ts src/vite.ts src/rollup.ts src/webpack.ts src/esbuild.ts src/rspack.ts src/rolldown.ts src/farm.ts --format cjs,esm --dts --unbundle --watch",
-    "test": "vitest run"
+    "test": "vitest run",
+    "e2e": "tsx e2e/scripts/run.ts",
+    "e2e:vite": "tsx e2e/scripts/run.ts --bundler vite",
+    "e2e:webpack": "tsx e2e/scripts/run.ts --bundler webpack",
+    "e2e:rollup": "tsx e2e/scripts/run.ts --bundler rollup",
+    "e2e:esbuild": "tsx e2e/scripts/run.ts --bundler esbuild",
+    "e2e:rspack": "tsx e2e/scripts/run.ts --bundler rspack",
+    "e2e:rolldown": "tsx e2e/scripts/run.ts --bundler rolldown",
+    "e2e:farm": "tsx e2e/scripts/run.ts --bundler farm"
   },
   "dependencies": {
     "@verter/native": "workspace:*",
     "unplugin": "^2.3.2"
   },
   "devDependencies": {
+    "@farmfe/cli": "^1.0.0",
+    "@farmfe/core": "^1.0.0",
+    "@playwright/test": "^1.52.0",
+    "@rollup/plugin-commonjs": "^29.0.0",
+    "@rollup/plugin-node-resolve": "^16.0.3",
+    "@rollup/plugin-replace": "^6.0.0",
+    "@rspack/cli": "^1.3.12",
+    "@rspack/core": "^1.3.12",
+    "css-loader": "^7.1.2",
+    "esbuild": "^0.27.3",
+    "esbuild-loader": "^4.3.0",
+    "execa": "^9.6.0",
+    "html-webpack-plugin": "^5.6.3",
+    "less": "^4.3.0",
+    "less-loader": "^12.3.0",
+    "rolldown": "^1.0.0-beta.8",
+    "rollup": "^4.57.1",
+    "rollup-plugin-postcss": "^4.0.2",
+    "sass": "^1.89.0",
+    "sass-loader": "^16.0.5",
+    "sirv-cli": "^3.0.1",
+    "style-loader": "^4.0.0",
     "tsdown": "^0.12.4",
+    "tsx": "^4.19.4",
     "typescript": "^5.9.3",
     "vite": "^7.3.1",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "vue": "3.6.0-beta.6",
+    "webpack": "^5.99.9",
+    "webpack-cli": "^6.0.1",
+    "webpack-dev-server": "^5.2.2"
   },
   "peerDependencies": {
     "vite": "^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0"

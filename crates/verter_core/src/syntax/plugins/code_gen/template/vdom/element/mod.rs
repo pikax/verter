@@ -148,6 +148,8 @@ pub(crate) fn handle_element_open<'alloc>(
         let imports = &mut *ectx.imports;
         imports.add(TemplateImportDependencies::RENDER_SLOT);
 
+        let inline = ectx.inline;
+
         // Extract static slot name from props (defaults to "default")
         let slot_name = ev.props.iter().find_map(|p| {
             if p.event.kind == PropKind::Value {
@@ -167,6 +169,44 @@ pub(crate) fn handle_element_open<'alloc>(
         buf.push_str(slot_name.unwrap_or("default"));
         buf.push('"');
 
+        // Collect scoped slot props (:prop="expr" binds, excluding name)
+        let mut slot_prop_count = 0;
+        for p in ev.props.iter() {
+            if p.event.kind == PropKind::Bind {
+                if let Some(ref arg) = p.event.arg {
+                    let attr_name = &ctx.input[arg.start as usize..arg.end as usize];
+                    if attr_name == "name" {
+                        continue; // skip :name (dynamic name)
+                    }
+                    if let Some(ref exp) = p.exp {
+                        let expr = &ctx.input[exp.start as usize..exp.end as usize];
+                        if slot_prop_count == 0 {
+                            buf.push_str(", { ");
+                        } else {
+                            buf.push_str(", ");
+                        }
+                        buf.push_str(attr_name);
+                        buf.push_str(": ");
+                        // Add binding prefix/suffix for setup context
+                        if let Some(bt) = bindings.get(expr) {
+                            buf.push_str(bt.accessor_prefix(inline));
+                            buf.push_str(expr);
+                            buf.push_str(bt.accessor_suffix(inline));
+                        } else if inline {
+                            buf.push_str(expr);
+                        } else {
+                            buf.push_str("$setup.");
+                            buf.push_str(expr);
+                        }
+                        slot_prop_count += 1;
+                    }
+                }
+            }
+        }
+        if slot_prop_count > 0 {
+            buf.push_str(" }");
+        }
+
         let s = code_transform.alloc_str(buf);
         pending_overwrites.push((open_tag.start, open_tag_end.end, s));
         return;
@@ -181,7 +221,45 @@ pub(crate) fn handle_element_open<'alloc>(
     // For components, check setup bindings first. If the component is available from
     // setup, use $setup["Name"] (standalone) or bare Name (inline) instead of _resolveComponent.
     let inline = ectx.inline;
-    let component_var: Option<&'alloc str> = if is_component {
+    let is_dynamic_component = open_tag.kind == ElementKind::DynamicComponent;
+    let component_var: Option<&'alloc str> = if is_dynamic_component {
+        // <component :is="expr"> → _resolveDynamicComponent(expr)
+        // Extract the :is expression from props
+        let is_expr = ev.props.iter().find_map(|p| {
+            if p.event.kind == PropKind::Bind {
+                if let Some(ref arg) = p.event.arg {
+                    let attr_name = &ctx.input[arg.start as usize..arg.end as usize];
+                    if attr_name == "is" {
+                        return p
+                            .exp
+                            .as_ref()
+                            .map(|exp| &ctx.input[exp.start as usize..exp.end as usize]);
+                    }
+                }
+            }
+            None
+        });
+        if let Some(expr) = is_expr {
+            imports.add(TemplateImportDependencies::RESOLVE_DYNAMIC_COMPONENT);
+            buf.clear();
+            buf.push_str("_resolveDynamicComponent(");
+            // Prefix the expression for setup context and add .value for refs
+            if let Some(bt) = bindings.get(expr) {
+                buf.push_str(bt.accessor_prefix(inline));
+                buf.push_str(expr);
+                buf.push_str(bt.accessor_suffix(inline));
+            } else if inline {
+                buf.push_str(expr);
+            } else {
+                buf.push_str("$setup.");
+                buf.push_str(expr);
+            }
+            buf.push(')');
+            Some(code_transform.alloc_str(buf))
+        } else {
+            None
+        }
+    } else if is_component {
         if let Some(binding_name) = resolve_setup_component(tag_name, bindings, buf) {
             // Component found in setup bindings — use direct reference
             buf.clear();
@@ -473,6 +551,18 @@ pub(crate) fn handle_element_open<'alloc>(
                 if merge_style && prop.event.kind == PropKind::StyleValue {
                     pending_overwrites.push((prop.event.start, prop.event.end, ""));
                     continue;
+                }
+
+                // <component :is="expr">: the :is prop is consumed by
+                // resolveDynamicComponent and must not be emitted as a regular prop.
+                if is_dynamic_component && prop.event.kind == PropKind::Bind {
+                    if let Some(ref arg) = prop.event.arg {
+                        let attr_name = &ctx.input[arg.start as usize..arg.end as usize];
+                        if attr_name == "is" {
+                            pending_overwrites.push((prop.event.start, prop.event.end, ""));
+                            continue;
+                        }
+                    }
                 }
 
                 let sep = if written > 0 { ", " } else { "" };

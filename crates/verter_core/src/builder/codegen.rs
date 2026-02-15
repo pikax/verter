@@ -364,6 +364,48 @@ pub fn compile(
 
     let events = syntax.events();
 
+    // Detect if the SFC has <script setup>. Inline render mode is only valid
+    // for script setup components (the render arrow is returned from setup()).
+    // For Options API components, we must always use function render() form.
+    // We check the raw input since OxcScript events aren't created until the pipeline runs.
+    let has_script_setup = input
+        .as_bytes()
+        .windows(b"<script".len())
+        .enumerate()
+        .any(|(i, w)| {
+            if !w.eq_ignore_ascii_case(b"<script") {
+                return false;
+            }
+            // Find the end of this <script ...> tag
+            let rest = &input[i + w.len()..];
+            if let Some(gt) = rest.find('>') {
+                let attrs = &rest[..gt];
+                // Check for `setup` as a standalone word in the tag attributes
+                attrs.split_whitespace().any(|a| a == "setup")
+            } else {
+                false
+            }
+        });
+    let effective_inline = options.resolve_inline() && has_script_setup;
+
+    // Pre-scan for <template vapor> to inform the script codegen plugin.
+    let has_vapor_template = input
+        .as_bytes()
+        .windows(b"<template".len())
+        .enumerate()
+        .any(|(i, w)| {
+            if !w.eq_ignore_ascii_case(b"<template") {
+                return false;
+            }
+            let rest = &input[i + w.len()..];
+            if let Some(gt) = rest.find('>') {
+                let attrs = &rest[..gt];
+                attrs.split_whitespace().any(|a| a == "vapor")
+            } else {
+                false
+            }
+        });
+
     let code_transform = Rc::new(RefCell::new(CodeTransform::new(input, allocator)));
 
     // CSS plugins — scope_id from custom component_id or hashed component name
@@ -388,13 +430,14 @@ pub fn compile(
         options.is_production,
     )
     .with_scope_id(scope_id)
-    .with_inline_template(options.resolve_inline())
-    .with_runtime_module_name(options.resolve_runtime_module_name().to_string());
+    .with_inline_template(effective_inline)
+    .with_runtime_module_name(options.resolve_runtime_module_name().to_string())
+    .with_vapor(has_vapor_template);
 
     use crate::syntax::plugins::code_gen::template::TemplateOptions;
     let template_options = TemplateOptions {
         is_production: options.is_production,
-        inline: options.resolve_inline(),
+        inline: effective_inline,
         comments: options.resolve_comments(),
         hoist_static: options.resolve_hoist_static(),
         cache_handlers: options.resolve_cache_handlers(),
@@ -977,8 +1020,13 @@ const color = ref('red')
             result.code
         );
         assert!(
-            result.code.contains("_ctx.color"),
-            "Should reference color via _ctx, got:\n{}",
+            result.code.contains("color.value"),
+            "Should reference color with .value (it's a ref), got:\n{}",
+            result.code
+        );
+        assert!(
+            !result.code.contains("_ctx.color"),
+            "Should NOT use _ctx.color for setup ref bindings, got:\n{}",
             result.code
         );
     }
@@ -1002,9 +1050,15 @@ const size = '16px'
             "Should inject useCssVars, got:\n{}",
             result.code
         );
+        // color and size are plain const (SetupConst), so direct access (no _ctx.)
         assert!(
-            result.code.contains("_ctx.color") && result.code.contains("_ctx.size"),
-            "Should reference both vars, got:\n{}",
+            result.code.contains("\"): (color)") || result.code.contains("\": (color)"),
+            "Should reference color directly (SetupConst), got:\n{}",
+            result.code
+        );
+        assert!(
+            result.code.contains("\"): (size)") || result.code.contains("\": (size)"),
+            "Should reference size directly (SetupConst), got:\n{}",
             result.code
         );
     }

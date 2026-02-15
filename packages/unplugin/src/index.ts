@@ -82,7 +82,8 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       const componentIdFn = opts.componentId || generateComponentId;
       const componentId = componentIdFn(filename, code, isProd);
 
-      const compileOptions: ViteCodegenOptions = {
+      // napi-rs converts snake_case to camelCase at runtime
+      const compileOptions = {
         filename,
         ssr,
         isProduction: isProd,
@@ -90,7 +91,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         sourcemap: true,
       };
 
-      const result = compiler.compileForVite(code, compileOptions);
+      const result = compiler.compileForVite(code, compileOptions as any);
 
       // Process preprocessor styles via Vite's CSS pipeline when available
       let processedStyles = result.styles;
@@ -99,6 +100,8 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         processedStyles = await Promise.all(
           result.styles.map(async (style) => {
             const hasPreprocessor = style.lang && style.lang !== "css";
+            const isModule = (style as any).isModule ?? (style as any).is_module ?? false;
+            const moduleName = (style as any).moduleName ?? (style as any).module_name;
 
             if (hasPreprocessor) {
               const preprocessed = await preprocessCSS(
@@ -107,18 +110,18 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
                 viteConfig!,
               );
 
-              if (style.scoped || style.is_module) {
+              if (style.scoped || isModule) {
                 const processed = compiler.processStyle(preprocessed.code, {
-                  scope_id: componentId,
+                  scopeId: componentId,
                   scoped: style.scoped,
-                  is_module: style.is_module,
-                  module_name: style.module_name ?? undefined,
-                });
+                  isModule,
+                  moduleName: moduleName ?? undefined,
+                } as any);
                 return {
                   ...style,
                   code: processed.code,
                   lang: "css",
-                  module_classes: processed.module_classes,
+                  moduleClasses: (processed as any).moduleClasses ?? (processed as any).module_classes ?? [],
                 };
               }
 
@@ -155,7 +158,9 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         };
       }
 
-      return { code: output, map: null };
+      // Fallback: strip TypeScript using native bindings for non-Vite bundlers
+      const stripped = compiler.stripTypes(output);
+      return { code: stripped.code, map: null };
     },
 
     watchChange(id) {

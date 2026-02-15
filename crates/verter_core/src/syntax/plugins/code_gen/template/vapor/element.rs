@@ -510,6 +510,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         close_tag: Option<&crate::syntax::types::ElementCloseTag>,
     ) -> TemplateCodeGenResult {
         let template_idx = self.register_template();
+        self.root_template_indices.push(template_idx);
 
         // Build creation code: template instantiation + navigation + text creations.
         let mut creation = format!("  const n{} = t{}()\n", state.node_ref, template_idx);

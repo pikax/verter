@@ -1,8 +1,11 @@
 use std::{cell::RefCell, rc::Rc};
 
+use rustc_hash::FxHashMap;
+
 use crate::{
     code_transform::{CodeTransform, SourceMapOptions},
     syntax::{
+        binding_types::BindingType,
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxResult},
         plugins::code_gen::{
             script::process::{process_script_event, ProcessScriptOptions},
@@ -40,11 +43,16 @@ pub struct ScriptGeneratorPlugin<'alloc> {
     has_seen_script_setup: bool,
     /// Track whether we've already seen a plain `<script>` block.
     has_seen_script: bool,
+    /// Binding metadata from OxcScript, used for correct accessor in _useCssVars.
+    bindings: FxHashMap<String, BindingType>,
     /// Deferred closing text for inline template mode.
     /// When the template is inlined inside setup(), the script closing only emits "\n"
     /// (leaving setup open). This string closes setup() and the component definition
     /// AFTER the template content. Emitted in `end()`.
     deferred_inline_closing: Option<String>,
+    /// Whether the template uses vapor mode (`<template vapor>`).
+    /// Detected from `CompiledTemplateStart` event, emitted as `__vapor: true` in `end()`.
+    is_vapor: bool,
 }
 
 impl<'alloc> ScriptGeneratorPlugin<'alloc> {
@@ -68,7 +76,9 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
             script_insert_pos: None,
             has_seen_script_setup: false,
             has_seen_script: false,
+            bindings: FxHashMap::default(),
             deferred_inline_closing: None,
+            is_vapor: false,
         }
     }
 
@@ -81,6 +91,12 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
     /// Set inline template mode (decoupled from is_production).
     pub fn with_inline_template(mut self, inline: bool) -> Self {
         self.inline_template = inline;
+        self
+    }
+
+    /// Set vapor mode (template uses `<template vapor>`).
+    pub fn with_vapor(mut self, vapor: bool) -> Self {
+        self.is_vapor = vapor;
         self
     }
 
@@ -149,6 +165,7 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
                 keep_ts_types: self.keep_ts_types,
                 is_production: self.is_production,
                 inline_template: self.inline_template,
+                is_vapor: self.is_vapor,
             },
         );
 
@@ -206,13 +223,44 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
         self.imports
             .add(ScriptSetupImportDependencies::USE_CSS_VARS);
 
+        let mut needs_unref = false;
+
         let mut buf = String::with_capacity(64 + self.css_v_binds.len() * 48);
         buf.push_str("\n_useCssVars(_ctx => ({\n");
         for (i, (key, expr)) in self.css_v_binds.iter().enumerate() {
             buf.push_str("  \"");
             buf.push_str(key);
-            buf.push_str("\": (_ctx.");
-            buf.push_str(expr);
+            buf.push_str("\": (");
+            // Inside setup(), bindings are in scope directly. Use binding metadata
+            // to determine the correct accessor, matching the official Vue compiler.
+            if let Some(bt) = self.bindings.get(expr.as_str()) {
+                match bt {
+                    BindingType::SetupRef => {
+                        // Definitively a ref: access .value directly
+                        buf.push_str(expr);
+                        buf.push_str(".value");
+                    }
+                    BindingType::SetupMaybeRef | BindingType::SetupLet => {
+                        // Might be a ref: wrap with _unref()
+                        needs_unref = true;
+                        buf.push_str("_unref(");
+                        buf.push_str(expr);
+                        buf.push(')');
+                    }
+                    BindingType::Props | BindingType::PropsAliased => {
+                        buf.push_str("__props.");
+                        buf.push_str(expr);
+                    }
+                    _ => {
+                        // SetupConst, SetupReactiveConst, LiteralConst: direct access
+                        buf.push_str(expr);
+                    }
+                }
+            } else {
+                // Unknown binding: use _ctx. prefix as fallback
+                buf.push_str("_ctx.");
+                buf.push_str(expr);
+            }
             buf.push(')');
             if i < self.css_v_binds.len() - 1 {
                 buf.push(',');
@@ -220,6 +268,10 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
             buf.push('\n');
         }
         buf.push_str("}))\n");
+
+        if needs_unref {
+            self.imports.add(ScriptSetupImportDependencies::UNREF);
+        }
 
         self.code_transform
             .borrow_mut()
@@ -265,6 +317,11 @@ impl<'alloc> SyntaxPlugin<'alloc> for ScriptGeneratorPlugin<'alloc> {
     ) -> SyntaxResult<Event<'alloc>> {
         match &event {
             Event::OxcScript(script) => {
+                // Store binding metadata for _useCssVars accessor generation
+                for (span, binding) in &script.result.bindings {
+                    let name = &ctx.input[span.start as usize..span.end as usize];
+                    self.bindings.insert(name.to_string(), *binding);
+                }
                 self.process_script(script, ctx);
             }
             Event::CssParsedStyle(parsed) => {
@@ -1340,6 +1397,64 @@ const x = CONST_VAL
         assert!(
             !code.contains("ref_key"),
             "Dev mode should not have ref_key, got:\n{code}"
+        );
+    }
+
+    // @ai-generated — Options API: production mode should NOT use inline render
+    #[test]
+    fn test_prod_options_api_no_inline_render() {
+        let code = gen_prod_and_validate(
+            "<script>\nimport { defineComponent } from 'vue'\nexport default defineComponent({ data() { return { count: 0 } } })\n</script>\n<template><div>{{ count }}</div></template>",
+        );
+        // Options API components should always use function render(), not inline arrow
+        assert!(
+            code.contains("function render("),
+            "Options API in production should use function render(), got:\n{code}"
+        );
+        assert!(
+            !code.contains("return (_ctx,_cache) => {"),
+            "Options API in production should NOT use inline render arrow, got:\n{code}"
+        );
+    }
+
+    // @ai-generated — Script setup: production mode SHOULD use inline render
+    #[test]
+    fn test_prod_script_setup_uses_inline_render() {
+        let code = gen_prod_and_validate(
+            "<script setup>\nconst count = 0\n</script>\n<template><div>{{ count }}</div></template>",
+        );
+        assert!(
+            code.contains("(_ctx,_cache) => {"),
+            "Script setup in production should use inline render arrow, got:\n{code}"
+        );
+        assert!(
+            !code.contains("function render("),
+            "Script setup in production should NOT use function render(), got:\n{code}"
+        );
+    }
+
+    // @ai-generated — CSS v-bind with ref should use .value in _useCssVars callback
+    #[test]
+    fn test_css_v_bind_ref_uses_value_accessor() {
+        let code = gen(r#"<script setup>
+import { ref } from 'vue'
+const themeColor = ref('red')
+</script>
+<template><div>{{ themeColor }}</div></template>
+<style scoped>
+.text { color: v-bind(themeColor); }
+</style>"#);
+        assert!(
+            code.contains("_useCssVars"),
+            "Should inject _useCssVars call, got:\n{code}"
+        );
+        assert!(
+            code.contains("themeColor.value"),
+            "Should use themeColor.value (not _ctx.themeColor) since it's a ref, got:\n{code}"
+        );
+        assert!(
+            !code.contains("_ctx.themeColor"),
+            "Should NOT use _ctx.themeColor for setup ref bindings, got:\n{code}"
         );
     }
 }

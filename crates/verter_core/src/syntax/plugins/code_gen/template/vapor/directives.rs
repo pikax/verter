@@ -3,7 +3,7 @@
 use crate::syntax::{
     plugin::SyntaxPluginContext,
     plugins::code_gen::{
-        template::shared::helper::prefix_vfor_references,
+        template::shared::helper::prefix_vfor_references_vapor,
         types::{TemplateCodeGenError, TemplateCodeGenResult, VaporImportDependencies},
     },
     types::{ElementScope, OxcCompiledElementStart},
@@ -51,14 +51,13 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                     let iterable = if let Some(val) = val_span {
                         let right_offset = vfor.parsed.right_offset();
                         let iterable_raw = &ctx.input[right_offset as usize..val.end as usize];
-                        prefix_vfor_references(
+                        prefix_vfor_references_vapor(
                             iterable_raw,
                             right_offset,
                             &vfor.parsed.references,
                             Some((right_offset, val.end)),
                             ctx.input,
                             &self.bindings,
-                            self.is_production,
                         )
                     } else {
                         "[]".to_string()

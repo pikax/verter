@@ -116,6 +116,10 @@ pub(crate) struct VaporTemplateGenerator<'alloc> {
     /// Hoisted template HTML strings (one per root element).
     templates: Vec<String>,
 
+    /// Template indices that correspond to root element templates
+    /// (as opposed to block/v-for sub-templates).
+    root_template_indices: Vec<u32>,
+
     /// HTML buffer for the current root element's template.
     current_html: String,
     /// Pending close tags for the HTML buffer (stripped if trailing).
@@ -163,6 +167,7 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             imports: VaporImportDependencies::default(),
             stack: Vec::new(),
             templates: Vec::new(),
+            root_template_indices: Vec::new(),
             current_html: String::new(),
             pending_close_tags: Vec::new(),
             counters: VaporCounters::new(),
@@ -226,12 +231,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             .last()
             .map(|s| s.for_var_mappings.as_slice())
             .unwrap_or(&[]);
-        super::shared::helper::build_prefixed_value_with_var_mappings(
+        super::shared::helper::build_prefixed_value_vapor(
             val_text,
             val_start,
             bindings_result,
             &self.bindings,
-            self.is_production,
             var_mappings,
         )
     }
@@ -586,10 +590,20 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         };
 
         // Build hoisted template constants.
+        // Single-root components pass `true` as the second parameter to root templates,
+        // telling the Vue runtime to use `firstChild` for direct node access.
+        let is_single_root = self.root_nodes.len() == 1;
         let mut hoist_str = String::new();
         for (i, html) in self.templates.iter().enumerate() {
             let escaped = escape_js_string(html);
-            hoist_str.push_str(&format!("const t{} = _template(\"{}\")\n", i, escaped));
+            if is_single_root && self.root_template_indices.contains(&(i as u32)) {
+                hoist_str.push_str(&format!(
+                    "const t{} = _template(\"{}\", true)\n",
+                    i, escaped
+                ));
+            } else {
+                hoist_str.push_str(&format!("const t{} = _template(\"{}\")\n", i, escaped));
+            }
         }
 
         // Build component resolution declarations (hoisted before render function).

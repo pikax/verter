@@ -21,6 +21,7 @@ pub struct ProcessScriptOptions<'alloc> {
 
     pub inline_template: bool,
     pub keep_ts_types: bool,
+    pub is_vapor: bool,
 }
 
 pub struct ProcessedScript {
@@ -192,6 +193,7 @@ pub fn process_script_event<'alloc>(
                         options = Some(result);
                     }
                     VueMacroKind::DefineModel => {
+                        imports.add(ScriptSetupImportDependencies::USE_MODEL);
                         models.push(result);
                     }
                     VueMacroKind::DefineExpose => {
@@ -239,10 +241,13 @@ pub fn process_script_event<'alloc>(
         }
     }
     {
-        let mut buf = String::with_capacity(opts.component_name.len() + 12);
+        let mut buf = String::with_capacity(opts.component_name.len() + 32);
         buf.push_str("__name: '");
         buf.push_str(opts.component_name);
         buf.push_str("',");
+        if opts.is_vapor {
+            buf.push_str("__vapor: true,");
+        }
         code_transform.prepend_left(script.tag_open_end, &buf);
     }
 

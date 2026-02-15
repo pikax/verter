@@ -101,13 +101,28 @@ fn test_dev_function_render() {
     );
 }
 
-/// @ai-generated — Production mode emits arrow function `(_ctx,_cache) => {`
+/// @ai-generated — Production mode with script setup emits arrow function `(_ctx,_cache) => {`
+/// Template-only components (no script setup) always use function render() even in production.
 #[test]
 fn test_prod_arrow_fn() {
+    // Template-only: no script setup, so no inline mode even in production
     let code = gen_prod_and_validate(r#"<template><div>hi</div></template>"#);
     assert!(
+        code.contains("function render("),
+        "Template-only in prod should use function render (no script setup), got:\n{}",
+        code
+    );
+
+    // With script setup: production mode should use inline arrow function
+    let code = gen_prod_and_validate(
+        r#"<script setup>
+const msg = 'hi'
+</script>
+<template><div>{{ msg }}</div></template>"#,
+    );
+    assert!(
         code.contains("(_ctx,_cache) => {"),
-        "Prod mode should emit arrow function, got:\n{}",
+        "Script setup in prod should emit arrow function, got:\n{}",
         code
     );
 }
@@ -2727,6 +2742,31 @@ fn test_slot_outlet_named() {
     );
 }
 
+/// @ai-generated — <slot name="scoped" :count="count" :increment="increment" />
+/// should compile to _renderSlot(_ctx.$slots, "scoped", { count: ..., increment: ... })
+#[test]
+fn test_slot_outlet_scoped_props() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+const increment = () => count.value++
+</script>
+<template><div><slot name="scoped" :count="count" :increment="increment" /></div></template>"#,
+    );
+    assert!(
+        code.contains(r#"_renderSlot(_ctx.$slots, "scoped""#),
+        "Scoped slot should use _renderSlot with name 'scoped', got:\n{}",
+        code
+    );
+    // Third argument should be an object with count and increment keys
+    assert!(
+        code.contains("count:") && code.contains("increment:"),
+        "Scoped slot should emit props object with count and increment keys, got:\n{}",
+        code
+    );
+}
+
 // =========================================================================
 // Props binding: const props = defineProps()
 // =========================================================================
@@ -3386,6 +3426,12 @@ fn test_vapor_static_element() {
     assert!(
         code.contains("_template("),
         "Should contain _template(), got:\n{}",
+        code
+    );
+    // Single-root templates must pass `true` as second parameter.
+    assert!(
+        code.contains(", true)"),
+        "Single-root should pass true to _template, got:\n{}",
         code
     );
     assert!(
@@ -5313,6 +5359,91 @@ fn test_vif_sole_child_array_wrapped() {
             || code.contains(", [\n")
             || code.contains(", [(_openBlock"),
         "v-if/v-else ternary as sole child must be array-wrapped.\nGot:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Vapor Mode: Binding Prefix Tests
+// =========================================================================
+
+/// @ai-generated - Vapor render function should use _ctx. prefix for setup bindings, not $setup.
+#[test]
+fn test_vapor_binding_uses_ctx_prefix() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>
+<template vapor><div>{{ msg }}</div></template>"#,
+    );
+    eprintln!("=== VAPOR BINDING PREFIX ===\n{}\n=== END ===", code);
+
+    // Vapor mode: bindings should use _ctx. prefix (not $setup.)
+    assert!(
+        code.contains("_ctx.msg"),
+        "Vapor should use _ctx.msg, not $setup.msg.\nGot:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("$setup.msg"),
+        "Vapor should NOT use $setup.msg prefix.\nGot:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Vapor render function should use _ctx. for event handlers too
+#[test]
+fn test_vapor_event_handler_uses_ctx_prefix() {
+    let code = gen_and_validate(
+        r#"<script setup>
+const onClick = () => {}
+</script>
+<template vapor><button @click="onClick">click</button></template>"#,
+    );
+    eprintln!("=== VAPOR EVENT PREFIX ===\n{}\n=== END ===", code);
+
+    assert!(
+        code.contains("_ctx.onClick"),
+        "Vapor event handler should use _ctx.onClick.\nGot:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("$setup.onClick"),
+        "Vapor should NOT use $setup.onClick.\nGot:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Single-root vapor templates with multiple children should pass true to _template
+#[test]
+fn test_vapor_single_root_multi_children_has_true() {
+    let code = gen_vapor_and_validate(
+        r#"<template vapor><div><span>a</span><button @click="fn">b</button><span>{{ x }}</span></div></template>"#,
+    );
+    eprintln!("=== MULTI CHILDREN ===\n{}\n=== END ===", code);
+    assert!(
+        code.contains(", true)"),
+        "Single-root with multiple children should pass true to _template, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Vapor component should include __vapor: true in component options
+#[test]
+fn test_vapor_component_has_vapor_flag() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>
+<template vapor><div>{{ msg }}</div></template>"#,
+    );
+    eprintln!("=== VAPOR FLAG ===\n{}\n=== END ===", code);
+
+    assert!(
+        code.contains("__vapor: true"),
+        "Vapor component should include __vapor: true.\nGot:\n{}",
         code
     );
 }

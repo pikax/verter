@@ -49,6 +49,8 @@ impl ScriptSetupImportDependencies {
     pub const USE_SLOTS: u8 = 1 << 1;
     pub const MERGE_MODELS: u8 = 1 << 2;
     pub const USE_CSS_VARS: u8 = 1 << 3;
+    pub const USE_MODEL: u8 = 1 << 4;
+    pub const UNREF: u8 = 1 << 5;
 
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -78,6 +80,12 @@ impl ScriptSetupImportDependencies {
         }
         if self.contains(Self::USE_CSS_VARS) {
             imports.push("useCssVars as _useCssVars");
+        }
+        if self.contains(Self::USE_MODEL) {
+            imports.push("useModel as _useModel");
+        }
+        if self.contains(Self::UNREF) {
+            imports.push("unref as _unref");
         }
         imports.join(",")
     }

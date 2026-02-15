@@ -162,6 +162,46 @@ pub fn build_prefixed_value_with_var_mappings(
     is_inline: bool,
     var_mappings: &[(String, String)],
 ) -> String {
+    build_prefixed_value_impl(
+        val_text,
+        val_start,
+        bindings_result,
+        map,
+        is_inline,
+        var_mappings,
+        false,
+    )
+}
+
+/// Like [`build_prefixed_value_with_var_mappings`] but for vapor mode.
+/// In vapor, ALL bindings use `_ctx.` prefix and never get `.value` suffix.
+pub fn build_prefixed_value_vapor(
+    val_text: &str,
+    val_start: u32,
+    bindings_result: Option<&BindingExtractionResult>,
+    map: &FxHashMap<&str, BindingType>,
+    var_mappings: &[(String, String)],
+) -> String {
+    build_prefixed_value_impl(
+        val_text,
+        val_start,
+        bindings_result,
+        map,
+        false,
+        var_mappings,
+        true,
+    )
+}
+
+fn build_prefixed_value_impl(
+    val_text: &str,
+    val_start: u32,
+    bindings_result: Option<&BindingExtractionResult>,
+    map: &FxHashMap<&str, BindingType>,
+    is_inline: bool,
+    var_mappings: &[(String, String)],
+    vapor: bool,
+) -> String {
     let Some(br) = bindings_result else {
         return val_text.to_string();
     };
@@ -185,7 +225,10 @@ pub fn build_prefixed_value_with_var_mappings(
         } else if b.ignore {
             continue;
         } else {
-            let (prefix, suffix) = if let Some(bt) = map.get(b.name) {
+            let (prefix, suffix) = if vapor {
+                // Vapor: _ctx. for all known bindings, no .value suffix
+                ("_ctx.", "")
+            } else if let Some(bt) = map.get(b.name) {
                 (bt.accessor_prefix(is_inline), bt.accessor_suffix(is_inline))
             } else {
                 ("_ctx.", "")
@@ -236,6 +279,50 @@ pub fn prefix_vfor_references(
     bindings: &FxHashMap<&str, BindingType>,
     is_production: bool,
 ) -> String {
+    prefix_vfor_references_impl(
+        text,
+        base_offset,
+        references,
+        filter_range,
+        input,
+        bindings,
+        is_production,
+        false,
+    )
+}
+
+/// Like [`prefix_vfor_references`] but for vapor mode — always uses `_ctx.` prefix.
+pub fn prefix_vfor_references_vapor(
+    text: &str,
+    base_offset: u32,
+    references: &[Span],
+    filter_range: Option<(u32, u32)>,
+    input: &str,
+    bindings: &FxHashMap<&str, BindingType>,
+) -> String {
+    prefix_vfor_references_impl(
+        text,
+        base_offset,
+        references,
+        filter_range,
+        input,
+        bindings,
+        false,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prefix_vfor_references_impl(
+    text: &str,
+    base_offset: u32,
+    references: &[Span],
+    filter_range: Option<(u32, u32)>,
+    input: &str,
+    bindings: &FxHashMap<&str, BindingType>,
+    is_production: bool,
+    vapor: bool,
+) -> String {
     // Forward iteration with push_str — no Vec allocation, no sort, no insert_str.
     // References from v-for parsing are already in source order.
     let mut result = String::with_capacity(text.len() + references.len() * 6);
@@ -251,7 +338,9 @@ pub fn prefix_vfor_references(
         let offset = (r.start - base_offset) as usize;
         let ident_len = (r.end - r.start) as usize;
         let name = &input[r.start as usize..r.end as usize];
-        let (prefix, suffix) = if let Some(bt) = bindings.get(name) {
+        let (prefix, suffix) = if vapor {
+            ("_ctx.", "")
+        } else if let Some(bt) = bindings.get(name) {
             (
                 bt.accessor_prefix(is_production),
                 bt.accessor_suffix(is_production),

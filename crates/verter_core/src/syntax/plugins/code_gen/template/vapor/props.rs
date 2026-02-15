@@ -4,7 +4,7 @@
 use crate::syntax::{
     plugin::SyntaxPluginContext,
     plugins::code_gen::{
-        template::shared::helper::build_prefixed_value_with_var_mappings,
+        template::shared::helper::build_prefixed_value_vapor,
         types::{TemplateCodeGenError, TemplateCodeGenResult, VaporImportDependencies},
     },
     types::{OxcCompiledElementStart, PropKind},
@@ -110,12 +110,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                             ))?;
                             let arg_raw =
                                 &ctx.input[arg_span.start as usize..arg_span.end as usize];
-                            let arg_prefixed = build_prefixed_value_with_var_mappings(
+                            let arg_prefixed = build_prefixed_value_vapor(
                                 arg_raw,
                                 arg_span.start,
                                 oxc_prop.arg.as_ref().and_then(|a| a.bindings.as_ref()),
                                 &self.bindings,
-                                self.is_production,
                                 &[],
                             );
                             self.imports.add(VaporImportDependencies::SET_DYNAMIC_PROPS);
@@ -362,12 +361,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 "dynamic On prop must have arg span",
             ))?;
             let arg_raw = &ctx.input[arg_span.start as usize..arg_span.end as usize];
-            let arg_prefixed = build_prefixed_value_with_var_mappings(
+            let arg_prefixed = build_prefixed_value_vapor(
                 arg_raw,
                 arg_span.start,
                 oxc_prop.arg.as_ref().and_then(|a| a.bindings.as_ref()),
                 &self.bindings,
-                self.is_production,
                 &[],
             );
             self.imports.add(VaporImportDependencies::ON);
@@ -558,12 +556,11 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
             .map(|arg_span| {
                 let raw = &ctx.input[arg_span.start as usize..arg_span.end as usize];
                 if prop.has_dynamic_arg {
-                    build_prefixed_value_with_var_mappings(
+                    build_prefixed_value_vapor(
                         raw,
                         arg_span.start,
                         oxc_prop.arg.as_ref().and_then(|a| a.bindings.as_ref()),
                         &self.bindings,
-                        self.is_production,
                         &[],
                     )
                 } else {

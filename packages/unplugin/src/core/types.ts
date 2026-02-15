@@ -3,9 +3,10 @@ import type {
   ViteCodegenResult,
   ProcessStyleOptions,
   ProcessStyleResult,
+  StripTypesResult,
 } from "@verter/native";
 
-export type { ViteCodegenOptions, ViteCodegenResult, ProcessStyleOptions, ProcessStyleResult };
+export type { ViteCodegenOptions, ViteCodegenResult, ProcessStyleOptions, ProcessStyleResult, StripTypesResult };
 
 export interface VerterPluginOptions {
   /** Custom component ID generator */
@@ -15,6 +16,7 @@ export interface VerterPluginOptions {
 export interface Compiler {
   compileForVite(input: string, options?: ViteCodegenOptions): ViteCodegenResult;
   processStyle(css: string, options: ProcessStyleOptions): ProcessStyleResult;
+  stripTypes(source: string): StripTypesResult;
 }
 
 export type HmrStrategy = "vite" | "webpack" | "none";
