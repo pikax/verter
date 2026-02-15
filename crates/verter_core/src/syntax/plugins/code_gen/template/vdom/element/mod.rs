@@ -156,7 +156,7 @@ pub(crate) fn handle_element_open<'alloc>(
         });
 
         buf.clear();
-        buf.push_str("_renderSlot($slots, \"");
+        buf.push_str("_renderSlot(_ctx.$slots, \"");
         buf.push_str(slot_name.unwrap_or("default"));
         buf.push('"');
 

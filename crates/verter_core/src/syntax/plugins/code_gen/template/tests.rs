@@ -2692,13 +2692,13 @@ fn test_slot_dynamic_production() {
 // Slot Outlets (<slot/> → _renderSlot)
 // =========================================================================
 
-/// @ai-generated — <slot/> should compile to _renderSlot, not _createElementVNode("slot")
+/// @ai-generated — <slot/> should compile to _renderSlot(_ctx.$slots, "default")
 #[test]
 fn test_slot_outlet_default() {
     let code = gen_and_validate(r#"<template><div><slot/></div></template>"#);
     assert!(
-        code.contains("_renderSlot("),
-        "<slot/> should use _renderSlot, got:\n{}",
+        code.contains("_renderSlot(_ctx.$slots,"),
+        "<slot/> should use _renderSlot(_ctx.$slots, ...), got:\n{}",
         code
     );
     assert!(
@@ -2708,13 +2708,13 @@ fn test_slot_outlet_default() {
     );
 }
 
-/// @ai-generated — <slot name="header"/> should compile to _renderSlot($slots, "header")
+/// @ai-generated — <slot name="header"/> should compile to _renderSlot(_ctx.$slots, "header")
 #[test]
 fn test_slot_outlet_named() {
     let code = gen_and_validate(r#"<template><div><slot name="header"/></div></template>"#);
     assert!(
-        code.contains("_renderSlot("),
-        "Named <slot> should use _renderSlot, got:\n{}",
+        code.contains("_renderSlot(_ctx.$slots,"),
+        "Named <slot> should use _renderSlot(_ctx.$slots, ...), got:\n{}",
         code
     );
     assert!(
