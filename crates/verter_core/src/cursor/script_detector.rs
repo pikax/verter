@@ -836,9 +836,7 @@ mod tests {
         let mut input = Vec::new();
         input.extend_from_slice(b"<!-- ");
         // Add 100_000_024 '!' characters to simulate a long comment
-        for _ in 0..100_000_024 {
-            input.push(b'!');
-        }
+        input.extend(std::iter::repeat_n(b'!', 100_000_024));
         input.extend_from_slice(b"<script lang=\"ts\">-->\n<script lang=\"jsx\"></script>");
         let detector = ScriptDetector::new();
         let result = detector.detect(&input);

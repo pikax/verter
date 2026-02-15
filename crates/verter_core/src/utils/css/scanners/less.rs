@@ -9,7 +9,7 @@
 
 use crate::{
     common::Span,
-    syntax_kai::types::{CssParsedClass, CssParsedRule, CssParsedVBind},
+    syntax::types::{CssParsedClass, CssParsedRule, CssParsedVBind},
 };
 
 use crate::utils::css::common::*;
@@ -559,7 +559,7 @@ mod tests {
     fn test_interpolation_in_selector() {
         let (rules, _, _) = scan_less_input(b".icon-@{name} { display: inline; }");
         // @{name} interpolation should not break parsing
-        assert!(rules.len() >= 1);
+        assert!(!rules.is_empty());
     }
 
     // --- Less nesting ---

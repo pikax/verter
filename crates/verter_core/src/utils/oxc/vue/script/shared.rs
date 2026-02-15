@@ -14,13 +14,13 @@ use crate::common::Span;
 
 /// Context for script parsing.
 ///
-/// In the `syntax_kai` pipeline, `adjust_program_spans` adjusts statement/expression
+/// In the `syntax` pipeline, `adjust_program_spans` adjusts statement/expression
 /// spans to SFC coordinates, but does NOT adjust TypeScript type annotation spans
 /// (type_arguments, interface body members, type alias bodies). The `content_offset`
 /// field provides the offset needed to convert those unadjusted spans to SFC coordinates.
 pub struct ScriptParseContext<'a> {
     /// Offset for unadjusted TypeScript type annotation spans.
-    /// In the `syntax_kai` pipeline this is `content_start` (where script content begins in the SFC).
+    /// In the `syntax` pipeline this is `content_start` (where script content begins in the SFC).
     /// In direct parsing (tests), this is 0 since spans are already local.
     pub content_offset: u32,
     /// Source bytes for byte comparisons

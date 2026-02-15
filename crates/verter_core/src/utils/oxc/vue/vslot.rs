@@ -527,7 +527,7 @@ mod tests {
     fn test_invalid_syntax() {
         let result = parse("{ invalid: }");
         assert!(!result.is_ok());
-        assert!(!result.errors.is_none());
+        assert!(result.errors.is_some());
     }
 
     #[test]

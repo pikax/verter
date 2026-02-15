@@ -94,7 +94,7 @@ use shared::{try_process_export, try_process_import};
 /// * `program` - The OXC-parsed program AST
 /// * `mode` - The script mode (Options or Setup)
 /// * `content_offset` - The byte offset for unadjusted TypeScript type annotation spans.
-///   In the `syntax_kai` pipeline this is `content_start` (where script content begins in the SFC).
+///   In the `syntax` pipeline this is `content_start` (where script content begins in the SFC).
 ///   In direct parsing (tests), this is 0 since spans are already local.
 /// * `source` - The source text of the script content
 ///

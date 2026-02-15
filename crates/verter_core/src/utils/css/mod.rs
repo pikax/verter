@@ -8,7 +8,7 @@ pub mod common;
 pub mod scanners;
 pub mod shared;
 
-use crate::syntax_kai::types::{CssParsedClass, CssParsedRule, CssParsedVBind, StyleLang};
+use crate::syntax::types::{CssParsedClass, CssParsedRule, CssParsedVBind, StyleLang};
 
 /// Dispatch to the correct language scanner based on `StyleLang`.
 ///

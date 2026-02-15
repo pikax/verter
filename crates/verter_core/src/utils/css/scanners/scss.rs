@@ -9,7 +9,7 @@
 
 use crate::{
     common::Span,
-    syntax_kai::types::{CssParsedClass, CssParsedRule, CssParsedVBind},
+    syntax::types::{CssParsedClass, CssParsedRule, CssParsedVBind},
 };
 
 use crate::utils::css::common::*;

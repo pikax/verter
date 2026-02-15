@@ -52,6 +52,20 @@ pub struct CodegenOptions {
 }
 
 #[napi(object)]
+pub struct JsDiagnostic {
+    /// Severity level: "error", "warning", or "info"
+    pub severity: String,
+    /// Vue-compatible error code (e.g., "XMissingEndTag", "XInvalidEndTag")
+    pub code: String,
+    /// Human-readable error message
+    pub message: String,
+    /// Optional source span start (byte offset)
+    pub span_start: Option<u32>,
+    /// Optional source span end (byte offset)
+    pub span_end: Option<u32>,
+}
+
+#[napi(object)]
 pub struct JsCompiledStyleBlock {
     /// Compiled CSS code (scoped selectors, v-bind replacements, module hashing applied)
     pub code: String,
@@ -77,17 +91,16 @@ pub struct CodegenResult {
     pub code_with_source_map: String,
     /// Compiled CSS blocks from `<style>` tags
     pub styles: Vec<JsCompiledStyleBlock>,
+    /// Scope ID for scoped styles (e.g., "data-v-a4f2eed6"). Empty if no scoped styles.
+    pub scope_id: String,
+    /// Compilation diagnostics (errors, warnings, info)
+    pub errors: Vec<JsDiagnostic>,
     /// Time taken for the Rust pipeline in milliseconds
     pub duration_ms: f64,
 }
 
-/// Compile a Vue SFC to JavaScript.
-///
-/// @param input - The Vue SFC source code (string or Buffer)
-/// @param options - Optional compilation options
-/// @returns The compiled result with code, source map, and code with inline source map
-#[napi]
-pub fn compile(
+/// Internal compile implementation shared by sync and async APIs.
+fn compile_impl(
     input: Either<String, Buffer>,
     options: Option<CodegenOptions>,
 ) -> Result<CodegenResult> {
@@ -149,16 +162,35 @@ pub fn compile(
                 code: s.code,
                 scoped: s.scoped,
                 lang: s.lang.map(|l| match l {
-                    verter_core::syntax_kai::types::StyleLang::Css => "css".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Scss => "scss".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Sass => "sass".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Less => "less".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Stylus => "stylus".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Unknown => "unknown".to_string(),
+                    verter_core::syntax::types::StyleLang::Css => "css".to_string(),
+                    verter_core::syntax::types::StyleLang::Scss => "scss".to_string(),
+                    verter_core::syntax::types::StyleLang::Sass => "sass".to_string(),
+                    verter_core::syntax::types::StyleLang::Less => "less".to_string(),
+                    verter_core::syntax::types::StyleLang::Stylus => "stylus".to_string(),
+                    verter_core::syntax::types::StyleLang::Unknown => "unknown".to_string(),
                 }),
                 is_module: s.module.is_some(),
                 module_classes,
                 errors: s.errors,
+            }
+        })
+        .collect();
+
+    let errors = result
+        .errors
+        .iter()
+        .map(|d| {
+            let severity = match d.severity {
+                verter_core::builder::codegen::CompileDiagnosticSeverity::Error => "error",
+                verter_core::builder::codegen::CompileDiagnosticSeverity::Warning => "warning",
+                verter_core::builder::codegen::CompileDiagnosticSeverity::Info => "info",
+            };
+            JsDiagnostic {
+                severity: severity.to_string(),
+                code: d.code.clone(),
+                message: d.message.clone(),
+                span_start: d.span.map(|s| s.start),
+                span_end: d.span.map(|s| s.end),
             }
         })
         .collect();
@@ -168,8 +200,36 @@ pub fn compile(
         source_map: result.source_map,
         code_with_source_map: result.code_with_source_map,
         styles,
+        scope_id: result.scope_id,
+        errors,
         duration_ms: result.duration_ms,
     })
+}
+
+/// Compile a Vue SFC to JavaScript (synchronous).
+///
+/// @param input - The Vue SFC source code (string or Buffer)
+/// @param options - Optional compilation options
+/// @returns The compiled result with code, source map, and code with inline source map
+#[napi(js_name = "compileSync")]
+pub fn compile_sync(
+    input: Either<String, Buffer>,
+    options: Option<CodegenOptions>,
+) -> Result<CodegenResult> {
+    compile_impl(input, options)
+}
+
+/// Compile a Vue SFC to JavaScript (async, runs on libuv thread pool).
+///
+/// @param input - The Vue SFC source code (string or Buffer)
+/// @param options - Optional compilation options
+/// @returns Promise resolving to the compiled result
+#[napi]
+pub fn compile(
+    input: Either<String, Buffer>,
+    options: Option<CodegenOptions>,
+) -> Result<CodegenResult> {
+    compile_impl(input, options)
 }
 
 // =============================================================================
@@ -247,16 +307,8 @@ pub struct ViteCodegenResult {
     pub duration_ms: f64,
 }
 
-/// Compile a Vue SFC for Vite plugin usage.
-///
-/// Thin wrapper around compile() that returns the result as a single script block.
-/// The Vite-specific split block compilation will be reimplemented in a future version.
-///
-/// @param input - The Vue SFC source code (string or Buffer)
-/// @param options - Optional compilation options
-/// @returns Compiled result with split blocks for virtual modules
-#[napi]
-pub fn compile_for_vite(
+/// Internal compile_for_vite implementation shared by sync and async APIs.
+fn compile_for_vite_impl(
     input: Either<String, Buffer>,
     options: Option<ViteCodegenOptions>,
 ) -> Result<ViteCodegenResult> {
@@ -302,12 +354,12 @@ pub fn compile_for_vite(
                 scoped: s.scoped,
                 is_module: s.module.is_some(),
                 lang: s.lang.map(|l| match l {
-                    verter_core::syntax_kai::types::StyleLang::Css => "css".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Scss => "scss".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Sass => "sass".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Less => "less".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Stylus => "stylus".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Unknown => "unknown".to_string(),
+                    verter_core::syntax::types::StyleLang::Css => "css".to_string(),
+                    verter_core::syntax::types::StyleLang::Scss => "scss".to_string(),
+                    verter_core::syntax::types::StyleLang::Sass => "sass".to_string(),
+                    verter_core::syntax::types::StyleLang::Less => "less".to_string(),
+                    verter_core::syntax::types::StyleLang::Stylus => "stylus".to_string(),
+                    verter_core::syntax::types::StyleLang::Unknown => "unknown".to_string(),
                 }),
                 module_name,
                 module_classes,
@@ -326,6 +378,32 @@ pub fn compile_for_vite(
         styles,
         duration_ms: result.duration_ms,
     })
+}
+
+/// Compile a Vue SFC for Vite plugin usage (synchronous).
+///
+/// @param input - The Vue SFC source code (string or Buffer)
+/// @param options - Optional compilation options
+/// @returns Compiled result with split blocks for virtual modules
+#[napi(js_name = "compileForViteSync")]
+pub fn compile_for_vite_sync(
+    input: Either<String, Buffer>,
+    options: Option<ViteCodegenOptions>,
+) -> Result<ViteCodegenResult> {
+    compile_for_vite_impl(input, options)
+}
+
+/// Compile a Vue SFC for Vite plugin usage (async, runs on libuv thread pool).
+///
+/// @param input - The Vue SFC source code (string or Buffer)
+/// @param options - Optional compilation options
+/// @returns Promise resolving to the compiled result
+#[napi(js_name = "compileForVite")]
+pub fn compile_for_vite(
+    input: Either<String, Buffer>,
+    options: Option<ViteCodegenOptions>,
+) -> Result<ViteCodegenResult> {
+    compile_for_vite_impl(input, options)
 }
 
 // =============================================================================

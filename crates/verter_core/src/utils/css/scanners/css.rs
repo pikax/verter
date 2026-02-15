@@ -8,7 +8,7 @@
 
 use crate::{
     common::Span,
-    syntax_kai::types::{CssParsedClass, CssParsedRule, CssParsedVBind},
+    syntax::types::{CssParsedClass, CssParsedRule, CssParsedVBind},
 };
 
 use crate::utils::css::common::*;
@@ -314,7 +314,7 @@ mod tests {
         let (rules, _, _) = scan_css(css);
         // The `//` is not treated as a comment, so parser sees unexpected tokens
         // The important thing is that .b is still found
-        assert!(rules.iter().any(|r| r.selectors.len() > 0));
+        assert!(rules.iter().any(|r| !r.selectors.is_empty()));
     }
 
     // --- v-bind ---

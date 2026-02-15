@@ -12,7 +12,7 @@ use oxc_ast::ast::{
 
 use super::shared::ScriptParseContext;
 use crate::common::Span;
-use crate::syntax_kai::binding_types::BindingType;
+use crate::syntax::binding_types::BindingType;
 
 /// Extract binding metadata from a parsed `<script setup>` program.
 ///
@@ -301,7 +301,7 @@ fn classify_import<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::syntax_kai::binding_types::BindingType;
+    use crate::syntax::binding_types::BindingType;
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;

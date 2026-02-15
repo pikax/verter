@@ -1,6 +1,37 @@
 export type InputBuffer = string | Uint8Array;
 
 /**
+ * Severity level for a compilation diagnostic
+ */
+export type DiagnosticSeverity = "error" | "warning" | "info";
+
+/**
+ * A structured diagnostic message from the compiler
+ */
+export interface Diagnostic {
+  /**
+   * Severity level
+   */
+  severity: DiagnosticSeverity;
+  /**
+   * Vue-compatible error code (e.g., "XMissingEndTag", "XInvalidEndTag")
+   */
+  code: string;
+  /**
+   * Human-readable error message
+   */
+  message: string;
+  /**
+   * Optional source span start (byte offset into original input)
+   */
+  span_start?: number;
+  /**
+   * Optional source span end (byte offset into original input)
+   */
+  span_end?: number;
+}
+
+/**
  * Options for compiling Vue SFC to JavaScript
  */
 export interface CodegenOptions {
@@ -16,6 +47,77 @@ export interface CodegenOptions {
    * Custom component ID (overrides auto-generation from filename)
    */
   component_id?: string;
+  /**
+   * Skip source map generation for faster compilation
+   */
+  skip_source_map?: boolean;
+  /**
+   * Custom interpolation delimiters [open, close]. Default: ["{{", "}}"]
+   */
+  delimiters?: [string, string];
+  /**
+   * Tag name prefixes treated as custom elements (skip component resolution).
+   * E.g. ["ion-", "my-"] matches <ion-button>, <my-card>
+   */
+  custom_elements?: string[];
+  /**
+   * Whether to preserve HTML comments in output. Default: !isProduction
+   */
+  comments?: boolean;
+  /**
+   * Runtime module name to import helpers from. Default: "vue"
+   */
+  runtime_module_name?: string;
+  /**
+   * Hoist static VNodes/props to constants. Default: true
+   */
+  hoist_static?: boolean;
+  /**
+   * Whitespace handling: "condense" or "preserve". Default: "condense"
+   */
+  whitespace?: "condense" | "preserve";
+  /**
+   * Cache event handler expressions. Default: false
+   */
+  cache_handlers?: boolean;
+  /**
+   * Inline render function in setup(). Default: isProduction
+   */
+  inline?: boolean;
+  /**
+   * Indicates SFC uses :slotted() in styles. Default: true
+   */
+  slotted?: boolean;
+}
+
+/**
+ * A compiled CSS style block from an SFC `<style>` tag
+ */
+export interface JsCompiledStyleBlock {
+  /**
+   * Compiled CSS code (scoped selectors, v-bind replacements, module hashing applied)
+   */
+  code: string;
+  /**
+   * Whether this style block is scoped
+   */
+  scoped: boolean;
+  /**
+   * Style language (css, scss, less, stylus)
+   */
+  lang?: string;
+  /**
+   * Whether this is a CSS module block
+   */
+  is_module: boolean;
+  /**
+   * CSS module class mappings (each entry is [original, hashed])
+   */
+  module_classes: [string, string][];
+  /**
+   * CSS processing diagnostics
+   */
+  errors: Diagnostic[];
 }
 
 /**
@@ -34,6 +136,18 @@ export interface CodegenResult {
    * The transformed code with inline source map appended
    */
   code_with_source_map: string;
+  /**
+   * Compiled CSS blocks from `<style>` tags
+   */
+  styles: JsCompiledStyleBlock[];
+  /**
+   * Scope ID for scoped styles (e.g., "data-v-a4f2eed6"). Empty if no scoped styles.
+   */
+  scope_id: string;
+  /**
+   * Compilation diagnostics (errors, warnings, info)
+   */
+  errors: Diagnostic[];
   /**
    * Time taken for the Rust pipeline in milliseconds
    */
@@ -176,6 +290,15 @@ export interface ViteCodegenResult {
 export declare function compile(input: InputBuffer, options?: CodegenOptions): CodegenResult;
 
 /**
+ * Compile a Vue SFC to JavaScript (synchronous).
+ *
+ * @param input - The Vue SFC source code (string or Buffer)
+ * @param options - Optional compilation options
+ * @returns The compiled result with code, source map, and code with inline source map
+ */
+export declare function compileSync(input: InputBuffer, options?: CodegenOptions): CodegenResult;
+
+/**
  * Compile a Vue SFC for Vite plugin usage.
  *
  * Returns split blocks (script, template, styles) for virtual module serving.
@@ -186,6 +309,18 @@ export declare function compile(input: InputBuffer, options?: CodegenOptions): C
  * @returns Compiled result with split blocks for virtual modules
  */
 export declare function compileForVite(
+  input: InputBuffer,
+  options?: ViteCodegenOptions,
+): ViteCodegenResult;
+
+/**
+ * Compile a Vue SFC for Vite plugin usage (synchronous).
+ *
+ * @param input - The Vue SFC source code (string or Buffer)
+ * @param options - Optional compilation options
+ * @returns Compiled result with split blocks for virtual modules
+ */
+export declare function compileForViteSync(
   input: InputBuffer,
   options?: ViteCodegenOptions,
 ): ViteCodegenResult;
@@ -274,5 +409,33 @@ export declare function processStyle(
   css: string,
   options: ProcessStyleOptions,
 ): ProcessStyleResult;
+
+// =============================================================================
+// Standalone TypeScript Stripping
+// =============================================================================
+
+/**
+ * Result of stripping TypeScript syntax
+ */
+export interface StripTypesResult {
+  /**
+   * The JavaScript output with TypeScript syntax removed
+   */
+  code: string;
+  /**
+   * Any parse errors encountered
+   */
+  errors: string[];
+}
+
+/**
+ * Strip TypeScript syntax from a standalone .ts/.tsx file.
+ *
+ * Removes type annotations, interfaces, type aliases, and converts enums to JavaScript.
+ *
+ * @param source - The TypeScript source code (string or Buffer)
+ * @returns The stripped JavaScript code and any parse errors
+ */
+export declare function stripTypes(source: InputBuffer): StripTypesResult;
 
 export {};

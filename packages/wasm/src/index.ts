@@ -9,6 +9,35 @@ export interface CodegenOptions {
   includeTsx?: boolean;
 }
 
+export interface CompiledStyleBlock {
+  /** Compiled CSS code (scoped selectors, v-bind replacements, module hashing applied) */
+  code: string;
+  /** Whether this style block is scoped */
+  scoped: boolean;
+  /** Style language (css, scss, less, stylus) */
+  lang: string | null;
+  /** Whether this is a CSS module block */
+  isModule: boolean;
+  /** CSS module class mappings (each entry is [original, hashed]) */
+  moduleClasses: string[][];
+  /** CSS processing errors */
+  errors: string[];
+}
+
+/** A structured diagnostic from the compiler */
+export interface WasmDiagnostic {
+  /** Severity level: "error", "warning", or "info" */
+  severity: string;
+  /** Vue-compatible error code (e.g., "XMissingEndTag") */
+  code: string;
+  /** Human-readable error message */
+  message: string;
+  /** Optional source span start (byte offset) */
+  spanStart?: number;
+  /** Optional source span end (byte offset) */
+  spanEnd?: number;
+}
+
 export interface CodegenResult {
   /** The transformed code */
   code: string;
@@ -16,6 +45,12 @@ export interface CodegenResult {
   sourceMap: string;
   /** The transformed code with inline source map appended */
   codeWithSourceMap: string;
+  /** Compiled CSS blocks from `<style>` tags */
+  styles: CompiledStyleBlock[];
+  /** Scope ID for scoped styles (e.g., "data-v-a4f2eed6"). Empty if no scoped styles. */
+  scopeId: string;
+  /** Compilation diagnostics (errors, warnings) */
+  errors: WasmDiagnostic[];
   /** Time taken for the Rust pipeline in milliseconds */
   durationMs: number;
   /** The generated TSX code (all blocks: script + template JSX + commented styles) */

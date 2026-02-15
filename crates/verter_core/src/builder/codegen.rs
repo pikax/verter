@@ -1,4 +1,4 @@
-//! Builder functions for the syntax_kai pipeline.
+//! Builder functions for the syntax pipeline.
 //!
 //! Two builder functions:
 //! - `compile()` — VDOM/Vapor template codegen (production compiler output)
@@ -13,10 +13,11 @@ use std::{cell::RefCell, rc::Rc};
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-pub use crate::syntax_kai::plugins::code_gen::css::CssStyleOutput;
+pub use crate::syntax::plugins::code_gen::css::CssStyleOutput;
 use crate::{
     code_transform::{CodeTransform, SourceMapOptions},
-    syntax_kai::{
+    syntax::{
+        pipeline::Syntax,
         plugin::{SyntaxPlugin, SyntaxPluginContext, SyntaxPluginOptions, SyntaxResult},
         plugins::{
             code_gen::{
@@ -27,7 +28,6 @@ use crate::{
             element_compiler::element_compiler::ElementCompilerPlugin,
             oxc_parser::oxc_parser::OxcParserPlugin,
         },
-        syntax::Syntax,
         types::*,
     },
     tokenizer::byte::{tokenize, tokenize_with_delimiters},
@@ -150,6 +150,27 @@ impl CodegenOptions {
     }
 }
 
+/// Severity level for a compilation diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompileDiagnosticSeverity {
+    Error,
+    Warning,
+    Info,
+}
+
+/// A structured diagnostic emitted during compilation.
+#[derive(Debug, Clone)]
+pub struct CompileDiagnostic {
+    /// Severity level.
+    pub severity: CompileDiagnosticSeverity,
+    /// Vue-compatible error code string (e.g., "X_MISSING_END_TAG").
+    pub code: String,
+    /// Human-readable message.
+    pub message: String,
+    /// Optional source span (byte offsets into original input).
+    pub span: Option<crate::common::Span>,
+}
+
 /// Result of the codegen process.
 pub struct CodegenResult {
     /// The generated code (VDOM or Vapor render function).
@@ -160,6 +181,11 @@ pub struct CodegenResult {
     pub code_with_source_map: String,
     /// Compiled CSS blocks from `<style>` tags (scoped, v-bind, modules applied).
     pub styles: Vec<CssStyleOutput>,
+    /// Scope ID for scoped styles (e.g., `"data-v-a4f2eed6"`).
+    /// Empty string when no `<style scoped>` blocks exist.
+    pub scope_id: String,
+    /// Diagnostics (errors, warnings, info) emitted during compilation.
+    pub errors: Vec<CompileDiagnostic>,
     /// Time taken in milliseconds.
     pub duration_ms: f64,
 }
@@ -184,19 +210,21 @@ pub struct TsxCodegenResult {
 ///
 /// Each event is passed through all plugins in order. If any plugin drops
 /// the event, subsequent plugins don't see it. Replace and Keep both forward
-/// the (potentially transformed) event to the next plugin.
+/// the (potentially transformed) event to the next plugin. Stop halts the
+/// entire pipeline — no further events are processed.
 fn run_pipeline<'a>(
     events: Vec<Event<'a>>,
     plugins: &mut [&mut dyn SyntaxPlugin<'a>],
     ctx: &mut SyntaxPluginContext<'a>,
 ) {
-    for event in events {
+    'outer: for event in events {
         let mut current = Some(event);
         for plugin in plugins.iter_mut() {
             if let Some(ev) = current.take() {
                 match plugin.process_event(ev, ctx) {
                     SyntaxResult::Keep(e) | SyntaxResult::Replace(e) => current = Some(e),
                     SyntaxResult::Drop => break,
+                    SyntaxResult::Stop => break 'outer,
                 }
             }
         }
@@ -233,11 +261,34 @@ fn compute_scope_id(component_name: &str) -> [u8; 8] {
     scope_id
 }
 
+/// Convert plugin diagnostics to public `CompileDiagnostic` structs.
+fn convert_diagnostics(
+    diagnostics: &[crate::syntax::plugin::Diagnostic],
+) -> Vec<CompileDiagnostic> {
+    diagnostics
+        .iter()
+        .map(|d| CompileDiagnostic {
+            severity: match d.severity {
+                crate::syntax::plugin::DiagnosticSeverity::Error => {
+                    CompileDiagnosticSeverity::Error
+                }
+                crate::syntax::plugin::DiagnosticSeverity::Warning => {
+                    CompileDiagnosticSeverity::Warning
+                }
+                crate::syntax::plugin::DiagnosticSeverity::Info => CompileDiagnosticSeverity::Info,
+            },
+            code: format!("{:?}", d.code),
+            message: d.message.clone(),
+            span: d.span,
+        })
+        .collect()
+}
+
 // =============================================================================
 // compile — VDOM/Vapor codegen
 // =============================================================================
 
-/// Compile a Vue SFC using the syntax_kai pipeline.
+/// Compile a Vue SFC using the syntax pipeline.
 ///
 /// Pipeline:
 /// 1. Tokenize input
@@ -270,6 +321,7 @@ pub fn compile(
         input,
         bytes,
         options: &syntax_options,
+        diagnostics: Vec::new(),
     };
 
     let component_name = options
@@ -288,6 +340,26 @@ pub fn compile(
         );
     } else {
         tokenize(bytes, |e| syntax.handle(&e, &ctx));
+    }
+
+    // Finalize: detect unclosed elements → X_MISSING_END_TAG errors.
+    syntax.finalize(bytes);
+
+    // Collect syntax-phase diagnostics into the pipeline context
+    ctx.diagnostics.extend(syntax.take_diagnostics());
+
+    // If fatal errors were found (missing/invalid end tags), stop early.
+    if syntax.has_fatal_error() {
+        let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
+        return CodegenResult {
+            code: String::new(),
+            source_map: String::new(),
+            code_with_source_map: String::new(),
+            styles: Vec::new(),
+            scope_id: String::new(),
+            errors: convert_diagnostics(&ctx.diagnostics),
+            duration_ms,
+        };
     }
 
     let events = syntax.events();
@@ -309,18 +381,13 @@ pub fn compile(
 
     // Code generation plugins
     let mut code_gen_css = CssGeneratorPlugin::new(Rc::clone(&code_transform), scope_id);
-    let mut code_gen_script = ScriptGeneratorPlugin::new(
-        Rc::clone(&code_transform),
-        &component_name,
-        false,
-        false,
-        false,
-    )
-    .with_scope_id(scope_id)
-    .with_inline_template(options.resolve_inline())
-    .with_runtime_module_name(options.resolve_runtime_module_name().to_string());
+    let mut code_gen_script =
+        ScriptGeneratorPlugin::new(Rc::clone(&code_transform), &component_name, false, false)
+            .with_scope_id(scope_id)
+            .with_inline_template(options.resolve_inline())
+            .with_runtime_module_name(options.resolve_runtime_module_name().to_string());
 
-    use crate::syntax_kai::plugins::code_gen::template::TemplateOptions;
+    use crate::syntax::plugins::code_gen::template::TemplateOptions;
     let template_options = TemplateOptions {
         is_production: options.is_production,
         inline: options.resolve_inline(),
@@ -361,6 +428,25 @@ pub fn compile(
     let code = code_transform.borrow().build_string();
     let styles = code_gen_css.take_styles();
 
+    // Scoped styles: wrap component in __sfc__ variable and set __scopeId
+    let has_scoped = styles.iter().any(|s| s.scoped);
+    let scope_id_string = if has_scoped {
+        let hex = std::str::from_utf8(&scope_id).unwrap_or("00000000");
+        format!("data-v-{}", hex)
+    } else {
+        String::new()
+    };
+    let code = if has_scoped {
+        let scope_id_hex = std::str::from_utf8(&scope_id).unwrap_or("00000000");
+        let code = code.replacen("export default ", "const __sfc__ = ", 1);
+        format!(
+            "{}\n__sfc__.__scopeId = \"data-v-{}\";\nexport default __sfc__;\n",
+            code, scope_id_hex
+        )
+    } else {
+        code
+    };
+
     let (source_map, code_with_source_map) = if options.skip_source_map {
         (String::new(), String::new())
     } else {
@@ -396,11 +482,15 @@ pub fn compile(
 
     let duration_ms = start.elapsed().as_secs_f64() * 1000.0;
 
+    let errors = convert_diagnostics(&ctx.diagnostics);
+
     CodegenResult {
         code,
         source_map,
         code_with_source_map,
         styles,
+        scope_id: scope_id_string,
+        errors,
         duration_ms,
     }
 }
@@ -409,7 +499,7 @@ pub fn compile(
 // compile_with_tsx — TSX codegen
 // =============================================================================
 
-/// Generate TSX from a Vue SFC using the syntax_kai pipeline.
+/// Generate TSX from a Vue SFC using the syntax pipeline.
 ///
 /// Pipeline:
 /// 1. Tokenize input
@@ -439,6 +529,113 @@ pub fn compile_with_tsx(
 mod tests {
     use super::*;
     use oxc_allocator::Allocator;
+
+    fn gen_result(input: &str) -> CodegenResult {
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        compile(input, &options, &allocator)
+    }
+
+    // ==================== diagnostics ====================
+
+    #[test]
+    fn test_compile_returns_empty_errors_on_valid_input() {
+        let input = r#"<template><div>hello</div></template>"#;
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.errors.is_empty(),
+            "Valid input should produce no errors, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_pipeline_stop_halts_processing() {
+        use crate::syntax::plugin::*;
+        use crate::syntax::types::Event;
+
+        // A plugin that always stops
+        struct StopPlugin;
+        impl<'a> SyntaxPlugin<'a> for StopPlugin {
+            fn name(&self) -> &str {
+                "stop-plugin"
+            }
+            fn process_event(
+                &mut self,
+                _event: Event<'a>,
+                ctx: &mut SyntaxPluginContext<'a>,
+            ) -> SyntaxResult<Event<'a>> {
+                ctx.error(
+                    "stop-plugin",
+                    crate::syntax::plugin::CompilerErrorCode::XInvalidExpression,
+                );
+                SyntaxResult::Stop
+            }
+        }
+
+        // A plugin that tracks whether it saw any events
+        struct CountPlugin {
+            count: usize,
+        }
+        impl<'a> SyntaxPlugin<'a> for CountPlugin {
+            fn name(&self) -> &str {
+                "count-plugin"
+            }
+            fn process_event(
+                &mut self,
+                event: Event<'a>,
+                _ctx: &mut SyntaxPluginContext<'a>,
+            ) -> SyntaxResult<Event<'a>> {
+                self.count += 1;
+                SyntaxResult::Keep(event)
+            }
+        }
+
+        let opts = SyntaxPluginOptions::default();
+        let input = "";
+        let mut ctx = SyntaxPluginContext {
+            input,
+            bytes: input.as_bytes(),
+            options: &opts,
+            diagnostics: Vec::new(),
+        };
+
+        let mut stop = StopPlugin;
+        let mut count = CountPlugin { count: 0 };
+
+        // Two events — Stop on first should prevent second from reaching count
+        let events = vec![
+            Event::Text(crate::syntax::types::Text {
+                parent_id: 0,
+                start: 0,
+                end: 3,
+                has_entity: false,
+            }),
+            Event::Text(crate::syntax::types::Text {
+                parent_id: 0,
+                start: 3,
+                end: 6,
+                has_entity: false,
+            }),
+        ];
+
+        let plugins: &mut [&mut dyn SyntaxPlugin] = &mut [
+            &mut stop as &mut dyn SyntaxPlugin,
+            &mut count as &mut dyn SyntaxPlugin,
+        ];
+        run_pipeline(events, plugins, &mut ctx);
+
+        assert_eq!(
+            count.count, 0,
+            "Stop should prevent events from reaching later plugins"
+        );
+        assert!(ctx.has_errors(), "Stop plugin should have added an error");
+        assert_eq!(ctx.diagnostics.len(), 1);
+    }
 
     // ==================== compile ====================
 
@@ -1231,15 +1428,13 @@ const count = ref(0)
     #[test]
     #[ignore = "profiling helper — run with --nocapture --ignored"]
     fn profile_pipeline_stages() {
-        use crate::syntax_kai::plugin::{
+        use crate::syntax::pipeline::Syntax;
+        use crate::syntax::plugin::{
             SyntaxPlugin, SyntaxPluginContext, SyntaxPluginOptions, SyntaxResult,
         };
-        use crate::syntax_kai::plugins::code_gen::script::ScriptGeneratorPlugin;
-        use crate::syntax_kai::plugins::code_gen::template::TemplateGeneratorPlugin;
-        use crate::syntax_kai::plugins::element_compiler::element_compiler::ElementCompilerPlugin;
-        use crate::syntax_kai::plugins::oxc_parser::oxc_parser::OxcParserPlugin;
-        use crate::syntax_kai::syntax::Syntax;
-        use crate::syntax_kai::types::Event;
+        use crate::syntax::plugins::element_compiler::element_compiler::ElementCompilerPlugin;
+        use crate::syntax::plugins::oxc_parser::oxc_parser::OxcParserPlugin;
+        use crate::syntax::types::Event;
         use crate::tokenizer::byte::tokenize;
         use std::cell::RefCell;
         use std::rc::Rc;
@@ -1264,7 +1459,7 @@ const count = ref(0)
                     if let Some(ev) = current.take() {
                         match plugin.process_event(ev, ctx) {
                             SyntaxResult::Keep(e) | SyntaxResult::Replace(e) => current = Some(e),
-                            SyntaxResult::Drop => break,
+                            SyntaxResult::Drop | SyntaxResult::Stop => break,
                         }
                     }
                 }
@@ -1285,6 +1480,7 @@ const count = ref(0)
                 input: &input,
                 bytes,
                 options: &opts,
+                diagnostics: Vec::new(),
             };
             let mut syntax = Syntax::new(false);
             tokenize(bytes, |e| syntax.handle(&e, &ctx));
@@ -1303,12 +1499,13 @@ const count = ref(0)
                 input: &input,
                 bytes,
                 options: &opts,
+                diagnostics: Vec::new(),
             };
             let mut syntax = Syntax::new(false);
             tokenize(bytes, |e| syntax.handle(&e, &ctx));
             let events = syntax.events();
 
-            let ct = Rc::new(RefCell::new(crate::code_transform::CodeTransform::new(
+            let _ct = Rc::new(RefCell::new(crate::code_transform::CodeTransform::new(
                 &input, &alloc,
             )));
             let mut ec = ElementCompilerPlugin::new();
@@ -1328,12 +1525,13 @@ const count = ref(0)
                 input: &input,
                 bytes,
                 options: &opts,
+                diagnostics: Vec::new(),
             };
             let mut syntax = Syntax::new(false);
             tokenize(bytes, |e| syntax.handle(&e, &ctx));
             let events = syntax.events();
 
-            let ct = Rc::new(RefCell::new(crate::code_transform::CodeTransform::new(
+            let _ct = Rc::new(RefCell::new(crate::code_transform::CodeTransform::new(
                 &input, &alloc,
             )));
             let mut ec = ElementCompilerPlugin::new();
@@ -1412,9 +1610,10 @@ const count = ref(0)
             input: &input,
             bytes: input.as_bytes(),
             options: &syntax_options,
+            diagnostics: Vec::new(),
         };
 
-        let mut syntax = crate::syntax_kai::syntax::Syntax::new(false);
+        let mut syntax = crate::syntax::pipeline::Syntax::new(false);
         crate::tokenizer::byte::tokenize(input.as_bytes(), |e| syntax.handle(&e, &ctx));
         let events = syntax.events();
         let event_count = events.len();
@@ -1423,24 +1622,23 @@ const count = ref(0)
 
         let component_name = "KitchenSink";
         let mut code_gen_script =
-            crate::syntax_kai::plugins::code_gen::script::ScriptGeneratorPlugin::new(
+            crate::syntax::plugins::code_gen::script::ScriptGeneratorPlugin::new(
                 Rc::clone(&code_transform),
                 component_name,
                 false,
                 false,
-                false,
             );
         let mut code_gen_template =
-            crate::syntax_kai::plugins::code_gen::template::TemplateGeneratorPlugin::new(
+            crate::syntax::plugins::code_gen::template::TemplateGeneratorPlugin::new(
                 Rc::clone(&code_transform),
                 false,
             );
 
         {
-            let mut ec = crate::syntax_kai::plugins::element_compiler::element_compiler::ElementCompilerPlugin::new();
+            let mut ec = crate::syntax::plugins::element_compiler::element_compiler::ElementCompilerPlugin::new();
             let mut oxc =
-                crate::syntax_kai::plugins::oxc_parser::oxc_parser::OxcParserPlugin::new(&alloc);
-            let mut pipeline: Vec<&mut dyn crate::syntax_kai::plugin::SyntaxPlugin> = vec![
+                crate::syntax::plugins::oxc_parser::oxc_parser::OxcParserPlugin::new(&alloc);
+            let mut pipeline: Vec<&mut dyn crate::syntax::plugin::SyntaxPlugin> = vec![
                 &mut ec,
                 &mut oxc,
                 &mut code_gen_script,
@@ -1487,6 +1685,7 @@ const count = ref(0)
                 input,
                 bytes,
                 options: &syntax_options,
+                diagnostics: Vec::new(),
             };
             let mut syntax = Syntax::new(false);
             tokenize(bytes, |e| syntax.handle(&e, &ctx));
@@ -1504,6 +1703,7 @@ const count = ref(0)
                 input,
                 bytes,
                 options: &syntax_options,
+                diagnostics: Vec::new(),
             };
             let mut syntax = Syntax::new(false);
             tokenize(bytes, |e| syntax.handle(&e, &ctx));
@@ -1511,7 +1711,7 @@ const count = ref(0)
 
             let code_transform = Rc::new(RefCell::new(CodeTransform::new(input, &alloc)));
             let mut cgs =
-                ScriptGeneratorPlugin::new(Rc::clone(&code_transform), "App", false, false, false);
+                ScriptGeneratorPlugin::new(Rc::clone(&code_transform), "App", false, false);
             let mut ec = ElementCompilerPlugin::new();
             let mut oxc = OxcParserPlugin::new(&alloc);
             let pipeline: &mut [&mut dyn SyntaxPlugin] = &mut [&mut ec, &mut oxc, &mut cgs];
@@ -1531,6 +1731,7 @@ const count = ref(0)
                 input,
                 bytes,
                 options: &syntax_options,
+                diagnostics: Vec::new(),
             };
             let mut syntax = Syntax::new(false);
             tokenize(bytes, |e| syntax.handle(&e, &ctx));
@@ -1538,7 +1739,7 @@ const count = ref(0)
 
             let code_transform = Rc::new(RefCell::new(CodeTransform::new(input, &alloc)));
             let mut cgs =
-                ScriptGeneratorPlugin::new(Rc::clone(&code_transform), "App", false, false, false);
+                ScriptGeneratorPlugin::new(Rc::clone(&code_transform), "App", false, false);
             let mut cgt = TemplateGeneratorPlugin::new(Rc::clone(&code_transform), false);
             let mut ec = ElementCompilerPlugin::new();
             let mut oxc = OxcParserPlugin::new(&alloc);
@@ -1581,5 +1782,303 @@ const count = ref(0)
             finalize_tostring_us / total_us * 100.0
         );
         eprintln!("  Total:                {total_us:.1}μs");
+    }
+
+    // ==================== Scoped styles: __scopeId ====================
+
+    /// @ai-generated — Scoped styles: compiler emits __sfc__.__scopeId in generated code
+    #[test]
+    fn test_scoped_styles_emit_scope_id() {
+        let input = r#"<script setup>
+const x = 1
+</script>
+<template><div>hi</div></template>
+<style scoped>.box { color: red; }</style>"#;
+
+        let result = gen_result(input);
+
+        assert!(
+            result.code.contains("const __sfc__ = "),
+            "Scoped SFC should use intermediate __sfc__ variable, got:\n{}",
+            result.code
+        );
+        assert!(
+            result.code.contains("__sfc__.__scopeId = \"data-v-"),
+            "Scoped SFC should emit __sfc__.__scopeId assignment, got:\n{}",
+            result.code
+        );
+        assert!(
+            result.code.contains("export default __sfc__"),
+            "Scoped SFC should re-export __sfc__, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Non-scoped styles: no __sfc__ or __scopeId in code
+    #[test]
+    fn test_no_scoped_styles_no_scope_id() {
+        let input = r#"<script setup>
+const x = 1
+</script>
+<template><div>hi</div></template>
+<style>.box { color: red; }</style>"#;
+
+        let result = gen_result(input);
+
+        assert!(
+            !result.code.contains("__sfc__"),
+            "Non-scoped SFC should NOT have __sfc__, got:\n{}",
+            result.code
+        );
+        assert!(
+            !result.code.contains("__scopeId"),
+            "Non-scoped SFC should NOT have __scopeId, got:\n{}",
+            result.code
+        );
+        assert!(
+            result.code.contains("export default "),
+            "Non-scoped SFC should use normal export default, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — scope_id field in result is populated for scoped styles
+    #[test]
+    fn test_scope_id_in_result() {
+        let input = r#"<template><div>hi</div></template>
+<style scoped>.box { color: red; }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("Scoped.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            !result.scope_id.is_empty(),
+            "scope_id should be populated when scoped styles exist"
+        );
+        assert!(
+            result.scope_id.starts_with("data-v-"),
+            "scope_id should start with 'data-v-', got: {}",
+            result.scope_id
+        );
+        assert_eq!(
+            result.scope_id.len(),
+            "data-v-".len() + 8,
+            "scope_id should have 8 hex chars after prefix, got: {}",
+            result.scope_id
+        );
+    }
+
+    /// @ai-generated — scope_id is empty when no scoped styles
+    #[test]
+    fn test_scope_id_empty_without_scoped() {
+        let input = r#"<template><div>hi</div></template>
+<style>.box { color: red; }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("Plain.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.scope_id.is_empty(),
+            "scope_id should be empty when no scoped styles, got: {}",
+            result.scope_id
+        );
+    }
+
+    /// @ai-generated — scope_id is deterministic (same input → same output)
+    #[test]
+    fn test_scope_id_deterministic() {
+        let input = r#"<template><div>hi</div></template>
+<style scoped>.box { color: red; }</style>"#;
+
+        let allocator1 = Allocator::new();
+        let allocator2 = Allocator::new();
+        let options = CodegenOptions::new().with_filename("Det.vue");
+
+        let result1 = compile(input, &options, &allocator1);
+        let result2 = compile(input, &options, &allocator2);
+
+        assert_eq!(
+            result1.scope_id, result2.scope_id,
+            "scope_id should be deterministic"
+        );
+    }
+
+    /// @ai-generated — scope_id matches CSS scoped selectors
+    #[test]
+    fn test_scope_id_matches_css() {
+        let input = r#"<template><div>hi</div></template>
+<style scoped>.box { color: red; }</style>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("Match.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(!result.scope_id.is_empty());
+        assert_eq!(result.styles.len(), 1);
+        let expected_attr = format!("[{}]", result.scope_id);
+        assert!(
+            result.styles[0].code.contains(&expected_attr),
+            "CSS should contain scope selector.\nscope_id: {}\nCSS: {}",
+            result.scope_id,
+            result.styles[0].code
+        );
+    }
+
+    /// @ai-generated — Scoped __sfc__ output is valid JS
+    #[test]
+    fn test_scoped_styles_valid_js() {
+        let input = r#"<script setup>
+const msg = 'hello'
+</script>
+<template><div>{{ msg }}</div></template>
+<style scoped>.box { color: red; }</style>"#;
+
+        let result = gen_result(input);
+
+        let js_allocator = Allocator::default();
+        let source_type = oxc_span::SourceType::mjs();
+        let parser_result =
+            oxc_parser::Parser::new(&js_allocator, &result.code, source_type).parse();
+        assert!(
+            parser_result.errors.is_empty(),
+            "Scoped output should be valid JS.\nErrors: {:?}\nCode:\n{}",
+            parser_result.errors,
+            result.code
+        );
+    }
+
+    // ==================== E2E error detection ====================
+
+    #[test]
+    fn test_compile_missing_end_tag_returns_error() {
+        let input = r#"<template><div></template>"#;
+        let result = gen_result(input);
+
+        assert!(
+            result.code.is_empty(),
+            "Fatal error should produce empty code"
+        );
+        assert!(
+            !result.errors.is_empty(),
+            "Missing end tag should produce errors"
+        );
+        let has_missing = result
+            .errors
+            .iter()
+            .any(|e| e.code == "XMissingEndTag" || e.code == "XInvalidEndTag");
+        assert!(
+            has_missing,
+            "Should have XMissingEndTag or XInvalidEndTag error, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_invalid_end_tag_returns_error() {
+        let input = r#"<template><div></span></div></template>"#;
+        let result = gen_result(input);
+
+        let has_invalid = result.errors.iter().any(|e| e.code == "XInvalidEndTag");
+        assert!(
+            has_invalid,
+            "Mismatched end tag should produce XInvalidEndTag, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_duplicate_v_if_produces_diagnostic() {
+        // Two v-if on the same element — should produce a diagnostic
+        let input = r#"<template><div v-if="a" v-if="b">text</div></template>"#;
+        let result = gen_result(input);
+
+        let has_dup = result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("Duplicate v-if"));
+        assert!(
+            has_dup,
+            "Duplicate v-if should produce a diagnostic, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_duplicate_v_for_produces_diagnostic() {
+        let input = r#"<template><div v-for="a in list" v-for="b in list">text</div></template>"#;
+        let result = gen_result(input);
+
+        let has_dup = result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("Duplicate v-for"));
+        assert!(
+            has_dup,
+            "Duplicate v-for should produce a diagnostic, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_duplicate_v_else_produces_diagnostic() {
+        // v-else twice on the same element — should produce a diagnostic
+        let input = r#"<template><div v-if="a">a</div><div v-else v-else>b</div></template>"#;
+        let result = gen_result(input);
+
+        let has_dup = result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("Duplicate v-else"));
+        assert!(
+            has_dup,
+            "Duplicate v-else should produce a diagnostic, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_duplicate_v_slot_produces_diagnostic() {
+        let input = r#"<template><MyComp v-slot="a" v-slot="b">text</MyComp></template>"#;
+        let result = gen_result(input);
+
+        let has_dup = result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("Duplicate v-slot"));
+        assert!(
+            has_dup,
+            "Duplicate v-slot should produce a diagnostic, got: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn test_compile_valid_directives_no_errors() {
+        // Single v-if, v-for, v-slot — no duplicate errors
+        let input = r#"<script setup>
+import { ref } from 'vue'
+const list = ref([1, 2, 3])
+const show = ref(true)
+</script>
+<template>
+  <div v-if="show">
+    <span v-for="item in list" :key="item">{{ item }}</span>
+  </div>
+</template>"#;
+        let result = gen_result(input);
+
+        let has_dup_error = result.errors.iter().any(|e| {
+            e.message.contains("Duplicate v-if")
+                || e.message.contains("Duplicate v-for")
+                || e.message.contains("Duplicate v-slot")
+                || e.message.contains("Duplicate v-else")
+        });
+        assert!(
+            !has_dup_error,
+            "Valid directives should not produce duplicate errors, got: {:?}",
+            result.errors
+        );
     }
 }

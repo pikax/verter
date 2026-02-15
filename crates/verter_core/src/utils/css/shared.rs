@@ -5,7 +5,7 @@
 
 use crate::{
     common::Span,
-    syntax_kai::types::{
+    syntax::types::{
         CssParsedClass, CssParsedSelector, CssParsedSpecialPseudo, CssParsedSpecialPseudoKind,
         CssParsedVBind,
     },

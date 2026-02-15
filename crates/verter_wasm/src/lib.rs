@@ -21,7 +21,7 @@ pub struct CodegenOptions {
     pub is_production: bool,
     /// Custom component ID (overrides auto-generation from filename)
     pub component_id: Option<String>,
-    /// When true, generate TSX output via the syntax_kai pipeline.
+    /// When true, generate TSX output via the syntax pipeline.
     /// Default: false (skip TSX generation to save time).
     #[serde(default)]
     pub include_tsx: bool,
@@ -64,6 +64,21 @@ pub struct CompiledStyleBlock {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WasmDiagnostic {
+    /// Severity level: "error", "warning", or "info"
+    pub severity: String,
+    /// Vue-compatible error code (e.g., "XMissingEndTag", "XInvalidEndTag")
+    pub code: String,
+    /// Human-readable error message
+    pub message: String,
+    /// Optional source span start (byte offset)
+    pub span_start: Option<u32>,
+    /// Optional source span end (byte offset)
+    pub span_end: Option<u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodegenResult {
     /// The transformed code
     pub code: String,
@@ -73,6 +88,10 @@ pub struct CodegenResult {
     pub code_with_source_map: String,
     /// Compiled CSS blocks from `<style>` tags
     pub styles: Vec<CompiledStyleBlock>,
+    /// Scope ID for scoped styles (e.g., "data-v-a4f2eed6"). Empty if no scoped styles.
+    pub scope_id: String,
+    /// Compilation diagnostics (errors, warnings, info)
+    pub errors: Vec<WasmDiagnostic>,
     /// Time taken for the Rust pipeline in milliseconds
     pub duration_ms: f64,
     /// The generated TSX code (all blocks: script + template JSX + commented styles)
@@ -141,12 +160,12 @@ fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
                 code: s.code.clone(),
                 scoped: s.scoped,
                 lang: s.lang.map(|l| match l {
-                    verter_core::syntax_kai::types::StyleLang::Css => "css".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Scss => "scss".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Sass => "sass".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Less => "less".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Stylus => "stylus".to_string(),
-                    verter_core::syntax_kai::types::StyleLang::Unknown => "unknown".to_string(),
+                    verter_core::syntax::types::StyleLang::Css => "css".to_string(),
+                    verter_core::syntax::types::StyleLang::Scss => "scss".to_string(),
+                    verter_core::syntax::types::StyleLang::Sass => "sass".to_string(),
+                    verter_core::syntax::types::StyleLang::Less => "less".to_string(),
+                    verter_core::syntax::types::StyleLang::Stylus => "stylus".to_string(),
+                    verter_core::syntax::types::StyleLang::Unknown => "unknown".to_string(),
                 }),
                 is_module: s.module.is_some(),
                 module_classes,
@@ -155,14 +174,47 @@ fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
         })
         .collect();
 
+    let errors = result
+        .errors
+        .iter()
+        .map(|d| {
+            let severity = match d.severity {
+                verter_core::builder::codegen::CompileDiagnosticSeverity::Error => "error",
+                verter_core::builder::codegen::CompileDiagnosticSeverity::Warning => "warning",
+                verter_core::builder::codegen::CompileDiagnosticSeverity::Info => "info",
+            };
+            WasmDiagnostic {
+                severity: severity.to_string(),
+                code: d.code.clone(),
+                message: d.message.clone(),
+                span_start: d.span.map(|s| s.start),
+                span_end: d.span.map(|s| s.end),
+            }
+        })
+        .collect();
+
+    // Build css from compiled styles when tsx pipeline hasn't produced CSS
+    let css = if tsx_result.css.is_empty() {
+        result
+            .styles
+            .iter()
+            .map(|s| s.code.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        tsx_result.css
+    };
+
     let js_result = CodegenResult {
         code: result.code,
         source_map: result.source_map,
         code_with_source_map: result.code_with_source_map,
         styles,
+        scope_id: result.scope_id,
+        errors,
         duration_ms: result.duration_ms,
         tsx: tsx_result.tsx,
-        css: tsx_result.css,
+        css,
         tsx_duration_ms: tsx_result.duration_ms,
     };
 

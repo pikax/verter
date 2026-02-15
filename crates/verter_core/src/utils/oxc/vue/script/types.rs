@@ -7,7 +7,7 @@
 #![allow(unused_imports)]
 
 use crate::common::Span;
-use crate::syntax_kai::binding_types::BindingType;
+use crate::syntax::binding_types::BindingType;
 
 /// The parsing mode for a script block
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -2,7 +2,7 @@ use super::byte::{tokenize, tokenize_with_delimiters};
 use super::types::{Event, QuoteType};
 use crate::common::ErrorCode;
 
-fn collect_events(input: &str) -> Vec<Event> {
+fn collect_events(input: &str) -> Vec<Event<'_>> {
     let mut events = Vec::new();
     tokenize(input.as_bytes(), |event| events.push(event));
     events
@@ -619,10 +619,7 @@ fn test_directive_static_argument() {
         .collect();
 
     assert_eq!(dir_args.len(), 1, "Should have one DirArg event");
-    assert_eq!(
-        dir_args[0], false,
-        "Static argument should have is_dynamic=false"
-    );
+    assert!(!dir_args[0], "Static argument should have is_dynamic=false");
 }
 
 #[test]
@@ -638,10 +635,7 @@ fn test_directive_dynamic_argument() {
         .collect();
 
     assert_eq!(dir_args.len(), 1, "Should have one DirArg event");
-    assert_eq!(
-        dir_args[0], true,
-        "Dynamic argument should have is_dynamic=true"
-    );
+    assert!(dir_args[0], "Dynamic argument should have is_dynamic=true");
 }
 
 #[test]
@@ -657,8 +651,8 @@ fn test_directive_dynamic_argument_nested_brackets() {
         .collect();
 
     assert_eq!(dir_args.len(), 1, "Should have one DirArg event");
-    assert_eq!(
-        dir_args[0], true,
+    assert!(
+        dir_args[0],
         "Dynamic argument with nested brackets should have is_dynamic=true"
     );
 }
@@ -676,8 +670,8 @@ fn test_directive_static_vs_dynamic_arguments() {
         .collect();
 
     assert_eq!(dir_args.len(), 2, "Should have two DirArg events");
-    assert_eq!(dir_args[0], false, "First argument should be static");
-    assert_eq!(dir_args[1], true, "Second argument should be dynamic");
+    assert!(!dir_args[0], "First argument should be static");
+    assert!(dir_args[1], "Second argument should be dynamic");
 }
 
 #[test]
@@ -693,8 +687,8 @@ fn test_directive_dynamic_argument_with_modifier() {
         .collect();
 
     assert_eq!(dir_args.len(), 1, "Should have one DirArg event");
-    assert_eq!(
-        dir_args[0], true,
+    assert!(
+        dir_args[0],
         "Dynamic argument with modifier should have is_dynamic=true"
     );
 }
@@ -712,8 +706,8 @@ fn test_directive_static_argument_with_modifier() {
         .collect();
 
     assert_eq!(dir_args.len(), 1, "Should have one DirArg event");
-    assert_eq!(
-        dir_args[0], false,
+    assert!(
+        !dir_args[0],
         "Static argument with modifier should have is_dynamic=false"
     );
 }
@@ -1917,7 +1911,7 @@ fn test_attrib_end_span_double_quote() {
     let (quote, end) = events
         .iter()
         .find_map(|e| match e {
-            Event::AttribEnd { quote, end } => Some((quote.clone(), *end)),
+            Event::AttribEnd { quote, end } => Some((*quote, *end)),
             _ => None,
         })
         .expect("Should have AttribEnd event");
@@ -1938,7 +1932,7 @@ fn test_attrib_end_no_value() {
     let (quote, _end) = events
         .iter()
         .find_map(|e| match e {
-            Event::AttribEnd { quote, end } => Some((quote.clone(), *end)),
+            Event::AttribEnd { quote, end } => Some((*quote, *end)),
             _ => None,
         })
         .expect("Should have AttribEnd event");
@@ -2603,7 +2597,7 @@ fn test_doctype_recovery() {
         .collect();
 
     assert!(
-        open_tags.iter().any(|t| *t == "<div"),
+        open_tags.contains(&"<div"),
         "Should have <div> after DOCTYPE, got: {:?}",
         open_tags
     );
@@ -2649,7 +2643,7 @@ fn test_unknown_declaration_recovery() {
         .collect();
 
     assert!(
-        open_tags.iter().any(|t| *t == "<span"),
+        open_tags.contains(&"<span"),
         "Should recover and parse <span> after unknown declaration, got: {:?}",
         open_tags
     );
