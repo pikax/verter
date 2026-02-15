@@ -60,6 +60,8 @@ pub struct ScriptBinding<'a> {
     pub name: &'a str,
     /// Span of the binding identifier
     pub span: Span,
+    /// Whether this is a per-specifier type import (`import { type Foo }`)
+    pub is_type_only: bool,
 }
 
 /// Import declaration item

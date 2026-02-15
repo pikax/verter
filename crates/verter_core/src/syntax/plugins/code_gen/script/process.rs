@@ -87,8 +87,11 @@ pub fn process_script_event<'alloc>(
                     );
                     // Include imported bindings in __returned__ so they're accessible
                     // via $setup in the render function (components, helpers, constants).
+                    // Skip per-specifier type imports (`import { type Foo }`) — they have no runtime value.
                     for binding in &event.bindings {
-                        returned.push(binding.name);
+                        if !binding.is_type_only {
+                            returned.push(binding.name);
+                        }
                     }
                 }
             }

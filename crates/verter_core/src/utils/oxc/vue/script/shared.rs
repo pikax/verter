@@ -59,18 +59,21 @@ pub fn process_import<'a>(
                     bindings.push(ScriptBinding {
                         name: s.local.name.as_str(),
                         span: Span::from(s.local.span),
+                        is_type_only: s.import_kind.is_type(),
                     });
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
                     bindings.push(ScriptBinding {
                         name: s.local.name.as_str(),
                         span: Span::from(s.local.span),
+                        is_type_only: false,
                     });
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
                     bindings.push(ScriptBinding {
                         name: s.local.name.as_str(),
                         span: Span::from(s.local.span),
+                        is_type_only: false,
                     });
                 }
             }
@@ -101,6 +104,7 @@ pub fn process_named_export<'a>(export: &ExportNamedDeclaration<'a>) -> ScriptEx
         bindings.push(ScriptBinding {
             name,
             span: Span::from(spec.exported.span()),
+            is_type_only: false,
         });
     }
 
@@ -132,6 +136,7 @@ pub fn process_all_export<'a>(
         vec![ScriptBinding {
             name,
             span: Span::from(exported.span()),
+            is_type_only: false,
         }]
     } else {
         Vec::new()
@@ -158,6 +163,7 @@ fn extract_declaration_bindings<'a>(decl: &Declaration<'a>, bindings: &mut Vec<S
                 bindings.push(ScriptBinding {
                     name: id.name.as_str(),
                     span: Span::from(id.span),
+                    is_type_only: false,
                 });
             }
         }
@@ -166,6 +172,7 @@ fn extract_declaration_bindings<'a>(decl: &Declaration<'a>, bindings: &mut Vec<S
                 bindings.push(ScriptBinding {
                     name: id.name.as_str(),
                     span: Span::from(id.span),
+                    is_type_only: false,
                 });
             }
         }
@@ -189,6 +196,7 @@ fn collect_binding_pattern_names<'a>(
             bindings.push(ScriptBinding {
                 name: id.name.as_str(),
                 span: Span::from(id.span),
+                is_type_only: false,
             });
         }
         BindingPattern::ObjectPattern(obj) => {

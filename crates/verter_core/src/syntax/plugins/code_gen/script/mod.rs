@@ -1141,4 +1141,32 @@ function increment() {}
             returned_section
         );
     }
+
+    /// @ai-generated — Per-specifier type imports must NOT appear in __returned__
+    /// `import { CONST, type MyType } from '...'` — only CONST should be in __returned__
+    #[test]
+    fn test_per_specifier_type_import_not_in_returned() {
+        // Use gen() not gen_and_validate(): output contains TS syntax (`type MyType`)
+        // which is valid TS but invalid JS — esbuild strips it in the real pipeline.
+        let code = gen(r#"<script setup lang="ts">
+import { CONST_VAL, type MyType } from './types'
+const x = CONST_VAL
+</script>
+<template><div>{{ x }}</div></template>"#);
+        let returned_pos = code
+            .find("__returned__={")
+            .expect("Should have __returned__");
+        let returned_end = code[returned_pos..].find('}').unwrap() + returned_pos;
+        let returned_section = &code[returned_pos..returned_end];
+        assert!(
+            returned_section.contains("CONST_VAL"),
+            "Value import CONST_VAL should be in __returned__, got section: {}",
+            returned_section
+        );
+        assert!(
+            !returned_section.contains("MyType"),
+            "Per-specifier type import MyType should NOT be in __returned__, got section: {}",
+            returned_section
+        );
+    }
 }
