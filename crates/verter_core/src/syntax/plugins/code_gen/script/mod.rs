@@ -146,6 +146,16 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
             },
         );
 
+        // Emit macro diagnostics (e.g., "Unresolvable type reference")
+        for diag in processed.diagnostics {
+            ctx.error_at_with_message(
+                "ScriptGeneratorPlugin",
+                CompilerErrorCode::XInvalidExpression,
+                diag.message,
+                diag.span,
+            );
+        }
+
         self.imports.add(processed.imports.0);
     }
 
@@ -529,6 +539,35 @@ const b = 2
         );
     }
 
+    /// @ai-generated — defineProps inline type: no stale delimiters in output
+    /// Verifies that < and > from the type parameter are not duplicated in the output.
+    #[test]
+    fn test_define_props_inline_no_stale_delimiters() {
+        let code = gen_and_validate(
+            "<script setup lang=\"ts\">\ndefineProps<{ title: string }>()\n</script>\n<template><div>x</div></template>",
+        );
+        // The output should not contain leftover < or > from the type parameter.
+        // Look for patterns like ">{" or "}<" or "><" that would indicate duplicated delimiters.
+        // It's fine for < and > to appear in the template render function, but the props section
+        // should not have stale angle brackets.
+        assert!(
+            !code.contains("defineProps<"),
+            "Should not leave defineProps< in output, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains(">()"),
+            "Should not leave >() in output, got:\n{}",
+            code
+        );
+        // The props section should be clean
+        assert!(
+            code.contains("props:"),
+            "Should have props section, got:\n{}",
+            code
+        );
+    }
+
     /// @ai-generated — defineProps with SFC-local interface reference
     #[test]
     fn test_define_props_interface_ref() {
@@ -585,6 +624,45 @@ const b = 2
             code.contains("__props"),
             "Should replace with __props, got:\n{}",
             code
+        );
+        // Unresolvable types should still emit a props section with empty object
+        // so that the component definition includes `props: {}`
+        assert!(
+            code.contains("props:"),
+            "Should emit props section for unresolvable types, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — defineProps with empty type literal should emit props:{}
+    #[test]
+    fn test_define_props_empty_type_literal() {
+        let code = gen_and_validate(
+            "<script setup lang=\"ts\">\ndefineProps<{}>()\n</script>\n<template><div>x</div></template>",
+        );
+        assert!(
+            code.contains("__props"),
+            "Should replace with __props, got:\n{}",
+            code
+        );
+        // Empty type literal should still emit a props section
+        assert!(
+            code.contains("props:"),
+            "Should emit props section for empty type literal, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — defineProps with unresolvable type should emit diagnostic error
+    #[test]
+    fn test_define_props_unresolvable_type_diagnostic() {
+        let result = gen_result(
+            "<script setup lang=\"ts\">\nimport type { ExternalProps } from './types'\ndefineProps<ExternalProps>()\n</script>\n<template><div>x</div></template>",
+        );
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("Unresolvable type reference")),
+            "Should emit 'Unresolvable type reference' diagnostic for imported types, got errors: {:?}",
+            result.errors
         );
     }
 

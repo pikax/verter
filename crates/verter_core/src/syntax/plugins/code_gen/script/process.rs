@@ -25,6 +25,7 @@ pub struct ProcessScriptOptions<'alloc> {
 
 pub struct ProcessedScript {
     pub imports: ScriptSetupImportDependencies,
+    pub diagnostics: Vec<super::macros::types::MacroDiagnostic>,
 }
 
 pub fn process_script_event<'alloc>(
@@ -33,6 +34,7 @@ pub fn process_script_event<'alloc>(
     opts: ProcessScriptOptions<'alloc>,
 ) -> ProcessedScript {
     let mut imports = ScriptSetupImportDependencies::default();
+    let mut diagnostics = Vec::new();
     // not in setup
     if script.setup.is_none() {
         // Regular <script> (no setup): strip the <script> and </script> tags
@@ -41,7 +43,10 @@ pub fn process_script_event<'alloc>(
         code_transform.remove(script.tag_close_start, script.tag_close_end);
 
         // TODO
-        return ProcessedScript { imports };
+        return ProcessedScript {
+            imports,
+            diagnostics,
+        };
     }
 
     // setup
@@ -139,13 +144,20 @@ pub fn process_script_event<'alloc>(
                     expose = Some(true);
                 }
 
-                let result = process_macro(
+                let mut result = process_macro(
                     script,
                     macro_item,
                     code_transform,
                     opts.source,
                     opts.is_production,
                 );
+
+                // Collect diagnostics from macro processing
+                if let Some(ref mut r) = result {
+                    if let Some(d) = r.diagnostic.take() {
+                        diagnostics.push(d);
+                    }
+                }
 
                 // Handle macros that don't return a result
                 if result.is_none() {
@@ -310,5 +322,8 @@ pub fn process_script_event<'alloc>(
     //     );
     // }
 
-    ProcessedScript { imports }
+    ProcessedScript {
+        imports,
+        diagnostics,
+    }
 }

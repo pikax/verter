@@ -81,5 +81,6 @@ pub fn process_define_model<'a>(
             name,
         )),
         remove: None,
+        diagnostic: None,
     })
 }

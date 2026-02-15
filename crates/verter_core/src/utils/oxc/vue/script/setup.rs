@@ -711,6 +711,16 @@ fn extract_type_params<'a>(
         .map(|ts_type| resolve_type_elements_with_ctx_ref(ts_type, ctx.content_offset, type_ctx))
         .unwrap_or_default();
 
+    // Detect unresolvable type references: the first type param is a TSTypeReference
+    // (e.g., `Props` in `defineProps<Props>()`) but resolution produced empty results.
+    // This distinguishes `defineProps<{}>()` (empty type literal, no error) from
+    // `defineProps<ExternalProps>()` (unresolvable reference, should warn).
+    let is_type_reference = tp
+        .params
+        .first()
+        .is_some_and(|ts_type| matches!(ts_type, TSType::TSTypeReference(_)));
+    let unresolved_type_ref = is_type_reference && resolved.props.is_empty();
+
     // Infer runtime types from the root type (for simple types like `string`, `number`)
     let runtime_types = tp
         .params
@@ -724,6 +734,7 @@ fn extract_type_params<'a>(
         gt_span,
         resolved,
         runtime_types,
+        unresolved_type_ref,
     }
 }
 

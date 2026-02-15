@@ -34,6 +34,7 @@ pub fn process_define_options<'a>(
                 "".to_string(),
             )),
             remove: None,
+            diagnostic: None,
         });
     }
 

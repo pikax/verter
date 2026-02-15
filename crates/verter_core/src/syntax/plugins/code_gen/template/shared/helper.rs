@@ -340,6 +340,7 @@ pub fn prefix_vfor_references_into(
     }
 }
 
+const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
 /// Escape characters in-place within a code_transform range for a JavaScript string literal.
 ///
 /// Reads characters from `input[start..end]` and pushes overwrites for those that need
@@ -399,22 +400,6 @@ pub fn escape_js_string_in_place<'a>(
             pending_overwrites.push((pos, pos + char_len, s));
         }
         pos += char_len;
-    }
-}
-
-const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
-
-/// Capitalize the first ASCII character in-place within a code_transform range.
-///
-/// Reads the byte at `input[start]` and if it's a lowercase ASCII letter,
-/// overwrites it with its uppercase equivalent. Non-lowercase bytes are left untouched.
-#[allow(dead_code)]
-pub fn capitalize_first_in_place(code_transform: &mut CodeTransform, start: u32, input: &str) {
-    let first_byte = input.as_bytes()[start as usize];
-    if first_byte.is_ascii_lowercase() {
-        let upper = (first_byte - b'a' + b'A') as char;
-        let mut buf = [0u8; 1];
-        code_transform.overwrite(start, start + 1, upper.encode_utf8(&mut buf));
     }
 }
 
@@ -535,14 +520,6 @@ pub fn classify_modifier(name: &str) -> ModifierKind {
         }
         _ => ModifierKind::Runtime,
     }
-}
-
-/// Capitalize the first ASCII character of a string (e.g., `click` → `Click`).
-#[allow(dead_code)] // used by capitalize_first_into callers; retained for standalone usage
-pub fn capitalize_first(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    capitalize_first_into(s, &mut out);
-    out
 }
 
 /// Capitalize the first character of `s` and append to `buf` (avoids allocation).
@@ -689,67 +666,6 @@ mod tests {
             "prefix\\\"middle\\\"suffix"
         );
     }
-
-    // ── capitalize_first_in_place tests ─────────────────────────────────
-
-    #[test]
-    fn test_capitalize_first_in_place_lowercase() {
-        let input = "click";
-        let alloc = Allocator::default();
-        let mut ct = crate::code_transform::CodeTransform::new(input, &alloc);
-        capitalize_first_in_place(&mut ct, 0, input);
-        assert_eq!(ct.build_string(), "Click");
-    }
-
-    #[test]
-    fn test_capitalize_first_in_place_already_upper() {
-        let input = "Click";
-        let alloc = Allocator::default();
-        let mut ct = crate::code_transform::CodeTransform::new(input, &alloc);
-        capitalize_first_in_place(&mut ct, 0, input);
-        assert_eq!(ct.build_string(), "Click");
-    }
-
-    #[test]
-    fn test_capitalize_first_in_place_at_offset() {
-        let input = "on-click";
-        let alloc = Allocator::default();
-        let mut ct = crate::code_transform::CodeTransform::new(input, &alloc);
-        capitalize_first_in_place(&mut ct, 3, input);
-        assert_eq!(ct.build_string(), "on-Click");
-    }
-
-    #[test]
-    fn test_capitalize_first_in_place_non_ascii_no_op() {
-        let input = "42abc";
-        let alloc = Allocator::default();
-        let mut ct = crate::code_transform::CodeTransform::new(input, &alloc);
-        capitalize_first_in_place(&mut ct, 0, input);
-        // '4' is not ascii_lowercase, so no change
-        assert_eq!(ct.build_string(), "42abc");
-    }
-
-    #[test]
-    fn test_escape_js_string() {
-        assert_eq!(escape_js_string("hello"), "hello");
-        assert_eq!(escape_js_string("he\"llo"), "he\\\"llo");
-        assert_eq!(escape_js_string("a\\b"), "a\\\\b");
-        assert_eq!(escape_js_string("a\nb"), "a\\nb");
-        assert_eq!(escape_js_string("a\0b"), "a\\0b");
-        assert_eq!(escape_js_string("a\x01b"), "a\\x01b");
-        assert_eq!(escape_js_string("a\x1Fb"), "a\\x1Fb");
-        assert_eq!(escape_js_string("a\u{2028}b"), "a\\u2028b");
-        assert_eq!(escape_js_string("a\u{2029}b"), "a\\u2029b");
-    }
-
-    #[test]
-    fn test_capitalize_first() {
-        assert_eq!(capitalize_first("click"), "Click");
-        assert_eq!(capitalize_first(""), "");
-        assert_eq!(capitalize_first("a"), "A");
-        assert_eq!(capitalize_first("Click"), "Click");
-    }
-
     // ── patch_bindings_with_var_mappings tests ────────────────────────
 
     /// Helper to build a BindingExtractionResult for tests.

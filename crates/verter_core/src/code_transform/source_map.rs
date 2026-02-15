@@ -380,4 +380,57 @@ mod tests {
             (2, 0)
         ); // T
     }
+
+    /// @ai-generated — Verify offset_to_line_column edge cases
+    /// Tests the Copilot-suggested concern that partition_point + line-1 is incorrect.
+    /// The current implementation IS correct: partition_point(|&s| s <= offset) returns
+    /// the count of elements satisfying the predicate, which minus 1 gives the correct line.
+    #[test]
+    fn test_line_column_edge_cases() {
+        // Single line: line_starts = [0]
+        let line_starts = vec![0u32];
+        assert_eq!(
+            CodeTransform::offset_to_line_column(&line_starts, 0),
+            (0, 0)
+        );
+        assert_eq!(
+            CodeTransform::offset_to_line_column(&line_starts, 5),
+            (0, 5)
+        );
+
+        // Two lines: "abc\ndef" → line_starts = [0, 4]
+        let line_starts = vec![0u32, 4];
+        // offset 0 = line 0, col 0
+        assert_eq!(
+            CodeTransform::offset_to_line_column(&line_starts, 0),
+            (0, 0)
+        );
+        // offset 3 = line 0, col 3 (the \n)
+        assert_eq!(
+            CodeTransform::offset_to_line_column(&line_starts, 3),
+            (0, 3)
+        );
+        // offset 4 = line 1, col 0 (first char of line 1)
+        assert_eq!(
+            CodeTransform::offset_to_line_column(&line_starts, 4),
+            (1, 0)
+        );
+        // offset 6 = line 1, col 2
+        assert_eq!(
+            CodeTransform::offset_to_line_column(&line_starts, 6),
+            (1, 2)
+        );
+
+        // Offset exactly at a line start boundary
+        // "a\nb\nc" → line_starts = [0, 2, 4]
+        let line_starts = vec![0u32, 2, 4];
+        assert_eq!(
+            CodeTransform::offset_to_line_column(&line_starts, 2),
+            (1, 0)
+        );
+        assert_eq!(
+            CodeTransform::offset_to_line_column(&line_starts, 4),
+            (2, 0)
+        );
+    }
 }

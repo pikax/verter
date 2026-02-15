@@ -60,6 +60,7 @@ pub fn process_define_emits<'a>(
                 }),
                 overwrite_span: None,
                 remove: None,
+                diagnostic: None,
             });
         } else {
             // No emits resolved from type params
@@ -90,6 +91,7 @@ pub fn process_define_emits<'a>(
             }),
             overwrite_span: None,
             remove: None,
+            diagnostic: None,
         });
     }
 
@@ -110,6 +112,7 @@ pub fn process_define_emits<'a>(
             }),
             overwrite_span: None,
             remove: None,
+            diagnostic: None,
         });
     }
 

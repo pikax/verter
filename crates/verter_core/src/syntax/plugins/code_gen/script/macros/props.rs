@@ -8,7 +8,9 @@
 
 use crate::code_transform::CodeTransform;
 use crate::common::Span;
-use crate::syntax::plugins::code_gen::script::macros::types::MacroProcessReturn;
+use crate::syntax::plugins::code_gen::script::macros::types::{
+    MacroDiagnostic, MacroProcessReturn,
+};
 use crate::utils::oxc::vue::{
     format_runtime_types, MacroArrayArg, MacroDeclarator, MacroObjectArg, MacroTypeParams,
 };
@@ -51,6 +53,7 @@ pub fn process_define_props<'a>(
                 "__props;".to_string(),
             )),
             remove: None,
+            diagnostic: None,
         });
     } else if let Some(arr) = array_arg {
         return Some(MacroProcessReturn {
@@ -66,6 +69,7 @@ pub fn process_define_props<'a>(
                 "__props;".to_string(),
             )),
             remove: None,
+            diagnostic: None,
         });
     }
     // Fallback: argument is an expression (e.g., defineProps(createAdProps())).
@@ -88,6 +92,7 @@ pub fn process_define_props<'a>(
                     "__props;".to_string(),
                 )),
                 remove: None,
+                diagnostic: None,
             });
         }
     }
@@ -98,6 +103,7 @@ pub fn process_define_props<'a>(
         }),
         overwrite_span: None,
         remove: None,
+        diagnostic: None,
     })
 }
 
@@ -149,13 +155,28 @@ fn transform_type_params_to_runtime<'a>(
 ) -> MacroProcessReturn {
     // Check if we have resolved props from the type literal
     if type_params.resolved.props.is_empty() {
-        // Type couldn't be resolved (e.g., imported type like `defineProps<ExternalProps>()`)
-        // Replace macro with __props and emit empty props object as fallback
-        code_transform.overwrite(macro_span.start, macro_span.end, "__props;");
+        // Empty type literal (e.g., `defineProps<{}>()`) or unresolvable type reference
+        // (e.g., `defineProps<ExternalProps>()`). In both cases, emit `props: {}` by:
+        // 1. Overwriting the macro prefix with __props;
+        // 2. Overwriting the type content with {} (the empty props object)
+        // 3. Removing the macro suffix
+        // This ensures move_span can reference the type_span region independently.
+        code_transform.overwrite(macro_span.start, type_params.type_span.start, "__props;");
+        code_transform.overwrite(type_params.type_span.start, type_params.type_span.end, "{}");
+        code_transform.overwrite(type_params.type_span.end, macro_span.end, "");
         return MacroProcessReturn {
-            move_span: None,
+            move_span: Some(type_params.type_span),
             overwrite_span: None,
             remove: None,
+            diagnostic: if type_params.unresolved_type_ref {
+                Some(MacroDiagnostic {
+                    message: "Unresolvable type reference or unsupported built-in utility type"
+                        .to_string(),
+                    span: type_params.type_span,
+                })
+            } else {
+                None
+            },
         };
     }
 
@@ -264,6 +285,7 @@ fn transform_type_params_to_runtime<'a>(
         move_span: Some(type_params.type_span),
         overwrite_span: None,
         remove: None,
+        diagnostic: None,
     }
 }
 
@@ -351,5 +373,6 @@ fn transform_external_type_to_runtime<'a>(
         move_span: Some(type_params.type_span),
         overwrite_span: None,
         remove: None,
+        diagnostic: None,
     }
 }
