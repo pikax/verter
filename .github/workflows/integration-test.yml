@@ -195,10 +195,6 @@ jobs:
         if: steps.source.outputs.source == 'artifact'
         run: pnpm --filter @verter/unplugin build
 
-      - name: Build vite-plugin
-        if: steps.source.outputs.source == 'artifact'
-        run: pnpm --filter @verter/vite-plugin build
-
       - name: Create local registry tarball
         if: steps.source.outputs.source == 'artifact'
         run: |
@@ -206,7 +202,6 @@ jobs:
           # Pack packages
           cd packages/native && pnpm pack --pack-destination ../../dist && cd ../..
           cd packages/unplugin && pnpm pack --pack-destination ../../dist && cd ../..
-          cd packages/vite-plugin && pnpm pack --pack-destination ../../dist && cd ../..
 
           echo "✅ Packages packed:"
           ls -lh dist/*.tgz

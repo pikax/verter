@@ -138,7 +138,7 @@ graph TB
     end
 
     subgraph "Build Tools"
-        Vite["@verter/vite-plugin<br/>(Vite Integration)"]
+        Unplugin["@verter/unplugin<br/>(Universal Bundler Plugin)"]
     end
 
     subgraph "Web"
@@ -154,7 +154,7 @@ graph TB
     Core --> Types
     Native --> RustCore
     WASM --> RustCore
-    Vite --> Native
+    Unplugin --> Native
     Playground --> WASM
 ```
 
@@ -183,7 +183,7 @@ verter/
 │   ├── types/                     # @verter/types — TypeScript utility types
 │   ├── native/                    # @verter/native — Native binding loader
 │   ├── wasm/                      # @verter/wasm — WASM binding wrapper
-│   ├── vite-plugin/               # @verter/vite-plugin — Vite integration
+│   ├── unplugin/                  # @verter/unplugin — Universal bundler plugin
 │   ├── language-server/           # @verter/language-server — LSP server
 │   ├── language-shared/           # @verter/language-shared — Shared protocol types
 │   ├── typescript-plugin/         # @verter/typescript-plugin — TS plugin
@@ -210,7 +210,7 @@ verter-vscode (VS Code extension)
 │   └── @verter/core
 └── @verter/oxc-bindings (OXC parser binary helper)
 
-@verter/vite-plugin (Vite integration)
+@verter/unplugin (universal bundler plugin)
 └── @verter/native
 
 @verter/playground (Netlify-hosted)
@@ -363,7 +363,7 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 | `@verter/types`             | [README](./packages/types/readme.md)             | TypeScript utility types          |
 | `@verter/native`            | [README](./packages/native/README.md)            | Native Node.js bindings (NAPI-RS) |
 | `@verter/wasm`              | [README](./packages/wasm/README.md)              | WASM bindings for browser         |
-| `@verter/vite-plugin`       | [README](./packages/vite-plugin/README.md)       | Vite build integration            |
+| `@verter/unplugin`          | [README](./packages/unplugin/README.md)          | Universal bundler plugin          |
 | `@verter/language-server`   | [README](./packages/language-server/readme.md)   | LSP server                        |
 | `@verter/language-shared`   | [README](./packages/language-shared/readme.md)   | Shared protocol types             |
 | `@verter/typescript-plugin` | [README](./packages/typescript-plugin/readme.md) | TypeScript plugin                 |

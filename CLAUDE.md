@@ -17,7 +17,7 @@ verter-vscode (VS Code extension)
 │   └── @verter/native (Rust template compiler, NAPI-RS)
 ├── @verter/typescript-plugin (IDE .vue import resolution)
 │   └── @verter/core
-└── @verter/vite-plugin
+└── @verter/unplugin (universal bundler plugin)
     └── @verter/native
 
 @verter/playground (Firebase-hosted)
@@ -36,7 +36,7 @@ packages/
   types/             # @verter/types - TypeScript utility types
   native/            # @verter/native - Native binding loader + platform packages
   wasm/              # @verter/wasm - WASM binding wrapper
-  vite-plugin/       # @verter/vite-plugin - Vite integration
+  unplugin/          # @verter/unplugin - Universal bundler plugin
   language-server/   # @verter/language-server - LSP server
   language-shared/   # @verter/language-shared - Shared LSP protocol types
   typescript-plugin/ # @verter/typescript-plugin - TS language service plugin
@@ -125,7 +125,7 @@ pnpm run build:ts             # Build all TypeScript packages
 pnpm run build:playground     # Build the playground for deployment
 ```
 
-`pnpm build` runs sequentially: native bindings first (needed by vite-plugin), then WASM (needed by playground), then all TS packages. This ensures F5 debugging in VS Code and `pnpm --filter @verter/playground dev` both work.
+`pnpm build` runs sequentially: native bindings first (needed by unplugin), then WASM (needed by playground), then all TS packages. This ensures F5 debugging in VS Code and `pnpm --filter @verter/playground dev` both work.
 
 ## Development
 
@@ -298,7 +298,7 @@ Scopes:
   napi     - verter_napi / @verter/native
   wasm     - verter_wasm / @verter/wasm
   play     - playground
-  vite     - vite-plugin
+  unplugin - @verter/unplugin
   lsp      - language-server
   types    - @verter/types
   ts       - @verter/core (TypeScript)
