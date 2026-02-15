@@ -37,15 +37,15 @@ Note: Script bindings are carried inside OxcScript.result.bindings
 ## Plugin Pipeline Order
 
 ### Script pipeline
-`element_compiler → oxc_parser → code_gen_script`
+`element_compiler → oxc_parser → code_gen/script`
 
 ### Template pipeline
-`element_compiler → css_style → oxc_parser → code_gen_template`
+`element_compiler → css_parser → oxc_parser → code_gen/template`
 
-Where `code_gen_template` is one of:
-- `code_gen_template` (VDOM mode)
-- `code_gen_template_vapor` (Vapor mode)
-- `code_gen_tsx` (TSX for type checking)
+Where `code_gen/template` targets one of:
+- `vdom/` (VDOM render function mode)
+- `vapor/` (Vapor mode)
+- TSX (for type checking — future)
 
 ## Binding Resolution Order
 
@@ -75,13 +75,14 @@ assert!(my_plugin.take_output().contains("expected"));
 | File | Purpose |
 |------|---------|
 | `types.rs` | All event and type definitions |
-| `syntax.rs` | Tokenizer → Event conversion |
+| `pipeline.rs` | Tokenizer → Event conversion |
 | `plugin.rs` | SyntaxPlugin trait and SyntaxResult |
 | `binding_types.rs` | BindingType, ReactivityLevel, binding resolution helpers |
 | `plugins/element_compiler/` | Raw events → Compiled events |
 | `plugins/oxc_parser/` | Compiled events → OXC-parsed events |
-| `plugins/code_gen_script/` | OxcScript pass-through (bindings in OxcScript.result) |
-| `plugins/css_style/` | Scoped CSS, v-bind(), CSS Modules |
-| `plugins/code_gen_template/` | VDOM render function codegen |
-| `plugins/code_gen_template_vapor/` | Vapor mode codegen |
-| `plugins/code_gen_tsx/` | TSX codegen for type checking |
+| `plugins/css_parser/` | Scoped CSS, v-bind(), CSS Modules |
+| `plugins/code_gen/script/` | Script codegen (macros, bindings, sections) |
+| `plugins/code_gen/template/vdom/` | VDOM render function codegen |
+| `plugins/code_gen/template/vapor/` | Vapor mode codegen |
+| `plugins/code_gen/css/` | CSS output generation |
+| `plugins/code_gen/types.rs` | Shared codegen types |

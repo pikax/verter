@@ -176,6 +176,7 @@ flowchart LR
 verter/
 ├── crates/                        # Rust crates
 │   ├── verter_core/               # Core template compiler (pure Rust)
+│   ├── verter_bench/              # Benchmarks and comparison examples
 │   ├── verter_napi/               # Native Node.js bindings (NAPI-RS)
 │   └── verter_wasm/               # WASM bindings (wasm-bindgen)
 ├── packages/                      # TypeScript packages
@@ -373,11 +374,12 @@ See [.github/INTEGRATION_TEST.md](./.github/INTEGRATION_TEST.md) for details.
 
 ### Rust Crates
 
-| Crate         | README                                   | Description              |
-| ------------- | ---------------------------------------- | ------------------------ |
-| `verter_core` | [README](./crates/verter_core/README.md) | Core template compiler   |
-| `verter_napi` | [README](./crates/verter_napi/README.md) | NAPI-RS Node.js bindings |
-| `verter_wasm` | [README](./crates/verter_wasm/README.md) | WASM bindings            |
+| Crate          | README                                    | Description                        |
+| -------------- | ----------------------------------------- | ---------------------------------- |
+| `verter_core`  | [README](./crates/verter_core/README.md)  | Core template compiler             |
+| `verter_bench` | [README](./crates/verter_bench/Cargo.toml)| Benchmarks and comparison examples |
+| `verter_napi`  | [README](./crates/verter_napi/README.md)  | NAPI-RS Node.js bindings           |
+| `verter_wasm`  | [README](./crates/verter_wasm/README.md)  | WASM bindings                      |
 
 ## Credits
 

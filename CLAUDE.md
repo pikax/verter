@@ -20,7 +20,7 @@ verter-vscode (VS Code extension)
 └── @verter/unplugin (universal bundler plugin)
     └── @verter/native
 
-@verter/playground (Firebase-hosted)
+@verter/playground (Netlify-hosted)
 └── @verter/wasm (Rust template compiler, wasm-bindgen)
 ```
 
@@ -29,6 +29,7 @@ verter-vscode (VS Code extension)
 ```
 crates/
   verter_core/       # Core template compiler (Rust)
+  verter_bench/      # Benchmarks and comparison examples (Rust)
   verter_napi/       # Native Node.js bindings (NAPI-RS cdylib)
   verter_wasm/       # WASM bindings (wasm-bindgen cdylib)
 packages/
@@ -41,7 +42,7 @@ packages/
   language-shared/   # @verter/language-shared - Shared LSP protocol types
   typescript-plugin/ # @verter/typescript-plugin - TS language service plugin
   oxc-bindings/      # @verter/oxc-bindings - OXC parser binary helper
-  playground/        # @verter/playground - Online playground (private, Firebase-hosted)
+  playground/        # @verter/playground - Online playground (private, Netlify-hosted)
   vue-vscode/        # verter-vscode - VS Code extension
   example/           # Example project
 scripts/
@@ -113,6 +114,55 @@ documents/
 - **DocumentManager**: Tracks open files, handles file changes, caches snapshots
 - **VerterManager**: Manages TypeScript LanguageService instances per tsconfig.json
 - **VueDocument**: Represents a `.vue` file, lazily parses and creates sub-documents for each block
+
+### Rust Compiler Architecture (`crates/verter_core/src/`)
+
+The Rust compiler uses an event-driven plugin pipeline. See [CLAUDE_IMPLEMENTATION_GUIDE.md](CLAUDE_IMPLEMENTATION_GUIDE.md) and [crates/verter_core/src/syntax/README.md](crates/verter_core/src/syntax/README.md) for details.
+
+```
+Vue SFC Source
+    ↓
+[Tokenizer] → TokenizerEvent stream
+    ↓
+[Syntax/Pipeline] → Vec<Event> (template/style) + Vec<Event> (script)
+    ↓
+[Plugin Pipeline] → Processed events + codegen output
+```
+
+**Plugin pipeline order:**
+- Script: `element_compiler → oxc_parser → code_gen/script`
+- Template: `element_compiler → css_parser → oxc_parser → code_gen/template`
+
+Where `code_gen/template` can target VDOM, Vapor, or TSX output modes.
+
+**Module overview:**
+
+```
+syntax/
+├── types.rs              # All event and type definitions
+├── pipeline.rs           # Tokenizer → Event conversion
+├── plugin.rs             # SyntaxPlugin trait
+├── binding_types.rs      # BindingType, ReactivityLevel
+└── plugins/
+    ├── element_compiler/  # Raw events → Compiled events
+    ├── oxc_parser/        # Compiled → OXC-parsed events (expression parsing)
+    ├── css_parser/        # Scoped CSS, v-bind(), CSS Modules
+    └── code_gen/          # Codegen plugins
+        ├── script/        # Script codegen (macros, bindings, sections)
+        ├── template/      # Template codegen
+        │   ├── vdom/      # VDOM render function output
+        │   ├── vapor/     # Vapor mode output
+        │   └── shared/    # Shared codegen helpers
+        ├── css/           # CSS output generation
+        └── types.rs       # Shared codegen types
+css/
+├── mod.rs                # CSS entry point
+├── prepass.rs            # CSS preprocessing
+├── scoped.rs             # Scoped CSS transformation
+├── modules.rs            # CSS Modules support
+├── walk.rs               # CSS AST walking
+└── types.rs              # CSS types
+```
 
 ## Build
 
@@ -218,8 +268,8 @@ See [CLAUDE_IMPLEMENTATION_GUIDE.md](CLAUDE_IMPLEMENTATION_GUIDE.md) for detaile
 - **TDD workflow** — write failing tests first, then implement
 - **`gen_and_validate()`** — all codegen tests MUST validate JS syntax via oxc parser
 - **AST comparison** — E2E tests compare against Vue's official compiler output
-- **State management** — `TemplateCodegenState` in `types.rs`
-- **Element processing** — "store in open, emit in close" pattern
+- **Event pipeline** — construct event Vecs, run through plugins, assert output
+- **Binding metadata** — `BindingType` and `ReactivityLevel` in `binding_types.rs`
 
 ## TypeScript Code Patterns
 
@@ -255,8 +305,17 @@ export const MyPlugin = definePlugin({
 | `packages/language-server/src/server.ts` | LSP server setup |
 | `packages/language-server/src/v5/documents/verter/manager/manager.ts` | TS service management |
 | `packages/types/src/helpers/helpers.ts` | Core type utilities |
-| `crates/verter_core/src/codegen/vue/template/types.rs` | Codegen state structs, patch flags |
-| `crates/verter_core/src/codegen/vue/template/element.rs` | Element open/close processing |
+| `crates/verter_core/src/syntax/types.rs` | All event and type definitions |
+| `crates/verter_core/src/syntax/pipeline.rs` | Tokenizer → Event conversion pipeline |
+| `crates/verter_core/src/syntax/binding_types.rs` | BindingType, ReactivityLevel, binding resolution |
+| `crates/verter_core/src/syntax/plugin.rs` | SyntaxPlugin trait and SyntaxResult |
+| `crates/verter_core/src/syntax/plugins/element_compiler/` | Raw events → Compiled events |
+| `crates/verter_core/src/syntax/plugins/oxc_parser/` | Compiled events → OXC-parsed events |
+| `crates/verter_core/src/syntax/plugins/code_gen/script/mod.rs` | Script codegen (macros, bindings) |
+| `crates/verter_core/src/syntax/plugins/code_gen/template/vdom/` | VDOM render function codegen |
+| `crates/verter_core/src/syntax/plugins/code_gen/template/vapor/` | Vapor mode codegen |
+| `crates/verter_core/src/syntax/plugins/css_parser/` | CSS scoping, modules, v-bind() |
+| `crates/verter_core/src/css/` | CSS preprocessing and style transformation |
 | `crates/verter_core/src/builder/codegen.rs` | Pipeline setup, E2E tests |
 
 ## Rust Performance

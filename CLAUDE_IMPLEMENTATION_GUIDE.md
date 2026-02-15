@@ -1,8 +1,8 @@
 # Implementation Guide
 
-## syntax_kai Pipeline Architecture
+## syntax Pipeline Architecture
 
-The `syntax_kai` module provides an event-driven plugin pipeline for compiling Vue SFCs. It tokenizes Vue SFCs into raw events, then processes them through a sequence of plugins that progressively enrich and transform the data.
+The `syntax` module provides an event-driven plugin pipeline for compiling Vue SFCs. It tokenizes Vue SFCs into raw events, then processes them through a sequence of plugins that progressively enrich and transform the data.
 
 ### Pipeline Overview
 
@@ -10,10 +10,10 @@ The `syntax_kai` module provides an event-driven plugin pipeline for compiling V
 Tokenizer → Syntax → Raw Events
                         ↓
               [Script Pipeline]
-              element_compiler → oxc_parser → code_gen_script
+              element_compiler → oxc_parser → code_gen/script
                         ↓
               [Template Pipeline]
-              element_compiler → css_style → oxc_parser → code_gen_*
+              element_compiler → css_parser → oxc_parser → code_gen/template
 ```
 
 Two separate event Vecs are produced by `Syntax`:
@@ -55,7 +55,7 @@ pub enum SyntaxResult<E> {
 
 ### Binding Metadata Flow
 
-1. `code_gen_script` processes `OxcScript` → walks AST → classifies bindings → emits `Event::ScriptBindings(BindingMetadata)`
+1. `code_gen/script` processes `OxcScript` → walks AST → classifies bindings → emits `Event::ScriptBindings(BindingMetadata)`
 2. Builder prepends `ScriptBindings` event to template pipeline
 3. Codegen plugins (VDOM/Vapor/TSX) consume `ScriptBindings` event, clone metadata into their state
 4. During codegen, `resolve_binding_prefix()` / `resolve_binding_suffix()` determine correct accessor
@@ -101,7 +101,7 @@ Use `&[u8]` or `Span` referencing original source throughout the pipeline. `Stri
 
 ### Adding a New Codegen Plugin
 
-1. Create `syntax_kai/plugins/my_plugin/mod.rs` and `my_plugin.rs`
+1. Create `syntax/plugins/my_plugin/mod.rs` and `my_plugin.rs`
 2. Implement `SyntaxPlugin` trait
-3. Register in `syntax_kai/plugins/mod.rs`
-4. Add to builder pipeline in `builder/codegen_kai.rs`
+3. Register in `syntax/plugins/mod.rs`
+4. Add to builder pipeline in `builder/codegen.rs`

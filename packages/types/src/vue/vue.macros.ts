@@ -3,6 +3,8 @@
 
 
 // Local copies of Vue utility types
+//#endregion
+//#region temp/packages/runtime-core/src/component.d.ts
 type Data = Record<string, unknown>;
 type DefaultFactory<T> = (props: Data) => T | null | undefined;
 type DefineModelOptions<T = any, G = T, S = T> = {
@@ -21,7 +23,9 @@ interface PropOptions<T = any, D = T> {
     validator?(value: unknown, props: Data): boolean;
 }
 export type SystemModifiers = (typeof systemModifiers)[number];
-export declare const systemModifiers: readonly [
+export //#endregion
+//#region temp/packages/runtime-dom/src/directives/vOn.d.ts
+declare const systemModifiers: readonly [
     "ctrl",
     "shift",
     "alt",
