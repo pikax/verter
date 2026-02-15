@@ -175,6 +175,14 @@ const emit = defineEmits<{ (e: 'update', val: string): void }>()
 </script>
 <template><button @click="emit('update', 'hi')">emit</button></template>`,
     },
+    {
+      name: 'mixed text and element children',
+      sfc: `<script setup>
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>
+<template><div><span>child</span>text{{ msg }}<span>end</span></div></template>`,
+    },
   ]
 
   for (const { name, sfc } of cases) {

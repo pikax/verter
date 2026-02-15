@@ -188,6 +188,11 @@ pub struct CodegenResult {
     pub errors: Vec<CompileDiagnostic>,
     /// Time taken in milliseconds.
     pub duration_ms: f64,
+    /// Whether the output contains a standalone `function render()` that must be
+    /// attached to the component via `_sfc_main.render = render`.
+    /// `false` when the render is inlined inside `setup()` (production mode with
+    /// `<script setup>`), or when there is no `<template>` block.
+    pub has_render: bool,
 }
 
 /// Result of the TSX codegen process.
@@ -359,6 +364,7 @@ pub fn compile(
             scope_id: String::new(),
             errors: convert_diagnostics(&ctx.diagnostics),
             duration_ms,
+            has_render: false,
         };
     }
 
@@ -387,6 +393,12 @@ pub fn compile(
             }
         });
     let effective_inline = options.resolve_inline() && has_script_setup;
+
+    // Check if the SFC has any <template> block.
+    let has_template = input
+        .as_bytes()
+        .windows(b"<template".len())
+        .any(|w| w.eq_ignore_ascii_case(b"<template"));
 
     // Pre-scan for <template vapor> to inform the script codegen plugin.
     let has_vapor_template = input
@@ -524,6 +536,11 @@ pub fn compile(
 
     let errors = convert_diagnostics(&ctx.diagnostics);
 
+    // A standalone `function render()` exists when:
+    // - There is a template AND the render was NOT inlined (VDOM dev / Options API), OR
+    // - There is a vapor template (vapor always emits standalone render)
+    let has_render = has_template && (!effective_inline || has_vapor_template);
+
     CodegenResult {
         code,
         source_map,
@@ -532,6 +549,7 @@ pub fn compile(
         scope_id: scope_id_string,
         errors,
         duration_ms,
+        has_render,
     }
 }
 

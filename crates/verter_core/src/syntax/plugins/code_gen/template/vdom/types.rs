@@ -40,6 +40,11 @@ impl ChildKind {
 pub(crate) struct ChildInfo<'alloc> {
     /// Start position in source — used for retroactive separator insertion via prepend_left.
     pub start: u32,
+    /// End position in source — used by the close phase for _createTextVNode closing.
+    /// For text: position after text content (where closing `"` is appended).
+    /// For interpolation: position after `}}` (where closing `)` overwrites to).
+    /// For elements/comments: 0 (unused in _createTextVNode wrapping).
+    pub end: u32,
     /// What kind of child this is.
     pub kind: ChildKind,
     /// Scope open prefix text (e.g. `"(show) ? "` for v-if, renderList wrapper for v-for).

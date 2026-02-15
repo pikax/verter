@@ -472,6 +472,25 @@ test.describe('Verter E2E Tests', () => {
     await expect(page.getByTestId('render-comment-count')).toHaveText('1')
   })
 
+  // @ai-generated - Text nodes mixed with element children must render correctly.
+  // Without _createTextVNode wrapping, raw strings in children arrays don't mount
+  // inside block elements (v-for, root template).
+  test('MixedTextChildren: text nodes render alongside elements', async ({ page }) => {
+    // Static text between elements
+    const staticDiv = page.getByTestId('mixed-text-static')
+    await expect(staticDiv).toContainText('middle')
+
+    // Interpolation between elements
+    const interpDiv = page.getByTestId('mixed-text-interp')
+    await expect(interpDiv).toContainText('static')
+
+    // v-for with mixed text+element children
+    await expect(page.getByTestId('mixed-item-1')).toContainText('Alpha')
+    await expect(page.getByTestId('mixed-badge-1')).toHaveText('A')
+    await expect(page.getByTestId('mixed-item-2')).toContainText('Beta')
+    await expect(page.getByTestId('mixed-badge-2')).toHaveText('B')
+  })
+
   // ─── Integration ────────────────────────────────────────
 
   test('TodoApp: full CRUD workflow', async ({ page }) => {

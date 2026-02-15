@@ -103,7 +103,7 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
     // returns the bindings that the render function accesses via _ctx.
     let vaporTemplateBlock = "";
     const templateStart = scriptCode.search(/\nconst t\d+ = _template\(/);
-    if (templateStart !== -1 && /^function render\b/m.test(scriptCode)) {
+    if (templateStart !== -1 && scriptCode.indexOf("function render(", templateStart) !== -1) {
       // Find the end of the render function by brace-matching from `function render(`
       const renderIdx = scriptCode.indexOf("function render(", templateStart);
       if (renderIdx !== -1) {
@@ -152,16 +152,17 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
   }
 
   // 3. Add template code (render function)
-  // The Rust compiler may put the render function in result.template or inline it
-  // in result.script.code. Detect either case.
-  const hasRenderInScript = result.script ? /^function render\b/m.test(result.script.code) : false;
   if (result.template) {
     lines.push(result.template.code);
     lines.push("");
   }
 
   // 4. Attach render function to component
-  if ((result.template || hasRenderInScript) && hasDefaultExport) {
+  // The pipeline reports `has_render` when a standalone `function render()` exists
+  // (non-inline VDOM or vapor). When the render is inlined inside setup()
+  // (production with <script setup>), has_render is false and no attachment is needed.
+  const hasRender = (result as any).hasRender ?? (result as any).has_render ?? false;
+  if (hasRender && hasDefaultExport) {
     lines.push("_sfc_main.render = render");
   }
 

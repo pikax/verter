@@ -364,11 +364,23 @@ pub(crate) fn handle_element_close<'alloc>(
         } else {
             // Non-text children: always array-wrap (single or multiple).
             // Vue's runtime requires `[child]` even for a single child.
-            for (i, child) in state.children.iter().enumerate() {
-                let sep = if i == 0 { ", [" } else { ", " };
-                let s = child_separator_str(code_transform, sep, child, buf);
-                pending_prepend_lefts.push((child.start, s));
-            }
+            //
+            // Text/interpolation children mixed with elements must be wrapped
+            // in `_createTextVNode(...)` so they become proper VNodes. Without
+            // this, Vue's optimized `mountChildren` (in block mode) skips
+            // `normalizeVNode` and raw strings never mount.
+            //
+            // Consecutive text-like children form "runs" that are grouped into
+            // a single `_createTextVNode("text " + _toDisplayString(expr), 1)`.
+            emit_mixed_children(
+                code_transform,
+                state,
+                is_production,
+                imports,
+                pending_prepend_lefts,
+                pending_append_lefts,
+                buf,
+            );
         }
     }
 
@@ -417,6 +429,98 @@ pub(crate) fn handle_element_close<'alloc>(
 
     // withDirectives wrapping for runtime directives (v-model native, v-show, custom)
     emit_with_directives(code_transform, state, close_pos, pending_append_lefts, buf);
+}
+
+/// Emit mixed children with text-like runs wrapped in `_createTextVNode()`.
+///
+/// Identifies consecutive "runs" of text/interpolation children and wraps each
+/// run in `_createTextVNode(...)`. Within a run, children are concatenated with
+/// ` + ` (same as the all-text-like path). Runs containing interpolation get
+/// a TEXT patch flag (`1`).
+///
+/// Non-text children (elements, comments) are emitted with normal separators.
+#[allow(clippy::too_many_arguments)]
+fn emit_mixed_children<'alloc>(
+    code_transform: &CodeTransform<'alloc>,
+    state: &StateStack<'alloc>,
+    is_production: bool,
+    imports: &mut TemplateImportDependencies,
+    pending_prepend_lefts: &mut Vec<(u32, &'alloc str)>,
+    pending_append_lefts: &mut Vec<(u32, &'alloc str)>,
+    buf: &mut String,
+) {
+    let children = &state.children;
+    let mut i = 0;
+    // Track whether we've emitted the first child (for `, [` vs `, ` separator).
+    let mut is_first_in_array = true;
+
+    while i < children.len() {
+        let child = &children[i];
+        let is_text_like = matches!(child.kind, ChildKind::Text | ChildKind::Interpolation);
+
+        if !is_text_like {
+            // Non-text child: emit with normal separator.
+            let sep = if is_first_in_array { ", [" } else { ", " };
+            let s = child_separator_str(code_transform, sep, child, buf);
+            pending_prepend_lefts.push((child.start, s));
+            is_first_in_array = false;
+            i += 1;
+            continue;
+        }
+
+        // Start of a text-like run. Find the end of this run.
+        let run_start = i;
+        let mut run_has_interp = false;
+        while i < children.len() {
+            let c = &children[i];
+            if !matches!(c.kind, ChildKind::Text | ChildKind::Interpolation) {
+                break;
+            }
+            if c.kind == ChildKind::Interpolation {
+                run_has_interp = true;
+            }
+            i += 1;
+        }
+        let run_end = i; // exclusive
+
+        imports.add(TemplateImportDependencies::CREATE_TEXT_VNODE);
+
+        // Emit the run.
+        // First child in the run: separator + `_createTextVNode(` + content_prefix
+        let first_child = &children[run_start];
+        let array_sep = if is_first_in_array { ", [" } else { ", " };
+        buf.clear();
+        buf.push_str(array_sep);
+        buf.push_str(first_child.scope_prefix);
+        buf.push_str("_createTextVNode(");
+        buf.push_str(first_child.kind.content_prefix());
+        let s = code_transform.alloc_str(buf);
+        pending_prepend_lefts.push((first_child.start, s));
+
+        // Remaining children in the run: ` + ` concatenation
+        for c in children.iter().take(run_end).skip(run_start + 1) {
+            buf.clear();
+            buf.push_str(" + ");
+            buf.push_str(c.kind.content_prefix());
+            let s = code_transform.alloc_str(buf);
+            pending_prepend_lefts.push((c.start, s));
+        }
+
+        // Close the _createTextVNode call after the last child in the run.
+        let last_child = &children[run_end - 1];
+        let close_str = if run_has_interp {
+            if is_production {
+                ", 1)"
+            } else {
+                ", 1 /* TEXT */)"
+            }
+        } else {
+            ")"
+        };
+        pending_append_lefts.push((last_child.end, close_str));
+
+        is_first_in_array = false;
+    }
 }
 
 /// Build the separator+prefix string for a child in the close phase.

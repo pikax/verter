@@ -19,6 +19,7 @@ function makeResult(overrides: Partial<ViteCodegenResult> = {}): ViteCodegenResu
     },
     styles: [],
     has_default_export: true,
+    has_render: true,
     duration_ms: 1,
     ...overrides,
   };
@@ -258,7 +259,7 @@ describe("generateMainModule", () => {
   });
 
   it("handles result with no template", () => {
-    const result = makeResult({ template: undefined });
+    const result = makeResult({ template: undefined, has_render: false });
     const output = generateMainModule(result, {
       filename: "/path/to/App.vue",
       scopeId: "abc12345",
@@ -323,6 +324,7 @@ describe("generateMainModule", () => {
         body_start_utf16: 0,
       },
       template: undefined,
+      has_render: false,
     });
 
     const output = generateMainModule(result, {
@@ -529,7 +531,7 @@ describe("generateMainModule", () => {
   // ==================== Inline render (production) ====================
 
   // @ai-generated - When production mode inlines the render into setup(),
-  // there is no separate `function render(...)` declaration.
+  // the pipeline reports has_render: false.
   // generateMainModule must NOT emit `_sfc_main.render = render`.
   it("does not attach render when render is inlined in setup (production)", () => {
     const result = makeResult({
@@ -551,6 +553,7 @@ describe("generateMainModule", () => {
         body_start_utf16: 0,
       },
       template: undefined,
+      has_render: false,
     });
 
     const output = generateMainModule(result, {
@@ -567,7 +570,7 @@ describe("generateMainModule", () => {
   });
 
   // @ai-generated - When dev mode emits a separate function render,
-  // generateMainModule must attach it to _sfc_main.
+  // the pipeline reports has_render: true.
   it("attaches render when there is a separate function render (dev mode)", () => {
     const result = makeResult({
       script: {
@@ -588,6 +591,7 @@ describe("generateMainModule", () => {
         body_start_utf16: 0,
       },
       template: undefined,
+      has_render: true,
     });
 
     const output = generateMainModule(result, {
@@ -602,7 +606,8 @@ describe("generateMainModule", () => {
   });
 
   // @ai-generated - Regression: a comment containing "function render" in script setup
-  // must not cause a false positive for render attachment in production inline mode
+  // must not cause a false positive for render attachment in production inline mode.
+  // The pipeline correctly reports has_render: false when render is inlined.
   it("does not attach render when 'function render' only appears in a comment (production)", () => {
     const result = makeResult({
       script: {
@@ -624,6 +629,7 @@ describe("generateMainModule", () => {
         body_start_utf16: 0,
       },
       template: undefined,
+      has_render: false,
     });
 
     const output = generateMainModule(result, {
@@ -725,6 +731,52 @@ const msg = ref('hello')
     // In dev mode, render should be a separate function attached to the component
     expect(output).toContain("_sfc_main.render = render");
     expect(output).toContain("function render");
+  });
+
+  // @ai-generated - Edge case: user defines `function render() {}` in <script setup>
+  // alongside a <template>. The user's render is a setup-local function;
+  // the compiler's template render is separate (dev) or inlined (prod).
+  it("integration: script setup with user-defined 'function render' and template", () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const native = require("@verter/native");
+    const sfc = `<script setup>
+function render() {}
+</script>
+<template></template>`;
+
+    // Production: render is inlined, has_render should be false
+    const prodResult = native.compileForVite(sfc, {
+      filename: "test.vue",
+      isProduction: true,
+      componentId: "test123",
+    });
+    expect(prodResult.hasRender ?? prodResult.has_render).toBe(false);
+
+    const prodOutput = generateMainModule(prodResult, {
+      filename: "test.vue",
+      scopeId: "test123",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+    expect(prodOutput).not.toContain("_sfc_main.render = render");
+
+    // Dev: compiler emits standalone render, has_render should be true
+    const devResult = native.compileForVite(sfc, {
+      filename: "test.vue",
+      isProduction: false,
+      componentId: "test123",
+    });
+    expect(devResult.hasRender ?? devResult.has_render).toBe(true);
+
+    const devOutput = generateMainModule(devResult, {
+      filename: "test.vue",
+      scopeId: "test123",
+      ssr: false,
+      isProd: false,
+      hmr: "none",
+    });
+    expect(devOutput).toContain("_sfc_main.render = render");
   });
 
   // @ai-generated - __cssModules uses _export_sfc metadata prop

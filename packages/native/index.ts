@@ -279,6 +279,11 @@ export interface ViteCodegenResult {
    */
   has_default_export: boolean;
   /**
+   * Whether the output contains a standalone `function render()` that must be
+   * attached to the component via `_sfc_main.render = render`.
+   */
+  has_render: boolean;
+  /**
    * Build time in milliseconds
    */
   duration_ms: number;

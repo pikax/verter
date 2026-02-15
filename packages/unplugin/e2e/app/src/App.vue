@@ -45,6 +45,7 @@ import DynamicComponent from './components/edge-cases/DynamicComponent.vue'
 import DeepNested from './components/edge-cases/DeepNested.vue'
 import ExportDefaultComment from './components/edge-cases/ExportDefaultComment.vue'
 import RenderInComment from './components/edge-cases/RenderInComment.vue'
+import MixedTextChildren from './components/edge-cases/MixedTextChildren.vue'
 
 // Vapor
 import VaporCounter from './components/vapor/VaporCounter.vue'
@@ -136,6 +137,7 @@ const genericItems = [
       <DeepNested />
       <ExportDefaultComment />
       <RenderInComment />
+      <MixedTextChildren />
     </section>
 
     <section data-testid="section-vapor">

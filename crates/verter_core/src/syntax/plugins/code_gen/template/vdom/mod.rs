@@ -444,6 +444,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         } else {
             parent.children.push(ChildInfo {
                 start: ev.event.event_open_tag.start,
+                end: 0, // unused for elements
                 kind: ChildKind::Element,
                 scope_prefix: "",
             });
@@ -836,6 +837,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             ))?;
         state.children.push(ChildInfo {
             start: ev.start,
+            end: ev.end,
             kind: ChildKind::Interpolation,
             scope_prefix: "",
         });

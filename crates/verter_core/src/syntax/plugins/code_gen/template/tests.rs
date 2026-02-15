@@ -1995,18 +1995,139 @@ fn test_sibling_void_elements() {
     );
 }
 
-/// @ai-generated — Mixed text and element children
+/// @ai-generated — Mixed text and element children: text wrapped in _createTextVNode
 #[test]
 fn test_mixed_text_and_element() {
     let code = gen_and_validate(r#"<template><div>text<span>child</span></div></template>"#);
     assert!(
-        code.contains(r#""text""#),
-        "Should have text child, got:\n{}",
+        code.contains(r#"_createTextVNode("text")"#),
+        "Text in mixed children should be wrapped in _createTextVNode, got:\n{}",
         code
     );
     assert!(
         code.contains(r#"_createElementVNode("span""#),
         "Should have span child, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Mixed interpolation and element: wrapped in _createTextVNode with TEXT flag
+#[test]
+fn test_mixed_interp_and_element() {
+    let code = gen_and_validate(r#"<template><div>{{ msg }}<span>child</span></div></template>"#);
+    assert!(
+        code.contains("_createTextVNode(_toDisplayString"),
+        "Interpolation in mixed children should use _createTextVNode(_toDisplayString...), got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("1 /* TEXT */"),
+        "Should have TEXT patch flag inside _createTextVNode, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Mixed text+interp and element: grouped in _createTextVNode with concatenation
+#[test]
+fn test_mixed_text_interp_and_element() {
+    let code =
+        gen_and_validate(r#"<template><div>hello {{ msg }} <span>child</span></div></template>"#);
+    assert!(
+        code.contains("_createTextVNode(\"hello \" + _toDisplayString"),
+        "Text+interp run should be grouped in _createTextVNode with +, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("1 /* TEXT */"),
+        "Should have TEXT patch flag for run with interpolation, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Text after element: <div>foo</div>aaa should wrap "aaa" in _createTextVNode
+#[test]
+fn test_mixed_text_after_element() {
+    let code = gen_and_validate(r#"<template><div><div>foo</div>aaa</div></template>"#);
+    assert!(
+        code.contains(r#"_createTextVNode("aaa")"#),
+        "Text after element should be wrapped in _createTextVNode, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Text between two elements
+#[test]
+fn test_mixed_text_between_elements() {
+    let code =
+        gen_and_validate(r#"<template><div><span>a</span>text<span>b</span></div></template>"#);
+    assert!(
+        code.contains(r#"_createTextVNode("text")"#),
+        "Text between elements should be wrapped in _createTextVNode, got:\n{}",
+        code
+    );
+    let span_count = code.matches(r#"_createElementVNode("span""#).count();
+    assert_eq!(span_count, 2, "Should have 2 spans, got:\n{}", code);
+}
+
+/// @ai-generated — Multiple text runs separated by elements
+#[test]
+fn test_mixed_multiple_text_runs() {
+    let code = gen_and_validate(r#"<template><div>before<span>mid</span>after</div></template>"#);
+    // Count calls (with open paren), not the import line
+    let ctv_count = code.matches("_createTextVNode(").count();
+    assert_eq!(
+        ctv_count, 2,
+        "Should have 2 _createTextVNode( calls for 2 text runs, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Mixed children in production mode: no patch flag comments
+#[test]
+fn test_mixed_children_production_mode() {
+    let code =
+        gen_prod_and_validate(r#"<template><div>{{ msg }}<span>child</span></div></template>"#);
+    assert!(
+        code.contains("_createTextVNode(_toDisplayString"),
+        "Production mode should still use _createTextVNode, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("/* TEXT */"),
+        "Production mode should not have patch flag comments, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains(", 1)"),
+        "Production mode should have numeric patch flag, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Mixed children should import createTextVNode
+#[test]
+fn test_mixed_children_import_create_text_vnode() {
+    let code = gen_and_validate(r#"<template><div>text<span>child</span></div></template>"#);
+    assert!(
+        code.contains("createTextVNode"),
+        "Should import createTextVNode for mixed children, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — v-for with mixed text and element children
+#[test]
+fn test_vfor_mixed_text_and_element() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import { ref } from 'vue'
+const items = ref([{id:1, name:'a'}])
+</script>
+<template><div v-for="item in items" :key="item.id">{{ item.name }}<span>badge</span></div></template>"#,
+    );
+    assert!(
+        code.contains("_createTextVNode(_toDisplayString"),
+        "v-for mixed children should use _createTextVNode, got:\n{}",
         code
     );
 }

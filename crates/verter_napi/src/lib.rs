@@ -305,6 +305,9 @@ pub struct ViteCodegenResult {
     pub styles: Vec<JsStyleBlock>,
     /// Whether the SFC has a default export (script setup or script with export default)
     pub has_default_export: bool,
+    /// Whether the output contains a standalone `function render()` that must be
+    /// attached to the component via `_sfc_main.render = render`.
+    pub has_render: bool,
     /// Build time in milliseconds
     pub duration_ms: f64,
 }
@@ -401,6 +404,7 @@ fn compile_for_vite_impl(
         template: None,
         styles,
         has_default_export,
+        has_render: result.has_render,
         duration_ms: result.duration_ms,
     })
 }

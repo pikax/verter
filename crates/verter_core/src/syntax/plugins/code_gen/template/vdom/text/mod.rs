@@ -38,6 +38,7 @@ pub(crate) fn handle_text<'alloc>(
 ) {
     state.children.push(ChildInfo {
         start: ev.start,
+        end: ev.end,
         kind: ChildKind::Text,
         scope_prefix: "",
     });

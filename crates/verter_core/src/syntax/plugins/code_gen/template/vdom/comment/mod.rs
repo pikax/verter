@@ -29,6 +29,7 @@ pub(crate) fn handle_comment<'alloc>(
 
     state.children.push(ChildInfo {
         start: ev.start,
+        end: 0, // unused for comments
         kind: ChildKind::Comment,
         scope_prefix: "",
     });
