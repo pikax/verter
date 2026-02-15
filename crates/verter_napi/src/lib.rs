@@ -322,6 +322,10 @@ fn compile_for_vite_impl(
         component_id: opts.component_id,
         include_tsx: false,
         skip_source_map: false,
+        // Vite plugin assembles script and template as separate blocks,
+        // so never inline the template (which would emit `return (_ctx,_cache) => {`
+        // at module top level, breaking ESM parsing).
+        inline: Some(false),
         ..Default::default()
     };
 

@@ -1037,14 +1037,17 @@ fn test_children_multiple_elements_array() {
     );
 }
 
-/// @ai-generated — Single element child: no array needed
+/// @ai-generated — Single element child: must be array-wrapped per Vue's spec.
+/// Vue's runtime expects `_createElementVNode("div", props, [child])` even for
+/// a single non-text child. Without array wrapping, `mountChildren` sees
+/// `children.length === undefined` and never mounts the child.
 #[test]
 fn test_children_single_element() {
     let code = gen_and_validate(r#"<template><div><span>inner</span></div></template>"#);
-    // Single child should not be in array
+    // Single non-text child MUST be in array
     assert!(
-        !code.contains("[_createElementVNode"),
-        "Single child should NOT be in array, got:\n{}",
+        code.contains("[_createElementVNode"),
+        "Single non-text child must be array-wrapped, got:\n{}",
         code
     );
 }
@@ -5001,6 +5004,315 @@ fn test_template_vif_uses_fragment() {
     assert!(
         code.contains("_Fragment"),
         "Template v-if should use _Fragment, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn test_print_full_sfc_output() {
+    let code = gen(r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+const message = ref('Hello from Verter!')
+function increment() { count.value++ }
+</script>
+<template>
+  <div class="app">
+    <h1>{{ message }}</h1>
+    <button @click="increment">Count: {{ count }}</button>
+  </div>
+</template>"#);
+    eprintln!("=== DEV MODE OUTPUT ===\n{}\n=== END ===", code);
+
+    let code_prod = gen_prod(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count = ref(0)
+const message = ref('Hello from Verter!')
+function increment() { count.value++ }
+</script>
+<template>
+  <div class="app">
+    <h1>{{ message }}</h1>
+    <button @click="increment">Count: {{ count }}</button>
+  </div>
+</template>"#,
+    );
+    eprintln!("=== PROD MODE OUTPUT ===\n{}\n=== END ===", code_prod);
+}
+
+/// @ai-generated — Test v-if/v-else block tree matches Vue official compiler.
+/// The playground's App.vue uses v-if="store.loading" / v-else and the resulting
+/// block tree must match Vue's output to avoid patchBlockChildren errors.
+#[test]
+fn test_vif_velse_block_tree_matches_vue() {
+    // Simplified version of the playground App.vue template pattern
+    let code = gen_and_validate(
+        r#"<template>
+  <div class="playground">
+    <div class="main-content">
+      <div v-if="loading" class="loading">Loading...</div>
+      <div v-else class="content">Content here</div>
+    </div>
+  </div>
+</template>"#,
+    );
+    eprintln!("=== V-IF/V-ELSE OUTPUT ===\n{}\n=== END ===", code);
+
+    // Vue's official compiler for this pattern produces:
+    // - Root div as block root with _createElementBlock
+    // - The v-if/v-else as a ternary inside the children array
+    // - Each v-if/v-else branch as a block root with (_openBlock(), _createElementBlock(...))
+    // - A _createCommentVNode("v-if", true) fallback is NOT needed when v-else is present
+    // - Each branch should have a `key` prop for stable patching
+
+    // Must contain block root for the outer div
+    assert!(
+        code.contains("_createElementBlock(\"div\""),
+        "Root should use _createElementBlock, got:\n{}",
+        code
+    );
+
+    // Both branches must be block roots (each uses _openBlock + _createElementBlock)
+    let open_block_count = code.matches("_openBlock()").count();
+    assert!(
+        open_block_count >= 3,
+        "Should have at least 3 openBlock calls (root + v-if + v-else), got {} in:\n{}",
+        open_block_count,
+        code
+    );
+
+    // Must have ternary for v-if/v-else (condition ? ... : ...)
+    assert!(
+        code.contains(" ? ") && code.contains(" : "),
+        "v-if/v-else should produce ternary operator, got:\n{}",
+        code
+    );
+
+    // v-if branches should have key props for stable patching.
+    // Vue's compiler always injects key: 0 on v-if and key: 1 on v-else,
+    // even when the element has other static props (they MUST NOT be hoisted).
+    assert!(
+        code.contains("key: 0"),
+        "v-if branch should have key: 0, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("key: 1"),
+        "v-else branch should have key: 1, got:\n{}",
+        code
+    );
+
+    // Should NOT have _createCommentVNode("v-if") since v-else is present
+    assert!(
+        !code.contains("_createCommentVNode(\"v-if\""),
+        "v-if with v-else should NOT have comment fallback, got:\n{}",
+        code
+    );
+
+    // Props on v-if/v-else branches must NOT be hoisted (key makes them unique per branch)
+    // If props were hoisted, the keys would be missing.
+    assert!(
+        !code.contains("_hoisted_3"),
+        "v-if branch props should NOT be hoisted (need key injection), got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — v-if without v-else should have comment fallback and key.
+#[test]
+fn test_vif_only_has_key_and_comment_fallback() {
+    let code = gen_and_validate(
+        r#"<template><div><div v-if="show" class="item">Visible</div></div></template>"#,
+    );
+
+    // v-if branch must have key: 0
+    assert!(
+        code.contains("key: 0"),
+        "v-if branch should have key: 0, got:\n{}",
+        code
+    );
+
+    // Without v-else, there should be a comment fallback
+    assert!(
+        code.contains("_createCommentVNode"),
+        "v-if without v-else should have _createCommentVNode fallback, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Test v-if/v-else with component children (App.vue exact pattern).
+/// This is the exact pattern from the playground App.vue that triggers the nextSibling error.
+#[test]
+fn test_vif_velse_with_component_exact_app_pattern() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import SplitPane from './SplitPane.vue'
+</script>
+<template>
+  <div class="playground">
+    <header>Header</header>
+    <div class="main-content">
+      <div v-if="loading" class="loading">Loading...</div>
+      <SplitPane v-else />
+    </div>
+  </div>
+</template>"#,
+    );
+    eprintln!("=== APP PATTERN OUTPUT ===\n{}\n=== END ===", code);
+
+    // Must produce valid JS
+    assert_valid_js(&code, "v-if/v-else with component");
+
+    // v-if/v-else should produce ternary
+    assert!(
+        code.contains(" ? ") && code.contains(" : "),
+        "v-if/v-else should produce ternary, got:\n{}",
+        code
+    );
+
+    // Both branches must be block roots
+    assert!(
+        code.contains("_openBlock()"),
+        "Branches should be block roots, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Test component with named slots in v-else branch has patch flags
+/// INSIDE _createBlock(), not outside as comma-operator expressions.
+///
+/// When a component with named slots (like SplitPane with #first/#second) has
+/// dynamic props, the patch flag (8 PROPS) and dynamic props array must be
+/// arguments to _createBlock(), not part of the outer comma expression.
+///
+/// Wrong:  (_openBlock(), _createBlock(Comp, props, {slots}), 8, ["prop"])
+/// Right:  (_openBlock(), _createBlock(Comp, props, {slots}, 8, ["prop"]))
+#[test]
+fn test_component_named_slots_patch_flags_inside_create_block() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import SplitPane from './SplitPane.vue'
+</script>
+<template>
+  <div>
+    <SplitPane :initial-split="50">
+      <template #first><div>First</div></template>
+      <template #second><div>Second</div></template>
+    </SplitPane>
+  </div>
+</template>"#,
+    );
+    eprintln!("=== NAMED SLOTS PATCH FLAGS ===\n{}\n=== END ===", code);
+
+    // The component should use _createVNode (or _createBlock if block root)
+    // with patch flag 8 (PROPS) and ["initial-split"] as dynamic props.
+    // These MUST be arguments inside the function call, not outside.
+
+    // Correct pattern: }, 8 /* PROPS */, ["initial-split"]) — inside the createVNode
+    // Wrong pattern:   }), 8, ["initial-split"]) — outside, in comma expression
+    assert!(
+        !code.contains("}), 8"),
+        "Patch flags must be INSIDE _createVNode/_createBlock, not outside.\n\
+         Found '}}), 8' which puts patch flag in comma expression.\n\
+         Got:\n{code}",
+    );
+    assert!(
+        code.contains("}, 8"),
+        "Should have patch flag 8 (PROPS) as argument to _createVNode/_createBlock.\n\
+         Got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Test component with named slots in v-else branch (exact playground pattern).
+/// SplitPane in v-else with dynamic :initial-split prop and named slots.
+#[test]
+fn test_velse_component_named_slots_patch_flags() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import SplitPane from './SplitPane.vue'
+</script>
+<template>
+  <div>
+    <div class="main-content">
+      <div v-if="loading" class="loading">Loading...</div>
+      <SplitPane v-else :initial-split="50">
+        <template #first><div>First panel</div></template>
+        <template #second><div>Second panel</div></template>
+      </SplitPane>
+    </div>
+  </div>
+</template>"#,
+    );
+    eprintln!("=== V-ELSE COMPONENT SLOTS ===\n{}\n=== END ===", code);
+
+    // v-if/v-else should produce ternary with keys
+    assert!(code.contains("key: 0"), "v-if should have key: 0");
+    assert!(code.contains("key: 1"), "v-else should have key: 1");
+
+    // Patch flags must be inside _createBlock, not outside
+    // Wrong: _createBlock(SplitPane, {key: 1, ...}, {slots}), 8, ["initial-split"])
+    // Right: _createBlock(SplitPane, {key: 1, ...}, {slots}, 8, ["initial-split"]))
+    assert!(
+        !code.contains("}), 8"),
+        "Patch flags must be INSIDE _createBlock, not as comma expression.\nGot:\n{code}",
+    );
+
+    // Verify the block close has proper nesting:
+    // The pattern should be: ...}, 8 /* PROPS */, ["initial-split"]))
+    // (inner ) closes _createBlock, outer ) closes openBlock grouping)
+    assert!(
+        code.contains("\"initial-split\"]))"),
+        "Should end with ]))  — inner ) for _createBlock, outer ) for openBlock group.\nGot:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Non-text children must always be array-wrapped per Vue's spec.
+///
+/// Vue's `_createElementVNode("div", props, children)` expects non-text children
+/// to be an array. If a single VNode is passed without array wrapping, Vue sets
+/// `shapeFlag |= ARRAY_CHILDREN` but `mountChildren` iterates `children.length`
+/// which is `undefined` on a VNode — causing the child to never mount to the DOM.
+///
+/// This is the root cause of the playground's `nextSibling` error: the v-if/v-else
+/// ternary was a single child of `div.main-content`, passed without `[...]` wrapping.
+#[test]
+fn test_single_non_text_child_must_be_array_wrapped() {
+    // Single element child
+    let code =
+        gen_and_validate(r#"<template><div class="wrapper"><span>hello</span></div></template>"#);
+    // Vue produces: _createElementVNode("div", ..., [_createElementVNode("span", ...)])
+    // The child should be in array brackets
+    assert!(
+        code.contains(", [_createElementVNode(\"span\""),
+        "Single element child must be wrapped in array.\nGot:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — v-if/v-else as sole child must be array-wrapped.
+#[test]
+fn test_vif_sole_child_array_wrapped() {
+    let code = gen_and_validate(
+        r#"<template>
+  <div class="wrapper">
+    <div v-if="show">Yes</div>
+    <div v-else>No</div>
+  </div>
+</template>"#,
+    );
+    eprintln!("=== V-IF SOLE CHILD ===\n{}\n=== END ===", code);
+
+    // The ternary must be inside array brackets as child of div.wrapper
+    // Correct: _createElementVNode("div", ..., [(_ctx.show) ? ... : ...])
+    // Wrong:   _createElementVNode("div", ..., (_ctx.show) ? ... : ...)
+    assert!(
+        code.contains(", [(_ctx.show)")
+            || code.contains(", [\n")
+            || code.contains(", [(_openBlock"),
+        "v-if/v-else ternary as sole child must be array-wrapped.\nGot:\n{}",
         code
     );
 }

@@ -295,8 +295,10 @@ pub(crate) fn handle_element_open<'alloc>(
         // Static prop kinds: Value, ClassValue, StyleValue.
         // Components never get props hoisted (Vue rule).
         // Hoisting can be disabled via the hoist_static option.
+        // v-if/v-else branches with a branch key must NOT hoist (key makes props unique per branch).
         let all_static = ectx.hoist_static
             && !is_component
+            && state.vif_branch_key.is_none()
             && ev.props.iter().all(|p| {
                 matches!(
                     p.event.kind,

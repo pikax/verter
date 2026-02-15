@@ -159,7 +159,11 @@ pub(crate) fn handle_element_close<'alloc>(
         .children
         .iter()
         .any(|c| c.kind == ChildKind::Interpolation);
-    let needs_array = has_children && !all_text_like && state.children.len() > 1;
+    // Vue's runtime expects non-text children to ALWAYS be array-wrapped.
+    // `_createElementVNode("div", props, [child])` — even for a single child.
+    // Without the array, `mountChildren` sees `children.length === undefined`
+    // and never mounts the child, leaving its `.el` null.
+    let needs_array = has_children && !all_text_like;
 
     // Named slot children: component has <template #name> children.
     // Children become `{ first: _withCtx(...), second: _withCtx(...), _: 1 }`.
@@ -187,8 +191,8 @@ pub(crate) fn handle_element_close<'alloc>(
         buf.push_str(", _: ");
         buf.push_str(slot_flag);
         buf.push('}');
-        buf.push(')');
         write_patch_flag_suffix(buf, patch_flag, &state.dynamic_props, is_production);
+        buf.push(')');
         if state.is_block_root {
             buf.push(')');
         }
@@ -280,8 +284,8 @@ pub(crate) fn handle_element_close<'alloc>(
             buf.push_str(")]), _: ");
             buf.push_str(slot_stable);
             buf.push('}');
-            buf.push(')');
             write_patch_flag_suffix(buf, patch_flag, &state.dynamic_props, is_production);
+            buf.push(')');
             if state.is_block_root {
                 buf.push(')');
             }
@@ -327,8 +331,9 @@ pub(crate) fn handle_element_close<'alloc>(
             buf.clear();
             buf.push_str("]), _: ");
             buf.push_str(slot_stable);
-            buf.push_str("})");
+            buf.push('}');
             write_patch_flag_suffix(buf, patch_flag, &state.dynamic_props, is_production);
+            buf.push(')');
             if state.is_block_root {
                 buf.push(')');
             }
@@ -356,13 +361,9 @@ pub(crate) fn handle_element_close<'alloc>(
             if has_interpolation {
                 patch_flag = patch_flag.add(PatchFlags::Text);
             }
-        } else if state.children.len() == 1 {
-            // Single non-text child: separator + scope_prefix + content_prefix
-            let child = &state.children[0];
-            let s = child_separator_str(code_transform, ", ", child, buf);
-            pending_prepend_lefts.push((child.start, s));
         } else {
-            // Multiple mixed children: array wrapping
+            // Non-text children: always array-wrap (single or multiple).
+            // Vue's runtime requires `[child]` even for a single child.
             for (i, child) in state.children.iter().enumerate() {
                 let sep = if i == 0 { ", [" } else { ", " };
                 let s = child_separator_str(code_transform, sep, child, buf);
