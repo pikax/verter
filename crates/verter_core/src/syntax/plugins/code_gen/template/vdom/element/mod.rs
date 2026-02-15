@@ -296,9 +296,25 @@ pub(crate) fn handle_element_open<'alloc>(
         // Components never get props hoisted (Vue rule).
         // Hoisting can be disabled via the hoist_static option.
         // v-if/v-else branches with a branch key must NOT hoist (key makes props unique per branch).
+        // In inline mode, `ref="xxx"` matching a setup binding produces a variable reference
+        // (ref_key + ref), making it non-static.
+        let has_inline_ref = inline
+            && ev.props.iter().any(|p| {
+                if p.event.kind == PropKind::Value {
+                    let name = &ctx.input[p.event.start as usize..p.event.name_end as usize];
+                    if name == "ref" {
+                        if let Some(val_span) = p.event.value {
+                            let val = &ctx.input[val_span.start as usize..val_span.end as usize];
+                            return bindings.contains_key(val);
+                        }
+                    }
+                }
+                false
+            });
         let all_static = ectx.hoist_static
             && !is_component
             && state.vif_branch_key.is_none()
+            && !has_inline_ref
             && ev.props.iter().all(|p| {
                 matches!(
                     p.event.kind,
@@ -307,6 +323,16 @@ pub(crate) fn handle_element_open<'alloc>(
             });
 
         if all_static {
+            // Add NEED_PATCH if any prop is a `ref` attribute (even hoisted, Vue runtime needs it).
+            if ev.props.iter().any(|p| {
+                p.event.kind == PropKind::Value && {
+                    let name = &ctx.input[p.event.start as usize..p.event.name_end as usize];
+                    name == "ref"
+                }
+            }) {
+                state.patch_flag = state.patch_flag.add(PatchFlags::NeedPatch);
+            }
+
             // Build the props object string for hoisting into the shared buf.
             // Uses save/truncate pattern to avoid a separate String allocation.
             let saved = buf.len();
@@ -456,6 +482,35 @@ pub(crate) fn handle_element_open<'alloc>(
                         // Static attribute: name="value"
                         let name =
                             &ctx.input[prop.event.start as usize..prop.event.name_end as usize];
+
+                        // Inline mode: ref="xxx" matching a setup binding needs
+                        // ref_key: "xxx", ref: xxx (variable reference, not string).
+                        if name == "ref" && inline {
+                            if let Some(val_span) = prop.event.value {
+                                let val =
+                                    &ctx.input[val_span.start as usize..val_span.end as usize];
+                                if bindings.contains_key(val) {
+                                    buf.clear();
+                                    buf.push_str(sep);
+                                    buf.push_str("ref_key: \"");
+                                    buf.push_str(val);
+                                    buf.push_str("\", ref: ");
+                                    buf.push_str(val);
+                                    let s = code_transform.alloc_str(buf);
+                                    pending_overwrites.push((prop.event.start, prop.event.end, s));
+                                    state.patch_flag = state.patch_flag.add(PatchFlags::NeedPatch);
+                                    written += 1;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Non-inline ref or ref not matching a binding: ref stays as string.
+                        // Also add NEED_PATCH for any ref attribute.
+                        if name == "ref" {
+                            state.patch_flag = state.patch_flag.add(PatchFlags::NeedPatch);
+                        }
+
                         let needs_quote = !is_valid_js_prop_key(name);
                         if let Some(val_span) = prop.event.value {
                             // Split overwrite: prefix before value, escape value in-place, suffix after

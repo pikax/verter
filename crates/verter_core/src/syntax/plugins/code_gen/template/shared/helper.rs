@@ -16,7 +16,14 @@ pub fn patch_bindings<'alloc>(
         bindings.bindings.iter().for_each(|f| {
             if !f.ignore {
                 if let Some(b) = map.get(&f.name) {
-                    code_transform.prepend_left(f.span.start, b.accessor_prefix(is_inline));
+                    let prefix = b.accessor_prefix(is_inline);
+                    if !prefix.is_empty() {
+                        code_transform.prepend_left(f.span.start, prefix);
+                    }
+                    let suffix = b.accessor_suffix(is_inline);
+                    if !suffix.is_empty() {
+                        code_transform.prepend_left(f.span.end, suffix);
+                    }
                 } else {
                     // Unresolved identifiers get _ctx. prefix (Vue behavior)
                     code_transform.prepend_left(f.span.start, "_ctx.");
@@ -42,13 +49,17 @@ pub fn collect_binding_patches<'alloc>(
     if let Some(bindings) = bindings {
         for f in &bindings.bindings {
             if !f.ignore {
-                let prefix = if let Some(b) = map.get(&f.name) {
-                    b.accessor_prefix(is_inline)
+                if let Some(b) = map.get(&f.name) {
+                    let prefix = b.accessor_prefix(is_inline);
+                    if !prefix.is_empty() {
+                        out.push((f.span.start, prefix));
+                    }
+                    let suffix = b.accessor_suffix(is_inline);
+                    if !suffix.is_empty() {
+                        out.push((f.span.end, suffix));
+                    }
                 } else {
-                    "_ctx."
-                };
-                if !prefix.is_empty() {
-                    out.push((f.span.start, prefix));
+                    out.push((f.span.start, "_ctx."));
                 }
             }
         }
@@ -82,6 +93,10 @@ pub fn patch_bindings_with_var_mappings<'alloc>(
                 if !prefix.is_empty() {
                     code_transform.prepend_left(b.span.start, prefix);
                 }
+                let suffix = bt.accessor_suffix(is_inline);
+                if !suffix.is_empty() {
+                    code_transform.prepend_left(b.span.end, suffix);
+                }
             } else {
                 code_transform.prepend_left(b.span.start, "_ctx.");
             }
@@ -109,13 +124,17 @@ pub fn patch_vfor_references(
             }
         }
         let name = &input[r.start as usize..r.end as usize];
-        let prefix = if let Some(bt) = bindings.get(name) {
-            bt.accessor_prefix(is_production)
+        if let Some(bt) = bindings.get(name) {
+            let prefix = bt.accessor_prefix(is_production);
+            if !prefix.is_empty() {
+                code_transform.prepend_left(r.start, prefix);
+            }
+            let suffix = bt.accessor_suffix(is_production);
+            if !suffix.is_empty() {
+                code_transform.prepend_left(r.end, suffix);
+            }
         } else {
-            "_ctx."
-        };
-        if !prefix.is_empty() {
-            code_transform.prepend_left(r.start, prefix);
+            code_transform.prepend_left(r.start, "_ctx.");
         }
     }
 }
@@ -166,15 +185,22 @@ pub fn build_prefixed_value_with_var_mappings(
         } else if b.ignore {
             continue;
         } else {
-            let prefix = if let Some(bt) = map.get(b.name) {
-                bt.accessor_prefix(is_inline)
+            let (prefix, suffix) = if let Some(bt) = map.get(b.name) {
+                (bt.accessor_prefix(is_inline), bt.accessor_suffix(is_inline))
             } else {
-                "_ctx."
+                ("_ctx.", "")
             };
-            if !prefix.is_empty() {
+            if !prefix.is_empty() || !suffix.is_empty() {
                 result.push_str(&val_text[last..offset]);
                 result.push_str(prefix);
-                last = offset; // keep original identifier
+                if !suffix.is_empty() {
+                    // Include the identifier and append suffix immediately
+                    result.push_str(&val_text[offset..offset + ident_len]);
+                    result.push_str(suffix);
+                    last = offset + ident_len;
+                } else {
+                    last = offset; // keep original identifier for next copy
+                }
                 modified = true;
             }
         }
@@ -223,16 +249,26 @@ pub fn prefix_vfor_references(
             }
         }
         let offset = (r.start - base_offset) as usize;
+        let ident_len = (r.end - r.start) as usize;
         let name = &input[r.start as usize..r.end as usize];
-        let prefix = if let Some(bt) = bindings.get(name) {
-            bt.accessor_prefix(is_production)
+        let (prefix, suffix) = if let Some(bt) = bindings.get(name) {
+            (
+                bt.accessor_prefix(is_production),
+                bt.accessor_suffix(is_production),
+            )
         } else {
-            "_ctx."
+            ("_ctx.", "")
         };
-        if !prefix.is_empty() {
+        if !prefix.is_empty() || !suffix.is_empty() {
             result.push_str(&text[last..offset]);
             result.push_str(prefix);
-            last = offset; // keep original identifier
+            if !suffix.is_empty() {
+                result.push_str(&text[offset..offset + ident_len]);
+                result.push_str(suffix);
+                last = offset + ident_len;
+            } else {
+                last = offset; // keep original identifier
+            }
             modified = true;
         }
     }
@@ -275,15 +311,21 @@ pub fn build_prefixed_value_into(
         } else if b.ignore {
             continue;
         } else {
-            let prefix = if let Some(bt) = map.get(b.name) {
-                bt.accessor_prefix(is_inline)
+            let (prefix, suffix) = if let Some(bt) = map.get(b.name) {
+                (bt.accessor_prefix(is_inline), bt.accessor_suffix(is_inline))
             } else {
-                "_ctx."
+                ("_ctx.", "")
             };
-            if !prefix.is_empty() {
+            if !prefix.is_empty() || !suffix.is_empty() {
                 buf.push_str(&val_text[last..offset]);
                 buf.push_str(prefix);
-                last = offset;
+                if !suffix.is_empty() {
+                    buf.push_str(&val_text[offset..offset + ident_len]);
+                    buf.push_str(suffix);
+                    last = offset + ident_len;
+                } else {
+                    last = offset;
+                }
                 modified = true;
             }
         }
@@ -319,16 +361,26 @@ pub fn prefix_vfor_references_into(
             }
         }
         let offset = (r.start - base_offset) as usize;
+        let ident_len = (r.end - r.start) as usize;
         let name = &input[r.start as usize..r.end as usize];
-        let prefix = if let Some(bt) = bindings.get(name) {
-            bt.accessor_prefix(is_production)
+        let (prefix, suffix) = if let Some(bt) = bindings.get(name) {
+            (
+                bt.accessor_prefix(is_production),
+                bt.accessor_suffix(is_production),
+            )
         } else {
-            "_ctx."
+            ("_ctx.", "")
         };
-        if !prefix.is_empty() {
+        if !prefix.is_empty() || !suffix.is_empty() {
             buf.push_str(&text[last..offset]);
             buf.push_str(prefix);
-            last = offset;
+            if !suffix.is_empty() {
+                buf.push_str(&text[offset..offset + ident_len]);
+                buf.push_str(suffix);
+                last = offset + ident_len;
+            } else {
+                last = offset;
+            }
             modified = true;
         }
     }
@@ -825,6 +877,90 @@ mod tests {
         map.insert("count" as &str, BindingType::SetupRef);
         patch_bindings_with_var_mappings(&mut ct, Some(&br), &map, false, &[]);
         assert_eq!(ct.build_string(), "$setup.count");
+    }
+
+    // ── inline mode suffix (.value) tests ─────────────────────────────
+
+    /// @ai-generated — collect_binding_patches: SetupRef in inline mode adds .value suffix
+    #[test]
+    fn test_collect_binding_patches_inline_ref_suffix() {
+        use crate::syntax::binding_types::BindingType;
+        let br = make_bindings(&[("count", 0, 5, false)]);
+        let mut map = FxHashMap::default();
+        map.insert("count" as &str, BindingType::SetupRef);
+        let mut out = Vec::new();
+        collect_binding_patches(Some(&br), &map, true, &mut out);
+        // Should contain a .value suffix patch at end position (5)
+        assert!(
+            out.iter().any(|(pos, s)| *pos == 5 && *s == ".value"),
+            "Should have .value suffix at end of 'count' (pos 5), got: {:?}",
+            out
+        );
+    }
+
+    /// @ai-generated — collect_binding_patches: SetupConst in inline mode has NO suffix
+    #[test]
+    fn test_collect_binding_patches_inline_const_no_suffix() {
+        use crate::syntax::binding_types::BindingType;
+        let br = make_bindings(&[("msg", 0, 3, false)]);
+        let mut map = FxHashMap::default();
+        map.insert("msg" as &str, BindingType::SetupConst);
+        let mut out = Vec::new();
+        collect_binding_patches(Some(&br), &map, true, &mut out);
+        // SetupConst: no prefix (empty, skipped) and no suffix
+        assert!(
+            out.is_empty(),
+            "SetupConst in inline mode should have no patches, got: {:?}",
+            out
+        );
+    }
+
+    /// @ai-generated — build_prefixed_value_with_var_mappings: inline ref adds .value
+    #[test]
+    fn test_build_prefixed_value_inline_ref_suffix() {
+        use crate::syntax::binding_types::BindingType;
+        let br = make_bindings(&[("count", 0, 5, false)]);
+        let mut map = FxHashMap::default();
+        map.insert("count" as &str, BindingType::SetupRef);
+        let result = build_prefixed_value_with_var_mappings("count", 0, Some(&br), &map, true, &[]);
+        assert_eq!(result, "count.value");
+    }
+
+    /// @ai-generated — build_prefixed_value_into: inline ref adds .value
+    #[test]
+    fn test_build_prefixed_value_into_inline_ref_suffix() {
+        use crate::syntax::binding_types::BindingType;
+        let br = make_bindings(&[("count", 0, 5, false)]);
+        let mut map = FxHashMap::default();
+        map.insert("count" as &str, BindingType::SetupRef);
+        let mut buf = String::new();
+        build_prefixed_value_into(&mut buf, "count", 0, Some(&br), &map, true, &[]);
+        assert_eq!(buf, "count.value");
+    }
+
+    /// @ai-generated — prefix_vfor_references: inline ref in iterable gets .value
+    #[test]
+    fn test_prefix_vfor_references_inline_ref_suffix() {
+        use crate::syntax::binding_types::BindingType;
+        let text = "items";
+        let mut bindings = FxHashMap::default();
+        bindings.insert("items" as &str, BindingType::SetupRef);
+        let refs = vec![Span { start: 0, end: 5 }];
+        let result = prefix_vfor_references(text, 0, &refs, None, text, &bindings, true);
+        assert_eq!(result, "items.value");
+    }
+
+    /// @ai-generated — prefix_vfor_references_into: inline ref gets .value
+    #[test]
+    fn test_prefix_vfor_references_into_inline_ref_suffix() {
+        use crate::syntax::binding_types::BindingType;
+        let text = "items";
+        let mut bindings = FxHashMap::default();
+        bindings.insert("items" as &str, BindingType::SetupRef);
+        let refs = vec![Span { start: 0, end: 5 }];
+        let mut buf = String::new();
+        prefix_vfor_references_into(&mut buf, text, 0, &refs, None, text, &bindings, true);
+        assert_eq!(buf, "items.value");
     }
 
     // ── patch_vfor_references tests ─────────────────────────────────────

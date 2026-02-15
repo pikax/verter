@@ -26,6 +26,10 @@ pub struct ProcessScriptOptions<'alloc> {
 pub struct ProcessedScript {
     pub imports: ScriptSetupImportDependencies,
     pub diagnostics: Vec<super::macros::types::MacroDiagnostic>,
+    /// Deferred closing text for inline template mode.
+    /// When set, this must be emitted AFTER the template content to close
+    /// setup() and the component definition.
+    pub deferred_closing: Option<String>,
 }
 
 pub fn process_script_event<'alloc>(
@@ -46,6 +50,7 @@ pub fn process_script_event<'alloc>(
         return ProcessedScript {
             imports,
             diagnostics,
+            deferred_closing: None,
         };
     }
 
@@ -288,10 +293,18 @@ pub fn process_script_event<'alloc>(
         ""
     };
 
-    // Build closing text and apply it. The closing text is also returned so callers
-    // can re-overwrite it with modifications (e.g. adding ")" for dual-script Object.assign).
-    let closing_text = if opts.is_production && opts.inline_template {
-        "\n".to_string()
+    // Build closing text and apply it.
+    // When inline_template is true, setup() is left open for the template to provide
+    // the return value (the arrow render function). The deferred_closing is emitted
+    // AFTER the template content by ScriptGeneratorPlugin::end().
+    let (closing_text, deferred_closing) = if opts.inline_template {
+        // Leave setup() open — template will provide `return (_ctx,_cache) => { ... }`
+        // The deferred closing will close setup() and the component definition.
+        let mut deferred = String::with_capacity(8);
+        deferred.push_str("\n}}");
+        deferred.push_str(closing_paren);
+        deferred.push(';');
+        ("\n".to_string(), Some(deferred))
     } else {
         let joined = returned.join(", ");
         let mut buf = String::with_capacity(joined.len() + 128);
@@ -308,7 +321,7 @@ pub fn process_script_event<'alloc>(
             buf.push_str(closing_paren);
             buf.push(';');
         }
-        buf
+        (buf, None)
     };
 
     code_transform.overwrite(script.tag_close_start, script.tag_close_end, &closing_text);
@@ -333,5 +346,6 @@ pub fn process_script_event<'alloc>(
     ProcessedScript {
         imports,
         diagnostics,
+        deferred_closing,
     }
 }

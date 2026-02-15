@@ -381,11 +381,15 @@ pub fn compile(
 
     // Code generation plugins
     let mut code_gen_css = CssGeneratorPlugin::new(Rc::clone(&code_transform), scope_id);
-    let mut code_gen_script =
-        ScriptGeneratorPlugin::new(Rc::clone(&code_transform), &component_name, false, false)
-            .with_scope_id(scope_id)
-            .with_inline_template(options.resolve_inline())
-            .with_runtime_module_name(options.resolve_runtime_module_name().to_string());
+    let mut code_gen_script = ScriptGeneratorPlugin::new(
+        Rc::clone(&code_transform),
+        &component_name,
+        false,
+        options.is_production,
+    )
+    .with_scope_id(scope_id)
+    .with_inline_template(options.resolve_inline())
+    .with_runtime_module_name(options.resolve_runtime_module_name().to_string());
 
     use crate::syntax::plugins::code_gen::template::TemplateOptions;
     let template_options = TemplateOptions {

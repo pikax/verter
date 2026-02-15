@@ -81,9 +81,12 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
   }
 
   // 4. Attach render function to component
-  // The render function may come from a separate template block, or be included
-  // directly in the script code by the Rust compiler (non-inline template mode).
-  const hasRenderFunction = result.template || result.script?.code.includes("function render(");
+  // In dev mode (non-inline template), the Rust compiler emits a standalone
+  // `function render(...)` that must be attached to the component.
+  // In production mode (inline template), the render function is returned
+  // directly from setup() as an arrow function — no attachment needed.
+  const hasRenderFunction =
+    result.template || (!isProd && result.script?.code.includes("function render("));
   if (hasRenderFunction && hasDefaultExport) {
     lines.push("_sfc_main.render = render");
   }

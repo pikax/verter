@@ -40,6 +40,11 @@ pub struct ScriptGeneratorPlugin<'alloc> {
     has_seen_script_setup: bool,
     /// Track whether we've already seen a plain `<script>` block.
     has_seen_script: bool,
+    /// Deferred closing text for inline template mode.
+    /// When the template is inlined inside setup(), the script closing only emits "\n"
+    /// (leaving setup open). This string closes setup() and the component definition
+    /// AFTER the template content. Emitted in `end()`.
+    deferred_inline_closing: Option<String>,
 }
 
 impl<'alloc> ScriptGeneratorPlugin<'alloc> {
@@ -63,6 +68,7 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
             script_insert_pos: None,
             has_seen_script_setup: false,
             has_seen_script: false,
+            deferred_inline_closing: None,
         }
     }
 
@@ -157,6 +163,11 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
         }
 
         self.imports.add(processed.imports.0);
+
+        // Store deferred closing for inline template mode
+        if processed.deferred_closing.is_some() {
+            self.deferred_inline_closing = processed.deferred_closing;
+        }
     }
 
     fn collect_css_v_binds(
@@ -224,6 +235,15 @@ impl<'alloc> SyntaxPlugin<'alloc> for ScriptGeneratorPlugin<'alloc> {
     fn end(&mut self, _ctx: &SyntaxPluginContext<'alloc>) {
         // Inject useCssVars call inside setup() if v-bind expressions were found
         self.inject_use_css_vars();
+
+        // Emit deferred inline closing at the very end of the output.
+        // When inline_template is true, the script closing only emits "\n" (leaving
+        // setup open for the template). The template close emits "}" for the arrow
+        // function. This deferred closing adds "\n}}" or "\n}})" to close setup()
+        // and the component definition.
+        if let Some(ref closing) = self.deferred_inline_closing {
+            self.code_transform.borrow_mut().append(closing);
+        }
 
         // Add imports to the top of the script
         if !self.imports.is_empty() {
@@ -360,10 +380,8 @@ const b = 2
 
     fn gen_prod_and_validate(input: &str) -> String {
         let code = gen_prod(input);
-        // Production script code with inline template starts with `return (_ctx,_cache) => {`
-        // so we wrap in a function for validation.
-        let wrapped = format!("function __wrapper__() {{ {} }}", code);
-        assert_valid_js(&wrapped, input);
+        // Production output should be valid JS at module level (export default ...)
+        assert_valid_js(&code, input);
         code
     }
 
@@ -1167,6 +1185,161 @@ const x = CONST_VAL
             !returned_section.contains("MyType"),
             "Per-specifier type import MyType should NOT be in __returned__, got section: {}",
             returned_section
+        );
+    }
+
+    // =========================================================================
+    // Production Inline Template
+    // =========================================================================
+
+    /// @ai-generated — Production inline template must produce valid module-level JS.
+    /// The inline render function `return (_ctx,_cache) => {` must be inside setup(),
+    /// not at module level after the component definition closes.
+    #[test]
+    fn test_prod_inline_template_valid_js() {
+        let code = gen_prod(
+            "<script setup>\nconst msg = 'Hello'\n</script>\n<template><div>{{ msg }}</div></template>",
+        );
+        // The production output should be valid JS at module level (no wrapping needed)
+        assert_valid_js(&code, "production inline template");
+    }
+
+    /// @ai-generated — Production inline template: render function is inside setup()
+    #[test]
+    fn test_prod_inline_template_inside_setup() {
+        let code = gen_prod(
+            "<script setup>\nconst msg = 'Hello'\n</script>\n<template><div>{{ msg }}</div></template>",
+        );
+        // Should have the inline arrow function
+        assert!(
+            code.contains("(_ctx,_cache) => {"),
+            "Should have inline template arrow function, got:\n{code}"
+        );
+        // Inline template replaces __returned__ — setup returns the render function directly
+        assert!(
+            !code.contains("__returned__"),
+            "Inline template should not have __returned__, got:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Production inline template: no __expose() auto-call
+    #[test]
+    fn test_prod_inline_no_auto_expose() {
+        let code = gen_prod(
+            "<script setup>\nconst msg = 'Hello'\n</script>\n<template><div>{{ msg }}</div></template>",
+        );
+        assert!(
+            !code.contains("__expose()"),
+            "Production mode should not auto-call __expose(), got:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Production inline: ref() bindings get .value suffix in template
+    #[test]
+    fn test_prod_inline_ref_gets_value_suffix() {
+        let code = gen_prod_and_validate(
+            "<script setup>\nimport { ref } from 'vue'\nconst count = ref(0)\n</script>\n<template><div>{{ count }}</div></template>",
+        );
+        // In inline mode, ref bindings must be accessed as `count.value`
+        assert!(
+            code.contains("count.value"),
+            "Inline ref should use count.value, got:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Production inline: computed() bindings get .value suffix in template
+    #[test]
+    fn test_prod_inline_computed_gets_value_suffix() {
+        let code = gen_prod_and_validate(
+            "<script setup>\nimport { ref, computed } from 'vue'\nconst count = ref(0)\nconst doubled = computed(() => count.value * 2)\n</script>\n<template><div>{{ doubled }}</div></template>",
+        );
+        // computed() is classified as SetupRef and needs .value in inline mode
+        assert!(
+            code.contains("doubled.value"),
+            "Inline computed should use doubled.value, got:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Production inline: non-ref const does NOT get .value suffix
+    #[test]
+    fn test_prod_inline_const_no_value_suffix() {
+        let code = gen_prod_and_validate(
+            "<script setup>\nconst msg = 'Hello'\n</script>\n<template><div>{{ msg }}</div></template>",
+        );
+        // SetupConst (literal const) should NOT have .value
+        assert!(
+            !code.contains("msg.value"),
+            "Literal const should NOT use .value, got:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Production inline: ref in v-for iterable gets .value
+    #[test]
+    fn test_prod_inline_ref_in_vfor_gets_value() {
+        let code = gen_prod_and_validate(
+            "<script setup>\nimport { ref } from 'vue'\nconst items = ref(['a','b','c'])\n</script>\n<template><div v-for=\"item in items\" :key=\"item\">{{ item }}</div></template>",
+        );
+        // The iterable `items` is a ref and should use .value in inline mode
+        assert!(
+            code.contains("items.value"),
+            "Inline ref in v-for iterable should use items.value, got:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Production inline: ref in v-if condition gets .value
+    #[test]
+    fn test_prod_inline_ref_in_vif_gets_value() {
+        let code = gen_prod_and_validate(
+            "<script setup>\nimport { ref } from 'vue'\nconst show = ref(true)\n</script>\n<template><div v-if=\"show\">visible</div></template>",
+        );
+        assert!(
+            code.contains("show.value"),
+            "Inline ref in v-if should use show.value, got:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Production inline: ref in event handler gets .value
+    #[test]
+    fn test_prod_inline_ref_in_event_handler_gets_value() {
+        let code = gen_prod_and_validate(
+            "<script setup>\nimport { ref } from 'vue'\nconst count = ref(0)\n</script>\n<template><button @click=\"count++\">click</button></template>",
+        );
+        assert!(
+            code.contains("count.value"),
+            "Inline ref in event handler should use count.value, got:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Production inline: template ref uses ref_key + ref variable (not string)
+    /// Vue inline mode converts `ref="el"` to `ref_key: "el", ref: el` when el is a setup-ref.
+    #[test]
+    fn test_prod_inline_template_ref_uses_ref_key() {
+        let code = gen_prod_and_validate(
+            "<script setup>\nimport { ref } from 'vue'\nconst el = ref()\n</script>\n<template><div ref=\"el\">hello</div></template>",
+        );
+        assert!(
+            code.contains("ref_key: \"el\""),
+            "Inline template ref should use ref_key, got:\n{code}"
+        );
+        assert!(
+            code.contains(", ref: el"),
+            "Inline template ref should reference the variable, got:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Dev mode: template ref stays as string (no ref_key needed)
+    #[test]
+    fn test_dev_template_ref_stays_string() {
+        let code = gen_and_validate(
+            "<script setup>\nimport { ref } from 'vue'\nconst el = ref()\n</script>\n<template><div ref=\"el\">hello</div></template>",
+        );
+        assert!(
+            code.contains("ref: \"el\""),
+            "Dev mode template ref should be a string, got:\n{code}"
+        );
+        assert!(
+            !code.contains("ref_key"),
+            "Dev mode should not have ref_key, got:\n{code}"
         );
     }
 }

@@ -76,6 +76,23 @@ impl BindingType {
         matches!(self, BindingType::SetupRef | BindingType::SetupMaybeRef)
     }
 
+    /// The suffix to append after the identifier in template expressions.
+    ///
+    /// Returns `.value` for `SetupRef` bindings in inline mode (these are
+    /// definitively refs: `ref()`, `computed()`, `shallowRef()`, etc.).
+    ///
+    /// `SetupMaybeRef` (composable returns like `useFoo()`) might or might not
+    /// be refs, so they need `unref()` wrapping instead of `.value`.
+    /// TODO: implement `unref()` wrapping for SetupMaybeRef/SetupLet.
+    #[inline]
+    pub fn accessor_suffix(&self, is_inline: bool) -> &'static str {
+        if is_inline && matches!(self, BindingType::SetupRef) {
+            ".value"
+        } else {
+            ""
+        }
+    }
+
     /// Whether this is a setup-type binding (non-props, non-options).
     #[inline]
     pub fn is_setup(&self) -> bool {
