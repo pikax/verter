@@ -160,6 +160,19 @@ pub(crate) struct StateStack<'alloc> {
     /// Whether the slot name is dynamic (`v-slot:[expr]`).
     pub slot_is_dynamic: bool,
 
+    /// Whether this `<template>` element defines a named slot inside a component parent.
+    /// When true, the template does NOT generate a VNode — its children become a slot
+    /// entry in the parent component's slots object.
+    pub is_named_slot_template: bool,
+
+    /// Whether this component has `<template #name>` children defining named slots.
+    /// When true, children are wrapped in `{ ... _: 1 }` instead of `[...]`.
+    pub has_named_slot_children: bool,
+
+    /// Whether any named slot child uses a dynamic name (`v-slot:[expr]`).
+    /// Determines slot flag: false → `_: 1` (STABLE), true → `_: 2` (DYNAMIC).
+    pub any_dynamic_slots: bool,
+
     // -- Directive fields --
     /// Runtime directives that need `_withDirectives()` wrapping.
     /// Populated during element open for v-model (native), v-show, and custom directives.
@@ -191,6 +204,9 @@ impl Default for StateStack<'_> {
             slot_params: None,
             slot_name: None,
             slot_is_dynamic: false,
+            is_named_slot_template: false,
+            has_named_slot_children: false,
+            any_dynamic_slots: false,
             runtime_directives: Vec::new(),
         }
     }
@@ -220,6 +236,9 @@ impl StateStack<'_> {
         self.slot_params = None;
         self.slot_name = None;
         self.slot_is_dynamic = false;
+        self.is_named_slot_template = false;
+        self.has_named_slot_children = false;
+        self.any_dynamic_slots = false;
         self.runtime_directives.clear();
     }
 }

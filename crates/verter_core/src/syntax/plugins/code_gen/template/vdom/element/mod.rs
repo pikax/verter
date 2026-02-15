@@ -135,6 +135,13 @@ pub(crate) fn handle_element_open<'alloc>(
     state.open_tag_start = open_tag.start;
     state.open_tag_end = open_tag_end.end;
 
+    // Named slot template: <template #name> inside a component.
+    // Don't emit a VNode — the close handler will emit the slot entry directly.
+    if state.is_named_slot_template {
+        pending_overwrites.push((open_tag.start, open_tag_end.end, ""));
+        return;
+    }
+
     // Slot outlet: <slot/> or <slot name="xxx"/> → _renderSlot($slots, "name")
     if open_tag.kind == ElementKind::SlotOutlet {
         state.is_slot_outlet = true;
@@ -218,6 +225,9 @@ pub(crate) fn handle_element_open<'alloc>(
         ""
     };
 
+    // <template v-if/v-for> uses _Fragment instead of string "template".
+    let is_template_fragment = open_tag.kind == ElementKind::Template;
+
     // Build the VNode call prefix into buf (deferred — may merge with props overwrite)
     if state.is_block_root {
         // Block root: (_openBlock(), _createElementBlock("tag" or _createBlock(_component_Tag
@@ -228,6 +238,12 @@ pub(crate) fn handle_element_open<'alloc>(
             buf.push_str(wd_prefix);
             buf.push_str("(_openBlock(), _createBlock(");
             buf.push_str(var);
+        } else if is_template_fragment {
+            imports.add(TemplateImportDependencies::CREATE_ELEMENT_BLOCK);
+            imports.add(TemplateImportDependencies::FRAGMENT);
+            buf.clear();
+            buf.push_str(wd_prefix);
+            buf.push_str("(_openBlock(), _createElementBlock(_Fragment");
         } else {
             imports.add(TemplateImportDependencies::CREATE_ELEMENT_BLOCK);
             buf.clear();
@@ -242,6 +258,12 @@ pub(crate) fn handle_element_open<'alloc>(
         buf.push_str(wd_prefix);
         buf.push_str("_createVNode(");
         buf.push_str(var);
+    } else if is_template_fragment {
+        imports.add(TemplateImportDependencies::CREATE_ELEMENT_VNODE);
+        imports.add(TemplateImportDependencies::FRAGMENT);
+        buf.clear();
+        buf.push_str(wd_prefix);
+        buf.push_str("_createElementVNode(_Fragment");
     } else {
         imports.add(TemplateImportDependencies::CREATE_ELEMENT_VNODE);
         buf.clear();

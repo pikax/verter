@@ -558,9 +558,32 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             self.imports.add(TemplateImportDependencies::WITH_CTX);
         }
 
+        // Named slot templates: <template #name> inside a component parent.
+        // Mark both this state and parent for named-slot object children mode.
+        if state.slot_params.is_some() {
+            let is_slot_template = ev
+                .scopes
+                .iter()
+                .any(|s| matches!(s, ElementScope::SlotTemplate(_)));
+            if is_slot_template {
+                if let Some(parent) = self.stack.last() {
+                    if parent.is_component {
+                        state.is_named_slot_template = true;
+                    }
+                }
+            }
+        }
+
         // Stack + self mutations
         if let Some(parent) = self.stack.last_mut() {
             parent.vif_key_counter = parent_vif_key_counter;
+            // Propagate named slot flags to parent component
+            if state.is_named_slot_template {
+                parent.has_named_slot_children = true;
+                if state.slot_is_dynamic {
+                    parent.any_dynamic_slots = true;
+                }
+            }
         }
 
         if !is_vif_continuation && !scope_prefix.is_empty() {

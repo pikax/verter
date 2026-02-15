@@ -4679,3 +4679,84 @@ fn perf_nested_static_elements_valid() {
     );
     assert_valid_js(&code, "nested static elements");
 }
+
+// =========================================================================
+// Named slots: <template #name> inside components
+// =========================================================================
+
+/// @ai-generated - Named slot templates inside a component should produce a
+/// slots object `{ name: _withCtx(() => [...]), _: 1 }` — NOT wrapped in
+/// `_createElementVNode("template", ...)`.
+#[test]
+fn test_named_slot_produces_slots_object() {
+    let code = gen_and_validate(
+        r#"<script setup>import Comp from './Comp.vue'</script>
+<template><Comp><template #header><div>Header</div></template></Comp></template>"#,
+    );
+    // Must NOT contain _createElementVNode("template"...) for slot templates
+    assert!(
+        !code.contains("_createElementVNode(\"template\""),
+        "Named slot should NOT generate _createElementVNode(\"template\"), got:\n{}",
+        code
+    );
+    // Must contain the slot object format
+    assert!(
+        code.contains("_withCtx(() => ["),
+        "Named slot should use _withCtx, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("header: _withCtx("),
+        "Named slot should have 'header: _withCtx(', got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_: 1"),
+        "Named slot should have stable slot flag '_: 1', got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Multiple named slots inside a component should be collected
+/// into a single slots object.
+#[test]
+fn test_multiple_named_slots() {
+    let code = gen_and_validate(
+        r#"<script setup>import Comp from './Comp.vue'</script>
+<template><Comp><template #first><span>A</span></template><template #second><span>B</span></template></Comp></template>"#,
+    );
+    assert!(
+        !code.contains("_createElementVNode(\"template\""),
+        "Named slots should NOT generate _createElementVNode(\"template\"), got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("first: _withCtx("),
+        "Should have 'first' slot, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("second: _withCtx("),
+        "Should have 'second' slot, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - <template v-if> should compile to _Fragment, not "template" string.
+#[test]
+fn test_template_vif_uses_fragment() {
+    let code = gen_and_validate(
+        r#"<template><div><template v-if="ok"><span>A</span><span>B</span></template></div></template>"#,
+    );
+    // v-if template should use _Fragment (imported), not the literal string "template"
+    assert!(
+        !code.contains("\"template\""),
+        "Template v-if should NOT generate string \"template\", got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_Fragment"),
+        "Template v-if should use _Fragment, got:\n{}",
+        code
+    );
+}

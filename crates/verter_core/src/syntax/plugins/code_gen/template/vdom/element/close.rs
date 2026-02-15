@@ -49,6 +49,105 @@ pub(crate) fn handle_element_close<'alloc>(
         return;
     }
 
+    // Named slot template: <template #name> inside a component.
+    // Emits just the slot entry `name: _withCtx((params) => [children])` without
+    // VNode wrapper. The parent component will wrap all entries in `{ ... _: 1 }`.
+    if state.is_named_slot_template {
+        let has_children = !state.children.is_empty();
+        let params = state.slot_params.unwrap_or("");
+        let slot_key = state.slot_name.unwrap_or("default");
+
+        // Build slot entry prefix: `name: _withCtx((params) => [`
+        buf.clear();
+        buf.push_str(slot_key);
+        buf.push_str(": _withCtx(");
+        if !params.is_empty() {
+            buf.push('(');
+            buf.push_str(params);
+            buf.push(')');
+        } else {
+            buf.push_str("()");
+        }
+        buf.push_str(" => [");
+        let slot_open = code_transform.alloc_str(buf);
+
+        if has_children {
+            let all_text_like = state
+                .children
+                .iter()
+                .all(|c| matches!(c.kind, ChildKind::Text | ChildKind::Interpolation));
+            let has_interpolation = state
+                .children
+                .iter()
+                .any(|c| c.kind == ChildKind::Interpolation);
+
+            if all_text_like {
+                imports.add(TemplateImportDependencies::CREATE_TEXT_VNODE);
+                let first_child = &state.children[0];
+                let text_flag = if has_interpolation {
+                    if is_production {
+                        ", 1"
+                    } else {
+                        ", 1 /* TEXT */"
+                    }
+                } else {
+                    ""
+                };
+
+                buf.clear();
+                buf.push_str(slot_open);
+                buf.push_str("_createTextVNode(");
+                buf.push_str(first_child.kind.content_prefix());
+                let s = code_transform.alloc_str(buf);
+                pending_prepend_lefts.push((first_child.start, s));
+
+                for child in state.children.iter().skip(1) {
+                    buf.clear();
+                    buf.push_str(" + ");
+                    buf.push_str(child.kind.content_prefix());
+                    let s = code_transform.alloc_str(buf);
+                    pending_prepend_lefts.push((child.start, s));
+                }
+
+                buf.clear();
+                buf.push_str(text_flag);
+                buf.push_str(")])");
+            } else {
+                // Mixed or element-only children
+                for (i, child) in state.children.iter().enumerate() {
+                    buf.clear();
+                    if i == 0 {
+                        buf.push_str(slot_open);
+                        buf.push_str(child.scope_prefix);
+                        buf.push_str(child.kind.content_prefix());
+                    } else {
+                        buf.push_str(", ");
+                        buf.push_str(child.scope_prefix);
+                        buf.push_str(child.kind.content_prefix());
+                    }
+                    let s = code_transform.alloc_str(buf);
+                    pending_prepend_lefts.push((child.start, s));
+                }
+
+                buf.clear();
+                buf.push_str("])");
+            }
+        } else {
+            buf.clear();
+            buf.push_str(slot_open);
+            buf.push_str("])");
+        }
+
+        if let Some(close_tag) = &ev.event.event_close_tag {
+            let s = code_transform.alloc_str(buf);
+            pending_overwrites.push((close_tag.start, close_tag.end, s));
+        } else {
+            let s = code_transform.alloc_str(buf);
+            pending_append_lefts.push((state.open_tag_end, s));
+        }
+        return;
+    }
+
     let mut patch_flag = state.patch_flag;
 
     let has_children = !state.children.is_empty();
@@ -61,6 +160,48 @@ pub(crate) fn handle_element_close<'alloc>(
         .iter()
         .any(|c| c.kind == ChildKind::Interpolation);
     let needs_array = has_children && !all_text_like && state.children.len() > 1;
+
+    // Named slot children: component has <template #name> children.
+    // Children become `{ first: _withCtx(...), second: _withCtx(...), _: 1 }`.
+    if state.has_named_slot_children && has_children {
+        // Emit separators: `, {` before first, `, ` between
+        for (i, child) in state.children.iter().enumerate() {
+            let sep = if i == 0 { ", {" } else { ", " };
+            let s = child_separator_str(code_transform, sep, child, buf);
+            pending_prepend_lefts.push((child.start, s));
+        }
+
+        // Build close: `, _: flag})`
+        let slot_flag = if state.any_dynamic_slots {
+            if is_production {
+                "2"
+            } else {
+                "2 /* DYNAMIC */"
+            }
+        } else if is_production {
+            "1"
+        } else {
+            "1 /* STABLE */"
+        };
+        buf.clear();
+        buf.push_str(", _: ");
+        buf.push_str(slot_flag);
+        buf.push('}');
+        buf.push(')');
+        write_patch_flag_suffix(buf, patch_flag, &state.dynamic_props, is_production);
+        if state.is_block_root {
+            buf.push(')');
+        }
+
+        if let Some(close_tag) = &ev.event.event_close_tag {
+            let s = code_transform.alloc_str(buf);
+            pending_overwrites.push((close_tag.start, close_tag.end, s));
+        } else {
+            let s = code_transform.alloc_str(buf);
+            pending_append_lefts.push((state.open_tag_end, s));
+        }
+        return;
+    }
 
     // Slot mode: children become `{ default: _withCtx((params) => [ ... ]), _: 1 }`
     let is_slot = state.slot_params.is_some();
