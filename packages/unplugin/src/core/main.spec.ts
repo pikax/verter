@@ -526,6 +526,207 @@ describe("generateMainModule", () => {
     expect(output).toContain('"classes"');
   });
 
+  // ==================== Inline render (production) ====================
+
+  // @ai-generated - When production mode inlines the render into setup(),
+  // there is no separate `function render(...)` declaration.
+  // generateMainModule must NOT emit `_sfc_main.render = render`.
+  it("does not attach render when render is inlined in setup (production)", () => {
+    const result = makeResult({
+      script: {
+        code: [
+          'import { toDisplayString as _toDisplayString, openBlock as _openBlock, createElementBlock as _createElementBlock } from "vue"',
+          "",
+          "const __sfc__ = /*@__PURE__*/_defineComponent({",
+          '  __name: "App",',
+          "  setup(__props) {",
+          '    const msg = "hello"',
+          "    return (_ctx, _cache) => {",
+          '      return (_openBlock(), _createElementBlock("div", null, _toDisplayString(msg)))',
+          "    }",
+          "  }",
+          "})",
+        ].join("\n"),
+        imports: [],
+        body_start_utf16: 0,
+      },
+      template: undefined,
+    });
+
+    const output = generateMainModule(result, {
+      filename: "/path/to/App.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    expect(output).not.toContain("_sfc_main.render = render");
+    expect(output).toContain("const _sfc_main");
+    expect(output).toContain("export default _sfc_main");
+  });
+
+  // @ai-generated - When dev mode emits a separate function render,
+  // generateMainModule must attach it to _sfc_main.
+  it("attaches render when there is a separate function render (dev mode)", () => {
+    const result = makeResult({
+      script: {
+        code: [
+          "const __sfc__ = /*@__PURE__*/_defineComponent({",
+          '  __name: "App",',
+          "  setup(__props) {",
+          '    const msg = "hello"',
+          "    const __returned__ = { msg }",
+          "    return __returned__",
+          "  }",
+          "})",
+          "function render(_ctx, _cache, $props, $setup) {",
+          '  return "hi"',
+          "}",
+        ].join("\n"),
+        imports: [],
+        body_start_utf16: 0,
+      },
+      template: undefined,
+    });
+
+    const output = generateMainModule(result, {
+      filename: "/path/to/App.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: false,
+      hmr: "none",
+    });
+
+    expect(output).toContain("_sfc_main.render = render");
+  });
+
+  // @ai-generated - Regression: a comment containing "function render" in script setup
+  // must not cause a false positive for render attachment in production inline mode
+  it("does not attach render when 'function render' only appears in a comment (production)", () => {
+    const result = makeResult({
+      script: {
+        code: [
+          'import { ref as _ref } from "vue"',
+          "",
+          "const __sfc__ = /*@__PURE__*/_defineComponent({",
+          '  __name: "Preview",',
+          "  setup(__props) {",
+          '    // Note: standalone `function render(...)` is NOT transformed here.',
+          "    const msg = _ref('hello')",
+          "    return (_ctx, _cache) => {",
+          '      return "hi"',
+          "    }",
+          "  }",
+          "})",
+        ].join("\n"),
+        imports: [],
+        body_start_utf16: 0,
+      },
+      template: undefined,
+    });
+
+    const output = generateMainModule(result, {
+      filename: "/path/to/Preview.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    // "function render" in a comment should NOT trigger render attachment
+    expect(output).not.toContain("_sfc_main.render = render");
+  });
+
+  // @ai-generated - Integration test: compile through native compiler and verify
+  // that production inline mode does not produce _sfc_main.render = render
+  it("integration: compileForVite in production does not add render attachment", () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const native = require("@verter/native");
+    const sfc = `<script setup>
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>
+<template><div>{{ msg }}</div></template>`;
+
+    const result = native.compileForVite(sfc, {
+      filename: "test.vue",
+      isProduction: true,
+      componentId: "test123",
+    });
+
+    const output = generateMainModule(result, {
+      filename: "test.vue",
+      scopeId: "test123",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    // In production with inline render, no separate render attachment
+    expect(output).not.toContain("_sfc_main.render = render");
+  });
+
+  // @ai-generated - Integration: script containing "function render" in a comment
+  // must not cause false positive render attachment in production
+  it("integration: compileForVite with 'function render' in comment (production)", () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const native = require("@verter/native");
+    const sfc = `<script setup>
+import { ref } from 'vue'
+const msg = ref('hello')
+// Note: standalone \`function render(...)\` is NOT transformed here.
+function updatePreview() { /* no-op */ }
+</script>
+<template><div>{{ msg }}</div></template>`;
+
+    const result = native.compileForVite(sfc, {
+      filename: "Preview.vue",
+      isProduction: true,
+      componentId: "preview123",
+    });
+
+    const output = generateMainModule(result, {
+      filename: "Preview.vue",
+      scopeId: "preview123",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    // The comment text should not cause a render attachment
+    expect(output).not.toContain("_sfc_main.render = render");
+  });
+
+  // @ai-generated - Integration: dev mode should produce separate render and attach it
+  it("integration: compileForVite in dev mode produces render attachment", () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const native = require("@verter/native");
+    const sfc = `<script setup>
+import { ref } from 'vue'
+const msg = ref('hello')
+</script>
+<template><div>{{ msg }}</div></template>`;
+
+    const result = native.compileForVite(sfc, {
+      filename: "test.vue",
+      isProduction: false,
+      componentId: "test123",
+    });
+
+    const output = generateMainModule(result, {
+      filename: "test.vue",
+      scopeId: "test123",
+      ssr: false,
+      isProd: false,
+      hmr: "none",
+    });
+
+    // In dev mode, render should be a separate function attached to the component
+    expect(output).toContain("_sfc_main.render = render");
+    expect(output).toContain("function render");
+  });
+
   // @ai-generated - __cssModules uses _export_sfc metadata prop
   it("attaches __cssModules via _export_sfc metadata", () => {
     const result = makeResult({

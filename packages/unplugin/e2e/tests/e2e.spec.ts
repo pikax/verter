@@ -460,6 +460,18 @@ test.describe('Verter E2E Tests', () => {
     await expect(page.getByTestId('export-comment-count')).toHaveText('1')
   })
 
+  // @ai-generated - Regression: scoped component with "function render" in a comment
+  // must compile and render correctly in both dev and production (inline render) builds.
+  // In production, the render is inlined and "function render" in a comment must not
+  // cause a false positive _sfc_main.render = render attachment.
+  test('RenderInComment: renders with scoped style and comment containing function render', async ({ page }) => {
+    await expect(page.getByTestId('render-comment-label')).toHaveText('function render in comment')
+    await expect(page.getByTestId('render-comment-count')).toHaveText('0')
+
+    await page.getByTestId('render-comment-btn').click()
+    await expect(page.getByTestId('render-comment-count')).toHaveText('1')
+  })
+
   // ─── Integration ────────────────────────────────────────
 
   test('TodoApp: full CRUD workflow', async ({ page }) => {
