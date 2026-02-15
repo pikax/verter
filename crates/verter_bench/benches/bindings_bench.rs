@@ -404,7 +404,7 @@ fn bench_with_context(c: &mut Criterion) {
                     let result = parser.parse_expression();
                     if let Ok(ast) = result {
                         let ctx =
-                            BindingContext::with_ignored(0, ignored.iter().map(|s| s.as_bytes()));
+                            BindingContext::with_ignored(0, ignored.iter().map(|s| s.as_str()));
                         let extraction =
                             extract_bindings_from_expression(black_box(&ast), expr, &ctx);
                         black_box(extraction);

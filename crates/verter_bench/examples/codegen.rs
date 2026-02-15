@@ -4,14 +4,11 @@
 //! runs them through the codegen pipeline, and outputs the generated JavaScript
 //! (with inline source maps) to examples/codegen/generated/{filename}.js
 //!
-//! Also compiles with vize_atelier_sfc for comparison, outputting to {filename}.vize.js
-//!
-//! Run with: cargo run --example codegen
+//! Run with: cargo run -p verter_bench --example codegen
 
 use std::fs;
 use std::path::Path;
 use verter_core::builder::codegen::{compile, CodegenOptions};
-use vize_atelier_sfc::{compile_sfc, parse_sfc, SfcCompileOptions, SfcParseOptions};
 
 fn main() {
     let example_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -88,7 +85,6 @@ fn process_files(vue_files: &[std::fs::DirEntry], generated_dir: &Path) {
         let file_name = file_path.file_name().unwrap().to_string_lossy();
         let base_name = file_path.file_stem().unwrap().to_string_lossy();
         let output_path = generated_dir.join(format!("{}.js", base_name));
-        let vize_output_path = generated_dir.join(format!("{}.vize.js", base_name));
 
         println!("Processing: {}", file_name);
 
@@ -107,33 +103,6 @@ fn process_files(vue_files: &[std::fs::DirEntry], generated_dir: &Path) {
                 println!("  -> {}", output_path.display());
                 println!("     Code length: {} bytes", result.code.len());
                 println!("     Source map length: {} bytes", result.source_map.len());
-
-                // // Vize codegen for comparison
-                // let parse_options = SfcParseOptions {
-                //     filename: file_name.to_string(),
-                //     source_map: false,
-                //     ..Default::default()
-                // };
-                // match parse_sfc(&source, parse_options) {
-                //     Ok(descriptor) => {
-                //         let compile_options = SfcCompileOptions::default();
-
-                //         match compile_sfc(&descriptor, compile_options) {
-                //             Ok(vize_result) => {
-                //                 fs::write(&vize_output_path, &vize_result.code)
-                //                     .expect("Failed to write vize output file");
-                //                 println!("  -> {}", vize_output_path.display());
-                //                 println!("     Vize code length: {} bytes", vize_result.code.len());
-                //             }
-                //             Err(err) => {
-                //                 eprintln!("  Vize compile error: {:?}", err);
-                //             }
-                //         }
-                //     }
-                //     Err(err) => {
-                //         eprintln!("  Vize parse error: {:?}", err);
-                //     }
-                // }
             }
             Err(err) => {
                 eprintln!("  Error reading file: {}", err);

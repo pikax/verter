@@ -4,7 +4,7 @@
 //! compares via OXC parse + AST checks, and writes diffs.jsonl + summary.json.
 //!
 //! Usage:
-//!   cargo run -p verter_core --example check_matrix -- --manifest <path/to/capture_manifest.json>
+//!   cargo run -p verter_bench --example check_matrix -- --manifest <path/to/capture_manifest.json>
 
 use oxc_parser::Parser;
 use oxc_span::SourceType;

@@ -1440,7 +1440,7 @@ const count = ref(0)
         use std::rc::Rc;
 
         let path = format!(
-            "{}/benches/fixtures/kitchen-sink.vue",
+            "{}/tests/fixtures/kitchen-sink.vue",
             env!("CARGO_MANIFEST_DIR")
         );
         let input = std::fs::read_to_string(&path).unwrap();
@@ -1599,7 +1599,7 @@ const count = ref(0)
     #[ignore = "profiling helper — run with --nocapture --ignored"]
     fn profile_chunk_count() {
         let path = format!(
-            "{}/benches/fixtures/kitchen-sink.vue",
+            "{}/tests/fixtures/kitchen-sink.vue",
             env!("CARGO_MANIFEST_DIR")
         );
         let input = std::fs::read_to_string(&path).unwrap();

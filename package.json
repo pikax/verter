@@ -10,11 +10,12 @@
   "scripts": {
     "test": "pnpm --filter @verter/types --filter @verter/language-server --filter @verter/core test",
     "fmt": "oxfmt",
-    "build": "pnpm run build:native && pnpm run build:wasm && pnpm run build:ts",
+    "build": "pnpm run build:native && pnpm run build:wasm && pnpm run build:ts && pnpm run build:unplugin",
     "build:native": "pnpm --filter @verter/native build",
     "build:wasm": "pnpm --filter @verter/wasm build",
     "build:ts": "pnpm -r --filter './packages/**' --filter '!@verter/native' --filter '!@verter/wasm' --filter '!@verter/playground' --filter '!example' build",
     "build:playground": "pnpm --filter @verter/playground build",
+    "build:unplugin": "pnpm --filter @verter/unplugin build",
     "watch": "pnpm --filter @verter/core --filter @verter/language-shared --filter @verter/language-server --filter verter-vscode --filter @verter/typescript-plugin watch",
     "dev-extension": "pnpm --filter @verter/language-server --filter verter-vscode watch",
     "update-all": "pnpm up -r -i -L",

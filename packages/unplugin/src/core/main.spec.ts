@@ -271,6 +271,147 @@ describe("generateMainModule", () => {
     expect(output).not.toContain("function render()");
   });
 
+  // ==================== Render function attachment ====================
+
+  // @ai-generated - When the Rust compiler includes the render function in script.code
+  // (with template: null), generateMainModule must still attach it to _sfc_main
+  it("attaches render function when it is in script code and template is null", () => {
+    const result = makeResult({
+      script: {
+        code: [
+          "const __sfc__ = { setup() { return {} } }",
+          "function render(_ctx, _cache, $props, $setup) { return null }",
+          "export default __sfc__",
+        ].join("\n"),
+        imports: [],
+        body_start_utf16: 0,
+      },
+      template: undefined,
+    });
+
+    const output = generateMainModule(result, {
+      filename: "/path/to/App.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    expect(output).toContain("_sfc_main.render = render");
+  });
+
+  // @ai-generated - When template is provided separately, render attachment still works
+  it("attaches render function when template is a separate block", () => {
+    const result = makeResult(); // default has both script and template
+    const output = generateMainModule(result, {
+      filename: "/path/to/App.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    expect(output).toContain("_sfc_main.render = render");
+  });
+
+  // @ai-generated - No render attachment when script has no render function and no template
+  it("does not attach render when there is no render function", () => {
+    const result = makeResult({
+      script: {
+        code: "export default { name: 'App' }",
+        imports: [],
+        body_start_utf16: 0,
+      },
+      template: undefined,
+    });
+
+    const output = generateMainModule(result, {
+      filename: "/path/to/App.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    expect(output).not.toContain("_sfc_main.render = render");
+  });
+
+  // ==================== Duplicate export default regression ====================
+
+  // @ai-generated - Reproduces the Preview.vue bug where "export default" in a comment
+  // causes the real export default to be missed, resulting in duplicate exports
+  it("replaces the real export default when 'export default' appears in a comment", () => {
+    const result = makeResult({
+      script: {
+        code: [
+          "const __sfc__ = { setup() {",
+          "  // Transform: export default X -> window.__modules__[name].default = X",
+          "  const x = 1",
+          "} }",
+          '__sfc__.__scopeId = "data-v-abc12345";',
+          "export default __sfc__",
+        ].join("\n"),
+        imports: [],
+        body_start_utf16: 0,
+      },
+      template: undefined,
+      styles: [{ code: ".red{}", scoped: true, is_module: false, module_classes: [] }],
+    });
+
+    const output = generateMainModule(result, {
+      filename: "/path/to/Preview.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    // The real "export default __sfc__" statement must be replaced, not the one in the comment
+    expect(output).toContain("const _sfc_main = __sfc__");
+    expect(output).not.toMatch(/^export default __sfc__/m);
+    expect(output).toContain("export default Preview");
+  });
+
+  // @ai-generated - Script code with "export default" inside a string literal
+  it("replaces the real export default when 'export default' appears in a string literal", () => {
+    const result = makeResult({
+      script: {
+        code: 'const msg = "export default something";\nexport default { name: "App" }',
+        imports: [],
+        body_start_utf16: 0,
+      },
+      template: undefined,
+    });
+
+    const output = generateMainModule(result, {
+      filename: "/path/to/App.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    // The real "export default" statement must be replaced, not the one in the string literal
+    expect(output).toContain('const _sfc_main = { name: "App" }');
+    expect(output).not.toMatch(/^export default \{ name/m);
+    expect(output).toContain("export default _sfc_main");
+  });
+
+  // @ai-generated - Regression: output should always have exactly one export default
+  it("produces exactly one export default in the output", () => {
+    const result = makeResult();
+    const output = generateMainModule(result, {
+      filename: "/path/to/App.vue",
+      scopeId: "abc12345",
+      ssr: false,
+      isProd: true,
+      hmr: "none",
+    });
+
+    const exportDefaultCount = (output.match(/export default /g) || []).length;
+    expect(exportDefaultCount).toBe(1);
+  });
+
   // ==================== CSS Modules: __cssModules injection ====================
 
   // @ai-generated - Default CSS module injects __cssModules["$style"]

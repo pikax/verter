@@ -58,7 +58,16 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
 
     hasDefaultExport = scriptCode.includes("export default");
     if (hasDefaultExport) {
-      scriptCode = scriptCode.replace(/export default\s+/, "const _sfc_main = ");
+      // Replace the LAST "export default " occurrence — the real export statement.
+      // Earlier occurrences may be inside comments or string literals (e.g. Preview.vue).
+      const marker = "export default ";
+      const lastIdx = scriptCode.lastIndexOf(marker);
+      if (lastIdx !== -1) {
+        scriptCode =
+          scriptCode.substring(0, lastIdx) +
+          "const _sfc_main = " +
+          scriptCode.substring(lastIdx + marker.length);
+      }
     }
 
     lines.push(scriptCode);
@@ -72,7 +81,10 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
   }
 
   // 4. Attach render function to component
-  if (result.template && hasDefaultExport) {
+  // The render function may come from a separate template block, or be included
+  // directly in the script code by the Rust compiler (non-inline template mode).
+  const hasRenderFunction = result.template || result.script?.code.includes("function render(");
+  if (hasRenderFunction && hasDefaultExport) {
     lines.push("_sfc_main.render = render");
   }
 
