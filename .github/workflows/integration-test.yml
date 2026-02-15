@@ -367,8 +367,8 @@ jobs:
           echo "  native: $NATIVE_TGZ"
           echo "  unplugin: $UNPLUGIN_TGZ"
 
-          # 1. Install @verter/native first
-          ${{ matrix.project.package-manager }} add -w "$NATIVE_TGZ"
+          # 1. Install both packages (both must be in deps before setting $ overrides)
+          ${{ matrix.project.package-manager }} add -w "$NATIVE_TGZ" "$UNPLUGIN_TGZ"
 
           # 2. Add pnpm overrides so transitive deps resolve locally
           node -e "
@@ -381,8 +381,8 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
-          # 3. Install @verter/unplugin (override ensures @verter/native resolves locally)
-          ${{ matrix.project.package-manager }} add -w "$UNPLUGIN_TGZ"
+          # 3. Reinstall to apply overrides to workspace packages
+          ${{ matrix.project.package-manager }} install --no-frozen-lockfile
           echo "✅ Verter packages installed from tarballs"
 
       - name: Install Verter unplugin (from npm)
