@@ -1691,6 +1691,122 @@ fn test_component_native_not_resolved() {
 }
 
 // =========================================================================
+// Component resolution with setup bindings
+// =========================================================================
+
+/// @ai-generated — Setup binding: PascalCase tag → $setup["X"], no _resolveComponent
+#[test]
+fn test_component_setup_binding_skips_resolve() {
+    let code = gen_and_validate(
+        r#"<script setup>const MyComponent = {}</script><template><MyComponent/></template>"#,
+    );
+    assert!(
+        code.contains(r#"$setup["MyComponent"]"#),
+        "Setup-bound component should use $setup[\"MyComponent\"], got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_resolveComponent"),
+        "Setup-bound component should NOT use _resolveComponent, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Setup binding: kebab-case tag matched to PascalCase binding
+#[test]
+fn test_component_setup_binding_kebab_case() {
+    let code = gen_and_validate(
+        r#"<script setup>const MyComponent = {}</script><template><my-component/></template>"#,
+    );
+    assert!(
+        code.contains(r#"$setup["MyComponent"]"#),
+        "Kebab-case tag should resolve to $setup[\"MyComponent\"], got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_resolveComponent"),
+        "Kebab-case setup-bound component should NOT use _resolveComponent, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — No script block = no bindings → still uses _resolveComponent
+#[test]
+fn test_component_no_binding_still_resolves() {
+    let code = gen_and_validate(r#"<template><MyComponent/></template>"#);
+    assert!(
+        code.contains(r#"_resolveComponent("MyComponent")"#),
+        "Component without setup binding should use _resolveComponent, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Mixed: one component from setup, one unresolved
+#[test]
+fn test_component_mixed_setup_and_unresolved() {
+    let code = gen_and_validate(
+        r#"<script setup>const CompA = {}</script><template><div><CompA/><CompB/></div></template>"#,
+    );
+    assert!(
+        code.contains(r#"$setup["CompA"]"#),
+        "CompA should use $setup[\"CompA\"], got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains(r#"_resolveComponent("CompA")"#),
+        "CompA should NOT use _resolveComponent, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains(r#"_resolveComponent("CompB")"#),
+        "CompB (not in setup) should use _resolveComponent, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Import as setup binding: import → $setup["X"], no _resolveComponent
+#[test]
+fn test_component_setup_import_skips_resolve() {
+    let code = gen_and_validate(
+        r#"<script setup>import MyComponent from './MyComponent.vue'</script><template><MyComponent/></template>"#,
+    );
+    assert!(
+        code.contains(r#"$setup["MyComponent"]"#),
+        "Imported component should use $setup[\"MyComponent\"], got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_resolveComponent"),
+        "Imported component should NOT use _resolveComponent, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Prod/inline mode: bare identifier, no $setup, no _resolveComponent
+#[test]
+fn test_component_setup_binding_prod_inline() {
+    let code = gen_prod_and_validate(
+        r#"<script setup>const MyComponent = {}</script><template><MyComponent/></template>"#,
+    );
+    assert!(
+        !code.contains("_resolveComponent"),
+        "Inline mode should NOT use _resolveComponent for setup-bound component, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains(r#"$setup["MyComponent"]"#),
+        "Inline mode should use bare identifier, not $setup, got:\n{}",
+        code
+    );
+    // Should contain bare MyComponent reference (not prefixed)
+    assert!(
+        code.contains("_createBlock(MyComponent"),
+        "Inline mode should use bare MyComponent in _createBlock, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
 // Multiple roots
 // =========================================================================
 
@@ -3901,6 +4017,47 @@ fn test_vapor_vfor_index() {
 // =========================================================================
 // Vapor: Components
 // =========================================================================
+
+/// @ai-generated — Vapor: setup binding → _createComponent(_ctx.X), no _resolveComponent
+#[test]
+fn test_vapor_component_setup_binding_skips_resolve() {
+    let code = gen_vapor_and_validate(
+        r#"<script setup>const MyComponent = {}</script><template vapor><MyComponent/></template>"#,
+    );
+    assert!(
+        code.contains("_createComponent(_ctx.MyComponent"),
+        "Setup-bound component should use _createComponent(_ctx.MyComponent), got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_resolveComponent"),
+        "Setup-bound component should NOT use _resolveComponent, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_createComponentWithFallback"),
+        "Setup-bound component should use _createComponent, not _createComponentWithFallback, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Vapor: kebab-case tag with setup binding
+#[test]
+fn test_vapor_component_setup_binding_kebab_case() {
+    let code = gen_vapor_and_validate(
+        r#"<script setup>const MyComponent = {}</script><template vapor><my-component/></template>"#,
+    );
+    assert!(
+        code.contains("_createComponent(_ctx.MyComponent"),
+        "Kebab-case tag should resolve to _createComponent(_ctx.MyComponent), got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_resolveComponent"),
+        "Kebab-case setup-bound component should NOT use _resolveComponent, got:\n{}",
+        code
+    );
+}
 
 /// @ai-generated — Vapor: simple component produces _resolveComponent + _createComponentWithFallback
 #[test]

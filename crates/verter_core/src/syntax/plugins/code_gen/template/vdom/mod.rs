@@ -600,6 +600,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         let mut ectx = element::ElementOpenContext {
             bindings: &self.bindings,
             is_production: self.is_production,
+            inline: self.inline,
             hoist_static: self.hoist_static,
             imports: &mut self.imports,
             resolved_components: &mut self.resolved_components,

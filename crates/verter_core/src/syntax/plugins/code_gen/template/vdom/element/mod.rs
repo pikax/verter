@@ -12,8 +12,9 @@ use crate::{
         plugin::SyntaxPluginContext,
         plugins::code_gen::{
             template::shared::helper::{
-                build_prefixed_value_into, collect_binding_patches, escape_js_string,
-                escape_js_string_in_place, escape_js_string_into, is_valid_js_prop_key,
+                build_prefixed_value_into, camelize_capitalize_into, camelize_into,
+                collect_binding_patches, escape_js_string, escape_js_string_in_place,
+                escape_js_string_into, is_valid_js_prop_key,
             },
             types::TemplateImportDependencies,
         },
@@ -31,6 +32,7 @@ use super::{DirectiveEntry, StateStack};
 pub(crate) struct ElementOpenContext<'a, 'alloc> {
     pub bindings: &'a FxHashMap<&'alloc str, BindingType>,
     pub is_production: bool,
+    pub inline: bool,
     pub hoist_static: bool,
     pub imports: &'a mut TemplateImportDependencies,
     pub resolved_components: &'a mut Vec<&'alloc str>,
@@ -38,6 +40,43 @@ pub(crate) struct ElementOpenContext<'a, 'alloc> {
     pub resolved_directives: &'a mut Vec<&'alloc str>,
     pub resolved_directives_set: &'a mut FxHashSet<&'alloc str>,
     pub hoisted_constants: &'a mut Vec<&'alloc str>,
+}
+
+/// Try to resolve a component tag name against setup bindings.
+///
+/// Checks exact match, camelCase, then PascalCase (matching Vue's resolver order).
+/// Returns the binding name if found as a setup binding, None otherwise.
+fn resolve_setup_component<'a>(
+    tag_name: &str,
+    bindings: &FxHashMap<&'a str, BindingType>,
+    buf: &mut String,
+) -> Option<&'a str> {
+    // 1. Exact match (handles <MyComponent> when MyComponent is a binding)
+    if let Some((&key, bt)) = bindings.get_key_value(tag_name) {
+        if bt.is_setup() {
+            return Some(key);
+        }
+    }
+
+    // 2. camelCase (handles <my-component> → myComponent)
+    buf.clear();
+    camelize_into(tag_name, buf);
+    if let Some((&key, bt)) = bindings.get_key_value(buf.as_str()) {
+        if bt.is_setup() {
+            return Some(key);
+        }
+    }
+
+    // 3. PascalCase (handles <my-component> → MyComponent)
+    buf.clear();
+    camelize_capitalize_into(tag_name, buf);
+    if let Some((&key, bt)) = bindings.get_key_value(buf.as_str()) {
+        if bt.is_setup() {
+            return Some(key);
+        }
+    }
+
+    None
 }
 
 /// Check whether an event handler expression needs wrapping in `$event => (...)`.
@@ -102,19 +141,33 @@ pub(crate) fn handle_element_open<'alloc>(
     // Tag name from source bytes
     let tag_name = &ctx.input[open_tag.start as usize + 1..open_tag.name_end as usize];
 
-    // For components, register for _resolveComponent and use the resolved variable name.
-    // Vue pattern: const _component_MyComponent = _resolveComponent("MyComponent")
-    // Then reference _component_MyComponent in _createBlock/_createVNode calls.
+    // For components, check setup bindings first. If the component is available from
+    // setup, use $setup["Name"] (standalone) or bare Name (inline) instead of _resolveComponent.
+    let inline = ectx.inline;
     let component_var: Option<&'alloc str> = if is_component {
-        buf.clear();
-        buf.push_str("_component_");
-        buf.push_str(tag_name);
-        let var_name = code_transform.alloc_str(buf);
-        if resolved_components_set.insert(tag_name) {
-            resolved_components.push(tag_name);
-            imports.add(TemplateImportDependencies::RESOLVE_COMPONENT);
+        if let Some(binding_name) = resolve_setup_component(tag_name, bindings, buf) {
+            // Component found in setup bindings — use direct reference
+            buf.clear();
+            if inline {
+                buf.push_str(binding_name);
+            } else {
+                buf.push_str("$setup[\"");
+                buf.push_str(binding_name);
+                buf.push_str("\"]");
+            }
+            Some(code_transform.alloc_str(buf))
+        } else {
+            // Not in setup — fall back to _resolveComponent
+            buf.clear();
+            buf.push_str("_component_");
+            buf.push_str(tag_name);
+            let var_name = code_transform.alloc_str(buf);
+            if resolved_components_set.insert(tag_name) {
+                resolved_components.push(tag_name);
+                imports.add(TemplateImportDependencies::RESOLVE_COMPONENT);
+            }
+            Some(var_name)
         }
-        Some(var_name)
     } else {
         None
     };

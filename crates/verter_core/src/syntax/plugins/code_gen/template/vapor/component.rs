@@ -2,8 +2,9 @@
 
 use crate::syntax::{
     plugin::SyntaxPluginContext,
-    plugins::code_gen::types::{
-        TemplateCodeGenError, TemplateCodeGenResult, VaporImportDependencies,
+    plugins::code_gen::{
+        template::shared::helper::{camelize_capitalize_into, camelize_into},
+        types::{TemplateCodeGenError, TemplateCodeGenResult, VaporImportDependencies},
     },
     types::{OxcCompiledElementStart, PropKind},
 };
@@ -126,20 +127,32 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
                 }
             }
             _ => {
-                // Regular user component.
-                self.imports.add(VaporImportDependencies::RESOLVE_COMPONENT);
-                self.imports
-                    .add(VaporImportDependencies::CREATE_COMPONENT_WITH_FALLBACK);
-                let comp_var = format!("_component_{}", tag_name.replace('-', "_"));
-                if self.resolutions.components_set.insert(tag_name.to_string()) {
-                    self.resolutions.components.push(tag_name.to_string());
-                    self.resolutions.component_decls.push(format!(
-                        "const {} = _resolveComponent(\"{}\")",
-                        comp_var, tag_name
-                    ));
-                }
-                if let VaporElementKind::Component { component_var, .. } = &mut state.kind {
-                    *component_var = comp_var;
+                // Check if component is available from setup bindings.
+                let setup_binding = self.resolve_setup_component(tag_name);
+
+                if let Some(binding_name) = setup_binding {
+                    // Setup-bound component: use _createComponent(_ctx.Name, ...)
+                    self.imports.add(VaporImportDependencies::CREATE_COMPONENT);
+                    let comp_var = format!("_ctx.{}", binding_name);
+                    if let VaporElementKind::Component { component_var, .. } = &mut state.kind {
+                        *component_var = comp_var;
+                    }
+                } else {
+                    // Regular user component: use _resolveComponent + _createComponentWithFallback.
+                    self.imports.add(VaporImportDependencies::RESOLVE_COMPONENT);
+                    self.imports
+                        .add(VaporImportDependencies::CREATE_COMPONENT_WITH_FALLBACK);
+                    let comp_var = format!("_component_{}", tag_name.replace('-', "_"));
+                    if self.resolutions.components_set.insert(tag_name.to_string()) {
+                        self.resolutions.components.push(tag_name.to_string());
+                        self.resolutions.component_decls.push(format!(
+                            "const {} = _resolveComponent(\"{}\")",
+                            comp_var, tag_name
+                        ));
+                    }
+                    if let VaporElementKind::Component { component_var, .. } = &mut state.kind {
+                        *component_var = comp_var;
+                    }
                 }
             }
         }
@@ -173,8 +186,9 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         };
 
         // Determine if this uses _createComponent or _createComponentWithFallback.
-        let is_builtin_create = comp_var.starts_with("_Vapor");
-        let create_fn = if is_builtin_create {
+        // Built-in components (_Vapor*) and setup-bound components (_ctx.*) use _createComponent.
+        let is_direct_create = comp_var.starts_with("_Vapor") || comp_var.starts_with("_ctx.");
+        let create_fn = if is_direct_create {
             "_createComponent"
         } else {
             "_createComponentWithFallback"
@@ -344,6 +358,39 @@ impl<'alloc> VaporTemplateGenerator<'alloc> {
         };
 
         format!("_createSlot({}, {})", slot_name, props_str)
+    }
+
+    /// Try to resolve a component tag name against setup bindings.
+    ///
+    /// Checks exact match, camelCase, then PascalCase (matching Vue's resolver order).
+    /// Returns the binding name if found as a setup binding, None otherwise.
+    fn resolve_setup_component(&self, tag_name: &str) -> Option<String> {
+        // 1. Exact match (handles <MyComponent> when MyComponent is a binding)
+        if let Some(bt) = self.bindings.get(tag_name) {
+            if bt.is_setup() {
+                return Some(tag_name.to_string());
+            }
+        }
+
+        // 2. camelCase (handles <my-component> → myComponent)
+        let mut buf = String::new();
+        camelize_into(tag_name, &mut buf);
+        if let Some(bt) = self.bindings.get(buf.as_str()) {
+            if bt.is_setup() {
+                return Some(buf);
+            }
+        }
+
+        // 3. PascalCase (handles <my-component> → MyComponent)
+        buf.clear();
+        camelize_capitalize_into(tag_name, &mut buf);
+        if let Some(bt) = self.bindings.get(buf.as_str()) {
+            if bt.is_setup() {
+                return Some(buf);
+            }
+        }
+
+        None
     }
 
     /// Build a `_createDynamicComponent(...)` call.
