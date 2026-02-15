@@ -18,7 +18,7 @@ use crate::{
             },
             types::TemplateImportDependencies,
         },
-        types::{OxcCompiledElementStart, PropKind},
+        types::{ElementKind, OxcCompiledElementStart, PropKind},
     },
     utils::vue::PatchFlags,
 };
@@ -134,6 +134,36 @@ pub(crate) fn handle_element_open<'alloc>(
     state.is_component = is_component;
     state.open_tag_start = open_tag.start;
     state.open_tag_end = open_tag_end.end;
+
+    // Slot outlet: <slot/> or <slot name="xxx"/> → _renderSlot($slots, "name")
+    if open_tag.kind == ElementKind::SlotOutlet {
+        state.is_slot_outlet = true;
+        let imports = &mut *ectx.imports;
+        imports.add(TemplateImportDependencies::RENDER_SLOT);
+
+        // Extract static slot name from props (defaults to "default")
+        let slot_name = ev.props.iter().find_map(|p| {
+            if p.event.kind == PropKind::Value {
+                let name = &ctx.input[p.event.start as usize..p.event.name_end as usize];
+                if name == "name" {
+                    return p
+                        .event
+                        .value
+                        .map(|v| &ctx.input[v.start as usize..v.end as usize]);
+                }
+            }
+            None
+        });
+
+        buf.clear();
+        buf.push_str("_renderSlot($slots, \"");
+        buf.push_str(slot_name.unwrap_or("default"));
+        buf.push('"');
+
+        let s = code_transform.alloc_str(buf);
+        pending_overwrites.push((open_tag.start, open_tag_end.end, s));
+        return;
+    }
 
     // Inherit patch flags already estimated during syntax parsing
     state.patch_flag = open_tag.patch_flag;

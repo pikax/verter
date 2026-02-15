@@ -39,6 +39,16 @@ pub(crate) fn handle_element_close<'alloc>(
     pending_append_lefts: &mut Vec<(u32, &'alloc str)>,
     buf: &mut String,
 ) {
+    // Slot outlets: _renderSlot($slots, "name") — just close the paren.
+    if state.is_slot_outlet {
+        if let Some(close_tag) = &ev.event.event_close_tag {
+            pending_overwrites.push((close_tag.start, close_tag.end, ")"));
+        } else {
+            pending_append_lefts.push((state.open_tag_end, ")"));
+        }
+        return;
+    }
+
     let mut patch_flag = state.patch_flag;
 
     let has_children = !state.children.is_empty();
@@ -369,6 +379,12 @@ pub(crate) fn handle_element_close_self_closing<'alloc>(
     pending_append_lefts: &mut Vec<(u32, &'alloc str)>,
     buf: &mut String,
 ) {
+    // Slot outlets: _renderSlot($slots, "name") — just close the paren.
+    if state.is_slot_outlet {
+        pending_append_lefts.push((state.open_tag_end, ")"));
+        return;
+    }
+
     // Fast path: use &'static str for common close strings (no patch flags).
     let s: &'alloc str = if state.patch_flag.0 == 0 {
         if state.is_block_root {

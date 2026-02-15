@@ -1265,6 +1265,33 @@ fn test_v_for_with_index() {
     );
 }
 
+/// @ai-generated — v-for _renderList first arg should be the iterable, not the full "item in items" expression
+#[test]
+fn test_v_for_renderlist_iterable_only() {
+    let code = gen_and_validate(
+        r#"<template><div v-for="(item, index) in items" :key="index">{{ item }}</div></template>"#,
+    );
+    // _renderList should receive just the iterable (e.g., _ctx.items), not "(item, index) in items"
+    assert!(
+        !code.contains("in _ctx.items") && !code.contains("in items") && !code.contains(") in "),
+        "v-for _renderList should NOT contain 'in' keyword from template syntax, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — v-for with simple variable: _renderList(source, (item) => ...)
+#[test]
+fn test_v_for_renderlist_simple() {
+    let code =
+        gen_and_validate(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
+    // Should be _renderList(_ctx.items, ...) not _renderList(item in _ctx.items, ...)
+    assert!(
+        !code.contains("item in"),
+        "v-for _renderList should not contain 'item in', got:\n{}",
+        code
+    );
+}
+
 /// @ai-generated — v-for removes directive from output
 #[test]
 fn test_v_for_removes_directive() {
@@ -2657,6 +2684,63 @@ fn test_slot_dynamic_production() {
     assert!(
         !code.contains("DYNAMIC"),
         "Production should not have DYNAMIC comment, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Slot Outlets (<slot/> → _renderSlot)
+// =========================================================================
+
+/// @ai-generated — <slot/> should compile to _renderSlot, not _createElementVNode("slot")
+#[test]
+fn test_slot_outlet_default() {
+    let code = gen_and_validate(r#"<template><div><slot/></div></template>"#);
+    assert!(
+        code.contains("_renderSlot("),
+        "<slot/> should use _renderSlot, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_createElementVNode(\"slot\""),
+        "<slot/> should NOT be compiled as a regular element, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — <slot name="header"/> should compile to _renderSlot($slots, "header")
+#[test]
+fn test_slot_outlet_named() {
+    let code = gen_and_validate(r#"<template><div><slot name="header"/></div></template>"#);
+    assert!(
+        code.contains("_renderSlot("),
+        "Named <slot> should use _renderSlot, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("\"header\""),
+        "Named <slot> should include slot name 'header', got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Props binding: const props = defineProps()
+// =========================================================================
+
+/// @ai-generated — `const props = defineProps()` followed by `props.x` in template should
+/// NOT produce double $props.props.x prefix
+#[test]
+fn test_props_whole_object_no_double_prefix() {
+    let code = gen_and_validate(
+        r#"<script setup>
+const props = defineProps({ msg: String })
+</script>
+<template><div>{{ props.msg }}</div></template>"#,
+    );
+    assert!(
+        !code.contains("$props.props"),
+        "Should NOT have double $props.props prefix, got:\n{}",
         code
     );
 }

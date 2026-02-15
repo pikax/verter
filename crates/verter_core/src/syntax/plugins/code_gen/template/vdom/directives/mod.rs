@@ -118,11 +118,14 @@ pub(crate) fn process_scope_opens<'alloc>(
                     "(_openBlock(true), _createElementBlock(_Fragment, null, _renderList(",
                 );
                 if let Some(val) = vfor.event.value {
-                    let val_text = &ctx.input[val.start as usize..val.end as usize];
+                    // Use only the right side (the iterable) of the v-for expression.
+                    // e.g., for "(item, index) in items", emit only "items", not the full expression.
+                    let right_offset = vfor.parsed.result.right_offset;
+                    let right_text = &ctx.input[right_offset as usize..val.end as usize];
                     prefix_vfor_references_into(
                         buf,
-                        val_text,
-                        val.start,
+                        right_text,
+                        right_offset,
                         &vfor.parsed.references,
                         None,
                         ctx.input,

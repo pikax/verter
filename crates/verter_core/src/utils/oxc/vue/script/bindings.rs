@@ -158,7 +158,9 @@ fn is_define_props_call<'a>(expr: &Expression<'a>) -> bool {
 /// Extract destructured props: `const { msg: m } = defineProps<...>()`
 ///
 /// For an object pattern, each binding is `PropsAliased`.
-/// For a plain identifier (`const props = defineProps()`), the binding is `Props`.
+/// For a plain identifier (`const props = defineProps()`), the binding is `SetupConst`
+/// because the variable holds the whole props object — accessed via `$setup.props`
+/// in standalone mode, not `$props.props`.
 fn extract_destructured_props<'a>(
     pattern: &BindingPattern<'a>,
     entries: &mut Vec<(Span, BindingType)>,
@@ -173,7 +175,9 @@ fn extract_destructured_props<'a>(
             }
         }
         BindingPattern::BindingIdentifier(ident) => {
-            entries.push((Span::from(ident.span), BindingType::Props));
+            // Plain identifier `const props = defineProps()` — the variable IS the
+            // props object itself. It's a setup binding, not an individual prop.
+            entries.push((Span::from(ident.span), BindingType::SetupConst));
         }
         _ => {}
     }
@@ -501,11 +505,12 @@ mod tests {
         assert_eq!(find(&b, "model"), Some(BindingType::SetupRef));
     }
 
-    /// @ai-generated
+    /// @ai-generated — `const props = defineProps()` is a setup binding (the whole object),
+    /// not an individual prop. Uses `$setup.props` not `$props.props`.
     #[test]
     fn const_define_props_whole_object() {
         let b = classify("const props = defineProps({ msg: String });");
-        assert_eq!(find(&b, "props"), Some(BindingType::Props));
+        assert_eq!(find(&b, "props"), Some(BindingType::SetupConst));
     }
 
     /// @ai-generated
@@ -530,12 +535,12 @@ mod tests {
         assert_eq!(find(&b, "rest"), Some(BindingType::PropsAliased));
     }
 
-    /// @ai-generated
+    /// @ai-generated — `const props = withDefaults(...)` is a setup binding (the whole object).
     #[test]
     fn const_with_defaults_whole_object() {
         let b =
             classify("const props = withDefaults(defineProps<{ msg: string }>(), { msg: 'hi' });");
-        assert_eq!(find(&b, "props"), Some(BindingType::Props));
+        assert_eq!(find(&b, "props"), Some(BindingType::SetupConst));
     }
 
     /// @ai-generated

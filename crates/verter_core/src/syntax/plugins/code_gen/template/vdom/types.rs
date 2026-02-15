@@ -91,6 +91,9 @@ pub(crate) struct StateStack<'alloc> {
     /// Whether this element is a component (vs native element).
     pub is_component: bool,
 
+    /// Whether this element is a `<slot/>` outlet (renders via `_renderSlot`).
+    pub is_slot_outlet: bool,
+
     /// Position of `<` of the open tag — used for withDirectives prepend.
     pub open_tag_start: u32,
 
@@ -172,6 +175,7 @@ impl Default for StateStack<'_> {
             cache_id: None,
 
             is_component: false,
+            is_slot_outlet: false,
             open_tag_start: 0,
             open_tag_end: 0,
             patch_flag: PatchFlag::empty(),
@@ -201,6 +205,7 @@ impl StateStack<'_> {
         self.children.clear();
         self.cache_id = None;
         self.is_component = false;
+        self.is_slot_outlet = false;
         self.open_tag_start = 0;
         self.open_tag_end = 0;
         self.patch_flag = PatchFlag::empty();
