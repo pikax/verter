@@ -563,6 +563,117 @@ fn test_hoist_production_mode() {
 }
 
 // =========================================================================
+// Hyphenated Prop Names — quoting for invalid JS identifiers
+// =========================================================================
+
+/// @ai-generated — Bound hyphenated prop name is quoted
+#[test]
+fn test_props_hyphenated_bound() {
+    let code = gen_and_validate(r#"<template><div :initial-foo="val">hi</div></template>"#);
+    assert!(
+        code.contains("\"initial-foo\": _ctx.val"),
+        "Hyphenated bound prop should be quoted, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Bound hyphenated prop on component is quoted
+#[test]
+fn test_props_hyphenated_bound_component() {
+    let code = gen_and_validate(r#"<template><SplitPane :initial-foo="50"/></template>"#);
+    assert!(
+        code.contains("\"initial-foo\": 50"),
+        "Hyphenated bound prop on component should be quoted, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Static hyphenated prop (non-hoisted, mixed with dynamic) is quoted
+#[test]
+fn test_props_hyphenated_static_non_hoisted() {
+    let code = gen_and_validate(r#"<template><div data-id="x" :title="t">hi</div></template>"#);
+    assert!(
+        code.contains("\"data-id\": \"x\""),
+        "Hyphenated static prop should be quoted, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Static hyphenated prop (hoisted) is quoted
+#[test]
+fn test_props_hyphenated_static_hoisted() {
+    let code = gen_and_validate(r#"<template><div data-foo="bar">{{ msg }}</div></template>"#);
+    assert!(
+        code.contains("\"data-foo\": \"bar\""),
+        "Hoisted hyphenated prop should be quoted, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Normal props stay unquoted alongside quoted hyphenated props
+#[test]
+fn test_props_hyphenated_mixed_with_normal() {
+    let code =
+        gen_and_validate(r#"<template><div :id="myId" :initial-foo="val">hi</div></template>"#);
+    assert!(
+        code.contains("id: _ctx.myId"),
+        "Normal prop should remain unquoted, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("\"initial-foo\": _ctx.val"),
+        "Hyphenated prop should be quoted, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Hyphenated Event Names — camelization
+// =========================================================================
+
+/// @ai-generated — Hyphenated event name is camelized
+#[test]
+fn test_event_hyphenated_camelize() {
+    let code = gen_and_validate(r#"<template><div @initial-split="handler">hi</div></template>"#);
+    assert!(
+        code.contains("onInitialSplit: _ctx.handler"),
+        "Hyphenated event should be camelized, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Hyphenated event on component is camelized
+#[test]
+fn test_event_hyphenated_component() {
+    let code = gen_and_validate(r#"<template><Comp @my-custom-event="handler"/></template>"#);
+    assert!(
+        code.contains("onMyCustomEvent"),
+        "Hyphenated event on component should be camelized, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// v-model with hyphenated names
+// =========================================================================
+
+/// @ai-generated — v-model with hyphenated name: prop quoted, event camelized
+#[test]
+fn test_vmodel_hyphenated_component() {
+    let code = gen_and_validate(r#"<template><Comp v-model:my-value="val"/></template>"#);
+    assert!(
+        code.contains("\"my-value\":"),
+        "v-model hyphenated prop should be quoted, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("\"onUpdate:myValue\""),
+        "v-model hyphenated event should be camelized, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
 // Events — @click etc.
 // =========================================================================
 

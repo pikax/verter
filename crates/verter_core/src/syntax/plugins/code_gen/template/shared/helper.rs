@@ -533,6 +533,70 @@ pub fn capitalize_first_into(s: &str, buf: &mut String) {
     }
 }
 
+/// Check if a string is a valid unquoted JavaScript object key (identifier).
+///
+/// Returns `true` for `foo`, `myProp`, `_private`, `$ref`.
+/// Returns `false` for `initial-foo`, `data-id`, empty strings.
+#[inline]
+pub fn is_valid_js_prop_key(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && first != '_' && first != '$' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
+/// Camelize a hyphenated string (without capitalizing the first character), appending to `buf`.
+///
+/// Converts `my-value` → `myValue`, `initial-split` → `initialSplit`.
+/// Hyphens are removed and the following character is uppercased.
+pub fn camelize_into(s: &str, buf: &mut String) {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut capitalize_next = false;
+    while i < bytes.len() {
+        if bytes[i] == b'-' {
+            capitalize_next = true;
+            i += 1;
+        } else {
+            if capitalize_next && bytes[i].is_ascii_lowercase() {
+                buf.push(bytes[i].to_ascii_uppercase() as char);
+            } else {
+                buf.push(bytes[i] as char);
+            }
+            capitalize_next = false;
+            i += 1;
+        }
+    }
+}
+
+/// Camelize a hyphenated string and capitalize the first character, appending to `buf`.
+///
+/// Converts `initial-split` → `InitialSplit`, `my-custom-event` → `MyCustomEvent`.
+/// Hyphens are removed and the following character is uppercased.
+pub fn camelize_capitalize_into(s: &str, buf: &mut String) {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut capitalize_next = true;
+    while i < bytes.len() {
+        if bytes[i] == b'-' {
+            capitalize_next = true;
+            i += 1;
+        } else {
+            if capitalize_next && bytes[i].is_ascii_lowercase() {
+                buf.push(bytes[i].to_ascii_uppercase() as char);
+            } else {
+                buf.push(bytes[i] as char);
+            }
+            capitalize_next = false;
+            i += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,5 +907,78 @@ mod tests {
         assert_eq!(classify_modifier("prevent"), ModifierKind::Runtime);
         assert_eq!(classify_modifier("self"), ModifierKind::Runtime);
         assert_eq!(classify_modifier("exact"), ModifierKind::Runtime);
+    }
+
+    // ── is_valid_js_prop_key tests ──────────────────────────────────────
+
+    #[test]
+    fn test_is_valid_js_prop_key_simple() {
+        assert!(is_valid_js_prop_key("foo"));
+        assert!(is_valid_js_prop_key("myProp"));
+        assert!(is_valid_js_prop_key("_private"));
+        assert!(is_valid_js_prop_key("$ref"));
+        assert!(is_valid_js_prop_key("a1"));
+    }
+
+    #[test]
+    fn test_is_valid_js_prop_key_invalid() {
+        assert!(!is_valid_js_prop_key("initial-foo"));
+        assert!(!is_valid_js_prop_key("data-id"));
+        assert!(!is_valid_js_prop_key(""));
+        assert!(!is_valid_js_prop_key("1abc"));
+        assert!(!is_valid_js_prop_key("a.b"));
+    }
+
+    // ── camelize_into tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_camelize_simple() {
+        let mut buf = String::new();
+        camelize_into("my-value", &mut buf);
+        assert_eq!(buf, "myValue");
+    }
+
+    #[test]
+    fn test_camelize_multiple_hyphens() {
+        let mut buf = String::new();
+        camelize_into("my-custom-value", &mut buf);
+        assert_eq!(buf, "myCustomValue");
+    }
+
+    #[test]
+    fn test_camelize_no_hyphens() {
+        let mut buf = String::new();
+        camelize_into("modelValue", &mut buf);
+        assert_eq!(buf, "modelValue");
+    }
+
+    // ── camelize_capitalize_into tests ──────────────────────────────────
+
+    #[test]
+    fn test_camelize_capitalize_simple() {
+        let mut buf = String::new();
+        camelize_capitalize_into("click", &mut buf);
+        assert_eq!(buf, "Click");
+    }
+
+    #[test]
+    fn test_camelize_capitalize_hyphenated() {
+        let mut buf = String::new();
+        camelize_capitalize_into("initial-split", &mut buf);
+        assert_eq!(buf, "InitialSplit");
+    }
+
+    #[test]
+    fn test_camelize_capitalize_multiple_hyphens() {
+        let mut buf = String::new();
+        camelize_capitalize_into("my-custom-event", &mut buf);
+        assert_eq!(buf, "MyCustomEvent");
+    }
+
+    #[test]
+    fn test_camelize_capitalize_no_change_needed() {
+        let mut buf = String::new();
+        camelize_capitalize_into("Click", &mut buf);
+        assert_eq!(buf, "Click");
     }
 }

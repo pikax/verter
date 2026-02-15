@@ -11,8 +11,9 @@ use crate::{
         binding_types::BindingType,
         plugin::SyntaxPluginContext,
         plugins::code_gen::template::shared::helper::{
-            build_prefixed_value_into, capitalize_first_into, classify_modifier,
-            collect_binding_patches, ModifierKind,
+            build_prefixed_value_into, camelize_capitalize_into, camelize_into,
+            capitalize_first_into, classify_modifier, collect_binding_patches,
+            is_valid_js_prop_key, ModifierKind,
         },
         types::{OxcProp, PropKind},
     },
@@ -73,6 +74,7 @@ pub(super) fn handle_prop_on<'alloc>(
         }
     }
 
+    // Build camelized event name in buffer (needed for dynamic_props in all cases)
     let event_name: &'alloc str = if prop.event.has_dynamic_arg {
         let arg_span = prop.event.arg.unwrap();
         let raw = &ctx.input[arg_span.start as usize..arg_span.end as usize];
@@ -100,11 +102,197 @@ pub(super) fn handle_prop_on<'alloc>(
     } else {
         buf.clear();
         buf.push_str("on");
-        capitalize_first_into(raw_event, buf);
+        camelize_capitalize_into(raw_event, buf);
         buf.push_str(&event_suffix);
         code_transform.alloc_str(buf)
     };
 
+    // Build handler prefix/suffix from modifiers (shared by all branches)
+    let mut handler_prefix = String::new();
+    let mut handler_suffix = String::new();
+
+    if !runtime_mods.is_empty() {
+        imports.add(TemplateImportDependencies::WITH_MODIFIERS);
+        handler_prefix.push_str("_withModifiers(");
+        handler_suffix.push_str(", [");
+        for (i, m) in runtime_mods.iter().enumerate() {
+            if i > 0 {
+                handler_suffix.push(',');
+            }
+            handler_suffix.push('"');
+            handler_suffix.push_str(m);
+            handler_suffix.push('"');
+        }
+        handler_suffix.push_str("])");
+    }
+    if !key_mods.is_empty() {
+        imports.add(TemplateImportDependencies::WITH_KEYS);
+        let old_prefix = std::mem::take(&mut handler_prefix);
+        handler_prefix.push_str("_withKeys(");
+        handler_prefix.push_str(&old_prefix);
+        handler_suffix.push_str(", [");
+        for (i, m) in key_mods.iter().enumerate() {
+            if i > 0 {
+                handler_suffix.push(',');
+            }
+            handler_suffix.push('"');
+            handler_suffix.push_str(m);
+            handler_suffix.push('"');
+        }
+        handler_suffix.push_str("])");
+    }
+
+    // For non-dynamic events with arg_span: use split overwrites to transform
+    // the event name in-place (capitalize first char, camelize hyphens, prepend "on").
+    if !prop.event.has_dynamic_arg {
+        if let Some(arg_span) = prop.event.arg {
+            // 1. Before name: replace @ prefix with sep + "on"
+            let before: &'static str = if sep.is_empty() { "on" } else { ", on" };
+            pending_overwrites.push((prop.event.start, arg_span.start, before));
+
+            // 2. Uppercase first character
+            let bytes = raw_event.as_bytes();
+            if let Some(&first) = bytes.first() {
+                if first.is_ascii_lowercase() {
+                    let saved = buf.len();
+                    buf.push(first.to_ascii_uppercase() as char);
+                    let s = code_transform.alloc_str(&buf[saved..]);
+                    buf.truncate(saved);
+                    pending_overwrites.push((arg_span.start, arg_span.start + 1, s));
+                }
+            }
+
+            // 3. Camelize hyphens: -x → X
+            for i in 0..bytes.len().saturating_sub(1) {
+                if bytes[i] == b'-' && bytes[i + 1].is_ascii_alphabetic() {
+                    let saved = buf.len();
+                    buf.push(bytes[i + 1].to_ascii_uppercase() as char);
+                    let s = code_transform.alloc_str(&buf[saved..]);
+                    buf.truncate(saved);
+                    pending_overwrites.push((
+                        arg_span.start + i as u32,
+                        arg_span.start + i as u32 + 2,
+                        s,
+                    ));
+                }
+            }
+
+            // 4. After name: event_suffix + ": " + handler_prefix [+ "$event => ("]
+            if let Some(val_span) = prop.event.value {
+                let wrap = prop
+                    .exp
+                    .as_ref()
+                    .map(|e| needs_event_handler_wrap(&e.expression))
+                    .unwrap_or(false);
+
+                if event_suffix.is_empty() && handler_prefix.is_empty() {
+                    let after: &'static str = if wrap { ": $event => (" } else { ": " };
+                    pending_overwrites.push((arg_span.end, val_span.start, after));
+                } else {
+                    buf.clear();
+                    buf.push_str(&event_suffix);
+                    buf.push_str(": ");
+                    buf.push_str(&handler_prefix);
+                    if wrap {
+                        buf.push_str("$event => (");
+                    }
+                    let s = code_transform.alloc_str(buf);
+                    pending_overwrites.push((arg_span.end, val_span.start, s));
+                }
+
+                // Suffix overwrite after value
+                if wrap {
+                    buf.clear();
+                    buf.push(')');
+                    buf.push_str(&handler_suffix);
+                    let s = code_transform.alloc_str(buf);
+                    pending_overwrites.push((val_span.end, prop.event.end, s));
+                } else {
+                    let s = code_transform.alloc_str(&handler_suffix);
+                    pending_overwrites.push((val_span.end, prop.event.end, s));
+                }
+
+                if let Some(exp) = &prop.exp {
+                    collect_binding_patches(
+                        exp.bindings.as_ref(),
+                        bindings,
+                        is_production,
+                        binding_patches,
+                    );
+                }
+            } else {
+                // No value: event_suffix + ": () => {}"
+                if event_suffix.is_empty() {
+                    pending_overwrites.push((arg_span.end, prop.event.end, ": () => {}"));
+                } else {
+                    buf.clear();
+                    buf.push_str(&event_suffix);
+                    buf.push_str(": () => {}");
+                    let s = code_transform.alloc_str(buf);
+                    pending_overwrites.push((arg_span.end, prop.event.end, s));
+                }
+            }
+        } else {
+            // No arg_span (default "click"): use buffer approach
+            emit_event_buffer(
+                code_transform,
+                prop,
+                sep,
+                event_name,
+                &event_suffix,
+                &handler_prefix,
+                &handler_suffix,
+                buf,
+                binding_patches,
+                bindings,
+                is_production,
+                pending_overwrites,
+            );
+        }
+    } else {
+        // Dynamic event: use buffer approach (current)
+        emit_event_buffer(
+            code_transform,
+            prop,
+            sep,
+            event_name,
+            &event_suffix,
+            &handler_prefix,
+            &handler_suffix,
+            buf,
+            binding_patches,
+            bindings,
+            is_production,
+            pending_overwrites,
+        );
+    }
+
+    // Events produce PROPS patch flag with event name in dynamic props.
+    let dp_entry: &'alloc str = event_name
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(event_name);
+    state.dynamic_props.push(dp_entry);
+    state.patch_flag = state.patch_flag.add(PatchFlags::Props);
+    1
+}
+
+/// Emit event overwrites using the buffer approach (for dynamic args or no arg_span).
+#[allow(clippy::too_many_arguments)]
+fn emit_event_buffer<'alloc>(
+    code_transform: &CodeTransform<'alloc>,
+    prop: &OxcProp<'alloc>,
+    sep: &str,
+    event_name: &'alloc str,
+    _event_suffix: &str,
+    handler_prefix: &str,
+    handler_suffix: &str,
+    buf: &mut String,
+    binding_patches: &mut Vec<(u32, &'alloc str)>,
+    bindings: &FxHashMap<&'alloc str, BindingType>,
+    is_production: bool,
+    pending_overwrites: &mut Vec<(u32, u32, &'alloc str)>,
+) {
     if let Some(val_span) = prop.event.value {
         let wrap = prop
             .exp
@@ -112,53 +300,18 @@ pub(super) fn handle_prop_on<'alloc>(
             .map(|e| needs_event_handler_wrap(&e.expression))
             .unwrap_or(false);
 
-        // Build handler prefix/suffix based on modifiers
-        let mut handler_prefix = String::new();
-        let mut handler_suffix = String::new();
-
-        if !runtime_mods.is_empty() {
-            imports.add(TemplateImportDependencies::WITH_MODIFIERS);
-            handler_prefix.push_str("_withModifiers(");
-            handler_suffix.push_str(", [");
-            for (i, m) in runtime_mods.iter().enumerate() {
-                if i > 0 {
-                    handler_suffix.push(',');
-                }
-                handler_suffix.push('"');
-                handler_suffix.push_str(m);
-                handler_suffix.push('"');
-            }
-            handler_suffix.push_str("])");
-        }
-        if !key_mods.is_empty() {
-            imports.add(TemplateImportDependencies::WITH_KEYS);
-            let old_prefix = std::mem::take(&mut handler_prefix);
-            handler_prefix.push_str("_withKeys(");
-            handler_prefix.push_str(&old_prefix);
-            handler_suffix.push_str(", [");
-            for (i, m) in key_mods.iter().enumerate() {
-                if i > 0 {
-                    handler_suffix.push(',');
-                }
-                handler_suffix.push('"');
-                handler_suffix.push_str(m);
-                handler_suffix.push('"');
-            }
-            handler_suffix.push_str("])");
-        }
-
         if wrap {
             buf.clear();
             buf.push_str(sep);
             buf.push_str(event_name);
             buf.push_str(": ");
-            buf.push_str(&handler_prefix);
+            buf.push_str(handler_prefix);
             buf.push_str("$event => (");
             let s = code_transform.alloc_str(buf);
             pending_overwrites.push((prop.event.start, val_span.start, s));
             buf.clear();
             buf.push(')');
-            buf.push_str(&handler_suffix);
+            buf.push_str(handler_suffix);
             let s = code_transform.alloc_str(buf);
             pending_overwrites.push((val_span.end, prop.event.end, s));
         } else {
@@ -166,10 +319,10 @@ pub(super) fn handle_prop_on<'alloc>(
             buf.push_str(sep);
             buf.push_str(event_name);
             buf.push_str(": ");
-            buf.push_str(&handler_prefix);
+            buf.push_str(handler_prefix);
             let s = code_transform.alloc_str(buf);
             pending_overwrites.push((prop.event.start, val_span.start, s));
-            let s = code_transform.alloc_str(&handler_suffix);
+            let s = code_transform.alloc_str(handler_suffix);
             pending_overwrites.push((val_span.end, prop.event.end, s));
         }
 
@@ -189,15 +342,6 @@ pub(super) fn handle_prop_on<'alloc>(
         let s = code_transform.alloc_str(buf);
         pending_overwrites.push((prop.event.start, prop.event.end, s));
     }
-
-    // Events produce PROPS patch flag with event name in dynamic props.
-    let dp_entry: &'alloc str = event_name
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(event_name);
-    state.dynamic_props.push(dp_entry);
-    state.patch_flag = state.patch_flag.add(PatchFlags::Props);
-    1
 }
 
 /// Handle `v-model` props (PropKind::Model).
@@ -259,13 +403,27 @@ pub(super) fn handle_prop_model<'alloc>(
                 val_text
             };
 
+            let needs_quote = !is_valid_js_prop_key(model_name);
+
             buf.clear();
             buf.push_str(sep);
+            // Prop key: quote if hyphenated
+            if needs_quote {
+                buf.push('"');
+            }
             buf.push_str(model_name);
+            if needs_quote {
+                buf.push('"');
+            }
             buf.push_str(": ");
             buf.push_str(prefixed_val);
+            // Event key: camelize model name within quoted "onUpdate:..."
             buf.push_str(", \"onUpdate:");
-            buf.push_str(model_name);
+            if needs_quote {
+                camelize_into(model_name, buf);
+            } else {
+                buf.push_str(model_name);
+            }
             buf.push_str("\": $event => ((");
             buf.push_str(prefixed_val);
             buf.push_str(") = $event)");
@@ -279,11 +437,18 @@ pub(super) fn handle_prop_model<'alloc>(
                     ""
                 };
                 buf.push_str(", ");
+                // Modifiers prop name needs quoting if model_name has hyphens
+                if needs_quote {
+                    buf.push('"');
+                }
                 if mods_prop_name.is_empty() {
                     buf.push_str(model_name);
                     buf.push_str("Modifiers");
                 } else {
                     buf.push_str(mods_prop_name);
+                }
+                if needs_quote {
+                    buf.push('"');
                 }
                 buf.push_str(": { ");
                 for (i, m) in model_modifiers.iter().enumerate() {
@@ -302,7 +467,11 @@ pub(super) fn handle_prop_model<'alloc>(
             state.dynamic_props.push(model_name);
             buf.clear();
             buf.push_str("onUpdate:");
-            buf.push_str(model_name);
+            if needs_quote {
+                camelize_into(model_name, buf);
+            } else {
+                buf.push_str(model_name);
+            }
             state.dynamic_props.push(code_transform.alloc_str(buf));
             state.patch_flag = state.patch_flag.add(PatchFlags::Props);
         }

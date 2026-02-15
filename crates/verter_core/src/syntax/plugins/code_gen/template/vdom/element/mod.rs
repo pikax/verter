@@ -13,7 +13,7 @@ use crate::{
         plugins::code_gen::{
             template::shared::helper::{
                 build_prefixed_value_into, collect_binding_patches, escape_js_string,
-                escape_js_string_in_place, escape_js_string_into,
+                escape_js_string_in_place, escape_js_string_into, is_valid_js_prop_key,
             },
             types::TemplateImportDependencies,
         },
@@ -228,14 +228,27 @@ pub(crate) fn handle_element_open<'alloc>(
                     PropKind::Value => {
                         let name =
                             &ctx.input[prop.event.start as usize..prop.event.name_end as usize];
+                        let needs_quote = !is_valid_js_prop_key(name);
                         if let Some(val_span) = prop.event.value {
                             let val = &ctx.input[val_span.start as usize..val_span.end as usize];
+                            if needs_quote {
+                                buf.push('"');
+                            }
                             buf.push_str(name);
+                            if needs_quote {
+                                buf.push('"');
+                            }
                             buf.push_str(": \"");
                             escape_js_string_into(buf, val);
                             buf.push('"');
                         } else {
+                            if needs_quote {
+                                buf.push('"');
+                            }
                             buf.push_str(name);
+                            if needs_quote {
+                                buf.push('"');
+                            }
                             buf.push_str(": \"\"");
                         }
                     }
@@ -336,11 +349,18 @@ pub(crate) fn handle_element_open<'alloc>(
                         // Static attribute: name="value"
                         let name =
                             &ctx.input[prop.event.start as usize..prop.event.name_end as usize];
+                        let needs_quote = !is_valid_js_prop_key(name);
                         if let Some(val_span) = prop.event.value {
                             // Split overwrite: prefix before value, escape value in-place, suffix after
                             buf.clear();
                             buf.push_str(sep);
+                            if needs_quote {
+                                buf.push('"');
+                            }
                             buf.push_str(name);
+                            if needs_quote {
+                                buf.push('"');
+                            }
                             buf.push_str(": \"");
                             let s = code_transform.alloc_str(buf);
                             pending_overwrites.push((prop.event.start, val_span.start, s));
@@ -355,7 +375,13 @@ pub(crate) fn handle_element_open<'alloc>(
                         } else {
                             buf.clear();
                             buf.push_str(sep);
+                            if needs_quote {
+                                buf.push('"');
+                            }
                             buf.push_str(name);
+                            if needs_quote {
+                                buf.push('"');
+                            }
                             buf.push_str(": \"\"");
                             let s = code_transform.alloc_str(buf);
                             pending_overwrites.push((prop.event.start, prop.event.end, s));
@@ -409,6 +435,7 @@ pub(crate) fn handle_element_open<'alloc>(
                             let raw = &ctx.input[arg_span.start as usize..arg_span.end as usize];
                             if prop.event.has_dynamic_arg {
                                 // Dynamic arg: :[foo]="value" → [_ctx.foo]: value
+                                // Built in buffer — computed property, no quoting needed
                                 let saved = buf.len();
                                 build_prefixed_value_into(
                                     buf,
@@ -419,41 +446,107 @@ pub(crate) fn handle_element_open<'alloc>(
                                     is_production,
                                     &[],
                                 );
-                                let result = code_transform.alloc_str(&buf[saved..]);
+                                let prop_name = code_transform.alloc_str(&buf[saved..]);
                                 buf.truncate(saved);
-                                result
+
+                                if let Some(val_span) = prop.event.value {
+                                    buf.clear();
+                                    buf.push_str(sep);
+                                    buf.push_str(prop_name);
+                                    buf.push_str(": ");
+                                    let s = code_transform.alloc_str(buf);
+                                    pending_overwrites.push((prop.event.start, val_span.start, s));
+                                    pending_overwrites.push((val_span.end, prop.event.end, ""));
+
+                                    if let Some(exp) = &prop.exp {
+                                        collect_binding_patches(
+                                            exp.bindings.as_ref(),
+                                            bindings,
+                                            is_production,
+                                            binding_patches,
+                                        );
+                                    }
+                                } else {
+                                    buf.clear();
+                                    buf.push_str(sep);
+                                    buf.push_str(prop_name);
+                                    buf.push_str(": undefined");
+                                    let s = code_transform.alloc_str(buf);
+                                    pending_overwrites.push((prop.event.start, prop.event.end, s));
+                                }
+                                prop_name
                             } else {
+                                // Static arg: split overwrite — name stays from source,
+                                // quotes added via boundary overwrite strings.
+                                let needs_quote = !is_valid_js_prop_key(raw);
+                                let before: &'static str = match (sep.is_empty(), needs_quote) {
+                                    (true, false) => "",
+                                    (true, true) => "\"",
+                                    (false, false) => ", ",
+                                    (false, true) => ", \"",
+                                };
+
+                                if let Some(val_span) = prop.event.value {
+                                    pending_overwrites.push((
+                                        prop.event.start,
+                                        arg_span.start,
+                                        before,
+                                    ));
+                                    let after: &'static str =
+                                        if needs_quote { "\": " } else { ": " };
+                                    pending_overwrites.push((arg_span.end, val_span.start, after));
+                                    pending_overwrites.push((val_span.end, prop.event.end, ""));
+
+                                    if let Some(exp) = &prop.exp {
+                                        collect_binding_patches(
+                                            exp.bindings.as_ref(),
+                                            bindings,
+                                            is_production,
+                                            binding_patches,
+                                        );
+                                    }
+                                } else {
+                                    pending_overwrites.push((
+                                        prop.event.start,
+                                        arg_span.start,
+                                        before,
+                                    ));
+                                    let after: &'static str = if needs_quote {
+                                        "\": undefined"
+                                    } else {
+                                        ": undefined"
+                                    };
+                                    pending_overwrites.push((arg_span.end, prop.event.end, after));
+                                }
                                 raw
                             }
                         } else {
+                            // No arg span — "unknown" fallback
+                            if let Some(val_span) = prop.event.value {
+                                buf.clear();
+                                buf.push_str(sep);
+                                buf.push_str("unknown: ");
+                                let s = code_transform.alloc_str(buf);
+                                pending_overwrites.push((prop.event.start, val_span.start, s));
+                                pending_overwrites.push((val_span.end, prop.event.end, ""));
+
+                                if let Some(exp) = &prop.exp {
+                                    collect_binding_patches(
+                                        exp.bindings.as_ref(),
+                                        bindings,
+                                        is_production,
+                                        binding_patches,
+                                    );
+                                }
+                            } else {
+                                buf.clear();
+                                buf.push_str(sep);
+                                buf.push_str("unknown: undefined");
+                                let s = code_transform.alloc_str(buf);
+                                pending_overwrites.push((prop.event.start, prop.event.end, s));
+                            }
                             "unknown"
                         };
-
-                        if let Some(val_span) = prop.event.value {
-                            buf.clear();
-                            buf.push_str(sep);
-                            buf.push_str(prop_name);
-                            buf.push_str(": ");
-                            let s = code_transform.alloc_str(buf);
-                            pending_overwrites.push((prop.event.start, val_span.start, s));
-                            pending_overwrites.push((val_span.end, prop.event.end, ""));
-
-                            if let Some(exp) = &prop.exp {
-                                collect_binding_patches(
-                                    exp.bindings.as_ref(),
-                                    bindings,
-                                    is_production,
-                                    binding_patches,
-                                );
-                            }
-                        } else {
-                            buf.clear();
-                            buf.push_str(sep);
-                            buf.push_str(prop_name);
-                            buf.push_str(": undefined");
-                            let s = code_transform.alloc_str(buf);
-                            pending_overwrites.push((prop.event.start, prop.event.end, s));
-                        }
 
                         // If this is a :key prop inside a v-for, mark the fragment as keyed
                         if prop_name == "key" {
