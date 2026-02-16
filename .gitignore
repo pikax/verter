@@ -32,3 +32,6 @@ CLAUDE.md
 # Benchmark results (generated artifacts)
 packages/bench/results/
 packages/benchmark/benchmark-results/
+
+# Integration test cloned repos
+.integration-tests/
