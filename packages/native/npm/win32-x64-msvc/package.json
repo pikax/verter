@@ -1,8 +1,12 @@
 {
   "name": "@verter/native-win32-x64-msvc",
-  "version": "0.0.1-alpha.2",
+  "version": "0.0.1-alpha.3",
   "description": "Native Node.js bindings for Verter Vue compiler",
   "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
   "files": [
     "verter-native.win32-x64-msvc.node"
   ],

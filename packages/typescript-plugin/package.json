@@ -1,9 +1,13 @@
 {
   "name": "@verter/typescript-plugin",
-  "version": "0.0.1-alpha.2",
+  "version": "0.0.1-alpha.3",
   "description": "Vue TypeScript Plugin powered by Verter",
   "keywords": [],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
   "author": "Carlos Rodrigues <pikax>",
   "type": "commonjs",
   "main": "dist/index.js",

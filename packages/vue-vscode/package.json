@@ -1,7 +1,7 @@
 {
   "name": "verter-vscode",
   "displayName": "Verter VSCode",
-  "version": "0.0.1-alpha.2",
+  "version": "0.0.1-alpha.3",
   "description": "Verter VSCode Extension",
   "categories": [
     "Programming Languages"
@@ -14,6 +14,7 @@
   "license": "MIT",
   "author": "Carlos Rodrigues <pikax>",
   "repository": {
+    "type": "git",
     "url": "https://github.com/pikax/verter"
   },
   "publisher": "pikax",

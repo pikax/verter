@@ -1,8 +1,13 @@
 {
   "name": "@verter/oxc-bindings",
   "displayName": "Verter OXC bindings",
-  "version": "0.0.1-alpha.2",
+  "version": "0.0.1-alpha.3",
   "description": "Resolves and downloads OXC bindings",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc -b"

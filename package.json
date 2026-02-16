@@ -1,10 +1,14 @@
 {
   "name": "verter",
-  "version": "0.0.1-alpha.2",
+  "version": "0.0.1-alpha.3",
   "private": true,
   "description": "",
   "keywords": [],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pikax/verter"
+  },
   "author": "",
   "main": "index.js",
   "scripts": {
