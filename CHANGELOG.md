@@ -32,7 +32,9 @@ All notable changes to this project will be documented in this file.
 - Again (c0ce892)
 - Only hoist verter (ca277ff)
 - Add agentic workflow update-docs (#87) (d5748c2)
-- Fix integration (68641db)
+- Benchmark results (3a0bceb)
+- Fix integration (843d0e3)
+- Fix release (d97d194)
 
 ### Bug Fixes
 
