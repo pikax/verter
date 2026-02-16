@@ -602,6 +602,15 @@ pub fn compile(
     .with_vapor(has_vapor_template);
 
     use crate::syntax::plugins::code_gen::template::TemplateOptions;
+    // Compute PascalCase self_name for recursive self-reference detection.
+    // Vue uses `capitalize(camelize(filename_without_ext))` which is equivalent
+    // to camelize_capitalize_into.
+    let self_name = {
+        use crate::syntax::plugins::code_gen::template::shared::helper::camelize_capitalize_into;
+        let mut buf = String::with_capacity(component_name.len());
+        camelize_capitalize_into(&component_name, &mut buf);
+        buf
+    };
     let template_options = TemplateOptions {
         is_production: options.is_production,
         inline: effective_inline,
@@ -610,6 +619,7 @@ pub fn compile(
         cache_handlers: options.resolve_cache_handlers(),
         runtime_module_name: options.resolve_runtime_module_name().to_string(),
         prefix_identifiers: options.resolve_prefix_identifiers(),
+        self_name,
     };
     let mut code_gen_template =
         TemplateGeneratorPlugin::with_options(Rc::clone(&code_transform), template_options);
@@ -3213,6 +3223,113 @@ const subsetTokens = computed(() => ['a', 'b'])
         assert!(
             result.code.contains("subsetTokens: $setup.subsetTokens"),
             "Shorthand with $setup. prefix must be expanded to key: value form: {}",
+            result.code
+        );
+    }
+
+    // ==================== recursive self-referencing components ====================
+
+    fn gen_result_with_filename(input: &str, filename: &str) -> CodegenResult {
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename(filename);
+        compile(input, &options, &allocator)
+    }
+
+    fn gen_and_validate_with_filename(input: &str, filename: &str) -> CodegenResult {
+        let result = gen_result_with_filename(input, filename);
+        assert_valid_js(&result.code, input);
+        result
+    }
+
+    /// @ai-generated — Recursive component self-reference should use _resolveComponent with true flag
+    #[test]
+    fn test_recursive_component_self_reference() {
+        let input = r#"<script setup>
+const props = defineProps(['level'])
+</script>
+<template>
+  <div>Level {{ level }}</div>
+  <TokenBreakdown v-if="level < 3" :level="level + 1" />
+</template>"#;
+        let result = gen_and_validate_with_filename(input, "TokenBreakdown.vue");
+        // Should use _resolveComponent("TokenBreakdown", true) — the true flag signals
+        // a possible self-reference to the Vue runtime.
+        assert!(
+            result
+                .code
+                .contains("_resolveComponent(\"TokenBreakdown\", true)"),
+            "Recursive component should use _resolveComponent with true flag: {}",
+            result.code
+        );
+        // Should NOT have _resolveComponent("TokenBreakdown") without the true flag
+        assert!(
+            !result
+                .code
+                .contains("_resolveComponent(\"TokenBreakdown\")"),
+            "Recursive component should NOT use _resolveComponent without true flag: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Non-self-referencing component should NOT have the true flag
+    #[test]
+    fn test_non_recursive_component_no_self_flag() {
+        let input = r#"<script setup>
+const x = 1
+</script>
+<template>
+  <SomeOtherComponent />
+</template>"#;
+        let result = gen_and_validate_with_filename(input, "MyComponent.vue");
+        // Non-self-referencing component should use _resolveComponent without true flag
+        assert!(
+            result
+                .code
+                .contains("_resolveComponent(\"SomeOtherComponent\")"),
+            "Non-recursive component should use plain _resolveComponent: {}",
+            result.code
+        );
+        assert!(
+            !result.code.contains(", true)"),
+            "Non-recursive component should NOT have true flag: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Recursive component with kebab-case tag name
+    #[test]
+    fn test_recursive_component_kebab_case() {
+        let input = r#"<script setup>
+const props = defineProps(['level'])
+</script>
+<template>
+  <div>Level {{ level }}</div>
+  <my-tree v-if="level < 3" :level="level + 1" />
+</template>"#;
+        let result = gen_and_validate_with_filename(input, "MyTree.vue");
+        // kebab-case <my-tree> should match PascalCase filename MyTree.vue
+        assert!(
+            result.code.contains("_resolveComponent(\"my-tree\", true)"),
+            "Kebab-case recursive component should have true flag: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Imported component with same name as SFC should use setup binding, not self-ref
+    #[test]
+    fn test_imported_component_overrides_self_reference() {
+        let input = r#"<script setup>
+import TokenBreakdown from './other/TokenBreakdown.vue'
+</script>
+<template>
+  <TokenBreakdown />
+</template>"#;
+        let result = gen_and_validate_with_filename(input, "TokenBreakdown.vue");
+        // When the component IS in setup bindings (imported), it should use $setup["TokenBreakdown"]
+        // rather than _resolveComponent, regardless of the self-name match.
+        assert!(
+            !result.code.contains("_resolveComponent"),
+            "Imported component should NOT use _resolveComponent: {}",
             result.code
         );
     }

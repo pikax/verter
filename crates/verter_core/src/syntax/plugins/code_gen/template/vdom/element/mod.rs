@@ -40,6 +40,8 @@ pub(crate) struct ElementOpenContext<'a, 'alloc> {
     pub resolved_directives: &'a mut Vec<&'alloc str>,
     pub resolved_directives_set: &'a mut FxHashSet<&'alloc str>,
     pub hoisted_constants: &'a mut Vec<&'alloc str>,
+    /// PascalCase component name from filename — used to detect recursive self-references.
+    pub self_name: &'a str,
 }
 
 /// Try to resolve a component tag name against setup bindings.
@@ -286,8 +288,29 @@ pub(crate) fn handle_element_open<'alloc>(
                 }
             }
             let var_name = code_transform.alloc_str(buf);
+
+            // Check if this component is a recursive self-reference.
+            // Vue checks `capitalize(camelize(tag)) === context.selfName`.
+            // When true, append `__self` to the tag stored in resolved_components
+            // so that handle_template_closed emits `_resolveComponent("Name", true)`.
+            let is_self_ref = if !ectx.self_name.is_empty() {
+                buf.clear();
+                camelize_capitalize_into(tag_name, buf);
+                buf == ectx.self_name
+            } else {
+                false
+            };
+
             if resolved_components_set.insert(tag_name) {
-                resolved_components.push(tag_name);
+                if is_self_ref {
+                    // Store tag + "__self" suffix to signal self-reference to the codegen
+                    buf.clear();
+                    buf.push_str(tag_name);
+                    buf.push_str("__self");
+                    resolved_components.push(code_transform.alloc_str(buf));
+                } else {
+                    resolved_components.push(tag_name);
+                }
                 imports.add(TemplateImportDependencies::RESOLVE_COMPONENT);
             }
             Some(var_name)

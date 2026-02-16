@@ -84,6 +84,8 @@ pub(crate) struct VdomTemplateGenerator<'alloc> {
     runtime_module_name: String,
     #[allow(dead_code)] // wired in API, behavioral implementation deferred
     prefix_identifiers: bool,
+    /// PascalCase component name from filename — used to detect recursive self-references.
+    self_name: String,
 
     imports: TemplateImportDependencies,
 
@@ -146,6 +148,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             cache_handlers: options.cache_handlers,
             runtime_module_name: options.runtime_module_name.clone(),
             prefix_identifiers: options.prefix_identifiers,
+            self_name: options.self_name.clone(),
 
             imports: TemplateImportDependencies::default(),
             bindings: FxHashMap::default(),
@@ -342,8 +345,18 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                     .sum();
                 let mut resolve_decls = String::with_capacity(resolve_size);
                 for comp_name in &self.resolved_components {
+                    // Detect `__self` suffix: signals a recursive self-reference.
+                    // Strip the suffix for the component name and add `, true` to
+                    // _resolveComponent (Vue's maybeSelfReference flag).
+                    let maybe_self_reference = comp_name.ends_with("__self");
+                    let actual_name = if maybe_self_reference {
+                        &comp_name[..comp_name.len() - 6]
+                    } else {
+                        comp_name
+                    };
+
                     resolve_decls.push_str("const _component_");
-                    for ch in comp_name.chars() {
+                    for ch in actual_name.chars() {
                         if ch == '-' {
                             resolve_decls.push('_');
                         } else {
@@ -351,8 +364,12 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                         }
                     }
                     resolve_decls.push_str(" = _resolveComponent(\"");
-                    resolve_decls.push_str(comp_name);
-                    resolve_decls.push_str("\");\n");
+                    resolve_decls.push_str(actual_name);
+                    if maybe_self_reference {
+                        resolve_decls.push_str("\", true);\n");
+                    } else {
+                        resolve_decls.push_str("\");\n");
+                    }
                 }
                 for dir_name in &self.resolved_directives {
                     resolve_decls.push_str("const _directive_");
@@ -650,6 +667,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             resolved_directives: &mut self.resolved_directives,
             resolved_directives_set: &mut self.resolved_directives_set,
             hoisted_constants: &mut self.hoisted_constants,
+            self_name: &self.self_name,
         };
         element::handle_element_open(
             &code_transform,

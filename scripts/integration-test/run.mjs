@@ -99,15 +99,32 @@ function parseArgs() {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /** Run a shell command; return { ok, stdout, stderr, durationMs }. */
-function run(cmd, cwd, { timeout = 10 * 60_000 } = {}) {
+function run(cmd, cwd, { timeout = 10 * 60_000, env: extraEnv = {} } = {}) {
   const start = performance.now();
+
+  // On Windows, strip leading VAR=val prefixes from commands and add to env
+  const parsedEnv = { ...extraEnv };
+  let finalCmd = cmd;
+  if (process.platform === 'win32') {
+    const envPrefixRe = /^(\w+=\S+\s+)+/;
+    const match = cmd.match(envPrefixRe);
+    if (match) {
+      const prefix = match[0];
+      for (const part of prefix.trim().split(/\s+/)) {
+        const eq = part.indexOf('=');
+        if (eq > 0) parsedEnv[part.slice(0, eq)] = part.slice(eq + 1);
+      }
+      finalCmd = cmd.slice(prefix.length);
+    }
+  }
+
   try {
-    const stdout = execSync(cmd, {
+    const stdout = execSync(finalCmd, {
       cwd,
       stdio: 'pipe',
       shell: true,
       timeout,
-      env: { ...process.env, FORCE_COLOR: '0', COREPACK_ENABLE_STRICT: '0' },
+      env: { ...process.env, FORCE_COLOR: '0', COREPACK_ENABLE_STRICT: '0', ...parsedEnv },
       maxBuffer: 50 * 1024 * 1024,
     });
     return {
@@ -312,6 +329,37 @@ function installDeps(project, repoDir) {
     if (!result.ok) {
       log(project.name, `Install warning: ${result.stderr.slice(0, 500)}`);
     }
+  }
+}
+
+// ── Fix Windows Scripts ──────────────────────────────────────────────────────
+
+/**
+ * On Windows, rewrite package.json scripts that use `VAR=val cmd` (Unix-only)
+ * to `cross-env VAR=val cmd`, and install cross-env as a devDependency.
+ */
+function fixWindowsScripts(project, repoDir) {
+  if (process.platform !== 'win32') return;
+
+  const pkgPath = path.join(repoDir, 'package.json');
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+  if (!pkg.scripts) return;
+
+  const envPrefixRe = /^(\w+=\S+\s+)/;
+  let changed = false;
+  for (const [name, script] of Object.entries(pkg.scripts)) {
+    if (typeof script === 'string' && envPrefixRe.test(script) && !script.startsWith('cross-env ')) {
+      pkg.scripts[name] = `cross-env ${script}`;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+    const pm = project.packageManager;
+    const installCmd = pm === 'pnpm' ? 'pnpm add -D cross-env' : 'npm install --save-dev cross-env --legacy-peer-deps';
+    run(installCmd, repoDir, { timeout: 60_000 });
+    log(project.name, '  Patched scripts with cross-env for Windows');
   }
 }
 
@@ -636,7 +684,7 @@ function runTest(project, repoDir, label) {
     return { ok: true, stdout: '', stderr: '', durationMs: 0, skipped: true, label: `${label}-test` };
   }
   log(project.name, `[${label}] Testing: ${project.testCmd}`);
-  const result = run(project.testCmd, repoDir);
+  const result = run(project.testCmd, repoDir, { env: { NODE_ENV: 'test' } });
   const dur = (result.durationMs / 1000).toFixed(1);
   const counts = extractTestCounts(result.stdout + result.stderr);
   log(
@@ -674,6 +722,7 @@ async function processProject(project, opts) {
     }
 
     installDeps(project, repoDir);
+    fixWindowsScripts(project, repoDir);
 
     // ── Baseline ──
     if (!opts.skipBaseline) {

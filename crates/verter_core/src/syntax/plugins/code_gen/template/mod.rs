@@ -181,6 +181,11 @@ pub struct TemplateOptions {
     pub cache_handlers: bool,
     pub runtime_module_name: String,
     pub prefix_identifiers: bool,
+    /// The PascalCase component name derived from the SFC filename (e.g., "TokenBreakdown"
+    /// from "TokenBreakdown.vue"). Used to detect recursive self-references in the template:
+    /// when a component tag matches this name, the compiler emits
+    /// `_resolveComponent("Name", true)` instead of `_resolveComponent("Name")`.
+    pub self_name: String,
 }
 
 impl TemplateOptions {
@@ -194,6 +199,7 @@ impl TemplateOptions {
             cache_handlers: false,
             runtime_module_name: "vue".to_string(),
             prefix_identifiers: true,
+            self_name: String::new(),
         }
     }
 }
