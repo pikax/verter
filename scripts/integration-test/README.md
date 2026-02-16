@@ -97,6 +97,7 @@ Cloned projects go into `.integration-tests/repos/` (gitignored). A `pnpm-worksp
 | `branch` | `branch` |
 | `buildCmd` | `build-cmd` |
 | `testCmd` | `test-cmd` |
+| `e2eCmd` | `e2e-cmd` |
 | `packageManager` | `package-manager` |
 | `bundler` | `bundler` |
 
@@ -130,16 +131,23 @@ my-project             30.1s      ERROR                                         
 
 ## Project List
 
-| Project | Repo | Bundler | PM | Tests |
-|---------|------|---------|----|-------|
-| vuetify | vuetifyjs/vuetify | vite | pnpm | vitest |
-| oku-primitives | oku-ui/primitives | vite | pnpm | vitest |
-| hoppscotch | hoppscotch/hoppscotch | vite | pnpm | vitest |
-| element-plus | element-plus/element-plus | rollup | pnpm | — |
-| coreui | coreui/coreui-free-vue-admin-template | vite | npm | — |
-| balancer-frontend-v2 | balancer/frontend-v2 | vite | npm | vitest |
-| shadcn-vue | unovue/shadcn-vue | vite | pnpm | vitest |
-| slidev | slidevjs/slidev | vite | pnpm | vitest |
-| zyronon-douyin | zyronon/douyin | vite | pnpm | — |
-| primevue | primefaces/primevue | rollup | pnpm | — |
-| ant-design-vue | vueComponent/ant-design-vue | vite | npm | jest |
+| Project | Repo | Bundler | PM | Tests | E2E |
+|---------|------|---------|----|-------|-----|
+| vuetify | vuetifyjs/vuetify | vite | pnpm | vitest | — |
+| oku-primitives | oku-ui/primitives | vite | pnpm | vitest | — |
+| hoppscotch | hoppscotch/hoppscotch | vite | pnpm | vitest | — |
+| element-plus | element-plus/element-plus | rollup | pnpm | — | — |
+| coreui | coreui/coreui-free-vue-admin-template | vite | npm | — | — |
+| balancer-frontend-v2 | balancer/frontend-v2 | vite | npm | vitest | — |
+| shadcn-vue | unovue/shadcn-vue | vite | pnpm | vitest | — |
+| slidev | slidevjs/slidev | vite | pnpm | vitest | Cypress |
+| zyronon-douyin | zyronon/douyin | vite | pnpm | — | — |
+| primevue | primefaces/primevue | rollup | pnpm | — | — |
+| ant-design-vue | vueComponent/ant-design-vue | vite | npm | jest | — |
+| nuxt-ui | nuxt/ui | nuxt | pnpm | vitest | — |
+| vue-vben-admin | vbenjs/vue-vben-admin | vite | pnpm | — | Playwright |
+| vant | youzan/vant | vite | pnpm | vitest | — |
+| naive-ui | tusen-ai/naive-ui | vite | pnpm | vitest | — |
+| tdesign-vue-next | Tencent/tdesign-vue-next | vite | pnpm | vitest | — |
+| radix-vue | unovue/radix-vue | vite | pnpm | vitest | — |
+| vitepress | vuejs/vitepress | vite | pnpm | vitest | Playwright |

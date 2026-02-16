@@ -240,6 +240,7 @@ jobs:
             branch: master
             build-cmd: pnpm run build
             test-cmd: pnpm --filter vuetify test:unit
+            e2e-cmd: ""
             package-manager: pnpm
             bundler: vite
           - name: oku-primitives
@@ -247,6 +248,7 @@ jobs:
             branch: main
             build-cmd: pnpm run build
             test-cmd: pnpm run test
+            e2e-cmd: ""
             package-manager: pnpm
             bundler: vite
           - name: hoppscotch
@@ -254,6 +256,7 @@ jobs:
             branch: main
             build-cmd: pnpm --filter @hoppscotch/selfhost-web build
             test-cmd: pnpm --filter @hoppscotch/common test
+            e2e-cmd: ""
             package-manager: pnpm
             bundler: vite
           - name: element-plus
@@ -261,6 +264,7 @@ jobs:
             branch: dev
             build-cmd: pnpm run build
             test-cmd: ""
+            e2e-cmd: ""
             package-manager: pnpm
             bundler: rollup
           - name: coreui
@@ -268,6 +272,7 @@ jobs:
             branch: main
             build-cmd: npm run build
             test-cmd: ""
+            e2e-cmd: ""
             package-manager: npm
             bundler: vite
           - name: balancer-frontend-v2
@@ -275,6 +280,7 @@ jobs:
             branch: develop
             build-cmd: npm run build:withouttokenlists
             test-cmd: npm run test:unit
+            e2e-cmd: ""
             package-manager: npm
             bundler: vite
           - name: shadcn-vue
@@ -282,6 +288,7 @@ jobs:
             branch: dev
             build-cmd: pnpm --filter shadcn-vue build
             test-cmd: pnpm --filter shadcn-vue test
+            e2e-cmd: ""
             package-manager: pnpm
             bundler: vite
           - name: slidev
@@ -289,6 +296,7 @@ jobs:
             branch: main
             build-cmd: pnpm -r --filter="./packages/**" --parallel run build
             test-cmd: pnpm run test
+            e2e-cmd: pnpm -C cypress/fixtures/basic run dev & sleep 10 && npx cypress run --headless
             package-manager: pnpm
             bundler: vite
           - name: zyronon-douyin
@@ -296,13 +304,15 @@ jobs:
             branch: master
             build-cmd: pnpm run build
             test-cmd: ""
+            e2e-cmd: ""
             package-manager: pnpm
             bundler: vite
           - name: primevue
             repo: primefaces/primevue
             branch: master
-            build-cmd: pnpm run build:packages
+            build-cmd: pnpm run build:metadata && pnpm run build:resolver && pnpm run build:core && pnpm run build:lib
             test-cmd: ""
+            e2e-cmd: ""
             package-manager: pnpm
             bundler: rollup
           - name: ant-design-vue
@@ -310,7 +320,64 @@ jobs:
             branch: main
             build-cmd: npm run build
             test-cmd: npm run test
+            e2e-cmd: ""
             package-manager: npm
+            bundler: vite
+          - name: nuxt-ui
+            repo: nuxt/ui
+            branch: v4
+            build-cmd: pnpm nuxt-module-build prepare && pnpm build
+            test-cmd: pnpm test
+            e2e-cmd: ""
+            package-manager: pnpm
+            bundler: nuxt
+          - name: vue-vben-admin
+            repo: vbenjs/vue-vben-admin
+            branch: main
+            build-cmd: pnpm build
+            test-cmd: ""
+            e2e-cmd: npx playwright install chromium --with-deps && pnpm run test:e2e
+            package-manager: pnpm
+            bundler: vite
+          - name: vant
+            repo: youzan/vant
+            branch: main
+            build-cmd: pnpm build
+            test-cmd: pnpm test
+            e2e-cmd: ""
+            package-manager: pnpm
+            bundler: vite
+          - name: naive-ui
+            repo: tusen-ai/naive-ui
+            branch: main
+            build-cmd: pnpm build:package
+            test-cmd: pnpm vitest run
+            e2e-cmd: ""
+            package-manager: pnpm
+            bundler: vite
+          - name: tdesign-vue-next
+            repo: Tencent/tdesign-vue-next
+            branch: develop
+            build-cmd: pnpm run build:vue
+            test-cmd: pnpm run test:vue
+            e2e-cmd: ""
+            package-manager: pnpm
+            bundler: vite
+          - name: radix-vue
+            repo: unovue/radix-vue
+            branch: v2
+            build-cmd: pnpm --filter reka-ui build
+            test-cmd: pnpm --filter reka-ui test
+            e2e-cmd: ""
+            package-manager: pnpm
+            bundler: vite
+          - name: vitepress
+            repo: vuejs/vitepress
+            branch: main
+            build-cmd: pnpm build
+            test-cmd: pnpm test:unit
+            e2e-cmd: npx playwright install chromium --with-deps && pnpm test:e2e-dev
+            package-manager: pnpm
             bundler: vite
 
     steps:
@@ -359,6 +426,26 @@ jobs:
           # pnpm's per-package isolation (some projects use ./node_modules/ paths in build scripts)
           echo 'public-hoist-pattern[]=@verter/*' >> .npmrc
           echo 'public-hoist-pattern[]=unplugin' >> .npmrc
+
+      - name: Normalize packageManager and engines.pnpm fields
+        working-directory: test-project
+        run: |
+          # Rewrite packageManager to match local pnpm version (prevents corepack version switching).
+          # Keep the field (vs deleting) because turbo-based projects require it.
+          # Strip engines.pnpm to prevent ERR_PNPM_UNSUPPORTED_ENGINE.
+          LOCAL_PNPM=$(pnpm --version 2>/dev/null || echo "")
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            let modified = false;
+            const localPnpm = '${LOCAL_PNPM}'.trim();
+            if (pkg.packageManager && localPnpm) { pkg.packageManager = 'pnpm@' + localPnpm; modified = true; }
+            if (pkg.engines?.pnpm) { delete pkg.engines.pnpm; if (!Object.keys(pkg.engines).length) delete pkg.engines; modified = true; }
+            if (modified) {
+              fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+              console.log('Normalized packageManager/engines.pnpm fields');
+            }
+          "
 
       - name: Install project dependencies
         working-directory: test-project
@@ -483,7 +570,46 @@ jobs:
         run: |
           BUNDLER="${{ matrix.project.bundler }}"
 
-          if [ "$BUNDLER" = "rollup" ]; then
+          if [ "$BUNDLER" = "nuxt" ]; then
+            # For Nuxt projects: inject a Nuxt module that replaces vite:vue plugin at runtime
+            OVERRIDE_MODULE='import { defineNuxtModule } from "@nuxt/kit"
+          import verter from "@verter/unplugin/vite"
+
+          export default defineNuxtModule({
+            meta: { name: "verter-override" },
+            setup(_options, nuxt) {
+              nuxt.hook("vite:extendConfig", (config) => {
+                config.plugins = (config.plugins || []).filter(
+                  (p) => !(p && typeof p === "object" && "name" in p && p.name === "vite:vue")
+                )
+                config.plugins.push(verter())
+              })
+            }
+          })'
+
+            # Find all nuxt.config files and inject the override module
+            NUXT_CONFIGS=$(find . -name 'nuxt.config.*' -not -path '*/node_modules/*' -not -path '*/.git/*')
+            if [ -z "$NUXT_CONFIGS" ]; then
+              echo "❌ No nuxt.config files found"
+              exit 1
+            fi
+
+            for CONFIG_FILE in $NUXT_CONFIGS; do
+              CONFIG_DIR=$(dirname "$CONFIG_FILE")
+              MODULE_FILE="$CONFIG_DIR/.verter-nuxt-override.mjs"
+              echo "$OVERRIDE_MODULE" > "$MODULE_FILE"
+              echo "📝 Created $MODULE_FILE"
+
+              # Inject module reference into nuxt.config
+              if grep -q 'modules\s*:' "$CONFIG_FILE"; then
+                sed -i "s|modules\s*:\s*\[|modules: [\n    './.verter-nuxt-override',|" "$CONFIG_FILE"
+              else
+                sed -i "s|defineNuxtConfig\s*(\s*{|defineNuxtConfig({\n  modules: ['./.verter-nuxt-override'],|" "$CONFIG_FILE"
+              fi
+              echo "📝 Modified $CONFIG_FILE"
+            done
+
+          elif [ "$BUNDLER" = "rollup" ]; then
             # For Rollup-based projects: replace in rollup configs and build scripts
             CONFIG_FILES=$(grep -rlE "@vitejs/plugin-vue|rollup-plugin-vue" \
               --include="*.config.*" --include="*.ts" --include="*.js" --include="*.mjs" \
@@ -514,6 +640,8 @@ jobs:
               # Rename the imported function
               sed -i 's|import vue from|import verter from|g' "$CONFIG_FILE"
               sed -i 's|import Vue from|import verter from|g' "$CONFIG_FILE"
+              sed -i 's|import vue,|import verter,|g' "$CONFIG_FILE"
+              sed -i 's|import Vue,|import verter,|g' "$CONFIG_FILE"
               sed -i 's|vue(|verter(|g' "$CONFIG_FILE"
               sed -i 's|Vue(|verter(|g' "$CONFIG_FILE"
 
@@ -548,6 +676,8 @@ jobs:
               sed -i "s|from \"@vitejs/plugin-vue\"|from \"@verter/unplugin/vite\"|g" "$CONFIG_FILE"
               sed -i 's|import vue from|import verter from|g' "$CONFIG_FILE"
               sed -i 's|import Vue from|import verter from|g' "$CONFIG_FILE"
+              sed -i 's|import vue,|import verter,|g' "$CONFIG_FILE"
+              sed -i 's|import Vue,|import verter,|g' "$CONFIG_FILE"
               sed -i 's|vue(|verter(|g' "$CONFIG_FILE"
               sed -i 's|Vue(|verter(|g' "$CONFIG_FILE"
 
@@ -561,26 +691,45 @@ jobs:
         working-directory: test-project
         run: |
           BUNDLER="${{ matrix.project.bundler }}"
-          if [ "$BUNDLER" = "rollup" ]; then
+          if [ "$BUNDLER" = "nuxt" ]; then
+            # For Nuxt: verify override module exists and is referenced
+            FOUND=$(find . -name '.verter-nuxt-override.mjs' -not -path '*/node_modules/*' || true)
+            if [ -z "$FOUND" ]; then
+              echo "::error::No .verter-nuxt-override.mjs files found!"
+              exit 1
+            fi
+            echo "✅ Verified Nuxt override module:"
+            echo "$FOUND"
+          elif [ "$BUNDLER" = "rollup" ]; then
             FOUND=$(grep -rl "@verter/unplugin/rollup" \
               --include="*.config.*" --include="*.ts" --include="*.js" --include="*.mjs" \
               --exclude-dir=node_modules --exclude-dir=.git . || true)
+            if [ -z "$FOUND" ]; then
+              echo "::error::No files contain @verter/unplugin after replacement!"
+              exit 1
+            fi
+            echo "✅ Verified @verter/unplugin is present in:"
+            echo "$FOUND"
+            for f in $FOUND; do
+              echo "--- $f ---"
+              grep -n "@verter/unplugin" "$f"
+            done
           else
             FOUND=$(grep -rl "@verter/unplugin/vite" \
               --include="vite.config.*" --include="vitest.config.*" \
               --include="*.ts" --include="*.js" --include="*.mjs" \
               --exclude-dir=node_modules --exclude-dir=.git . || true)
+            if [ -z "$FOUND" ]; then
+              echo "::error::No files contain @verter/unplugin after replacement!"
+              exit 1
+            fi
+            echo "✅ Verified @verter/unplugin is present in:"
+            echo "$FOUND"
+            for f in $FOUND; do
+              echo "--- $f ---"
+              grep -n "@verter/unplugin" "$f"
+            done
           fi
-          if [ -z "$FOUND" ]; then
-            echo "::error::No files contain @verter/unplugin after replacement! The sed replacement did not work."
-            exit 1
-          fi
-          echo "✅ Verified @verter/unplugin is present in:"
-          echo "$FOUND"
-          for f in $FOUND; do
-            echo "--- $f ---"
-            grep -n "@verter/unplugin" "$f"
-          done
 
       - name: Verter build
         id: verter-build
@@ -647,6 +796,20 @@ jobs:
           echo "duration=$((END - START))" >> $GITHUB_OUTPUT
           echo "test_passed=${TP:-0}" >> $GITHUB_OUTPUT
           echo "test_failed=${TF:-0}" >> $GITHUB_OUTPUT
+
+      - name: Verter E2E tests
+        id: verter-e2e
+        if: matrix.project.e2e-cmd != ''
+        working-directory: test-project
+        continue-on-error: true
+        run: |
+          START=$(date +%s)
+          if eval "${{ matrix.project.e2e-cmd }}" 2>&1 | tee ../verter-e2e.log; then
+            echo "status=passed" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+          echo "duration=$(($(date +%s) - START))" >> $GITHUB_OUTPUT
 
       - name: Generate project report
         if: always()
@@ -822,6 +985,7 @@ jobs:
             baseline-test.log
             verter-build.log
             verter-test.log
+            verter-e2e.log
           if-no-files-found: ignore
 
       - name: Add to job summary

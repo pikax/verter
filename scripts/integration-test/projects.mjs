@@ -10,7 +10,8 @@
  *   repo           → repo
  *   branch         → branch
  *   buildCmd       → build-cmd
- *   testCmd         → test-cmd
+ *   testCmd        → test-cmd
+ *   e2eCmd         → e2e-cmd
  *   packageManager → package-manager
  *   bundler        → bundler
  */
@@ -25,6 +26,7 @@
  * @property {string}         branch         - Branch to clone / checkout
  * @property {string}         buildCmd       - Shell command to build the project
  * @property {string}         testCmd        - Shell command to run tests (empty string = no tests)
+ * @property {string}         [e2eCmd]       - Shell command to run E2E tests (absent/empty = no e2e)
  * @property {PackageManager} packageManager - Package manager used by the project
  * @property {Bundler}        bundler        - Build tool that loads the Vue plugin
  */
@@ -103,6 +105,8 @@ export const projects = [
     branch: 'main',
     buildCmd: 'pnpm -r --filter="./packages/**" --parallel run build',
     testCmd: 'pnpm run test',
+    // Cypress 14: must start fixture dev server on port 3041 manually
+    e2eCmd: 'pnpm -C cypress/fixtures/basic run dev & sleep 10 && npx cypress run --headless',
     packageManager: 'pnpm',
     bundler: 'vite',
   },
@@ -119,7 +123,9 @@ export const projects = [
     name: 'primevue',
     repo: 'primefaces/primevue',
     branch: 'master',
-    buildCmd: 'pnpm run build:packages',
+    // Full build:packages runs build:tokens (empty script) which fails.
+    // Build only up to build:lib which compiles all 100+ .vue components via rollup.
+    buildCmd: 'pnpm run build:metadata && pnpm run build:resolver && pnpm run build:core && pnpm run build:lib',
     testCmd: '',
     packageManager: 'pnpm',
     bundler: 'rollup',
@@ -152,6 +158,8 @@ export const projects = [
     branch: 'main',
     buildCmd: 'pnpm build',
     testCmd: '',
+    // Playwright: auto-starts dev server via playwright.config.ts webServer (port 5555)
+    e2eCmd: 'npx playwright install chromium --with-deps && pnpm run test:e2e',
     packageManager: 'pnpm',
     bundler: 'vite',
   },
@@ -177,8 +185,9 @@ export const projects = [
     name: 'tdesign-vue-next',
     repo: 'Tencent/tdesign-vue-next',
     branch: 'develop',
-    buildCmd: 'pnpm run build',
-    testCmd: 'pnpm run test',
+    // Project only has build:vue, build:chat, build:auto-import-resolver (no generic "build")
+    buildCmd: 'pnpm run build:vue',
+    testCmd: 'pnpm run test:vue',
     packageManager: 'pnpm',
     bundler: 'vite',
   },
@@ -188,6 +197,17 @@ export const projects = [
     branch: 'v2',
     buildCmd: 'pnpm --filter reka-ui build',
     testCmd: 'pnpm --filter reka-ui test',
+    packageManager: 'pnpm',
+    bundler: 'vite',
+  },
+  {
+    name: 'vitepress',
+    repo: 'vuejs/vitepress',
+    branch: 'main',
+    buildCmd: 'pnpm build',
+    testCmd: 'pnpm test:unit',
+    // Playwright: auto-starts dev server via playwright config
+    e2eCmd: 'npx playwright install chromium --with-deps && pnpm test:e2e-dev',
     packageManager: 'pnpm',
     bundler: 'vite',
   },

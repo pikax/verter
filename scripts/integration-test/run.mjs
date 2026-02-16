@@ -164,6 +164,22 @@ function log(prefix, msg) {
   console.log(`[${ts}] [${prefix}] ${msg}`);
 }
 
+/** Recursively copy a directory, skipping entries whose names are in `skipNames`. */
+function copyRecursive(src, dest, skipNames = []) {
+  const skip = new Set(skipNames);
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    if (skip.has(entry.name)) continue;
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyRecursive(srcPath, destPath, skipNames);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
 // ── Build Verter ─────────────────────────────────────────────────────────────
 
 function buildVerter() {
@@ -242,6 +258,30 @@ function installDeps(project, repoDir) {
     const wsPath = path.join(repoDir, 'pnpm-workspace.yaml');
     if (!fs.existsSync(wsPath)) {
       fs.writeFileSync(wsPath, 'packages: []\n');
+    }
+
+    // Rewrite `packageManager` to match the local pnpm version, preventing corepack
+    // from trying to switch to an unavailable version. We keep the field (vs deleting)
+    // because turbo-based projects require it.
+    // Also strip `engines.pnpm` to prevent ERR_PNPM_UNSUPPORTED_ENGINE errors.
+    const pkgJsonPath = path.join(repoDir, 'package.json');
+    if (fs.existsSync(pkgJsonPath)) {
+      const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+      let modified = false;
+      if (pkgJson.packageManager) {
+        const localPnpmVersion = execFileSync('pnpm', ['--version'], { encoding: 'utf8' }).trim();
+        pkgJson.packageManager = `pnpm@${localPnpmVersion}`;
+        modified = true;
+      }
+      if (pkgJson.engines?.pnpm) {
+        delete pkgJson.engines.pnpm;
+        if (Object.keys(pkgJson.engines).length === 0) delete pkgJson.engines;
+        modified = true;
+      }
+      if (modified) {
+        fs.writeFileSync(pkgJsonPath, JSON.stringify(pkgJson, null, 2) + '\n');
+        log(project.name, '  Rewrote packageManager/engines.pnpm fields');
+      }
     }
 
     // On Windows, configure pnpm to use bash for running scripts.
@@ -333,7 +373,36 @@ function installVerterTarballs(project, repoDir) {
     run('npm install --legacy-peer-deps', repoDir);
   }
 
+  ensureVerterAccessible(project, repoDir);
   log(project.name, 'Verter tarballs installed.');
+}
+
+/**
+ * Verify that @verter/native and @verter/unplugin are accessible from the
+ * project's node_modules.  Some pnpm monorepos don't properly hoist the
+ * tarball-installed packages into the repo's own node_modules — the packages
+ * end up at the parent workspace level without the `dist/` directory containing
+ * the native `.node` binary.  When that happens, copy from source.
+ */
+function ensureVerterAccessible(project, repoDir) {
+  const nativeDir = path.join(repoDir, 'node_modules', '@verter', 'native');
+  const unpluginDir = path.join(repoDir, 'node_modules', '@verter', 'unplugin');
+  const nativeIndex = path.join(nativeDir, 'index.js');
+  const nativeDist = path.join(nativeDir, 'dist');
+
+  if (!fs.existsSync(nativeIndex) || !fs.existsSync(nativeDist)) {
+    log(project.name, '  @verter/native not properly hoisted, copying from source...');
+    const srcNative = path.join(ROOT, 'packages', 'native');
+    fs.mkdirSync(path.join(repoDir, 'node_modules', '@verter'), { recursive: true });
+    copyRecursive(srcNative, nativeDir, ['node_modules']);
+  }
+
+  if (!fs.existsSync(path.join(unpluginDir, 'package.json'))) {
+    log(project.name, '  @verter/unplugin not properly hoisted, copying from source...');
+    const srcUnplugin = path.join(ROOT, 'packages', 'unplugin');
+    fs.mkdirSync(path.join(repoDir, 'node_modules', '@verter'), { recursive: true });
+    copyRecursive(srcUnplugin, unpluginDir, ['node_modules', 'src']);
+  }
 }
 
 // ── Replace Vue Plugin ───────────────────────────────────────────────────────
@@ -389,8 +458,11 @@ function replaceVuePlugin(project, repoDir) {
     }
 
     // Rename imported identifiers (word-boundary safe)
+    // Handle both `import vue from` and `import Vue, { namedExport } from`
     modified = modified.replace(/\bimport vue from\b/g, 'import verter from');
     modified = modified.replace(/\bimport Vue from\b/g, 'import verter from');
+    modified = modified.replace(/\bimport vue,/g, 'import verter,');
+    modified = modified.replace(/\bimport Vue,/g, 'import verter,');
 
     // Rename function calls (word-boundary safe — avoids matching inside
     // compound names like viteVue(, viteVueJsx(, etc.)
@@ -573,7 +645,7 @@ async function processProject(project, opts) {
   const results = {
     name: project.name,
     baseline: { build: null, test: null },
-    verter: { build: null, test: null },
+    verter: { build: null, test: null, e2e: null },
     replacement: { modified: [], verified: false },
     error: null,
   };
@@ -662,6 +734,15 @@ async function processProject(project, opts) {
       }
     }
 
+    // ── E2E tests (Verter only) ──
+    if (project.e2eCmd && results.verter.build?.ok) {
+      log(project.name, `[verter] E2E: ${project.e2eCmd}`);
+      const e2eResult = run(project.e2eCmd, repoDir, { timeout: 5 * 60_000 });
+      const dur = (e2eResult.durationMs / 1000).toFixed(1);
+      log(project.name, `[verter] E2E ${e2eResult.ok ? 'OK' : 'FAILED'} (${dur}s)`);
+      results.verter.e2e = e2eResult;
+    }
+
     // Save verter logs
     const logDir = path.join(LOGS_DIR, project.name);
     fs.mkdirSync(logDir, { recursive: true });
@@ -675,6 +756,12 @@ async function processProject(project, opts) {
       fs.writeFileSync(
         path.join(logDir, 'verter-test.log'),
         results.verter.test.stdout + '\n' + results.verter.test.stderr,
+      );
+    }
+    if (results.verter.e2e) {
+      fs.writeFileSync(
+        path.join(logDir, 'verter-e2e.log'),
+        results.verter.e2e.stdout + '\n' + results.verter.e2e.stderr,
       );
     }
   } catch (/** @type {any} */ err) {
@@ -714,6 +801,7 @@ function printSummary(allResults) {
     { name: 'Delta', width: 10 },
     { name: 'B.Tests', width: 14 },
     { name: 'V.Tests', width: 14 },
+    { name: 'E2E', width: 8 },
     { name: 'Status', width: 12 },
   ];
 
@@ -734,6 +822,7 @@ function printSummary(allResults) {
         ''.padEnd(10),
         ''.padEnd(14),
         ''.padEnd(14),
+        ''.padEnd(8),
         'ERROR'.padEnd(12),
       ];
       console.log(row.join(' | '));
@@ -772,6 +861,11 @@ function printSummary(allResults) {
       passed++;
     }
 
+    let e2eStatus = '-';
+    if (r.verter.e2e) {
+      e2eStatus = r.verter.e2e.ok ? 'OK' : 'FAIL';
+    }
+
     const row = [
       r.name.padEnd(22),
       formatDuration(bBuild).padEnd(10),
@@ -779,6 +873,7 @@ function printSummary(allResults) {
       delta.padEnd(10),
       formatTestResult(r.baseline.test).padEnd(14),
       formatTestResult(r.verter.test).padEnd(14),
+      e2eStatus.padEnd(8),
       status.padEnd(12),
     ];
     console.log(row.join(' | '));
