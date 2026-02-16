@@ -864,6 +864,122 @@ const b = 2
     }
 
     // =========================================================================
+    // export interface / export type with defineProps
+    // =========================================================================
+
+    /// @ai-generated — export interface should resolve like plain interface in defineProps
+    #[test]
+    fn test_define_props_export_interface_resolves() {
+        // Verify generated code is valid JS and props are resolved
+        let code = gen_and_validate(
+            "<script setup lang=\"ts\">\nexport interface Props {\n  foo: string\n  bar?: number\n}\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.foo }}</div></template>",
+        );
+        assert!(
+            code.contains("props:"),
+            "Should have props section, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("foo:"),
+            "Should have foo prop, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("bar:"),
+            "Should have bar prop, got:\n{}",
+            code
+        );
+
+        // Verify no "Unresolvable" error
+        let result = gen_result(
+            "<script setup lang=\"ts\">\nexport interface Props {\n  foo: string\n  bar?: number\n}\nconst props = defineProps<Props>()\n</script>\n<template><div>{{ props.foo }}</div></template>",
+        );
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Unresolvable type reference")),
+            "Should NOT emit 'Unresolvable type reference' for locally exported interface, got errors: {:?}",
+            result.errors
+        );
+    }
+
+    /// @ai-generated — export type alias should resolve like plain type alias in defineProps
+    #[test]
+    fn test_define_props_export_type_alias_resolves() {
+        let code = gen_and_validate(
+            "<script setup lang=\"ts\">\nexport type Props = {\n  bar: number\n}\ndefineProps<Props>()\n</script>\n<template><div>x</div></template>",
+        );
+        assert!(
+            code.contains("props:"),
+            "Should have props section, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("bar:"),
+            "Should have bar prop, got:\n{}",
+            code
+        );
+
+        let result = gen_result(
+            "<script setup lang=\"ts\">\nexport type Props = {\n  bar: number\n}\ndefineProps<Props>()\n</script>\n<template><div>x</div></template>",
+        );
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Unresolvable type reference")),
+            "Should NOT emit 'Unresolvable type reference' for locally exported type alias, got errors: {:?}",
+            result.errors
+        );
+    }
+
+    /// @ai-generated — export interface with withDefaults should produce props with defaults
+    #[test]
+    fn test_with_defaults_export_interface() {
+        let code = gen_and_validate(
+            "<script setup lang=\"ts\">\nexport interface Props {\n  size?: number\n  color?: string\n}\nconst props = withDefaults(defineProps<Props>(), {\n  size: 16,\n  color: 'red',\n})\n</script>\n<template><div>{{ props.size }}</div></template>",
+        );
+        assert!(
+            code.contains("props:"),
+            "Should have props section, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("size:"),
+            "Should have size prop, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("color:"),
+            "Should have color prop, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("default:"),
+            "Should have default values, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("withDefaults("),
+            "Should NOT leave withDefaults as-is, got:\n{}",
+            code
+        );
+
+        let result = gen_result(
+            "<script setup lang=\"ts\">\nexport interface Props {\n  size?: number\n  color?: string\n}\nconst props = withDefaults(defineProps<Props>(), {\n  size: 16,\n  color: 'red',\n})\n</script>\n<template><div>{{ props.size }}</div></template>",
+        );
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Unresolvable type reference")),
+            "Should NOT emit 'Unresolvable type reference' for exported interface in withDefaults, got errors: {:?}",
+            result.errors
+        );
+    }
+
+    // =========================================================================
     // defineEmits
     // =========================================================================
 

@@ -362,6 +362,23 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
                 let name_span = Span::from(interface.id.span);
                 ctx.interfaces.push((name_span, &interface.body.body));
             }
+            // Collect exported type aliases and interfaces:
+            // `export type Foo = { bar: string }` / `export interface Foo { bar: string }`
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(decl) = &export.declaration {
+                    match decl {
+                        Declaration::TSTypeAliasDeclaration(alias) => {
+                            let name_span = Span::from(alias.id.span);
+                            ctx.type_aliases.push((name_span, &alias.type_annotation));
+                        }
+                        Declaration::TSInterfaceDeclaration(interface) => {
+                            let name_span = Span::from(interface.id.span);
+                            ctx.interfaces.push((name_span, &interface.body.body));
+                        }
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }
