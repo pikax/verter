@@ -3333,4 +3333,227 @@ import TokenBreakdown from './other/TokenBreakdown.vue'
             result.code
         );
     }
+
+    // ==================== defineProps / withDefaults variable assignment ====================
+
+    /// @ai-generated — const props = defineProps([...]) must produce const props = __props
+    #[test]
+    fn test_define_props_array_preserves_variable_assignment() {
+        let input = r#"<script setup>
+const props = defineProps(['disabled'])
+function check() { return props.disabled }
+</script>
+<template><button :disabled="props.disabled" @click="check">x</button></template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("const props = __props"),
+            "defineProps with array arg should produce `const props = __props`, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — const props = defineProps({...}) must produce const props = __props
+    #[test]
+    fn test_define_props_object_preserves_variable_assignment() {
+        let input = r#"<script setup>
+const props = defineProps({ disabled: Boolean })
+function check() { return props.disabled }
+</script>
+<template><button :disabled="props.disabled" @click="check">x</button></template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("const props = __props"),
+            "defineProps with object arg should produce `const props = __props`, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — const props = withDefaults(defineProps<T>(), {...}) must produce const props = __props
+    #[test]
+    fn test_with_defaults_type_params_preserves_variable_assignment() {
+        let input = r#"<script setup lang="ts">
+const props = withDefaults(defineProps<{ disabled?: boolean }>(), {
+  disabled: false,
+})
+function check() { return props.disabled }
+</script>
+<template><button :disabled="props.disabled" @click="check">x</button></template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("const props = __props"),
+            "withDefaults should produce `const props = __props`, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — const props = defineProps<T>() must produce const props = __props (type-only)
+    #[test]
+    fn test_define_props_type_only_preserves_variable_assignment() {
+        let input = r#"<script setup lang="ts">
+const props = defineProps<{ disabled?: boolean }>()
+function check() { return props.disabled }
+</script>
+<template><button :disabled="props.disabled" @click="check">x</button></template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("const props = __props"),
+            "defineProps<T>() should produce `const props = __props`, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — const props = withDefaults(defineProps<Props>(), {...}) with external interface
+    /// must produce const props = __props (not strip the assignment)
+    #[test]
+    fn test_with_defaults_external_type_preserves_variable_assignment() {
+        let input = r#"<script setup lang="ts">
+type Props = {
+  disabled?: boolean;
+};
+const props = withDefaults(defineProps<Props>(), {
+  disabled: false,
+})
+function doSomething() {
+  console.log(props.disabled)
+}
+</script>
+<template><button :disabled="props.disabled" @click="doSomething">Click</button></template>"#;
+        let result = gen_and_validate(input);
+        println!("OUTPUT:\n{}", result.code);
+        assert!(
+            result.code.contains("const props = __props"),
+            "withDefaults with external type should produce `const props = __props`, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — const props = defineProps<Props>() with external interface
+    /// must produce const props = __props
+    #[test]
+    fn test_define_props_external_type_preserves_variable_assignment() {
+        let input = r#"<script setup lang="ts">
+interface Props {
+  disabled?: boolean;
+}
+const props = defineProps<Props>()
+function check() { return props.disabled }
+</script>
+<template><button :disabled="props.disabled" @click="check">x</button></template>"#;
+        let result = gen_and_validate(input);
+        println!("OUTPUT:\n{}", result.code);
+        assert!(
+            result.code.contains("const props = __props"),
+            "defineProps<ExternalInterface>() should produce `const props = __props`, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Exact repro from props-interface.vue benchmark file
+    #[test]
+    fn test_props_interface_benchmark_file() {
+        let input = r#"<template>
+  <div class="flex flex-col items-center justify-center">
+    <div class="mt-[29px] text-[15px] text-white">{{ props.describeText }}</div>
+    <div v-if="props.isTimeFilter" class="filter-button">选择时间</div>
+  </div>
+</template>
+<script setup lang="ts">
+interface Props {
+  isTimeFilter?: boolean;
+  describeText?: string;
+}
+const props = withDefaults(defineProps<Props>(), {
+  isTimeFilter: false,
+  describeText: "...",
+});
+</script>"#;
+        let result = gen_and_validate(input);
+        println!("BENCHMARK FILE OUTPUT:\n{}", result.code);
+        assert!(
+            result.code.contains("const props = __props"),
+            "Props should be assigned to __props in benchmark file, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — withDefaults with imported type (unresolvable external type)
+    #[test]
+    fn test_with_defaults_imported_type_preserves_variable_assignment() {
+        let input = r#"<script lang="ts" setup>
+import type { AffixProps } from './affix'
+const props = withDefaults(defineProps<AffixProps>(), {
+  zIndex: 100,
+  target: '',
+  offset: 0,
+  position: 'top',
+})
+function check() { return props.zIndex }
+</script>
+<template><div>{{ props.zIndex }}</div></template>"#;
+        let result = gen_and_validate(input);
+        println!("IMPORTED TYPE OUTPUT:\n{}", result.code);
+        assert!(
+            result.code.contains("const props = __props"),
+            "withDefaults with imported type should produce `const props = __props`, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Production mode: const props = withDefaults(defineProps<Props>(), {...})
+    /// with external interface must produce const props = __props
+    #[test]
+    fn test_with_defaults_external_type_prod_preserves_variable_assignment() {
+        let input = r#"<script setup lang="ts">
+type Props = {
+  disabled?: boolean;
+};
+const props = withDefaults(defineProps<Props>(), {
+  disabled: false,
+})
+function doSomething() {
+  console.log(props.disabled)
+}
+</script>
+<template><button :disabled="props.disabled" @click="doSomething">Click</button></template>"#;
+        let result = gen_and_validate_prod(input);
+        println!("PROD OUTPUT:\n{}", result.code);
+        assert!(
+            result.code.contains("const props = __props"),
+            "Production withDefaults with external type should produce `const props = __props`, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — defineEmits with declarator should produce const emit = __emit
+    #[test]
+    fn test_define_emits_preserves_variable_assignment() {
+        let input = r#"<script setup>
+const emit = defineEmits(['change'])
+function trigger() { emit('change') }
+</script>
+<template><button @click="trigger">x</button></template>"#;
+        let result = gen_and_validate(input);
+        println!("EMITS OUTPUT:\n{}", result.code);
+        assert!(
+            result.code.contains("const emit = __emit"),
+            "defineEmits should produce `const emit = __emit`, got:\n{}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — defineProps without assignment should NOT produce any variable assignment
+    #[test]
+    fn test_define_props_no_assignment() {
+        let input = r#"<script setup>
+defineProps(['disabled'])
+</script>
+<template><button :disabled="disabled">x</button></template>"#;
+        let result = gen_and_validate(input);
+        // Should not have "const  = __props" or similar
+        assert!(
+            !result.code.contains("const  = __props"),
+            "defineProps without assignment should not create bogus variable: {}",
+            result.code
+        );
+    }
 }

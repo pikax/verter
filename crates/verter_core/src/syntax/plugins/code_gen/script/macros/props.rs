@@ -19,10 +19,15 @@ use crate::utils::oxc::vue::{
 ///
 /// Transforms TypeScript type parameters into Vue runtime prop definitions.
 /// Each property `foo: string` becomes `foo: { type: String, required: true }`.
+///
+/// When a declarator is present (`const props = defineProps(...)`), the macro call
+/// is replaced with `__props` so the variable assignment is preserved.
+/// When no declarator is present (`defineProps(...)`), the macro call is removed
+/// entirely, matching Vue's official compiler behavior.
 #[allow(clippy::too_many_arguments)]
 pub fn process_define_props<'a>(
     span: &Span,
-    _declarator: &Option<MacroDeclarator<'a>>,
+    declarator: &Option<MacroDeclarator<'a>>,
     type_params: &Option<MacroTypeParams>,
     object_arg: &Option<MacroObjectArg<'a>>,
     array_arg: &Option<MacroArrayArg>,
@@ -30,16 +35,24 @@ pub fn process_define_props<'a>(
     source: &str,
     is_production: bool,
 ) -> Option<MacroProcessReturn> {
+    let has_declarator = declarator.is_some();
+
     if let Some(type_params) = type_params {
         return Some(transform_type_params_to_runtime(
             span,
             type_params,
             None, // no defaults
+            has_declarator,
             code_transform,
             source,
             is_production,
         ));
-    } else if let Some(obj) = object_arg {
+    }
+
+    // Replacement for the macro call: `__props` when assigned to a variable, empty when standalone.
+    let replacement = if has_declarator { "__props" } else { "" };
+
+    if let Some(obj) = object_arg {
         return Some(MacroProcessReturn {
             move_span: Some(Span {
                 start: obj.span.start,
@@ -50,7 +63,7 @@ pub fn process_define_props<'a>(
                     start: span.start,
                     end: span.end,
                 },
-                "__props;".to_string(),
+                replacement.to_string(),
             )),
             remove: None,
             diagnostic: None,
@@ -66,7 +79,7 @@ pub fn process_define_props<'a>(
                     start: span.start,
                     end: span.end,
                 },
-                "__props;".to_string(),
+                replacement.to_string(),
             )),
             remove: None,
             diagnostic: None,
@@ -89,7 +102,7 @@ pub fn process_define_props<'a>(
                         start: span.start,
                         end: span.end,
                     },
-                    "__props;".to_string(),
+                    replacement.to_string(),
                 )),
                 remove: None,
                 diagnostic: None,
@@ -113,18 +126,21 @@ pub fn process_define_props<'a>(
 /// incorporating default values from the second argument.
 pub fn process_with_defaults<'a>(
     span: Span,
-    _declarator: &Option<MacroDeclarator<'a>>,
+    declarator: &Option<MacroDeclarator<'a>>,
     type_params: Option<&MacroTypeParams>,
     defaults: Option<&MacroObjectArg<'a>>,
     code_transform: &mut CodeTransform,
     source: &str,
     is_production: bool,
 ) -> Option<MacroProcessReturn> {
+    let has_declarator = declarator.is_some();
+
     if let Some(tp) = type_params {
         return Some(transform_type_params_to_runtime(
             &span,
             tp,
             defaults,
+            has_declarator,
             code_transform,
             source,
             is_production,
@@ -145,23 +161,34 @@ pub fn process_with_defaults<'a>(
 ///
 /// If the type couldn't be resolved (e.g., `defineProps<Props>()` where Props is an interface),
 /// generates an empty props object `{}` as a fallback.
+///
+/// When `has_declarator` is true (e.g., `const props = defineProps<T>()`), the macro call
+/// is replaced with `__props`. When false (standalone `defineProps<T>()`), it is removed.
 fn transform_type_params_to_runtime<'a>(
     macro_span: &Span,
     type_params: &MacroTypeParams,
     defaults: Option<&MacroObjectArg<'a>>,
+    has_declarator: bool,
     code_transform: &mut CodeTransform,
     source: &str,
     is_production: bool,
 ) -> MacroProcessReturn {
+    // Replacement for the macro call prefix: `__props` when assigned, empty when standalone.
+    let props_replacement = if has_declarator { "__props" } else { "" };
+
     // Check if we have resolved props from the type literal
     if type_params.resolved.props.is_empty() {
         // Empty type literal (e.g., `defineProps<{}>()`) or unresolvable type reference
         // (e.g., `defineProps<ExternalProps>()`). In both cases, emit `props: {}` by:
-        // 1. Overwriting the macro prefix with __props;
+        // 1. Overwriting the macro prefix with __props (or empty if no declarator)
         // 2. Overwriting the type content with {} (the empty props object)
         // 3. Removing the macro suffix
         // This ensures move_span can reference the type_span region independently.
-        code_transform.overwrite(macro_span.start, type_params.type_span.start, "__props;");
+        code_transform.overwrite(
+            macro_span.start,
+            type_params.type_span.start,
+            props_replacement,
+        );
         code_transform.overwrite(type_params.type_span.start, type_params.type_span.end, "{}");
         code_transform.overwrite(type_params.type_span.end, macro_span.end, "");
         return MacroProcessReturn {
@@ -196,6 +223,7 @@ fn transform_type_params_to_runtime<'a>(
             macro_span,
             type_params,
             defaults,
+            has_declarator,
             code_transform,
             source,
             is_production,
@@ -205,8 +233,12 @@ fn transform_type_params_to_runtime<'a>(
     // Inline type literal — props are between < and >, use move_span + individual overwrites.
 
     // Overwrite the macro call start (e.g., "defineProps<" or "withDefaults(defineProps<")
-    // with just "__props;" to capture the props reference
-    code_transform.overwrite(macro_span.start, type_params.type_span.start, "__props;");
+    // with `__props` when assigned to a variable, or empty when standalone.
+    code_transform.overwrite(
+        macro_span.start,
+        type_params.type_span.start,
+        props_replacement,
+    );
 
     // Transform each property in the type literal
     for prop in &type_params.resolved.props {
@@ -299,6 +331,7 @@ fn transform_external_type_to_runtime<'a>(
     macro_span: &Span,
     type_params: &MacroTypeParams,
     defaults: Option<&MacroObjectArg<'a>>,
+    has_declarator: bool,
     code_transform: &mut CodeTransform,
     source: &str,
     is_production: bool,
@@ -355,9 +388,16 @@ fn transform_external_type_to_runtime<'a>(
 
     props_str.push('}');
 
+    // Replacement for the macro call prefix: `__props` when assigned, empty when standalone.
+    let props_replacement = if has_declarator { "__props" } else { "" };
+
     // Overwrite non-overlapping ranges:
-    // 1. From macro start to type_span start (the "defineProps<" part) → "__props;"
-    code_transform.overwrite(macro_span.start, type_params.type_span.start, "__props;");
+    // 1. From macro start to type_span start (the "defineProps<" part) → "__props" or ""
+    code_transform.overwrite(
+        macro_span.start,
+        type_params.type_span.start,
+        props_replacement,
+    );
     // 2. The type content between < and > → the built props object
     code_transform.overwrite(
         type_params.type_span.start,
