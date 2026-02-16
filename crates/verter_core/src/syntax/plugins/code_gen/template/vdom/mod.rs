@@ -600,7 +600,13 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         }
 
         if !is_vif_continuation && !scope_prefix.is_empty() {
-            if let Some(parent) = self.stack.last_mut() {
+            if state.is_named_slot_template {
+                // For named slot templates with v-if, store the scope prefix on the
+                // state itself so it can be emitted INSIDE the _withCtx callback,
+                // not wrapping the slot key-value pair in the parent's slots object.
+                state.named_slot_vif_prefix = scope_prefix;
+                state.named_slot_has_vif = true;
+            } else if let Some(parent) = self.stack.last_mut() {
                 if let Some(last_child) = parent.children.last_mut() {
                     last_child.scope_prefix = scope_prefix;
                 }
@@ -754,14 +760,20 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             .map(|c| c.end)
             .unwrap_or(state.open_tag_end);
 
-        let had_vif_close = directives::process_scope_closes(
-            &code_transform,
-            &state.pending_scope_closes,
-            close_pos,
-            self.is_production,
-            &mut self.pending_append_lefts,
-            &mut self.buf,
-        );
+        // Named slot templates with v-if handle scope closes internally (inside
+        // the _withCtx callback in handle_element_close). Skip external processing.
+        let had_vif_close = if state.named_slot_has_vif {
+            false
+        } else {
+            directives::process_scope_closes(
+                &code_transform,
+                &state.pending_scope_closes,
+                close_pos,
+                self.is_production,
+                &mut self.pending_append_lefts,
+                &mut self.buf,
+            )
+        };
 
         if had_vif_close {
             if let Some(parent) = self.stack.last_mut() {

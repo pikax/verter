@@ -175,6 +175,18 @@ pub(crate) struct StateStack<'alloc> {
     /// entry in the parent component's slots object.
     pub is_named_slot_template: bool,
 
+    /// v-if scope prefix for named slot templates (e.g. `"(!isMobile) ? "`).
+    /// When a `<template v-if="cond" #name>` is encountered, the v-if condition
+    /// must be emitted INSIDE the `_withCtx(() => [...])` callback, not wrapping
+    /// the slot key-value pair. This field stores the scope prefix so the close
+    /// phase can incorporate it inside the callback.
+    pub named_slot_vif_prefix: &'alloc str,
+
+    /// Whether this named slot template's scope closes should be handled internally
+    /// (inside the _withCtx callback) rather than externally by the parent.
+    /// Set to true when `named_slot_vif_prefix` is non-empty.
+    pub named_slot_has_vif: bool,
+
     /// Whether this component has `<template #name>` children defining named slots.
     /// When true, children are wrapped in `{ ... _: 1 }` instead of `[...]`.
     pub has_named_slot_children: bool,
@@ -215,6 +227,8 @@ impl Default for StateStack<'_> {
             slot_name: None,
             slot_is_dynamic: false,
             is_named_slot_template: false,
+            named_slot_vif_prefix: "",
+            named_slot_has_vif: false,
             has_named_slot_children: false,
             any_dynamic_slots: false,
             runtime_directives: Vec::new(),
@@ -247,6 +261,8 @@ impl StateStack<'_> {
         self.slot_name = None;
         self.slot_is_dynamic = false;
         self.is_named_slot_template = false;
+        self.named_slot_vif_prefix = "";
+        self.named_slot_has_vif = false;
         self.has_named_slot_children = false;
         self.any_dynamic_slots = false;
         self.runtime_directives.clear();
