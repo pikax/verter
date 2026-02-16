@@ -343,159 +343,36 @@ impl<'a> SyntaxPlugin<'a> for CustomBlockCollector {
 // Helpers
 // =============================================================================
 
-/// Find all root-level SFC block byte ranges in the source.
+/// Extract root-level SFC block byte ranges from parsed pipeline events.
 ///
 /// Returns a sorted, non-overlapping vec of `(start, end)` byte offsets for
 /// each top-level block (`<script>`, `<template>`, `<style>`, custom blocks).
 /// Any source content outside these ranges is inter-block "gap" content
 /// (whitespace, HTML comments, stray text) that should be removed from JS output.
 ///
-/// Uses nesting-aware matching: for tags like `<template>` that can appear nested
-/// (e.g., `<template #slot>`), the function tracks nesting depth to find the
-/// correct root-level closing tag.
-fn find_sfc_block_ranges(bytes: &[u8]) -> Vec<(u32, u32)> {
+/// This uses events produced by the tokenizer (which correctly handles RCDATA
+/// mode for `<script>`/`<style>` blocks), avoiding the need to re-scan raw bytes
+/// and the risk of confusing string literal content with SFC block boundaries.
+fn extract_sfc_block_ranges(events: &[Event]) -> Vec<(u32, u32)> {
     let mut ranges: Vec<(u32, u32)> = Vec::new();
-    let len = bytes.len();
-    let mut i = 0;
+    // Stack of open block starts: (kind, start_pos)
+    let mut open_stack: Vec<(RootNodeKind, u32)> = Vec::new();
 
-    while i < len {
-        // Look for '<' that starts a root-level tag
-        if bytes[i] != b'<' {
-            i += 1;
-            continue;
-        }
-
-        // Skip comments: <!-- ... -->
-        if i + 3 < len && bytes[i + 1] == b'!' && bytes[i + 2] == b'-' && bytes[i + 3] == b'-' {
-            if let Some(end_rel) = bytes[i + 4..].windows(3).position(|w| w == b"-->") {
-                i = i + 4 + end_rel + 3;
-            } else {
-                i += 4;
-            }
-            continue;
-        }
-
-        // Must be a letter after '<' (not '</' or '<!' or '< ')
-        if i + 1 >= len || !bytes[i + 1].is_ascii_alphabetic() {
-            i += 1;
-            continue;
-        }
-
-        // Extract the tag name
-        let tag_start = i;
-        let name_start = i + 1;
-        let mut name_end = name_start;
-        while name_end < len && (bytes[name_end].is_ascii_alphanumeric() || bytes[name_end] == b'-')
-        {
-            name_end += 1;
-        }
-        let tag_name_len = name_end - name_start;
-        if tag_name_len == 0 {
-            i += 1;
-            continue;
-        }
-
-        // Find the end of the opening tag '>'
-        let mut j = name_end;
-        while j < len && bytes[j] != b'>' {
-            j += 1;
-        }
-        if j >= len {
-            break;
-        }
-
-        // Check for self-closing tag '/>'
-        if j > 0 && bytes[j - 1] == b'/' {
-            ranges.push((tag_start as u32, (j + 1) as u32));
-            i = j + 1;
-            continue;
-        }
-
-        // Non-self-closing: find the matching closing tag with nesting awareness.
-        // Tags like <template> can nest (e.g., <template #slot> inside <template>).
-        j += 1; // past the '>'
-        let mut depth = 1u32;
-
-        while j < len && depth > 0 {
-            if bytes[j] != b'<' {
-                j += 1;
-                continue;
-            }
-
-            // Skip nested comments
-            if j + 3 < len && bytes[j + 1] == b'!' && bytes[j + 2] == b'-' && bytes[j + 3] == b'-' {
-                if let Some(end_rel) = bytes[j + 4..].windows(3).position(|w| w == b"-->") {
-                    j = j + 4 + end_rel + 3;
+    for event in events {
+        match event {
+            Event::RootOpenTagEnd(e) => {
+                if e.is_self_closing {
+                    ranges.push((e.start, e.end));
                 } else {
-                    j += 4;
-                }
-                continue;
-            }
-
-            // Closing tag: </tagname>
-            if j + 1 < len && bytes[j + 1] == b'/' {
-                let close_name_start = j + 2;
-                if close_name_start + tag_name_len <= len
-                    && bytes[close_name_start..close_name_start + tag_name_len]
-                        .eq_ignore_ascii_case(&bytes[name_start..name_end])
-                {
-                    // Verify next char after name is '>' or whitespace
-                    let after = close_name_start + tag_name_len;
-                    if after < len && (bytes[after] == b'>' || bytes[after].is_ascii_whitespace()) {
-                        depth -= 1;
-                        if depth == 0 {
-                            // Find the '>' of this closing tag
-                            let mut close_end = after;
-                            while close_end < len && bytes[close_end] != b'>' {
-                                close_end += 1;
-                            }
-                            if close_end < len {
-                                close_end += 1; // include '>'
-                            }
-                            ranges.push((tag_start as u32, close_end as u32));
-                            i = close_end;
-                            break;
-                        }
-                    }
-                }
-                j += 2;
-                continue;
-            }
-
-            // Opening tag of the same name: increase depth
-            if j + 1 < len && bytes[j + 1].is_ascii_alphabetic() {
-                let nested_name_start = j + 1;
-                if nested_name_start + tag_name_len <= len
-                    && bytes[nested_name_start..nested_name_start + tag_name_len]
-                        .eq_ignore_ascii_case(&bytes[name_start..name_end])
-                {
-                    // Verify next char after name is '>', whitespace, or '/' (self-closing)
-                    let after = nested_name_start + tag_name_len;
-                    if after < len
-                        && (bytes[after] == b'>'
-                            || bytes[after].is_ascii_whitespace()
-                            || bytes[after] == b'/')
-                    {
-                        // Check if self-closing
-                        let mut k = after;
-                        while k < len && bytes[k] != b'>' {
-                            k += 1;
-                        }
-                        if k < len && k > 0 && bytes[k - 1] != b'/' {
-                            depth += 1;
-                        }
-                        j = k + 1;
-                        continue;
-                    }
+                    open_stack.push((e.kind.clone(), e.start));
                 }
             }
-
-            j += 1;
-        }
-
-        if depth > 0 {
-            // Didn't find matching close — skip past the tag name
-            i = name_end;
+            Event::RootCloseTag(e) => {
+                if let Some((_kind, start)) = open_stack.pop() {
+                    ranges.push((start, e.end));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -509,14 +386,12 @@ fn find_sfc_block_ranges(bytes: &[u8]) -> Vec<(u32, u32)> {
 /// whitespace). This content is not valid JS and must be blanked out.
 fn remove_inter_block_gaps(
     code_transform: &mut crate::code_transform::CodeTransform,
-    input_bytes: &[u8],
+    input_len: u32,
+    ranges: &[(u32, u32)],
 ) {
-    let ranges = find_sfc_block_ranges(input_bytes);
     if ranges.is_empty() {
         return;
     }
-
-    let input_len = input_bytes.len() as u32;
 
     // Remove gap before first block
     if ranges[0].0 > 0 {
@@ -670,31 +545,60 @@ pub fn compile(
 
     let events = syntax.events();
 
-    // Detect if the SFC has <script setup>. Inline render mode is only valid
-    // for script setup components (the render arrow is returned from setup()).
-    // For Options API components, we must always use function render() form.
-    // We check the raw input since OxcScript events aren't created until the pipeline runs.
-    let script_setup_pos = input
-        .as_bytes()
-        .windows(b"<script".len())
-        .enumerate()
-        .find_map(|(i, w)| {
-            if !w.eq_ignore_ascii_case(b"<script") {
-                return None;
-            }
-            // Find the end of this <script ...> tag
-            let rest = &input[i + w.len()..];
-            if let Some(gt) = rest.find('>') {
-                let attrs = &rest[..gt];
-                // Check for `setup` as a standalone word in the tag attributes
-                if attrs.split_whitespace().any(|a| a == "setup") {
-                    return Some(i);
-                }
-            }
-            None
-        });
-    let has_script_setup = script_setup_pos.is_some();
+    // Extract SFC block info from pipeline events (tokenizer-derived, RCDATA-aware).
+    // This replaces naive byte scanning which breaks on `<script`/`<template` inside
+    // JS string literals.
+    let block_ranges = extract_sfc_block_ranges(&events);
 
+    // Extract block metadata from events for script_setup / template detection.
+    let mut script_setup_pos: Option<usize> = None;
+    let mut has_template = false;
+    let mut has_vapor_template = false;
+    let mut template_block: Option<(u32, u32)> = None;
+    let mut script_block_end: Option<u32> = None;
+
+    for event in &events {
+        match event {
+            Event::RootOpenTagEnd(e) => match e.kind {
+                RootNodeKind::Script => {
+                    // Check for `setup` attribute in the raw source between name_end and end
+                    let attrs_slice = &input[e.name_end as usize..e.end as usize];
+                    if attrs_slice
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                        .any(|word| word == "setup")
+                    {
+                        script_setup_pos = Some(e.start as usize);
+                    }
+                }
+                RootNodeKind::Template => {
+                    has_template = true;
+                    let attrs_slice = &input[e.name_end as usize..e.end as usize];
+                    if attrs_slice
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                        .any(|word| word == "vapor")
+                    {
+                        has_vapor_template = true;
+                    }
+                    template_block = Some((e.start, 0)); // end filled by RootCloseTag
+                }
+                _ => {}
+            },
+            Event::RootCloseTag(e) => match e.kind {
+                RootNodeKind::Template => {
+                    if let Some(ref mut tb) = template_block {
+                        tb.1 = e.end;
+                    }
+                }
+                RootNodeKind::Script => {
+                    script_block_end = Some(e.end);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    let has_script_setup = script_setup_pos.is_some();
     let effective_inline = options.resolve_inline() && has_script_setup;
 
     // When <template> appears before <script setup> and inline mode is active,
@@ -702,57 +606,15 @@ pub fn compile(
     // template position (before the setup() wrapper). We detect this and later
     // use move_slice to relocate the template block inside setup().
     let template_before_script_range = if effective_inline {
-        let template_start = input
-            .as_bytes()
-            .windows(b"<template".len())
-            .position(|w| w.eq_ignore_ascii_case(b"<template"));
-        match (template_start, script_setup_pos) {
-            (Some(t), Some(s)) if t < s => {
-                // Find end of </template> — the tag includes '>', so pos + len is past it
-                let template_end = input
-                    .as_bytes()
-                    .windows(b"</template>".len())
-                    .rposition(|w| w.eq_ignore_ascii_case(b"</template>"))
-                    .map(|pos| pos + b"</template>".len());
-                // Find end of </script> after the <script setup> tag
-                let script_end = input.as_bytes()[s..]
-                    .windows(b"</script>".len())
-                    .position(|w| w.eq_ignore_ascii_case(b"</script>"))
-                    .map(|rel| s + rel + b"</script>".len());
-                match (template_end, script_end) {
-                    (Some(te), Some(se)) => Some((t as u32, te as u32, se as u32)),
-                    _ => None,
-                }
+        match (template_block, script_setup_pos, script_block_end) {
+            (Some((tpl_start, tpl_end)), Some(s), Some(se)) if (tpl_start as usize) < s => {
+                Some((tpl_start, tpl_end, se))
             }
             _ => None,
         }
     } else {
         None
     };
-
-    // Check if the SFC has any <template> block.
-    let has_template = input
-        .as_bytes()
-        .windows(b"<template".len())
-        .any(|w| w.eq_ignore_ascii_case(b"<template"));
-
-    // Pre-scan for <template vapor> to inform the script codegen plugin.
-    let has_vapor_template = input
-        .as_bytes()
-        .windows(b"<template".len())
-        .enumerate()
-        .any(|(i, w)| {
-            if !w.eq_ignore_ascii_case(b"<template") {
-                return false;
-            }
-            let rest = &input[i + w.len()..];
-            if let Some(gt) = rest.find('>') {
-                let attrs = &rest[..gt];
-                attrs.split_whitespace().any(|a| a == "vapor")
-            } else {
-                false
-            }
-        });
 
     let code_transform = Rc::new(RefCell::new(CodeTransform::new(input, allocator)));
 
@@ -839,7 +701,11 @@ pub fn compile(
     // Remove inter-block gaps: HTML comments, whitespace, and stray text between
     // root-level SFC blocks (e.g., between </script> and <template>). These are
     // not valid JS and must not leak into the output.
-    remove_inter_block_gaps(&mut code_transform.borrow_mut(), input.as_bytes());
+    remove_inter_block_gaps(
+        &mut code_transform.borrow_mut(),
+        input.len() as u32,
+        &block_ranges,
+    );
 
     let code = code_transform.borrow().build_string();
     let styles = code_gen_css.take_styles();
@@ -2973,6 +2839,37 @@ const onChecked = (e: any, checkedKeys: string[], onItemSelect: (n: any, c: bool
                 .contains(&("src".to_string(), "./en.json".to_string())),
             "Should have src attribute, got: {:?}",
             block.attrs
+        );
+    }
+
+    // ==================== regression: script tags in string literals ====================
+
+    /// @ai-generated — Regression test: `<script` inside a template literal in
+    /// `<script setup>` must NOT confuse the block range detection.
+    /// The event-based `extract_sfc_block_ranges` must not treat `<script` inside
+    /// JS strings as SFC block boundaries.
+    #[test]
+    fn test_script_tag_inside_template_literal() {
+        let input = r#"<script setup lang="ts">
+import srcdocTemplate from "./srcdoc.html?raw";
+
+const srcdoc = computed(() => {
+  const importMapScript = `<script type="importmap">${JSON.stringify(props.store.importMap)}<\/script>`;
+  return srcdocTemplate.replace("</head>", `${importMapScript}\n  </head>`);
+});
+</script>
+<template><div>hello</div></template>"#;
+
+        let result = gen_result(input);
+        assert!(
+            result.errors.is_empty(),
+            "Script tag inside template literal should not cause errors, got: {:?}",
+            result.errors
+        );
+        assert!(
+            result.code.contains("importMapScript"),
+            "Output should preserve the importMapScript variable, got: {}",
+            result.code
         );
     }
 }
