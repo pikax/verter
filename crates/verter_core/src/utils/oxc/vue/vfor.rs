@@ -235,7 +235,10 @@ fn extract_vfor_bindings_internal(
         collect_ts_type_reference_spans_from_expression(right, &mut references_set);
     }
 
-    let references: Vec<Span> = references_set.into_iter().collect();
+    let mut references: Vec<Span> = references_set.into_iter().collect();
+    // Sort by start position — downstream consumers (prefix_vfor_references_into)
+    // use a forward-scanning cursor that assumes ascending order.
+    references.sort_unstable_by_key(|s| s.start);
     (locals, references)
 }
 
@@ -967,5 +970,42 @@ mod tests {
 
         assert!(wb.is_ok());
         assert!(wb.references.is_empty());
+    }
+
+    /// @ai-generated - References from computed member expressions must be sorted by position.
+    ///
+    /// Regression test: `collections[activeIndex].data` produces two references
+    /// (`collections` and `activeIndex`). Since they are collected via FxHashSet,
+    /// iteration order is non-deterministic. Downstream consumers
+    /// (`prefix_vfor_references_into`) require ascending order to avoid panics.
+    #[test]
+    fn test_bindings_references_sorted_by_position() {
+        let allocator = Box::leak(Box::new(Allocator::default()));
+        let source = "item in collections[activeIndex].data";
+        let wb = parse_vfor_with_bindings(allocator, source, SourceType::tsx(), &[]);
+
+        assert!(wb.is_ok());
+        assert_eq!(
+            wb.references.len(),
+            2,
+            "Should have 2 references (collections, activeIndex), got: {:?}",
+            wb.references
+                .iter()
+                .map(|s| s.slice(source))
+                .collect::<Vec<_>>()
+        );
+
+        // Verify references are sorted by start position
+        for pair in wb.references.windows(2) {
+            assert!(
+                pair[0].start <= pair[1].start,
+                "References must be sorted by start position, but got {:?} before {:?} \
+                 (names: '{}' before '{}')",
+                pair[0],
+                pair[1],
+                pair[0].slice(source),
+                pair[1].slice(source),
+            );
+        }
     }
 }
