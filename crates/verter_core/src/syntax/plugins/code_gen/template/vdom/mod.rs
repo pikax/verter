@@ -343,7 +343,13 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                 let mut resolve_decls = String::with_capacity(resolve_size);
                 for comp_name in &self.resolved_components {
                     resolve_decls.push_str("const _component_");
-                    resolve_decls.push_str(comp_name);
+                    for ch in comp_name.chars() {
+                        if ch == '-' {
+                            resolve_decls.push('_');
+                        } else {
+                            resolve_decls.push(ch);
+                        }
+                    }
                     resolve_decls.push_str(" = _resolveComponent(\"");
                     resolve_decls.push_str(comp_name);
                     resolve_decls.push_str("\");\n");

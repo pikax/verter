@@ -1711,6 +1711,43 @@ fn test_component_same_used_twice() {
     );
 }
 
+/// @ai-generated — Hyphenated component name produces valid JS identifier
+/// e.g. <router-view/> → const _component_router_view = _resolveComponent("router-view")
+#[test]
+fn test_component_hyphenated_name_valid_identifier() {
+    let code = gen_and_validate(r#"<template><div><router-view /></div></template>"#);
+    assert!(
+        code.contains(r#"const _component_router_view = _resolveComponent("router-view")"#),
+        "Hyphenated component should produce underscore variable name, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createVNode(_component_router_view"),
+        "Should reference _component_router_view at call site, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Multiple hyphenated components each get valid identifiers
+#[test]
+fn test_component_multiple_hyphenated_names() {
+    let code = gen_and_validate(
+        r#"<template><div><router-view /><transition-group><div/></transition-group></div></template>"#,
+    );
+    assert!(
+        code.contains(r#"const _component_router_view = _resolveComponent("router-view")"#),
+        "router-view should have underscore variable, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains(
+            r#"const _component_transition_group = _resolveComponent("transition-group")"#
+        ),
+        "transition-group should have underscore variable, got:\n{}",
+        code
+    );
+}
+
 /// @ai-generated — Component as block root (v-if branch) uses _createBlock
 #[test]
 fn test_component_vif_block_root() {
@@ -3498,6 +3535,28 @@ fn test_custom_directive_full() {
     assert!(
         code.contains("mod: true"),
         "Should have modifier object, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated — Custom directive on a COMPONENT uses withDirectives wrapping
+#[test]
+fn test_custom_directive_on_component() {
+    let code =
+        gen_and_validate(r#"<template><div><MyComp v-custom="{ foo: 'bar' }" /></div></template>"#);
+    assert!(
+        code.contains("_withDirectives("),
+        "Component with custom directive should use _withDirectives, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_withDirectives(_createVNode(_component_MyComp"),
+        "withDirectives should wrap the component vnode, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_directive_custom"),
+        "Should resolve custom directive, got:\n{}",
         code
     );
 }
@@ -5565,6 +5624,185 @@ const msg = ref('hello')
     assert!(
         code.contains("__vapor: true"),
         "Vapor component should include __vapor: true.\nGot:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Bug Regression Tests — Codegen Bugs from Integration Testing
+// =========================================================================
+
+/// @ai-generated - Bug 4: v-for directive raw text must not leak into JS output.
+/// When v-for is mixed with other props like :key and @click, the v-for attribute
+/// text must be fully consumed by the compiler and not appear in the generated
+/// props object.
+#[test]
+fn test_bug4_vfor_raw_text_does_not_leak_into_props() {
+    let code = gen_and_validate(
+        r#"<template><div class="poster-item" :key="index" v-for="(i, index) in list" @click="handler">{{ i }}</div></template>"#,
+    );
+    assert!(
+        !code.contains("v-for"),
+        "v-for directive text should not appear in generated JS output, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_renderList"),
+        "v-for should generate _renderList call, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 4 variant: v-for with :key before v-for in source order.
+#[test]
+fn test_bug4_vfor_key_before_vfor_no_leak() {
+    let code = gen_and_validate(
+        r#"<template><div :key="item.id" v-for="item in items" class="x">{{ item.name }}</div></template>"#,
+    );
+    assert!(
+        !code.contains("v-for"),
+        "v-for directive text should not appear in generated JS output, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 1: v-bind="expr" mixed with other props must use _mergeProps.
+/// When a component has both v-bind="expr" and other static/dynamic props,
+/// the official Vue compiler uses _mergeProps(expr, { ...otherProps }).
+#[test]
+fn test_bug1_vbind_spread_mixed_with_props_uses_merge_props() {
+    let code = gen_and_validate(
+        r#"<template><div v-bind="attrs" class="static" id="test">x</div></template>"#,
+    );
+    assert!(
+        code.contains("_mergeProps"),
+        "v-bind spread mixed with other props should use _mergeProps, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 1 variant: v-bind="$attrs" with dynamic bind and static props on component.
+#[test]
+fn test_bug1_vbind_spread_component_with_static_and_dynamic_props() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import Comp from './Comp.vue'
+</script>
+<template><Comp v-bind="$attrs" as="a" :href="href" /></template>"#,
+    );
+    assert!(
+        code.contains("_mergeProps"),
+        "Component with v-bind spread and other props should use _mergeProps, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 1: v-bind="expr" as the ONLY prop should still use _normalizeProps.
+#[test]
+fn test_bug1_vbind_spread_only_uses_normalize_props() {
+    let code = gen_and_validate(r#"<template><div v-bind="attrs">x</div></template>"#);
+    assert!(
+        code.contains("_normalizeProps"),
+        "v-bind spread as only prop should use _normalizeProps, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("_mergeProps"),
+        "v-bind spread as only prop should NOT use _mergeProps, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 2: Event handler names with colons must be quoted.
+/// @update:model-value="handler" → "onUpdate:modelValue": handler (quoted key).
+#[test]
+fn test_bug2_event_colon_key_quoted() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import Comp from './Comp.vue'
+function handler() {}
+</script>
+<template><Comp @update:model-value="handler" /></template>"#,
+    );
+    assert!(
+        code.contains(r#""onUpdate:modelValue""#),
+        "Event name with colon should be quoted as string key, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 2 variant: @update:foo event must be quoted.
+#[test]
+fn test_bug2_event_update_custom_name_quoted() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import Comp from './Comp.vue'
+function handler() {}
+</script>
+<template><Comp @update:foo="handler" /></template>"#,
+    );
+    assert!(
+        code.contains(r#""onUpdate:foo""#) || code.contains(r#""onUpdate:Foo""#),
+        "Event name update:foo with colon should be quoted, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 3: ES shorthand property with _ctx. prefix must expand to key: value.
+/// { as } where `as` resolves to _ctx.as → must become { as: _ctx.as }, not { _ctx.as }.
+#[test]
+fn test_bug3_shorthand_with_ctx_prefix_expands() {
+    let code = gen_and_validate(r#"<template><div v-bind="fn({ foo })">x</div></template>"#);
+    // foo should be prefixed with _ctx. and expanded: { foo: _ctx.foo }
+    assert!(
+        !code.contains("{ _ctx."),
+        "Shorthand property with _ctx. prefix should be expanded to key: value form, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 3 variant: shorthand inside v-bind spread expression with setup binding.
+#[test]
+fn test_bug3_shorthand_with_setup_prefix_expands() {
+    let code = gen_and_validate(
+        r#"<script setup>
+const myVar = 'test'
+</script>
+<template><div v-bind="fn({ myVar })">x</div></template>"#,
+    );
+    // myVar should be accessible as $setup.myVar in non-inline mode
+    // The shorthand { myVar } should NOT become { $setup.myVar }
+    assert!(
+        !code.contains("{ $setup."),
+        "Shorthand property with $setup. prefix should be expanded, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 5: Sibling elements in children array must have commas.
+/// Tests a complex template with transition, v-show, nested v-if, and slots
+/// to ensure all children in the render array have proper comma separators.
+#[test]
+fn test_bug5_children_array_commas() {
+    let code = gen_and_validate(
+        r#"<template>
+<div>
+  <transition name="fade">
+    <div v-show="visible" :class="classes">
+      <template v-if="showTitle">
+        <h2>Title</h2>
+      </template>
+      <slot></slot>
+    </div>
+  </transition>
+</div>
+</template>"#,
+    );
+    // gen_and_validate already checks valid JS (which would fail on missing commas)
+    // Additionally verify no adjacent _createVNode without comma
+    assert!(
+        !code.contains(") _create"),
+        "Children should be separated by commas, got:\n{}",
         code
     );
 }

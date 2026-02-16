@@ -1435,6 +1435,31 @@ const x = CONST_VAL
         assert_valid_js(&code, "production inline template");
     }
 
+    /// @ai-generated — Template-before-script in production must still use inline mode
+    /// AND produce valid JS. The template content should be moved inside setup().
+    #[test]
+    fn test_prod_template_before_script_valid_js() {
+        let code = gen_prod(
+            "<template><div class=\"text-sm\">{{ msg }}</div></template>\n<script setup lang=\"ts\">\nconst msg = ref('Hello')\n</script>",
+        );
+        assert_valid_js(&code, "production template-before-script");
+        assert!(
+            code.contains("(_ctx,_cache) => {"),
+            "Template-before-script should still use inline mode, got:\n{code}"
+        );
+    }
+
+    /// @ai-generated — Template-before-script: dev mode must also produce valid JS.
+    /// Dev mode uses function render() form (not inline), so this mainly tests
+    /// that the function render is valid when template precedes script.
+    #[test]
+    fn test_dev_template_before_script_valid_js() {
+        let code = gen(
+            "<template><div class=\"text-sm\">{{ msg }}</div></template>\n<script setup lang=\"ts\">\nconst msg = ref('Hello')\n</script>",
+        );
+        assert_valid_js(&code, "dev template-before-script");
+    }
+
     /// @ai-generated — Production inline template: render function is inside setup()
     #[test]
     fn test_prod_inline_template_inside_setup() {

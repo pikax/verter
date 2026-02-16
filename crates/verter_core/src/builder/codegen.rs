@@ -171,6 +171,17 @@ pub struct CompileDiagnostic {
     pub span: Option<crate::common::Span>,
 }
 
+/// A custom block extracted from the SFC (e.g., `<i18n>`, `<docs>`).
+pub struct CustomBlock {
+    /// The tag name (e.g., "i18n", "docs").
+    pub block_type: String,
+    /// Raw content between open and close tags (empty string for self-closing).
+    pub content: String,
+    /// Attributes as key-value pairs (e.g., `[("lang", "json")]`).
+    /// Boolean attributes (no value) have an empty string value.
+    pub attrs: Vec<(String, String)>,
+}
+
 /// Result of the codegen process.
 pub struct CodegenResult {
     /// The generated code (VDOM or Vapor render function).
@@ -181,6 +192,8 @@ pub struct CodegenResult {
     pub code_with_source_map: String,
     /// Compiled CSS blocks from `<style>` tags (scoped, v-bind, modules applied).
     pub styles: Vec<CssStyleOutput>,
+    /// Custom blocks (e.g., `<i18n>`, `<docs>`).
+    pub custom_blocks: Vec<CustomBlock>,
     /// Scope ID for scoped styles (e.g., `"data-v-a4f2eed6"`).
     /// Empty string when no `<style scoped>` blocks exist.
     pub scope_id: String,
@@ -233,6 +246,96 @@ fn run_pipeline<'a>(
                 }
             }
         }
+    }
+}
+
+// =============================================================================
+// Custom block collector plugin
+// =============================================================================
+
+/// A lightweight pipeline plugin that collects `CompiledUnknownStart/End` events
+/// into `CustomBlock` structs. Events pass through unchanged.
+struct CustomBlockCollector {
+    /// Pending start event data (tag name + attrs), waiting for the matching End.
+    pending: Option<(String, Vec<(String, String)>)>,
+    /// Collected custom blocks.
+    blocks: Vec<CustomBlock>,
+}
+
+impl CustomBlockCollector {
+    fn new() -> Self {
+        Self {
+            pending: None,
+            blocks: Vec::new(),
+        }
+    }
+
+    fn take_blocks(&mut self) -> Vec<CustomBlock> {
+        std::mem::take(&mut self.blocks)
+    }
+
+    /// Extract attribute name and value from a `Prop` using source byte offsets.
+    /// The value span already excludes quotes (pipeline handles this).
+    fn extract_attr(prop: &Prop, input: &str) -> (String, String) {
+        let name = &input[prop.start as usize..prop.name_end as usize];
+        let value = prop
+            .value
+            .as_ref()
+            .map(|span| &input[span.start as usize..span.end as usize])
+            .unwrap_or("");
+        (name.to_string(), value.to_string())
+    }
+}
+
+impl<'a> SyntaxPlugin<'a> for CustomBlockCollector {
+    fn name(&self) -> &str {
+        "custom-block-collector"
+    }
+
+    fn process_event(
+        &mut self,
+        event: Event<'a>,
+        ctx: &mut SyntaxPluginContext<'a>,
+    ) -> SyntaxResult<Event<'a>> {
+        match &event {
+            Event::CompiledUnknownStart(start) => {
+                // Extract tag name: source between '<' and name_end
+                let tag_name =
+                    &ctx.input[(start.tag_open_event.start + 1) as usize..start.name_end as usize];
+                let attrs: Vec<(String, String)> = start
+                    .attributes
+                    .iter()
+                    .map(|prop| Self::extract_attr(prop, ctx.input))
+                    .collect();
+
+                if start.tag_open_end_event.is_self_closing {
+                    // Self-closing: no CompiledUnknownEnd will follow
+                    self.blocks.push(CustomBlock {
+                        block_type: tag_name.to_string(),
+                        content: String::new(),
+                        attrs,
+                    });
+                } else {
+                    self.pending = Some((tag_name.to_string(), attrs));
+                }
+            }
+            Event::CompiledUnknownEnd(end) => {
+                if let Some((block_type, attrs)) = self.pending.take() {
+                    let content = end
+                        .content
+                        .as_ref()
+                        .map(|span| &ctx.input[span.start as usize..span.end as usize])
+                        .unwrap_or("");
+                    self.blocks.push(CustomBlock {
+                        block_type,
+                        content: content.to_string(),
+                        attrs,
+                    });
+                }
+            }
+            _ => {}
+        }
+        SyntaxResult::Keep(event)
     }
 }
 
@@ -361,6 +464,7 @@ pub fn compile(
             source_map: String::new(),
             code_with_source_map: String::new(),
             styles: Vec::new(),
+            custom_blocks: Vec::new(),
             scope_id: String::new(),
             errors: convert_diagnostics(&ctx.diagnostics),
             duration_ms,
@@ -374,25 +478,61 @@ pub fn compile(
     // for script setup components (the render arrow is returned from setup()).
     // For Options API components, we must always use function render() form.
     // We check the raw input since OxcScript events aren't created until the pipeline runs.
-    let has_script_setup = input
+    let script_setup_pos = input
         .as_bytes()
         .windows(b"<script".len())
         .enumerate()
-        .any(|(i, w)| {
+        .find_map(|(i, w)| {
             if !w.eq_ignore_ascii_case(b"<script") {
-                return false;
+                return None;
             }
             // Find the end of this <script ...> tag
             let rest = &input[i + w.len()..];
             if let Some(gt) = rest.find('>') {
                 let attrs = &rest[..gt];
                 // Check for `setup` as a standalone word in the tag attributes
-                attrs.split_whitespace().any(|a| a == "setup")
-            } else {
-                false
+                if attrs.split_whitespace().any(|a| a == "setup") {
+                    return Some(i);
+                }
             }
+            None
         });
+    let has_script_setup = script_setup_pos.is_some();
+
     let effective_inline = options.resolve_inline() && has_script_setup;
+
+    // When <template> appears before <script setup> and inline mode is active,
+    // the in-place CodeTransform would emit `return (_ctx,_cache) => {` at the
+    // template position (before the setup() wrapper). We detect this and later
+    // use move_slice to relocate the template block inside setup().
+    let template_before_script_range = if effective_inline {
+        let template_start = input
+            .as_bytes()
+            .windows(b"<template".len())
+            .position(|w| w.eq_ignore_ascii_case(b"<template"));
+        match (template_start, script_setup_pos) {
+            (Some(t), Some(s)) if t < s => {
+                // Find end of </template> — the tag includes '>', so pos + len is past it
+                let template_end = input
+                    .as_bytes()
+                    .windows(b"</template>".len())
+                    .rposition(|w| w.eq_ignore_ascii_case(b"</template>"))
+                    .map(|pos| pos + b"</template>".len());
+                // Find end of </script> after the <script setup> tag
+                let script_end = input.as_bytes()[s..]
+                    .windows(b"</script>".len())
+                    .position(|w| w.eq_ignore_ascii_case(b"</script>"))
+                    .map(|rel| s + rel + b"</script>".len());
+                match (template_end, script_end) {
+                    (Some(te), Some(se)) => Some((t as u32, te as u32, se as u32)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
 
     // Check if the SFC has any <template> block.
     let has_template = input
@@ -459,14 +599,19 @@ pub fn compile(
     let mut code_gen_template =
         TemplateGeneratorPlugin::with_options(Rc::clone(&code_transform), template_options);
 
+    let mut custom_block_collector = CustomBlockCollector::new();
+
     {
         // transient plugins
         let mut script_ec = ElementCompilerPlugin::new();
         let mut script_oxc = OxcParserPlugin::new(allocator);
 
-        // Pipeline: parsers first, code_gen last (code_gen order independent)
+        // Pipeline: parsers first, code_gen last (code_gen order independent).
+        // custom_block_collector sits after element_compiler to capture
+        // CompiledUnknownStart/End events before they're dropped by codegen plugins.
         let pipeline: &mut [&mut dyn SyntaxPlugin] = &mut [
             &mut script_ec,
+            &mut custom_block_collector,
             &mut css_parser,
             &mut script_oxc,
             &mut code_gen_css,
@@ -483,6 +628,17 @@ pub fn compile(
     // Emit generated import statements (template helpers + script helpers).
     code_gen_template.emit_imports();
     code_gen_script.end(&ctx);
+
+    // When <template> appears before <script setup> in inline mode, the template
+    // content (return (_ctx,_cache) => { ... }) was emitted at the template's source
+    // position, which precedes the setup() wrapper. Move the entire template block
+    // to after </script> (which was replaced with "\n", leaving setup() open).
+    // This places the render function inside setup() where it belongs.
+    if let Some((tpl_start, tpl_end, script_close_end)) = template_before_script_range {
+        code_transform
+            .borrow_mut()
+            .move_slice(tpl_start, tpl_end, script_close_end);
+    }
 
     let code = code_transform.borrow().build_string();
     let styles = code_gen_css.take_styles();
@@ -541,11 +697,14 @@ pub fn compile(
     // - There is a vapor template (vapor always emits standalone render)
     let has_render = has_template && (!effective_inline || has_vapor_template);
 
+    let custom_blocks = custom_block_collector.take_blocks();
+
     CodegenResult {
         code,
         source_map,
         code_with_source_map,
         styles,
+        custom_blocks,
         scope_id: scope_id_string,
         errors,
         duration_ms,
@@ -863,6 +1022,105 @@ const count = ref(0)
             result.styles[0].code.contains(".btn_"),
             "Module classes should be hashed, got: {}",
             result.styles[0].code
+        );
+    }
+
+    /// @ai-generated — Scoped LESS/SCSS/Sass/Stylus style should NOT be processed
+    /// by lightningcss. Non-CSS langs are preprocessed by Vite BEFORE calling
+    /// processStyle(). The inline Rust pipeline should pass them through raw.
+    #[test]
+    fn test_pipeline_scoped_less_no_css_error() {
+        let input = "<template><div>hi</div></template>\n\
+<style scoped lang=\"less\">\n\
+#AllMessage {\n\
+  position: fixed;\n\
+  font-size: 14rem;\n\
+\n\
+  .center {\n\
+    display: flex;\n\
+\n\
+    img {\n\
+      width: 15rem;\n\
+      transform: rotate(180deg);\n\
+    }\n\
+  }\n\
+\n\
+  .type-dialog {\n\
+    z-index: 9;\n\
+    position: fixed;\n\
+    height: calc(var(--vh, 1vh) * 100);\n\
+\n\
+    .dialog-content {\n\
+      border-radius: 0 0 4rem 4rem;\n\
+\n\
+      img {\n\
+        width: 18rem;\n\
+      }\n\
+    }\n\
+\n\
+    .mask {\n\
+      height: calc(var(--vh, 1vh) * 100);\n\
+    }\n\
+  }\n\
+\n\
+  .messages {\n\
+    .message {\n\
+      display: flex;\n\
+\n\
+      &:first-child {\n\
+        margin-top: 20rem;\n\
+      }\n\
+\n\
+      .left {\n\
+        .avatar {\n\
+          width: 58rem;\n\
+          border-radius: 50%;\n\
+        }\n\
+      }\n\
+    }\n\
+  }\n\
+}\n\
+</style>";
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("Less.vue");
+
+        let result = compile(input, &options, &allocator);
+
+        assert_eq!(result.styles.len(), 1, "Should have one style block");
+        assert!(result.styles[0].scoped, "Style should be scoped");
+        assert!(
+            result.styles[0].errors.is_empty(),
+            "LESS style should NOT produce CSS parse errors, got: {:?}",
+            result.styles[0].errors
+        );
+    }
+
+    /// @ai-generated — Scoped SCSS also should not be processed by lightningcss
+    #[test]
+    fn test_pipeline_scoped_scss_no_css_error() {
+        let input = "<template><div>hi</div></template>\n\
+<style scoped lang=\"scss\">\n\
+$primary: red;\n\
+.box {\n\
+  color: $primary;\n\
+  &__inner {\n\
+    font-size: 14px;\n\
+  }\n\
+}\n\
+</style>";
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("Scss.vue");
+
+        let result = compile(input, &options, &allocator);
+
+        assert_eq!(result.styles.len(), 1, "Should have one style block");
+        assert!(result.styles[0].scoped, "Style should be scoped");
+        assert!(
+            result.styles[0].errors.is_empty(),
+            "SCSS style should NOT produce CSS parse errors, got: {:?}",
+            result.styles[0].errors
         );
     }
 
@@ -2386,5 +2644,134 @@ const onChecked = (e: any, checkedKeys: string[], onItemSelect: (n: any, c: bool
             result.errors
         );
         assert!(!result.code.is_empty(), "Should produce output code");
+    }
+
+    /// @ai-generated - Verify that custom blocks are extracted with correct
+    /// block_type, content, and attributes.
+    #[test]
+    fn test_custom_blocks_extracted() {
+        let input = r#"<i18n lang="json" locale="en">
+{"hello": "world"}
+</i18n>
+
+<template>
+  <div>{{ $t('hello') }}</div>
+</template>
+
+<script setup>
+</script>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.errors.is_empty(),
+            "Should compile without errors, got: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            result.custom_blocks.len(),
+            1,
+            "Should have one custom block"
+        );
+
+        let block = &result.custom_blocks[0];
+        assert_eq!(block.block_type, "i18n");
+        assert_eq!(block.content, "\n{\"hello\": \"world\"}\n");
+
+        // Check attributes
+        assert_eq!(block.attrs.len(), 2);
+        assert!(
+            block
+                .attrs
+                .contains(&("lang".to_string(), "json".to_string())),
+            "Should have lang=json attribute, got: {:?}",
+            block.attrs
+        );
+        assert!(
+            block
+                .attrs
+                .contains(&("locale".to_string(), "en".to_string())),
+            "Should have locale=en attribute, got: {:?}",
+            block.attrs
+        );
+    }
+
+    /// @ai-generated - Multiple custom blocks of different types are all extracted.
+    #[test]
+    fn test_multiple_custom_blocks() {
+        let input = r#"<i18n lang="json">
+{"hello": "world"}
+</i18n>
+
+<docs>
+# My Component
+</docs>
+
+<template>
+  <div>hello</div>
+</template>
+
+<script setup>
+</script>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.errors.is_empty(),
+            "Should compile without errors, got: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            result.custom_blocks.len(),
+            2,
+            "Should have two custom blocks"
+        );
+
+        assert_eq!(result.custom_blocks[0].block_type, "i18n");
+        assert_eq!(result.custom_blocks[1].block_type, "docs");
+        assert!(result.custom_blocks[1].content.contains("# My Component"));
+    }
+
+    /// @ai-generated - Self-closing custom blocks have empty content.
+    #[test]
+    fn test_self_closing_custom_block() {
+        let input = r#"<i18n src="./en.json" />
+
+<template>
+  <div>hello</div>
+</template>
+
+<script setup>
+</script>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.errors.is_empty(),
+            "Should compile without errors, got: {:?}",
+            result.errors
+        );
+        assert_eq!(
+            result.custom_blocks.len(),
+            1,
+            "Should have one custom block"
+        );
+
+        let block = &result.custom_blocks[0];
+        assert_eq!(block.block_type, "i18n");
+        assert_eq!(block.content, "");
+        assert!(
+            block
+                .attrs
+                .contains(&("src".to_string(), "./en.json".to_string())),
+            "Should have src attribute, got: {:?}",
+            block.attrs
+        );
     }
 }

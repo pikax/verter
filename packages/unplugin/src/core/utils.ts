@@ -2,7 +2,7 @@ import type { ViteCodegenResult } from "@verter/native";
 
 export interface VueQuery {
   vue: boolean;
-  type?: "script" | "template" | "style";
+  type?: "script" | "template" | "style" | (string & {});
   index?: number;
   scoped?: boolean;
   lang?: string;

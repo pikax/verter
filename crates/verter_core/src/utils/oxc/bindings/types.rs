@@ -23,6 +23,10 @@ pub struct Binding<'a> {
     pub pos: u32,
     /// Whether this binding should be ignored (is a keyword, parameter, or local variable)
     pub ignore: bool,
+    /// Whether this identifier is the value of a shorthand property (`{ foo }`).
+    /// When true and a prefix is applied (e.g., `_ctx.`), the shorthand must be
+    /// expanded to key: value form (`{ foo: _ctx.foo }`).
+    pub is_shorthand: bool,
 }
 
 /// Represents a function found in an expression (byte-optimized version).
@@ -214,24 +218,28 @@ mod tests {
             span: Span::new(0, 3),
             pos: 0,
             ignore: false,
+            is_shorthand: false,
         });
         result.bindings.push(Binding {
             name: "bar",
             span: Span::new(6, 9),
             pos: 6,
             ignore: false,
+            is_shorthand: false,
         });
         result.bindings.push(Binding {
             name: "foo",
             span: Span::new(12, 15),
             pos: 12,
             ignore: false,
+            is_shorthand: false,
         }); // duplicate
         result.bindings.push(Binding {
             name: "ignored",
             span: Span::new(18, 25),
             pos: 18,
             ignore: true,
+            is_shorthand: false,
         });
 
         let names = result.non_ignored_binding_names();

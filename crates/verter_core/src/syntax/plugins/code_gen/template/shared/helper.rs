@@ -52,6 +52,11 @@ pub fn collect_binding_patches<'alloc>(
                 if let Some(b) = map.get(&f.name) {
                     let prefix = b.accessor_prefix(is_inline);
                     if !prefix.is_empty() {
+                        // Shorthand property: expand `{ foo }` → `{ foo: prefix.foo }`
+                        if f.is_shorthand {
+                            out.push((f.span.start, f.name));
+                            out.push((f.span.start, ": "));
+                        }
                         out.push((f.span.start, prefix));
                     }
                     let suffix = b.accessor_suffix(is_inline);
@@ -59,6 +64,11 @@ pub fn collect_binding_patches<'alloc>(
                         out.push((f.span.end, suffix));
                     }
                 } else {
+                    // Shorthand property: expand `{ foo }` → `{ foo: _ctx.foo }`
+                    if f.is_shorthand {
+                        out.push((f.span.start, f.name));
+                        out.push((f.span.start, ": "));
+                    }
                     out.push((f.span.start, "_ctx."));
                 }
             }
@@ -357,6 +367,11 @@ pub fn build_prefixed_value_into(
             };
             if !prefix.is_empty() || !suffix.is_empty() {
                 buf.push_str(&val_text[last..offset]);
+                // Shorthand property: expand `{ foo }` → `{ foo: prefix.foo }`
+                if b.is_shorthand && !prefix.is_empty() {
+                    buf.push_str(b.name);
+                    buf.push_str(": ");
+                }
                 buf.push_str(prefix);
                 if !suffix.is_empty() {
                     buf.push_str(&val_text[offset..offset + ident_len]);
@@ -837,6 +852,7 @@ mod tests {
                     },
                     pos: *start,
                     ignore: *ignore,
+                    is_shorthand: false,
                 })
                 .collect(),
             ..Default::default()

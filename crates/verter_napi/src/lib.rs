@@ -296,6 +296,16 @@ pub struct JsStyleBlock {
 }
 
 #[napi(object)]
+pub struct JsCustomBlock {
+    /// The tag name (e.g., "i18n", "docs")
+    pub block_type: String,
+    /// Raw content between open and close tags
+    pub content: String,
+    /// Attributes as key-value pairs [[key, value], ...]
+    pub attrs: Vec<Vec<String>>,
+}
+
+#[napi(object)]
 pub struct ViteCodegenResult {
     /// Script block (component definition)
     pub script: Option<JsBlockOutput>,
@@ -303,6 +313,8 @@ pub struct ViteCodegenResult {
     pub template: Option<JsBlockOutput>,
     /// Style blocks
     pub styles: Vec<JsStyleBlock>,
+    /// Custom blocks (e.g., `<i18n>`, `<docs>`)
+    pub custom_blocks: Vec<JsCustomBlock>,
     /// Whether the SFC has a default export (script setup or script with export default)
     pub has_default_export: bool,
     /// Whether the output contains a standalone `function render()` that must be
@@ -394,6 +406,16 @@ fn compile_for_vite_impl(
         }
     }
 
+    let custom_blocks = result
+        .custom_blocks
+        .into_iter()
+        .map(|b| JsCustomBlock {
+            block_type: b.block_type,
+            content: b.content,
+            attrs: b.attrs.into_iter().map(|(k, v)| vec![k, v]).collect(),
+        })
+        .collect();
+
     Ok(ViteCodegenResult {
         script: Some(JsBlockOutput {
             code,
@@ -403,6 +425,7 @@ fn compile_for_vite_impl(
         }),
         template: None,
         styles,
+        custom_blocks,
         has_default_export,
         has_render: result.has_render,
         duration_ms: result.duration_ms,

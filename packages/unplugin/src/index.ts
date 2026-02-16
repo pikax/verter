@@ -63,6 +63,19 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
           map: undefined,
         };
       }
+
+      // Custom blocks (e.g., <i18n>, <docs>)
+      if (
+        query.type &&
+        query.type !== "script" &&
+        query.type !== "template" &&
+        query.type !== "style" &&
+        query.index != null
+      ) {
+        const block = (descriptor as any).customBlocks?.[query.index];
+        if (!block) return;
+        return { code: block.content };
+      }
     },
 
     transformInclude(id) {

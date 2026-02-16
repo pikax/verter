@@ -73,8 +73,9 @@ impl<'alloc> CssGeneratorPlugin<'alloc> {
         let (code, module, errors) = if let Some(content_span) = parsed.content {
             let css_str = &ctx.input[content_span.start as usize..content_span.end as usize];
             let needs_transform = parsed.scoped || !parsed.v_binds.is_empty() || is_module;
+            let is_plain_css = matches!(parsed.lang, None | Some(StyleLang::Css));
 
-            if needs_transform {
+            if needs_transform && is_plain_css {
                 let options = crate::css::ProcessStyleOptions {
                     scope_id: scope_id_str,
                     scoped: parsed.scoped,

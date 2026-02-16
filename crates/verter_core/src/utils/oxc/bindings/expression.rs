@@ -215,7 +215,14 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
                                 // adjust_expression_spans (only expression-convertible keys are),
                                 // so the key span stays substring-relative. The value's Identifier
                                 // span IS correctly adjusted to file-relative positions.
-                                self.visit_expression(&prop.value);
+                                //
+                                // Mark as shorthand so prefixing expands to key: value form
+                                // (e.g., `{ foo }` → `{ foo: _ctx.foo }` not `{ _ctx.foo }`).
+                                if let Expression::Identifier(ident) = &prop.value {
+                                    self.add_shorthand_binding(ident.name.as_str(), ident.span);
+                                } else {
+                                    self.visit_expression(&prop.value);
+                                }
                             } else {
                                 self.visit_expression(&prop.value);
                             }
@@ -679,12 +686,23 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
 
     #[inline]
     fn add_binding(&mut self, name: &'a str, span: OxcSpan) {
+        self.add_binding_inner(name, span, false);
+    }
+
+    #[inline]
+    fn add_shorthand_binding(&mut self, name: &'a str, span: OxcSpan) {
+        self.add_binding_inner(name, span, true);
+    }
+
+    #[inline]
+    fn add_binding_inner(&mut self, name: &'a str, span: OxcSpan, is_shorthand: bool) {
         let ignore = self.ctx.should_ignore(name);
         self.result.bindings.push(Binding {
             name,
             span: span.into(),
             pos: span.start + self.ctx.base_offset,
             ignore,
+            is_shorthand,
         });
     }
 

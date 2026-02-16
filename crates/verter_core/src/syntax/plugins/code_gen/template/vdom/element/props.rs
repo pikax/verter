@@ -146,8 +146,17 @@ pub(super) fn handle_prop_on<'alloc>(
     // the event name in-place (capitalize first char, camelize hyphens, prepend "on").
     if !prop.event.has_dynamic_arg {
         if let Some(arg_span) = prop.event.arg {
-            // 1. Before name: replace @ prefix with sep + "on"
-            let before: &'static str = if sep.is_empty() { "on" } else { ", on" };
+            // Event names with colons (e.g., update:model-value → onUpdate:modelValue)
+            // must be quoted as string keys in JavaScript object literals.
+            let needs_key_quote = raw_event.contains(':');
+
+            // 1. Before name: replace @ prefix with sep + "on" (or quoted variant)
+            let before: &'static str = match (sep.is_empty(), needs_key_quote) {
+                (true, false) => "on",
+                (true, true) => "\"on",
+                (false, false) => ", on",
+                (false, true) => ", \"on",
+            };
             pending_overwrites.push((prop.event.start, arg_span.start, before));
 
             // 2. Uppercase first character
@@ -177,7 +186,9 @@ pub(super) fn handle_prop_on<'alloc>(
                 }
             }
 
-            // 4. After name: event_suffix + ": " + handler_prefix [+ "$event => ("]
+            // 4. After name: [closing quote] + event_suffix + ": " + handler_prefix [+ "$event => ("]
+            let quote_close = if needs_key_quote { "\"" } else { "" };
+
             if let Some(val_span) = prop.event.value {
                 let wrap = prop
                     .exp
@@ -185,12 +196,13 @@ pub(super) fn handle_prop_on<'alloc>(
                     .map(|e| needs_event_handler_wrap(&e.expression))
                     .unwrap_or(false);
 
-                if event_suffix.is_empty() && handler_prefix.is_empty() {
+                if event_suffix.is_empty() && handler_prefix.is_empty() && !needs_key_quote {
                     let after: &'static str = if wrap { ": $event => (" } else { ": " };
                     pending_overwrites.push((arg_span.end, val_span.start, after));
                 } else {
                     buf.clear();
                     buf.push_str(&event_suffix);
+                    buf.push_str(quote_close);
                     buf.push_str(": ");
                     buf.push_str(&handler_prefix);
                     if wrap {
@@ -221,16 +233,13 @@ pub(super) fn handle_prop_on<'alloc>(
                     );
                 }
             } else {
-                // No value: event_suffix + ": () => {}"
-                if event_suffix.is_empty() {
-                    pending_overwrites.push((arg_span.end, prop.event.end, ": () => {}"));
-                } else {
-                    buf.clear();
-                    buf.push_str(&event_suffix);
-                    buf.push_str(": () => {}");
-                    let s = code_transform.alloc_str(buf);
-                    pending_overwrites.push((arg_span.end, prop.event.end, s));
-                }
+                // No value: [closing quote] + event_suffix + ": () => {}"
+                buf.clear();
+                buf.push_str(&event_suffix);
+                buf.push_str(quote_close);
+                buf.push_str(": () => {}");
+                let s = code_transform.alloc_str(buf);
+                pending_overwrites.push((arg_span.end, prop.event.end, s));
             }
         } else {
             // No arg_span (default "click"): use buffer approach
@@ -293,6 +302,10 @@ fn emit_event_buffer<'alloc>(
     is_production: bool,
     pending_overwrites: &mut Vec<(u32, u32, &'alloc str)>,
 ) {
+    // Quote the key if it contains characters invalid as a bare JS identifier (e.g., colon).
+    // Computed property keys (starting with `[`) are already bracketed and must not be quoted.
+    let needs_quote = !event_name.starts_with('[') && !is_valid_js_prop_key(event_name);
+
     if let Some(val_span) = prop.event.value {
         let wrap = prop
             .exp
@@ -300,28 +313,30 @@ fn emit_event_buffer<'alloc>(
             .map(|e| needs_event_handler_wrap(&e.expression))
             .unwrap_or(false);
 
+        buf.clear();
+        buf.push_str(sep);
+        if needs_quote {
+            buf.push('"');
+        }
+        buf.push_str(event_name);
+        if needs_quote {
+            buf.push('"');
+        }
+        buf.push_str(": ");
+        buf.push_str(handler_prefix);
         if wrap {
-            buf.clear();
-            buf.push_str(sep);
-            buf.push_str(event_name);
-            buf.push_str(": ");
-            buf.push_str(handler_prefix);
             buf.push_str("$event => (");
-            let s = code_transform.alloc_str(buf);
-            pending_overwrites.push((prop.event.start, val_span.start, s));
+        }
+        let s = code_transform.alloc_str(buf);
+        pending_overwrites.push((prop.event.start, val_span.start, s));
+
+        if wrap {
             buf.clear();
             buf.push(')');
             buf.push_str(handler_suffix);
             let s = code_transform.alloc_str(buf);
             pending_overwrites.push((val_span.end, prop.event.end, s));
         } else {
-            buf.clear();
-            buf.push_str(sep);
-            buf.push_str(event_name);
-            buf.push_str(": ");
-            buf.push_str(handler_prefix);
-            let s = code_transform.alloc_str(buf);
-            pending_overwrites.push((prop.event.start, val_span.start, s));
             let s = code_transform.alloc_str(handler_suffix);
             pending_overwrites.push((val_span.end, prop.event.end, s));
         }
@@ -337,7 +352,13 @@ fn emit_event_buffer<'alloc>(
     } else {
         buf.clear();
         buf.push_str(sep);
+        if needs_quote {
+            buf.push('"');
+        }
         buf.push_str(event_name);
+        if needs_quote {
+            buf.push('"');
+        }
         buf.push_str(": () => {}");
         let s = code_transform.alloc_str(buf);
         pending_overwrites.push((prop.event.start, prop.event.end, s));

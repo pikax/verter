@@ -275,7 +275,13 @@ pub(crate) fn handle_element_open<'alloc>(
             // Not in setup — fall back to _resolveComponent
             buf.clear();
             buf.push_str("_component_");
-            buf.push_str(tag_name);
+            for ch in tag_name.chars() {
+                if ch == '-' {
+                    buf.push('_');
+                } else {
+                    buf.push(ch);
+                }
+            }
             let var_name = code_transform.alloc_str(buf);
             if resolved_components_set.insert(tag_name) {
                 resolved_components.push(tag_name);
@@ -288,15 +294,14 @@ pub(crate) fn handle_element_open<'alloc>(
     };
 
     // Pre-scan: will this element need _withDirectives() wrapping?
-    // Native v-model, v-show, and custom directives all produce runtime directives.
-    // Component v-model is prop-based, not directive-based.
-    let needs_with_directives = !is_component
-        && ev.props.iter().any(|p| {
-            matches!(
-                p.event.kind,
-                PropKind::Model | PropKind::Show | PropKind::Directive
-            )
-        });
+    // Custom directives (PropKind::Directive) need wrapping on both elements and components.
+    // Native v-model and v-show only need wrapping on native elements (not components).
+    // Component v-model is prop-based (modelValue + onUpdate:modelValue), not directive-based.
+    let needs_with_directives = ev.props.iter().any(|p| match p.event.kind {
+        PropKind::Directive => true,
+        PropKind::Model | PropKind::Show if !is_component => true,
+        _ => false,
+    });
     let wd_prefix = if needs_with_directives {
         "_withDirectives("
     } else {
@@ -521,10 +526,60 @@ pub(crate) fn handle_element_open<'alloc>(
                 .iter()
                 .all(|p| matches!(p.event.kind, PropKind::BindSpread | PropKind::OnSpread));
 
+            // Check if spread props are mixed with regular props → requires _mergeProps.
+            // Vue uses _mergeProps(spreadExpr, { regularProps }) when both are present.
+            let has_mixed_spread = !is_spread_only
+                && ev
+                    .props
+                    .iter()
+                    .any(|p| matches!(p.event.kind, PropKind::BindSpread | PropKind::OnSpread));
+
+            // Track _mergeProps state: whether we're inside a { } object group.
+            let mut in_merge_obj = false;
+            let mut merge_obj_written: usize = 0;
+
             // Normal inline props processing
             let first_prop_start = ev.props[0].event.start;
             if is_spread_only {
                 pending_overwrites.push((open_tag.name_end, first_prop_start, ", "));
+            } else if has_mixed_spread {
+                imports.add(TemplateImportDependencies::MERGE_PROPS);
+                let first_is_spread = matches!(
+                    ev.props[0].event.kind,
+                    PropKind::BindSpread | PropKind::OnSpread
+                );
+                if first_is_spread {
+                    if let Some(k) = state.vif_branch_key {
+                        buf.clear();
+                        buf.push_str(", _mergeProps({key: ");
+                        super::helper::push_u32(buf, k);
+                        buf.push_str("}, ");
+                        let s = code_transform.alloc_str(buf);
+                        pending_overwrites.push((open_tag.name_end, first_prop_start, s));
+                    } else {
+                        pending_overwrites.push((
+                            open_tag.name_end,
+                            first_prop_start,
+                            ", _mergeProps(",
+                        ));
+                    }
+                } else {
+                    if let Some(k) = state.vif_branch_key {
+                        buf.clear();
+                        buf.push_str(", _mergeProps({key: ");
+                        super::helper::push_u32(buf, k);
+                        buf.push_str(", ");
+                        let s = code_transform.alloc_str(buf);
+                        pending_overwrites.push((open_tag.name_end, first_prop_start, s));
+                    } else {
+                        pending_overwrites.push((
+                            open_tag.name_end,
+                            first_prop_start,
+                            ", _mergeProps({",
+                        ));
+                    }
+                    in_merge_obj = true;
+                }
             } else if let Some(k) = state.vif_branch_key {
                 // Inject v-if branch key at the beginning of the props object
                 buf.clear();
@@ -541,7 +596,33 @@ pub(crate) fn handle_element_open<'alloc>(
             // Props that are skipped (e.g. ClassValue when merging) don't count.
             let mut written: usize = 0;
 
-            for prop in ev.props.iter() {
+            for (prop_idx, prop) in ev.props.iter().enumerate() {
+                // Blank gaps between consecutive OXC-parsed props.
+                // Structural directives (v-for, v-if, etc.) are extracted as scopes
+                // and removed from ev.props, but their source text still occupies the
+                // gap between neighboring regular props. Without blanking, raw directive
+                // text leaks into the generated JavaScript output.
+                //
+                // When has_mixed_spread, gap text also handles _mergeProps group
+                // transitions: closing `}` before a spread, opening `{` after a spread.
+                if prop_idx > 0 {
+                    let prev_end = ev.props[prop_idx - 1].event.end;
+                    let is_spread =
+                        matches!(prop.event.kind, PropKind::BindSpread | PropKind::OnSpread);
+                    if has_mixed_spread && is_spread && in_merge_obj {
+                        // Transition: non-spread → spread. Close the {} group.
+                        pending_overwrites.push((prev_end, prop.event.start, "}, "));
+                        in_merge_obj = false;
+                        merge_obj_written = 0;
+                    } else if has_mixed_spread && !is_spread && !in_merge_obj {
+                        // Transition: spread → non-spread. Open a new {} group.
+                        pending_overwrites.push((prev_end, prop.event.start, ", {"));
+                        in_merge_obj = true;
+                        merge_obj_written = 0;
+                    } else if prop.event.start > prev_end {
+                        pending_overwrites.push((prev_end, prop.event.start, ""));
+                    }
+                }
                 // When merging, skip the static ClassValue/StyleValue — they're folded
                 // into the ClassBind/StyleBind handler below.
                 if merge_class && prop.event.kind == PropKind::ClassValue {
@@ -565,7 +646,22 @@ pub(crate) fn handle_element_open<'alloc>(
                     }
                 }
 
-                let sep = if written > 0 { ", " } else { "" };
+                let sep = if has_mixed_spread {
+                    if in_merge_obj {
+                        if merge_obj_written > 0 {
+                            ", "
+                        } else {
+                            ""
+                        }
+                    } else {
+                        // Spread prop: separator handled by gap transitions
+                        ""
+                    }
+                } else if written > 0 {
+                    ", "
+                } else {
+                    ""
+                };
 
                 match &prop.event.kind {
                     PropKind::Value => {
@@ -1013,26 +1109,41 @@ pub(crate) fn handle_element_open<'alloc>(
                     }
 
                     PropKind::BindSpread => {
-                        // v-bind="obj" → _normalizeProps(_guardReactiveProps(expr))
-                        imports.add(TemplateImportDependencies::NORMALIZE_PROPS);
-                        imports.add(TemplateImportDependencies::GUARD_REACTIVE_PROPS);
-                        // BindSpread replaces the entire props object, not a single prop.
-                        // We mark this and handle it specially after the loop.
-                        // For now: overwrite with _normalizeProps wrapper
-                        if let Some(val_span) = prop.event.value {
-                            buf.clear();
-                            buf.push_str(sep);
-                            buf.push_str("_normalizeProps(_guardReactiveProps(");
-                            let s = code_transform.alloc_str(buf);
-                            pending_overwrites.push((prop.event.start, val_span.start, s));
-                            pending_overwrites.push((val_span.end, prop.event.end, "))"));
-                            if let Some(exp) = &prop.exp {
-                                collect_binding_patches(
-                                    exp.bindings.as_ref(),
-                                    bindings,
-                                    is_production,
-                                    binding_patches,
-                                );
+                        if has_mixed_spread {
+                            // In _mergeProps mode: emit the expression as a standalone
+                            // argument (no _normalizeProps wrapping needed).
+                            if let Some(val_span) = prop.event.value {
+                                pending_overwrites.push((prop.event.start, val_span.start, ""));
+                                pending_overwrites.push((val_span.end, prop.event.end, ""));
+                                if let Some(exp) = &prop.exp {
+                                    collect_binding_patches(
+                                        exp.bindings.as_ref(),
+                                        bindings,
+                                        is_production,
+                                        binding_patches,
+                                    );
+                                }
+                            }
+                        } else {
+                            // v-bind="obj" as sole prop source →
+                            // _normalizeProps(_guardReactiveProps(expr))
+                            imports.add(TemplateImportDependencies::NORMALIZE_PROPS);
+                            imports.add(TemplateImportDependencies::GUARD_REACTIVE_PROPS);
+                            if let Some(val_span) = prop.event.value {
+                                buf.clear();
+                                buf.push_str(sep);
+                                buf.push_str("_normalizeProps(_guardReactiveProps(");
+                                let s = code_transform.alloc_str(buf);
+                                pending_overwrites.push((prop.event.start, val_span.start, s));
+                                pending_overwrites.push((val_span.end, prop.event.end, "))"));
+                                if let Some(exp) = &prop.exp {
+                                    collect_binding_patches(
+                                        exp.bindings.as_ref(),
+                                        bindings,
+                                        is_production,
+                                        binding_patches,
+                                    );
+                                }
                             }
                         }
                         state.patch_flag = state.patch_flag.add(PatchFlags::FullProps);
@@ -1084,12 +1195,28 @@ pub(crate) fn handle_element_open<'alloc>(
                         pending_overwrites.push((prop.event.start, prop.event.end, ""));
                     }
                 }
+
+                // Track props within the current _mergeProps object group.
+                if has_mixed_spread && in_merge_obj {
+                    let is_spread =
+                        matches!(prop.event.kind, PropKind::BindSpread | PropKind::OnSpread);
+                    if !is_spread {
+                        merge_obj_written += 1;
+                    }
+                }
             }
 
             // Close the props object: overwrite `>` with `}` (or empty for spread-only)
             let last_prop_end = ev.props.last().unwrap().event.end;
             if is_spread_only {
                 pending_overwrites.push((last_prop_end, open_tag_end.end, ""));
+            } else if has_mixed_spread {
+                // Close _mergeProps: close {} if in object group, then close paren.
+                if in_merge_obj {
+                    pending_overwrites.push((last_prop_end, open_tag_end.end, "})"));
+                } else {
+                    pending_overwrites.push((last_prop_end, open_tag_end.end, ")"));
+                }
             } else {
                 pending_overwrites.push((last_prop_end, open_tag_end.end, "}"));
             }

@@ -59,7 +59,26 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
     lines.push(`import "${filename}?${query.toString()}&lang.${lang}"`);
   });
 
-  if (result.styles.length > 0) {
+  // 1b. Import custom blocks as virtual modules
+  const customBlocks: any[] = (result as any).customBlocks ?? (result as any).custom_blocks ?? [];
+  customBlocks.forEach((block: any, index: number) => {
+    const blockType: string = block.blockType ?? block.block_type;
+    const attrs: string[][] = block.attrs ?? [];
+    const query = new URLSearchParams();
+    query.set("vue", "");
+    query.set("type", blockType);
+    query.set("index", String(index));
+    // Forward block attributes as query params
+    for (const [key, value] of attrs) {
+      if (key !== "type" && key !== "index" && key !== "vue") {
+        query.set(key, value);
+      }
+    }
+    const lang = attrs.find(([k]: string[]) => k === "lang")?.[1] || blockType;
+    lines.push(`import block${index} from "${filename}?${query.toString()}&lang.${lang}"`);
+  });
+
+  if (result.styles.length > 0 || customBlocks.length > 0) {
     lines.push("");
   }
 
@@ -166,7 +185,12 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
     lines.push("_sfc_main.render = render");
   }
 
-  // 5. Apply metadata and export
+  // 5. Apply custom blocks to component
+  customBlocks.forEach((_: any, index: number) => {
+    lines.push(`if (typeof block${index} === 'function') block${index}(_sfc_main)`);
+  });
+
+  // 6. Apply metadata and export
   const hasScoped = result.styles.some((s) => s.scoped);
   const metadataProps: string[] = [];
 
@@ -201,7 +225,7 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
     );
   }
 
-  // 6. HMR setup (development only)
+  // 7. HMR setup (development only)
   if (!isProd && !ssr && hasDefaultExport) {
     if (hmr === "vite") {
       lines.push("");
@@ -245,7 +269,7 @@ export function generateMainModule(result: ViteCodegenResult, options: MainModul
     // hmr === "none" — skip HMR code entirely
   }
 
-  // 7. Export the component
+  // 8. Export the component
   if (hasDefaultExport) {
     lines.push("");
     if (metadataProps.length > 0) {
