@@ -41,6 +41,7 @@ pub(crate) fn handle_text<'alloc>(
         end: ev.end,
         kind: ChildKind::Text,
         scope_prefix: "",
+        is_named_slot: false,
     });
 
     // Escape the text content in-place for use inside a JS string literal.

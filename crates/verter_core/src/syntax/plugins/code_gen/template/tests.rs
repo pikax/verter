@@ -6107,6 +6107,28 @@ fn test_event_modifier_no_handler() {
     );
 }
 
+/// @ai-generated — @click.stop="" (empty string value) should produce valid JS.
+/// Vue compiler emits `_withModifiers(() => {}, ["stop"])`.
+/// Verter was emitting `_withModifiers(, ["stop"])` — missing first argument.
+#[test]
+fn test_event_modifier_empty_string_handler() {
+    let code = gen_and_validate(
+        r#"<script setup>
+</script>
+<template><a @click.stop="">link</a></template>"#,
+    );
+    assert!(
+        !code.contains("_withModifiers(,"),
+        "Empty string handler should have () => {{}} as first arg, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_withModifiers("),
+        "Should still use _withModifiers for .stop modifier, got:\n{}",
+        code
+    );
+}
+
 // =========================================================================
 // Bug: Element-plus backtop pattern — Transition + v-show + @click.stop + slot
 // =========================================================================
@@ -6476,6 +6498,59 @@ function onBalRulesAccepted() {}
     assert!(
         code.contains(r#""onUpdate:modelValue""#),
         "Event name with colon should be quoted as string key, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - v-bind="$attrs" spread with many individual props and events on a component.
+/// Reproduces bug from element-plus popover.vue where v-bind="$attrs" combined with 20+ props
+/// and events including @update:visible (colon in event name) generated invalid JavaScript.
+#[test]
+fn test_vbind_spread_with_many_props_and_events() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import { computed, ref } from 'vue'
+import ElTooltip from './ElTooltip.vue'
+const trigger = ref('click')
+const onUpdateVisible = computed(() => true)
+const beforeEnter = () => {}
+const afterEnter = () => {}
+</script>
+<template>
+  <ElTooltip
+    ref="tooltipRef"
+    v-bind="$attrs"
+    :trigger="trigger"
+    :disabled="false"
+    @update:visible="onUpdateVisible"
+    @before-show="beforeEnter"
+    @show="afterEnter"
+  >
+    <template v-if="$slots.reference">
+      <slot name="reference" />
+    </template>
+    <template #content>
+      <slot />
+    </template>
+  </ElTooltip>
+</template>"#,
+    );
+    // Should use _mergeProps for v-bind spread mixed with other props
+    assert!(
+        code.contains("_mergeProps"),
+        "v-bind spread with individual props should use _mergeProps, got:\n{}",
+        code
+    );
+    // @update:visible should produce a quoted key
+    assert!(
+        code.contains(r#""onUpdate:visible""#) || code.contains(r#""onUpdate:Visible""#),
+        "Event name with colon should be quoted as string key, got:\n{}",
+        code
+    );
+    // Non-named-slot content (template v-if) must be wrapped in default: _withCtx
+    assert!(
+        code.contains("default: _withCtx("),
+        "Implicit default slot content should be wrapped in default: _withCtx(), got:\n{}",
         code
     );
 }

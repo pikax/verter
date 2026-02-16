@@ -32,6 +32,7 @@ pub(crate) fn handle_comment<'alloc>(
         end: 0, // unused for comments
         kind: ChildKind::Comment,
         scope_prefix: "",
+        is_named_slot: false,
     });
 
     imports.add(TemplateImportDependencies::CREATE_COMMENT_VNODE);

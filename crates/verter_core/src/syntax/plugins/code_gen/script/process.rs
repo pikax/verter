@@ -230,6 +230,7 @@ pub fn process_script_event<'alloc>(
     }
 
     let needs_processing = if let Some(Some(opt)) = options {
+        let has_move = opt.move_span.is_some();
         if let Some(span) = opt.move_span {
             code_transform.move_wrapped(
                 span.start,
@@ -243,10 +244,13 @@ pub fn process_script_event<'alloc>(
                 },
                 if is_typescript { "," } else { ",{" },
             );
-            false
-        } else {
-            true
         }
+        // Apply overwrite_span to remove the defineOptions() call from its original location.
+        // The object argument was already moved above; this removes the remaining call expression.
+        if let Some((span, s)) = opt.overwrite_span {
+            code_transform.overwrite(span.start, span.end, s.as_str());
+        }
+        !has_move
     } else {
         true
     };

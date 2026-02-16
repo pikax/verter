@@ -51,6 +51,11 @@ pub(crate) struct ChildInfo<'alloc> {
     /// Emitted by the close phase as part of the separator prepend_left call, ensuring correct
     /// ordering: separator THEN scope prefix THEN child content.
     pub scope_prefix: &'alloc str,
+    /// Whether this child is a `<template #name>` that defines a named slot.
+    /// Named slot children emit their own `name: _withCtx(...)` string and don't
+    /// need wrapping by the parent. Non-named-slot children inside a component with
+    /// named slots must be wrapped in `default: _withCtx(() => [...])`.
+    pub is_named_slot: bool,
 }
 
 /// Stored scope close token — emitted after the element VNode call closes.

@@ -241,12 +241,82 @@ pub(crate) fn handle_element_close<'alloc>(
 
     // Named slot children: component has <template #name> children.
     // Children become `{ first: _withCtx(...), second: _withCtx(...), _: 1 }`.
+    //
+    // When a component has BOTH named slot templates (`<template #name>`) and
+    // non-named-slot content (e.g., `<template v-if>`, bare elements, text),
+    // the non-named-slot children must be wrapped in `default: _withCtx(() => [...])`.
+    // Named slot children already emit their own `name: _withCtx(...)` during their
+    // own close phase (is_named_slot_template handling above).
     if state.has_named_slot_children && has_children {
-        // Emit separators: `, {` before first, `, ` between
-        for (i, child) in state.children.iter().enumerate() {
-            let sep = if i == 0 { ", {" } else { ", " };
-            let s = child_separator_str(code_transform, sep, child, buf);
-            pending_prepend_lefts.push((child.start, s));
+        imports.add(TemplateImportDependencies::WITH_CTX);
+
+        // Check if any children are NOT named slot templates.
+        let has_implicit_default = state.children.iter().any(|c| !c.is_named_slot);
+
+        if !has_implicit_default {
+            // All children are named slot templates — simple case.
+            for (i, child) in state.children.iter().enumerate() {
+                let sep = if i == 0 { ", {" } else { ", " };
+                let s = child_separator_str(code_transform, sep, child, buf);
+                pending_prepend_lefts.push((child.start, s));
+            }
+        } else {
+            // Mixed: some children are named slots, some are implicit default slot content.
+            // Group non-named-slot children into `default: _withCtx(() => [...])`.
+            //
+            // Strategy: use the separator before each child to handle transitions.
+            // - When entering default slot content: prepend `default: _withCtx(() => [`
+            // - When transitioning default→named: prepend `]), ` before the named slot child
+            // - When the last child is default: close `])` in the close string
+            let mut first_in_object = true;
+            let mut in_default_slot = false;
+
+            for child in state.children.iter() {
+                if child.is_named_slot {
+                    if in_default_slot {
+                        // Transition: default slot → named slot.
+                        // Close the default slot wrapper and start the named slot separator.
+                        buf.clear();
+                        buf.push_str("]), ");
+                        buf.push_str(child.scope_prefix);
+                        buf.push_str(child.kind.content_prefix());
+                        let s = code_transform.alloc_str(buf);
+                        pending_prepend_lefts.push((child.start, s));
+                        in_default_slot = false;
+                    } else {
+                        // Named slot entry — already emits `name: _withCtx(...)` on its own
+                        let sep = if first_in_object { ", {" } else { ", " };
+                        let s = child_separator_str(code_transform, sep, child, buf);
+                        pending_prepend_lefts.push((child.start, s));
+                    }
+                    first_in_object = false;
+                } else {
+                    // Implicit default slot content
+                    if !in_default_slot {
+                        // Start the default slot wrapper: `default: _withCtx(() => [`
+                        buf.clear();
+                        if first_in_object {
+                            buf.push_str(", {default: _withCtx(() => [");
+                        } else {
+                            buf.push_str(", default: _withCtx(() => [");
+                        }
+                        buf.push_str(child.scope_prefix);
+                        buf.push_str(child.kind.content_prefix());
+                        let s = code_transform.alloc_str(buf);
+                        pending_prepend_lefts.push((child.start, s));
+                        first_in_object = false;
+                        in_default_slot = true;
+                    } else {
+                        // Continue inside the default slot array
+                        buf.clear();
+                        buf.push_str(", ");
+                        buf.push_str(child.scope_prefix);
+                        buf.push_str(child.kind.content_prefix());
+                        let s = code_transform.alloc_str(buf);
+                        pending_prepend_lefts.push((child.start, s));
+                    }
+                }
+            }
         }
 
         // Build close: `, _: flag})`
@@ -262,6 +332,17 @@ pub(crate) fn handle_element_close<'alloc>(
             "1 /* STABLE */"
         };
         buf.clear();
+        // If the last child was implicit default slot content, close the _withCtx wrapper
+        if has_implicit_default {
+            let last_is_default = state
+                .children
+                .last()
+                .map(|c| !c.is_named_slot)
+                .unwrap_or(false);
+            if last_is_default {
+                buf.push_str("])");
+            }
+        }
         buf.push_str(", _: ");
         buf.push_str(slot_flag);
         buf.push('}');

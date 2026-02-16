@@ -190,54 +190,74 @@ pub(super) fn handle_prop_on<'alloc>(
             let quote_close = if needs_key_quote { "\"" } else { "" };
 
             if let Some(val_span) = prop.event.value {
-                let wrap = prop
-                    .exp
-                    .as_ref()
-                    .map(|e| needs_event_handler_wrap(&e.expression))
-                    .unwrap_or(false);
+                // Empty value (e.g., @click.stop="") — treat like no-value
+                // but still wrap with modifier helpers.
+                // Vue compiler emits `_withModifiers(() => {}, ["stop"])`.
+                let is_empty_value = val_span.start == val_span.end;
 
-                if event_suffix.is_empty() && handler_prefix.is_empty() && !needs_key_quote {
-                    let after: &'static str = if wrap { ": $event => (" } else { ": " };
-                    pending_overwrites.push((arg_span.end, val_span.start, after));
-                } else {
+                if is_empty_value {
                     buf.clear();
                     buf.push_str(&event_suffix);
                     buf.push_str(quote_close);
                     buf.push_str(": ");
                     buf.push_str(&handler_prefix);
-                    if wrap {
-                        buf.push_str("$event => (");
-                    }
-                    let s = code_transform.alloc_str(buf);
-                    pending_overwrites.push((arg_span.end, val_span.start, s));
-                }
-
-                // Suffix overwrite after value
-                if wrap {
-                    buf.clear();
-                    buf.push(')');
+                    buf.push_str("() => {}");
                     buf.push_str(&handler_suffix);
                     let s = code_transform.alloc_str(buf);
-                    pending_overwrites.push((val_span.end, prop.event.end, s));
+                    pending_overwrites.push((arg_span.end, prop.event.end, s));
                 } else {
-                    let s = code_transform.alloc_str(&handler_suffix);
-                    pending_overwrites.push((val_span.end, prop.event.end, s));
-                }
+                    let wrap = prop
+                        .exp
+                        .as_ref()
+                        .map(|e| needs_event_handler_wrap(&e.expression))
+                        .unwrap_or(false);
 
-                if let Some(exp) = &prop.exp {
-                    collect_binding_patches(
-                        exp.bindings.as_ref(),
-                        bindings,
-                        is_production,
-                        binding_patches,
-                    );
+                    if event_suffix.is_empty() && handler_prefix.is_empty() && !needs_key_quote {
+                        let after: &'static str = if wrap { ": $event => (" } else { ": " };
+                        pending_overwrites.push((arg_span.end, val_span.start, after));
+                    } else {
+                        buf.clear();
+                        buf.push_str(&event_suffix);
+                        buf.push_str(quote_close);
+                        buf.push_str(": ");
+                        buf.push_str(&handler_prefix);
+                        if wrap {
+                            buf.push_str("$event => (");
+                        }
+                        let s = code_transform.alloc_str(buf);
+                        pending_overwrites.push((arg_span.end, val_span.start, s));
+                    }
+
+                    // Suffix overwrite after value
+                    if wrap {
+                        buf.clear();
+                        buf.push(')');
+                        buf.push_str(&handler_suffix);
+                        let s = code_transform.alloc_str(buf);
+                        pending_overwrites.push((val_span.end, prop.event.end, s));
+                    } else {
+                        let s = code_transform.alloc_str(&handler_suffix);
+                        pending_overwrites.push((val_span.end, prop.event.end, s));
+                    }
+
+                    if let Some(exp) = &prop.exp {
+                        collect_binding_patches(
+                            exp.bindings.as_ref(),
+                            bindings,
+                            is_production,
+                            binding_patches,
+                        );
+                    }
                 }
             } else {
                 // No value: [closing quote] + event_suffix + ": () => {}"
                 buf.clear();
                 buf.push_str(&event_suffix);
                 buf.push_str(quote_close);
-                buf.push_str(": () => {}");
+                buf.push_str(": ");
+                buf.push_str(&handler_prefix);
+                buf.push_str("() => {}");
+                buf.push_str(&handler_suffix);
                 let s = code_transform.alloc_str(buf);
                 pending_overwrites.push((arg_span.end, prop.event.end, s));
             }
@@ -307,47 +327,69 @@ fn emit_event_buffer<'alloc>(
     let needs_quote = !event_name.starts_with('[') && !is_valid_js_prop_key(event_name);
 
     if let Some(val_span) = prop.event.value {
-        let wrap = prop
-            .exp
-            .as_ref()
-            .map(|e| needs_event_handler_wrap(&e.expression))
-            .unwrap_or(false);
+        // Empty value (e.g., @click.stop="") — emit `() => {}` as the handler,
+        // still wrapped with any modifier helpers.
+        let is_empty_value = val_span.start == val_span.end;
 
-        buf.clear();
-        buf.push_str(sep);
-        if needs_quote {
-            buf.push('"');
-        }
-        buf.push_str(event_name);
-        if needs_quote {
-            buf.push('"');
-        }
-        buf.push_str(": ");
-        buf.push_str(handler_prefix);
-        if wrap {
-            buf.push_str("$event => (");
-        }
-        let s = code_transform.alloc_str(buf);
-        pending_overwrites.push((prop.event.start, val_span.start, s));
-
-        if wrap {
+        if is_empty_value {
             buf.clear();
-            buf.push(')');
+            buf.push_str(sep);
+            if needs_quote {
+                buf.push('"');
+            }
+            buf.push_str(event_name);
+            if needs_quote {
+                buf.push('"');
+            }
+            buf.push_str(": ");
+            buf.push_str(handler_prefix);
+            buf.push_str("() => {}");
             buf.push_str(handler_suffix);
             let s = code_transform.alloc_str(buf);
-            pending_overwrites.push((val_span.end, prop.event.end, s));
+            pending_overwrites.push((prop.event.start, prop.event.end, s));
         } else {
-            let s = code_transform.alloc_str(handler_suffix);
-            pending_overwrites.push((val_span.end, prop.event.end, s));
-        }
+            let wrap = prop
+                .exp
+                .as_ref()
+                .map(|e| needs_event_handler_wrap(&e.expression))
+                .unwrap_or(false);
 
-        if let Some(exp) = &prop.exp {
-            collect_binding_patches(
-                exp.bindings.as_ref(),
-                bindings,
-                is_production,
-                binding_patches,
-            );
+            buf.clear();
+            buf.push_str(sep);
+            if needs_quote {
+                buf.push('"');
+            }
+            buf.push_str(event_name);
+            if needs_quote {
+                buf.push('"');
+            }
+            buf.push_str(": ");
+            buf.push_str(handler_prefix);
+            if wrap {
+                buf.push_str("$event => (");
+            }
+            let s = code_transform.alloc_str(buf);
+            pending_overwrites.push((prop.event.start, val_span.start, s));
+
+            if wrap {
+                buf.clear();
+                buf.push(')');
+                buf.push_str(handler_suffix);
+                let s = code_transform.alloc_str(buf);
+                pending_overwrites.push((val_span.end, prop.event.end, s));
+            } else {
+                let s = code_transform.alloc_str(handler_suffix);
+                pending_overwrites.push((val_span.end, prop.event.end, s));
+            }
+
+            if let Some(exp) = &prop.exp {
+                collect_binding_patches(
+                    exp.bindings.as_ref(),
+                    bindings,
+                    is_production,
+                    binding_patches,
+                );
+            }
         }
     } else {
         buf.clear();
@@ -359,7 +401,10 @@ fn emit_event_buffer<'alloc>(
         if needs_quote {
             buf.push('"');
         }
-        buf.push_str(": () => {}");
+        buf.push_str(": ");
+        buf.push_str(handler_prefix);
+        buf.push_str("() => {}");
+        buf.push_str(handler_suffix);
         let s = code_transform.alloc_str(buf);
         pending_overwrites.push((prop.event.start, prop.event.end, s));
     }

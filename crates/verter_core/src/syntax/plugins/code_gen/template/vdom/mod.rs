@@ -453,6 +453,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                 end: 0, // unused for elements
                 kind: ChildKind::Element,
                 scope_prefix: "",
+                is_named_slot: false,
             });
         }
 
@@ -589,6 +590,11 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                 parent.has_named_slot_children = true;
                 if state.slot_is_dynamic {
                     parent.any_dynamic_slots = true;
+                }
+                // Mark the child info so the close phase can distinguish
+                // named slot entries from implicit default slot content.
+                if let Some(last_child) = parent.children.last_mut() {
+                    last_child.is_named_slot = true;
                 }
             }
         }
@@ -846,6 +852,7 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             end: ev.end,
             kind: ChildKind::Interpolation,
             scope_prefix: "",
+            is_named_slot: false,
         });
 
         interpolation::handle_interpolation(

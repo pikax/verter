@@ -1118,6 +1118,41 @@ const b = 2
         );
     }
 
+    /// @ai-generated — defineOptions should be stripped when used with other macros (oku-primitives pattern)
+    #[test]
+    fn test_define_options_with_name_and_inherit_attrs() {
+        let code = gen_and_validate(
+            r#"<script setup lang="ts">
+import type { LabelEmits, LabelProps } from './Label.ts'
+import { Primitive } from '../primitive/index.ts'
+
+defineOptions({
+  name: 'RadixLabel',
+  inheritAttrs: false,
+})
+
+withDefaults(defineProps<LabelProps>(), {})
+const emit = defineEmits<LabelEmits>()
+</script>
+
+<template>
+  <Primitive>
+    <slot />
+  </Primitive>
+</template>"#,
+        );
+        assert!(
+            !code.contains("defineOptions("),
+            "defineOptions should be stripped from output, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("inheritAttrs: false"),
+            "defineOptions object should be merged into component definition, got:\n{}",
+            code
+        );
+    }
+
     // =========================================================================
     // defineSlots
     // =========================================================================
