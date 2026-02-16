@@ -1203,10 +1203,19 @@ pub(crate) fn handle_element_open<'alloc>(
                 }
 
                 // Track props within the current _mergeProps object group.
+                // Only count props that actually emit content into the object.
+                // Show and Directive emit "" (removed from props) and use withDirectives
+                // instead, so they must not be counted — otherwise the next real prop
+                // gets a leading ", " separator producing invalid `{, ...}`.
                 if has_mixed_spread && in_merge_obj {
-                    let is_spread =
-                        matches!(prop.event.kind, PropKind::BindSpread | PropKind::OnSpread);
-                    if !is_spread {
+                    let is_non_emitting = matches!(
+                        prop.event.kind,
+                        PropKind::BindSpread
+                            | PropKind::OnSpread
+                            | PropKind::Show
+                            | PropKind::Directive
+                    );
+                    if !is_non_emitting {
                         merge_obj_written += 1;
                     }
                 }

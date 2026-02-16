@@ -3169,6 +3169,34 @@ const count = ref(0)
         );
     }
 
+    /// @ai-generated — v-show with v-bind spread must not leave empty leading prop in _mergeProps
+    #[test]
+    fn test_vshow_with_vbind_spread() {
+        let input = r#"<script setup>
+import { ref } from 'vue'
+const loaded = ref(false)
+const onLoaded = () => { loaded.value = true }
+</script>
+<template>
+  <div>
+    <img v-show="loaded" :width="'auto'" :height="'auto'" v-bind="$attrs" @load="onLoaded" />
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            !result.code.contains("{,"),
+            "Should not have empty leading prop in _mergeProps object: {}",
+            result.code
+        );
+        // Vue official compiler groups non-spread props before and after v-bind="$attrs":
+        // _mergeProps({ width: ..., height: ... }, _ctx.$attrs, { onLoad: ... })
+        assert!(
+            result.code.contains("{width:"),
+            "First _mergeProps group should start with width (no empty slot): {}",
+            result.code
+        );
+    }
+
     /// @ai-generated — Shorthand property with $setup. prefix (non-inline mode) must expand
     #[test]
     fn test_shorthand_property_with_setup_prefix() {
