@@ -210,7 +210,6 @@ fn adjust_object_expression_spans(obj: &mut ObjectExpression<'_>, offset: u32) {
         match prop {
             ObjectPropertyKind::ObjectProperty(p) => {
                 adjust_span(&mut p.span, offset);
-                // Key might not be convertible to expression (e.g., shorthand properties like `{ foo }`)
                 if let Some(key_expr) = p.key.as_expression_mut() {
                     adjust_expression_spans(key_expr, offset);
                 }
@@ -356,12 +355,18 @@ fn adjust_conditional_expression_spans(cond: &mut ConditionalExpression<'_>, off
 fn adjust_arrow_function_expression_spans(arrow: &mut ArrowFunctionExpression<'_>, offset: u32) {
     adjust_span(&mut arrow.span, offset);
     adjust_formal_parameters_spans(&mut arrow.params, offset);
-    // Body could be expression or function body - handle expression case
+    adjust_span(&mut arrow.body.span, offset);
     if arrow.expression {
+        // Expression body: (x) => x + 1
         if let Some(oxc_ast::ast::Statement::ExpressionStatement(stmt)) =
             arrow.body.statements.first_mut()
         {
             adjust_expression_spans(&mut stmt.expression, offset);
+        }
+    } else {
+        // Block body: (x) => { return x + 1; }
+        for stmt in &mut arrow.body.statements {
+            adjust_statement_spans(stmt, offset);
         }
     }
 }
@@ -737,7 +742,6 @@ fn subtract_expression_spans(expr: &mut Expression<'_>, offset: u32) {
             for prop in &mut obj.properties {
                 if let ObjectPropertyKind::ObjectProperty(p) = prop {
                     adjust_span_subtract(&mut p.span, offset);
-                    // Key might not be convertible to expression (e.g., shorthand properties like `{ foo }`)
                     if let Some(key_expr) = p.key.as_expression_mut() {
                         subtract_expression_spans(key_expr, offset);
                     }

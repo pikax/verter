@@ -2151,4 +2151,240 @@ const show = ref(true)
             result.errors
         );
     }
+
+    /// @ai-generated - v-for with computed member expression iterable should not panic.
+    ///
+    /// Regression test: `collections[activeIndex].data` has two references
+    /// (`collections` and `activeIndex`) that may come out of the FxHashSet in
+    /// arbitrary order. `prefix_vfor_references_into` assumed ascending order,
+    /// causing a slice panic when `activeIndex` (higher offset) was iterated
+    /// before `collections` (lower offset).
+    #[test]
+    fn test_vfor_computed_member_expression_does_not_panic() {
+        let input = r#"<script setup>
+import { ref, computed } from 'vue'
+const activeIndex = ref(0)
+const collections = computed(() => [
+  { id: 'a', data: [1, 2] },
+  { id: 'b', data: [3, 4] },
+])
+</script>
+<template>
+  <div v-for="item in collections[activeIndex].data" :key="item">
+    {{ item }}
+  </div>
+</template>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.errors.is_empty(),
+            "Should compile without errors, got: {:?}",
+            result.errors
+        );
+        assert!(!result.code.is_empty(), "Should produce output code");
+        assert!(
+            result.code.contains("_renderList"),
+            "Should contain _renderList for v-for, got: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated - Directive with shorthand object properties should not panic.
+    ///
+    /// Regression test: `v-tooltip="{ content, offset }"` with shorthand props
+    /// causes an overflow in `build_prefixed_value_into` when `b.span.start < val_start`.
+    #[test]
+    fn test_directive_shorthand_object_props_does_not_panic() {
+        let input = r#"<script setup>
+import { ref } from 'vue'
+const content = ref('hello')
+const offset = ref(10)
+</script>
+<template>
+  <div v-tooltip="{ content, offset, placement: 'right' }">hover</div>
+</template>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.errors.is_empty(),
+            "Should compile without errors, got: {:?}",
+            result.errors
+        );
+        assert!(!result.code.is_empty(), "Should produce output code");
+    }
+
+    /// @ai-generated - Options API component with directive using shorthand object properties.
+    ///
+    /// Regression test: Options API (defineComponent) with directive value like
+    /// `v-tooltip="{ content, offset }"` where content/offset come from props.
+    #[test]
+    fn test_options_api_directive_shorthand_does_not_panic() {
+        let input = r#"<script lang="ts">
+import { defineComponent } from 'vue'
+export default defineComponent({
+  props: {
+    content: { type: String, required: true },
+    offset: { type: Array, default: () => [0, 15] },
+  },
+})
+</script>
+<template>
+  <div v-tooltip="{ content, offset, placement: 'right' }">hover</div>
+</template>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.errors.is_empty(),
+            "Should compile without errors, got: {:?}",
+            result.errors
+        );
+        assert!(!result.code.is_empty(), "Should produce output code");
+    }
+
+    /// @ai-generated - Vue SFC with custom `<docs>` block containing multi-byte UTF-8
+    /// and shorthand object properties in the template.
+    ///
+    /// Regression test: custom blocks with Chinese characters (3-byte UTF-8) before
+    /// `<template>` combined with shorthand object properties could cause a char
+    /// boundary panic in `CodeTransform::build_string()` because byte positions
+    /// land in the middle of multi-byte characters.
+    #[test]
+    fn test_custom_block_with_multibyte_utf8_does_not_panic() {
+        // Matches 7109_clickable.vue from ant-design-vue
+        let input = r#"<docs>
+---
+order: 9
+title:
+  zh-CN: 可点击
+  en-US: Clickable
+---
+
+## zh-CN
+
+设置 `v-model` 后，Steps 变为可点击状态。
+
+## en-US
+
+Setting `v-model` makes Steps clickable.
+</docs>
+
+<template>
+  <div>
+    <a-steps
+      v-model:current="current"
+      :items="[
+        {
+          title: 'Step 1',
+          description,
+        },
+        {
+          title: 'Step 2',
+          description,
+        },
+        {
+          title: 'Step 3',
+          description,
+        },
+      ]"
+    ></a-steps>
+  </div>
+</template>
+<script lang="ts" setup>
+import { ref } from 'vue';
+const current = ref<number>(0);
+const description = 'This is a description.';
+</script>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.errors.is_empty(),
+            "Should compile without errors, got: {:?}",
+            result.errors
+        );
+        assert!(!result.code.is_empty(), "Should produce output code");
+    }
+
+    /// @ai-generated - Vue SFC with `<docs>` block, scoped slots, and multi-byte UTF-8.
+    ///
+    /// Regression test: file from ant-design-vue (tree-transfer.vue) with Chinese
+    /// chars in `<docs>` block, scoped slots with destructuring, and spread operators.
+    #[test]
+    fn test_docs_block_with_scoped_slots_does_not_panic() {
+        let input = r#"<docs>
+---
+order: 7
+title:
+  zh-CN: 树穿梭框
+  en-US: Tree Transfer
+---
+
+## zh-CN
+
+使用 Tree 组件作为自定义渲染列表。
+
+## en-US
+
+Customize render list with Tree component.
+
+</docs>
+
+<template>
+  <div>
+    <a-transfer
+      v-model:target-keys="targetKeys"
+      class="tree-transfer"
+      :data-source="dataSource"
+      :render="item => item.title"
+      :show-select-all="false"
+    >
+      <template #children="{ direction, selectedKeys, onItemSelect }">
+        <a-tree
+          v-if="direction === 'left'"
+          block-node
+          checkable
+          check-strictly
+          default-expand-all
+          :checked-keys="[...selectedKeys, ...targetKeys]"
+          :tree-data="treeData"
+          @check="
+            (_, props) => {
+              onChecked(props, [...selectedKeys, ...targetKeys], onItemSelect);
+            }
+          "
+        />
+      </template>
+    </a-transfer>
+  </div>
+</template>
+<script lang="ts" setup>
+import { computed, ref } from 'vue';
+const targetKeys = ref<string[]>([]);
+const dataSource = ref([]);
+const treeData = computed(() => []);
+const onChecked = (e: any, checkedKeys: string[], onItemSelect: (n: any, c: boolean) => void) => {};
+</script>"#;
+
+        let allocator = Allocator::new();
+        let options = CodegenOptions::new().with_filename("test.vue");
+        let result = compile(input, &options, &allocator);
+
+        assert!(
+            result.errors.is_empty(),
+            "Should compile without errors, got: {:?}",
+            result.errors
+        );
+        assert!(!result.code.is_empty(), "Should produce output code");
+    }
 }

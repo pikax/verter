@@ -209,9 +209,13 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
                                 self.visit_property_key(&prop.key);
                             }
                             if prop.shorthand {
-                                if let PropertyKey::StaticIdentifier(ident) = &prop.key {
-                                    self.add_binding(ident.name.as_str(), ident.span);
-                                }
+                                // For shorthand `{ foo }`, use the VALUE (Expression::Identifier)
+                                // rather than the KEY (PropertyKey::StaticIdentifier).
+                                // StaticIdentifier key spans are NOT adjusted by
+                                // adjust_expression_spans (only expression-convertible keys are),
+                                // so the key span stays substring-relative. The value's Identifier
+                                // span IS correctly adjusted to file-relative positions.
+                                self.visit_expression(&prop.value);
                             } else {
                                 self.visit_expression(&prop.value);
                             }
