@@ -335,6 +335,11 @@ jobs:
   integration-test:
     name: Run Integration Tests
     needs: [validate, publish-npm]
+    permissions:
+      contents: read
+      checks: write
+      issues: write
+      pull-requests: write
     uses: ./.github/workflows/integration-test.yml
     with:
       source: npm
