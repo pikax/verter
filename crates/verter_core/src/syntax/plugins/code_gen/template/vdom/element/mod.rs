@@ -224,38 +224,41 @@ pub(crate) fn handle_element_open<'alloc>(
     let is_dynamic_component = open_tag.kind == ElementKind::DynamicComponent;
     let component_var: Option<&'alloc str> = if is_dynamic_component {
         // <component :is="expr"> → _resolveDynamicComponent(expr)
-        // Extract the :is expression from props
-        let is_expr = ev.props.iter().find_map(|p| {
+        // Extract the :is prop (not just the expression text) so we can use
+        // its OXC-parsed binding info for correct prefixing of complex expressions.
+        let is_prop = ev.props.iter().find(|p| {
             if p.event.kind == PropKind::Bind {
                 if let Some(ref arg) = p.event.arg {
                     let attr_name = &ctx.input[arg.start as usize..arg.end as usize];
-                    if attr_name == "is" {
-                        return p
-                            .exp
-                            .as_ref()
-                            .map(|exp| &ctx.input[exp.start as usize..exp.end as usize]);
-                    }
+                    return attr_name == "is";
                 }
             }
-            None
+            false
         });
-        if let Some(expr) = is_expr {
-            imports.add(TemplateImportDependencies::RESOLVE_DYNAMIC_COMPONENT);
-            buf.clear();
-            buf.push_str("_resolveDynamicComponent(");
-            // Prefix the expression for setup context and add .value for refs
-            if let Some(bt) = bindings.get(expr) {
-                buf.push_str(bt.accessor_prefix(inline));
-                buf.push_str(expr);
-                buf.push_str(bt.accessor_suffix(inline));
-            } else if inline {
-                buf.push_str(expr);
+        if let Some(prop) = is_prop {
+            if let Some(ref exp) = prop.exp {
+                let expr = &ctx.input[exp.start as usize..exp.end as usize];
+                imports.add(TemplateImportDependencies::RESOLVE_DYNAMIC_COMPONENT);
+                buf.clear();
+                buf.push_str("_resolveDynamicComponent(");
+                // Use build_prefixed_value_into to correctly handle complex
+                // expressions (e.g., `!hasLabel ? 'span' : 'label'`). The simple
+                // `bindings.get(expr)` approach fails when the expression is not
+                // a single identifier.
+                build_prefixed_value_into(
+                    buf,
+                    expr,
+                    exp.start,
+                    exp.bindings.as_ref(),
+                    bindings,
+                    inline,
+                    &[],
+                );
+                buf.push(')');
+                Some(code_transform.alloc_str(buf))
             } else {
-                buf.push_str("$setup.");
-                buf.push_str(expr);
+                None
             }
-            buf.push(')');
-            Some(code_transform.alloc_str(buf))
         } else {
             None
         }

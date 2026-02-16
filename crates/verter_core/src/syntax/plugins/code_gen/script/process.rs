@@ -402,10 +402,16 @@ fn strip_ts_declarations<'alloc>(
                 }
             }
             Statement::FunctionDeclaration(func) => {
-                strip_ts_function(func, code_transform);
+                // `declare function` is removed entirely by the TypeDeclaration item handler
+                if !func.declare {
+                    strip_ts_function(func, code_transform);
+                }
             }
             Statement::ClassDeclaration(class) => {
-                strip_ts_class(class, code_transform, source);
+                // `declare class` is removed entirely by the TypeDeclaration item handler
+                if !class.declare {
+                    strip_ts_class(class, code_transform, source);
+                }
             }
             // Export declarations may wrap type-annotated declarations
             Statement::ExportNamedDeclaration(export) => {

@@ -332,6 +332,15 @@ impl<'alloc> SyntaxPlugin<'alloc> for ScriptGeneratorPlugin<'alloc> {
             self.code_transform.borrow_mut().append(closing);
         }
 
+        // Template-only components (no <script> block at all): emit a minimal
+        // component definition so bundlers get `export default __sfc__`.
+        if !self.has_default_export && !self.has_seen_script && !self.has_seen_script_setup {
+            self.code_transform
+                .borrow_mut()
+                .append("\nconst __sfc__ = {};");
+            self.has_default_export = true;
+        }
+
         // Emit __sfc__.__scopeId and export default __sfc__ at the end.
         // This is done here (not in codegen.rs) because the plugin has AST-level
         // knowledge of where `export default` was placed, avoiding fragile string matching.
@@ -1761,6 +1770,242 @@ const msg = 'hi'
         assert!(
             !code.contains("__sfc__.__scopeId"),
             "Non-scoped should not set __scopeId, got:\n{code}"
+        );
+    }
+
+    // =========================================================================
+    // TypeScript Declaration Stripping
+    // =========================================================================
+
+    /// @ai-generated — TypeScript interface declarations must be stripped from JS output
+    #[test]
+    fn test_ts_interface_stripped() {
+        let code = gen_and_validate(
+            r#"<script lang="ts" setup>
+import { computed } from 'vue';
+
+interface Props {
+  codes?: string[];
+}
+
+const props = withDefaults(defineProps<Props>(), {
+  codes: () => [],
+});
+
+const hasAccess = computed(() => props.codes.length > 0);
+</script>
+<template><div v-if="hasAccess"><slot /></div></template>"#,
+        );
+        assert!(
+            !code.contains("interface"),
+            "TypeScript interface should be stripped, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — TypeScript type alias declarations must be stripped from JS output
+    #[test]
+    fn test_ts_type_alias_stripped() {
+        let code = gen_and_validate(
+            r#"<script lang="ts" setup>
+type Status = 'active' | 'inactive';
+
+const status: Status = 'active';
+</script>
+<template><div>{{ status }}</div></template>"#,
+        );
+        assert!(
+            !code.contains("type Status"),
+            "TypeScript type alias should be stripped, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — TypeScript enum declarations must be stripped from JS output
+    #[test]
+    fn test_ts_enum_stripped() {
+        let code = gen_and_validate(
+            r#"<script lang="ts" setup>
+enum Direction {
+  Up,
+  Down,
+  Left,
+  Right,
+}
+
+const dir = Direction.Up;
+</script>
+<template><div>{{ dir }}</div></template>"#,
+        );
+        assert!(
+            !code.contains("enum Direction"),
+            "TypeScript enum should be stripped, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Multiple TypeScript declarations should all be stripped
+    #[test]
+    fn test_ts_multiple_declarations_stripped() {
+        let code = gen_and_validate(
+            r#"<script lang="ts" setup>
+interface User {
+  name: string;
+  age: number;
+}
+
+type Role = 'admin' | 'user';
+
+const user = { name: 'test', age: 25 };
+</script>
+<template><div>{{ user.name }}</div></template>"#,
+        );
+        assert!(
+            !code.contains("interface User"),
+            "TypeScript interface should be stripped, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("type Role"),
+            "TypeScript type alias should be stripped, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — declare const/function should be stripped from JS output
+    #[test]
+    fn test_ts_declare_stripped() {
+        let code = gen_and_validate(
+            r#"<script lang="ts" setup>
+declare const __brand: unique symbol;
+declare function assertNever(x: never): never;
+
+const x = 1;
+</script>
+<template><div>{{ x }}</div></template>"#,
+        );
+        assert!(
+            !code.contains("declare"),
+            "TypeScript declare should be stripped, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — export interface should be stripped from JS output
+    #[test]
+    fn test_ts_export_interface_stripped() {
+        let code = gen_and_validate(
+            r#"<script lang="ts" setup>
+export interface MyProps {
+  value: string;
+}
+
+const x = 1;
+</script>
+<template><div>{{ x }}</div></template>"#,
+        );
+        assert!(
+            !code.contains("interface"),
+            "Exported TypeScript interface should be stripped, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — export type alias should be stripped from JS output
+    #[test]
+    fn test_ts_export_type_alias_stripped() {
+        let code = gen_and_validate(
+            r#"<script lang="ts" setup>
+export type MyType = string | number;
+
+const x = 1;
+</script>
+<template><div>{{ x }}</div></template>"#,
+        );
+        assert!(
+            !code.contains("type MyType"),
+            "Exported TypeScript type alias should be stripped, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — namespace declaration should be stripped from JS output
+    #[test]
+    fn test_ts_namespace_stripped() {
+        let code = gen_and_validate(
+            r#"<script lang="ts" setup>
+namespace MyNS {
+  export interface Foo {
+    bar: string;
+  }
+}
+
+const x = 1;
+</script>
+<template><div>{{ x }}</div></template>"#,
+        );
+        assert!(
+            !code.contains("namespace"),
+            "TypeScript namespace should be stripped, got:\n{}",
+            code
+        );
+    }
+
+    // =========================================================================
+    // Template-only Components (no <script> block)
+    // =========================================================================
+
+    /// @ai-generated — Template-only component must have `export default` so bundlers can import it
+    #[test]
+    fn test_template_only_component_has_default_export() {
+        let code = gen_and_validate(r#"<template><div>hello</div></template>"#);
+        assert!(
+            code.contains("export default"),
+            "Template-only component should have export default, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Template-only component must have `const __sfc__` scaffolding
+    #[test]
+    fn test_template_only_component_has_sfc_scaffolding() {
+        let code = gen_and_validate(
+            r#"<template>
+  <div class="footer">
+    <span>Footer text</span>
+  </div>
+</template>"#,
+        );
+        assert!(
+            code.contains("const __sfc__"),
+            "Template-only component should have const __sfc__, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("export default __sfc__"),
+            "Template-only component should have export default __sfc__, got:\n{}",
+            code
+        );
+    }
+
+    /// @ai-generated — Template-only component with scoped style must include __scopeId
+    #[test]
+    fn test_template_only_component_scoped_style() {
+        let code = gen_and_validate(
+            r#"<template><div class="red">hello</div></template>
+<style scoped>
+.red { color: red }
+</style>"#,
+        );
+        assert!(
+            code.contains("export default"),
+            "Template-only component with scoped style should have export default, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__sfc__.__scopeId"),
+            "Template-only component with scoped style should have __scopeId, got:\n{}",
+            code
         );
     }
 }

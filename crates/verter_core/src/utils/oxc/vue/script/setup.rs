@@ -109,17 +109,48 @@ pub fn process_setup_statement<'a>(
 
         // Variable declarations
         Statement::VariableDeclaration(var_decl) => {
-            process_variable_declaration(var_decl, ctx, type_ctx, setup_ctx, items);
+            // `declare const/let/var` has no runtime value — treat as type declaration
+            if var_decl.declare {
+                let name = var_decl
+                    .declarations
+                    .first()
+                    .and_then(|d| extract_binding_name(&d.id));
+                items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
+                    span: Span::from(var_decl.span),
+                    name,
+                    kind: TypeDeclarationKind::TypeAlias,
+                }));
+            } else {
+                process_variable_declaration(var_decl, ctx, type_ctx, setup_ctx, items);
+            }
         }
 
         // Function declarations
         Statement::FunctionDeclaration(func) => {
-            process_function_declaration(func, ctx, setup_ctx, items);
+            // `declare function` has no runtime value — treat as type declaration
+            if func.declare {
+                let name = func.id.as_ref().map(|id| id.name.as_str());
+                items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
+                    span: Span::from(func.span),
+                    name,
+                    kind: TypeDeclarationKind::TypeAlias,
+                }));
+            } else {
+                process_function_declaration(func, ctx, setup_ctx, items);
+            }
         }
 
         // Class declarations
         Statement::ClassDeclaration(class) => {
-            if setup_ctx.should_track_declarations() {
+            // `declare class` has no runtime value — treat as type declaration
+            if class.declare {
+                let name = class.id.as_ref().map(|id| id.name.as_str());
+                items.push(ScriptItem::TypeDeclaration(ScriptTypeDeclaration {
+                    span: Span::from(class.span),
+                    name,
+                    kind: TypeDeclarationKind::TypeAlias,
+                }));
+            } else if setup_ctx.should_track_declarations() {
                 if let Some(id) = &class.id {
                     items.push(ScriptItem::Declaration(ScriptDeclaration {
                         span: Span::from(class.span),

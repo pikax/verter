@@ -6336,3 +6336,146 @@ fn test_slot_outlet_fallback_with_interpolation() {
         code
     );
 }
+
+// =========================================================================
+// Bug Regression Tests
+// =========================================================================
+
+/// @ai-generated - Bug 1: `!` prefix in `<component :is="!x ? 'a' : 'b'">` produces invalid JS.
+/// The negation operator in the :is expression must produce valid JavaScript.
+#[test]
+fn test_bug1_dynamic_component_negation_prefix() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import { ref } from 'vue'
+const hasOwnLabel = ref(false)
+const isLabeledByFormItem = ref(false)
+</script>
+<template><component :is="!hasOwnLabel && isLabeledByFormItem ? 'span' : 'label'">text</component></template>"#,
+    );
+    assert!(
+        code.contains("_resolveDynamicComponent("),
+        "Should use _resolveDynamicComponent, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 1 simplified: `<component :is="!x ? 'span' : 'label'">`.
+#[test]
+fn test_bug1_dynamic_component_negation_simple() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import { ref } from 'vue'
+const hasLabel = ref(false)
+</script>
+<template><component :is="!hasLabel ? 'span' : 'label'">text</component></template>"#,
+    );
+    assert!(!code.is_empty());
+}
+
+/// @ai-generated - Bug 1 regression: simple variable `:is` still works after fix.
+#[test]
+fn test_bug1_dynamic_component_simple_variable() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import { ref } from 'vue'
+const comp = ref('div')
+</script>
+<template><component :is="comp">text</component></template>"#,
+    );
+    assert!(
+        code.contains("_resolveDynamicComponent("),
+        "Should use _resolveDynamicComponent, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 1: `:is` with string literal only.
+#[test]
+fn test_bug1_dynamic_component_string_literal() {
+    let code = gen_and_validate(r#"<template><component :is="'div'">text</component></template>"#);
+    assert!(
+        code.contains("_resolveDynamicComponent("),
+        "Should use _resolveDynamicComponent, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 2: `@update:model-value="handler"` on a component must produce
+/// a quoted key in the props object.
+#[test]
+fn test_bug2_update_model_value_event_handler() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import BalRadio from './BalRadio.vue'
+function onBalRulesAccepted() {}
+</script>
+<template><BalRadio @update:model-value="onBalRulesAccepted" /></template>"#,
+    );
+    assert!(
+        code.contains(r#""onUpdate:modelValue""#),
+        "Event name with colon should be quoted as string key, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 3: Template literal `${expr}-suffix` in `:class` array produces invalid JS.
+/// The template literal must be preserved correctly through codegen.
+#[test]
+fn test_bug3_template_literal_in_class_array() {
+    let code = gen_and_validate(
+        r#"<script setup>
+const ns = { namespace: { value: 'el' }, is: (x) => x }
+</script>
+<template><div :class="[`${ns.namespace.value}-drawer`]">x</div></template>"#,
+    );
+    assert!(!code.is_empty());
+}
+
+/// @ai-generated - Bug 3 variant: More complex `:overlay-class` array with template literals.
+#[test]
+fn test_bug3_template_literal_in_class_array_complex() {
+    let code = gen_and_validate(
+        r#"<script setup>
+const ns = { namespace: { value: 'el' }, is: (x, y) => x }
+const modalClass = ''
+const penetrable = false
+</script>
+<template><div :class="[ns.is('drawer'), modalClass ?? '', `${ns.namespace.value}-modal-drawer`, ns.is('penetrable', penetrable)]">x</div></template>"#,
+    );
+    assert!(!code.is_empty());
+}
+
+/// @ai-generated - Bug 3: hyphenated prop name `:overlay-class` with template literal array.
+/// This mirrors the element-plus drawer.vue pattern exactly.
+#[test]
+fn test_bug3_overlay_class_with_template_literal() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import Comp from './Comp.vue'
+const ns = { namespace: { value: 'el' }, is: (x, y) => x }
+const modalClass = ''
+const penetrable = false
+</script>
+<template><Comp :overlay-class="[ns.is('drawer'), modalClass ?? '', `${ns.namespace.value}-modal-drawer`, ns.is('penetrable', penetrable)]">x</Comp></template>"#,
+    );
+    assert!(!code.is_empty());
+}
+
+/// @ai-generated - Bug 2 variant: @update:model-value with additional props.
+#[test]
+fn test_bug2_update_model_value_with_other_props() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import BalRadio from './BalRadio.vue'
+const rules = false
+function onBalRulesAccepted() {}
+</script>
+<template><BalRadio :rules="rules" @update:model-value="onBalRulesAccepted" label="test" /></template>"#,
+    );
+    assert!(
+        code.contains(r#""onUpdate:modelValue""#),
+        "Event name with colon should be quoted as string key, got:\n{}",
+        code
+    );
+}
