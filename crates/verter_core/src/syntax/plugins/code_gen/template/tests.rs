@@ -6036,3 +6036,303 @@ const count = ref(0)
         code
     );
 }
+
+/// Reproduction for radix-vue: import type from non-vue local path.
+#[test]
+fn test_bug9_import_type_local_path() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+import type { PrimitiveProps } from './Primitive'
+import { ref } from 'vue'
+const open = ref(false)
+</script>
+<template><div>{{ open }}</div></template>"#,
+    );
+    assert!(
+        !code.contains("import type"),
+        "import type from local path should be stripped, got:\n{}",
+        code
+    );
+}
+
+/// Reproduction for hoppscotch: HTML comments between template tags should not leak.
+#[test]
+fn test_html_comments_not_in_output() {
+    let code = gen_and_validate(
+        r#"<script setup>
+const x = 1
+</script>
+
+<!-- The Catch-All Page -->
+<!-- Reserved for Critical Errors and 404 ONLY -->
+
+<template><div>{{ x }}</div></template>"#,
+    );
+    assert!(
+        !code.contains("<!--"),
+        "HTML comments should not appear in JS output, got:\n{}",
+        code
+    );
+}
+
+/// HTML comments after the last SFC block should not appear in JS output.
+#[test]
+fn test_html_comments_after_template_not_in_output() {
+    let code = gen_and_validate(
+        r#"<script setup>
+const x = 1
+</script>
+<template><div>{{ x }}</div></template>
+<!-- Footer comment -->"#,
+    );
+    assert!(
+        !code.contains("<!--"),
+        "HTML comments after template should not appear in JS output, got:\n{}",
+        code
+    );
+}
+
+/// Reproduction for balancer: @click.stop with empty handler.
+#[test]
+fn test_event_modifier_no_handler() {
+    let code = gen_and_validate(
+        r#"<script setup>
+</script>
+<template><a @click.stop>link</a></template>"#,
+    );
+    assert!(
+        !code.contains("_withModifiers(,"),
+        "Empty handler should not produce _withModifiers(,), got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Bug: Element-plus backtop pattern — Transition + v-show + @click.stop + slot
+// =========================================================================
+
+/// @ai-generated - Reproduce element-plus backtop.vue pattern.
+/// Transition component containing div with v-show, @click.stop, and a slot.
+/// Should produce valid JS with balanced parentheses.
+#[test]
+fn test_element_plus_backtop_pattern() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import { ref } from 'vue'
+const visible = ref(true)
+function handleClick() {}
+</script>
+<template>
+  <Transition name="fade">
+    <div v-show="visible" class="backtop" @click.stop="handleClick">
+      <slot><span>Top</span></slot>
+    </div>
+  </Transition>
+</template>"#,
+    );
+    assert!(!code.is_empty());
+}
+
+/// @ai-generated - Simpler variant: component with child that has v-show.
+/// Tests that v-show inside a component child doesn't break parent VNode call.
+#[test]
+fn test_component_child_with_vshow() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import Comp from './Comp.vue'
+const show = true
+</script>
+<template>
+  <Comp><div v-show="show">content</div></Comp>
+</template>"#,
+    );
+    assert!(!code.is_empty());
+}
+
+/// @ai-generated - Component with v-show child and event handler.
+/// The @click.stop modifier combined with v-show should produce valid JS.
+#[test]
+fn test_component_child_vshow_with_event_stop() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import Comp from './Comp.vue'
+const visible = true
+function handleClick() {}
+</script>
+<template>
+  <Comp>
+    <div v-show="visible" @click.stop="handleClick">
+      <span>content</span>
+    </div>
+  </Comp>
+</template>"#,
+    );
+    assert!(!code.is_empty());
+}
+
+// =========================================================================
+// Bug: PrimeVue v-bind spread pattern — :class + v-bind="expr" mixed
+// =========================================================================
+
+/// @ai-generated - PrimeVue pattern: :class="cx('root')" v-bind="ptmi('root')"
+/// When a dynamic bind (:class) appears before v-bind spread, codegen should
+/// use _mergeProps() and NOT produce bare _normalizeProps inside object literal.
+#[test]
+fn test_primevue_class_with_vbind_spread() {
+    let code = gen_and_validate(
+        r#"<script setup>
+function cx(name) { return name }
+function ptmi(name) { return {} }
+</script>
+<template><div :class="cx('root')" v-bind="ptmi('root')">content</div></template>"#,
+    );
+    assert!(
+        code.contains("_mergeProps"),
+        "Should use _mergeProps when mixing :class and v-bind spread, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("{_normalizeProps"),
+        "Should not have bare _normalizeProps inside object literal, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - PrimeVue extended pattern: :class + v-bind spread + nested elements.
+/// Realistic PrimeVue-like component structure.
+#[test]
+fn test_primevue_accordion_pattern() {
+    let code = gen_and_validate(
+        r#"<script setup>
+function cx(name) { return name }
+function ptmi(name) { return {} }
+function ptm(name) { return {} }
+</script>
+<template>
+  <div :class="cx('root')" v-bind="ptmi('root')">
+    <div :class="cx('tab')" v-bind="ptm('tab')">
+      <span>text</span>
+    </div>
+  </div>
+</template>"#,
+    );
+    assert!(!code.is_empty());
+}
+
+/// @ai-generated - Multiple static and dynamic props mixed with v-bind spread.
+/// Pattern: static attr + :class + v-bind="spread" + @click
+#[test]
+fn test_mixed_props_with_vbind_spread_and_events() {
+    let code = gen_and_validate(
+        r#"<script setup>
+function cx(name) { return name }
+function ptmi(name) { return {} }
+function handleClick() {}
+</script>
+<template><div id="root" :class="cx('root')" v-bind="ptmi('root')" @click="handleClick">content</div></template>"#,
+    );
+    assert!(
+        code.contains("_mergeProps"),
+        "Should use _mergeProps for mixed props with spread, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Slot outlet with fallback content
+// =========================================================================
+
+/// @ai-generated - Slot with text fallback content.
+/// <slot>Default text</slot> → _renderSlot($slots, "default", {}, () => [_createTextVNode("Default text")])
+#[test]
+fn test_slot_outlet_text_fallback() {
+    let code = gen_and_validate(r#"<template><div><slot>Default text</slot></div></template>"#);
+    assert!(
+        code.contains("_renderSlot("),
+        "Should use _renderSlot, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("() => ["),
+        "Fallback content should be wrapped in () => [...], got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Slot with element fallback content.
+/// <slot><span>fallback</span></slot> → _renderSlot($slots, "default", {}, () => [_createElementVNode("span", ...)])
+#[test]
+fn test_slot_outlet_element_fallback() {
+    let code =
+        gen_and_validate(r#"<template><div><slot><span>fallback</span></slot></div></template>"#);
+    assert!(
+        code.contains("_renderSlot("),
+        "Should use _renderSlot, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("() => ["),
+        "Fallback content should be wrapped in () => [...], got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createElementVNode(\"span\""),
+        "Fallback should contain span element, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Slot with multiple fallback children.
+/// <slot><span>A</span><span>B</span></slot>
+#[test]
+fn test_slot_outlet_multiple_fallback_children() {
+    let code = gen_and_validate(
+        r#"<template><div><slot><span>A</span><span>B</span></slot></div></template>"#,
+    );
+    assert!(
+        code.contains("_renderSlot("),
+        "Should use _renderSlot, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("() => ["),
+        "Multiple fallback children should be wrapped in array, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Named slot with fallback content.
+/// <slot name="header"><h1>Default header</h1></slot>
+#[test]
+fn test_slot_outlet_named_with_fallback() {
+    let code = gen_and_validate(
+        r#"<template><div><slot name="header"><h1>Default header</h1></slot></div></template>"#,
+    );
+    assert!(
+        code.contains("\"header\""),
+        "Should include slot name 'header', got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("() => ["),
+        "Named slot fallback should be wrapped in () => [...], got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Slot fallback with interpolation.
+/// <slot>Hello {{ name }}</slot>
+#[test]
+fn test_slot_outlet_fallback_with_interpolation() {
+    let code = gen_and_validate(r#"<template><div><slot>Hello {{ name }}</slot></div></template>"#);
+    assert!(
+        code.contains("_renderSlot("),
+        "Should use _renderSlot, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createTextVNode("),
+        "Text+interpolation fallback should use _createTextVNode, got:\n{}",
+        code
+    );
+}

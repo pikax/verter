@@ -40,11 +40,85 @@ pub(crate) fn handle_element_close<'alloc>(
     buf: &mut String,
 ) {
     // Slot outlets: _renderSlot($slots, "name") — just close the paren.
+    // With fallback content: _renderSlot($slots, "name", {}, () => [children])
     if state.is_slot_outlet {
-        if let Some(close_tag) = &ev.event.event_close_tag {
-            pending_overwrites.push((close_tag.start, close_tag.end, ")"));
+        if state.children.is_empty() {
+            // No fallback content — just close the paren
+            if let Some(close_tag) = &ev.event.event_close_tag {
+                pending_overwrites.push((close_tag.start, close_tag.end, ")"));
+            } else {
+                pending_append_lefts.push((state.open_tag_end, ")"));
+            }
         } else {
-            pending_append_lefts.push((state.open_tag_end, ")"));
+            // Fallback content present — emit: , {}, () => [children])
+            let all_text_like = state
+                .children
+                .iter()
+                .all(|c| matches!(c.kind, ChildKind::Text | ChildKind::Interpolation));
+            let has_interpolation = state
+                .children
+                .iter()
+                .any(|c| c.kind == ChildKind::Interpolation);
+
+            if all_text_like {
+                // Text/interpolation fallback: wrap in _createTextVNode
+                imports.add(TemplateImportDependencies::CREATE_TEXT_VNODE);
+                let first_child = &state.children[0];
+                let text_flag = if has_interpolation {
+                    if is_production {
+                        ", 1"
+                    } else {
+                        ", 1 /* TEXT */"
+                    }
+                } else {
+                    ""
+                };
+
+                buf.clear();
+                buf.push_str(", {}, () => [_createTextVNode(");
+                buf.push_str(first_child.kind.content_prefix());
+                let s = code_transform.alloc_str(buf);
+                pending_prepend_lefts.push((first_child.start, s));
+
+                for child in state.children.iter().skip(1) {
+                    buf.clear();
+                    buf.push_str(" + ");
+                    buf.push_str(child.kind.content_prefix());
+                    let s = code_transform.alloc_str(buf);
+                    pending_prepend_lefts.push((child.start, s));
+                }
+
+                buf.clear();
+                buf.push_str(text_flag);
+                buf.push_str(")])");
+            } else {
+                // Mixed or element-only fallback children
+                for (i, child) in state.children.iter().enumerate() {
+                    buf.clear();
+                    if i == 0 {
+                        buf.push_str(", {}, () => [");
+                        buf.push_str(child.scope_prefix);
+                        buf.push_str(child.kind.content_prefix());
+                    } else {
+                        buf.push_str(", ");
+                        buf.push_str(child.scope_prefix);
+                        buf.push_str(child.kind.content_prefix());
+                    }
+                    let s = code_transform.alloc_str(buf);
+                    pending_prepend_lefts.push((child.start, s));
+                }
+
+                buf.clear();
+                buf.push_str("])");
+            }
+
+            if let Some(close_tag) = &ev.event.event_close_tag {
+                let s = code_transform.alloc_str(buf);
+                pending_overwrites.push((close_tag.start, close_tag.end, s));
+            } else {
+                let s = code_transform.alloc_str(buf);
+                pending_append_lefts.push((state.open_tag_end, s));
+            }
         }
         return;
     }

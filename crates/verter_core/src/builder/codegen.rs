@@ -343,6 +343,202 @@ impl<'a> SyntaxPlugin<'a> for CustomBlockCollector {
 // Helpers
 // =============================================================================
 
+/// Find all root-level SFC block byte ranges in the source.
+///
+/// Returns a sorted, non-overlapping vec of `(start, end)` byte offsets for
+/// each top-level block (`<script>`, `<template>`, `<style>`, custom blocks).
+/// Any source content outside these ranges is inter-block "gap" content
+/// (whitespace, HTML comments, stray text) that should be removed from JS output.
+///
+/// Uses nesting-aware matching: for tags like `<template>` that can appear nested
+/// (e.g., `<template #slot>`), the function tracks nesting depth to find the
+/// correct root-level closing tag.
+fn find_sfc_block_ranges(bytes: &[u8]) -> Vec<(u32, u32)> {
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // Look for '<' that starts a root-level tag
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+
+        // Skip comments: <!-- ... -->
+        if i + 3 < len && bytes[i + 1] == b'!' && bytes[i + 2] == b'-' && bytes[i + 3] == b'-' {
+            if let Some(end_rel) = bytes[i + 4..].windows(3).position(|w| w == b"-->") {
+                i = i + 4 + end_rel + 3;
+            } else {
+                i += 4;
+            }
+            continue;
+        }
+
+        // Must be a letter after '<' (not '</' or '<!' or '< ')
+        if i + 1 >= len || !bytes[i + 1].is_ascii_alphabetic() {
+            i += 1;
+            continue;
+        }
+
+        // Extract the tag name
+        let tag_start = i;
+        let name_start = i + 1;
+        let mut name_end = name_start;
+        while name_end < len && (bytes[name_end].is_ascii_alphanumeric() || bytes[name_end] == b'-')
+        {
+            name_end += 1;
+        }
+        let tag_name_len = name_end - name_start;
+        if tag_name_len == 0 {
+            i += 1;
+            continue;
+        }
+
+        // Find the end of the opening tag '>'
+        let mut j = name_end;
+        while j < len && bytes[j] != b'>' {
+            j += 1;
+        }
+        if j >= len {
+            break;
+        }
+
+        // Check for self-closing tag '/>'
+        if j > 0 && bytes[j - 1] == b'/' {
+            ranges.push((tag_start as u32, (j + 1) as u32));
+            i = j + 1;
+            continue;
+        }
+
+        // Non-self-closing: find the matching closing tag with nesting awareness.
+        // Tags like <template> can nest (e.g., <template #slot> inside <template>).
+        j += 1; // past the '>'
+        let mut depth = 1u32;
+
+        while j < len && depth > 0 {
+            if bytes[j] != b'<' {
+                j += 1;
+                continue;
+            }
+
+            // Skip nested comments
+            if j + 3 < len && bytes[j + 1] == b'!' && bytes[j + 2] == b'-' && bytes[j + 3] == b'-' {
+                if let Some(end_rel) = bytes[j + 4..].windows(3).position(|w| w == b"-->") {
+                    j = j + 4 + end_rel + 3;
+                } else {
+                    j += 4;
+                }
+                continue;
+            }
+
+            // Closing tag: </tagname>
+            if j + 1 < len && bytes[j + 1] == b'/' {
+                let close_name_start = j + 2;
+                if close_name_start + tag_name_len <= len
+                    && bytes[close_name_start..close_name_start + tag_name_len]
+                        .eq_ignore_ascii_case(&bytes[name_start..name_end])
+                {
+                    // Verify next char after name is '>' or whitespace
+                    let after = close_name_start + tag_name_len;
+                    if after < len && (bytes[after] == b'>' || bytes[after].is_ascii_whitespace()) {
+                        depth -= 1;
+                        if depth == 0 {
+                            // Find the '>' of this closing tag
+                            let mut close_end = after;
+                            while close_end < len && bytes[close_end] != b'>' {
+                                close_end += 1;
+                            }
+                            if close_end < len {
+                                close_end += 1; // include '>'
+                            }
+                            ranges.push((tag_start as u32, close_end as u32));
+                            i = close_end;
+                            break;
+                        }
+                    }
+                }
+                j += 2;
+                continue;
+            }
+
+            // Opening tag of the same name: increase depth
+            if j + 1 < len && bytes[j + 1].is_ascii_alphabetic() {
+                let nested_name_start = j + 1;
+                if nested_name_start + tag_name_len <= len
+                    && bytes[nested_name_start..nested_name_start + tag_name_len]
+                        .eq_ignore_ascii_case(&bytes[name_start..name_end])
+                {
+                    // Verify next char after name is '>', whitespace, or '/' (self-closing)
+                    let after = nested_name_start + tag_name_len;
+                    if after < len
+                        && (bytes[after] == b'>'
+                            || bytes[after].is_ascii_whitespace()
+                            || bytes[after] == b'/')
+                    {
+                        // Check if self-closing
+                        let mut k = after;
+                        while k < len && bytes[k] != b'>' {
+                            k += 1;
+                        }
+                        if k < len && k > 0 && bytes[k - 1] != b'/' {
+                            depth += 1;
+                        }
+                        j = k + 1;
+                        continue;
+                    }
+                }
+            }
+
+            j += 1;
+        }
+
+        if depth > 0 {
+            // Didn't find matching close — skip past the tag name
+            i = name_end;
+        }
+    }
+
+    ranges.sort_by_key(|&(s, _)| s);
+    ranges
+}
+
+/// Remove inter-block gaps from the code transform.
+///
+/// SFC source may contain content between root-level blocks (e.g., HTML comments,
+/// whitespace). This content is not valid JS and must be blanked out.
+fn remove_inter_block_gaps(
+    code_transform: &mut crate::code_transform::CodeTransform,
+    input_bytes: &[u8],
+) {
+    let ranges = find_sfc_block_ranges(input_bytes);
+    if ranges.is_empty() {
+        return;
+    }
+
+    let input_len = input_bytes.len() as u32;
+
+    // Remove gap before first block
+    if ranges[0].0 > 0 {
+        code_transform.remove(0, ranges[0].0);
+    }
+
+    // Remove gaps between consecutive blocks
+    for i in 0..ranges.len() - 1 {
+        let gap_start = ranges[i].1;
+        let gap_end = ranges[i + 1].0;
+        if gap_start < gap_end {
+            code_transform.remove(gap_start, gap_end);
+        }
+    }
+
+    // Remove gap after last block
+    let last_end = ranges[ranges.len() - 1].1;
+    if last_end < input_len {
+        code_transform.remove(last_end, input_len);
+    }
+}
+
 /// SHA-256 hash → 8 hex chars (first 4 bytes).
 pub(crate) fn get_hash(text: &str) -> String {
     let mut hasher = Sha256::new();
@@ -639,6 +835,11 @@ pub fn compile(
             .borrow_mut()
             .move_slice(tpl_start, tpl_end, script_close_end);
     }
+
+    // Remove inter-block gaps: HTML comments, whitespace, and stray text between
+    // root-level SFC blocks (e.g., between </script> and <template>). These are
+    // not valid JS and must not leak into the output.
+    remove_inter_block_gaps(&mut code_transform.borrow_mut(), input.as_bytes());
 
     let code = code_transform.borrow().build_string();
     let styles = code_gen_css.take_styles();

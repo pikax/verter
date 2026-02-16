@@ -401,7 +401,9 @@ function ensureVerterAccessible(project, repoDir) {
     log(project.name, '  @verter/unplugin not properly hoisted, copying from source...');
     const srcUnplugin = path.join(ROOT, 'packages', 'unplugin');
     fs.mkdirSync(path.join(repoDir, 'node_modules', '@verter'), { recursive: true });
-    copyRecursive(srcUnplugin, unpluginDir, ['node_modules', 'src']);
+    // Copy dist + package.json but skip src; keep node_modules since
+    // @verter/unplugin depends on 'unplugin' which lives in its own node_modules
+    copyRecursive(srcUnplugin, unpluginDir, ['src']);
   }
 }
 
