@@ -26,7 +26,6 @@ nul
 
 .vscode/
 
-CLAUDE.md
 .claude/settings.local.json
 
 # Benchmark results (generated artifacts)

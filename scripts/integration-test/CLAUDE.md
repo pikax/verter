@@ -1,0 +1,174 @@
+# Integration Tests — Agent Guide
+
+Instructions for AI agents working on Verter's integration test infrastructure.
+
+## SYNC RULE (CRITICAL)
+
+**`scripts/integration-test/projects.mjs` and `.github/workflows/integration-test.yml` define the same project matrix.**
+
+When adding, removing, or modifying a project in **either** file, you **MUST** update the other file to match. The fields map as follows:
+
+| JS (`projects.mjs`) | YAML (`integration-test.yml`) |
+|---------------------|-------------------------------|
+| `name` | `name` |
+| `repo` | `repo` |
+| `branch` | `branch` |
+| `buildCmd` | `build-cmd` |
+| `testCmd` | `test-cmd` |
+| `e2eCmd` | `e2e-cmd` |
+| `packageManager` | `package-manager` |
+| `bundler` | `bundler` |
+
+## Running Integration Tests
+
+### Local (primary for development)
+
+```bash
+# Single project (fastest feedback)
+pnpm integration-test coreui
+
+# With existing build artifacts
+pnpm integration-test --skip-build --no-clone coreui
+
+# Multiple projects
+pnpm integration-test coreui balancer-frontend-v2 slidev
+
+# All projects
+pnpm integration-test
+```
+
+### CI
+
+Triggered by:
+- PR comment: `/integration`
+- Manual dispatch on GitHub Actions
+- Release workflow
+
+## Debugging Failures
+
+### Build failure
+
+1. Check `.integration-tests/logs/<project>/verter-build.log`
+2. Compare with `baseline-build.log` — if baseline also fails, the issue is project setup, not Verter
+3. Common causes:
+   - Plugin replacement didn't work (check verification step output)
+   - Verter doesn't support a template feature the project uses
+   - Dependency version conflict with `@verter/native`
+
+### Test regression
+
+If Verter has **more** test failures than baseline (`TEST REGR` status):
+1. Check `.integration-tests/logs/<project>/verter-test.log`
+2. Diff against `baseline-test.log` to find which tests regressed
+3. These failures indicate Verter's compiler generates incorrect code for some Vue patterns
+4. Look at the failing test's component templates for the unsupported pattern
+
+### Replacement verification failed
+
+If "No files contain @verter/unplugin after replacement":
+1. The project may use a non-standard import style
+2. Check how the project imports its Vue plugin (grep for `@vitejs/plugin-vue` or `rollup-plugin-vue`)
+3. The replacement patterns may need to be extended in both `run.mjs` (Node.js `String.replace`) and `integration-test.yml` (bash `sed`)
+
+## Adding a New Project
+
+### Checklist
+
+1. **Build tool**: Must use Vite (`@vitejs/plugin-vue`), Rollup (`rollup-plugin-vue`), or Nuxt (uses a runtime module override). Webpack and Vue CLI are not supported.
+2. **Vue plugin import**: Find the exact import statement. Common patterns:
+   - `import vue from '@vitejs/plugin-vue'` (standard)
+   - `import Vue from '@vitejs/plugin-vue'` (capital V, e.g., zyronon-douyin)
+   - `import vue from 'rollup-plugin-vue'` (rollup projects)
+   - Programmatic: `import Vue from '@vitejs/plugin-vue'` in a `.ts` source file (e.g., slidev)
+3. **Package manager**: Check for `pnpm-lock.yaml` (pnpm) or `package-lock.json` (npm)
+4. **Build command**: Find in `package.json` scripts. For monorepos, use filtered commands (e.g., `pnpm --filter <pkg> build`)
+5. **Test command**: Find in `package.json` scripts. Use `""` if no runnable tests exist
+6. **Branch**: Check the default branch (`main`, `master`, `dev`, etc.)
+
+### Steps
+
+1. Add entry to `scripts/integration-test/projects.mjs`
+2. Add matching entry to `.github/workflows/integration-test.yml` matrix
+3. Run `pnpm integration-test <name>` to validate
+4. Check that:
+   - Clone succeeds
+   - Baseline build passes
+   - Replacement is verified ("`@verter/unplugin` is present in...")
+   - Verter build runs (pass or fail is informational for new projects)
+
+## Infrastructure Fixes
+
+The runner automatically handles several common project setup issues:
+
+### `packageManager` stripping
+Projects with a `packageManager` field in `package.json` (e.g., `"pnpm@10.28.0"`) trigger corepack version switching, which fails if the exact version isn't installed. The runner strips this field before installing deps. `COREPACK_ENABLE_STRICT=0` alone is not sufficient.
+
+### `ensureVerterAccessible()` — native binding hoisting fix
+Some pnpm monorepos don't properly hoist `@verter/native` into the repo's `node_modules/`. The packages end up at the parent workspace level without the `dist/` directory containing the native `.node` binary. After installing tarballs, the runner checks if `@verter/native/index.js` and `@verter/native/dist/` exist in the repo's `node_modules/`. If not, it copies from source (`packages/native/` and `packages/unplugin/`).
+
+### E2E tests
+Projects can define an optional `e2eCmd` field. E2E tests run only on the Verter build (not baseline) after the unit tests complete. E2E logs are saved as `verter-e2e.log`. E2E frameworks used:
+- **Playwright** (VitePress, vue-vben-admin): Auto-starts dev server via playwright config
+- **Cypress** (slidev): Must start fixture dev server manually before running Cypress
+
+## Common Patterns and Gotchas
+
+### VueMacros wrapping (zyronon-douyin)
+
+```js
+import Vue from '@vitejs/plugin-vue'
+VueMacros({ plugins: { vue: Vue() } })
+```
+
+After replacement: `Vue(` → `verter(` correctly changes the function call. The object key `vue:` stays as-is.
+
+### Programmatic import (slidev)
+
+```js
+// packages/slidev/node/vite/vue.ts
+import Vue from '@vitejs/plugin-vue'
+const VuePlugin = Vue({ ... })
+```
+
+This is NOT in a `vite.config.*` file. The CI grep and local `findFiles` must search all `.ts` files, not just config files.
+
+### Monorepo build commands
+
+Some projects have complex build chains. Use the most targeted command:
+- `pnpm --filter <pkg> build` for specific workspace packages
+- `pnpm run build:packages` to skip non-essential steps (linting, type checking)
+- Avoid `npm run build` if it has problematic `prebuild` hooks (check package.json)
+
+### npm vs pnpm differences
+
+- **pnpm**: Needs `public-hoist-pattern` in `.npmrc`, uses `pnpm add -w`, overrides go in `pkg.pnpm.overrides`
+- **npm**: Hoists by default, uses `npm install`, overrides go in `pkg.overrides`
+
+### @vitejs/plugin-vue-jsx
+
+The replacement patterns do NOT modify `@vitejs/plugin-vue-jsx` because:
+- The import source replacement uses exact match: `'@vitejs/plugin-vue'` (closing quote prevents matching `-jsx`)
+- The function rename `Vue(` does not match `VueJsx(` (different characters after `Vue`)
+
+## File Locations
+
+| File | Purpose |
+|------|---------|
+| `scripts/integration-test/run.mjs` | Local runner script |
+| `scripts/integration-test/projects.mjs` | Project definitions (source of truth) |
+| `scripts/integration-test/README.md` | Human documentation |
+| `scripts/integration-test/CLAUDE.md` | This file (agent documentation) |
+| `.github/workflows/integration-test.yml` | CI workflow (MUST stay in sync with projects.mjs) |
+| `.integration-tests/` | Gitignored directory for cloned repos, tarballs, logs |
+
+## Test Result Interpretation
+
+Test results are the primary quality signal for Verter's compiler:
+
+| Scenario | Meaning | Action |
+|----------|---------|--------|
+| Verter tests = baseline tests | Verter compiles correctly for this project | None needed |
+| Verter has fewer failures | Verter fixed something upstream Vue got wrong (unlikely) | Investigate |
+| Verter has more failures | **Compiler regression** — Verter generates incorrect code | Fix the compiler |
+| Verter build fails, baseline passes | Verter cannot compile some pattern in this project | Add support or document limitation |
+| Both fail identically | Project setup issue, not Verter | Check project compatibility |
