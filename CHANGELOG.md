@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+### Miscellaneous
+
+- Improve working on benchmark (ecd5dd9)
+- Add packages repo (2893ae0)
+
 ### Features
 
 - Remove oxc_transform and remove typescript as plugin (474eeba)
