@@ -220,6 +220,17 @@ pub struct Syntax<'alloc> {
     has_style_scope: bool,
     has_style_module: bool,
 
+    /// Start position of `<script setup>` if present.
+    script_setup_start: Option<u32>,
+    /// Whether a `<template>` block exists.
+    has_template: bool,
+    /// Whether a `<template vapor>` block exists.
+    has_vapor_template: bool,
+    /// (start, close_end) byte range of the `<template>` block.
+    template_block: Option<(u32, u32)>,
+    /// End position (after `>`) of the `</script>` close tag.
+    script_block_end: Option<u32>,
+
     /// Diagnostics accumulated during tokenization (errors, warnings).
     diagnostics: Vec<crate::syntax::plugin::Diagnostic>,
 
@@ -238,6 +249,21 @@ impl<'alloc> Syntax<'alloc> {
     }
     pub fn has_style_module(&self) -> bool {
         self.has_style_module
+    }
+    pub fn script_setup_start(&self) -> Option<u32> {
+        self.script_setup_start
+    }
+    pub fn has_template(&self) -> bool {
+        self.has_template
+    }
+    pub fn has_vapor_template(&self) -> bool {
+        self.has_vapor_template
+    }
+    pub fn template_block(&self) -> Option<(u32, u32)> {
+        self.template_block
+    }
+    pub fn script_block_end(&self) -> Option<u32> {
+        self.script_block_end
     }
 
     /// Take accumulated diagnostics from the tokenization phase.
@@ -274,6 +300,11 @@ impl<'alloc> Syntax<'alloc> {
             scripts_found: 0,
             has_style_scope: false,
             has_style_module: false,
+            script_setup_start: None,
+            has_template: false,
+            has_vapor_template: false,
+            template_block: None,
+            script_block_end: None,
             diagnostics: Vec::new(),
             has_fatal_error: false,
         }
@@ -462,6 +493,11 @@ impl<'alloc> Syntax<'alloc> {
                             self.last_parent_id = self.parent_stack.pop().unwrap_or(NO_PARENT);
                         }
 
+                        if ev.kind == RootNodeKind::Template {
+                            self.has_template = true;
+                            self.template_block = Some((ev.start, 0));
+                        }
+
                         if ev.kind == RootNodeKind::Script {
                             self.root_script_events.push(Event::RootOpenTagEnd(ev));
                         } else {
@@ -594,6 +630,15 @@ impl<'alloc> Syntax<'alloc> {
                             name_end,
                             end,
                         };
+
+                        // Track block end positions for codegen.
+                        if root.kind == RootNodeKind::Template {
+                            if let Some(ref mut tb) = self.template_block {
+                                tb.1 = end;
+                            }
+                        } else if root.kind == RootNodeKind::Script {
+                            self.script_block_end = Some(end);
+                        }
 
                         // Route script close tag to root_script_events
                         if root.kind == RootNodeKind::Script {
@@ -835,8 +880,14 @@ impl<'alloc> Syntax<'alloc> {
         if self.last_event_open_tag.is_none() {
             if let Some(RootNodeOpenTag::Start(ref root)) = self.last_root_node {
                 if root.kind == RootNodeKind::Script {
+                    if name == b"setup" {
+                        self.script_setup_start = Some(root.start);
+                    }
                     self.root_script_events.push(Event::Prop(ev));
                     return;
+                }
+                if root.kind == RootNodeKind::Template && name == b"vapor" {
+                    self.has_vapor_template = true;
                 }
                 if root.kind == RootNodeKind::Style {
                     if name == b"scoped" {
@@ -982,6 +1033,33 @@ mod tests {
             }
 
             let events_storage = syntax.events();
+            let $events = &events_storage;
+            $body
+        }};
+    }
+
+    /// Like `with_syntax_events!` but also provides access to the `Syntax` struct
+    /// after events have been collected (for testing metadata getters).
+    macro_rules! with_syntax {
+        ($input:expr, $template_mode:expr, |$syntax:ident, $events:ident| $body:block) => {{
+            let input: &str = $input;
+            let mut tokenizer_events = Vec::new();
+            tokenize(input.as_bytes(), |event| tokenizer_events.push(event));
+
+            let options = SyntaxPluginOptions::default();
+            let mut ctx = SyntaxPluginContext {
+                input,
+                bytes: input.as_bytes(),
+                options: &options,
+                diagnostics: Vec::new(),
+            };
+
+            let mut $syntax = Syntax::new($template_mode);
+            for event in &tokenizer_events {
+                $syntax.handle(event, &mut ctx);
+            }
+
+            let events_storage = $syntax.events();
             let $events = &events_storage;
             $body
         }};
@@ -1571,6 +1649,82 @@ mod tests {
             assert!(
                 !texts[2].has_entity,
                 "Plain text should have has_entity=false"
+            );
+        });
+    }
+
+    // ==================== SFC metadata getters ====================
+
+    /// @ai-generated — Syntax should track script setup status during tokenization.
+    #[test]
+    fn test_syntax_tracks_script_setup() {
+        let input = r#"<script setup lang="ts">const x = 1;</script><template><div/></template>"#;
+        with_syntax!(input, false, |syntax, _events| {
+            assert!(
+                syntax.script_setup_start().is_some(),
+                "Should detect script setup"
+            );
+            assert_eq!(syntax.script_setup_start().unwrap(), 0);
+        });
+    }
+
+    /// @ai-generated — Syntax should NOT report setup for plain script blocks.
+    #[test]
+    fn test_syntax_no_setup_for_plain_script() {
+        let input = r#"<script>const x = 1;</script><template><div/></template>"#;
+        with_syntax!(input, false, |syntax, _events| {
+            assert!(
+                syntax.script_setup_start().is_none(),
+                "Plain script should not be detected as setup"
+            );
+        });
+    }
+
+    /// @ai-generated — Syntax should track template and vapor presence.
+    #[test]
+    fn test_syntax_tracks_template_and_vapor() {
+        let input = r#"<script setup>const x = 1;</script><template vapor><div/></template>"#;
+        with_syntax!(input, false, |syntax, _events| {
+            assert!(syntax.has_template(), "Should detect template");
+            assert!(syntax.has_vapor_template(), "Should detect vapor template");
+        });
+    }
+
+    /// @ai-generated — Syntax should track template block positions.
+    #[test]
+    fn test_syntax_tracks_template_block_position() {
+        let input = r#"<script setup>const x = 1;</script>
+<template><div/></template>"#;
+        with_syntax!(input, false, |syntax, _events| {
+            let tb = syntax.template_block();
+            assert!(tb.is_some(), "Should have template block positions");
+            let (start, end) = tb.unwrap();
+            let block = &input[start as usize..end as usize];
+            assert!(
+                block.starts_with("<template>"),
+                "Template block should start with <template>, got: {}",
+                block
+            );
+            assert!(
+                block.ends_with("</template>"),
+                "Template block should end with </template>, got: {}",
+                block
+            );
+        });
+    }
+
+    /// @ai-generated — Syntax should track script block end position.
+    #[test]
+    fn test_syntax_tracks_script_block_end() {
+        let input = r#"<script setup>const x = 1;</script><template><div/></template>"#;
+        with_syntax!(input, false, |syntax, _events| {
+            let se = syntax.script_block_end();
+            assert!(se.is_some(), "Should have script block end");
+            let end = se.unwrap() as usize;
+            assert!(
+                input[..end].ends_with("</script>"),
+                "Script block end should be after </script>, got: ...{}",
+                &input[end.saturating_sub(15)..end]
             );
         });
     }

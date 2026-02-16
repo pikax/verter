@@ -543,62 +543,19 @@ pub fn compile(
         };
     }
 
+    // Read SFC metadata from Syntax (tracked during tokenization).
+    let script_setup_pos = syntax.script_setup_start().map(|s| s as usize);
+    let has_script_setup = script_setup_pos.is_some();
+    let has_template = syntax.has_template();
+    let has_vapor_template = syntax.has_vapor_template();
+    let template_block = syntax.template_block();
+    let script_block_end = syntax.script_block_end();
+
     let events = syntax.events();
 
-    // Extract SFC block info from pipeline events (tokenizer-derived, RCDATA-aware).
-    // This replaces naive byte scanning which breaks on `<script`/`<template` inside
-    // JS string literals.
+    // Extract SFC block byte ranges from pipeline events (tokenizer-derived, RCDATA-aware).
     let block_ranges = extract_sfc_block_ranges(&events);
 
-    // Extract block metadata from events for script_setup / template detection.
-    let mut script_setup_pos: Option<usize> = None;
-    let mut has_template = false;
-    let mut has_vapor_template = false;
-    let mut template_block: Option<(u32, u32)> = None;
-    let mut script_block_end: Option<u32> = None;
-
-    for event in &events {
-        match event {
-            Event::RootOpenTagEnd(e) => match e.kind {
-                RootNodeKind::Script => {
-                    // Check for `setup` attribute in the raw source between name_end and end
-                    let attrs_slice = &input[e.name_end as usize..e.end as usize];
-                    if attrs_slice
-                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-                        .any(|word| word == "setup")
-                    {
-                        script_setup_pos = Some(e.start as usize);
-                    }
-                }
-                RootNodeKind::Template => {
-                    has_template = true;
-                    let attrs_slice = &input[e.name_end as usize..e.end as usize];
-                    if attrs_slice
-                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-                        .any(|word| word == "vapor")
-                    {
-                        has_vapor_template = true;
-                    }
-                    template_block = Some((e.start, 0)); // end filled by RootCloseTag
-                }
-                _ => {}
-            },
-            Event::RootCloseTag(e) => match e.kind {
-                RootNodeKind::Template => {
-                    if let Some(ref mut tb) = template_block {
-                        tb.1 = e.end;
-                    }
-                }
-                RootNodeKind::Script => {
-                    script_block_end = Some(e.end);
-                }
-                _ => {}
-            },
-            _ => {}
-        }
-    }
-
-    let has_script_setup = script_setup_pos.is_some();
     let effective_inline = options.resolve_inline() && has_script_setup;
 
     // When <template> appears before <script setup> and inline mode is active,
