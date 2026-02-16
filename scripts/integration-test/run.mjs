@@ -43,6 +43,7 @@ function parseArgs() {
     skipBaseline: false,
     skipBuild: false,
     noClone: false,
+    fast: false,
     concurrency: 1,
     projectNames: /** @type {string[]} */ ([]),
   };
@@ -57,6 +58,9 @@ function parseArgs() {
         break;
       case '--no-clone':
         opts.noClone = true;
+        break;
+      case '--fast':
+        opts.fast = true;
         break;
       case '--concurrency':
         opts.concurrency = parseInt(args[++i], 10) || 1;
@@ -182,9 +186,10 @@ function copyRecursive(src, dest, skipNames = []) {
 
 // ── Build Verter ─────────────────────────────────────────────────────────────
 
-function buildVerter() {
-  log('verter', 'Building native bindings...');
-  const native = run('pnpm run build:native', ROOT);
+function buildVerter({ fast = false } = {}) {
+  log('verter', `Building native bindings${fast ? ' (fast/debug)' : ''}...`);
+  const nativeScript = fast ? 'pnpm --filter @verter/native build:debug' : 'pnpm run build:native';
+  const native = run(nativeScript, ROOT);
   if (!native.ok) {
     console.error(native.stderr || native.stdout);
     throw new Error('Failed to build native bindings');
@@ -923,7 +928,7 @@ async function main() {
 
   // Build Verter
   if (!opts.skipBuild) {
-    buildVerter();
+    buildVerter({ fast: opts.fast });
   } else {
     const tarballs = fs.existsSync(TARBALLS_DIR)
       ? fs.readdirSync(TARBALLS_DIR).filter((f) => f.endsWith('.tgz'))

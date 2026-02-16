@@ -770,11 +770,35 @@ pub fn compile_with_tsx(
 mod tests {
     use super::*;
     use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
 
     fn gen_result(input: &str) -> CodegenResult {
         let allocator = Allocator::new();
         let options = CodegenOptions::new().with_filename("test.vue");
         compile(input, &options, &allocator)
+    }
+
+    fn assert_valid_js(code: &str, context: &str) {
+        let allocator = Allocator::default();
+        let source_type = SourceType::mjs();
+        let parser_result = Parser::new(&allocator, code, source_type).parse();
+        assert!(
+            parser_result.errors.is_empty(),
+            "Generated code is NOT valid JavaScript!\n\
+             Context: {}\n\
+             Parse Errors: {:?}\n\
+             Generated Code:\n{}",
+            context,
+            parser_result.errors,
+            code
+        );
+    }
+
+    fn gen_and_validate(input: &str) -> CodegenResult {
+        let result = gen_result(input);
+        assert_valid_js(&result.code, input);
+        result
     }
 
     // ==================== diagnostics ====================
@@ -2826,6 +2850,341 @@ const srcdoc = computed(() => {
         assert!(
             result.code.contains("importMapScript"),
             "Output should preserve the importMapScript variable, got: {}",
+            result.code
+        );
+    }
+
+    // ==================== hyphenated slot names ====================
+
+    /// @ai-generated — Slot names containing hyphens must be quoted as JS object keys.
+    /// `pool-summary` is not a valid bare JS identifier (interpreted as `pool - summary`),
+    /// so it must be emitted as `"pool-summary"`.
+    #[test]
+    fn test_hyphenated_slot_name() {
+        let input = r#"<script setup>
+import Comp from './Comp.vue'
+import Child from './Child.vue'
+</script>
+<template>
+  <Comp>
+    <template #pool-summary>
+      <Child />
+    </template>
+  </Comp>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("\"pool-summary\""),
+            "Slot name with hyphen should be quoted: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Slot names containing colons must be quoted as JS object keys.
+    #[test]
+    fn test_colon_slot_name() {
+        let input = r#"<script setup>
+import Comp from './Comp.vue'
+import Child from './Child.vue'
+</script>
+<template>
+  <Comp>
+    <template #slot:name>
+      <Child />
+    </template>
+  </Comp>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("\"slot:name\""),
+            "Slot name with colon should be quoted: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Simple slot names (valid JS identifiers) should NOT be quoted.
+    #[test]
+    fn test_simple_slot_name_not_quoted() {
+        let input = r#"<script setup>
+import Comp from './Comp.vue'
+import Child from './Child.vue'
+</script>
+<template>
+  <Comp>
+    <template #header>
+      <Child />
+    </template>
+  </Comp>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("header: _withCtx"),
+            "Simple slot name should not be quoted: {}",
+            result.code
+        );
+        assert!(
+            !result.code.contains("\"header\""),
+            "Simple slot name should not have quotes: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Named slot template inside a component (parent-level slot_params path).
+    /// Hyphenated slot names on component children must also be quoted.
+    #[test]
+    fn test_hyphenated_slot_name_with_slot_params() {
+        let input = r#"<script setup>
+import Comp from './Comp.vue'
+</script>
+<template>
+  <Comp>
+    <template #pool-summary="{ data }">
+      {{ data }}
+    </template>
+  </Comp>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("\"pool-summary\""),
+            "Slot name with hyphen and params should be quoted: {}",
+            result.code
+        );
+    }
+
+    // ==================== v-once ====================
+
+    #[test]
+    fn test_v_once_with_v_if_self_closing_component() {
+        // v-once + v-if on a self-closing component.
+        // The _createCommentVNode must be INSIDE the ternary (the else branch),
+        // not dangling after the cache block close.
+        //
+        // Vue official compiler output:
+        //   _cache[0] || (
+        //     _setBlockTracking(-1, true),
+        //     (_cache[0] = (show.value)
+        //       ? (_openBlock(), _createBlock(Comp, { key: 0 }))
+        //       : _createCommentVNode("v-if", true)).cacheIndex = 0,
+        //     _setBlockTracking(1),
+        //     _cache[0]
+        //   )
+        let input = r#"<script setup>
+import Comp from './Comp.vue'
+const show = true
+</script>
+<template>
+  <div>
+    <Comp v-if="show" v-once />
+    <div>other content</div>
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // The ternary else must NOT be empty (`: )` pattern)
+        assert!(
+            !result.code.contains(": )"),
+            "ternary else should not be empty — _createCommentVNode must be inside the ternary: {}",
+            result.code
+        );
+        // The comment node must appear inside the cache block
+        assert!(
+            result.code.contains("_createCommentVNode"),
+            "should have _createCommentVNode for v-if else branch: {}",
+            result.code
+        );
+        // Verify the comment node is BEFORE the cache close, not after
+        let cache_close = ").cacheIndex = ";
+        let comment = "_createCommentVNode(";
+        if let (Some(comment_pos), Some(cache_pos)) =
+            (result.code.find(comment), result.code.find(cache_close))
+        {
+            assert!(
+                comment_pos < cache_pos,
+                "_createCommentVNode (at {}) must appear before .cacheIndex (at {}) in: {}",
+                comment_pos,
+                cache_pos,
+                result.code
+            );
+        }
+    }
+
+    #[test]
+    fn test_v_once_with_v_if_non_self_closing_element() {
+        // v-once + v-if on a non-self-closing element.
+        // Same requirement: _createCommentVNode must be inside the ternary.
+        let input = r#"<script setup>
+const show = true
+</script>
+<template>
+  <div>
+    <span v-if="show" v-once>text</span>
+    <div>other content</div>
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            !result.code.contains(": )"),
+            "ternary else should not be empty: {}",
+            result.code
+        );
+        assert!(
+            result.code.contains("_createCommentVNode"),
+            "should have _createCommentVNode: {}",
+            result.code
+        );
+        let cache_close = ").cacheIndex = ";
+        let comment = "_createCommentVNode(";
+        if let (Some(comment_pos), Some(cache_pos)) =
+            (result.code.find(comment), result.code.find(cache_close))
+        {
+            assert!(
+                comment_pos < cache_pos,
+                "_createCommentVNode (at {}) must appear before .cacheIndex (at {}) in: {}",
+                comment_pos,
+                cache_pos,
+                result.code
+            );
+        }
+    }
+
+    #[test]
+    fn test_ref_with_class_and_vbind_spread() {
+        // ref="xxx" matching a setup binding + :class + v-bind="$attrs" + events.
+        // In inline mode, ref matching a binding emits ref_key + ref (variable reference).
+        // When _mergeProps is used, the ref prop must be followed by a comma before
+        // subsequent props like class.
+        let input = r#"<script setup>
+import { ref } from 'vue'
+const activator = ref()
+const handleMouseEnter = () => {}
+const handleMouseLeave = () => {}
+</script>
+<template>
+  <button
+    ref="activator"
+    :class="['leading-none', { 'cursor-default': false }]"
+    v-bind="$attrs"
+    @mouseenter="handleMouseEnter"
+    @mouseleave="handleMouseLeave"
+  >
+    content
+  </button>
+</template>"#;
+        let allocator = Allocator::new();
+        let options = CodegenOptions {
+            inline: Some(true),
+            ..CodegenOptions::new().with_filename("test.vue")
+        };
+        let result = compile(input, &options, &allocator);
+        assert_valid_js(&result.code, input);
+        // Must NOT have "activatorclass" — that means a comma is missing between
+        // `ref: activator` and `class: _normalizeClass(...)`.
+        assert!(
+            !result.code.contains("activatorclass"),
+            "Missing comma between ref and class props: {}",
+            result.code
+        );
+        // Verify the correct pattern: `ref: activator, class:`
+        assert!(
+            result.code.contains("ref: activator, class:"),
+            "Should have proper comma separation between ref and class: {}",
+            result.code
+        );
+    }
+
+    // ==================== shorthand property expansion ====================
+
+    fn gen_result_prod(input: &str) -> CodegenResult {
+        let allocator = Allocator::new();
+        let options = CodegenOptions {
+            is_production: true,
+            ..CodegenOptions::new().with_filename("test.vue")
+        };
+        compile(input, &options, &allocator)
+    }
+
+    fn gen_and_validate_prod(input: &str) -> CodegenResult {
+        let result = gen_result_prod(input);
+        assert_valid_js(&result.code, input);
+        result
+    }
+
+    /// @ai-generated — Shorthand property with .value suffix must expand to key: value form
+    /// (production/inline mode where SetupRef gets .value suffix)
+    #[test]
+    fn test_shorthand_property_with_ref_value_prod() {
+        let input = r#"<script setup>
+import { computed } from 'vue'
+import Comp from './Comp.vue'
+const subsetTokens = computed(() => ['a', 'b'])
+</script>
+<template>
+  <Comp :tokenSelectProps="{ ignoreBalances: true, subsetTokens }" />
+</template>"#;
+        let result = gen_and_validate_prod(input);
+        // In production (inline) mode, computed refs get .value suffix
+        // Shorthand must be expanded to key: value form
+        assert!(
+            result.code.contains("subsetTokens: subsetTokens.value"),
+            "Shorthand with .value must be expanded to key: value form: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Shorthand property with _ctx. prefix must expand to key: value form
+    #[test]
+    fn test_shorthand_property_with_ctx_prefix() {
+        let input = r#"<script setup>
+import Comp from './Comp.vue'
+</script>
+<template>
+  <Comp :data="{ someFlag: true, unknownVar }" />
+</template>"#;
+        let result = gen_and_validate(input);
+        // unknownVar is not declared in script setup, so it should get _ctx. prefix
+        // and shorthand must be expanded
+        assert!(
+            result.code.contains("unknownVar: _ctx.unknownVar"),
+            "Shorthand with _ctx. prefix must be expanded to key: value form: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Shorthand property with ref() in production mode also needs expansion
+    #[test]
+    fn test_shorthand_property_with_ref_prod() {
+        let input = r#"<script setup>
+import { ref } from 'vue'
+import Comp from './Comp.vue'
+const count = ref(0)
+</script>
+<template>
+  <Comp :data="{ count }" />
+</template>"#;
+        let result = gen_and_validate_prod(input);
+        // count is a ref, should get .value suffix and shorthand must be expanded
+        assert!(
+            result.code.contains("count: count.value"),
+            "Shorthand ref must be expanded to key: value form: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Shorthand property with $setup. prefix (non-inline mode) must expand
+    #[test]
+    fn test_shorthand_property_with_setup_prefix() {
+        let input = r#"<script setup>
+import { computed } from 'vue'
+import Comp from './Comp.vue'
+const subsetTokens = computed(() => ['a', 'b'])
+</script>
+<template>
+  <Comp :data="{ ignoreBalances: true, subsetTokens }" />
+</template>"#;
+        let result = gen_and_validate(input);
+        // In non-inline mode, setup refs get $setup. prefix
+        assert!(
+            result.code.contains("subsetTokens: $setup.subsetTokens"),
+            "Shorthand with $setup. prefix must be expanded to key: value form: {}",
             result.code
         );
     }

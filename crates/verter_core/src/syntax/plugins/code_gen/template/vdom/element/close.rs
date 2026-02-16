@@ -2,7 +2,10 @@ use crate::{
     code_transform::CodeTransform,
     syntax::{
         plugins::code_gen::{
-            template::vdom::helper::write_patch_flag_suffix, types::TemplateImportDependencies,
+            template::{
+                shared::helper::is_valid_js_prop_key, vdom::helper::write_patch_flag_suffix,
+            },
+            types::TemplateImportDependencies,
         },
         types::OxcCompiledElementClosed,
     },
@@ -132,8 +135,17 @@ pub(crate) fn handle_element_close<'alloc>(
         let slot_key = state.slot_name.unwrap_or("default");
 
         // Build slot entry prefix: `name: _withCtx((params) => [`
+        // Slot names with non-identifier characters (hyphens, colons, etc.) must be quoted.
+        let needs_slot_quote = !slot_key.starts_with('[') && !is_valid_js_prop_key(slot_key);
+
         buf.clear();
+        if needs_slot_quote {
+            buf.push('"');
+        }
         buf.push_str(slot_key);
+        if needs_slot_quote {
+            buf.push('"');
+        }
         buf.push_str(": _withCtx(");
         if !params.is_empty() {
             buf.push('(');
@@ -373,10 +385,19 @@ pub(crate) fn handle_element_close<'alloc>(
         // from the tokenizer, so no extra wrapping is needed.
         let slot_key = state.slot_name.unwrap_or("default");
 
+        // Slot names with non-identifier characters (hyphens, colons, etc.) must be quoted.
+        let needs_slot_quote = !slot_key.starts_with('[') && !is_valid_js_prop_key(slot_key);
+
         // Build slot_open string
         buf.clear();
         buf.push_str(", {");
+        if needs_slot_quote {
+            buf.push('"');
+        }
         buf.push_str(slot_key);
+        if needs_slot_quote {
+            buf.push('"');
+        }
         buf.push_str(": _withCtx(");
         if !params.is_empty() {
             buf.push('(');

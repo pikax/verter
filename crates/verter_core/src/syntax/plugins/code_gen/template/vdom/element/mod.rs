@@ -689,6 +689,9 @@ pub(crate) fn handle_element_open<'alloc>(
                                     pending_overwrites.push((prop.event.start, prop.event.end, s));
                                     state.patch_flag = state.patch_flag.add(PatchFlags::NeedPatch);
                                     written += 1;
+                                    if has_mixed_spread && in_merge_obj {
+                                        merge_obj_written += 1;
+                                    }
                                     continue;
                                 }
                             }

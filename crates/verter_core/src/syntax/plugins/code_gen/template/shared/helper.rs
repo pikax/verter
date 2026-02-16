@@ -17,15 +17,24 @@ pub fn patch_bindings<'alloc>(
             if !f.ignore {
                 if let Some(b) = map.get(&f.name) {
                     let prefix = b.accessor_prefix(is_inline);
+                    let suffix = b.accessor_suffix(is_inline);
+                    // Shorthand property: expand `{ foo }` → `{ foo: prefixfoo.suffix }`
+                    if f.is_shorthand && (!prefix.is_empty() || !suffix.is_empty()) {
+                        code_transform.prepend_left(f.span.start, ": ");
+                        code_transform.prepend_left(f.span.start, f.name);
+                    }
                     if !prefix.is_empty() {
                         code_transform.prepend_left(f.span.start, prefix);
                     }
-                    let suffix = b.accessor_suffix(is_inline);
                     if !suffix.is_empty() {
                         code_transform.prepend_left(f.span.end, suffix);
                     }
                 } else {
                     // Unresolved identifiers get _ctx. prefix (Vue behavior)
+                    if f.is_shorthand {
+                        code_transform.prepend_left(f.span.start, ": ");
+                        code_transform.prepend_left(f.span.start, f.name);
+                    }
                     code_transform.prepend_left(f.span.start, "_ctx.");
                 }
             }
@@ -51,15 +60,17 @@ pub fn collect_binding_patches<'alloc>(
             if !f.ignore {
                 if let Some(b) = map.get(&f.name) {
                     let prefix = b.accessor_prefix(is_inline);
+                    let suffix = b.accessor_suffix(is_inline);
+                    // Shorthand property: expand `{ foo }` → `{ foo: prefixfoo.suffix }`
+                    // Must expand when EITHER prefix or suffix is applied (e.g., `.value`
+                    // suffix without prefix for SetupRef in inline mode).
+                    if f.is_shorthand && (!prefix.is_empty() || !suffix.is_empty()) {
+                        out.push((f.span.start, f.name));
+                        out.push((f.span.start, ": "));
+                    }
                     if !prefix.is_empty() {
-                        // Shorthand property: expand `{ foo }` → `{ foo: prefix.foo }`
-                        if f.is_shorthand {
-                            out.push((f.span.start, f.name));
-                            out.push((f.span.start, ": "));
-                        }
                         out.push((f.span.start, prefix));
                     }
-                    let suffix = b.accessor_suffix(is_inline);
                     if !suffix.is_empty() {
                         out.push((f.span.end, suffix));
                     }
@@ -100,14 +111,24 @@ pub fn patch_bindings_with_var_mappings<'alloc>(
                 continue;
             } else if let Some(bt) = map.get(&b.name) {
                 let prefix = bt.accessor_prefix(is_inline);
+                let suffix = bt.accessor_suffix(is_inline);
+                // Shorthand property: expand `{ foo }` → `{ foo: prefixfoo.suffix }`
+                if b.is_shorthand && (!prefix.is_empty() || !suffix.is_empty()) {
+                    code_transform.prepend_left(b.span.start, ": ");
+                    code_transform.prepend_left(b.span.start, b.name);
+                }
                 if !prefix.is_empty() {
                     code_transform.prepend_left(b.span.start, prefix);
                 }
-                let suffix = bt.accessor_suffix(is_inline);
                 if !suffix.is_empty() {
                     code_transform.prepend_left(b.span.end, suffix);
                 }
             } else {
+                // Shorthand property: expand `{ foo }` → `{ foo: _ctx.foo }`
+                if b.is_shorthand {
+                    code_transform.prepend_left(b.span.start, ": ");
+                    code_transform.prepend_left(b.span.start, b.name);
+                }
                 code_transform.prepend_left(b.span.start, "_ctx.");
             }
         }
@@ -219,6 +240,11 @@ fn build_prefixed_value_impl(
             };
             if !prefix.is_empty() || !suffix.is_empty() {
                 result.push_str(&val_text[last..offset]);
+                // Shorthand property: expand `{ foo }` → `{ foo: prefixfoo.suffix }`
+                if b.is_shorthand {
+                    result.push_str(b.name);
+                    result.push_str(": ");
+                }
                 result.push_str(prefix);
                 if !suffix.is_empty() {
                     // Include the identifier and append suffix immediately
@@ -367,8 +393,8 @@ pub fn build_prefixed_value_into(
             };
             if !prefix.is_empty() || !suffix.is_empty() {
                 buf.push_str(&val_text[last..offset]);
-                // Shorthand property: expand `{ foo }` → `{ foo: prefix.foo }`
-                if b.is_shorthand && !prefix.is_empty() {
+                // Shorthand property: expand `{ foo }` → `{ foo: prefixfoo.suffix }`
+                if b.is_shorthand {
                     buf.push_str(b.name);
                     buf.push_str(": ");
                 }

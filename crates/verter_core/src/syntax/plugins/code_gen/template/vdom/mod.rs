@@ -684,6 +684,20 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             );
 
             if let Some(cache_id) = state.cache_id {
+                // When v-once wraps a v-if, the comment fallback must appear INSIDE
+                // the cached ternary (before `.cacheIndex`), not deferred to the parent.
+                // Expected: `(_cache[0] = (cond) ? vnode : _createCommentVNode("v-if", true)).cacheIndex = 0`
+                if had_vif_close {
+                    let comment = if self.is_production {
+                        "_createCommentVNode(\"\", true)"
+                    } else {
+                        "_createCommentVNode(\"v-if\", true)"
+                    };
+                    self.pending_append_lefts.push((close_pos, comment));
+                    self.imports
+                        .add(TemplateImportDependencies::CREATE_COMMENT_VNODE);
+                }
+
                 buf.clear();
                 buf.push_str(").cacheIndex = ");
                 helper::push_u32(&mut buf, cache_id as u32);
@@ -696,7 +710,9 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
 
             drop(code_transform);
 
-            if had_vif_close {
+            // Only defer v-if fallback to parent when NOT inside a v-once cache block.
+            // When cache_id is present, the comment was already emitted inside the cache.
+            if had_vif_close && state.cache_id.is_none() {
                 if let Some(parent) = self.stack.last_mut() {
                     parent.pending_vif_fallbacks.push(close_pos);
                 }
@@ -775,13 +791,21 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             )
         };
 
-        if had_vif_close {
-            if let Some(parent) = self.stack.last_mut() {
-                parent.pending_vif_fallbacks.push(close_pos);
-            }
-        }
-
         if let Some(cache_id) = state.cache_id {
+            // When v-once wraps a v-if, the comment fallback must appear INSIDE
+            // the cached ternary (before `.cacheIndex`), not deferred to the parent.
+            // Expected: `(_cache[0] = (cond) ? vnode : _createCommentVNode("v-if", true)).cacheIndex = 0`
+            if had_vif_close {
+                let comment = if self.is_production {
+                    "_createCommentVNode(\"\", true)"
+                } else {
+                    "_createCommentVNode(\"v-if\", true)"
+                };
+                self.pending_append_lefts.push((close_pos, comment));
+                self.imports
+                    .add(TemplateImportDependencies::CREATE_COMMENT_VNODE);
+            }
+
             self.buf.clear();
             self.buf.push_str(").cacheIndex = ");
             helper::push_u32(&mut self.buf, cache_id as u32);
@@ -790,6 +814,14 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             self.buf.push_str("])");
             let s = code_transform.alloc_str(&self.buf);
             self.pending_append_lefts.push((close_pos, s));
+        }
+
+        // Only defer v-if fallback to parent when NOT inside a v-once cache block.
+        // When cache_id is present, the comment was already emitted inside the cache.
+        if had_vif_close && state.cache_id.is_none() {
+            if let Some(parent) = self.stack.last_mut() {
+                parent.pending_vif_fallbacks.push(close_pos);
+            }
         }
 
         // Drop code_transform borrow before mutating self.
