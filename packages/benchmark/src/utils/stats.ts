@@ -10,66 +10,6 @@ export interface BenchmarkStats {
 }
 
 /**
- * Calculate statistical metrics from an array of measurements
- */
-export function calculateStats(samples: number[], heapUsedMB: number = 0): BenchmarkStats {
-  if (samples.length === 0) {
-    return {
-      mean: 0,
-      median: 0,
-      p95: 0,
-      p99: 0,
-      min: 0,
-      max: 0,
-      stdDev: 0,
-      heapUsedMB
-    }
-  }
-
-  const sorted = [...samples].sort((a, b) => a - b)
-  const len = sorted.length
-
-  const mean = samples.reduce((sum, val) => sum + val, 0) / len
-  const median = getPercentile(sorted, 50)
-  const p95 = getPercentile(sorted, 95)
-  const p99 = getPercentile(sorted, 99)
-  const min = sorted[0]
-  const max = sorted[len - 1]
-
-  // Calculate standard deviation
-  const squaredDiffs = samples.map(val => Math.pow(val - mean, 2))
-  const variance = squaredDiffs.reduce((sum, val) => sum + val, 0) / len
-  const stdDev = Math.sqrt(variance)
-
-  return {
-    mean,
-    median,
-    p95,
-    p99,
-    min,
-    max,
-    stdDev,
-    heapUsedMB
-  }
-}
-
-/**
- * Get percentile value from sorted array
- */
-function getPercentile(sorted: number[], percentile: number): number {
-  const index = (percentile / 100) * (sorted.length - 1)
-  const lower = Math.floor(index)
-  const upper = Math.ceil(index)
-  const weight = index - lower
-
-  if (lower === upper) {
-    return sorted[lower]
-  }
-
-  return sorted[lower] * (1 - weight) + sorted[upper] * weight
-}
-
-/**
  * Calculate throughput in MB/s
  */
 export function calculateThroughput(sizeBytes: number, timeMs: number): number {

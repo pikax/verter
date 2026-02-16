@@ -206,13 +206,13 @@ export function compileVue(source: string, filename: string) {
 ### Verter Compiler Wrapper
 
 ```typescript
-// Single-pass compilation with built-in timing
+// Single-pass compilation (timing handled by tinybench)
 export function compileVerter(source: string, filename: string) {
   const result = compile(source, { filename })
-  
+
   return {
     code: result.code,
-    durationMs: result.duration_ms // Rust-measured compilation time
+    errors: result.errors || []
   }
 }
 ```
@@ -301,10 +301,6 @@ A: Integration tests verify Verter works with real projects (Vuetify, PrimeVue, 
 **Q: Can I run just one fixture?**
 
 A: Not directly, but you can modify the `FIXTURES` array in `src/index.ts` temporarily for local testing.
-
-**Q: Why does Verter include `duration_ms` from Rust?**
-
-A: This measures pure Rust compilation time without Node.js/NAPI overhead. It's informational but not used for benchmark comparison (tinybench times are used).
 
 **Q: What if Verter is slower than Vue?**
 

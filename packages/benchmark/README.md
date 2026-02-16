@@ -6,7 +6,7 @@ Performance benchmarks comparing Vue and Verter SFC compilation.
 
 This package benchmarks Vue and Verter compilers using real-world Vue SFC fixtures:
 - **Vue**: 2-phase compilation (parse → compileScript → compileTemplate)
-- **Verter**: Single-pass compilation with built-in timing
+- **Verter**: Single-pass compilation via Rust/NAPI
 
 ## Metrics
 
