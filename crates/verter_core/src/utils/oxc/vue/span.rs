@@ -354,6 +354,12 @@ fn adjust_conditional_expression_spans(cond: &mut ConditionalExpression<'_>, off
 
 fn adjust_arrow_function_expression_spans(arrow: &mut ArrowFunctionExpression<'_>, offset: u32) {
     adjust_span(&mut arrow.span, offset);
+    if let Some(tp) = &mut arrow.type_parameters {
+        adjust_span(&mut tp.span, offset);
+    }
+    if let Some(rt) = &mut arrow.return_type {
+        adjust_span(&mut rt.span, offset);
+    }
     adjust_formal_parameters_spans(&mut arrow.params, offset);
     adjust_span(&mut arrow.body.span, offset);
     if arrow.expression {
@@ -537,6 +543,9 @@ pub fn adjust_formal_parameters_spans(params: &mut FormalParameters<'_>, offset:
     }
     if let Some(rest) = &mut params.rest {
         adjust_span(&mut rest.span, offset);
+        if let Some(ta) = &mut rest.type_annotation {
+            adjust_span(&mut ta.span, offset);
+        }
         adjust_binding_pattern_spans(&mut rest.rest.argument, offset);
     }
 }
@@ -544,10 +553,12 @@ pub fn adjust_formal_parameters_spans(params: &mut FormalParameters<'_>, offset:
 fn adjust_formal_parameter_spans(param: &mut FormalParameter<'_>, offset: u32) {
     adjust_span(&mut param.span, offset);
     adjust_binding_pattern_spans(&mut param.pattern, offset);
+    if let Some(ta) = &mut param.type_annotation {
+        adjust_span(&mut ta.span, offset);
+    }
     if let Some(init) = &mut param.initializer {
         adjust_expression_spans(init, offset);
     }
-    // Type annotation spans could be adjusted if needed
 }
 
 fn adjust_binding_rest_element_spans(rest: &mut BindingRestElement<'_>, offset: u32) {
@@ -1057,6 +1068,9 @@ fn adjust_variable_declaration_spans(
     for declarator in &mut decl.declarations {
         adjust_span(&mut declarator.span, offset);
         adjust_binding_pattern_spans(&mut declarator.id, offset);
+        if let Some(ta) = &mut declarator.type_annotation {
+            adjust_span(&mut ta.span, offset);
+        }
         if let Some(init) = &mut declarator.init {
             adjust_expression_spans(init, offset);
         }
@@ -1067,6 +1081,12 @@ fn adjust_function_spans(func: &mut oxc_ast::ast::Function<'_>, offset: u32) {
     adjust_span(&mut func.span, offset);
     if let Some(id) = &mut func.id {
         adjust_span(&mut id.span, offset);
+    }
+    if let Some(tp) = &mut func.type_parameters {
+        adjust_span(&mut tp.span, offset);
+    }
+    if let Some(rt) = &mut func.return_type {
+        adjust_span(&mut rt.span, offset);
     }
     adjust_formal_parameters_spans(&mut func.params, offset);
     if let Some(body) = &mut func.body {
@@ -1081,6 +1101,15 @@ fn adjust_class_spans(class: &mut oxc_ast::ast::Class<'_>, offset: u32) {
     adjust_span(&mut class.span, offset);
     if let Some(id) = &mut class.id {
         adjust_span(&mut id.span, offset);
+    }
+    if let Some(tp) = &mut class.type_parameters {
+        adjust_span(&mut tp.span, offset);
+    }
+    if let Some(sta) = &mut class.super_type_arguments {
+        adjust_span(&mut sta.span, offset);
+    }
+    for impl_clause in &mut class.implements {
+        adjust_span(&mut impl_clause.span, offset);
     }
     if let Some(super_class) = &mut class.super_class {
         adjust_expression_spans(super_class, offset);
@@ -1100,6 +1129,9 @@ fn adjust_class_spans(class: &mut oxc_ast::ast::Class<'_>, offset: u32) {
                 if let Some(key_expr) = prop.key.as_expression_mut() {
                     adjust_expression_spans(key_expr, offset);
                 }
+                if let Some(ta) = &mut prop.type_annotation {
+                    adjust_span(&mut ta.span, offset);
+                }
                 if let Some(value) = &mut prop.value {
                     adjust_expression_spans(value, offset);
                 }
@@ -1114,6 +1146,9 @@ fn adjust_class_spans(class: &mut oxc_ast::ast::Class<'_>, offset: u32) {
                 adjust_span(&mut prop.span, offset);
                 if let Some(key_expr) = prop.key.as_expression_mut() {
                     adjust_expression_spans(key_expr, offset);
+                }
+                if let Some(ta) = &mut prop.type_annotation {
+                    adjust_span(&mut ta.span, offset);
                 }
                 if let Some(value) = &mut prop.value {
                     adjust_expression_spans(value, offset);

@@ -9,7 +9,7 @@ use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
-mod typescript;
+pub(crate) mod typescript;
 
 use crate::code_transform::CodeTransform;
 use typescript::strip_typescript_types;

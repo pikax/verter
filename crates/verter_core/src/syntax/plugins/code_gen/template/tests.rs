@@ -5806,3 +5806,233 @@ fn test_bug5_children_array_commas() {
         code
     );
 }
+
+// =========================================================================
+// Bug 6: Unquoted onUpdate:modelValue object key
+// =========================================================================
+
+/// @ai-generated - Bug 6: v-model on native input produces quoted "onUpdate:modelValue" key.
+/// The `onUpdate:modelValue` object key contains a colon, so it MUST be quoted
+/// in JavaScript object literals.
+#[test]
+fn test_bug6_vmodel_native_quoted_key() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import { ref } from 'vue'
+const text = ref('')
+</script>
+<template><input v-model="text"></template>"#,
+    );
+    // The key must be quoted as "onUpdate:modelValue", not bare onUpdate:modelValue
+    assert!(
+        code.contains("\"onUpdate:modelValue\""),
+        "Native v-model should produce quoted \"onUpdate:modelValue\" key, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 6 variant: v-model on component produces quoted "onUpdate:modelValue" key.
+#[test]
+fn test_bug6_vmodel_component_quoted_key() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import { ref } from 'vue'
+import Comp from './Comp.vue'
+const val = ref('')
+</script>
+<template><Comp v-model="val" /></template>"#,
+    );
+    assert!(
+        code.contains("\"onUpdate:modelValue\""),
+        "Component v-model should produce quoted \"onUpdate:modelValue\" key, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 6 variant: production mode with inline template.
+#[test]
+fn test_bug6_vmodel_native_prod_quoted_key() {
+    let code = gen_prod_and_validate(
+        r#"<script setup>
+import { ref } from 'vue'
+const text = ref('')
+</script>
+<template><input v-model="text"></template>"#,
+    );
+    assert!(
+        code.contains("\"onUpdate:modelValue\""),
+        "Production v-model should produce quoted \"onUpdate:modelValue\" key, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Bug 7: _normalizeProps() as bare expression in object literal (v-bind spread)
+// =========================================================================
+
+/// @ai-generated - Bug 7: v-bind spread as sole prop on a component should NOT be wrapped in {}.
+/// The output should be `_normalizeProps(...)` as a direct argument, not `{_normalizeProps(...)}`.
+#[test]
+fn test_bug7_vbind_spread_sole_prop_component() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import Comp from './Comp.vue'
+const attrs = { a: 1 }
+</script>
+<template><Comp v-bind="attrs">content</Comp></template>"#,
+    );
+    assert!(
+        !code.contains("{_normalizeProps"),
+        "v-bind spread should not produce bare _normalizeProps inside object literal, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 7 variant: v-bind spread mixed with other props uses _mergeProps.
+#[test]
+fn test_bug7_vbind_spread_mixed_with_class_on_element() {
+    let code = gen_and_validate(r#"<template><div v-bind="attrs" class="foo">x</div></template>"#);
+    assert!(
+        code.contains("_mergeProps"),
+        "v-bind spread mixed with class should use _mergeProps, got:\n{}",
+        code
+    );
+    // Must NOT contain _normalizeProps inside an object literal
+    assert!(
+        !code.contains("{_normalizeProps"),
+        "Should not have bare _normalizeProps in object literal, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 7: Real-world pattern from CoreUI (AppSidebar.vue).
+/// Component with v-bind="$attrs" followed by static props and event handler.
+/// Must use _mergeProps, not a bare _normalizeProps inside object literal.
+#[test]
+fn test_bug7_coreui_vbind_attrs_mixed_props() {
+    let code = gen_and_validate(
+        r#"<script setup>
+import CSidebarBrand from './CSidebarBrand.vue'
+</script>
+<template><CSidebarBrand v-bind="$attrs" as="a" href="/" @click="navigate">x</CSidebarBrand></template>"#,
+    );
+    // The spread must NOT appear as a bare expression inside {}
+    assert!(
+        !code.contains("{_normalizeProps"),
+        "v-bind spread mixed with static props must not produce bare _normalizeProps in object, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 7: Real-world pattern from PrimeVue (Accordion.vue).
+/// Element with dynamic :class followed by v-bind spread.
+/// Must use _mergeProps, not a bare _normalizeProps inside object literal.
+#[test]
+fn test_bug7_primevue_class_then_vbind_spread() {
+    let code = gen_and_validate(
+        r#"<template><div :class="cx('root')" v-bind="ptmi('root')">x</div></template>"#,
+    );
+    assert!(
+        !code.contains("{_normalizeProps") && !code.contains(", _normalizeProps"),
+        "Dynamic class + v-bind spread must not produce bare _normalizeProps in object, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Bug 8: v-for directive text leaked into props
+// =========================================================================
+
+/// @ai-generated - Bug 8: v-for with class and event handler — v-for text must not leak.
+/// When v-for appears between other attributes, its raw text must be blanked.
+#[test]
+fn test_bug8_vfor_between_attrs_no_leak() {
+    let code = gen_and_validate(
+        r#"<template><div class="item" v-for="item in list" :key="item.id" @click="handle">{{ item.name }}</div></template>"#,
+    );
+    assert!(
+        !code.contains("v-for"),
+        "v-for directive text should not leak into JS output, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("item in"),
+        "v-for iteration expression should not appear in props, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 8 variant: v-for as first attribute followed by static props.
+#[test]
+fn test_bug8_vfor_first_attr_with_static_props() {
+    let code = gen_and_validate(
+        r#"<template><li v-for="(item, i) in items" :key="i" class="entry" role="listitem">{{ item }}</li></template>"#,
+    );
+    assert!(
+        !code.contains("v-for"),
+        "v-for directive text should not leak into JS output, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 8: Real-world pattern from zyronon-douyin (SelectDialog.vue).
+/// When v-for appears AFTER :key and other props, its text leaks into the output.
+/// Pattern: `class="item" :key="i" v-for="(item, i) in list" @click.stop="onOk(item)"`
+#[test]
+fn test_bug8_zyronon_key_before_vfor() {
+    let code = gen_and_validate(
+        r#"<template><div class="item" :key="i" v-for="(item, i) in list" @click.stop="onOk(item)">{{ item.name }}</div></template>"#,
+    );
+    assert!(
+        !code.contains("v-for"),
+        "v-for after :key should not leak directive text, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("in list"),
+        "v-for expression text should not appear in props, got:\n{}",
+        code
+    );
+}
+
+// =========================================================================
+// Bug 9: import type retained in JS output
+// =========================================================================
+
+/// @ai-generated - Bug 9: `import type` statements should be stripped from JS output.
+/// When keep_ts_types is false, type-only imports must be removed.
+#[test]
+fn test_bug9_import_type_stripped() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+import type { Ref } from 'vue'
+import { ref } from 'vue'
+const count: Ref<number> = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+    assert!(
+        !code.contains("import type"),
+        "import type should be stripped from JS output, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Bug 9 variant: per-specifier type import should be stripped.
+/// `import { type Foo, ref } from 'vue'` should become `import { ref } from 'vue'`.
+#[test]
+fn test_bug9_per_specifier_type_import_stripped() {
+    let code = gen_and_validate(
+        r#"<script setup lang="ts">
+import { type Ref, ref } from 'vue'
+const count = ref(0)
+</script>
+<template><div>{{ count }}</div></template>"#,
+    );
+    // The output should not contain "type Ref" or "type " before an import specifier
+    assert!(
+        !code.contains("type Ref"),
+        "Per-specifier type import should be stripped from JS output, got:\n{}",
+        code
+    );
+}

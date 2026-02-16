@@ -79,6 +79,16 @@ pub fn process_script_event<'alloc>(
         "const __sfc__ = /*@__PURE__*/",
     );
 
+    // Strip TypeScript type annotations from declarations BEFORE processing items.
+    // This handles inline type annotations (`: number`, `as Foo`, etc.) and
+    // per-specifier type imports that process_script_event doesn't handle.
+    // We walk the program AST directly, skipping imports (handled below) and
+    // expression statements (which may contain Vue macros like defineProps<...>()).
+    // Program AST spans are SFC-absolute (adjusted by oxc_parser).
+    if !opts.keep_ts_types && is_typescript {
+        strip_ts_declarations(&script.program, code_transform, opts.source);
+    }
+
     // Process each script item
     for item in script.result.items.iter() {
         match item {
@@ -87,6 +97,12 @@ pub fn process_script_event<'alloc>(
                     // Strip type-only imports (`import type { ... }`) — invalid in JS output
                     code_transform.remove(event.span.start, event.span.end);
                 } else {
+                    // Strip per-specifier type imports BEFORE moving.
+                    // Moved chunks are skipped by subsequent overwrite/remove operations,
+                    // so we must strip `type` keywords before the move.
+                    if !opts.keep_ts_types {
+                        strip_import_type_specifiers(event, &script.program, code_transform);
+                    }
                     code_transform.move_with_suffix(
                         event.span.start,
                         event.span.end,
@@ -333,26 +349,372 @@ pub fn process_script_event<'alloc>(
 
     code_transform.overwrite(script.tag_close_start, script.tag_close_end, &closing_text);
 
-    // TODO remove typescript types if keep_ts_types is false (eg: playground mode)
-    // // Note: We don't move the script block. After template processing moves its content
-    // // to the end of the file, the script block naturally appears first in the output.
-    // // This avoids complex move interactions.
-
-    // // Strip TypeScript type annotations when keep_ts is false (playground mode)
-    // if !opts.keep_ts_types {
-    //     let script_content =
-    //         &source[info.event.content_start as usize..info.event.content_end as usize];
-    //     strip_typescript_types(
-    //         &info.event.program,
-    //         code_transform,
-    //         info.event.content_start,
-    //         script_content,
-    //     );
-    // }
+    // TypeScript type annotations in declarations (variable type annotations,
+    // function signatures) were already stripped by strip_ts_declarations() above.
+    // Import type specifiers were stripped by strip_import_type_specifiers() before
+    // imports were moved. Macro type parameters are handled by macro processing.
 
     ProcessedScript {
         imports,
         diagnostics,
         deferred_closing,
+    }
+}
+
+/// Strip TypeScript type annotations from declarations in the program body.
+///
+/// This handles variable type annotations, function signatures, and other
+/// declaration-level TypeScript syntax. It deliberately skips:
+/// - Import declarations (handled separately by process_script_event)
+/// - Expression statements (may contain Vue macros like defineProps<...>())
+///
+/// The program AST spans must be SFC-absolute (adjusted by oxc_parser).
+fn strip_ts_declarations<'alloc>(
+    program: &oxc_ast::ast::Program<'alloc>,
+    code_transform: &mut code_transform::CodeTransform<'alloc>,
+    source: &str,
+) {
+    use oxc_ast::ast::*;
+
+    for stmt in &program.body {
+        match stmt {
+            // Skip imports — handled by process_script_event
+            Statement::ImportDeclaration(_) => {}
+            // Skip expression statements — may contain Vue macros
+            Statement::ExpressionStatement(_) => {}
+            // Skip TS declarations — handled by process_script_event (TypeDeclaration item)
+            Statement::TSTypeAliasDeclaration(_)
+            | Statement::TSInterfaceDeclaration(_)
+            | Statement::TSModuleDeclaration(_)
+            | Statement::TSEnumDeclaration(_) => {}
+            // Strip type annotations from variable declarations
+            Statement::VariableDeclaration(var_decl) => {
+                if var_decl.declare {
+                    continue;
+                }
+                for declarator in &var_decl.declarations {
+                    if let Some(ta) = &declarator.type_annotation {
+                        code_transform.remove(ta.span.start, ta.span.end);
+                    }
+                    if let Some(init) = &declarator.init {
+                        strip_ts_expression(init, code_transform);
+                    }
+                }
+            }
+            Statement::FunctionDeclaration(func) => {
+                strip_ts_function(func, code_transform);
+            }
+            Statement::ClassDeclaration(class) => {
+                strip_ts_class(class, code_transform, source);
+            }
+            // Export declarations may wrap type-annotated declarations
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(decl) = &export.declaration {
+                    match decl {
+                        Declaration::VariableDeclaration(var_decl) => {
+                            if !var_decl.declare {
+                                for declarator in &var_decl.declarations {
+                                    if let Some(ta) = &declarator.type_annotation {
+                                        code_transform.remove(ta.span.start, ta.span.end);
+                                    }
+                                    if let Some(init) = &declarator.init {
+                                        strip_ts_expression(init, code_transform);
+                                    }
+                                }
+                            }
+                        }
+                        Declaration::FunctionDeclaration(func) => {
+                            strip_ts_function(func, code_transform);
+                        }
+                        Declaration::ClassDeclaration(class) => {
+                            strip_ts_class(class, code_transform, source);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Statement::ExportDefaultDeclaration(export) => match &export.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(f) => {
+                    strip_ts_function(f, code_transform);
+                }
+                ExportDefaultDeclarationKind::ClassDeclaration(c) => {
+                    strip_ts_class(c, code_transform, source);
+                }
+                _ => {
+                    if let Some(expr) = export.declaration.as_expression() {
+                        strip_ts_expression(expr, code_transform);
+                    }
+                }
+            },
+            _ => {}
+        }
+    }
+}
+
+/// Strip TypeScript type annotations from a function declaration/expression.
+fn strip_ts_function<'alloc>(
+    func: &oxc_ast::ast::Function<'alloc>,
+    code_transform: &mut code_transform::CodeTransform<'alloc>,
+) {
+    if let Some(tp) = &func.type_parameters {
+        code_transform.remove(tp.span.start, tp.span.end);
+    }
+    if let Some(rt) = &func.return_type {
+        code_transform.remove(rt.span.start, rt.span.end);
+    }
+    // Strip parameter type annotations
+    for param in &func.params.items {
+        if let Some(ta) = &param.type_annotation {
+            code_transform.remove(ta.span.start, ta.span.end);
+        }
+    }
+    if let Some(rest) = &func.params.rest {
+        if let Some(ta) = &rest.type_annotation {
+            code_transform.remove(ta.span.start, ta.span.end);
+        }
+    }
+    // Recurse into function body
+    if let Some(body) = &func.body {
+        for stmt in &body.statements {
+            strip_ts_statement(stmt, code_transform);
+        }
+    }
+}
+
+/// Strip TypeScript type annotations from expressions (as, satisfies, non-null, etc.)
+fn strip_ts_expression<'alloc>(
+    expr: &oxc_ast::ast::Expression<'alloc>,
+    code_transform: &mut code_transform::CodeTransform<'alloc>,
+) {
+    use oxc_ast::ast::*;
+    use oxc_span::GetSpan;
+
+    match expr {
+        Expression::TSAsExpression(e) => {
+            code_transform.remove(e.expression.span().end, e.span.end);
+            strip_ts_expression(&e.expression, code_transform);
+        }
+        Expression::TSSatisfiesExpression(e) => {
+            code_transform.remove(e.expression.span().end, e.span.end);
+            strip_ts_expression(&e.expression, code_transform);
+        }
+        Expression::TSNonNullExpression(e) => {
+            code_transform.remove(e.expression.span().end, e.span.end);
+            strip_ts_expression(&e.expression, code_transform);
+        }
+        Expression::TSTypeAssertion(e) => {
+            code_transform.remove(e.span.start, e.expression.span().start);
+            strip_ts_expression(&e.expression, code_transform);
+        }
+        Expression::TSInstantiationExpression(e) => {
+            code_transform.remove(e.expression.span().end, e.span.end);
+            strip_ts_expression(&e.expression, code_transform);
+        }
+        // Note: We do NOT strip type arguments from call expressions here,
+        // because Vue macros (defineProps, defineEmits, etc.) handle their own
+        // type parameters. Regular TS call type args like `fn<T>()` would need
+        // stripping, but those are rare in <script setup> and can be added later.
+        Expression::ArrowFunctionExpression(arrow) => {
+            if let Some(tp) = &arrow.type_parameters {
+                code_transform.remove(tp.span.start, tp.span.end);
+            }
+            if let Some(rt) = &arrow.return_type {
+                code_transform.remove(rt.span.start, rt.span.end);
+            }
+            for param in &arrow.params.items {
+                if let Some(ta) = &param.type_annotation {
+                    code_transform.remove(ta.span.start, ta.span.end);
+                }
+            }
+            for stmt in &arrow.body.statements {
+                strip_ts_statement(stmt, code_transform);
+            }
+        }
+        Expression::FunctionExpression(func) => {
+            strip_ts_function(func, code_transform);
+        }
+        // Recurse into container expressions
+        Expression::ParenthesizedExpression(p) => {
+            strip_ts_expression(&p.expression, code_transform);
+        }
+        Expression::ConditionalExpression(c) => {
+            strip_ts_expression(&c.test, code_transform);
+            strip_ts_expression(&c.consequent, code_transform);
+            strip_ts_expression(&c.alternate, code_transform);
+        }
+        Expression::AssignmentExpression(a) => {
+            strip_ts_expression(&a.right, code_transform);
+        }
+        Expression::SequenceExpression(s) => {
+            for e in &s.expressions {
+                strip_ts_expression(e, code_transform);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Strip TypeScript from a statement (recursive helper for function/block bodies).
+fn strip_ts_statement<'alloc>(
+    stmt: &oxc_ast::ast::Statement<'alloc>,
+    code_transform: &mut code_transform::CodeTransform<'alloc>,
+) {
+    use oxc_ast::ast::*;
+
+    match stmt {
+        Statement::VariableDeclaration(var_decl) => {
+            if var_decl.declare {
+                code_transform.remove(var_decl.span.start, var_decl.span.end);
+                return;
+            }
+            for declarator in &var_decl.declarations {
+                if let Some(ta) = &declarator.type_annotation {
+                    code_transform.remove(ta.span.start, ta.span.end);
+                }
+                if let Some(init) = &declarator.init {
+                    strip_ts_expression(init, code_transform);
+                }
+            }
+        }
+        Statement::ExpressionStatement(expr_stmt) => {
+            strip_ts_expression(&expr_stmt.expression, code_transform);
+        }
+        Statement::ReturnStatement(ret) => {
+            if let Some(arg) = &ret.argument {
+                strip_ts_expression(arg, code_transform);
+            }
+        }
+        Statement::FunctionDeclaration(func) => {
+            strip_ts_function(func, code_transform);
+        }
+        Statement::BlockStatement(block) => {
+            for s in &block.body {
+                strip_ts_statement(s, code_transform);
+            }
+        }
+        Statement::IfStatement(if_stmt) => {
+            strip_ts_expression(&if_stmt.test, code_transform);
+            strip_ts_statement(&if_stmt.consequent, code_transform);
+            if let Some(alt) = &if_stmt.alternate {
+                strip_ts_statement(alt, code_transform);
+            }
+        }
+        Statement::ForStatement(for_stmt) => {
+            if let Some(ForStatementInit::VariableDeclaration(var_decl)) = &for_stmt.init {
+                for declarator in &var_decl.declarations {
+                    if let Some(ta) = &declarator.type_annotation {
+                        code_transform.remove(ta.span.start, ta.span.end);
+                    }
+                }
+            }
+            strip_ts_statement(&for_stmt.body, code_transform);
+        }
+        Statement::ForInStatement(s) => {
+            strip_ts_statement(&s.body, code_transform);
+        }
+        Statement::ForOfStatement(s) => {
+            strip_ts_statement(&s.body, code_transform);
+        }
+        Statement::WhileStatement(s) => {
+            strip_ts_statement(&s.body, code_transform);
+        }
+        Statement::TryStatement(t) => {
+            for s in &t.block.body {
+                strip_ts_statement(s, code_transform);
+            }
+            if let Some(handler) = &t.handler {
+                for s in &handler.body.body {
+                    strip_ts_statement(s, code_transform);
+                }
+            }
+            if let Some(finalizer) = &t.finalizer {
+                for s in &finalizer.body {
+                    strip_ts_statement(s, code_transform);
+                }
+            }
+        }
+        // TS declarations inside function bodies
+        Statement::TSTypeAliasDeclaration(d) => {
+            code_transform.remove(d.span.start, d.span.end);
+        }
+        Statement::TSInterfaceDeclaration(d) => {
+            code_transform.remove(d.span.start, d.span.end);
+        }
+        _ => {}
+    }
+}
+
+/// Strip TypeScript-specific syntax from a class declaration.
+fn strip_ts_class<'alloc>(
+    _class: &oxc_ast::ast::Class<'alloc>,
+    _code_transform: &mut code_transform::CodeTransform<'alloc>,
+    _source: &str,
+) {
+    // Class TS stripping is complex (implements, type parameters, accessibility modifiers).
+    // For now, this is a stub — full class stripping can be added when needed.
+    // Most script setup code doesn't define classes inline.
+}
+
+/// Strip per-specifier `type` keywords from a non-type-only import before it is moved.
+///
+/// For `import { type Ref, ref } from 'vue'`, removes the `type Ref, ` part
+/// so the moved import becomes `import { ref } from 'vue'`.
+fn strip_import_type_specifiers<'alloc>(
+    event: &crate::utils::oxc::vue::ScriptImport<'alloc>,
+    program: &oxc_ast::ast::Program<'alloc>,
+    code_transform: &mut code_transform::CodeTransform<'alloc>,
+) {
+    use oxc_ast::ast::*;
+    use oxc_span::GetSpan;
+
+    // Check if this import has any type-only bindings
+    let has_type_specifiers = event.bindings.iter().any(|b| b.is_type_only);
+    if !has_type_specifiers {
+        return;
+    }
+
+    // If ALL specifiers are type-only, remove the entire import
+    if event.bindings.iter().all(|b| b.is_type_only) {
+        code_transform.remove(event.span.start, event.span.end);
+        return;
+    }
+
+    // Find the matching import declaration in the program AST by span
+    for stmt in &program.body {
+        if let Statement::ImportDeclaration(import) = stmt {
+            if import.span.start != event.span.start {
+                continue;
+            }
+            // Found matching import — strip type specifiers using AST spans
+            if let Some(specifiers) = &import.specifiers {
+                let type_indices: Vec<usize> = specifiers
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, spec)| {
+                        if let ImportDeclarationSpecifier::ImportSpecifier(s) = spec {
+                            if s.import_kind.is_type() {
+                                return Some(i);
+                            }
+                        }
+                        None
+                    })
+                    .collect();
+
+                // Remove type specifiers in reverse order to avoid span invalidation
+                for &idx in type_indices.iter().rev() {
+                    let spec_span = specifiers[idx].span();
+                    if idx + 1 < specifiers.len() {
+                        // Remove from this specifier to the start of the next
+                        let next_span = specifiers[idx + 1].span();
+                        code_transform.remove(spec_span.start, next_span.start);
+                    } else if idx > 0 {
+                        // Last specifier: remove from end of previous to end of this
+                        let prev_span = specifiers[idx - 1].span();
+                        code_transform.remove(prev_span.end, spec_span.end);
+                    }
+                }
+            }
+            break;
+        }
     }
 }
