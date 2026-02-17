@@ -297,7 +297,7 @@ jobs:
             branch: main
             build-cmd: pnpm -r --filter="./packages/**" --parallel run build
             test-cmd: pnpm run test
-            e2e-cmd: pnpm -C cypress/fixtures/basic run dev > /dev/null 2>&1 & DEV_PID=$!; sleep 10 && npx cypress run --headless; EXIT=$?; kill $DEV_PID 2>/dev/null; wait $DEV_PID 2>/dev/null; exit $EXIT
+            e2e-cmd: DEV_LOG=/tmp/slidev-dev.log; pnpm -C cypress/fixtures/basic run dev > "$DEV_LOG" 2>&1 & DEV_PID=$!; sleep 15 && npx cypress run --headless; EXIT=$?; echo "--- Dev server log ---"; cat "$DEV_LOG" 2>/dev/null || true; kill $DEV_PID 2>/dev/null; wait $DEV_PID 2>/dev/null; exit $EXIT
             package-manager: pnpm
             bundler: vite
           - name: zyronon-douyin
@@ -412,11 +412,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: lts/*
-          cache: ${{ matrix.project.package-manager }}
-          cache-dependency-path: >-
-            ${{ matrix.project.package-manager == 'pnpm'
-              && 'test-project/**/pnpm-lock.yaml'
-              || 'test-project/**/package-lock.json' }}
 
       - name: Configure hoist pattern for Verter
         if: matrix.project.package-manager == 'pnpm'
@@ -452,7 +447,19 @@ jobs:
         working-directory: test-project
         run: |
           if [ "${{ matrix.project.package-manager }}" = "pnpm" ]; then
-            pnpm install --no-frozen-lockfile
+            if ! pnpm install --no-frozen-lockfile 2>&1 | tee /tmp/pnpm-install.log; then
+              # Handle ERR_PNPM_WORKSPACE_PKG_NOT_FOUND: remove the offending workspace
+              # package and retry (e.g. tdesign-vue-next's chat/site references a missing @tdesign/common)
+              OFFENDING_DIR=$(grep -oP 'In \K[^:]+' /tmp/pnpm-install.log | head -1 || true)
+              if [ -n "$OFFENDING_DIR" ] && [ -d "$OFFENDING_DIR" ]; then
+                echo "⚠️ Removing broken workspace package: $OFFENDING_DIR"
+                rm -rf "$OFFENDING_DIR"
+                pnpm install --no-frozen-lockfile
+              else
+                cat /tmp/pnpm-install.log
+                exit 1
+              fi
+            fi
           else
             # --legacy-peer-deps bypasses ERESOLVE errors from outdated peer dependencies
             # in third-party projects (e.g. ant-design-vue)
@@ -518,8 +525,12 @@ jobs:
           PKG_MGR="${{ matrix.project.package-manager }}"
 
           if [ "$PKG_MGR" = "pnpm" ]; then
-            # 1. Install both packages
-            pnpm add -w "$NATIVE_TGZ" "$UNPLUGIN_TGZ"
+            # 1. Install both packages (use -w only for workspace projects)
+            PNPM_W=""
+            if [ -f "pnpm-workspace.yaml" ] || [ -f "pnpm-workspace.yml" ]; then
+              PNPM_W="-w"
+            fi
+            pnpm add $PNPM_W "$NATIVE_TGZ" "$UNPLUGIN_TGZ"
 
             # 2. Add pnpm overrides using file: protocol to the tarballs.
             #    The $packageName syntax doesn't work with tarball-installed packages —
@@ -534,8 +545,14 @@ jobs:
               fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
             "
 
-            # 3. Reinstall to apply overrides to workspace packages
-            pnpm install --no-frozen-lockfile
+            # 3. Reinstall to apply overrides to workspace packages.
+            #    If install fails (e.g. lockfile references a yanked npm version),
+            #    delete the lockfile and retry with fresh resolution.
+            if ! pnpm install --no-frozen-lockfile 2>/dev/null; then
+              echo "⚠️ Reinstall failed, retrying without lockfile..."
+              rm -f pnpm-lock.yaml
+              pnpm install
+            fi
           else
             # 1. Install both packages
             npm install --legacy-peer-deps "$NATIVE_TGZ" "$UNPLUGIN_TGZ"
@@ -561,7 +578,11 @@ jobs:
         run: |
           echo "Installing from npm with dist-tag: ${{ steps.source.outputs.dist-tag }}"
           if [ "${{ matrix.project.package-manager }}" = "pnpm" ]; then
-            pnpm add -w @verter/unplugin@${{ steps.source.outputs.dist-tag }}
+            PNPM_W=""
+            if [ -f "pnpm-workspace.yaml" ] || [ -f "pnpm-workspace.yml" ]; then
+              PNPM_W="-w"
+            fi
+            pnpm add $PNPM_W @verter/unplugin@${{ steps.source.outputs.dist-tag }}
           else
             npm install --legacy-peer-deps @verter/unplugin@${{ steps.source.outputs.dist-tag }}
           fi
@@ -840,7 +861,12 @@ jobs:
         continue-on-error: true
         run: |
           START=$(date +%s)
-          if eval "${{ matrix.project.e2e-cmd }}" 2>&1 | tee ../verter-e2e.log; then
+          # Write e2e command to a temp script to prevent bash from
+          # pre-expanding $-variables ($!, $?, etc.) inside double quotes.
+          cat > /tmp/verter-e2e-cmd.sh <<'VERTER_E2E_EOF'
+          ${{ matrix.project.e2e-cmd }}
+          VERTER_E2E_EOF
+          if bash /tmp/verter-e2e-cmd.sh 2>&1 | tee ../verter-e2e.log; then
             echo "status=passed" >> $GITHUB_OUTPUT
           else
             echo "status=failed" >> $GITHUB_OUTPUT
