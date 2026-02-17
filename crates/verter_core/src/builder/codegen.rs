@@ -4225,4 +4225,129 @@ const attrs = useAttrs();
             result.code
         );
     }
+
+    /// Object shorthand with prop that gets $props. prefix must expand to full key-value.
+    /// `{ as }` where `as` is a prop → `{ as: $props.as }` (not `{ $props.as }`)
+    /// Reproduces oku-primitives Label.vue pattern.
+    #[test]
+    fn test_object_shorthand_prop_expansion() {
+        let input = r#"<script setup lang="ts">
+interface Props { as?: string }
+withDefaults(defineProps<Props>(), { as: 'label' })
+</script>
+<template>
+  <Primitive v-bind="normalizeAttrs(fn([$attrs, { as }]))">
+    <slot />
+  </Primitive>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("SHORTHAND PROP OUTPUT:\n{}", result.code);
+        // Must NOT contain { $props.as } — that's invalid JS
+        assert!(
+            !result.code.contains("{ $props.as }"),
+            "shorthand {{ $props.as }} is invalid, must expand to {{ as: $props.as }}: {}",
+            result.code
+        );
+        // Must NOT contain { _ctx.as } either
+        assert!(
+            !result.code.contains("{ _ctx.as }"),
+            "shorthand {{ _ctx.as }} is invalid, must expand: {}",
+            result.code
+        );
+        // Must contain the expanded form
+        assert!(
+            result.code.contains("as: $props.as"),
+            "must expand to {{ as: $props.as }}: {}",
+            result.code
+        );
+    }
+
+    /// Custom directive on a component (v-c-placeholder).
+    /// Reproduces coreui Placeholders.vue: CButton with v-c-placeholder directive.
+    #[test]
+    fn test_custom_directive_on_component() {
+        let input = r##"<script setup>
+</script>
+<template>
+  <CButton
+    v-c-placeholder="{ xs: 6 }"
+    color="primary"
+    aria-hidden="true"
+    disabled
+    href="#"
+    tabindex="-1"
+  ></CButton>
+</template>"##;
+        let result = gen_and_validate(input);
+        eprintln!("CUSTOM DIRECTIVE OUTPUT:\n{}", result.code);
+        assert!(
+            result.code.contains("_withDirectives"),
+            "must use _withDirectives: {}",
+            result.code
+        );
+    }
+
+    /// Custom directive on component WITH children.
+    /// Reproduces coreui: <CCardTitle v-c-placeholder="..."><CPlaceholder /></CCardTitle>
+    #[test]
+    fn test_custom_directive_on_component_with_children() {
+        let input = r#"<script setup>
+</script>
+<template>
+  <CCardTitle v-c-placeholder="{ animation: 'glow', xs: 7 }">
+    <CPlaceholder :xs="6" />
+  </CCardTitle>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("DIRECTIVE WITH CHILDREN:\n{}", result.code);
+        assert!(
+            result.code.contains("_withDirectives"),
+            "must use _withDirectives: {}",
+            result.code
+        );
+    }
+
+    /// Reproduces oku-primitives Label.vue exactly: defineProps with imported type,
+    /// defineOptions, defineEmits, and shorthand `{ as }` in template expression.
+    /// KNOWN LIMITATION: When LabelProps is imported from another file, Verter can't
+    /// cross-file resolve the type to extract prop names. This causes `as` to be
+    /// resolved as `_ctx.as` instead of `$props.as`. Requires cross-file type resolution.
+    #[test]
+    #[ignore = "requires cross-file type resolution for defineProps<ImportedType>()"]
+    fn test_oku_label_pattern_imported_type() {
+        let input = r#"<script setup lang="ts">
+import type { EmitsToHookProps } from '../shared/index.ts'
+import type { LabelProps, LabelEmits } from './Label.ts'
+import { Primitive } from '../primitive/index.ts'
+import { normalizeAttrs } from '../shared/index.ts'
+import { DEFAULT_LABEL_PROPS, useLabel } from './Label.ts'
+
+defineOptions({
+  name: 'RadixLabel',
+  inheritAttrs: false,
+})
+
+withDefaults(defineProps<LabelProps>(), DEFAULT_LABEL_PROPS)
+const emit = defineEmits<LabelEmits>()
+
+const label = useLabel({
+  onMousedown(event) {
+    emit('mousedown', event)
+  },
+} satisfies Required<EmitsToHookProps<LabelEmits>>)
+</script>
+<template>
+  <Primitive v-bind="normalizeAttrs(label.attrs([$attrs, { as }]))">
+    <slot />
+  </Primitive>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("OKU LABEL OUTPUT:\n{}", result.code);
+        // `as` must NOT use _ctx prefix — it's a prop
+        assert!(
+            !result.code.contains("_ctx.as"),
+            "as must NOT use _ctx prefix (should be $props.as): {}",
+            result.code
+        );
+    }
 }

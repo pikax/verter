@@ -466,13 +466,16 @@ pub(crate) fn handle_element_close<'alloc>(
                 buf.push(')');
             }
 
-            if let Some(close_tag) = &ev.event.event_close_tag {
+            let close_pos = if let Some(close_tag) = &ev.event.event_close_tag {
                 let s = code_transform.alloc_str(buf);
                 pending_overwrites.push((close_tag.start, close_tag.end, s));
+                close_tag.end
             } else {
                 let s = code_transform.alloc_str(buf);
                 pending_append_lefts.push((state.open_tag_end, s));
-            }
+                state.open_tag_end
+            };
+            emit_with_directives(code_transform, state, close_pos, pending_append_lefts, buf);
             return;
         } else {
             // Mixed or element-only children: each child is a separate array entry
@@ -514,13 +517,16 @@ pub(crate) fn handle_element_close<'alloc>(
                 buf.push(')');
             }
 
-            if let Some(close_tag) = &ev.event.event_close_tag {
+            let close_pos = if let Some(close_tag) = &ev.event.event_close_tag {
                 let s = code_transform.alloc_str(buf);
                 pending_overwrites.push((close_tag.start, close_tag.end, s));
+                close_tag.end
             } else {
                 let s = code_transform.alloc_str(buf);
                 pending_append_lefts.push((state.open_tag_end, s));
-            }
+                state.open_tag_end
+            };
+            emit_with_directives(code_transform, state, close_pos, pending_append_lefts, buf);
             return;
         }
     }
@@ -576,13 +582,16 @@ pub(crate) fn handle_element_close<'alloc>(
                 buf.push(')');
             }
 
-            if let Some(close_tag) = &ev.event.event_close_tag {
+            let close_pos = if let Some(close_tag) = &ev.event.event_close_tag {
                 let s = code_transform.alloc_str(buf);
                 pending_overwrites.push((close_tag.start, close_tag.end, s));
+                close_tag.end
             } else {
                 let s = code_transform.alloc_str(buf);
                 pending_append_lefts.push((state.open_tag_end, s));
-            }
+                state.open_tag_end
+            };
+            emit_with_directives(code_transform, state, close_pos, pending_append_lefts, buf);
             return;
         } else {
             // Mixed/element default slot content: each child is a separate array entry
@@ -616,13 +625,16 @@ pub(crate) fn handle_element_close<'alloc>(
                 buf.push(')');
             }
 
-            if let Some(close_tag) = &ev.event.event_close_tag {
+            let close_pos = if let Some(close_tag) = &ev.event.event_close_tag {
                 let s = code_transform.alloc_str(buf);
                 pending_overwrites.push((close_tag.start, close_tag.end, s));
+                close_tag.end
             } else {
                 let s = code_transform.alloc_str(buf);
                 pending_append_lefts.push((state.open_tag_end, s));
-            }
+                state.open_tag_end
+            };
+            emit_with_directives(code_transform, state, close_pos, pending_append_lefts, buf);
             return;
         }
     } else if has_children {
