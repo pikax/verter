@@ -4061,4 +4061,96 @@ const value = '42%'
             result.code
         );
     }
+
+    /// Component with v-for containing mixed slot content.
+    /// Reproduces StakingBreakdown pattern: BalHStack with span + interpolation.
+    /// The interpolation value (amount) must render in the output.
+    #[test]
+    fn test_component_vfor_mixed_slot_element_interpolation() {
+        let input = r#"<script setup>
+import { ref } from 'vue'
+const items = ref([['Min BAL', '0.44%'], ['Max BAL', '5.67%']])
+function fmt(v) { return v }
+</script>
+<template>
+  <div>
+    <Comp v-for="([label, amount], i) in items" :key="i" justify="between">
+      <span>{{ label }}</span>
+      {{ fmt(amount) }}
+    </Comp>
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // The interpolation `{{ fmt(amount) }}` must be wrapped in _createTextVNode
+        assert!(
+            result.code.contains("_createTextVNode"),
+            "v-for component mixed slot must use _createTextVNode: {}",
+            result.code
+        );
+        // The fmt() call must appear in the output (not dropped)
+        assert!(
+            result.code.contains("fmt(amount)"),
+            "fmt(amount) interpolation must be present in output: {}",
+            result.code
+        );
+    }
+
+    /// Exact reproduction of StakingBreakdown v-for breakdown pattern.
+    /// The span has `{{ label }} {{ suffix }} </span>` — the trailing space
+    /// after the last interpolation is a separate whitespace-only text node.
+    /// Vue removes it because it's the last child of the span.
+    /// Without this fix, the trailing space + condensed whitespace between
+    /// </span> and {{ fNum(...) }} creates a double-space in the output.
+    #[test]
+    fn test_staking_breakdown_vfor_pattern() {
+        let input = r#"<script setup>
+import { ref } from 'vue'
+const breakdownItems = ref([])
+function fNum(v, f) { return v }
+const FNumFormats = { bp: 'bp' }
+const suffix = 'APR'
+</script>
+<template>
+  <div data-testid="staking-apr">
+    <BalHStack justify="between" class="font-bold">
+      <span>Staking APR</span>
+      {{ '0.44% - 5.67%' }}
+    </BalHStack>
+    <BalVStack spacing="xs" class="mt-1">
+      <BalHStack
+        v-for="([label, amount], i) in breakdownItems"
+        :key="i"
+        justify="between"
+        class="text-gray-500"
+      >
+        <span class="ml-2">{{ label }} {{ suffix }} </span>
+        {{ fNum(amount, FNumFormats.bp) }}
+      </BalHStack>
+    </BalVStack>
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("GENERATED:\n{}", result.code);
+        // Both component slots must have _createTextVNode wrapping
+        assert!(
+            result.code.contains("_createTextVNode"),
+            "Mixed slot text+interp must use _createTextVNode: {}",
+            result.code
+        );
+        // The fNum call must be present
+        assert!(
+            result.code.contains("fNum(amount"),
+            "fNum interpolation must be present: {}",
+            result.code
+        );
+        // The span's trailing space (last child, whitespace-only) must be removed.
+        // The span text should be: _toDisplayString(label) + " " + _toDisplayString(suffix)
+        // NOT: _toDisplayString(label) + " " + _toDisplayString(suffix) + " "
+        // Verify no trailing space before the span's closing paren:
+        assert!(
+            result.code.contains("_toDisplayString( $setup.suffix )"),
+            "suffix interpolation must be present: {}",
+            result.code
+        );
+    }
 }

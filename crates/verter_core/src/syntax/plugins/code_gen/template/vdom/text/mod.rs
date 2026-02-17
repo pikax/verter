@@ -51,41 +51,27 @@ pub(crate) fn handle_text<'alloc>(
     let has_newline = raw_bytes.iter().any(|&b| matches!(b, b'\n' | b'\r'));
 
     if is_all_whitespace {
-        if has_newline {
-            // Deferred Rule 1: All-whitespace text containing a newline — decision deferred.
-            //
-            // Vue's condense mode removes this ONLY when:
-            //   - It's the first or last child, OR
-            //   - Both adjacent siblings are elements or comments.
-            // Between an element and an interpolation, it becomes a single space.
-            //
-            // Since we don't know the next sibling yet, push as WhitespaceNewline
-            // and let resolve_whitespace_candidates() in the close phase decide.
-            // No overwrites or closing quotes are emitted here — the close phase
-            // handles everything.
-            state.children.push(ChildInfo {
-                start: ev.start,
-                end: ev.end,
-                kind: ChildKind::WhitespaceNewline,
-                scope_prefix: "",
-                is_named_slot: false,
-            });
-            return;
-        }
-        // Rule 2: All-whitespace without newline → condense to single space.
-        // Overwrite the entire range with a single space character, then emit as text.
-        pending_overwrites.push((ev.start, ev.end, " "));
-
+        // All whitespace-only text is deferred to resolve_whitespace_candidates().
+        // Vue's condense mode has context-dependent rules:
+        // - First/last child → always remove
+        // - Between comments → always remove
+        // - Between element+comment → always remove
+        // - Between elements with newline → remove
+        // - Otherwise → condense to single space
+        //
+        // Since we don't know adjacent siblings yet, defer the decision.
+        let kind = if has_newline {
+            ChildKind::WhitespaceNewline
+        } else {
+            ChildKind::WhitespaceSpace
+        };
         state.children.push(ChildInfo {
             start: ev.start,
             end: ev.end,
-            kind: ChildKind::Text,
+            kind,
             scope_prefix: "",
             is_named_slot: false,
         });
-
-        // The opening quote is added by the close phase via ChildKind::content_prefix().
-        pending_append_lefts.push((ev.end, "\""));
         return;
     }
 
@@ -171,12 +157,20 @@ fn condense_and_escape(text: &str) -> String {
 
 const HEX_DIGITS: [u8; 16] = *b"0123456789abcdef";
 
-/// Resolve deferred `WhitespaceNewline` children based on their neighbors.
+/// Resolve deferred whitespace-only children based on their neighbors.
 ///
-/// Vue's condense mode rules for whitespace-only text containing newlines:
-/// - **Remove** if it's the first or last child.
-/// - **Remove** if both adjacent siblings are elements or comments.
-/// - **Keep as single space** otherwise (e.g., between element and interpolation).
+/// Vue's condense mode rules for whitespace-only text (from `@vue/compiler-core`):
+///
+/// **Always remove** when:
+/// - It's the first or last child (`!prev || !next`)
+/// - Both adjacent are comments
+/// - One adjacent is a comment and the other is an element
+///
+/// **Remove if has newline** (`WhitespaceNewline`) when:
+/// - Both adjacent are elements
+///
+/// **Keep as single space** otherwise (e.g., between element and interpolation,
+/// between two interpolations, or between elements without newline).
 ///
 /// Must be called in the close phase (when all children are known) before
 /// any child-processing logic that reads `state.children`.
@@ -189,53 +183,75 @@ pub(crate) fn resolve_whitespace_candidates(
         return;
     }
 
-    // Fast path: no WhitespaceNewline children.
-    if !children
-        .iter()
-        .any(|c| c.kind == ChildKind::WhitespaceNewline)
-    {
+    // Fast path: no whitespace candidates.
+    if !children.iter().any(|c| {
+        matches!(
+            c.kind,
+            ChildKind::WhitespaceNewline | ChildKind::WhitespaceSpace
+        )
+    }) {
         return;
     }
 
-    // Decide for each WhitespaceNewline: remove or keep.
     let len = children.len();
     let mut to_remove: Vec<usize> = Vec::new();
 
     for i in 0..len {
-        if children[i].kind != ChildKind::WhitespaceNewline {
+        let ws_kind = children[i].kind;
+        if !matches!(
+            ws_kind,
+            ChildKind::WhitespaceNewline | ChildKind::WhitespaceSpace
+        ) {
             continue;
         }
 
-        // Find the effective previous sibling (skip over other WhitespaceNewline).
+        let has_newline = ws_kind == ChildKind::WhitespaceNewline;
+
+        // Find the effective previous sibling (skip over other whitespace candidates).
         let prev_kind = (0..i)
             .rev()
-            .find(|&j| children[j].kind != ChildKind::WhitespaceNewline)
+            .find(|&j| {
+                !matches!(
+                    children[j].kind,
+                    ChildKind::WhitespaceNewline | ChildKind::WhitespaceSpace
+                )
+            })
             .map(|j| children[j].kind);
 
-        // Find the effective next sibling (skip over other WhitespaceNewline).
+        // Find the effective next sibling (skip over other whitespace candidates).
         let next_kind = ((i + 1)..len)
-            .find(|&j| children[j].kind != ChildKind::WhitespaceNewline)
+            .find(|&j| {
+                !matches!(
+                    children[j].kind,
+                    ChildKind::WhitespaceNewline | ChildKind::WhitespaceSpace
+                )
+            })
             .map(|j| children[j].kind);
 
+        // Vue's removal rules (from @vue/compiler-core condenseWhitespace):
         let should_remove = match (prev_kind, next_kind) {
-            // First or last effective child → remove.
+            // First or last effective child → always remove.
             (None, _) | (_, None) => true,
-            // Between two elements/comments → remove.
             (Some(p), Some(n)) => {
-                matches!(p, ChildKind::Element | ChildKind::Comment)
-                    && matches!(n, ChildKind::Element | ChildKind::Comment)
+                let p_is_el_or_comment = matches!(p, ChildKind::Element | ChildKind::Comment);
+                let n_is_el_or_comment = matches!(n, ChildKind::Element | ChildKind::Comment);
+                // Both comments → remove
+                // Comment + element (either order) → remove
+                // Both elements + has newline → remove
+                (p == ChildKind::Comment && n == ChildKind::Comment)
+                    || (p == ChildKind::Comment && n_is_el_or_comment)
+                    || (p_is_el_or_comment && n == ChildKind::Comment)
+                    || (p == ChildKind::Element && n == ChildKind::Element && has_newline)
             }
         };
 
         if should_remove {
-            // Overwrite source range to empty so raw whitespace doesn't leak.
             pending_overwrites.push((children[i].start, children[i].end, ""));
             to_remove.push(i);
         } else {
             // Keep as single space: overwrite source, add closing quote.
             pending_overwrites.push((children[i].start, children[i].end, " "));
             pending_append_lefts.push((children[i].end, "\""));
-            // Convert to regular Text so the close phase handles it normally.
             children[i].kind = ChildKind::Text;
         }
     }
