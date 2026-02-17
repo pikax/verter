@@ -3386,6 +3386,29 @@ function check() { return props.disabled }
         );
     }
 
+    /// @ai-generated — TypeScript enum in script setup must be preserved (converted to JS)
+    #[test]
+    fn test_enum_preserved_in_script_setup() {
+        let input = r#"<script setup lang="ts">
+enum BtnStates { Default, Init, Confirming }
+const state = ref(BtnStates.Default)
+</script>
+<template><div>{{ state }}</div></template>"#;
+        let result = gen_result(input);
+        eprintln!("=== ENUM OUTPUT ===\n{}\n=== END ===", result.code);
+        // TypeScript enum should either be converted to JS or preserved for downstream tools.
+        // It should NOT be silently removed (which would cause ReferenceError at runtime).
+        assert!(
+            result.code.contains("BtnStates"),
+            "TypeScript enum should be preserved (converted to JS), not stripped:\n{}",
+            result.code
+        );
+        // If the enum is still TypeScript syntax, it's NOT valid JS
+        if result.code.contains("enum BtnStates") {
+            eprintln!("WARNING: Enum is preserved as raw TypeScript — not valid JS!");
+        }
+    }
+
     /// @ai-generated — const props = defineProps<T>() must produce const props = __props (type-only)
     #[test]
     fn test_define_props_type_only_preserves_variable_assignment() {
@@ -3553,6 +3576,488 @@ defineProps(['disabled'])
         assert!(
             !result.code.contains("const  = __props"),
             "defineProps without assignment should not create bogus variable: {}",
+            result.code
+        );
+    }
+
+    // ==================== whitespace condensation ====================
+
+    /// @ai-generated — Whitespace-only text between elements with newlines is removed entirely.
+    /// Vue condense mode: text that is ALL whitespace AND contains a newline → removed.
+    #[test]
+    fn test_whitespace_condense_removes_newline_only_text() {
+        let input = r#"<template>
+  <div>
+    <span>a</span>
+    <span>b</span>
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // The whitespace between <span>a</span> and <span>b</span> should be removed,
+        // not appear as a text child. Only the two <span> elements should be children.
+        assert!(
+            !result.code.contains("\\n"),
+            "Whitespace-only text with newlines should be removed, got: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Multi-line text content is condensed: newlines+indentation → single space.
+    /// This is the exact bug from the issue: `\n  Total APR\n  2.71%` → `Total APR 2.71%`
+    #[test]
+    fn test_whitespace_condense_multiline_text() {
+        let input = r#"<template>
+  <div data-testid="total-apr">
+    Total APR
+    2.71%
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // The text should be condensed: leading/trailing whitespace with newlines removed,
+        // internal newline+spaces → single space.
+        // Note: the whitespace-only nodes before/after the text are separate Text events
+        // that get removed. The text "Total APR\n    2.71%" itself has its whitespace condensed.
+        assert!(
+            result.code.contains("Total APR"),
+            "Should contain 'Total APR', got: {}",
+            result.code
+        );
+        assert!(
+            !result.code.contains("\\n"),
+            "Newlines should be condensed to spaces, got: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Simple text without extra whitespace is preserved as-is.
+    #[test]
+    fn test_whitespace_condense_simple_text_preserved() {
+        let input = r#"<template><div>hello world</div></template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("\"hello world\""),
+            "Simple text should be preserved: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Single space between elements (no newline) is dropped by the tokenizer
+    /// (whitespace-only text before a `<` is not emitted). This is tokenizer-level behavior.
+    #[test]
+    fn test_whitespace_condense_single_space_between_elements_kept() {
+        let input = r#"<template><div><span>a</span> <span>b</span></div></template>"#;
+        let result = gen_and_validate(input);
+        // Vue condense mode: space (no newline) between two elements → kept as single space.
+        // Only whitespace WITH newlines between two elements is removed.
+        assert!(
+            result.code.contains("_createTextVNode(\" \")"),
+            "Space between elements (no newline) should be kept: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Multiple spaces (no newline) condense to single space.
+    #[test]
+    fn test_whitespace_condense_multiple_spaces() {
+        let input = "<template><div>a   b</div></template>";
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("\"a b\""),
+            "Multiple spaces should condense to single space: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Tab characters are treated as whitespace and condensed.
+    #[test]
+    fn test_whitespace_condense_tabs() {
+        let input = "<template><div>a\t\tb</div></template>";
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("\"a b\""),
+            "Tabs should condense to single space: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Text with interpolation: whitespace between text and interpolation is condensed.
+    #[test]
+    fn test_whitespace_condense_with_interpolation() {
+        let input = r#"<script setup>
+const msg = 'hello'
+</script>
+<template>
+  <div>
+    prefix {{ msg }} suffix
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // The text nodes around the interpolation should have their whitespace condensed.
+        // " prefix " and " suffix " are separate text events from the tokenizer.
+        assert!(
+            !result.code.contains("\\n"),
+            "No raw newlines should remain in text: {}",
+            result.code
+        );
+    }
+
+    /// Vue condense mode: multiple spaces (no newline) between elements → condense to single space.
+    #[test]
+    fn test_whitespace_condense_spaces_only_no_newline_between_elements_kept() {
+        let input = "<template><div><span>a</span>   <span>b</span></div></template>";
+        let result = gen_and_validate(input);
+        // Vue condense mode: multiple spaces (no newline) → condense to single space, kept.
+        assert!(
+            result.code.contains("_createTextVNode(\" \")"),
+            "Multiple spaces between elements (no newline) should condense to single space: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Mixed whitespace (spaces + newlines) within text content.
+    #[test]
+    fn test_whitespace_condense_mixed_content() {
+        let input = "<template><div>hello\n    world</div></template>";
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("\"hello world\""),
+            "Newline + spaces in text should condense to single space: {}",
+            result.code
+        );
+    }
+
+    /// @ai-generated — Real-world GameAccess pattern: multi-line text in nested elements.
+    #[test]
+    fn test_whitespace_condense_real_world_total_apr() {
+        let input = r#"<script setup>
+const apr = '2.71%'
+</script>
+<template>
+  <div>
+    <span>
+      Total APR:
+      {{ apr }}
+    </span>
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // No raw newlines should appear in the output
+        assert!(
+            !result.code.contains("\\n"),
+            "No raw newlines in condensed output: {}",
+            result.code
+        );
+    }
+
+    /// Vue condense mode: whitespace between element and interpolation (with newline)
+    /// should be kept as a single space, NOT removed.
+    ///
+    /// Template: `<div><span>APR</span>\n  {{ value }}\n</div>`
+    /// In Vue's compiler:
+    ///   - Whitespace between </span> and {{ value }} has a newline → but it's between
+    ///     an element and an interpolation, so it becomes " " (single space).
+    ///   - Whitespace after {{ value }} at end → removed (last child).
+    ///   - Whitespace before <span> at start → removed (first child).
+    /// Result: text concat = `"APR"`, `" "`, `_toDisplayString(value)` → "APR 15.22%"
+    #[test]
+    fn test_whitespace_condense_element_interpolation_keeps_space() {
+        let input = r#"<script setup>
+const value = '15.22%'
+</script>
+<template>
+  <div>
+    <span>APR</span>
+    {{ value }}
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // The whitespace between </span> and {{ value }} should produce a " " text node.
+        // This means the children should include a text concatenation with a space:
+        // _createTextVNode(" " + _toDisplayString(...))  or similar with the space
+        assert!(
+            result.code.contains("\" \"")
+                || result.code.contains("\" \" +")
+                || result.code.contains("+ \" \""),
+            "Whitespace between element and interpolation should be kept as space: {}",
+            result.code
+        );
+    }
+
+    /// Vue condense mode: whitespace between two elements (with newline) → removed.
+    /// Template: `<div>\n  <span>A</span>\n  <span>B</span>\n</div>`
+    /// The whitespace between the two spans has a newline and both siblings are elements → removed.
+    #[test]
+    fn test_whitespace_condense_between_elements_removed() {
+        let input = r#"<template>
+  <div>
+    <span>A</span>
+    <span>B</span>
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // No text node should exist between the two spans.
+        // The children array should have exactly the two spans.
+        assert!(
+            !result.code.contains("\" \""),
+            "Whitespace between two elements should be removed, not kept as space: {}",
+            result.code
+        );
+    }
+
+    /// Vue condense mode: whitespace between interpolation and element (with newline)
+    /// should be kept as a single space.
+    #[test]
+    fn test_whitespace_condense_interpolation_element_keeps_space() {
+        let input = r#"<script setup>
+const msg = 'hello'
+</script>
+<template>
+  <div>
+    {{ msg }}
+    <span>world</span>
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // The whitespace between {{ msg }} and <span> should produce a text node.
+        assert!(
+            result.code.contains("\" \"")
+                || result.code.contains("\" \" +")
+                || result.code.contains("+ \" \""),
+            "Whitespace between interpolation and element should be kept as space: {}",
+            result.code
+        );
+    }
+
+    /// Real-world APRTooltip pattern: <span>label</span>\n{{ value }}
+    /// The space between the label span and the value interpolation must be preserved.
+    #[test]
+    fn test_whitespace_condense_apr_tooltip_pattern() {
+        let input = r#"<script setup>
+const label = 'Swap fees APR'
+const value = '15.22%'
+</script>
+<template>
+  <div>
+    <span>{{ label }}</span>
+    {{ value }}
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // Between the <span> and {{ value }}, the newline whitespace should become a space.
+        // This ensures "Swap fees APR 15.22%" not "Swap fees APR15.22%".
+        assert!(
+            result.code.contains("\" \"")
+                || result.code.contains("\" \" +")
+                || result.code.contains("+ \" \""),
+            "APRTooltip pattern: space between element and interpolation must be preserved: {}",
+            result.code
+        );
+    }
+
+    /// Self-closing component followed by div (multi-root with whitespace).
+    #[test]
+    fn test_whitespace_condense_self_closing_then_element() {
+        let input = r#"<template>
+  <Comp />
+  <div>hello</div>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            !result.code.contains("\\n"),
+            "No raw newlines: {}",
+            result.code
+        );
+    }
+
+    /// v-if self-closing component followed by div (multi-root).
+    #[test]
+    fn test_whitespace_condense_vif_self_closing_then_element() {
+        let input = r#"<script setup>
+const show = true
+</script>
+<template>
+  <Comp v-if="show" />
+  <div>hello</div>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            !result.code.contains("\\n"),
+            "No raw newlines: {}",
+            result.code
+        );
+    }
+
+    /// Self-closing component with dynamic props followed by div (multi-root).
+    /// Tests the patch flag path in handle_element_close_self_closing.
+    #[test]
+    fn test_whitespace_condense_self_closing_with_props() {
+        let input = r#"<script setup>
+const msg = 'hi'
+</script>
+<template>
+  <Comp :msg="msg" />
+  <div>hello</div>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            !result.code.contains("\\n"),
+            "No raw newlines: {}",
+            result.code
+        );
+    }
+
+    /// v-if self-closing component with dynamic props followed by div (multi-root).
+    /// Tests v-if + patch flag path interaction with whitespace removal.
+    #[test]
+    fn test_whitespace_condense_vif_self_closing_with_props() {
+        let input = r#"<script setup>
+const show = true
+const msg = 'hi'
+</script>
+<template>
+  <Comp v-if="show" :msg="msg" />
+  <div>hello</div>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            !result.code.contains("\\n"),
+            "No raw newlines: {}",
+            result.code
+        );
+    }
+
+    /// Focused layout pattern: multi-root with v-if + nested component slots.
+    /// Reproduces build failure from FocussedLayout.vue.
+    #[test]
+    fn test_whitespace_condense_focused_layout() {
+        let input = r#"<script setup>
+import AppNavAlert from './AppNavAlert.vue'
+const currentAlert = null
+const isFakeModal = true
+function getReturnRoute() { return '/' }
+</script>
+<template>
+  <AppNavAlert v-if="currentAlert" :alert="currentAlert" />
+  <div class="pb-16">
+    <div class="h-screen" :class="{ 'bg-gray-850': isFakeModal }">
+      <div class="mb-12 layout-header">
+        <div />
+        <BalBtn tag="router-link" :to="getReturnRoute()" color="white" circle>
+          <BalIcon name="x" size="lg" />
+        </BalBtn>
+      </div>
+      <slot />
+    </div>
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            !result.code.contains("\\n"),
+            "No raw newlines in output: {}",
+            result.code
+        );
+    }
+
+    /// v-for with array destructuring: `v-for="([address, amount], index) in entries"`
+    /// Must preserve destructuring in renderList callback params.
+    #[test]
+    fn test_vfor_array_destructuring() {
+        let input = r#"<script setup>
+const entries = [['0x123', 100], ['0x456', 200]]
+</script>
+<template>
+  <div v-for="([address, amount], index) in entries" :key="index">
+    {{ address }} {{ amount }}
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // Must have ([address, amount], index) in the callback, not (address, amount, index)
+        assert!(
+            result.code.contains("([address, amount], index)"),
+            "v-for array destructuring must be preserved: {}",
+            result.code
+        );
+    }
+
+    /// v-for with object destructuring: `v-for="({ address, weight }, i) in tokens"`
+    /// Must preserve destructuring in renderList callback params.
+    #[test]
+    fn test_vfor_object_destructuring() {
+        let input = r#"<script setup>
+const tokens = [{ address: '0x123', weight: 50 }]
+</script>
+<template>
+  <div v-for="({ address, weight }, i) in tokens" :key="i">
+    {{ address }} {{ weight }}
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // Must have ({ address, weight }, i) in the callback, not (address, weight, i)
+        assert!(
+            result.code.contains("({ address, weight }, i)"),
+            "v-for object destructuring must be preserved: {}",
+            result.code
+        );
+    }
+
+    /// v-for with simple pattern (no destructuring): `v-for="item in list"`
+    /// Should still work correctly.
+    #[test]
+    fn test_vfor_simple_pattern() {
+        let input = r#"<script setup>
+const list = [1, 2, 3]
+</script>
+<template>
+  <div v-for="item in list" :key="item">{{ item }}</div>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("(item)"),
+            "Simple v-for param must be wrapped in parens: {}",
+            result.code
+        );
+    }
+
+    /// v-for with (item, index) pattern.
+    #[test]
+    fn test_vfor_item_index_pattern() {
+        let input = r#"<script setup>
+const list = [1, 2, 3]
+</script>
+<template>
+  <div v-for="(item, index) in list" :key="index">{{ item }}</div>
+</template>"#;
+        let result = gen_and_validate(input);
+        assert!(
+            result.code.contains("(item, index)"),
+            "v-for (item, index) pattern must be preserved: {}",
+            result.code
+        );
+    }
+
+    /// Component with mixed slot content: element + interpolation.
+    /// Reproduces APRTooltip StakingBreakdown pattern.
+    /// Component with mixed slot content: element + interpolation.
+    /// Text/interpolation runs inside component slots must be wrapped in
+    /// _createTextVNode — bare strings are not valid VNodes.
+    /// Reproduces APRTooltip StakingBreakdown pattern.
+    #[test]
+    fn test_component_mixed_slot_element_interpolation() {
+        let input = r#"<script setup>
+const value = '42%'
+</script>
+<template>
+  <Comp justify="between">
+    <span>Label</span>
+    {{ value }}
+  </Comp>
+</template>"#;
+        let result = gen_and_validate(input);
+        // Text+interpolation in mixed component slot content must be wrapped
+        // in _createTextVNode, not emitted as bare strings/toDisplayString.
+        assert!(
+            result.code.contains("_createTextVNode"),
+            "Mixed slot text+interp must use _createTextVNode: {}",
             result.code
         );
     }

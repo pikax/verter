@@ -205,12 +205,12 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
     pub(crate) fn finalize(&mut self) {
         let mut ct = self.code_transform.borrow_mut();
 
-        // Phase 1: apply all overwrites (already in document order — no sort needed)
+        // Phase 1: apply all overwrites.
+        // Sort by start position: deferred whitespace resolution in the close phase
+        // may push overwrites at positions earlier than previously-emitted entries.
+        // TimSort is nearly O(n) when the input is almost sorted (typical case).
         if !self.pending_overwrites.is_empty() {
-            debug_assert!(
-                self.pending_overwrites.windows(2).all(|w| w[0].0 <= w[1].0),
-                "INVARIANT VIOLATED: pending_overwrites not in document order"
-            );
+            self.pending_overwrites.sort_by_key(|(start, _, _)| *start);
             ct.batch_overwrite(&self.pending_overwrites);
             self.pending_overwrites.clear();
         }
@@ -315,7 +315,14 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             code_transform.prepend_left(self.template_start_pos, &hoist_str);
         }
 
-        let extra_return = if let Some(state) = self.stack.pop() {
+        let extra_return = if let Some(mut state) = self.stack.pop() {
+            // Resolve deferred whitespace-with-newline children based on neighbors.
+            text::resolve_whitespace_candidates(
+                &mut state.children,
+                &mut self.pending_overwrites,
+                &mut self.pending_append_lefts,
+            );
+
             // Defer pending v-if fallback comments for root-level children.
             for &fallback_pos in &state.pending_vif_fallbacks {
                 let comment = if self.is_production {
@@ -400,14 +407,20 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                     buf.push_str("return (_openBlock(), _createElementBlock(_Fragment, null, [");
                     buf.push_str(first.scope_prefix);
                     buf.push_str(first.kind.content_prefix());
-                    code_transform.prepend_left(first.start, &buf);
+                    // Use deferred prepend_left to avoid conflicts with pending
+                    // whitespace overwrites. Direct code_transform.prepend_left()
+                    // would insert BEFORE the batch_overwrite runs, causing the
+                    // overwrite to consume the separator.
+                    let s = code_transform.alloc_str(&buf);
+                    self.pending_prepend_lefts.push((first.start, s));
 
                     for child in state.children.iter().skip(1) {
                         buf.clear();
                         buf.push_str(", ");
                         buf.push_str(child.scope_prefix);
                         buf.push_str(child.kind.content_prefix());
-                        code_transform.prepend_left(child.start, &buf);
+                        let s = code_transform.alloc_str(&buf);
+                        self.pending_prepend_lefts.push((child.start, s));
                     }
                 } else {
                     let first = &state.children[0];
@@ -415,7 +428,8 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                     buf.push_str("return ");
                     buf.push_str(first.scope_prefix);
                     buf.push_str(first.kind.content_prefix());
-                    code_transform.prepend_left(first.start, &buf);
+                    let s = code_transform.alloc_str(&buf);
+                    self.pending_prepend_lefts.push((first.start, s));
                 }
 
                 if is_multi_root {
@@ -753,12 +767,19 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         ev: &OxcCompiledElementClosed,
         _ctx: &SyntaxPluginContext<'alloc>,
     ) -> TemplateCodeGenResult {
-        let state = self
+        let mut state = self
             .stack
             .pop()
             .ok_or(TemplateCodeGenError::StackUnderflow(
                 "element close must have matching open",
             ))?;
+
+        // Resolve deferred whitespace-with-newline children based on neighbors.
+        text::resolve_whitespace_candidates(
+            &mut state.children,
+            &mut self.pending_overwrites,
+            &mut self.pending_append_lefts,
+        );
 
         let code_transform = self.code_transform.borrow();
 

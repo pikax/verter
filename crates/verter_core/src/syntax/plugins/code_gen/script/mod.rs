@@ -1858,9 +1858,12 @@ const status: Status = 'active';
 
     /// @ai-generated — TypeScript enum declarations must be stripped from JS output
     #[test]
-    fn test_ts_enum_stripped() {
-        let code = gen_and_validate(
-            r#"<script lang="ts" setup>
+    fn test_ts_enum_preserved() {
+        // TypeScript enums have runtime semantics and must be preserved for
+        // downstream tools (esbuild in Vite) to convert. Vue's official
+        // compiler also preserves enums. Use gen_result (not gen_and_validate)
+        // because the raw TS enum syntax isn't valid JS on its own.
+        let code = gen(r#"<script lang="ts" setup>
 enum Direction {
   Up,
   Down,
@@ -1870,11 +1873,15 @@ enum Direction {
 
 const dir = Direction.Up;
 </script>
-<template><div>{{ dir }}</div></template>"#,
+<template><div>{{ dir }}</div></template>"#);
+        assert!(
+            code.contains("enum Direction"),
+            "TypeScript enum should be preserved (has runtime semantics), got:\n{}",
+            code
         );
         assert!(
-            !code.contains("enum Direction"),
-            "TypeScript enum should be stripped, got:\n{}",
+            code.contains("Direction"),
+            "Enum should be in __returned__ for $setup access, got:\n{}",
             code
         );
     }

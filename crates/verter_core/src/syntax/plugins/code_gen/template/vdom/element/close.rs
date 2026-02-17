@@ -525,8 +525,107 @@ pub(crate) fn handle_element_close<'alloc>(
         }
     }
 
-    // Normal (non-slot) children handling
-    if has_children {
+    // Normal (non-slot) children handling.
+    // Components without explicit v-slot still need their children wrapped in a
+    // default slot function: `{ default: _withCtx(() => [...]), _: 1 }`.
+    // Native elements emit children as direct args (text concat or array).
+    if has_children && state.is_component {
+        // Component implicit default slot: wrap in _withCtx function.
+        imports.add(TemplateImportDependencies::WITH_CTX);
+
+        let slot_stable = if is_production { "1" } else { "1 /* STABLE */" };
+
+        if all_text_like {
+            // Text-only default slot: _createTextVNode inside _withCtx
+            imports.add(TemplateImportDependencies::CREATE_TEXT_VNODE);
+            let first_child = &state.children[0];
+
+            let text_flag = if has_interpolation {
+                if is_production {
+                    ", 1"
+                } else {
+                    ", 1 /* TEXT */"
+                }
+            } else {
+                ""
+            };
+
+            buf.clear();
+            buf.push_str(", {default: _withCtx(() => [_createTextVNode(");
+            buf.push_str(first_child.kind.content_prefix());
+            let s = code_transform.alloc_str(buf);
+            pending_prepend_lefts.push((first_child.start, s));
+
+            for child in state.children.iter().skip(1) {
+                let prefix = child.kind.content_prefix();
+                buf.clear();
+                buf.push_str(" + ");
+                buf.push_str(prefix);
+                let s = code_transform.alloc_str(buf);
+                pending_prepend_lefts.push((child.start, s));
+            }
+
+            buf.clear();
+            buf.push_str(text_flag);
+            buf.push_str(")]), _: ");
+            buf.push_str(slot_stable);
+            buf.push('}');
+            write_patch_flag_suffix(buf, patch_flag, &state.dynamic_props, is_production);
+            buf.push(')');
+            if state.is_block_root {
+                buf.push(')');
+            }
+
+            if let Some(close_tag) = &ev.event.event_close_tag {
+                let s = code_transform.alloc_str(buf);
+                pending_overwrites.push((close_tag.start, close_tag.end, s));
+            } else {
+                let s = code_transform.alloc_str(buf);
+                pending_append_lefts.push((state.open_tag_end, s));
+            }
+            return;
+        } else {
+            // Mixed/element default slot content: each child is a separate array entry
+            // inside `{ default: _withCtx(() => [...]), _: STABLE }`.
+            // Text/interpolation runs must be wrapped in _createTextVNode — bare strings
+            // and _toDisplayString results are not valid VNodes in slot arrays.
+            let slot_open = {
+                buf.clear();
+                buf.push_str(", {default: _withCtx(() => [");
+                code_transform.alloc_str(buf)
+            };
+
+            emit_mixed_children_with_prefix(
+                code_transform,
+                state,
+                is_production,
+                imports,
+                pending_prepend_lefts,
+                pending_append_lefts,
+                buf,
+                slot_open,
+            );
+
+            buf.clear();
+            buf.push_str("]), _: ");
+            buf.push_str(slot_stable);
+            buf.push('}');
+            write_patch_flag_suffix(buf, patch_flag, &state.dynamic_props, is_production);
+            buf.push(')');
+            if state.is_block_root {
+                buf.push(')');
+            }
+
+            if let Some(close_tag) = &ev.event.event_close_tag {
+                let s = code_transform.alloc_str(buf);
+                pending_overwrites.push((close_tag.start, close_tag.end, s));
+            } else {
+                let s = code_transform.alloc_str(buf);
+                pending_append_lefts.push((state.open_tag_end, s));
+            }
+            return;
+        }
+    } else if has_children {
         if all_text_like {
             // Concatenation mode: join with " + "
             for (i, child) in state.children.iter().enumerate() {
@@ -615,8 +714,12 @@ pub(crate) fn handle_element_close<'alloc>(
 /// a TEXT patch flag (`1`).
 ///
 /// Non-text children (elements, comments) are emitted with normal separators.
+///
+/// `first_prefix` controls the separator for the very first child:
+/// - For element children: `", ["` (standard array open)
+/// - For slot children: `", {default: _withCtx(() => ["` (slot wrapper)
 #[allow(clippy::too_many_arguments)]
-fn emit_mixed_children<'alloc>(
+fn emit_mixed_children_impl<'alloc>(
     code_transform: &CodeTransform<'alloc>,
     state: &StateStack<'alloc>,
     is_production: bool,
@@ -624,10 +727,11 @@ fn emit_mixed_children<'alloc>(
     pending_prepend_lefts: &mut Vec<(u32, &'alloc str)>,
     pending_append_lefts: &mut Vec<(u32, &'alloc str)>,
     buf: &mut String,
+    first_prefix: &'alloc str,
 ) {
     let children = &state.children;
     let mut i = 0;
-    // Track whether we've emitted the first child (for `, [` vs `, ` separator).
+    // Track whether we've emitted the first child (for custom prefix vs `, ` separator).
     let mut is_first_in_array = true;
 
     while i < children.len() {
@@ -636,7 +740,11 @@ fn emit_mixed_children<'alloc>(
 
         if !is_text_like {
             // Non-text child: emit with normal separator.
-            let sep = if is_first_in_array { ", [" } else { ", " };
+            let sep = if is_first_in_array {
+                first_prefix
+            } else {
+                ", "
+            };
             let s = child_separator_str(code_transform, sep, child, buf);
             pending_prepend_lefts.push((child.start, s));
             is_first_in_array = false;
@@ -664,7 +772,11 @@ fn emit_mixed_children<'alloc>(
         // Emit the run.
         // First child in the run: separator + `_createTextVNode(` + content_prefix
         let first_child = &children[run_start];
-        let array_sep = if is_first_in_array { ", [" } else { ", " };
+        let array_sep = if is_first_in_array {
+            first_prefix
+        } else {
+            ", "
+        };
         buf.clear();
         buf.push_str(array_sep);
         buf.push_str(first_child.scope_prefix);
@@ -697,6 +809,54 @@ fn emit_mixed_children<'alloc>(
 
         is_first_in_array = false;
     }
+}
+
+/// Emit mixed children for element arrays (uses `", ["` as first separator).
+#[allow(clippy::too_many_arguments)]
+fn emit_mixed_children<'alloc>(
+    code_transform: &CodeTransform<'alloc>,
+    state: &StateStack<'alloc>,
+    is_production: bool,
+    imports: &mut TemplateImportDependencies,
+    pending_prepend_lefts: &mut Vec<(u32, &'alloc str)>,
+    pending_append_lefts: &mut Vec<(u32, &'alloc str)>,
+    buf: &mut String,
+) {
+    emit_mixed_children_impl(
+        code_transform,
+        state,
+        is_production,
+        imports,
+        pending_prepend_lefts,
+        pending_append_lefts,
+        buf,
+        ", [",
+    );
+}
+
+/// Emit mixed children for component implicit default slots.
+/// Uses a custom `first_prefix` (e.g. `", {default: _withCtx(() => ["`) instead of `", ["`.
+#[allow(clippy::too_many_arguments)]
+fn emit_mixed_children_with_prefix<'alloc>(
+    code_transform: &CodeTransform<'alloc>,
+    state: &StateStack<'alloc>,
+    is_production: bool,
+    imports: &mut TemplateImportDependencies,
+    pending_prepend_lefts: &mut Vec<(u32, &'alloc str)>,
+    pending_append_lefts: &mut Vec<(u32, &'alloc str)>,
+    buf: &mut String,
+    first_prefix: &'alloc str,
+) {
+    emit_mixed_children_impl(
+        code_transform,
+        state,
+        is_production,
+        imports,
+        pending_prepend_lefts,
+        pending_append_lefts,
+        buf,
+        first_prefix,
+    );
 }
 
 /// Build the separator+prefix string for a child in the close phase.

@@ -139,8 +139,14 @@ pub fn process_script_event<'alloc>(
                 } else {
                     match type_decl.kind {
                         TypeDeclarationKind::Enum => {
-                            // TODO convert to JS enum-like object instead of removing
-                            code_transform.remove(type_decl.span.start, type_decl.span.end);
+                            // Enums have runtime semantics — preserve them for downstream
+                            // tools (e.g. esbuild in Vite) to convert to JS. This matches
+                            // Vue's official compiler behavior which also preserves enums.
+                            // Track the enum name as a returned binding so it's accessible
+                            // via $setup in the template render function.
+                            if let Some(name) = type_decl.name {
+                                returned.push(name);
+                            }
                         }
                         _ => {
                             // Remove interfaces, type aliases, namespaces

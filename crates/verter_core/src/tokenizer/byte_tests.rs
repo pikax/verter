@@ -732,7 +732,9 @@ fn test_skip_script() {
 }
 
 #[test]
-fn test_not_send_first_child_text_node_if_empty() {
+fn test_whitespace_before_element_emitted() {
+    // Whitespace-only text before `<` is emitted as a Text event.
+    // Vue's condense mode handles removal at the compiler level, not the tokenizer.
     let events = collect_events("<div>    <span></span></div>");
 
     let text_nodes: Vec<_> = events
@@ -742,8 +744,8 @@ fn test_not_send_first_child_text_node_if_empty() {
 
     assert_eq!(
         text_nodes.len(),
-        0,
-        "Should have no Text events for empty div"
+        1,
+        "Whitespace-only text before `<` should be emitted as Text event"
     );
 }
 
@@ -2395,8 +2397,9 @@ fn test_error_missing_end_tag_name() {
 }
 
 #[test]
-fn test_whitespace_only_text_not_emitted() {
-    // Whitespace-only text between tags should not be emitted
+fn test_whitespace_only_text_emitted() {
+    // Whitespace-only text between tags IS emitted as a Text event.
+    // Vue's condense mode handles removal at the compiler level, not the tokenizer.
     let input = "<div>   </div>";
     let events = collect_events(input);
 
@@ -2407,8 +2410,8 @@ fn test_whitespace_only_text_not_emitted() {
 
     assert_eq!(
         text_events.len(),
-        0,
-        "Whitespace-only text should not be emitted"
+        1,
+        "Whitespace-only text should be emitted as Text event"
     );
 }
 

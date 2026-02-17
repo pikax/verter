@@ -135,18 +135,25 @@ pub(crate) fn process_scope_opens<'alloc>(
                 } else {
                     buf.push_str("[]");
                 }
-                buf.push_str(", (");
-                if vfor.parsed.locals.is_empty() {
-                    buf.push_str("_item");
+                // Emit v-for callback parameters preserving destructuring syntax.
+                // Use raw left-side text from the source so patterns like
+                // `([a, b], i)` and `({ key, val }, i)` are preserved.
+                let left_offset = vfor.parsed.result.left_offset as usize;
+                let left_end = (vfor.parsed.result.right_offset - 4) as usize; // before " in "/" of "
+                let left_text = ctx.input[left_offset..left_end].trim();
+                if left_text.is_empty() {
+                    buf.push_str(", (_item) => {return ");
+                } else if left_text.starts_with('(') {
+                    // Already parenthesized: (item, index), ([a, b], i), etc.
+                    buf.push_str(", ");
+                    buf.push_str(left_text);
+                    buf.push_str(" => {return ");
                 } else {
-                    for (i, span) in vfor.parsed.locals.iter().enumerate() {
-                        if i > 0 {
-                            buf.push_str(", ");
-                        }
-                        buf.push_str(&ctx.input[span.start as usize..span.end as usize]);
-                    }
+                    // Simple identifier or bare destructuring: item, { key }, [a, b]
+                    buf.push_str(", (");
+                    buf.push_str(left_text);
+                    buf.push_str(") => {return ");
                 }
-                buf.push_str(") => {return ");
 
                 imports.add(TemplateImportDependencies::OPEN_BLOCK);
                 imports.add(TemplateImportDependencies::FRAGMENT);

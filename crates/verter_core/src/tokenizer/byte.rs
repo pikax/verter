@@ -318,7 +318,10 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
 
                 if c == LT {
                     if p > self.section_start {
-                        self.flush_text(p, true);
+                        // Emit ALL text before `<`, including whitespace-only text.
+                        // Vue's condense mode handles whitespace removal at the compiler
+                        // level (resolve_whitespace_candidates), not at the tokenizer level.
+                        self.flush_text(p, false);
                     }
                     self.state = State::BeforeTagName;
                     self.section_start = p;

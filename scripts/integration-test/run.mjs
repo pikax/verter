@@ -684,7 +684,7 @@ function runTest(project, repoDir, label) {
     return { ok: true, stdout: '', stderr: '', durationMs: 0, skipped: true, label: `${label}-test` };
   }
   log(project.name, `[${label}] Testing: ${project.testCmd}`);
-  const result = run(project.testCmd, repoDir, { env: { NODE_ENV: 'test' } });
+  const result = run(project.testCmd, repoDir, { env: { NODE_ENV: 'test', CI: 'true' } });
   const dur = (result.durationMs / 1000).toFixed(1);
   const counts = extractTestCounts(result.stdout + result.stderr);
   log(

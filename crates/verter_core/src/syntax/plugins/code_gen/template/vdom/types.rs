@@ -7,6 +7,18 @@ pub(crate) enum ChildKind {
     Interpolation,
     Element,
     Comment,
+    /// Whitespace-only text containing newlines — deferred to the close phase.
+    ///
+    /// Vue's condense mode removes whitespace-only text with newlines ONLY when:
+    /// - It's the first or last child, OR
+    /// - Both adjacent siblings are elements or comments.
+    ///
+    /// Between an element and an interpolation (e.g. `<span>A</span>\n{{ B }}`),
+    /// the whitespace is condensed to a single space instead.
+    ///
+    /// Since the text handler doesn't know the next sibling, this decision is
+    /// deferred to `resolve_whitespace_candidates()` which runs in the close phase.
+    WhitespaceNewline,
 }
 
 impl ChildKind {
@@ -24,6 +36,8 @@ impl ChildKind {
             ChildKind::Text => "\"",
             ChildKind::Interpolation => "_toDisplayString",
             ChildKind::Element | ChildKind::Comment => "",
+            // Should never reach close phase — resolve_whitespace_candidates converts/removes these.
+            ChildKind::WhitespaceNewline => "\"",
         }
     }
 }
