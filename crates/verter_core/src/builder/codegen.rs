@@ -4350,4 +4350,31 @@ const label = useLabel({
             result.code
         );
     }
+
+    /// Scoped slot with hyphenated prop name.
+    /// `:handle-keydown="onKeydown"` must produce a valid object key.
+    /// Reproduces element-plus focus-trap.vue pattern.
+    #[test]
+    fn test_slot_hyphenated_prop() {
+        let input = r#"<script>
+import { defineComponent } from 'vue'
+export default defineComponent({
+  setup() {
+    const onKeydown = () => {}
+    return { onKeydown }
+  }
+})
+</script>
+<template>
+  <slot :handle-keydown="onKeydown" />
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("SLOT HYPHENATED PROP:\n{}", result.code);
+        // The key "handle-keydown" must be quoted or camelized
+        assert!(
+            !result.code.contains("handle-keydown:"),
+            "hyphenated key must be quoted or camelized: {}",
+            result.code
+        );
+    }
 }

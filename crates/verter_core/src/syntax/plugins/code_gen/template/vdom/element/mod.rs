@@ -187,7 +187,16 @@ pub(crate) fn handle_element_open<'alloc>(
                         } else {
                             buf.push_str(", ");
                         }
+                        // Quote the key if it's not a valid unquoted JS
+                        // property name (e.g., hyphenated like "handle-keydown").
+                        let needs_quote = !is_valid_js_prop_key(attr_name);
+                        if needs_quote {
+                            buf.push('"');
+                        }
                         buf.push_str(attr_name);
+                        if needs_quote {
+                            buf.push('"');
+                        }
                         buf.push_str(": ");
                         // Add binding prefix/suffix for setup context
                         if let Some(bt) = bindings.get(expr) {
