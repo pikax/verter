@@ -330,11 +330,11 @@ pub(crate) fn handle_element_open<'alloc>(
 
     // Pre-scan: will this element need _withDirectives() wrapping?
     // Custom directives (PropKind::Directive) need wrapping on both elements and components.
-    // Native v-model and v-show only need wrapping on native elements (not components).
-    // Component v-model is prop-based (modelValue + onUpdate:modelValue), not directive-based.
+    // v-show needs wrapping on both elements and components (always a runtime directive).
+    // v-model only needs wrapping on native elements (component v-model is prop-based).
     let needs_with_directives = ev.props.iter().any(|p| match p.event.kind {
-        PropKind::Directive => true,
-        PropKind::Model | PropKind::Show if !is_component => true,
+        PropKind::Directive | PropKind::Show => true,
+        PropKind::Model if !is_component => true,
         _ => false,
     });
     let wd_prefix = if needs_with_directives {

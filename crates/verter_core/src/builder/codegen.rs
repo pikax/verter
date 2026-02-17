@@ -4377,4 +4377,41 @@ export default defineComponent({
             result.code
         );
     }
+
+    /// v-show on component with complex children (el-overlay pattern).
+    /// Reproduces element-plus drawer.vue: v-show on el-overlay with nested slots.
+    #[test]
+    fn test_vshow_component_with_nested_children() {
+        let input = r#"<script setup>
+import { ref } from 'vue'
+const visible = ref(true)
+const ns = { b: () => 'overlay', e: (s) => s, is: (s,v) => s }
+const handleClick = () => {}
+</script>
+<template>
+  <ElOverlay
+    v-show="visible"
+    :mask="true"
+    @click="handleClick"
+  >
+    <div ref="drawerRef" @click.stop>
+      <header>
+        <slot name="header" :close="handleClick">
+          <span>Title</span>
+        </slot>
+      </header>
+      <div>
+        <slot />
+      </div>
+    </div>
+  </ElOverlay>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("V-SHOW COMPONENT WITH CHILDREN:\n{}", result.code);
+        assert!(
+            result.code.contains("_withDirectives"),
+            "must use _withDirectives for v-show: {}",
+            result.code
+        );
+    }
 }
