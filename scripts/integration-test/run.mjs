@@ -532,7 +532,68 @@ function replaceVuePlugin(project, repoDir) {
     }
   }
 
+  // For monorepos: if we replaced imports in a workspace sub-package's source,
+  // add @verter/unplugin as a dependency so the build tool externalizes it
+  // instead of bundling it (which would embed require("@verter/native") inline).
+  if (modifiedFiles.length > 0) {
+    patchWorkspacePackageDeps(project, repoDir, modifiedFiles);
+  }
+
   return modifiedFiles;
+}
+
+/**
+ * For each workspace sub-package that had source files modified, replace
+ * `@vitejs/plugin-vue` with `@verter/unplugin` in its package.json dependencies.
+ * This ensures the bundler (tsdown/tsup/rollup) treats `@verter/unplugin` as
+ * external rather than inlining it into the dist.
+ */
+function patchWorkspacePackageDeps(project, repoDir, modifiedFiles) {
+  // Collect unique package directories containing modified files
+  const pkgDirs = new Set();
+  for (const relFile of modifiedFiles) {
+    const absFile = path.join(repoDir, relFile);
+    let dir = path.dirname(absFile);
+    // Walk up to find the nearest package.json (stop at repoDir)
+    while (dir !== repoDir && dir !== path.dirname(dir)) {
+      if (fs.existsSync(path.join(dir, 'package.json'))) {
+        pkgDirs.add(dir);
+        break;
+      }
+      dir = path.dirname(dir);
+    }
+  }
+
+  for (const pkgDir of pkgDirs) {
+    // Skip the repo root (it already has @verter/unplugin from installVerterTarballs)
+    if (pkgDir === repoDir) continue;
+
+    const pkgPath = path.join(pkgDir, 'package.json');
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    let changed = false;
+
+    for (const depField of ['dependencies', 'devDependencies']) {
+      if (pkg[depField]?.['@vitejs/plugin-vue']) {
+        const version = pkg[depField]['@vitejs/plugin-vue'];
+        pkg[depField]['@verter/unplugin'] = version;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+      const rel = path.relative(repoDir, pkgPath);
+      log(project.name, `  Patched deps: ${rel} (added @verter/unplugin)`);
+    }
+  }
+
+  // Re-install to update symlinks for new dependencies
+  if (pkgDirs.size > 0) {
+    const installCmd = project.packageManager === 'pnpm'
+      ? 'pnpm install --no-frozen-lockfile'
+      : 'npm install --legacy-peer-deps';
+    run(installCmd, repoDir, { timeout: 2 * 60_000 });
+  }
 }
 
 // ── Replace Nuxt Plugin ──────────────────────────────────────────────────────

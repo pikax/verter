@@ -229,6 +229,7 @@ jobs:
   test-project:
     name: Test ${{ matrix.project.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs: [setup]
     if: always() && needs.setup.result == 'success'
     strategy:
@@ -296,7 +297,7 @@ jobs:
             branch: main
             build-cmd: pnpm -r --filter="./packages/**" --parallel run build
             test-cmd: pnpm run test
-            e2e-cmd: pnpm -C cypress/fixtures/basic run dev & sleep 10 && npx cypress run --headless
+            e2e-cmd: pnpm -C cypress/fixtures/basic run dev > /dev/null 2>&1 & DEV_PID=$!; sleep 10 && npx cypress run --headless; EXIT=$?; kill $DEV_PID 2>/dev/null; wait $DEV_PID 2>/dev/null; exit $EXIT
             package-manager: pnpm
             bundler: vite
           - name: zyronon-douyin
@@ -685,6 +686,41 @@ jobs:
               cat "$CONFIG_FILE"
               echo "==="
             done
+          fi
+
+          # For monorepos: if we modified source files in workspace sub-packages,
+          # add @verter/unplugin as a dependency so the build tool externalizes it
+          # instead of bundling it (which would embed require("@verter/native") inline
+          # and generate wrong import paths like markdown-it/lib/token.js).
+          echo "📝 Patching workspace sub-package deps..."
+          for PKG_FILE in $(find . -name 'package.json' \
+            -not -path '*/node_modules/*' -not -path './.git/*' \
+            -not -path './package.json'); do
+            if node -e "
+              const fs = require('fs');
+              const pkg = JSON.parse(fs.readFileSync('$PKG_FILE', 'utf8'));
+              let changed = false;
+              for (const field of ['dependencies', 'devDependencies']) {
+                if (pkg[field]?.['@vitejs/plugin-vue']) {
+                  pkg[field]['@verter/unplugin'] = pkg[field]['@vitejs/plugin-vue'];
+                  changed = true;
+                }
+              }
+              if (changed) {
+                fs.writeFileSync('$PKG_FILE', JSON.stringify(pkg, null, 2) + '\n');
+                process.exit(0);
+              }
+              process.exit(1);
+            " 2>/dev/null; then
+              echo "  ✅ Patched $PKG_FILE (added @verter/unplugin)"
+            fi
+          done
+
+          # Reinstall to pick up new sub-package deps
+          if [ "${{ matrix.project.package-manager }}" = "pnpm" ]; then
+            pnpm install --no-frozen-lockfile
+          else
+            npm install --legacy-peer-deps
           fi
 
       - name: Verify Verter plugin replacement

@@ -106,7 +106,7 @@ export const projects = [
     buildCmd: 'pnpm -r --filter="./packages/**" --parallel run build',
     testCmd: 'pnpm run test',
     // Cypress 14: must start fixture dev server on port 3041 manually
-    e2eCmd: 'pnpm -C cypress/fixtures/basic run dev & sleep 10 && npx cypress run --headless',
+    e2eCmd: 'pnpm -C cypress/fixtures/basic run dev > /dev/null 2>&1 & DEV_PID=$!; sleep 10 && npx cypress run --headless; EXIT=$?; kill $DEV_PID 2>/dev/null; wait $DEV_PID 2>/dev/null; exit $EXIT',
     packageManager: 'pnpm',
     bundler: 'vite',
   },
