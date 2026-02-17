@@ -478,6 +478,39 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
 
         if is_vif_continuation {
             parent.pending_vif_fallbacks.pop();
+            // Strip any HTML comments and whitespace nodes recorded between
+            // the previous v-if/v-else-if branch and this continuation.
+            // Comments interleaved in a ternary chain break the
+            // `cond ? ... : cond2 ? ... : ...` expression because they emit
+            // `_createCommentVNode(...)` at a position where only the next
+            // ternary branch should appear. Whitespace between branches is
+            // also stripped since it would produce invalid separators.
+            while let Some(last) = parent.children.last() {
+                match last.kind {
+                    ChildKind::Comment => {
+                        let child_start = last.start;
+                        let child_end = last.end;
+                        parent.children.pop();
+                        // Remove the partial overwrites pushed by handle_comment
+                        // (<!-- → _createCommentVNode(" and --> → ")), then push
+                        // a single full-span blank overwrite to erase the comment.
+                        let mut i = 0;
+                        while i < self.pending_overwrites.len() {
+                            let (s, e, _) = self.pending_overwrites[i];
+                            if s >= child_start && e <= child_end {
+                                self.pending_overwrites.swap_remove(i);
+                            } else {
+                                i += 1;
+                            }
+                        }
+                        self.pending_overwrites.push((child_start, child_end, ""));
+                    }
+                    ChildKind::WhitespaceNewline | ChildKind::WhitespaceSpace => {
+                        parent.children.pop();
+                    }
+                    _ => break,
+                }
+            }
         } else {
             parent.children.push(ChildInfo {
                 start: ev.event.event_open_tag.start,

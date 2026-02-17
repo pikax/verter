@@ -4414,4 +4414,358 @@ const handleClick = () => {}
             result.code
         );
     }
+
+    /// Computed property names in :class object binding.
+    /// `[ns.bm('group', 'append')]: $slots.append` must produce valid JS.
+    /// Reproduces element-plus input.vue pattern.
+    #[test]
+    fn test_class_computed_property_name() {
+        let input = r#"<script setup>
+const ns = { bm: (a, b) => a + b }
+</script>
+<template>
+  <div :class="[containerKls, { [ns.bm('group', 'append')]: $slots.append }]">
+    <slot />
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("COMPUTED PROP NAME:\n{}", result.code);
+    }
+
+    /// HTML comment between v-if/v-else branches breaks ternary chain.
+    #[test]
+    fn test_comment_between_vif_velse_branches() {
+        let input = r#"<script setup>
+const show = true
+</script>
+<template>
+  <div>
+    <span v-if="show">A</span>
+    <!-- comment -->
+    <span v-else>B</span>
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("COMMENT BETWEEN IF/ELSE:\n{}", result.code);
+        // The comment should NOT break the ternary chain
+    }
+
+    /// HTML comment between v-else-if branches breaks ternary chain.
+    #[test]
+    fn test_comment_between_velseif_branches() {
+        let input = r#"<script setup>
+const a = true
+const b = false
+</script>
+<template>
+  <div>
+    <span v-if="a">A</span>
+    <span v-else-if="b">B</span>
+    <!-- eslint-disable -->
+    <span v-else>C</span>
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("COMMENT BETWEEN ELSE-IF/ELSE:\n{}", result.code);
+    }
+
+    /// Reproduces element-plus cascader-panel/menu.vue — exact template.
+    #[test]
+    fn test_element_plus_cascader_menu() {
+        let input = r##"<template>
+  <el-scrollbar
+    :key="menuId"
+    tag="ul"
+    role="menu"
+    :class="ns.b()"
+    :wrap-class="ns.e('wrap')"
+    :view-class="[ns.e('list'), ns.is('empty', isEmpty)]"
+    @mousemove="handleMouseMove"
+    @mouseleave="clearHoverZone"
+  >
+    <el-cascader-node
+      v-for="node in nodes"
+      :key="node.uid"
+      :node="node"
+      :menu-id="menuId"
+      @expand="handleExpand"
+    />
+    <div v-if="isLoading" :class="ns.e('empty-text')">
+      <el-icon size="14" :class="ns.is('loading')">
+        <loading />
+      </el-icon>
+      {{ t('el.cascader.loading') }}
+    </div>
+    <div v-else-if="isEmpty" :class="ns.e('empty-text')">
+      <slot name="empty">{{ t('el.cascader.noData') }}</slot>
+    </div>
+    <!-- eslint-disable vue/html-self-closing -->
+    <svg
+      v-else-if="panel?.isHoverMenu"
+      ref="hoverZone"
+      :class="ns.e('hover-zone')"
+    ></svg>
+    <!-- eslint-enable vue/html-self-closing -->
+  </el-scrollbar>
+</template>
+<script setup>
+import { computed, getCurrentInstance, inject, ref } from 'vue'
+import { Loading } from '@element-plus/icons-vue'
+defineOptions({ name: 'ElCascaderMenu' })
+const props = defineProps({
+  nodes: { type: Array, required: true },
+  index: { type: Number, required: true },
+})
+const ns = { b: () => '', e: (s) => s, is: (a, b) => a }
+const t = (s) => s
+const panel = inject('key')
+const hoverZone = ref(null)
+const isEmpty = computed(() => !props.nodes.length)
+const isLoading = computed(() => false)
+const menuId = computed(() => `test-${props.index}`)
+const handleExpand = (e) => {}
+const handleMouseMove = (e) => {}
+const clearHoverZone = () => {}
+</script>"##;
+        let result = gen_and_validate(input);
+        eprintln!("CASCADER MENU:\n{}", result.code);
+    }
+
+    /// Reproduces element-plus input/input.vue — exact template.
+    #[test]
+    fn test_element_plus_input() {
+        let input = r##"<template>
+  <div
+    :class="[
+      containerKls,
+      {
+        [nsInput.bm('group', 'append')]: $slots.append,
+        [nsInput.bm('group', 'prepend')]: $slots.prepend,
+      },
+    ]"
+    :style="containerStyle"
+    @mouseenter="handleMouseEnter"
+    @mouseleave="handleMouseLeave"
+  >
+    <!-- input -->
+    <template v-if="type !== 'textarea'">
+      <!-- prepend slot -->
+      <div v-if="$slots.prepend" :class="nsInput.be('group', 'prepend')">
+        <slot name="prepend" />
+      </div>
+
+      <div ref="wrapperRef" :class="wrapperKls">
+        <!-- prefix slot -->
+        <span v-if="$slots.prefix || prefixIcon" :class="nsInput.e('prefix')">
+          <span :class="nsInput.e('prefix-inner')">
+            <slot name="prefix" />
+            <el-icon v-if="prefixIcon" :class="nsInput.e('icon')">
+              <component :is="prefixIcon" />
+            </el-icon>
+          </span>
+        </span>
+
+        <input
+          :id="inputId"
+          ref="input"
+          :class="nsInput.e('inner')"
+          v-bind="attrs"
+          :name="name"
+          :minlength="minlength"
+          :maxlength="maxlength"
+          :type="showPassword ? (passwordVisible ? 'text' : 'password') : type"
+          :disabled="inputDisabled"
+          :readonly="readonly"
+          :autocomplete="autocomplete"
+          :tabindex="tabindex"
+          :aria-label="ariaLabel"
+          :placeholder="placeholder"
+          :style="inputStyle"
+          :form="form"
+          :autofocus="autofocus"
+          :role="containerRole"
+          :inputmode="inputmode"
+          @compositionstart="handleCompositionStart"
+          @compositionupdate="handleCompositionUpdate"
+          @compositionend="handleCompositionEnd"
+          @input="handleInput"
+          @change="handleChange"
+          @keydown="handleKeydown"
+        />
+
+        <!-- suffix slot -->
+        <span v-if="suffixVisible" :class="nsInput.e('suffix')">
+          <span :class="nsInput.e('suffix-inner')">
+            <template
+              v-if="!showClear || !showPwdVisible || !isWordLimitVisible"
+            >
+              <slot name="suffix" />
+              <el-icon v-if="suffixIcon" :class="nsInput.e('icon')">
+                <component :is="suffixIcon" />
+              </el-icon>
+            </template>
+            <el-icon
+              v-if="showClear"
+              :class="[nsInput.e('icon'), nsInput.e('clear')]"
+              @mousedown.prevent="NOOP"
+              @click="clear"
+            >
+              <component :is="clearIcon" />
+            </el-icon>
+            <el-icon
+              v-if="showPwdVisible"
+              :class="[nsInput.e('icon'), nsInput.e('password')]"
+              @click="handlePasswordVisible"
+              @mousedown.prevent="NOOP"
+              @mouseup.prevent="NOOP"
+            >
+              <component :is="passwordIcon" />
+            </el-icon>
+            <span
+              v-if="isWordLimitVisible"
+              :class="[
+                nsInput.e('count'),
+                nsInput.is('outside', wordLimitPosition === 'outside'),
+              ]"
+            >
+              <span :class="nsInput.e('count-inner')">
+                {{ textLength }} / {{ maxlength }}
+              </span>
+            </span>
+            <el-icon
+              v-if="validateState && validateIcon && needStatusIcon"
+              :class="[
+                nsInput.e('icon'),
+                nsInput.e('validateIcon'),
+                nsInput.is('loading', validateState === 'validating'),
+              ]"
+            >
+              <component :is="validateIcon" />
+            </el-icon>
+          </span>
+        </span>
+      </div>
+
+      <!-- append slot -->
+      <div v-if="$slots.append" :class="nsInput.be('group', 'append')">
+        <slot name="append" />
+      </div>
+    </template>
+
+    <!-- textarea -->
+    <template v-else>
+      <textarea
+        :id="inputId"
+        ref="textarea"
+        :class="[nsTextarea.e('inner'), nsInput.is('focus', isFocused)]"
+        v-bind="attrs"
+        :name="name"
+        :minlength="minlength"
+        :maxlength="maxlength"
+        :tabindex="tabindex"
+        :disabled="inputDisabled"
+        :readonly="readonly"
+        :autocomplete="autocomplete"
+        :style="textareaStyle"
+        :aria-label="ariaLabel"
+        :placeholder="placeholder"
+        :form="form"
+        :autofocus="autofocus"
+        :rows="rows"
+        :role="containerRole"
+        @compositionstart="handleCompositionStart"
+        @compositionupdate="handleCompositionUpdate"
+        @compositionend="handleCompositionEnd"
+        @input="handleInput"
+        @focus="handleFocus"
+        @blur="handleBlur"
+        @change="handleChange"
+        @keydown="handleKeydown"
+      />
+      <span
+        v-if="isWordLimitVisible"
+        :style="countStyle"
+        :class="[
+          nsInput.e('count'),
+          nsInput.is('outside', wordLimitPosition === 'outside'),
+        ]"
+      >
+        {{ textLength }} / {{ maxlength }}
+      </span>
+    </template>
+  </div>
+</template>
+<script lang="ts" setup>
+import { computed, ref, shallowRef, toRef, useAttrs as useRawAttrs, useSlots } from 'vue'
+const NOOP = () => {}
+defineOptions({ name: 'ElInput', inheritAttrs: false })
+const props = defineProps({
+  type: { type: String, default: 'text' },
+  modelValue: { type: [String, Number], default: '' },
+  name: String,
+  minlength: Number,
+  maxlength: Number,
+  disabled: Boolean,
+  readonly: Boolean,
+  autocomplete: String,
+  tabindex: [String, Number],
+  placeholder: String,
+  form: String,
+  autofocus: Boolean,
+  rows: { type: Number, default: 2 },
+  resize: String,
+  inputmode: String,
+  clearable: Boolean,
+  showPassword: Boolean,
+  showWordLimit: Boolean,
+  suffixIcon: [String, Object],
+  prefixIcon: [String, Object],
+  validateEvent: { type: Boolean, default: true },
+})
+const emit = defineEmits(['update:modelValue', 'input', 'change', 'clear', 'mouseenter', 'mouseleave', 'keydown'])
+const nsInput = { b: () => '', e: (s) => s, m: (s) => s, bm: (a, b) => a, be: (a, b) => a, is: (a, b) => a }
+const nsTextarea = { b: () => '', e: (s) => s }
+const attrs = {}
+const containerKls = computed(() => [])
+const wrapperKls = computed(() => [])
+const containerStyle = computed(() => ({}))
+const inputStyle = computed(() => ({}))
+const textareaStyle = computed(() => ({}))
+const countStyle = ref({})
+const inputId = ref('id')
+const inputDisabled = ref(false)
+const suffixVisible = ref(true)
+const showClear = ref(false)
+const showPwdVisible = ref(false)
+const isWordLimitVisible = ref(false)
+const passwordVisible = ref(false)
+const hovering = ref(false)
+const isFocused = ref(false)
+const validateState = ref('')
+const validateIcon = ref(null)
+const needStatusIcon = ref(false)
+const textLength = ref(0)
+const clearIcon = ref(null)
+const passwordIcon = ref(null)
+const ariaLabel = ref('')
+const containerRole = ref('')
+const wordLimitPosition = ref('outside')
+const input = shallowRef(null)
+const textarea = shallowRef(null)
+const handleMouseEnter = () => {}
+const handleMouseLeave = () => {}
+const handleCompositionStart = () => {}
+const handleCompositionUpdate = () => {}
+const handleCompositionEnd = () => {}
+const handleInput = () => {}
+const handleChange = () => {}
+const handleKeydown = () => {}
+const handleFocus = () => {}
+const handleBlur = () => {}
+const handlePasswordVisible = () => {}
+const clear = () => {}
+</script>"##;
+        let result = gen_and_validate(input);
+        eprintln!("INPUT:\n{}", result.code);
+    }
 }
