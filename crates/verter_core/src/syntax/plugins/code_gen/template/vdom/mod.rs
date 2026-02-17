@@ -916,12 +916,14 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             .ok_or(TemplateCodeGenError::StackUnderflow(
                 "comment inside template must have stack",
             ))?;
+        let ct = self.code_transform.clone();
         comment::handle_comment(
             ev,
             ctx,
             state,
             &mut self.imports,
             &mut self.pending_overwrites,
+            |s| ct.borrow().alloc_str(s),
             self.comments,
         );
 

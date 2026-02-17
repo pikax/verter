@@ -4768,4 +4768,101 @@ const clear = () => {}
         let result = gen_and_validate(input);
         eprintln!("INPUT:\n{}", result.code);
     }
+
+    /// Multi-line HTML comment inside a component child.
+    #[test]
+    fn test_multiline_comment_inside_component() {
+        let input = r#"<script setup>
+const checked = true
+</script>
+<template>
+  <Radio v-model="checked">
+    <!--
+      Multi-line comment
+      inside a component
+    -->
+    <span />
+  </Radio>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("MULTILINE COMMENT:\n{}", result.code);
+    }
+
+    /// @click.stop with no handler (empty event modifier).
+    #[test]
+    fn test_empty_event_handler_with_stop_modifier() {
+        let input = r#"<script setup>
+const handler = () => {}
+</script>
+<template>
+  <Checkbox
+    :model-value="true"
+    @click.stop
+    @update:model-value="handler"
+  />
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("EMPTY HANDLER STOP:\n{}", result.code);
+    }
+
+    /// Reproduces cascader-panel/node.vue pattern (v-if chain with @click.stop and @update:model-value).
+    #[test]
+    fn test_cascader_node_pattern() {
+        let input = r##"<script setup>
+import { computed, inject } from 'vue'
+const props = defineProps({
+  node: { type: Object, required: true },
+  menuId: String,
+})
+const ns = { b: () => '', e: (s) => s, is: (a, b) => a }
+const multiple = computed(() => false)
+const checkStrictly = computed(() => false)
+const showPrefix = computed(() => true)
+const checkedNodeId = computed(() => 1)
+const isDisabled = computed(() => false)
+const isLeaf = computed(() => false)
+const expandable = computed(() => true)
+const inExpandingPath = computed(() => false)
+const inCheckedPath = computed(() => false)
+const handleHoverExpand = () => {}
+const handleClick = () => {}
+const handleSelectCheck = () => {}
+</script>
+<template>
+  <li
+    :id="`${menuId}-${node.uid}`"
+    role="menuitem"
+    :class="[ns.b(), ns.is('active', node.checked)]"
+    @mouseenter="handleHoverExpand"
+    @click="handleClick"
+  >
+    <!-- prefix -->
+    <Checkbox
+      v-if="multiple && showPrefix"
+      :model-value="node.checked"
+      :disabled="isDisabled"
+      @click.stop
+      @update:model-value="handleSelectCheck"
+    />
+    <Radio
+      v-else-if="checkStrictly && showPrefix"
+      :model-value="checkedNodeId"
+      :label="node.uid"
+      :disabled="isDisabled"
+      @update:model-value="handleSelectCheck"
+      @click.stop
+    >
+      <!--
+        Add an empty element to avoid render label
+      -->
+      <span />
+    </Radio>
+    <Icon v-else-if="isLeaf && node.checked" :class="ns.e('prefix')">
+      <check />
+    </Icon>
+  </li>
+</template>"##;
+        let result = gen_and_validate(input);
+        eprintln!("CASCADER NODE:\n{}", result.code);
+    }
 }
