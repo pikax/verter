@@ -235,11 +235,9 @@ pub(crate) fn resolve_whitespace_candidates(
             (Some(p), Some(n)) => {
                 let p_is_el_or_comment = matches!(p, ChildKind::Element | ChildKind::Comment);
                 let n_is_el_or_comment = matches!(n, ChildKind::Element | ChildKind::Comment);
-                // Both comments → remove
-                // Comment + element (either order) → remove
+                // Comment + element/comment (either order) → remove
                 // Both elements + has newline → remove
-                (p == ChildKind::Comment && n == ChildKind::Comment)
-                    || (p == ChildKind::Comment && n_is_el_or_comment)
+                (p == ChildKind::Comment && n_is_el_or_comment)
                     || (p_is_el_or_comment && n == ChildKind::Comment)
                     || (p == ChildKind::Element && n == ChildKind::Element && has_newline)
             }

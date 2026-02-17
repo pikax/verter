@@ -406,6 +406,32 @@ fn compile_for_vite_impl(
         }
     }
 
+    // Merge dual script blocks: when both <script> and <script setup> exist,
+    // the compiler produces two `const __sfc__ = ...` declarations. Rename the
+    // first to `__default__` and inject `...__default__,` into the second one's
+    // _defineComponent({) so options (inheritAttrs, name, etc.) are preserved.
+    {
+        let first = code.find("const __sfc__ = ");
+        if let Some(first_pos) = first {
+            let after_first = first_pos + "const __sfc__ = ".len();
+            if let Some(second_offset) = code[after_first..].find("const __sfc__ = ") {
+                let second_pos = after_first + second_offset;
+                // Rename first declaration: __sfc__ → __default__
+                code.replace_range(
+                    first_pos..first_pos + "const __sfc__ = ".len(),
+                    "const __default__ = ",
+                );
+                // The second declaration shifted by 4 chars ("__default__" is 4 longer than "__sfc__")
+                let adjusted_second = second_pos + 4;
+                // Find the opening `{` of _defineComponent({ after the second declaration
+                if let Some(brace_offset) = code[adjusted_second..].find("_defineComponent({") {
+                    let brace_pos = adjusted_second + brace_offset + "_defineComponent({".len();
+                    code.insert_str(brace_pos, "...__default__,");
+                }
+            }
+        }
+    }
+
     let custom_blocks = result
         .custom_blocks
         .into_iter()

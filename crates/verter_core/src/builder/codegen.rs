@@ -4153,4 +4153,76 @@ const suffix = 'APR'
             result.code
         );
     }
+
+    /// Props from defineProps must be accessible in template without $props. prefix.
+    /// Vue's compiler resolves `tag` in `:is="tag"` as `$props.tag` when `tag`
+    /// is a prop from defineProps. Verter must do the same.
+    /// Reproduces BalLink.vue pattern where <component :is="tag"> renders as <a>.
+    #[test]
+    fn test_define_props_accessible_in_template() {
+        let input = r#"<script lang="ts" setup>
+type Props = {
+  tag?: string;
+  external?: boolean;
+};
+const props = withDefaults(defineProps<Props>(), {
+  tag: 'a',
+  external: false,
+});
+</script>
+<template>
+  <component :is="tag">
+    <slot />
+  </component>
+</template>"#;
+        let result = gen_and_validate(input);
+        // `tag` must resolve to $props.tag, NOT _ctx.tag
+        assert!(
+            !result.code.contains("_ctx.tag"),
+            "tag must NOT use _ctx prefix (should be $props.tag): {}",
+            result.code
+        );
+    }
+
+    /// Dual script blocks: <script> with inheritAttrs + <script setup> with defineProps.
+    /// Reproduces BalLink.vue pattern. The component :is="tag" must still resolve.
+    #[test]
+    fn test_dual_script_blocks_component_is() {
+        let input = r#"<script lang="ts">
+export default {
+  inheritAttrs: false,
+};
+</script>
+<script lang="ts" setup>
+type Props = {
+  tag?: string;
+  external?: boolean;
+};
+const props = withDefaults(defineProps<Props>(), {
+  tag: 'a',
+  external: false,
+});
+const attrs = useAttrs();
+</script>
+<template>
+  <component :is="tag" v-bind="attrs">
+    <slot />
+  </component>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("DUAL SCRIPT GENERATED:\n{}", result.code);
+        // Must still resolve tag to $props.tag
+        assert!(
+            !result.code.contains("_ctx.tag"),
+            "tag must NOT use _ctx prefix in dual-script: {}",
+            result.code
+        );
+        // Must have inheritAttrs: false in the output
+        assert!(
+            result.code.contains("inheritAttrs: false")
+                || result.code.contains("inheritAttrs:false"),
+            "inheritAttrs must be preserved: {}",
+            result.code
+        );
+    }
 }
