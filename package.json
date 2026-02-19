@@ -28,6 +28,9 @@
     "copy-plugin": "npx shx mkdir -p extensions/vue-vscode/node_modules/@verter && npx shx cp -r extensions/typescript-plugin extensions/vue-vscode/node_modules/@verter/typescript-plugin",
     "clean": "pnpm -r exec npx shx rm -rf .turbo dist tsconfig.tsbuildinfo && npx shx rm -rf .turbo dist tsconfig.tsbuildinfo",
     "integration-test": "node scripts/integration-test/run.mjs"
+    ,"profile:hotpath": "cargo run -p verter_bench --example profile_ast --release --features=hotpath"
+    ,"profile:hotpath:alloc": "cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc"
+    ,"profile:hotpath:mcp": "cargo run -p verter_bench --example profile_ast --release --features=hotpath-mcp"
   },
   "dependencies": {
     "@vue/compiler-core": "^3.6.0-beta.6",

@@ -3,15 +3,25 @@ import type { HmrStrategy } from "./types";
 import { basename } from "path";
 import { EXPORT_HELPER_ID } from "./constants";
 
+/** JS reserved words that cannot be used as variable names. */
+const JS_RESERVED = new Set([
+  "break", "case", "catch", "continue", "debugger", "default", "delete",
+  "do", "else", "finally", "for", "function", "if", "in", "instanceof",
+  "new", "return", "switch", "this", "throw", "try", "typeof", "var",
+  "void", "while", "with", "class", "const", "enum", "export", "extends",
+  "import", "super", "implements", "interface", "let", "package", "private",
+  "protected", "public", "static", "yield", "await",
+]);
+
 /**
  * Extract component name from filename and sanitize to a valid JS identifier.
  * e.g., "SplitPane.vue" → "SplitPane", "app-bar-first.vue" → "app_bar_first",
- * "404.vue" → "_404"
+ * "404.vue" → "_404", "switch.vue" → "_switch"
  */
 function extractComponentName(filename: string): string {
   let name = basename(filename).replace(/\.vue$/, "");
   name = name.replace(/[^a-zA-Z0-9_$]/g, "_");
-  if (/^[0-9]/.test(name)) {
+  if (/^[0-9]/.test(name) || JS_RESERVED.has(name)) {
     name = "_" + name;
   }
   return name;

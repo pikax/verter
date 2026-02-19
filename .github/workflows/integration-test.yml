@@ -239,7 +239,7 @@ jobs:
           - name: vuetify
             repo: vuetifyjs/vuetify
             branch: master
-            build-cmd: pnpm --filter vuetifyjs.com build
+            build-cmd: pnpm --filter vuetifyjs.com... build
             test-cmd: ""
             e2e-cmd: ""
             package-manager: pnpm
@@ -446,14 +446,25 @@ jobs:
       - name: Install project dependencies
         working-directory: test-project
         run: |
+          set -o pipefail
           if [ "${{ matrix.project.package-manager }}" = "pnpm" ]; then
             if ! pnpm install --no-frozen-lockfile 2>&1 | tee /tmp/pnpm-install.log; then
-              # Handle ERR_PNPM_WORKSPACE_PKG_NOT_FOUND: remove the offending workspace
-              # package and retry (e.g. tdesign-vue-next's chat/site references a missing @tdesign/common)
+              # Handle ERR_PNPM_WORKSPACE_PKG_NOT_FOUND: strip the missing workspace
+              # dependency from the offending package.json and retry
+              # (e.g. tdesign-vue-next's chat/site references non-existent @tdesign/common)
               OFFENDING_DIR=$(grep -oP 'In \K[^:]+' /tmp/pnpm-install.log | head -1 || true)
-              if [ -n "$OFFENDING_DIR" ] && [ -d "$OFFENDING_DIR" ]; then
-                echo "⚠️ Removing broken workspace package: $OFFENDING_DIR"
-                rm -rf "$OFFENDING_DIR"
+              MISSING_PKG=$(grep -oP 'no package named "\K[^"]+' /tmp/pnpm-install.log | head -1 || true)
+              if [ -n "$OFFENDING_DIR" ] && [ -n "$MISSING_PKG" ] && [ -f "$OFFENDING_DIR/package.json" ]; then
+                echo "⚠️ Stripping broken workspace dep '$MISSING_PKG' from $OFFENDING_DIR/package.json"
+                node -e "
+                  const fs = require('fs');
+                  const p = '$OFFENDING_DIR/package.json';
+                  const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+                  for (const f of ['dependencies','devDependencies','peerDependencies','optionalDependencies']) {
+                    if (pkg[f]?.['$MISSING_PKG']) delete pkg[f]['$MISSING_PKG'];
+                  }
+                  fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+                "
                 pnpm install --no-frozen-lockfile
               else
                 cat /tmp/pnpm-install.log
@@ -471,6 +482,7 @@ jobs:
         working-directory: test-project
         continue-on-error: true
         run: |
+          set -o pipefail
           START=$(date +%s)
           if ${{ matrix.project.build-cmd }} 2>&1 | tee ../baseline-build.log; then
             echo "status=success" >> $GITHUB_OUTPUT
@@ -484,6 +496,7 @@ jobs:
         working-directory: test-project
         continue-on-error: true
         run: |
+          set -o pipefail
           if [ -z "${{ matrix.project.test-cmd }}" ]; then
             echo "duration=0" >> $GITHUB_OUTPUT
             echo "status=skipped" >> $GITHUB_OUTPUT
@@ -664,8 +677,8 @@ jobs:
               sed -i 's|import Vue from|import verter from|g' "$CONFIG_FILE"
               sed -i 's|import vue,|import verter,|g' "$CONFIG_FILE"
               sed -i 's|import Vue,|import verter,|g' "$CONFIG_FILE"
-              sed -i 's|vue(|verter(|g' "$CONFIG_FILE"
-              sed -i 's|Vue(|verter(|g' "$CONFIG_FILE"
+              sed -i 's|\bvue(|verter(|g' "$CONFIG_FILE"
+              sed -i 's|\bVue(|verter(|g' "$CONFIG_FILE"
 
               echo "📝 Modified:"
               cat "$CONFIG_FILE"
@@ -700,8 +713,8 @@ jobs:
               sed -i 's|import Vue from|import verter from|g' "$CONFIG_FILE"
               sed -i 's|import vue,|import verter,|g' "$CONFIG_FILE"
               sed -i 's|import Vue,|import verter,|g' "$CONFIG_FILE"
-              sed -i 's|vue(|verter(|g' "$CONFIG_FILE"
-              sed -i 's|Vue(|verter(|g' "$CONFIG_FILE"
+              sed -i 's|\bvue(|verter(|g' "$CONFIG_FILE"
+              sed -i 's|\bVue(|verter(|g' "$CONFIG_FILE"
 
               echo "📝 Modified:"
               cat "$CONFIG_FILE"
@@ -793,6 +806,7 @@ jobs:
         working-directory: test-project
         continue-on-error: true
         run: |
+          set -o pipefail
           START=$(date +%s)
           if ${{ matrix.project.build-cmd }} 2>&1 | tee ../verter-build.log; then
             echo "status=success" >> $GITHUB_OUTPUT
@@ -806,6 +820,7 @@ jobs:
         working-directory: test-project
         continue-on-error: true
         run: |
+          set -o pipefail
           if [ -z "${{ matrix.project.test-cmd }}" ]; then
             echo "duration=0" >> $GITHUB_OUTPUT
             echo "status=skipped" >> $GITHUB_OUTPUT
@@ -860,6 +875,7 @@ jobs:
         working-directory: test-project
         continue-on-error: true
         run: |
+          set -o pipefail
           START=$(date +%s)
           # Write e2e command to a temp script to prevent bash from
           # pre-expanding $-variables ($!, $?, etc.) inside double quotes.

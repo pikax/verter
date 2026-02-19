@@ -71,6 +71,9 @@ pub(crate) fn handle_text<'alloc>(
             kind,
             scope_prefix: "",
             is_named_slot: false,
+            slot_name: "",
+            slot_format_prepend_idx: None,
+            slot_close_tag_end: 0,
         });
         return;
     }
@@ -88,6 +91,9 @@ pub(crate) fn handle_text<'alloc>(
         kind: ChildKind::Text,
         scope_prefix: "",
         is_named_slot: false,
+        slot_name: "",
+        slot_format_prepend_idx: None,
+        slot_close_tag_end: 0,
     });
 
     if needs_condense {

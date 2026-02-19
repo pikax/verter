@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "verter-hotpath": {
+      "url": "http://localhost:6771/mcp"
+    }
+  }
+}

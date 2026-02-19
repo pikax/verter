@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "test": "vitest --run",
+    "test:e2e": "playwright test",
     "generate:vue-language": "tsx scripts/generate-vue-language.ts"
   },
   "dependencies": {
@@ -22,7 +24,9 @@
     "monaco-editor-core": "^0.55.1",
     "shiki": "^3.9.2",
     "tsx": "^4.19.4",
+    "happy-dom": "^18.0.1",
     "typescript": "^5.9.3",
-    "vite": "^7.3.1"
+    "vite": "^7.3.1",
+    "vitest": "^3.2.1"
   }
 }

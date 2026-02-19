@@ -197,6 +197,90 @@ When comparing against another compiler (e.g., Vue's `@vue/compiler-sfc`):
 - **NAPI overhead is fixed** — allocator creation + JS↔Rust marshalling adds ~7μs per call. This is a floor that no Rust-side optimization can remove. For sub-100μs compilations, NAPI overhead is a significant percentage.
 - **Profile in release mode** — debug builds are 10-50x slower and have completely different bottleneck profiles.
 
+## 10.1 Agent Profiling via MCP (hotpath)
+
+When performance work needs AI-agent investigation, run hotpath with MCP enabled so tools can query live profiling data.
+
+### Start profiler with MCP endpoint
+
+From repo root:
+
+```bash
+pnpm run profile:hotpath:mcp
+```
+
+This runs `crates/verter_bench/examples/profile_ast.rs` against real-world Vue repos (or fixture fallback) and exposes:
+
+- `http://localhost:6771/mcp`
+
+### Agent MCP config
+
+Use the checked-in MCP config template:
+
+```text
+mcp/hotpath.mcp.json
+```
+
+It contains:
+
+```json
+{
+    "mcpServers": {
+        "verter-hotpath": {
+            "url": "http://localhost:6771/mcp"
+        }
+    }
+}
+```
+
+Point your MCP-capable agent to this file (or copy the `mcpServers.verter-hotpath` entry into your local MCP config).
+
+### Non-MCP fallback modes
+
+```bash
+pnpm run profile:hotpath        # timing hotspots
+pnpm run profile:hotpath:alloc  # timing + allocation hotspots
+```
+
+## 11. CodeTransform Optimization History
+
+This section documents performance experiments on the `code_transform` module, including what worked and what didn't. Reference this before attempting further optimizations.
+
+### Successful Optimizations (Committed)
+
+**A. Fast-path `overwrite()` for single Original chunk** (`daae488`)
+- **What**: When the overwritten range `[start, end)` falls within a single Original chunk, bypass the general `SmallVec<[Chunk; 4]>` + `Vec::splice` path. Instead, use direct `Vec::insert` (1-2 calls) for the 4 sub-cases (middle split → 3 chunks, left-aligned → 2, right-aligned → 2, exact match → 1 in-place).
+- **Why it worked**: `overwrite()` is the most frequently called mutation. The common case is a single-chunk replacement, and `Vec::splice` has higher overhead than targeted `insert` calls.
+- **Impact**: Measurable improvement on `basic_operations/overwrite` and `sequential_overwrite`.
+
+**B. Eliminate `build_string` first pass via `output_delta` tracking** (`4b6a323`)
+- **What**: Added an `output_delta: i64` field to `CodeTransform` that tracks the running difference between inserted and removed content. Each mutation updates it. `build_string()` uses `(original.len() as i64 + output_delta) as usize` for `String::with_capacity`, eliminating the first pass that computed exact length.
+- **Why it worked**: `build_string()` previously iterated all chunks twice — once for length, once for building. Removing the first pass halved cache traffic for the string-building hot path.
+- **Impact**: ~19% improvement on `chunk_iteration/build_string/2000`.
+
+**C. Merge `move_wrapped` split + identification into single pass** (`5dfc598`)
+- **What**: Replaced the 3 separate linear scans in `move_wrapped` (`ensure_split_at(start)`, `ensure_split_at(end)`, full iteration for `indices_to_move`) with a single forward `while` loop that splits at boundaries and collects indices in one pass.
+- **Why it worked**: Reduced 3× O(n) scans to 1× O(n), with inline split logic avoiding redundant chunk-list traversals.
+- **Impact**: Measurable improvement on `code_transform/moves`.
+
+### Failed Optimizations (Reverted)
+
+**D. Source map linear sweep (`PositionSweep`) for monotonic positions** — REVERTED
+- **What**: Added `PositionSweep` struct to `position.rs` that replaces O(log N) binary search in `PositionResolver::offset_to_line_col()` with O(1) amortized linear sweep for monotonically increasing offsets. Changed `emit_mapped_content` to accept pre-resolved `(source_line, source_column)` instead of `&PositionResolver + offset`, allowing Original/Overwritten chunks to use the sweep while Moved chunks fall back to binary search.
+- **Why it failed**: Changing `emit_mapped_content`'s function signature (removing `&PositionResolver` parameter, adding two `u32`s) altered LLVM's inlining/optimization decisions, causing **+8.7% regression on unmodified files** and **+7.2% on 10 edits**. Only 100+ edits showed marginal improvement (-2.8%). The binary search on typical file sizes (~400-700 lines ≈ 10 comparisons) is already fast enough that the sweep's constant savings (~5ns/chunk) don't overcome the indirect regression from function signature changes.
+- **Lesson**: Binary search with ~10 comparisons is already in the CPU branch predictor's sweet spot. Replacing it with a linear sweep only helps at very high chunk counts (thousands), but the structural code changes needed to thread the sweep state through the API cause compiler optimization regressions that dominate in the common case. **Do not attempt to optimize `offset_to_line_col` for source map generation** — the binary search is not a bottleneck.
+- **Note**: `PositionSweep` was kept in `position.rs` as it's well-tested and may be useful for other use cases with truly large line counts (10K+ lines).
+
+### Where NOT to Look for Further Gains
+
+| Area | Why it won't help |
+|------|-------------------|
+| `offset_to_line_col` binary search | See Opt D above — already fast for typical file sizes |
+| `emit_mapped_content` signature | Changing parameters causes LLVM optimization regressions |
+| `memchr_iter` in source map | Already optimal — memchr uses SIMD on supported platforms |
+| `SourceMapBuilder::add_token` | External dependency (oxc_sourcemap), can't optimize internally |
+| `advance_generated_position` | Already a tight loop with memchr, no fat to cut |
+
 ## Anti-Patterns
 
 | Pattern | Problem | Fix |
@@ -213,3 +297,5 @@ When comparing against another compiler (e.g., Vue's `@vue/compiler-sfc`):
 | Replacing sort with merge for deferred-op buffers | Deferred emission buffers (`pending_append_lefts`, `pending_prepend_lefts`) are NOT in document order — binding patches and v-if fallbacks break position ordering | Only `pending_overwrites` maintains document order. Always sort deferred buffers. |
 | `_createStaticVNode` HTML string building | Verter's overwrite architecture (`&'alloc str` references into bump memory) is already more efficient than building escaped HTML strings — iterating source bytes + JS escaping + heap allocation costs MORE than individual VNode overwrites | Keep individual VNode generation. Overwrite-based codegen is already the optimal representation for static content. |
 | `.drain(..)` to avoid clone for Copy-like types | For structs with mostly Copy fields (u32, bool, enum) and `Option::None` modifiers, clone is nearly free — drain saves one Vec data buffer but not the field copy cost | Only use drain when types have expensive-to-clone fields (String, Vec, etc.) |
+| Changing hot function signatures to pass pre-resolved values | Replacing `&SomeResolver` parameter with pre-computed values changes LLVM inlining/optimization decisions — can cause 5-10% regressions even when the new version does strictly less work | Keep hot function signatures stable; if you need a pre-computation, do it inside the function or use a trait to abstract the lookup strategy |
+| Linear sweep replacing binary search on <1K elements | Binary search on ~700 elements ≈ 10 comparisons is already in the CPU branch predictor's sweet spot; linear sweep saves ~5ns/call but structural overhead dominates | Only consider linear sweep when element count exceeds ~10K and the sweep state can be threaded without function signature changes |

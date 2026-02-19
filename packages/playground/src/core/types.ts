@@ -1,24 +1,18 @@
 export interface CompiledFile {
-  ts: string;
   js: string;
   css: string;
-  tsx: string;
-  kai: string;
+  verterSourceMap: string;
   errors: string[];
-  sourceMap: string;
 }
 
 export class File {
   filename: string;
   code: string;
   compiled: CompiledFile = {
-    ts: "",
     js: "",
     css: "",
-    tsx: "",
-    kai: "",
+    verterSourceMap: "",
     errors: [],
-    sourceMap: "",
   };
 
   constructor(filename: string, code = "") {
@@ -45,7 +39,7 @@ export class File {
   }
 }
 
-export type OutputMode = "preview" | "ts" | "js" | "css" | "tsx" | "kai";
+export type OutputMode = "preview" | "js" | "css";
 
 export interface CompilerOptions {
   isProduction: boolean;
@@ -53,12 +47,8 @@ export interface CompilerOptions {
 }
 
 export interface CompileTiming {
-  verter: number | null; // ms for Vue SFC compilation (JS-measured)
-  verterNative: number | null; // ms for Rust pipeline (reported by Rust)
-  stripTypes: number | null; // ms for stripTypes call (when showTS is enabled)
-  tsx: number | null; // ms for TSX generation (reported by Rust, when showTSX is enabled)
-  kai: number | null; // ms for kai codegen pipeline (reported by Rust)
-  kaiJs: number | null; // ms for kai codegen (JS-measured)
+  verterNew: number | null; // ms for new_impl codegen pipeline (reported by Rust)
+  verterNewJs: number | null; // ms for new_impl codegen (JS-measured)
 }
 
 export interface StoreState {
@@ -70,8 +60,6 @@ export interface StoreState {
   loading: boolean;
   darkMode: boolean;
   autoSave: boolean;
-  showTS: boolean;
-  showTSX: boolean;
   compilerOptions: CompilerOptions;
   compileTiming: CompileTiming;
 }

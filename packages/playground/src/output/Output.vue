@@ -11,32 +11,21 @@ const props = defineProps<{
 
 const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "preview", label: "Preview" },
-  { mode: "kai", label: "Kai" },
-  { mode: "tsx", label: "TSX" },
-  { mode: "ts", label: "TS" },
   { mode: "js", label: "JS" },
   { mode: "css", label: "CSS" },
 ];
 
-/** Show TS/TSX tabs conditionally based on toggle state */
-const tabs = computed(() => {
-  const file = props.store.activeFile;
-  const showTSTab = props.store.showTS && (file?.isTS ?? false);
-  const showTSXTab = props.store.showTSX;
-  const isVue = file?.filename.endsWith(".vue") ?? false;
-  return allTabs.filter((tab) => {
-    if (tab.mode === "ts") return showTSTab;
-    if (tab.mode === "tsx") return showTSXTab;
-    if (tab.mode === "kai") return isVue;
-    return true;
-  });
-});
+const tabs = computed(() => allTabs);
 
 function openSourceMapVisualization() {
   const file = props.store.activeFile;
-  if (!file?.compiled.sourceMap) return;
-  const code = file.compiled.ts || file.compiled.js;
-  const map = file.compiled.sourceMap;
+  if (!file) return;
+
+  const map = file.compiled.verterSourceMap;
+  if (!map) return;
+
+  const code = file.compiled.js;
+
   // evanw's source-map-visualization uses length-prefixed format:
   // btoa(`${utf8CodeLen}\0${utf8Code}${utf8MapLen}\0${utf8Map}`)
   const enc = new TextEncoder();
@@ -54,26 +43,19 @@ function openSourceMapVisualization() {
   window.open(`https://evanw.github.io/source-map-visualization/#${encoded}`, "_blank");
 }
 
+/** Whether the source map button should be visible */
+const showSourceMapButton = computed(() => {
+  const file = props.store.activeFile;
+  if (!file) return false;
+  return props.store.outputMode === "js" && !!file.compiled.verterSourceMap;
+});
+
 function getTabTiming(mode: OutputMode): string | null {
-  const { verter, stripTypes, tsx, kai } = props.store.compileTiming;
+  const { verterNew } = props.store.compileTiming;
   switch (mode) {
-    case "preview": {
-      const total = (verter ?? 0) + (stripTypes ?? 0);
-      return total > 0 ? `${total.toFixed(1)}ms` : null;
-    }
-    case "kai":
-      return kai !== null ? `${kai.toFixed(1)}ms` : null;
-    case "tsx":
-      return tsx !== null ? `${tsx.toFixed(1)}ms` : null;
-    case "ts":
-      return verter !== null ? `${verter.toFixed(1)}ms` : null;
     case "js":
-      // When showTS is on and file is TS, JS tab shows stripTypes timing
-      if (props.store.showTS && (props.store.activeFile?.isTS ?? false)) {
-        return stripTypes !== null ? `${stripTypes.toFixed(1)}ms` : null;
-      }
-      return verter !== null ? `${verter.toFixed(1)}ms` : null;
-    case "css":
+      return verterNew !== null ? `${verterNew.toFixed(1)}ms` : null;
+    default:
       return null;
   }
 }
@@ -95,7 +77,7 @@ function getTabTiming(mode: OutputMode): string | null {
         </span>
       </button>
       <button
-        v-if="store.activeFile?.compiled.sourceMap"
+        v-if="showSourceMapButton"
         class="sourcemap-btn"
         @click="openSourceMapVisualization"
         title="Visualize Source Map"

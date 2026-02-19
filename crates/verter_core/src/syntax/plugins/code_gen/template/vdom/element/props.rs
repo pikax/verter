@@ -13,7 +13,7 @@ use crate::{
         plugins::code_gen::template::shared::helper::{
             build_prefixed_value_into, camelize_capitalize_into, camelize_into,
             capitalize_first_into, classify_modifier, collect_binding_patches,
-            is_valid_js_prop_key, ModifierKind,
+            decode_html_entities_in_place, is_valid_js_prop_key, ModifierKind,
         },
         types::{OxcProp, PropKind},
     },
@@ -228,6 +228,15 @@ pub(super) fn handle_prop_on<'alloc>(
                         pending_overwrites.push((arg_span.end, val_span.start, s));
                     }
 
+                    // Decode HTML entities in event handler value
+                    decode_html_entities_in_place(
+                        code_transform,
+                        val_span.start,
+                        val_span.end,
+                        ctx.input,
+                        pending_overwrites,
+                    );
+
                     // Suffix overwrite after value
                     if wrap {
                         buf.clear();
@@ -276,6 +285,7 @@ pub(super) fn handle_prop_on<'alloc>(
                 bindings,
                 is_production,
                 pending_overwrites,
+                ctx.input,
             );
         }
     } else {
@@ -293,6 +303,7 @@ pub(super) fn handle_prop_on<'alloc>(
             bindings,
             is_production,
             pending_overwrites,
+            ctx.input,
         );
     }
 
@@ -321,6 +332,7 @@ fn emit_event_buffer<'alloc>(
     bindings: &FxHashMap<&'alloc str, BindingType>,
     is_production: bool,
     pending_overwrites: &mut Vec<(u32, u32, &'alloc str)>,
+    input: &str,
 ) {
     // Quote the key if it contains characters invalid as a bare JS identifier (e.g., colon).
     // Computed property keys (starting with `[`) are already bracketed and must not be quoted.
@@ -370,6 +382,15 @@ fn emit_event_buffer<'alloc>(
             }
             let s = code_transform.alloc_str(buf);
             pending_overwrites.push((prop.event.start, val_span.start, s));
+
+            // Decode HTML entities in event handler value
+            decode_html_entities_in_place(
+                code_transform,
+                val_span.start,
+                val_span.end,
+                input,
+                pending_overwrites,
+            );
 
             if wrap {
                 buf.clear();

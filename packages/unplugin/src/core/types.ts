@@ -11,6 +11,8 @@ export type { ViteCodegenOptions, ViteCodegenResult, ProcessStyleOptions, Proces
 export interface VerterPluginOptions {
   /** Custom component ID generator */
   componentId?: (filename: string, source: string, isProd: boolean) => string;
+  /** File patterns to include (default: [/\.vue$/]). Matches @vitejs/plugin-vue `include` option. */
+  include?: string | RegExp | (string | RegExp)[];
 }
 
 export interface Compiler {

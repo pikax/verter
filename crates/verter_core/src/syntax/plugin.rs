@@ -61,6 +61,10 @@ pub enum CompilerErrorCode {
     /// Duplicate `<script>` block.
     DuplicateScript,
 
+    // -- Directive duplication --
+    /// Duplicate built-in directive on the same element (v-if, v-for, v-slot, v-once).
+    XDuplicateDirective,
+
     // -- Expression errors --
     /// Error parsing JavaScript expression.
     XInvalidExpression,
@@ -103,6 +107,7 @@ impl CompilerErrorCode {
             Self::DuplicateScript => {
                 "Duplicate <script> block — only one plain <script> is allowed per SFC."
             }
+            Self::XDuplicateDirective => "Duplicate built-in directive on the same element.",
             Self::XInvalidExpression => "Error parsing JavaScript expression.",
         }
     }

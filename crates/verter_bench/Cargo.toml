@@ -6,6 +6,11 @@ license = "MIT"
 publish = false
 description = "Benchmarks and examples for verter_core"
 
+[features]
+hotpath = ["verter_core/hotpath", "dep:hotpath", "hotpath/hotpath"]
+hotpath-alloc = ["verter_core/hotpath-alloc", "hotpath", "hotpath/hotpath-alloc"]
+hotpath-mcp = ["hotpath", "hotpath/hotpath-mcp"]
+
 [dependencies]
 verter_core = { path = "../verter_core" }
 oxc_allocator = "0.112.0"
@@ -16,9 +21,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 walkdir = "2"
 rayon = "1.7"
+hotpath = { version = "0.10", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8.1", features = ["html_reports"] }
+smallvec = "1"
 
 [[bench]]
 name = "bindings_bench"
@@ -44,6 +51,39 @@ harness = false
 name = "css_bench"
 harness = false
 
+[[bench]]
+name = "box_element_bench"
+harness = false
+
+[[bench]]
+name = "stack_elements_bench"
+harness = false
+
+[[bench]]
+name = "smallvec_children_bench"
+harness = false
+
+[[bench]]
+name = "syntax_bench"
+harness = false
+
+[[bench]]
+name = "code_transform_bench"
+harness = false
+
+[[bench]]
+name = "real_world_compile_bench"
+harness = false
+
+[[bench]]
+name = "oxc_template_bench"
+harness = false
+
+[[bench]]
+name = "new_impl_comparison"
+harness = false
+
+
 [[example]]
 name = "codegen"
 path = "examples/codegen.rs"
@@ -59,3 +99,15 @@ path = "examples/expression_validator.rs"
 [[example]]
 name = "check_matrix"
 path = "examples/check_matrix.rs"
+
+[[example]]
+name = "profile_ast"
+path = "examples/profile_ast.rs"
+
+[[example]]
+name = "compare_vapor"
+path = "examples/compare_vapor.rs"
+
+[[example]]
+name = "new_impl_check"
+path = "examples/new_impl_check.rs"

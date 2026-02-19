@@ -197,6 +197,77 @@ impl<'a> PositionResolver<'a> {
 }
 
 // ============================================================================
+// LINEAR SWEEP RESOLVER
+// ============================================================================
+
+/// A linear sweep position resolver for monotonically increasing byte offsets.
+///
+/// Replaces O(log N) binary search with O(1) amortized lookup when offsets
+/// are queried in non-decreasing order. Useful for scenarios with very large
+/// line counts (10K+) where binary search overhead becomes measurable.
+///
+/// NOTE: Benchmarked for source map generation but NOT used there — changing
+/// `emit_mapped_content`'s function signature to thread sweep state caused
+/// LLVM optimization regressions (+8.7% on unmodified files). Binary search
+/// on typical file sizes (~700 lines ≈ 10 comparisons) is already fast enough.
+/// See `.claude/performance-guide.md` § "Opt D" for details.
+pub struct PositionSweep<'a> {
+    resolver: &'a PositionResolver<'a>,
+    /// Current line index (0-based), tracks our position in line_offsets
+    current_line: usize,
+}
+
+impl<'a> PositionSweep<'a> {
+    pub fn new(resolver: &'a PositionResolver<'a>) -> Self {
+        Self {
+            resolver,
+            current_line: 0,
+        }
+    }
+
+    /// Returns (1-based line, 1-based UTF-16 column, UTF-16 offset).
+    ///
+    /// Assumes offsets are called in monotonically non-decreasing order.
+    /// Advances linearly from the last known line position.
+    #[inline]
+    pub fn offset_to_line_col(&mut self, offset: usize) -> (usize, usize, usize) {
+        debug_assert!(offset <= self.resolver.input.len(), "offset out of bounds");
+        debug_assert!(
+            self.resolver.input.is_char_boundary(offset),
+            "offset must land on a char boundary"
+        );
+
+        // Advance current_line forward while offset is past the current newline
+        let line_offsets = &self.resolver.line_offsets;
+        while self.current_line < line_offsets.len() && offset > line_offsets[self.current_line] {
+            self.current_line += 1;
+        }
+
+        let line = self.current_line;
+
+        // Line start is either 0 (first line) or byte after previous newline
+        let line_start = if line == 0 {
+            0
+        } else {
+            line_offsets[line - 1] + 1
+        };
+
+        // Calculate UTF-16 column for the slice from line start to offset
+        let col_utf16 = utf16_len(&self.resolver.input[line_start..offset]);
+        let offset_utf16 = self.resolver.utf16_cache.get(line).copied().unwrap_or(0) + col_utf16;
+
+        (line + 1, col_utf16 + 1, offset_utf16)
+    }
+}
+
+impl<'a> PositionResolver<'a> {
+    /// Create a linear sweep resolver for monotonically increasing offsets.
+    pub fn sweep(&'a self) -> PositionSweep<'a> {
+        PositionSweep::new(self)
+    }
+}
+
+// ============================================================================
 // UNIT TESTS
 // ============================================================================
 
@@ -741,6 +812,90 @@ mod tests {
         let (line, col, utf16_off) = resolver.offset_to_line_col(3);
         assert_eq!((line, col), (3, 1)); // 'b'
         assert_eq!(utf16_off, 3);
+    }
+
+    // === PositionSweep tests ===
+
+    /// @ai-generated — PositionSweep produces same results as PositionResolver for monotonic offsets
+    #[test]
+    fn test_position_sweep_matches_resolver_ascii() {
+        let input = "line1\nline2\nline3";
+        let resolver = PositionResolver::new(input);
+        let mut sweep = resolver.sweep();
+
+        // Query monotonically increasing offsets
+        for offset in [0, 4, 5, 6, 11, 12, 16] {
+            let expected = resolver.offset_to_line_col(offset);
+            let actual = sweep.offset_to_line_col(offset);
+            assert_eq!(
+                actual, expected,
+                "mismatch at offset {offset}: sweep={actual:?}, resolver={expected:?}"
+            );
+        }
+    }
+
+    /// @ai-generated — PositionSweep handles UTF-16 correctly
+    #[test]
+    fn test_position_sweep_matches_resolver_utf16() {
+        let input = "a😊b\nc🧪d";
+        let resolver = PositionResolver::new(input);
+        let mut sweep = resolver.sweep();
+
+        for offset in [0, 1, 5, 7, 8, 12] {
+            let expected = resolver.offset_to_line_col(offset);
+            let actual = sweep.offset_to_line_col(offset);
+            assert_eq!(
+                actual, expected,
+                "mismatch at offset {offset}: sweep={actual:?}, resolver={expected:?}"
+            );
+        }
+    }
+
+    /// @ai-generated — PositionSweep handles empty lines
+    #[test]
+    fn test_position_sweep_empty_lines() {
+        let input = "a\n\nb\n\nc";
+        let resolver = PositionResolver::new(input);
+        let mut sweep = resolver.sweep();
+
+        for offset in [0, 1, 2, 3, 4, 5, 6] {
+            let expected = resolver.offset_to_line_col(offset);
+            let actual = sweep.offset_to_line_col(offset);
+            assert_eq!(
+                actual, expected,
+                "mismatch at offset {offset}: sweep={actual:?}, resolver={expected:?}"
+            );
+        }
+    }
+
+    /// @ai-generated — PositionSweep handles repeated same offset
+    #[test]
+    fn test_position_sweep_repeated_offset() {
+        let input = "abc\ndef";
+        let resolver = PositionResolver::new(input);
+        let mut sweep = resolver.sweep();
+
+        let expected = resolver.offset_to_line_col(4);
+        // Call with same offset twice — should still work
+        assert_eq!(sweep.offset_to_line_col(4), expected);
+        assert_eq!(sweep.offset_to_line_col(4), expected);
+    }
+
+    /// @ai-generated — PositionSweep handles CJK content
+    #[test]
+    fn test_position_sweep_cjk() {
+        let input = "你好\n世界";
+        let resolver = PositionResolver::new(input);
+        let mut sweep = resolver.sweep();
+
+        for offset in [0, 3, 6, 7, 10] {
+            let expected = resolver.offset_to_line_col(offset);
+            let actual = sweep.offset_to_line_col(offset);
+            assert_eq!(
+                actual, expected,
+                "mismatch at offset {offset}: sweep={actual:?}, resolver={expected:?}"
+            );
+        }
     }
 }
 

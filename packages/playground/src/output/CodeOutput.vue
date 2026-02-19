@@ -17,12 +17,6 @@ const code = computed(() => {
   if (!file) return "";
 
   switch (props.mode) {
-    case "kai":
-      return file.compiled.kai;
-    case "tsx":
-      return file.compiled.tsx;
-    case "ts":
-      return file.compiled.ts;
     case "js":
       return file.compiled.js;
     case "css":
@@ -34,12 +28,6 @@ const code = computed(() => {
 
 const language = computed(() => {
   switch (props.mode) {
-    case "kai":
-      return "javascript";
-    case "tsx":
-      return "typescript";
-    case "ts":
-      return "typescript";
     case "js":
       return "javascript";
     case "css":

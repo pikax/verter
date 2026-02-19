@@ -13,8 +13,11 @@ categories = ["compilers", "template-engine"]
 
 [features]
 dhat-heap = []
+hotpath = ["dep:hotpath", "hotpath/hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
 [dependencies]
+hotpath = { version = "0.10", optional = true }
 memchr = "2.7.6"
 rustc-hash = "2.1"
 smallvec = "1.13"

@@ -9,6 +9,37 @@ use std::collections::HashSet;
 
 use super::keywords::is_keyword;
 
+// ======================== Dynamism ========================
+
+/// Three-state dynamism classification for template expressions.
+///
+/// Tells codegen whether a script-binding lookup is needed to determine
+/// if an expression is truly static or dynamic:
+///
+/// - [`Static`](Dynamism::Static) — no identifiers at all → skip lookup.
+/// - [`MaybeDynamic`](Dynamism::MaybeDynamic) — has script-level identifiers →
+///   codegen checks if they are `const` (static) or `ref`/`reactive` (dynamic).
+/// - [`Dynamic`](Dynamism::Dynamic) — has injected locals (v-for/v-slot) →
+///   definitely per-iteration, skip lookup.
+///
+/// Computed incrementally during binding extraction — no separate iteration needed.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum Dynamism {
+    /// No identifier references — pure literals/operators. Definitely constant.
+    /// Codegen can skip script binding lookup.
+    Static,
+
+    /// Has script-level identifier references that could be `const` (static)
+    /// or `ref`/`reactive`/`computed` (dynamic). Codegen must resolve via
+    /// script binding analysis.
+    MaybeDynamic,
+
+    /// Has at least one injected local (v-for/v-slot variable). Definitely
+    /// per-iteration/per-slot — the value changes at runtime. Codegen can
+    /// skip script binding lookup.
+    Dynamic,
+}
+
 /// Type alias for parameter byte slices - most functions have ≤8 params
 pub type ParamBytes<'a> = SmallVec<[&'a str; 8]>;
 
@@ -54,7 +85,7 @@ pub struct LiteralBinding<'a> {
 }
 
 /// The result of extracting bindings from an expression (byte-optimized version).
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct BindingExtractionResult<'a> {
     /// All identifier bindings found
     pub bindings: Vec<Binding<'a>>,
@@ -64,6 +95,21 @@ pub struct BindingExtractionResult<'a> {
     pub literals: Vec<LiteralBinding<'a>>,
     /// Whether the expression had parse errors
     pub has_errors: bool,
+    /// Three-state dynamism classification, computed incrementally during extraction.
+    /// No separate iteration over bindings needed.
+    pub dynamism: Dynamism,
+}
+
+impl Default for BindingExtractionResult<'_> {
+    fn default() -> Self {
+        Self {
+            bindings: Vec::new(),
+            functions: Vec::new(),
+            literals: Vec::new(),
+            has_errors: false,
+            dynamism: Dynamism::Static,
+        }
+    }
 }
 
 impl<'a> BindingExtractionResult<'a> {
@@ -96,6 +142,14 @@ impl<'a> BindingExtractionResult<'a> {
         self.literals.extend(other.literals.iter().cloned());
         if other.has_errors {
             self.has_errors = true;
+        }
+        // Dynamic trumps MaybeDynamic trumps Static
+        if self.dynamism != Dynamism::Dynamic {
+            match other.dynamism {
+                Dynamism::Dynamic => self.dynamism = Dynamism::Dynamic,
+                Dynamism::MaybeDynamic => self.dynamism = Dynamism::MaybeDynamic,
+                Dynamism::Static => {}
+            }
         }
     }
 }

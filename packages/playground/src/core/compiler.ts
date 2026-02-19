@@ -1,10 +1,44 @@
-import type { CodegenResult, StripTypesResult, WasmDiagnostic } from "@verter/wasm";
+import type { WasmDiagnostic } from "@verter/wasm";
 import type { File, CompilerOptions, CompileTiming } from "./types";
 import { loadLocalWasm, loadCommitWasm, loadReleaseWasm, type WasmModule } from "./wasmLoader";
 import type { VersionEntry } from "./versions";
 
+/** Result shape returned by compileVerter WASM binding. */
+export interface VerterCompileResult {
+  script: {
+    code: string;
+    durationMs: number;
+    sourceMap: string;
+    setup: boolean;
+    attrs: [string, string][];
+  } | null;
+  template: {
+    code: string;
+    sourceMap: string;
+    imports: string[];
+    durationMs: number;
+    attrs: [string, string][];
+  } | null;
+  styles: Array<{
+    code: string;
+    scoped: boolean;
+    lang: string | null;
+    durationMs: number;
+    attrs: [string, string][];
+  }>;
+  customBlocks: Array<{
+    type: string;
+    content: string;
+    attrs: [string, string][];
+  }>;
+  scopeId: string;
+  errors: WasmDiagnostic[];
+  parseDurationMs: number;
+  totalDurationMs: number;
+}
+
 /** Convert structured WASM diagnostics to display strings. */
-function formatDiagnostics(diagnostics: WasmDiagnostic[] | undefined): string[] {
+export function formatDiagnostics(diagnostics: WasmDiagnostic[] | undefined): string[] {
   if (!diagnostics || diagnostics.length === 0) return [];
   return diagnostics.map((d) => {
     const loc = d.spanStart != null ? ` (${d.spanStart}:${d.spanEnd ?? d.spanStart})` : "";
@@ -12,8 +46,7 @@ function formatDiagnostics(diagnostics: WasmDiagnostic[] | undefined): string[] 
   });
 }
 
-let wasmCompile: ((input: string, options?: unknown) => CodegenResult) | null = null;
-let wasmStripTypes: ((source: string) => StripTypesResult) | null = null;
+let wasmCompileVerter: ((input: string, options?: unknown) => VerterCompileResult) | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
 
@@ -23,8 +56,7 @@ export async function initCompilers(): Promise<void> {
 
   initPromise = (async () => {
     const wasmModule = await loadLocalWasm();
-    wasmCompile = wasmModule.compile as typeof wasmCompile;
-    wasmStripTypes = (wasmModule.stripTypes as typeof wasmStripTypes) ?? null;
+    wasmCompileVerter = (wasmModule.compileVerter as typeof wasmCompileVerter) ?? null;
     initialized = true;
   })();
 
@@ -48,8 +80,7 @@ export async function switchWasmVersion(entry: VersionEntry): Promise<void> {
     throw new Error(`Unknown version type: ${entry.type}`);
   }
 
-  wasmCompile = wasmModule.compile as typeof wasmCompile;
-  wasmStripTypes = (wasmModule.stripTypes as typeof wasmStripTypes) ?? null;
+  wasmCompileVerter = (wasmModule.compileVerter as typeof wasmCompileVerter) ?? null;
 }
 
 /**
@@ -94,168 +125,82 @@ export function mergeRenderIntoComponent(code: string): string {
   return merged;
 }
 
-function compileInner(
-  source: string,
-  filename: string,
-  options?: CompilerOptions,
-  includeTsx?: boolean,
-): CodegenResult {
-  if (!wasmCompile) {
-    throw new Error("WASM compiler not initialized");
+/** Format an internal helper name as an import specifier.
+ *  e.g. "_createElementVNode" → "createElementVNode as _createElementVNode" */
+export function formatImportSpecifier(name: string): string {
+  if (name.startsWith("_") && name.length > 1) {
+    return `${name.slice(1)} as ${name}`;
   }
-  const result = wasmCompile(source, {
-    filename,
-    isProduction: options?.isProduction ?? false,
-    includeTsx: includeTsx ?? false,
-  });
-  result.code = mergeRenderIntoComponent(result.code);
-  return result;
+  return name;
 }
 
-export async function compileVueSFC(
-  source: string,
-  filename: string,
-  options?: CompilerOptions,
-): Promise<CodegenResult> {
-  await initCompilers();
-  return compileInner(source, filename, options);
-}
-
-/** Extract raw CSS from <style> blocks in a Vue SFC source */
-function extractStyles(source: string): string {
-  const styleRegex = /<style[^>]*>([\s\S]*?)<\/style>/gi;
-  const styles: string[] = [];
-  let match;
-  while ((match = styleRegex.exec(source)) !== null) {
-    styles.push(match[1].trim());
+/** Assemble new_impl VerterCompileResult blocks into a single JS string. */
+export function assembleVerterResult(result: VerterCompileResult): string {
+  const parts: string[] = [];
+  if (result.template?.imports?.length) {
+    const specifiers = result.template.imports.map(formatImportSpecifier);
+    parts.push(`import { ${specifiers.join(", ")} } from "vue"\n`);
   }
-  return styles.join("\n");
+  if (result.script) parts.push(result.script.code);
+  if (result.template) parts.push(result.template.code);
+  return parts.join("\n");
 }
 
 export async function compileFile(
   file: File,
   options?: CompilerOptions,
-  showTS?: boolean,
-  showTSX?: boolean,
 ): Promise<CompileTiming> {
   await initCompilers();
-  const timing: CompileTiming = { verter: null, verterNative: null, stripTypes: null, tsx: null, kai: null, kaiJs: null };
+  const timing: CompileTiming = { verterNew: null, verterNewJs: null };
 
   if (file.filename.endsWith(".vue")) {
     try {
-      if (showTS && file.isTS) {
-        // Show TS mode: compile, then stripTypes for JS
-        const verterStart = performance.now();
-        const verterResult = compileInner(file.code, file.filename, options, showTSX);
-        timing.verter = performance.now() - verterStart;
-        timing.verterNative = (verterResult as any).durationMs ?? null;
-        timing.tsx = (verterResult as any).tsxDurationMs ?? null;
+      if (!wasmCompileVerter) throw new Error("compileVerter WASM binding not available");
 
-        file.compiled.sourceMap = verterResult.sourceMap ?? "";
-        file.compiled.css = verterResult.styles?.length
-          ? verterResult.styles.map((s) => s.code).join("\n")
-          : verterResult.css || extractStyles(file.code);
-        file.compiled.tsx = verterResult.tsx ?? "";
-        file.compiled.ts = verterResult.code;
-        file.compiled.kai = verterResult.code;
+      const start = performance.now();
+      const result = wasmCompileVerter(file.code, {
+        filename: file.filename,
+        isProduction: options?.isProduction ?? false,
+        stripTs: true,
+        sourceMap: true,
+      });
+      timing.verterNewJs = performance.now() - start;
+      timing.verterNew = result.totalDurationMs ?? null;
 
-        // Collect compiler diagnostics (missing end tags, invalid end tags, etc.)
-        const compilerErrors = formatDiagnostics(verterResult.errors);
-
-        // Strip types for JS tab
-        if (wasmStripTypes) {
-          const stripStart = performance.now();
-          const jsResult = wasmStripTypes(verterResult.code);
-          timing.stripTypes = performance.now() - stripStart;
-          file.compiled.js = jsResult.code;
-          file.compiled.errors = [...compilerErrors, ...(jsResult.errors ?? [])];
-        } else {
-          file.compiled.js = verterResult.code;
-          file.compiled.errors = compilerErrors;
-        }
-      } else {
-        // Default: compile → JS directly
-        const verterStart = performance.now();
-        const verterResult = compileInner(file.code, file.filename, options, showTSX);
-        timing.verter = performance.now() - verterStart;
-        timing.verterNative = (verterResult as any).durationMs ?? null;
-        timing.tsx = (verterResult as any).tsxDurationMs ?? null;
-
-        file.compiled.sourceMap = verterResult.sourceMap ?? "";
-        file.compiled.css = verterResult.styles?.length
-          ? verterResult.styles.map((s) => s.code).join("\n")
-          : verterResult.css || extractStyles(file.code);
-        file.compiled.tsx = verterResult.tsx ?? "";
-        file.compiled.js = verterResult.code;
-        file.compiled.ts = "";
-        file.compiled.kai = verterResult.code;
-        file.compiled.errors = formatDiagnostics(verterResult.errors);
-      }
-
-      console.log(
-        `Compiled ${file.filename} in ${timing.verter}ms (WASM:${timing.verterNative ?? "N/A"}ms)`,
-      );
+      const assembled = assembleVerterResult(result);
+      file.compiled.js = mergeRenderIntoComponent(assembled);
+      file.compiled.css = result.styles.map((s) => s.code).join("\n");
+      file.compiled.verterSourceMap = result.template?.sourceMap ?? "";
+      file.compiled.errors = formatDiagnostics(result.errors);
     } catch (e) {
       file.compiled.errors = [e instanceof Error ? e.message : String(e)];
     }
   } else if (file.filename.endsWith(".ts")) {
-    // Standalone .ts files: wrap in SFC and compile
     try {
-      const sfc = `<script setup lang="ts">\n${file.code}\n</script>`;
-      if (showTS) {
-        // Show TS mode: compile, then stripTypes
-        file.compiled.ts = file.code;
-        const verterStart = performance.now();
-        const result = compileInner(
-          sfc,
-          file.filename.replace(".ts", ".vue"),
-          undefined,
-          showTSX,
-        );
-        timing.verter = performance.now() - verterStart;
-        timing.tsx = (result as any).tsxDurationMs ?? null;
-        file.compiled.tsx = result.tsx ?? "";
+      if (!wasmCompileVerter) throw new Error("compileVerter WASM binding not available");
 
-        const tsCompilerErrors = formatDiagnostics(result.errors);
-        if (wasmStripTypes) {
-          const stripStart = performance.now();
-          const jsResult = wasmStripTypes(result.code);
-          timing.stripTypes = performance.now() - stripStart;
-          file.compiled.js = jsResult.code;
-          file.compiled.errors = [...tsCompilerErrors, ...(jsResult.errors ?? [])];
-        } else {
-          file.compiled.js = result.code;
-          file.compiled.errors = tsCompilerErrors;
-        }
-      } else {
-        // Default: compile → JS directly
-        file.compiled.ts = "";
-        const verterStart = performance.now();
-        const result = compileInner(
-          sfc,
-          file.filename.replace(".ts", ".vue"),
-          undefined,
-          showTSX,
-        );
-        timing.verter = performance.now() - verterStart;
-        timing.tsx = (result as any).tsxDurationMs ?? null;
-        file.compiled.tsx = result.tsx ?? "";
-        file.compiled.js = result.code;
-        file.compiled.errors = formatDiagnostics(result.errors);
-      }
+      const sfc = `<script setup lang="ts">\n${file.code}\n</script>`;
+      const start = performance.now();
+      const result = wasmCompileVerter(sfc, {
+        filename: file.filename.replace(".ts", ".vue"),
+        isProduction: options?.isProduction ?? false,
+        stripTs: true,
+        sourceMap: true,
+      });
+      timing.verterNewJs = performance.now() - start;
+      timing.verterNew = result.totalDurationMs ?? null;
+
+      file.compiled.js = result.script?.code ?? "";
+      file.compiled.errors = formatDiagnostics(result.errors);
     } catch (e) {
       file.compiled.js = "";
-      file.compiled.tsx = "";
       file.compiled.errors = [e instanceof Error ? e.message : String(e)];
     }
   } else if (file.filename.endsWith(".js")) {
     file.compiled.js = file.code;
-    file.compiled.ts = "";
-    file.compiled.tsx = "";
     file.compiled.errors = [];
   } else if (file.filename.endsWith(".css")) {
     file.compiled.css = file.code;
-    file.compiled.tsx = "";
     file.compiled.errors = [];
   }
 

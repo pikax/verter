@@ -36,6 +36,7 @@ pub(crate) fn handle_element_close<'alloc>(
     ev: &OxcCompiledElementClosed,
     state: &StateStack<'alloc>,
     is_production: bool,
+    parent_any_dynamic_slots: bool,
     imports: &mut TemplateImportDependencies,
     pending_prepend_lefts: &mut Vec<(u32, &'alloc str)>,
     pending_overwrites: &mut Vec<(u32, u32, &'alloc str)>,
@@ -127,26 +128,36 @@ pub(crate) fn handle_element_close<'alloc>(
     }
 
     // Named slot template: <template #name> inside a component.
-    // Emits just the slot entry `name: _withCtx((params) => [children])` without
-    // VNode wrapper. The parent component will wrap all entries in `{ ... _: 1 }`.
+    //
+    // The name format prefix is emitted as a SEPARATE prepend_left entry so it
+    // can be retroactively patched from static to dynamic format if a later
+    // sibling named slot has v-if (which sets parent.any_dynamic_slots = true
+    // after this slot has already closed).
+    //
+    // Static slots (parent_any_dynamic_slots=false):
+    //   `name: _withCtx((params) => [children])`
+    //   Parent wraps all entries in `{ ... _: 1 }`.
+    //
+    // Dynamic slots (parent_any_dynamic_slots=true):
+    //   `{ name: "slotName", fn: _withCtx((params) => [children]) }`
+    //   Parent wraps in `_createSlots({ _: 2 }, [...])`.
     if state.is_named_slot_template {
         let has_children = !state.children.is_empty();
         let params = state.slot_params.unwrap_or("");
         let slot_key = state.slot_name.unwrap_or("default");
+        let is_dynamic_name = slot_key.starts_with('[');
+        let needs_slot_quote = !is_dynamic_name && !is_valid_js_prop_key(slot_key);
 
-        // Build slot entry prefix: `name: _withCtx((params) => [`
-        // Slot names with non-identifier characters (hyphens, colons, etc.) must be quoted.
-        let needs_slot_quote = !slot_key.starts_with('[') && !is_valid_js_prop_key(slot_key);
+        // Build name format prefix — emitted as a separate entry for retroactive patching.
+        let name_format: &'alloc str = if parent_any_dynamic_slots {
+            build_dynamic_slot_name_format(code_transform, slot_key, is_dynamic_name, buf)
+        } else {
+            build_static_slot_name_format(code_transform, slot_key, needs_slot_quote, buf)
+        };
 
+        // Build _withCtx open (format-independent: `_withCtx((params) => [`)
         buf.clear();
-        if needs_slot_quote {
-            buf.push('"');
-        }
-        buf.push_str(slot_key);
-        if needs_slot_quote {
-            buf.push('"');
-        }
-        buf.push_str(": _withCtx(");
+        buf.push_str("_withCtx(");
         if !params.is_empty() {
             buf.push('(');
             buf.push_str(params);
@@ -155,7 +166,18 @@ pub(crate) fn handle_element_close<'alloc>(
             buf.push_str("()");
         }
         buf.push_str(" => [");
-        let slot_open = code_transform.alloc_str(buf);
+        let withctx_open = code_transform.alloc_str(buf);
+
+        // Closing suffix: `])` for static, `]) }` for dynamic (_createSlots format)
+        let slot_close_suffix = if parent_any_dynamic_slots {
+            "]) }"
+        } else {
+            "])"
+        };
+
+        // Position where the name format prepend_left will be added.
+        // This is the position of the first child (or close tag for empty slots).
+        let name_format_pos: u32;
 
         if has_children {
             let all_text_like = state
@@ -166,6 +188,8 @@ pub(crate) fn handle_element_close<'alloc>(
                 .children
                 .iter()
                 .any(|c| c.kind == ChildKind::Interpolation);
+
+            name_format_pos = state.children[0].start;
 
             if all_text_like {
                 imports.add(TemplateImportDependencies::CREATE_TEXT_VNODE);
@@ -180,8 +204,11 @@ pub(crate) fn handle_element_close<'alloc>(
                     ""
                 };
 
+                // Entry 1: name format (patchable)
+                pending_prepend_lefts.push((first_child.start, name_format));
+                // Entry 2: _withCtx + children prefix
                 buf.clear();
-                buf.push_str(slot_open);
+                buf.push_str(withctx_open);
                 buf.push_str("_createTextVNode(");
                 buf.push_str(first_child.kind.content_prefix());
                 let s = code_transform.alloc_str(buf);
@@ -197,13 +224,17 @@ pub(crate) fn handle_element_close<'alloc>(
 
                 buf.clear();
                 buf.push_str(text_flag);
-                buf.push_str(")])");
+                buf.push(')'); // close _createTextVNode(
+                buf.push_str(slot_close_suffix);
             } else {
                 // Mixed or element-only children
                 for (i, child) in state.children.iter().enumerate() {
                     buf.clear();
                     if i == 0 {
-                        buf.push_str(slot_open);
+                        // Entry 1: name format (patchable)
+                        pending_prepend_lefts.push((child.start, name_format));
+                        // Entry 2: _withCtx + first child prefix
+                        buf.push_str(withctx_open);
                         buf.push_str(child.scope_prefix);
                         buf.push_str(child.kind.content_prefix());
                     } else {
@@ -216,12 +247,23 @@ pub(crate) fn handle_element_close<'alloc>(
                 }
 
                 buf.clear();
-                buf.push_str("])");
+                buf.push_str(slot_close_suffix);
             }
         } else {
+            // Empty slot: name_format + withctx_open + close in one overwrite/append
+            name_format_pos = ev
+                .event
+                .event_close_tag
+                .as_ref()
+                .map(|c| c.start)
+                .unwrap_or(state.open_tag_end);
+
+            // Entry 1: name format (patchable) at the close tag position
+            pending_prepend_lefts.push((name_format_pos, name_format));
+
             buf.clear();
-            buf.push_str(slot_open);
-            buf.push_str("])");
+            buf.push_str(withctx_open);
+            buf.push_str(slot_close_suffix);
         }
 
         if let Some(close_tag) = &ev.event.event_close_tag {
@@ -231,6 +273,13 @@ pub(crate) fn handle_element_close<'alloc>(
             let s = code_transform.alloc_str(buf);
             pending_append_lefts.push((state.open_tag_end, s));
         }
+
+        // Store the name format prepend index for retroactive patching.
+        // The caller (mod.rs) will save this on the parent's ChildInfo.
+        // We use the `name_format_pos` field of `buf` indirectly — the index
+        // is computed by the caller from pending_prepend_lefts length.
+        let _ = name_format_pos; // used above
+
         return;
     }
 
@@ -252,60 +301,161 @@ pub(crate) fn handle_element_close<'alloc>(
     let needs_array = has_children && !all_text_like;
 
     // Named slot children: component has <template #name> children.
-    // Children become `{ first: _withCtx(...), second: _withCtx(...), _: 1 }`.
     //
-    // When a component has BOTH named slot templates (`<template #name>`) and
-    // non-named-slot content (e.g., `<template v-if>`, bare elements, text),
+    // Static slots (any_dynamic_slots=false):
+    //   `{ first: _withCtx(...), second: _withCtx(...), _: 1 /* STABLE */ }`
+    //
+    // Dynamic slots (any_dynamic_slots=true, e.g. v-if on named slots):
+    //   `_createSlots({ _: 2 /* DYNAMIC */ }, [entries...])`
+    //   where entries are `{ name: "x", fn: _withCtx(...) }` or ternary chains.
+    //
+    // When a component has BOTH named slot templates and non-named-slot content,
     // the non-named-slot children must be wrapped in `default: _withCtx(() => [...])`.
-    // Named slot children already emit their own `name: _withCtx(...)` during their
-    // own close phase (is_named_slot_template handling above).
+    // Named slot children already emit their own entry during their close phase.
     if state.has_named_slot_children && has_children {
         imports.add(TemplateImportDependencies::WITH_CTX);
 
         // Check if any children are NOT named slot templates.
         let has_implicit_default = state.children.iter().any(|c| !c.is_named_slot);
 
-        if !has_implicit_default {
-            // All children are named slot templates — simple case.
-            for (i, child) in state.children.iter().enumerate() {
-                let sep = if i == 0 { ", {" } else { ", " };
-                let s = child_separator_str(code_transform, sep, child, buf);
-                pending_prepend_lefts.push((child.start, s));
-            }
-        } else {
-            // Mixed: some children are named slots, some are implicit default slot content.
-            // Group non-named-slot children into `default: _withCtx(() => [...])`.
-            //
-            // Strategy: use the separator before each child to handle transitions.
-            // - When entering default slot content: prepend `default: _withCtx(() => [`
-            // - When transitioning default→named: prepend `]), ` before the named slot child
-            // - When the last child is default: close `])` in the close string
-            let mut first_in_object = true;
-            let mut in_default_slot = false;
+        if state.any_dynamic_slots {
+            // Dynamic slots: use _createSlots({ _: 2 }, [entries...])
+            imports.add(TemplateImportDependencies::CREATE_SLOTS);
 
+            // Retroactively patch any named slot entries that were emitted in static
+            // format before any_dynamic_slots was set (e.g. #content closed before
+            // a sibling v-if #default opened and set the flag).
             for child in state.children.iter() {
-                if child.is_named_slot {
-                    if in_default_slot {
-                        // Transition: default slot → named slot.
-                        // Close the default slot wrapper and start the named slot separator.
-                        buf.clear();
-                        buf.push_str("]), ");
-                        buf.push_str(child.scope_prefix);
-                        buf.push_str(child.kind.content_prefix());
-                        let s = code_transform.alloc_str(buf);
-                        pending_prepend_lefts.push((child.start, s));
-                        in_default_slot = false;
+                if let Some(prefix_idx) = child.slot_format_prepend_idx {
+                    // Replace static name format (`slotName: `) with dynamic format
+                    // (`{ name: "slotName", fn: `) in the already-emitted prepend_left.
+                    let (pos, _old_prefix) = pending_prepend_lefts[prefix_idx];
+                    let is_dynamic_name = child.slot_name.starts_with('[');
+                    let new_prefix = build_dynamic_slot_name_format(
+                        code_transform,
+                        child.slot_name,
+                        is_dynamic_name,
+                        buf,
+                    );
+                    pending_prepend_lefts[prefix_idx] = (pos, new_prefix);
+                    // Append ` }` after the slot close to complete `{ name, fn: ... }`
+                    pending_append_lefts.push((child.slot_close_tag_end, " }"));
+                }
+            }
+
+            if !has_implicit_default {
+                // All children are named slot templates — all go in the array.
+                for (i, child) in state.children.iter().enumerate() {
+                    let sep = if i == 0 {
+                        ", _createSlots({ _: 2 /* DYNAMIC */ }, ["
                     } else {
-                        // Named slot entry — already emits `name: _withCtx(...)` on its own
-                        let sep = if first_in_object { ", {" } else { ", " };
-                        let s = child_separator_str(code_transform, sep, child, buf);
-                        pending_prepend_lefts.push((child.start, s));
+                        ", "
+                    };
+                    let s = child_separator_str(code_transform, sep, child, buf);
+                    pending_prepend_lefts.push((child.start, s));
+                }
+            } else {
+                // Mixed: default slot children + dynamic named slots.
+                // Default children → `{ name: "default", fn: _withCtx(() => [...]) }`
+                // Named slot children already emit `{ name: "x", fn: ... }` format.
+                let mut first_in_array = true;
+                let mut in_default_slot = false;
+
+                for child in state.children.iter() {
+                    if child.is_named_slot {
+                        if in_default_slot {
+                            // Close default slot, then separator for named slot
+                            buf.clear();
+                            buf.push_str("]) }, ");
+                            buf.push_str(child.scope_prefix);
+                            buf.push_str(child.kind.content_prefix());
+                            let s = code_transform.alloc_str(buf);
+                            pending_prepend_lefts.push((child.start, s));
+                            in_default_slot = false;
+                        } else {
+                            let sep = if first_in_array {
+                                ", _createSlots({ _: 2 /* DYNAMIC */ }, ["
+                            } else {
+                                ", "
+                            };
+                            let s = child_separator_str(code_transform, sep, child, buf);
+                            pending_prepend_lefts.push((child.start, s));
+                        }
+                        first_in_array = false;
+                    } else {
+                        // Implicit default slot content
+                        if !in_default_slot {
+                            buf.clear();
+                            if first_in_array {
+                                buf.push_str(
+                                    ", _createSlots({ _: 2 /* DYNAMIC */ }, [{ name: \"default\", fn: _withCtx(() => [",
+                                );
+                            } else {
+                                buf.push_str(", { name: \"default\", fn: _withCtx(() => [");
+                            }
+                            buf.push_str(child.scope_prefix);
+                            buf.push_str(child.kind.content_prefix());
+                            let s = code_transform.alloc_str(buf);
+                            pending_prepend_lefts.push((child.start, s));
+                            first_in_array = false;
+                            in_default_slot = true;
+                        } else {
+                            buf.clear();
+                            buf.push_str(", ");
+                            buf.push_str(child.scope_prefix);
+                            buf.push_str(child.kind.content_prefix());
+                            let s = code_transform.alloc_str(buf);
+                            pending_prepend_lefts.push((child.start, s));
+                        }
                     }
-                    first_in_object = false;
-                } else {
-                    // Implicit default slot content
-                    if !in_default_slot {
-                        // Start the default slot wrapper: `default: _withCtx(() => [`
+                }
+            }
+
+            // Build close: `])`
+            buf.clear();
+            if has_implicit_default {
+                let last_is_default = state
+                    .children
+                    .last()
+                    .map(|c| !c.is_named_slot)
+                    .unwrap_or(false);
+                if last_is_default {
+                    buf.push_str("]) }");
+                }
+            }
+            buf.push_str("])");
+        } else {
+            // Static slots: use plain object `{ name: _withCtx(...), _: 1 }`
+            if !has_implicit_default {
+                // All children are named slot templates — simple case.
+                for (i, child) in state.children.iter().enumerate() {
+                    let sep = if i == 0 { ", {" } else { ", " };
+                    let s = child_separator_str(code_transform, sep, child, buf);
+                    pending_prepend_lefts.push((child.start, s));
+                }
+            } else {
+                // Mixed: some children are named slots, some are implicit default slot content.
+                // Group non-named-slot children into `default: _withCtx(() => [...])`.
+                let mut first_in_object = true;
+                let mut in_default_slot = false;
+
+                for child in state.children.iter() {
+                    if child.is_named_slot {
+                        if in_default_slot {
+                            buf.clear();
+                            buf.push_str("]), ");
+                            buf.push_str(child.scope_prefix);
+                            buf.push_str(child.kind.content_prefix());
+                            let s = code_transform.alloc_str(buf);
+                            pending_prepend_lefts.push((child.start, s));
+                            in_default_slot = false;
+                        } else {
+                            let sep = if first_in_object { ", {" } else { ", " };
+                            let s = child_separator_str(code_transform, sep, child, buf);
+                            pending_prepend_lefts.push((child.start, s));
+                        }
+                        first_in_object = false;
+                    } else if !in_default_slot {
                         buf.clear();
                         if first_in_object {
                             buf.push_str(", {default: _withCtx(() => [");
@@ -319,7 +469,6 @@ pub(crate) fn handle_element_close<'alloc>(
                         first_in_object = false;
                         in_default_slot = true;
                     } else {
-                        // Continue inside the default slot array
                         buf.clear();
                         buf.push_str(", ");
                         buf.push_str(child.scope_prefix);
@@ -329,48 +478,40 @@ pub(crate) fn handle_element_close<'alloc>(
                     }
                 }
             }
-        }
 
-        // Build close: `, _: flag})`
-        let slot_flag = if state.any_dynamic_slots {
-            if is_production {
-                "2"
-            } else {
-                "2 /* DYNAMIC */"
+            // Build close: `, _: flag})`
+            let slot_flag = if is_production { "1" } else { "1 /* STABLE */" };
+            buf.clear();
+            if has_implicit_default {
+                let last_is_default = state
+                    .children
+                    .last()
+                    .map(|c| !c.is_named_slot)
+                    .unwrap_or(false);
+                if last_is_default {
+                    buf.push_str("])");
+                }
             }
-        } else if is_production {
-            "1"
-        } else {
-            "1 /* STABLE */"
-        };
-        buf.clear();
-        // If the last child was implicit default slot content, close the _withCtx wrapper
-        if has_implicit_default {
-            let last_is_default = state
-                .children
-                .last()
-                .map(|c| !c.is_named_slot)
-                .unwrap_or(false);
-            if last_is_default {
-                buf.push_str("])");
-            }
+            buf.push_str(", _: ");
+            buf.push_str(slot_flag);
+            buf.push('}');
         }
-        buf.push_str(", _: ");
-        buf.push_str(slot_flag);
-        buf.push('}');
         write_patch_flag_suffix(buf, patch_flag, &state.dynamic_props, is_production);
         buf.push(')');
         if state.is_block_root {
             buf.push(')');
         }
 
-        if let Some(close_tag) = &ev.event.event_close_tag {
+        let close_pos = if let Some(close_tag) = &ev.event.event_close_tag {
             let s = code_transform.alloc_str(buf);
             pending_overwrites.push((close_tag.start, close_tag.end, s));
+            close_tag.end
         } else {
             let s = code_transform.alloc_str(buf);
             pending_append_lefts.push((state.open_tag_end, s));
-        }
+            state.open_tag_end
+        };
+        emit_with_directives(code_transform, state, close_pos, pending_append_lefts, buf);
         return;
     }
 
@@ -1009,4 +1150,43 @@ pub(crate) fn handle_element_close_self_closing<'alloc>(
         pending_append_lefts,
         buf,
     );
+}
+
+/// Build the static slot name format: `slotName: ` or `"slot-name": `.
+fn build_static_slot_name_format<'alloc>(
+    code_transform: &CodeTransform<'alloc>,
+    slot_key: &str,
+    needs_quote: bool,
+    buf: &mut String,
+) -> &'alloc str {
+    buf.clear();
+    if needs_quote {
+        buf.push('"');
+    }
+    buf.push_str(slot_key);
+    if needs_quote {
+        buf.push('"');
+    }
+    buf.push_str(": ");
+    code_transform.alloc_str(buf)
+}
+
+/// Build the dynamic slot name format: `{ name: "slotName", fn: ` or `{ name: [expr], fn: `.
+pub(crate) fn build_dynamic_slot_name_format<'alloc>(
+    code_transform: &CodeTransform<'alloc>,
+    slot_key: &str,
+    is_dynamic_name: bool,
+    buf: &mut String,
+) -> &'alloc str {
+    buf.clear();
+    buf.push_str("{ name: ");
+    if is_dynamic_name {
+        buf.push_str(slot_key);
+    } else {
+        buf.push('"');
+        buf.push_str(slot_key);
+        buf.push('"');
+    }
+    buf.push_str(", fn: ");
+    code_transform.alloc_str(buf)
 }

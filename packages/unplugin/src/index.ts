@@ -23,6 +23,14 @@ function getHmrStrategy(framework: string): HmrStrategy {
   }
 }
 
+function createFilter(include?: string | RegExp | (string | RegExp)[]): (filename: string) => boolean {
+  if (!include) {
+    return (f) => f.endsWith(".vue");
+  }
+  const patterns = Array.isArray(include) ? include : [include];
+  return (f) => patterns.some((p) => (typeof p === "string" ? f.endsWith(p) : p.test(f)));
+}
+
 export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> = (
   options,
   meta,
@@ -30,6 +38,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
   const opts = options ?? {};
   let viteConfig: ResolvedConfig | null = null;
   const hmrStrategy = getHmrStrategy(meta.framework);
+  const filter = createFilter(opts.include);
 
   return {
     name: "unplugin-verter",
@@ -80,7 +89,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
 
     transformInclude(id) {
       const { filename, query } = parseVueRequest(id);
-      return filename.endsWith(".vue") && !query.vue;
+      return filter(filename) && !query.vue;
     },
 
     async transform(code, id) {
@@ -168,7 +177,8 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         return {
           code: stripped.code,
           map: stripped.map ?? null,
-        };
+          meta: { vite: { lang: 'ts' } },
+        } as any;
       }
 
       // Fallback: strip TypeScript using native bindings for non-Vite bundlers
@@ -177,7 +187,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
     },
 
     watchChange(id) {
-      if (id.endsWith(".vue")) {
+      if (filter(id)) {
         deleteDescriptor(id);
       }
     },

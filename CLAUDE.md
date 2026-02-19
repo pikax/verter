@@ -185,6 +185,25 @@ pnpm dev-extension            # Watch language-server + vscode extension
 pnpm clean                    # Remove build artifacts
 ```
 
+## Profiling with MCP (for agents)
+
+Use the real-world profiling example with hotpath instrumentation:
+
+```bash
+pnpm run profile:hotpath          # Timing hotspots
+pnpm run profile:hotpath:alloc    # Timing + allocation hotspots
+pnpm run profile:hotpath:mcp      # Starts MCP endpoint at http://localhost:6771/mcp
+```
+
+Agent MCP config template is checked in at:
+
+```text
+mcp/hotpath.mcp.json
+```
+
+Point your MCP-capable agent to that file (or copy its `mcpServers` entry into your local MCP config).
+For client-specific setup examples, see [mcp/README.md](mcp/README.md).
+
 ## Testing
 
 ### Running Tests

@@ -384,7 +384,7 @@ fn extract_sfc_block_ranges(events: &[Event]) -> Vec<(u32, u32)> {
 ///
 /// SFC source may contain content between root-level blocks (e.g., HTML comments,
 /// whitespace). This content is not valid JS and must be blanked out.
-fn remove_inter_block_gaps(
+pub(crate) fn remove_inter_block_gaps(
     code_transform: &mut crate::code_transform::CodeTransform,
     input_len: u32,
     ranges: &[(u32, u32)],
@@ -423,7 +423,7 @@ pub(crate) fn get_hash(text: &str) -> String {
 }
 
 /// Extract component name from a filename.
-fn extract_component_name(filename: &str) -> String {
+pub(crate) fn extract_component_name(filename: &str) -> String {
     let name = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
     let name = name.strip_suffix(".vue").unwrap_or(name);
     let name = name.strip_suffix(".ts").unwrap_or(name);
@@ -432,7 +432,7 @@ fn extract_component_name(filename: &str) -> String {
 }
 
 /// Compute scope_id as 8 hex chars from component name.
-fn compute_scope_id(component_name: &str) -> [u8; 8] {
+pub(crate) fn compute_scope_id(component_name: &str) -> [u8; 8] {
     let hash = get_hash(component_name);
     let hash_bytes = hash.as_bytes();
     let mut scope_id = [0u8; 8];
@@ -441,7 +441,7 @@ fn compute_scope_id(component_name: &str) -> [u8; 8] {
 }
 
 /// Convert plugin diagnostics to public `CompileDiagnostic` structs.
-fn convert_diagnostics(
+pub(crate) fn convert_diagnostics(
     diagnostics: &[crate::syntax::plugin::Diagnostic],
 ) -> Vec<CompileDiagnostic> {
     diagnostics
@@ -693,20 +693,18 @@ pub fn compile(
         (String::new(), String::new())
     } else {
         // Generate source map
+        let source_name = options
+            .filename
+            .clone()
+            .unwrap_or_else(|| "input.vue".to_string());
+        let file_name = options
+            .filename
+            .as_ref()
+            .map(|f| format!("{}.js", f))
+            .unwrap_or_else(|| "output.js".to_string());
         let source_map_options = SourceMapOptions::new()
-            .with_source(
-                options
-                    .filename
-                    .clone()
-                    .unwrap_or_else(|| "input.vue".to_string()),
-            )
-            .with_file(
-                options
-                    .filename
-                    .as_ref()
-                    .map(|f| format!("{}.js", f))
-                    .unwrap_or_else(|| "output.js".to_string()),
-            );
+            .with_source(&source_name)
+            .with_file(&file_name);
 
         let sm = code_transform
             .borrow()
@@ -4788,6 +4786,31 @@ const checked = true
         eprintln!("MULTILINE COMMENT:\n{}", result.code);
     }
 
+    /// Conditional named slot with v-if on template #slotname.
+    #[test]
+    fn test_conditional_named_slot() {
+        let input = r#"<script setup>
+const inputValue = ''
+</script>
+<template>
+  <ElInput v-model="inputValue">
+    <template v-if="$slots.prefix" #prefix>
+      <slot name="prefix" />
+    </template>
+    <template #suffix>
+      <Icon v-if="clearBtnVisible" @click.stop="handleClear">
+        <component :is="clearIcon" />
+      </Icon>
+      <Icon v-else @click.stop="togglePopperVisible()">
+        <arrow-down />
+      </Icon>
+    </template>
+  </ElInput>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("CONDITIONAL NAMED SLOT:\n{}", result.code);
+    }
+
     /// @click.stop with no handler (empty event modifier).
     #[test]
     fn test_empty_event_handler_with_stop_modifier() {
@@ -4864,5 +4887,539 @@ const handleSelectCheck = () => {}
 </template>"##;
         let result = gen_and_validate(input);
         eprintln!("CASCADER NODE:\n{}", result.code);
+    }
+
+    /// Custom directive with dynamic argument using bracket syntax: v-click-outside:[triggerRef]
+    /// This is the pattern from element-plus color-picker.vue that causes "Expected ) but found ]"
+    #[test]
+    fn test_custom_directive_dynamic_arg_bracket() {
+        let input = r#"<script setup>
+import { ClickOutside as vClickOutside } from '@element-plus/directives'
+const triggerRef = ref()
+const handleClickOutside = () => {}
+</script>
+<template>
+  <div v-click-outside:[triggerRef]="handleClickOutside">content</div>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("DIRECTIVE DYNAMIC ARG:\n{}", result.code);
+        // Ensure the directive is actually used in _withDirectives
+        assert!(
+            result.code.contains("_directive_click_outside"),
+            "Directive should be referenced in output"
+        );
+    }
+
+    /// Custom directive with dynamic arg on a COMPONENT (not element) — this is the real pattern
+    /// from color-picker.vue where v-click-outside:[triggerRef] is on a component with named slots
+    #[test]
+    fn test_custom_directive_dynamic_arg_on_component() {
+        let input = r#"<script setup>
+import { ClickOutside as vClickOutside } from '@element-plus/directives'
+const triggerRef = ref()
+const handleClickOutside = () => {}
+const panelProps = {}
+</script>
+<template>
+  <MyComp v-bind="panelProps" v-click-outside:[triggerRef]="handleClickOutside" :border="false">
+    <template #footer>
+      <div>footer</div>
+    </template>
+  </MyComp>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("DIRECTIVE ON COMPONENT:\n{}", result.code);
+        assert!(
+            result.code.contains("_directive_click_outside"),
+            "Directive should be referenced in output"
+        );
+    }
+
+    /// Full color-picker.vue pattern: el-tooltip with named slots, v-click-outside:[triggerRef],
+    /// v-bind="$attrs", v-show, v-if conditions — tests bracket handling in directives
+    #[test]
+    fn test_element_plus_color_picker_pattern() {
+        let input = r#"<script setup>
+import { ClickOutside as vClickOutside } from '@element-plus/directives'
+const triggerRef = ref()
+const showPicker = ref(false)
+const panelProps = computed(() => ({}))
+const handleClickOutside = () => {}
+const handleEsc = (e) => {}
+const clearable = ref(true)
+const btnKls = computed(() => [])
+const buttonId = ref('')
+const modelValue = ref('')
+const showPanelColor = ref(false)
+const showAlpha = ref(false)
+const displayedColor = computed(() => '')
+const ns = { be: (a, b) => '', is: (a, b) => '' }
+</script>
+<template>
+  <el-tooltip
+    ref="popper"
+    :visible="showPicker"
+    :show-arrow="false"
+    trigger="click"
+  >
+    <template #content>
+      <el-color-picker-panel
+        ref="pickerPanelRef"
+        v-bind="panelProps"
+        v-click-outside:[triggerRef]="handleClickOutside"
+        :border="false"
+        @keydown.esc="handleEsc"
+      >
+        <template #footer>
+          <div>
+            <el-button
+              v-if="clearable"
+              :class="ns.be('footer', 'link-btn')"
+              text
+              size="small"
+              @click="clear"
+            >
+              Clear
+            </el-button>
+            <el-button
+              plain
+              size="small"
+              :class="ns.be('footer', 'btn')"
+              @click="confirmValue"
+            >
+              Confirm
+            </el-button>
+          </div>
+        </template>
+      </el-color-picker-panel>
+    </template>
+    <template #default>
+      <div
+        :id="buttonId"
+        ref="triggerRef"
+        v-bind="$attrs"
+        :class="btnKls"
+        role="button"
+      >
+        <div :class="ns.be('picker', 'trigger')">
+          <span :class="[ns.be('picker', 'color'), ns.is('alpha', showAlpha)]">
+            <span
+              :class="ns.be('picker', 'color-inner')"
+              :style="{ backgroundColor: displayedColor }"
+            >
+              <el-icon
+                v-show="modelValue || showPanelColor"
+                :class="[ns.be('picker', 'icon'), ns.is('icon-arrow-down')]"
+              >
+                <arrow-down />
+              </el-icon>
+              <el-icon
+                v-show="!modelValue && !showPanelColor"
+                :class="[ns.be('picker', 'empty'), ns.is('icon-close')]"
+              >
+                <close />
+              </el-icon>
+            </span>
+          </span>
+        </div>
+      </div>
+    </template>
+  </el-tooltip>
+</template>"#;
+        let result = gen_result(input);
+        std::fs::write("color_picker_output.js", &result.code).unwrap();
+        assert_valid_js(&result.code, "color-picker pattern");
+    }
+
+    /// Full switch.vue pattern from element-plus — tests reserved word filename + complex template
+    #[test]
+    fn test_element_plus_switch_full() {
+        let input = r#"<script setup>
+import { computed, ref, shallowRef } from 'vue'
+import { switchEmits } from './switch'
+
+const COMPONENT_NAME = 'ElSwitch'
+defineOptions({ name: COMPONENT_NAME })
+
+const props = defineProps({
+  modelValue: { default: false },
+  disabled: { default: undefined },
+  activeText: { default: '' },
+  inactiveText: { default: '' },
+  name: { default: '' },
+})
+const emit = defineEmits(switchEmits)
+const ns = { b: () => '', m: (s) => '', e: (s) => '', em: (a, b) => '', is: (a, b) => '' }
+const inputId = ref('')
+const input = shallowRef()
+const switchDisabled = ref(false)
+const checked = computed(() => true)
+const switchKls = computed(() => [])
+const labelLeftKls = computed(() => [])
+const labelRightKls = computed(() => [])
+const coreStyle = computed(() => ({}))
+const inlinePrompt = ref(false)
+const loading = ref(false)
+
+const handleChange = () => {}
+const switchValue = () => {}
+</script>
+<template>
+  <div :class="switchKls" @click.prevent="switchValue">
+    <input
+      :id="inputId"
+      ref="input"
+      :class="ns.e('input')"
+      type="checkbox"
+      role="switch"
+      :aria-checked="checked"
+      :aria-disabled="switchDisabled"
+      :name="name"
+      :disabled="switchDisabled"
+      @change="handleChange"
+      @keydown.enter="switchValue"
+    />
+    <span
+      v-if="!inlinePrompt && (inactiveIcon || inactiveText || $slots.inactive)"
+      :class="labelLeftKls"
+    >
+      <slot name="inactive">
+        <el-icon v-if="inactiveIcon">
+          <component :is="inactiveIcon" />
+        </el-icon>
+        <span v-if="!inactiveIcon && inactiveText" :aria-hidden="checked">{{
+          inactiveText
+        }}</span>
+      </slot>
+    </span>
+    <span :class="ns.e('core')" :style="coreStyle">
+      <div v-if="inlinePrompt" :class="ns.e('inner')">
+        <div v-if="!checked" :class="ns.e('inner-wrapper')">
+          <slot name="inactive">
+            <el-icon v-if="inactiveIcon">
+              <component :is="inactiveIcon" />
+            </el-icon>
+            <span v-if="!inactiveIcon && inactiveText">{{ inactiveText }}</span>
+          </slot>
+        </div>
+        <div v-else :class="ns.e('inner-wrapper')">
+          <slot name="active">
+            <el-icon v-if="activeIcon">
+              <component :is="activeIcon" />
+            </el-icon>
+            <span v-if="!activeIcon && activeText">{{ activeText }}</span>
+          </slot>
+        </div>
+      </div>
+      <div :class="ns.e('action')">
+        <el-icon v-if="loading" :class="ns.is('loading')">
+          <loading />
+        </el-icon>
+        <slot v-else-if="checked" name="active-action">
+          <el-icon v-if="activeActionIcon">
+            <component :is="activeActionIcon" />
+          </el-icon>
+        </slot>
+        <slot v-else-if="!checked" name="inactive-action">
+          <el-icon v-if="inactiveActionIcon">
+            <component :is="inactiveActionIcon" />
+          </el-icon>
+        </slot>
+      </div>
+    </span>
+    <span
+      v-if="!inlinePrompt && (activeIcon || activeText || $slots.active)"
+      :class="labelRightKls"
+    >
+      <slot name="active">
+        <el-icon v-if="activeIcon">
+          <component :is="activeIcon" />
+        </el-icon>
+        <span v-if="!activeIcon && activeText" :aria-hidden="!checked">{{
+          activeText
+        }}</span>
+      </slot>
+    </span>
+  </div>
+</template>"#;
+        let result = gen_and_validate_with_filename(input, "switch.vue");
+        eprintln!("SWITCH FULL:\n{}", result.code);
+    }
+
+    /// Conditional named slots: <template v-if="cond" #name> inside a component
+    /// must use _createSlots or conditionally include the slot, not inline ternary
+    #[test]
+    fn test_conditional_named_slot_v_if_v_else_if() {
+        let input = r#"<script setup>
+const loading = ref(false)
+const items = ref([])
+</script>
+<template>
+  <MyComp :data="items">
+    <template v-if="loading" #loading>
+      <div>Loading...</div>
+    </template>
+    <template v-else-if="items.length === 0" #empty>
+      <div>No data</div>
+    </template>
+  </MyComp>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("CONDITIONAL SLOTS:\n{}", result.code);
+    }
+
+    /// Simpler case: single conditional named slot with v-if
+    #[test]
+    fn test_single_conditional_named_slot() {
+        let input = r#"<script setup>
+const show = ref(true)
+</script>
+<template>
+  <MyComp>
+    <template v-if="show" #header>
+      <div>Header</div>
+    </template>
+    <template #default>
+      <div>Default</div>
+    </template>
+  </MyComp>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("SINGLE CONDITIONAL SLOT:\n{}", result.code);
+    }
+
+    /// Static named slot closes before conditional sibling sets any_dynamic_slots.
+    /// The static slot must be retroactively patched to { name, fn } format.
+    /// Reproduces dropdown.vue pattern: <template #content> then <template v-if #default>.
+    #[test]
+    fn test_static_slot_before_conditional_sibling() {
+        let input = r#"<script setup>
+const splitButton = ref(false)
+</script>
+<template>
+  <MyTooltip trigger="click">
+    <template #content>
+      <div>Scrollbar content</div>
+    </template>
+    <template v-if="!splitButton" #default>
+      <div>Trigger element</div>
+    </template>
+  </MyTooltip>
+</template>"#;
+        let result = gen_and_validate(input);
+        let code = &result.code;
+        eprintln!("STATIC SLOT BEFORE CONDITIONAL:\n{}", code);
+
+        // Both slots should use { name, fn } format inside _createSlots
+        assert!(
+            code.contains("_createSlots("),
+            "Should use _createSlots for mixed static/conditional slots"
+        );
+        assert!(
+            code.contains(r#"{ name: "content", fn: _withCtx"#),
+            "Static #content slot should be patched to {{ name, fn }} format"
+        );
+        assert!(
+            code.contains(r#"{ name: "default", fn: _withCtx"#),
+            "Conditional #default slot should use {{ name, fn }} format"
+        );
+    }
+
+    /// select-v2.vue: v-click-outside on native element, v-for inside slot,
+    /// inline event expressions, @keydown.delete.stop, v-text, conditional named slots
+    #[test]
+    fn test_element_plus_select_v2_pattern() {
+        let input = r#"<script setup>
+import { ClickOutside as vClickOutside } from '@element-plus/directives'
+const popperRef = ref()
+const handleClickOutside = () => {}
+const states = reactive({ inputHovering: false, inputValue: '', isBeforeHide: false })
+const selectSize = ref('default')
+const nsSelect = { b: () => '', m: (s) => '', e: (s) => '', is: (a, b) => '', be: (a, b) => '' }
+const dropdownMenuVisible = ref(false)
+const filterable = ref(false)
+const selectDisabled = ref(false)
+const expanded = ref(false)
+const isFocused = ref(false)
+const multiple = ref(false)
+const loading = ref(false)
+const showTagList = ref([])
+const filteredOptions = ref([])
+const emptyText = ref('')
+const toggleMenu = () => {}
+const handleMenuEnter = () => {}
+const onInput = () => {}
+const handleCompositionStart = () => {}
+const handleCompositionUpdate = () => {}
+const handleCompositionEnd = () => {}
+const onKeyboardNavigate = (d) => {}
+const onKeyboardSelect = () => {}
+const handleEsc = () => {}
+const handleDel = () => {}
+const deleteTag = (e, i) => {}
+const getValueKey = (v) => v
+const getValue = (i) => i
+const getLabel = (i) => i
+const getDisabled = (i) => false
+</script>
+<template>
+  <div
+    ref="selectRef"
+    v-click-outside:[popperRef]="handleClickOutside"
+    :class="[nsSelect.b(), nsSelect.m(selectSize)]"
+    @mouseenter="states.inputHovering = true"
+    @mouseleave="states.inputHovering = false"
+  >
+    <el-tooltip
+      ref="tooltipRef"
+      :visible="dropdownMenuVisible"
+      trigger="click"
+      @before-show="handleMenuEnter"
+      @hide="states.isBeforeHide = false"
+    >
+      <template #default>
+        <div ref="wrapperRef" :class="nsSelect.e('wrapper')" @click.prevent="toggleMenu">
+          <div ref="selectionRef" :class="nsSelect.e('selection')">
+            <slot v-if="multiple" name="tag" :data="states.cachedOptions" :delete-tag="deleteTag">
+              <div v-for="item in showTagList" :key="getValueKey(getValue(item))" :class="nsSelect.e('selected-item')">
+                <el-tag :closable="!selectDisabled && !getDisabled(item)" @close="deleteTag($event, item)">
+                  <span :class="nsSelect.e('tags-text')">
+                    <slot name="label" :label="getLabel(item)" :value="getValue(item)">
+                      {{ getLabel(item) }}
+                    </slot>
+                  </span>
+                </el-tag>
+              </div>
+            </slot>
+            <div :class="nsSelect.e('selected-item')">
+              <input
+                ref="inputRef"
+                :value="states.inputValue"
+                :aria-expanded="expanded"
+                :disabled="selectDisabled"
+                role="combobox"
+                type="text"
+                @input="onInput"
+                @compositionstart="handleCompositionStart"
+                @compositionupdate="handleCompositionUpdate"
+                @compositionend="handleCompositionEnd"
+                @keydown.up.stop.prevent="onKeyboardNavigate('backward')"
+                @keydown.down.stop.prevent="onKeyboardNavigate('forward')"
+                @keydown.enter.stop.prevent="onKeyboardSelect"
+                @keydown.esc.stop.prevent="handleEsc"
+                @keydown.delete.stop="handleDel"
+                @click.stop="toggleMenu"
+              />
+              <span
+                v-if="filterable"
+                ref="calculatorRef"
+                aria-hidden="true"
+                :class="nsSelect.e('input-calculator')"
+                v-text="states.inputValue"
+              />
+            </div>
+          </div>
+        </div>
+      </template>
+      <template #content>
+        <el-select-menu :id="'content'" ref="menuRef" :data="filteredOptions">
+          <template v-if="$slots.header" #header>
+            <div :class="nsSelect.be('dropdown', 'header')" @click.stop>
+              <slot name="header" />
+            </div>
+          </template>
+          <template #default="scope">
+            <slot v-bind="scope" />
+          </template>
+          <template v-if="$slots.loading && loading" #loading>
+            <div :class="nsSelect.be('dropdown', 'loading')">
+              <slot name="loading" />
+            </div>
+          </template>
+          <template v-else-if="loading || filteredOptions.length === 0" #empty>
+            <div :class="nsSelect.be('dropdown', 'empty')">
+              <slot name="empty">
+                <span>{{ emptyText }}</span>
+              </slot>
+            </div>
+          </template>
+          <template v-if="$slots.footer" #footer>
+            <div :class="nsSelect.be('dropdown', 'footer')" @click.stop>
+              <slot name="footer" />
+            </div>
+          </template>
+        </el-select-menu>
+      </template>
+    </el-tooltip>
+  </div>
+</template>"#;
+        let result = gen_and_validate(input);
+        eprintln!("SELECT-V2 len:{}", result.code.len());
+    }
+
+    /// Reserved word as filename (switch.vue) must not produce invalid JS.
+    #[test]
+    fn test_reserved_word_filename_switch() {
+        let input = r#"<script setup>
+defineOptions({ name: 'ElSwitch' })
+const checked = true
+</script>
+<template>
+  <div @click.prevent="switchValue">
+    <input type="checkbox" role="switch" />
+  </div>
+</template>"#;
+        let result = gen_and_validate_with_filename(input, "switch.vue");
+        eprintln!("SWITCH:\n{}", result.code);
+        // __name should not produce bare `switch` keyword
+    }
+
+    #[test]
+    fn test_root_level_comment_before_script() {
+        let input = r#"<!--
+ Root-level comment before the script block.
+ This should be stripped from the output.
+-->
+<script lang="ts" setup>
+import { computed } from 'vue'
+const x = computed(() => 1)
+</script>
+<template>
+  <div>{{ x }}</div>
+</template>"#;
+        let result = gen_and_validate(input);
+        // The comment text should NOT appear in the JS output
+        assert!(
+            !result.code.contains("Root-level comment"),
+            "Comment leaked into output: {}",
+            result.code
+        );
+    }
+
+    #[test]
+    fn test_html_entities_decoded_in_attribute_values() {
+        // HTML entities like &quot; &amp; &lt; &gt; in attribute values must be
+        // decoded to their literal characters in the JS output.
+        let input = r#"<script setup>
+const x = 1
+</script>
+<template>
+  <DemoBox :data="{&quot;title&quot;:&quot;hello&quot;,&quot;desc&quot;:&quot;a &amp; b&quot;}">
+    <div>content</div>
+  </DemoBox>
+</template>"#;
+        let result = gen_and_validate(input);
+        // &quot; should become " and &amp; should become &
+        // The output should NOT contain raw HTML entities
+        assert!(
+            !result.code.contains("&quot;"),
+            "Raw &quot; in output:\n{}",
+            result.code
+        );
+        assert!(
+            !result.code.contains("&amp;"),
+            "Raw &amp; in output:\n{}",
+            result.code
+        );
     }
 }

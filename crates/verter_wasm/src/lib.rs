@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use verter_core::builder::codegen::{
     compile as core_compile, compile_with_tsx, CodegenOptions as CoreOptions,
 };
+use verter_core::new_impl::compile::{compile as verter_compile, VerterCompileOptions};
 use verter_core::strip_types::strip_types as core_strip_types;
 use wasm_bindgen::prelude::*;
 
@@ -102,6 +103,33 @@ pub struct CodegenResult {
     pub tsx_duration_ms: f64,
 }
 
+/// Build [`CoreOptions`] from the WASM-facing [`CodegenOptions`].
+fn build_core_options(opts: &CodegenOptions) -> CoreOptions {
+    let whitespace = opts.whitespace.as_ref().and_then(|w| match w.as_str() {
+        "preserve" => Some(verter_core::builder::codegen::WhitespaceStrategy::Preserve),
+        "condense" => Some(verter_core::builder::codegen::WhitespaceStrategy::Condense),
+        _ => None,
+    });
+
+    CoreOptions {
+        filename: opts.filename.clone(),
+        is_production: opts.is_production,
+        component_id: opts.component_id.clone(),
+        include_tsx: opts.include_tsx,
+        skip_source_map: false,
+        delimiters: opts.delimiters.clone(),
+        custom_elements: opts.custom_elements.clone(),
+        comments: opts.comments,
+        runtime_module_name: opts.runtime_module_name.clone(),
+        hoist_static: opts.hoist_static,
+        whitespace,
+        cache_handlers: opts.cache_handlers,
+        inline: opts.inline,
+        slotted: opts.slotted,
+        prefix_identifiers: None,
+    }
+}
+
 fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
     let allocator = oxc_allocator::Allocator::new();
 
@@ -112,29 +140,7 @@ fn compile_inner(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
             .map_err(|e| JsValue::from_str(&format!("Invalid options: {}", e)))?
     };
 
-    let whitespace = opts.whitespace.and_then(|w| match w.as_str() {
-        "preserve" => Some(verter_core::builder::codegen::WhitespaceStrategy::Preserve),
-        "condense" => Some(verter_core::builder::codegen::WhitespaceStrategy::Condense),
-        _ => None,
-    });
-
-    let core_options = CoreOptions {
-        filename: opts.filename.clone(),
-        is_production: opts.is_production,
-        component_id: opts.component_id.clone(),
-        include_tsx: opts.include_tsx,
-        skip_source_map: false,
-        delimiters: opts.delimiters,
-        custom_elements: opts.custom_elements,
-        comments: opts.comments,
-        runtime_module_name: opts.runtime_module_name,
-        hoist_static: opts.hoist_static,
-        whitespace,
-        cache_handlers: opts.cache_handlers,
-        inline: opts.inline,
-        slotted: opts.slotted,
-        prefix_identifiers: None,
-    };
+    let core_options = build_core_options(&opts);
 
     let result = core_compile(input, &core_options, &allocator);
 
@@ -272,6 +278,192 @@ pub fn strip_types(source: &str) -> Result<JsValue, JsValue> {
     let js_result = StripTypesResult {
         code: result.code,
         errors: result.errors,
+    };
+
+    serde_wasm_bindgen::to_value(&js_result)
+        .map_err(|e| JsValue::from_str(&format!("Serialization error: {}", e)))
+}
+
+// =============================================================================
+// compileVerter — AST-based pipeline (new_impl)
+// =============================================================================
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VerterOptions {
+    // ── Shared with CodegenOptions ──
+    pub filename: Option<String>,
+    #[serde(default)]
+    pub is_production: bool,
+    pub component_id: Option<String>,
+    pub delimiters: Option<(String, String)>,
+    pub custom_elements: Option<Vec<String>>,
+    pub comments: Option<bool>,
+    pub runtime_module_name: Option<String>,
+    // ── Verter-specific ──
+    #[serde(default)]
+    pub force_vapor: bool,
+    #[serde(default)]
+    pub strip_ts: bool,
+    #[serde(default)]
+    pub source_map: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerterResult {
+    pub script: Option<VerterScriptResult>,
+    pub template: Option<VerterTemplateResult>,
+    pub styles: Vec<VerterStyleResult>,
+    pub custom_blocks: Vec<VerterCustomBlockResult>,
+    pub scope_id: String,
+    pub errors: Vec<WasmDiagnostic>,
+    pub parse_duration_ms: f64,
+    pub total_duration_ms: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerterScriptResult {
+    pub code: String,
+    pub duration_ms: f64,
+    pub source_map: String,
+    pub setup: bool,
+    pub attrs: Vec<(String, String)>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerterTemplateResult {
+    pub code: String,
+    pub source_map: String,
+    pub imports: Vec<&'static str>,
+    pub duration_ms: f64,
+    pub attrs: Vec<(String, String)>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerterStyleResult {
+    pub code: String,
+    pub scoped: bool,
+    pub lang: Option<String>,
+    pub duration_ms: f64,
+    pub attrs: Vec<(String, String)>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerterCustomBlockResult {
+    #[serde(rename = "type")]
+    pub block_type: String,
+    pub content: String,
+    pub attrs: Vec<(String, String)>,
+}
+
+/// Compile a Vue SFC using the AST-based (new_impl) pipeline.
+///
+/// Returns individual blocks (script, template, styles, custom blocks)
+/// with separate timing and source map information.
+///
+/// @param input - The Vue SFC source code
+/// @param options - Optional compilation options (as JS object)
+/// @returns The compiled result with individual blocks
+#[wasm_bindgen(js_name = compileVerter)]
+pub fn compile_verter(input: &str, options: JsValue) -> Result<JsValue, JsValue> {
+    let allocator = oxc_allocator::Allocator::new();
+
+    let opts: VerterOptions = if options.is_undefined() || options.is_null() {
+        VerterOptions::default()
+    } else {
+        serde_wasm_bindgen::from_value(options)
+            .map_err(|e| JsValue::from_str(&format!("Invalid options: {}", e)))?
+    };
+
+    let core_options = CoreOptions {
+        filename: opts.filename.clone(),
+        is_production: opts.is_production,
+        component_id: opts.component_id.clone(),
+        include_tsx: false,
+        skip_source_map: true,
+        delimiters: opts.delimiters,
+        custom_elements: opts.custom_elements,
+        comments: opts.comments,
+        runtime_module_name: opts.runtime_module_name,
+        hoist_static: None,
+        whitespace: None,
+        cache_handlers: None,
+        inline: None,
+        slotted: None,
+        prefix_identifiers: None,
+    };
+
+    let verter_opts = VerterCompileOptions {
+        force_vapor: opts.force_vapor,
+        strip_ts: opts.strip_ts,
+        source_map: opts.source_map,
+    };
+
+    let result = verter_compile(input, &core_options, &verter_opts, &allocator);
+
+    let errors: Vec<WasmDiagnostic> = result
+        .errors
+        .iter()
+        .map(|d| {
+            let severity = match d.severity {
+                verter_core::builder::codegen::CompileDiagnosticSeverity::Error => "error",
+                verter_core::builder::codegen::CompileDiagnosticSeverity::Warning => "warning",
+                verter_core::builder::codegen::CompileDiagnosticSeverity::Info => "info",
+            };
+            WasmDiagnostic {
+                severity: severity.to_string(),
+                code: d.code.clone(),
+                message: d.message.clone(),
+                span_start: d.span.map(|s| s.start),
+                span_end: d.span.map(|s| s.end),
+            }
+        })
+        .collect();
+
+    let js_result = VerterResult {
+        script: result.script.map(|s| VerterScriptResult {
+            code: s.code,
+            duration_ms: s.duration_ms,
+            source_map: s.source_map,
+            setup: s.setup,
+            attrs: s.attrs,
+        }),
+        template: result.template.map(|t| VerterTemplateResult {
+            code: t.code,
+            source_map: t.source_map,
+            imports: t.imports,
+            duration_ms: t.duration_ms,
+            attrs: t.attrs,
+        }),
+        styles: result
+            .styles
+            .into_iter()
+            .map(|s| VerterStyleResult {
+                code: s.code,
+                scoped: s.scoped,
+                lang: s.lang,
+                duration_ms: s.duration_ms,
+                attrs: s.attrs,
+            })
+            .collect(),
+        custom_blocks: result
+            .custom_blocks
+            .into_iter()
+            .map(|cb| VerterCustomBlockResult {
+                block_type: cb.block_type,
+                content: cb.content,
+                attrs: cb.attrs,
+            })
+            .collect(),
+        scope_id: result.scope_id,
+        errors,
+        parse_duration_ms: result.parse_duration_ms,
+        total_duration_ms: result.total_duration_ms,
     };
 
     serde_wasm_bindgen::to_value(&js_result)

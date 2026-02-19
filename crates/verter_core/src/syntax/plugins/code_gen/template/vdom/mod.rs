@@ -323,18 +323,26 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                 &mut self.pending_append_lefts,
             );
 
-            // Defer pending v-if fallback comments for root-level children.
-            for &fallback_pos in &state.pending_vif_fallbacks {
-                let comment = if self.is_production {
-                    "_createCommentVNode(\"\", true)"
-                } else {
-                    "_createCommentVNode(\"v-if\", true)"
-                };
-                self.pending_append_lefts.push((fallback_pos, comment));
-            }
-            if !state.pending_vif_fallbacks.is_empty() {
-                self.imports
-                    .add(TemplateImportDependencies::CREATE_COMMENT_VNODE);
+            // Defer pending v-if fallbacks for root-level children.
+            {
+                let mut has_regular_vif_fallback = false;
+                for &(fallback_pos, is_named_slot) in &state.pending_vif_fallbacks {
+                    if is_named_slot {
+                        self.pending_append_lefts.push((fallback_pos, "undefined"));
+                    } else {
+                        let comment = if self.is_production {
+                            "_createCommentVNode(\"\", true)"
+                        } else {
+                            "_createCommentVNode(\"v-if\", true)"
+                        };
+                        self.pending_append_lefts.push((fallback_pos, comment));
+                        has_regular_vif_fallback = true;
+                    }
+                }
+                if has_regular_vif_fallback {
+                    self.imports
+                        .add(TemplateImportDependencies::CREATE_COMMENT_VNODE);
+                }
             }
 
             if state.children.is_empty() {
@@ -518,6 +526,9 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                 kind: ChildKind::Element,
                 scope_prefix: "",
                 is_named_slot: false,
+                slot_name: "",
+                slot_format_prepend_idx: None,
+                slot_close_tag_end: 0,
             });
         }
 
@@ -659,17 +670,23 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
                 // named slot entries from implicit default slot content.
                 if let Some(last_child) = parent.children.last_mut() {
                     last_child.is_named_slot = true;
+                    last_child.slot_name = state.slot_name.unwrap_or("default");
                 }
             }
         }
 
         if !is_vif_continuation && !scope_prefix.is_empty() {
             if state.is_named_slot_template {
-                // For named slot templates with v-if, store the scope prefix on the
-                // state itself so it can be emitted INSIDE the _withCtx callback,
-                // not wrapping the slot key-value pair in the parent's slots object.
-                state.named_slot_vif_prefix = scope_prefix;
-                state.named_slot_has_vif = true;
+                // For named slot templates with v-if, the condition wraps the slot
+                // entry externally (e.g. `(cond) ? { name: "x", fn: ... } : undefined`).
+                // Store scope_prefix on the child (same as regular elements) and mark
+                // parent for _createSlots().
+                if let Some(parent) = self.stack.last_mut() {
+                    parent.any_dynamic_slots = true;
+                    if let Some(last_child) = parent.children.last_mut() {
+                        last_child.scope_prefix = scope_prefix;
+                    }
+                }
             } else if let Some(parent) = self.stack.last_mut() {
                 if let Some(last_child) = parent.children.last_mut() {
                     last_child.scope_prefix = scope_prefix;
@@ -779,7 +796,9 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             // When cache_id is present, the comment was already emitted inside the cache.
             if had_vif_close && state.cache_id.is_none() {
                 if let Some(parent) = self.stack.last_mut() {
-                    parent.pending_vif_fallbacks.push(close_pos);
+                    parent
+                        .pending_vif_fallbacks
+                        .push((close_pos, state.is_named_slot_template));
                 }
             }
 
@@ -816,24 +835,47 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
 
         let code_transform = self.code_transform.borrow();
 
-        for &fallback_pos in &state.pending_vif_fallbacks {
-            let comment = if self.is_production {
-                "_createCommentVNode(\"\", true)"
-            } else {
-                "_createCommentVNode(\"v-if\", true)"
-            };
-            self.pending_append_lefts.push((fallback_pos, comment));
+        // Emit pending v-if fallbacks: named slot fallbacks get `undefined`
+        // (for _createSlots arrays), regular fallbacks get `_createCommentVNode`.
+        {
+            let mut has_regular_vif_fallback = false;
+            for &(fallback_pos, is_named_slot) in &state.pending_vif_fallbacks {
+                if is_named_slot {
+                    self.pending_append_lefts.push((fallback_pos, "undefined"));
+                } else {
+                    let comment = if self.is_production {
+                        "_createCommentVNode(\"\", true)"
+                    } else {
+                        "_createCommentVNode(\"v-if\", true)"
+                    };
+                    self.pending_append_lefts.push((fallback_pos, comment));
+                    has_regular_vif_fallback = true;
+                }
+            }
+            if has_regular_vif_fallback {
+                self.imports
+                    .add(TemplateImportDependencies::CREATE_COMMENT_VNODE);
+            }
         }
-        if !state.pending_vif_fallbacks.is_empty() {
-            self.imports
-                .add(TemplateImportDependencies::CREATE_COMMENT_VNODE);
-        }
+
+        let parent_any_dynamic_slots = self.stack.last().is_some_and(|p| p.any_dynamic_slots);
+
+        // Record prepend_lefts length before close handler runs.
+        // For named slot templates, the first prepend_left added is the
+        // name format entry (patchable). We store its index on the parent's
+        // ChildInfo for potential retroactive patching.
+        let prepend_left_len_before = if state.is_named_slot_template {
+            Some(self.pending_prepend_lefts.len())
+        } else {
+            None
+        };
 
         element::handle_element_close(
             &code_transform,
             ev,
             &state,
             self.is_production,
+            parent_any_dynamic_slots,
             &mut self.imports,
             &mut self.pending_prepend_lefts,
             &mut self.pending_overwrites,
@@ -848,20 +890,31 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             .map(|c| c.end)
             .unwrap_or(state.open_tag_end);
 
-        // Named slot templates with v-if handle scope closes internally (inside
-        // the _withCtx callback in handle_element_close). Skip external processing.
-        let had_vif_close = if state.named_slot_has_vif {
-            false
-        } else {
-            directives::process_scope_closes(
-                &code_transform,
-                &state.pending_scope_closes,
-                close_pos,
-                self.is_production,
-                &mut self.pending_append_lefts,
-                &mut self.buf,
-            )
-        };
+        // Store named slot emit info on the parent's ChildInfo for retroactive patching.
+        // Only needed when emitted in static format (parent_any_dynamic_slots was false).
+        if let Some(name_format_idx) = prepend_left_len_before {
+            if !parent_any_dynamic_slots {
+                if let Some(parent) = self.stack.last_mut() {
+                    // Find this named slot's ChildInfo in the parent's children list.
+                    for child in parent.children.iter_mut().rev() {
+                        if child.is_named_slot && child.start == state.open_tag_start {
+                            child.slot_format_prepend_idx = Some(name_format_idx);
+                            child.slot_close_tag_end = close_pos;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let had_vif_close = directives::process_scope_closes(
+            &code_transform,
+            &state.pending_scope_closes,
+            close_pos,
+            self.is_production,
+            &mut self.pending_append_lefts,
+            &mut self.buf,
+        );
 
         if let Some(cache_id) = state.cache_id {
             // When v-once wraps a v-if, the comment fallback must appear INSIDE
@@ -892,7 +945,9 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
         // When cache_id is present, the comment was already emitted inside the cache.
         if had_vif_close && state.cache_id.is_none() {
             if let Some(parent) = self.stack.last_mut() {
-                parent.pending_vif_fallbacks.push(close_pos);
+                parent
+                    .pending_vif_fallbacks
+                    .push((close_pos, state.is_named_slot_template));
             }
         }
 
@@ -971,6 +1026,9 @@ impl<'alloc> VdomTemplateGenerator<'alloc> {
             kind: ChildKind::Interpolation,
             scope_prefix: "",
             is_named_slot: false,
+            slot_name: "",
+            slot_format_prepend_idx: None,
+            slot_close_tag_end: 0,
         });
 
         interpolation::handle_interpolation(

@@ -19,6 +19,7 @@ const JSDELIVR_BASE = "https://cdn.jsdelivr.net/npm/@verter/wasm";
 export interface WasmModule {
   compile: (input: string, options?: unknown) => unknown;
   compileBytes?: (input: Uint8Array, options?: unknown) => unknown;
+  compileVerter?: (input: string, options?: unknown) => unknown;
   stripTypes?: (source: string) => unknown;
   default: (input?: unknown) => Promise<unknown>;
 }

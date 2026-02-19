@@ -13,8 +13,8 @@ use crate::{
         plugins::code_gen::{
             template::shared::helper::{
                 build_prefixed_value_into, camelize_capitalize_into, camelize_into,
-                collect_binding_patches, escape_js_string, escape_js_string_in_place,
-                escape_js_string_into, is_valid_js_prop_key,
+                collect_binding_patches, decode_html_entities_in_place, escape_js_string,
+                escape_js_string_in_place, escape_js_string_into, is_valid_js_prop_key,
             },
             types::TemplateImportDependencies,
         },
@@ -842,6 +842,13 @@ pub(crate) fn handle_element_open<'alloc>(
                                     buf.push_str(": ");
                                     let s = code_transform.alloc_str(buf);
                                     pending_overwrites.push((prop.event.start, val_span.start, s));
+                                    decode_html_entities_in_place(
+                                        code_transform,
+                                        val_span.start,
+                                        val_span.end,
+                                        ctx.input,
+                                        pending_overwrites,
+                                    );
                                     pending_overwrites.push((val_span.end, prop.event.end, ""));
 
                                     if let Some(exp) = &prop.exp {
@@ -881,6 +888,13 @@ pub(crate) fn handle_element_open<'alloc>(
                                     let after: &'static str =
                                         if needs_quote { "\": " } else { ": " };
                                     pending_overwrites.push((arg_span.end, val_span.start, after));
+                                    decode_html_entities_in_place(
+                                        code_transform,
+                                        val_span.start,
+                                        val_span.end,
+                                        ctx.input,
+                                        pending_overwrites,
+                                    );
                                     pending_overwrites.push((val_span.end, prop.event.end, ""));
 
                                     if let Some(exp) = &prop.exp {
@@ -914,6 +928,13 @@ pub(crate) fn handle_element_open<'alloc>(
                                 buf.push_str("unknown: ");
                                 let s = code_transform.alloc_str(buf);
                                 pending_overwrites.push((prop.event.start, val_span.start, s));
+                                decode_html_entities_in_place(
+                                    code_transform,
+                                    val_span.start,
+                                    val_span.end,
+                                    ctx.input,
+                                    pending_overwrites,
+                                );
                                 pending_overwrites.push((val_span.end, prop.event.end, ""));
 
                                 if let Some(exp) = &prop.exp {

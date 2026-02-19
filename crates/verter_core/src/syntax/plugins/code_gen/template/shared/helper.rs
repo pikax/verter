@@ -495,18 +495,50 @@ pub fn escape_js_string_in_place<'a>(
     let needs_escape = bytes.iter().any(|&b| {
         matches!(
             b,
-            b'\\' | b'"' | b'\n' | b'\r' | b'\t' | b'\0' | 0xe2 // LS/PS start byte
+            b'\\' | b'"' | b'\n' | b'\r' | b'\t' | b'\0' | b'&' | 0xe2 // LS/PS start byte
         ) || b.is_ascii_control()
     });
     if !needs_escape {
         return;
     }
 
-    // Slow path: iterate character by character
+    // Slow path: iterate byte by byte (needed for HTML entity look-ahead)
     let text = &input[start as usize..end as usize];
-    let mut pos = start;
-    for ch in text.chars() {
-        let char_len = ch.len_utf8() as u32;
+    let text_bytes = text.as_bytes();
+    let mut i = 0;
+    while i < text_bytes.len() {
+        let byte = text_bytes[i];
+        let pos = start + i as u32;
+
+        // HTML entity decoding: &amp; &lt; &gt; &quot; &apos; &#NNN; &#xHHH;
+        if byte == b'&' {
+            if let Some((decoded, entity_len)) = decode_html_entity(&text[i..]) {
+                let entity_end = pos + entity_len as u32;
+                // The decoded char may also need JS escaping
+                let replacement: &str = match decoded {
+                    '"' => "\\\"",
+                    '\\' => "\\\\",
+                    '\n' => "\\n",
+                    '\r' => "\\r",
+                    '\t' => "\\t",
+                    '\0' => "\\0",
+                    '\u{2028}' => "\\u2028",
+                    '\u{2029}' => "\\u2029",
+                    ch => {
+                        let mut buf = [0u8; 4];
+                        let s = ch.encode_utf8(&mut buf);
+                        code_transform.alloc_str(s)
+                    }
+                };
+                pending_overwrites.push((pos, entity_end, replacement));
+                i += entity_len;
+                continue;
+            }
+        }
+
+        // Normal JS escape handling
+        let ch = text[i..].chars().next().unwrap();
+        let char_len = ch.len_utf8();
         let escape: Option<&str> = match ch {
             '\\' => Some("\\\\"),
             '"' => Some("\\\""),
@@ -519,7 +551,7 @@ pub fn escape_js_string_in_place<'a>(
             _ => None,
         };
         if let Some(esc) = escape {
-            pending_overwrites.push((pos, pos + char_len, esc));
+            pending_overwrites.push((pos, pos + char_len as u32, esc));
         } else if ch.is_ascii_control() {
             let mut hex_buf = [0u8; 4]; // "\\xHH"
             hex_buf[0] = b'\\';
@@ -529,9 +561,82 @@ pub fn escape_js_string_in_place<'a>(
             hex_buf[3] = HEX_DIGITS[(val & 0xf) as usize];
             let s = unsafe { std::str::from_utf8_unchecked(&hex_buf) };
             let s = code_transform.alloc_str(s);
-            pending_overwrites.push((pos, pos + char_len, s));
+            pending_overwrites.push((pos, pos + char_len as u32, s));
         }
-        pos += char_len;
+        i += char_len;
+    }
+}
+
+/// Decode an HTML entity at the start of the string. Returns the decoded char
+/// and byte length consumed (including the `&` and `;`).
+fn decode_html_entity(s: &str) -> Option<(char, usize)> {
+    if !s.starts_with('&') {
+        return None;
+    }
+    // Find the semicolon, but limit search to avoid scanning long strings
+    let semi = s[1..].find(';')?;
+    if semi > 10 {
+        return None; // entities are at most ~10 chars
+    }
+    let entity = &s[1..semi + 1]; // between & and ;
+    let ch = match entity {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "nbsp" => '\u{00A0}',
+        _ if entity.starts_with('#') => {
+            let num = &entity[1..];
+            let code_point = if num.starts_with('x') || num.starts_with('X') {
+                u32::from_str_radix(&num[1..], 16).ok()?
+            } else {
+                num.parse::<u32>().ok()?
+            };
+            char::from_u32(code_point)?
+        }
+        _ => return None, // Unknown entity — leave as-is
+    };
+    Some((ch, semi + 2)) // +2 for '&' and ';'
+}
+
+/// Decode HTML entities in-place within an expression value span.
+///
+/// Unlike `escape_js_string_in_place`, this does NOT add JS string escaping
+/// (no backslash-escaping of quotes/newlines). It only replaces HTML entities
+/// like `&quot;` → `"`, `&amp;` → `&`, etc. Used for v-bind expression values
+/// where the source contains HTML-encoded characters.
+pub fn decode_html_entities_in_place<'a>(
+    code_transform: &CodeTransform<'a>,
+    start: u32,
+    end: u32,
+    input: &str,
+    pending_overwrites: &mut Vec<(u32, u32, &'a str)>,
+) {
+    let bytes = &input.as_bytes()[start as usize..end as usize];
+
+    // Fast path: no ampersands means no entities
+    if !bytes.contains(&b'&') {
+        return;
+    }
+
+    let text = &input[start as usize..end as usize];
+    let text_bytes = text.as_bytes();
+    let mut i = 0;
+    while i < text_bytes.len() {
+        if text_bytes[i] == b'&' {
+            if let Some((decoded, entity_len)) = decode_html_entity(&text[i..]) {
+                let pos = start + i as u32;
+                let entity_end = pos + entity_len as u32;
+                let mut buf = [0u8; 4];
+                let s = decoded.encode_utf8(&mut buf);
+                let replacement = code_transform.alloc_str(s);
+                pending_overwrites.push((pos, entity_end, replacement));
+                i += entity_len;
+                continue;
+            }
+        }
+        i += 1;
     }
 }
 

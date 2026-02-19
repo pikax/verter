@@ -7,6 +7,7 @@ use oxc_ast::ast::*;
 use oxc_span::Span as OxcSpan;
 use smallvec::SmallVec;
 
+use super::keywords::is_keyword;
 use super::types::{
     Binding, BindingContext, BindingExtractionResult, FunctionBinding, LiteralBinding, ParamBytes,
 };
@@ -696,6 +697,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
 
     #[inline]
     fn add_binding_inner(&mut self, name: &'a str, span: OxcSpan, is_shorthand: bool) {
+        use super::types::Dynamism;
         let ignore = self.ctx.should_ignore(name);
         self.result.bindings.push(Binding {
             name,
@@ -704,6 +706,19 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
             ignore,
             is_shorthand,
         });
+
+        // Incrementally update dynamism — avoids a separate post-extraction loop.
+        // Dynamic trumps MaybeDynamic trumps Static.
+        if self.result.dynamism != Dynamism::Dynamic {
+            if ignore && !is_keyword(name.as_bytes()) {
+                // Injected local (v-for/v-slot variable, not a JS keyword)
+                self.result.dynamism = Dynamism::Dynamic;
+            } else if !ignore {
+                // Script-level identifier reference
+                self.result.dynamism = Dynamism::MaybeDynamic;
+            }
+            // keyword-ignored → no change (keywords don't affect dynamism)
+        }
     }
 
     #[inline]
@@ -726,6 +741,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::types::Dynamism;
     use super::*;
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
@@ -999,5 +1015,118 @@ mod tests {
     fn test_nullish_coalescing() {
         let (names, _, _) = extract("foo ?? bar");
         assert_eq!(names, vec!["foo", "bar"]);
+    }
+
+    // ===========================================
+    // Dynamism (computed incrementally during extraction)
+    // ===========================================
+
+    /// Helper that returns the full BindingExtractionResult for dynamism tests
+    fn extract_result<'a>(
+        source: &'a str,
+        alloc: &'a Allocator,
+        ignored: &[&'a str],
+    ) -> BindingExtractionResult<'a> {
+        let parser = Parser::new(alloc, source, SourceType::tsx());
+        let expr = parser.parse_expression().unwrap();
+        let ctx = BindingContext::with_ignored(0, ignored.iter().copied());
+        extract_bindings_from_expression(&expr, source, &ctx)
+    }
+
+    /// Pure literal → Static (no identifiers at all)
+    #[test]
+    fn dynamism_literal_static() {
+        let alloc = Allocator::default();
+        let result = extract_result("42", &alloc, &[]);
+        assert_eq!(result.dynamism, Dynamism::Static);
+    }
+
+    /// String literal → Static
+    #[test]
+    fn dynamism_string_literal_static() {
+        let alloc = Allocator::default();
+        let result = extract_result("'hello'", &alloc, &[]);
+        assert_eq!(result.dynamism, Dynamism::Static);
+    }
+
+    /// Binary expression of pure literals → Static
+    #[test]
+    fn dynamism_binary_literals_static() {
+        let alloc = Allocator::default();
+        let result = extract_result("1 + 2", &alloc, &[]);
+        assert_eq!(result.dynamism, Dynamism::Static);
+    }
+
+    /// Keywords only (true && false) → Static
+    #[test]
+    fn dynamism_keywords_only_static() {
+        let alloc = Allocator::default();
+        let result = extract_result("true && false", &alloc, &[]);
+        assert_eq!(result.dynamism, Dynamism::Static);
+    }
+
+    /// Script-level identifier → MaybeDynamic
+    #[test]
+    fn dynamism_script_identifier_maybe_dynamic() {
+        let alloc = Allocator::default();
+        let result = extract_result("foo", &alloc, &[]);
+        assert_eq!(result.dynamism, Dynamism::MaybeDynamic);
+    }
+
+    /// Multiple script-level identifiers → MaybeDynamic
+    #[test]
+    fn dynamism_multiple_script_identifiers_maybe_dynamic() {
+        let alloc = Allocator::default();
+        let result = extract_result("foo + bar", &alloc, &[]);
+        assert_eq!(result.dynamism, Dynamism::MaybeDynamic);
+    }
+
+    /// Ignored identifier (v-for local) → Dynamic
+    #[test]
+    fn dynamism_ignored_identifier_dynamic() {
+        let alloc = Allocator::default();
+        let result = extract_result("item", &alloc, &["item"]);
+        assert_eq!(result.dynamism, Dynamism::Dynamic);
+    }
+
+    /// Member expression with ignored root → Dynamic
+    #[test]
+    fn dynamism_ignored_member_expr_dynamic() {
+        let alloc = Allocator::default();
+        let result = extract_result("item.name", &alloc, &["item"]);
+        assert_eq!(result.dynamism, Dynamism::Dynamic);
+    }
+
+    /// Mixed: ignored local + script-level → Dynamic (injected trumps)
+    #[test]
+    fn dynamism_mixed_injected_trumps() {
+        let alloc = Allocator::default();
+        let result = extract_result("item.name + cls", &alloc, &["item"]);
+        assert_eq!(result.dynamism, Dynamism::Dynamic);
+    }
+
+    /// Keyword-ignored (e.g. `undefined`) is NOT an injected local → stays MaybeDynamic
+    #[test]
+    fn dynamism_keyword_ignored_not_injected() {
+        let alloc = Allocator::default();
+        let result = extract_result("foo ?? undefined", &alloc, &[]);
+        // `undefined` is keyword-ignored, not injected → MaybeDynamic (from `foo`)
+        assert_eq!(result.dynamism, Dynamism::MaybeDynamic);
+    }
+
+    /// Arrow function body references script-level → MaybeDynamic
+    #[test]
+    fn dynamism_arrow_function_maybe_dynamic() {
+        let alloc = Allocator::default();
+        let result = extract_result("() => foo", &alloc, &[]);
+        assert_eq!(result.dynamism, Dynamism::MaybeDynamic);
+    }
+
+    /// Arrow function with ignored in body → Dynamic
+    #[test]
+    fn dynamism_arrow_function_with_ignored_dynamic() {
+        let alloc = Allocator::default();
+        let result = extract_result("() => item.name", &alloc, &["item"]);
+        assert_eq!(result.dynamism, Dynamism::Dynamic);
     }
 }

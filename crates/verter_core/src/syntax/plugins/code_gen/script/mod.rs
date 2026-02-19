@@ -119,7 +119,7 @@ impl<'alloc> ScriptGeneratorPlugin<'alloc> {
     }
 
     /// Generate source map JSON string.
-    pub fn generate_source_map(&self, options: SourceMapOptions) -> String {
+    pub fn generate_source_map(&self, options: SourceMapOptions<'_>) -> String {
         self.code_transform.borrow().generate_map_json(options)
     }
 

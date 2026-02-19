@@ -345,6 +345,25 @@ pnpm --filter @verter/benchmark bench:json
 
 Benchmarks are also triggered in CI via `/benchmark` PR comment.
 
+### Profiling (hotpath + MCP)
+
+Use hotpath profiling on real Vue projects (or fixture fallback) via `profile_ast`:
+
+```bash
+# Timing profile
+pnpm run profile:hotpath
+
+# Timing + allocation profile
+pnpm run profile:hotpath:alloc
+
+# MCP server for agents (serves http://localhost:6771/mcp)
+pnpm run profile:hotpath:mcp
+```
+
+For MCP-capable agents, use [mcp/hotpath.mcp.json](./mcp/hotpath.mcp.json) as the server config.
+If your agent expects a custom config path, point it at that file.
+For client-specific setup examples, see [mcp/README.md](./mcp/README.md).
+
 ### Integration Tests
 
 Tests Verter against real-world Vue projects (Vuetify, PrimeVue, etc.) to ensure compilation correctness:

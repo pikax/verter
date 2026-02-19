@@ -77,6 +77,17 @@ pub(crate) struct ChildInfo<'alloc> {
     /// need wrapping by the parent. Non-named-slot children inside a component with
     /// named slots must be wrapped in `default: _withCtx(() => [...])`.
     pub is_named_slot: bool,
+    /// Slot name for named slot entries (e.g. "content", "default", "[expr]").
+    /// Empty string when not a named slot.
+    pub slot_name: &'alloc str,
+    /// Index into `pending_prepend_lefts` where the slot name format prefix was emitted.
+    /// When Some, the slot was emitted in STATIC format (`slotName: `) and may need
+    /// retroactive patching to DYNAMIC format (`{ name: "slotName", fn: }`) if the
+    /// parent component later discovers it has dynamic slots.
+    pub slot_format_prepend_idx: Option<usize>,
+    /// Position after the named slot's close tag — used to append ` }` suffix
+    /// when retroactively patching a static slot entry to dynamic format.
+    pub slot_close_tag_end: u32,
 }
 
 /// Stored scope close token — emitted after the element VNode call closes.
@@ -144,24 +155,28 @@ pub(crate) struct StateStack<'alloc> {
     /// True for: direct children of <template>, v-if/v-for branch elements.
     pub is_block_root: bool,
 
-    /// Pending v-if/v-else-if close positions where comment fallback should be emitted.
+    /// Pending v-if/v-else-if close positions where fallback should be emitted.
+    ///
+    /// Each entry is `(position, is_named_slot_fallback)`:
+    /// - `is_named_slot_fallback = false` → emit `_createCommentVNode("v-if", true)`
+    /// - `is_named_slot_fallback = true`  → emit `undefined` (for `_createSlots` arrays)
     ///
     /// # Deferred Emission Contract
     ///
     /// When `process_scope_closes()` encounters `ScopeClose::IfTernary` or
     /// `ScopeClose::ElseIfTernary`, it appends ` : ` at `close_pos` but does NOT
-    /// emit `_createCommentVNode(...)`. Instead, the caller pushes `close_pos`
-    /// here. Two things can happen next:
+    /// emit the fallback. Instead, the caller pushes `close_pos` here.
+    /// Two things can happen next:
     ///
     /// 1. A v-else-if/v-else sibling follows: `handle_element_start()` pops the
     ///    last entry (consumed by the else branch).
     /// 2. No else follows: the parent's `handle_element_closed()` or
-    ///    `handle_template_closed()` emits `_createCommentVNode("v-if", true)`
-    ///    at each remaining position.
+    ///    `handle_template_closed()` emits the appropriate fallback at each
+    ///    remaining position.
     ///
     /// This two-phase approach is necessary because at the time an element with
     /// v-if closes, we don't yet know whether v-else-if/v-else follows.
-    pub pending_vif_fallbacks: Vec<u32>,
+    pub pending_vif_fallbacks: Vec<(u32, bool)>,
 
     /// Counter for v-if branch keys within this parent's scope.
     /// Each new v-if chain starts at 0, incremented for each v-if/v-else-if/v-else branch.
@@ -196,24 +211,13 @@ pub(crate) struct StateStack<'alloc> {
     /// entry in the parent component's slots object.
     pub is_named_slot_template: bool,
 
-    /// v-if scope prefix for named slot templates (e.g. `"(!isMobile) ? "`).
-    /// When a `<template v-if="cond" #name>` is encountered, the v-if condition
-    /// must be emitted INSIDE the `_withCtx(() => [...])` callback, not wrapping
-    /// the slot key-value pair. This field stores the scope prefix so the close
-    /// phase can incorporate it inside the callback.
-    pub named_slot_vif_prefix: &'alloc str,
-
-    /// Whether this named slot template's scope closes should be handled internally
-    /// (inside the _withCtx callback) rather than externally by the parent.
-    /// Set to true when `named_slot_vif_prefix` is non-empty.
-    pub named_slot_has_vif: bool,
-
     /// Whether this component has `<template #name>` children defining named slots.
     /// When true, children are wrapped in `{ ... _: 1 }` instead of `[...]`.
     pub has_named_slot_children: bool,
 
-    /// Whether any named slot child uses a dynamic name (`v-slot:[expr]`).
-    /// Determines slot flag: false → `_: 1` (STABLE), true → `_: 2` (DYNAMIC).
+    /// Whether any named slot child uses a dynamic name (`v-slot:[expr]`) or
+    /// conditional v-if. When true, the parent component uses `_createSlots()`
+    /// and slot flag `_: 2` (DYNAMIC) instead of a static object with `_: 1`.
     pub any_dynamic_slots: bool,
 
     // -- Directive fields --
@@ -248,8 +252,6 @@ impl Default for StateStack<'_> {
             slot_name: None,
             slot_is_dynamic: false,
             is_named_slot_template: false,
-            named_slot_vif_prefix: "",
-            named_slot_has_vif: false,
             has_named_slot_children: false,
             any_dynamic_slots: false,
             runtime_directives: Vec::new(),
@@ -282,8 +284,6 @@ impl StateStack<'_> {
         self.slot_name = None;
         self.slot_is_dynamic = false;
         self.is_named_slot_template = false;
-        self.named_slot_vif_prefix = "";
-        self.named_slot_has_vif = false;
         self.has_named_slot_children = false;
         self.any_dynamic_slots = false;
         self.runtime_directives.clear();

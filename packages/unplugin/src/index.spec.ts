@@ -93,6 +93,27 @@ describe("unplugin hooks", () => {
       ),
     ).toBe(false);
   });
+
+  // @ai-generated - Tests include option for non-.vue files
+  it("transformInclude respects include option with RegExp array", () => {
+    const plugin = unpluginFactory({ include: [/\.vue$/, /\.md$/] }, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+    expect(plugin.transformInclude("/path/to/App.vue")).toBe(true);
+    expect(plugin.transformInclude("/path/to/docs.md")).toBe(true);
+    expect(plugin.transformInclude("/path/to/file.ts")).toBe(false);
+  });
+
+  it("transformInclude respects include option with single RegExp", () => {
+    const plugin = unpluginFactory({ include: /\.(vue|md)$/ }, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+    expect(plugin.transformInclude("/path/to/App.vue")).toBe(true);
+    expect(plugin.transformInclude("/path/to/docs.md")).toBe(true);
+    expect(plugin.transformInclude("/path/to/file.ts")).toBe(false);
+  });
 });
 
 describe("bundler entry points", () => {

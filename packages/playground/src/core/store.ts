@@ -61,8 +61,6 @@ export interface Store extends StoreState {
   toggleAutoSave(): void;
   toggleProduction(): void;
   toggleSSR(): void;
-  toggleShowTS(): void;
-  toggleShowTSX(): void;
   recompile(): Promise<void>;
   switchVerterVersion(entry: VersionEntry): Promise<void>;
 }
@@ -78,19 +76,13 @@ export function useStore(): Store {
     typeof window !== "undefined" && window.matchMedia("(prefers-color-scheme: dark)").matches,
   );
   const autoSave = ref(true);
-  const showTS = ref(false);
-  const showTSX = ref(false);
   const compilerOptions = reactive<CompilerOptions>({
     isProduction: false,
     ssr: false,
   });
   const compileTiming = reactive<CompileTiming>({
-    verter: null,
-    verterNative: null,
-    stripTypes: null,
-    tsx: null,
-    kai: null,
-    kaiJs: null,
+    verterNew: null,
+    verterNewJs: null,
   });
 
   const verterVersion = ref("local");
@@ -138,15 +130,11 @@ export function useStore(): Store {
 
     // Compile all files on init and capture timing from the last one compiled
     let lastTiming: CompileTiming = {
-      verter: null,
-      verterNative: null,
-      stripTypes: null,
-      tsx: null,
-      kai: null,
-      kaiJs: null,
+      verterNew: null,
+      verterNewJs: null,
     };
     for (const file of Object.values(files.value)) {
-      lastTiming = await compileFile(file, compilerOptions, showTS.value, showTSX.value);
+      lastTiming = await compileFile(file, compilerOptions);
     }
     Object.assign(compileTiming, lastTiming);
     loading.value = false;
@@ -157,20 +145,7 @@ export function useStore(): Store {
       async () => {
         if (activeFilename.value === IMPORT_MAP_FILENAME) return;
         if (autoSave.value && activeFile.value) {
-          // Auto-switch away from TS tab if showTS is disabled or file is not TS
-          if (outputMode.value === "ts" && (!showTS.value || !activeFile.value.isTS)) {
-            outputMode.value = "js";
-          }
-          // Auto-switch away from TSX tab if showTSX is disabled
-          if (outputMode.value === "tsx" && !showTSX.value) {
-            outputMode.value = "js";
-          }
-          const timing = await compileFile(
-            activeFile.value,
-            compilerOptions,
-            showTS.value,
-            showTSX.value,
-          );
+          const timing = await compileFile(activeFile.value, compilerOptions);
           Object.assign(compileTiming, timing);
           errors.value = activeFile.value.compiled.errors;
         }
@@ -184,15 +159,7 @@ export function useStore(): Store {
         if (activeFilename.value === IMPORT_MAP_FILENAME) return;
         const file = activeFile.value;
         if (file) {
-          // Auto-switch away from TS tab if showTS is disabled or file is not TS
-          if (outputMode.value === "ts" && (!showTS.value || !file.isTS)) {
-            outputMode.value = "js";
-          }
-          // Auto-switch away from TSX tab if showTSX is disabled
-          if (outputMode.value === "tsx" && !showTSX.value) {
-            outputMode.value = "js";
-          }
-          const timing = await compileFile(file, compilerOptions, showTS.value, showTSX.value);
+          const timing = await compileFile(file, compilerOptions);
           Object.assign(compileTiming, timing);
           errors.value = file.compiled.errors;
         }
@@ -269,16 +236,6 @@ export function useStore(): Store {
   }
 
   function setOutputMode(mode: OutputMode) {
-    // Auto-fallback: if switching to TS tab but showTS is off or file is not TS, go to JS
-    if (mode === "ts" && (!showTS.value || !activeFile.value?.isTS)) {
-      outputMode.value = "js";
-      return;
-    }
-    // Auto-fallback: if switching to TSX tab but showTSX is off, go to JS
-    if (mode === "tsx" && !showTSX.value) {
-      outputMode.value = "js";
-      return;
-    }
     outputMode.value = mode;
   }
 
@@ -301,29 +258,11 @@ export function useStore(): Store {
     recompile();
   }
 
-  function toggleShowTS() {
-    showTS.value = !showTS.value;
-    // If disabling showTS and currently on TS tab, switch to JS
-    if (!showTS.value && outputMode.value === "ts") {
-      outputMode.value = "js";
-    }
-    recompile();
-  }
-
-  function toggleShowTSX() {
-    showTSX.value = !showTSX.value;
-    // If disabling showTSX and currently on TSX tab, switch to JS
-    if (!showTSX.value && outputMode.value === "tsx") {
-      outputMode.value = "js";
-    }
-    recompile();
-  }
-
   async function recompile() {
     if (activeFilename.value === IMPORT_MAP_FILENAME) return;
     const file = activeFile.value;
     if (file) {
-      const timing = await compileFile(file, compilerOptions, showTS.value, showTSX.value);
+      const timing = await compileFile(file, compilerOptions);
       Object.assign(compileTiming, timing);
       errors.value = file.compiled.errors;
     }
@@ -351,8 +290,6 @@ export function useStore(): Store {
     loading,
     darkMode,
     autoSave,
-    showTS,
-    showTSX,
     compilerOptions,
     compileTiming,
     activeFile,
@@ -370,8 +307,6 @@ export function useStore(): Store {
     toggleAutoSave,
     toggleProduction,
     toggleSSR,
-    toggleShowTS,
-    toggleShowTSX,
     recompile,
     switchVerterVersion: switchVersion,
   }) as Store;
