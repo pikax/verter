@@ -37,6 +37,60 @@ export interface VerterCompileResult {
   totalDurationMs: number;
 }
 
+interface HostCompileProfile {
+  filename?: string;
+  isProduction?: boolean;
+  ssr?: boolean;
+  hmrStrategy?: "none" | "vite" | "webpack";
+  stripTs?: boolean;
+  sourceMap?: boolean;
+}
+
+interface HostVirtualNodeKind {
+  kind: "main" | "script" | "template" | "style" | "custom";
+  index?: number;
+}
+
+interface HostDiagnostic {
+  severity: "error" | "warning" | "info";
+  code: string;
+  message: string;
+  spanStart?: number;
+  spanEnd?: number;
+}
+
+interface HostDiagnosticsSnapshot {
+  diagnostics: HostDiagnostic[];
+  hasErrors: boolean;
+}
+
+interface HostUpdateResult {
+  diagnostics: HostDiagnosticsSnapshot;
+}
+
+interface HostVirtualFileResponse {
+  code: string;
+  sourceMap?: string;
+  diagnostics: HostDiagnosticsSnapshot;
+}
+
+interface HostBinding {
+  upsert(request: {
+    inputId: string;
+    source: string;
+    fileKind: "vue";
+    aliases?: string[];
+    compileProfile?: HostCompileProfile;
+  }): HostUpdateResult;
+  getVirtualFile(query: {
+    rawId?: string;
+    canonicalId?: string;
+    nodeKind?: HostVirtualNodeKind;
+    compileProfile?: HostCompileProfile;
+  }): HostVirtualFileResponse;
+  listVirtualFiles(canonicalId: string): HostVirtualNodeKind[];
+}
+
 /** Convert structured WASM diagnostics to display strings. */
 export function formatDiagnostics(diagnostics: WasmDiagnostic[] | undefined): string[] {
   if (!diagnostics || diagnostics.length === 0) return [];
@@ -47,8 +101,66 @@ export function formatDiagnostics(diagnostics: WasmDiagnostic[] | undefined): st
 }
 
 let wasmCompileVerter: ((input: string, options?: unknown) => VerterCompileResult) | null = null;
+let wasmHost: HostBinding | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
+
+const useHostPipeline =
+  typeof window !== "undefined" && new URLSearchParams(window.location.search).get("host") === "1";
+
+function toHostProfile(file: File, options?: CompilerOptions): HostCompileProfile {
+  return {
+    filename: file.filename,
+    isProduction: options?.isProduction ?? false,
+    ssr: options?.ssr ?? false,
+    hmrStrategy: "none",
+    stripTs: true,
+    sourceMap: true,
+  };
+}
+
+function formatHostDiagnostics(diagnostics: HostDiagnostic[] | undefined): string[] {
+  if (!diagnostics || diagnostics.length === 0) return [];
+  return diagnostics.map((d) => {
+    const loc = d.spanStart != null ? ` (${d.spanStart}:${d.spanEnd ?? d.spanStart})` : "";
+    return `[${d.severity}] ${d.message}${loc}`;
+  });
+}
+
+function configureHost(wasmModule: WasmModule): void {
+  const hostCtor = wasmModule.VerterHost;
+  if (!hostCtor) {
+    wasmHost = null;
+    return;
+  }
+  try {
+    wasmHost = new hostCtor({
+      devMode: true,
+      compileErrorPolicy: "devServeLastKnownGood",
+      maxProfilesPerFile: 8,
+    }) as HostBinding;
+  } catch {
+    wasmHost = null;
+  }
+}
+
+function collectUniqueHostDiagnostics(
+  snapshots: Array<HostDiagnosticsSnapshot | undefined>,
+): HostDiagnostic[] {
+  const seen = new Set<string>();
+  const diagnostics: HostDiagnostic[] = [];
+  for (const snapshot of snapshots) {
+    const list = snapshot?.diagnostics ?? [];
+    for (const d of list) {
+      const key = `${d.severity}|${d.code}|${d.message}|${d.spanStart ?? -1}|${d.spanEnd ?? -1}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        diagnostics.push(d);
+      }
+    }
+  }
+  return diagnostics;
+}
 
 export async function initCompilers(): Promise<void> {
   if (initialized) return;
@@ -57,6 +169,7 @@ export async function initCompilers(): Promise<void> {
   initPromise = (async () => {
     const wasmModule = await loadLocalWasm();
     wasmCompileVerter = (wasmModule.compileVerter as typeof wasmCompileVerter) ?? null;
+    configureHost(wasmModule);
     initialized = true;
   })();
 
@@ -81,6 +194,7 @@ export async function switchWasmVersion(entry: VersionEntry): Promise<void> {
   }
 
   wasmCompileVerter = (wasmModule.compileVerter as typeof wasmCompileVerter) ?? null;
+  configureHost(wasmModule);
 }
 
 /**
@@ -146,6 +260,82 @@ export function assembleVerterResult(result: VerterCompileResult): string {
   return parts.join("\n");
 }
 
+function compileVueWithHost(file: File, options: CompilerOptions | undefined): CompileTiming | null {
+  if (!wasmHost || !useHostPipeline) return null;
+
+  const start = performance.now();
+  const profile = toHostProfile(file, options);
+
+  const upsertResult = wasmHost.upsert({
+    inputId: file.filename,
+    source: file.code,
+    fileKind: "vue",
+    aliases: [],
+    compileProfile: profile,
+  });
+
+  const nodes = wasmHost.listVirtualFiles(file.filename);
+  const nodeKinds = new Set(nodes.map((node) => node.kind));
+  const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [upsertResult.diagnostics];
+
+  let assembledJs = "";
+  let templateSourceMap = "";
+
+  if (nodeKinds.has("script")) {
+    const script = wasmHost.getVirtualFile({
+      rawId: `${file.filename}?vue&type=script`,
+      compileProfile: profile,
+    });
+    diagnosticsSnapshots.push(script.diagnostics);
+    assembledJs += script.code;
+  }
+
+  if (nodeKinds.has("template")) {
+    const template = wasmHost.getVirtualFile({
+      rawId: `${file.filename}?vue&type=template`,
+      compileProfile: profile,
+    });
+    diagnosticsSnapshots.push(template.diagnostics);
+    if (assembledJs) assembledJs += "\n";
+    assembledJs += template.code;
+    templateSourceMap = template.sourceMap ?? "";
+  }
+
+  if (!assembledJs) {
+    const main = wasmHost.getVirtualFile({
+      rawId: file.filename,
+      compileProfile: profile,
+    });
+    diagnosticsSnapshots.push(main.diagnostics);
+    assembledJs = main.code;
+  }
+
+  const styleIndices = nodes
+    .filter((node): node is HostVirtualNodeKind => node.kind === "style" && node.index != null)
+    .map((node) => node.index as number)
+    .sort((a, b) => a - b);
+
+  const styleChunks: string[] = [];
+  for (const index of styleIndices) {
+    const style = wasmHost.getVirtualFile({
+      rawId: `${file.filename}?vue&type=style&index=${index}`,
+      compileProfile: profile,
+    });
+    diagnosticsSnapshots.push(style.diagnostics);
+    styleChunks.push(style.code);
+  }
+
+  file.compiled.js = mergeRenderIntoComponent(assembledJs);
+  file.compiled.css = styleChunks.join("\n");
+  file.compiled.verterSourceMap = templateSourceMap;
+  file.compiled.errors = formatHostDiagnostics(collectUniqueHostDiagnostics(diagnosticsSnapshots));
+
+  return {
+    verterNew: null,
+    verterNewJs: performance.now() - start,
+  };
+}
+
 export async function compileFile(
   file: File,
   options?: CompilerOptions,
@@ -154,6 +344,11 @@ export async function compileFile(
   const timing: CompileTiming = { verterNew: null, verterNewJs: null };
 
   if (file.filename.endsWith(".vue")) {
+    const hostTiming = compileVueWithHost(file, options);
+    if (hostTiming) {
+      return hostTiming;
+    }
+
     try {
       if (!wasmCompileVerter) throw new Error("compileVerter WASM binding not available");
 

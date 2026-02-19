@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use napi::bindgen_prelude::*;
 use napi::{Error, Status};
 use napi_derive::napi;
 use verter_core::builder::codegen::{compile as core_compile, CodegenOptions as CoreOptions};
 use verter_core::strip_types::strip_types as core_strip_types;
+use verter_host as host;
 
 fn with_input_str<T>(input: Either<String, Buffer>, f: impl FnOnce(&str) -> T) -> Result<T> {
     match input {
@@ -593,4 +596,502 @@ pub fn strip_types(source: Either<String, Buffer>) -> Result<StripTypesResult> {
         code: result.code,
         errors: result.errors,
     })
+}
+
+// =============================================================================
+// VerterHost (in-memory virtual file host)
+// =============================================================================
+
+#[napi(object)]
+#[derive(Default)]
+pub struct HostConfig {
+    pub dev_mode: Option<bool>,
+    pub compile_error_policy: Option<String>,
+    pub lsp_scheme: Option<String>,
+    pub max_profiles_per_file: Option<u32>,
+}
+
+#[napi(object)]
+#[derive(Default, Clone)]
+pub struct HostCompileProfile {
+    pub filename: Option<String>,
+    pub is_production: Option<bool>,
+    pub ssr: Option<bool>,
+    pub hmr_strategy: Option<String>,
+    pub component_id: Option<String>,
+    pub delimiters: Option<Vec<String>>,
+    pub custom_elements: Option<Vec<String>>,
+    pub comments: Option<bool>,
+    pub runtime_module_name: Option<String>,
+    pub force_vapor: Option<bool>,
+    pub strip_ts: Option<bool>,
+    pub source_map: Option<bool>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct HostVirtualNodeKind {
+    pub kind: String,
+    pub index: Option<u32>,
+}
+
+#[napi(object)]
+pub struct HostSliceChanges {
+    pub script_changed: bool,
+    pub template_changed: bool,
+    pub style_indices_changed: Vec<u32>,
+    pub custom_indices_changed: Vec<u32>,
+    pub structure_changed: bool,
+    pub descriptor_changed: bool,
+}
+
+#[napi(object)]
+pub struct HostDiagnostic {
+    pub severity: String,
+    pub code: String,
+    pub message: String,
+    pub span_start: Option<u32>,
+    pub span_end: Option<u32>,
+}
+
+#[napi(object)]
+pub struct HostDiagnosticsSnapshot {
+    pub diagnostics: Vec<HostDiagnostic>,
+    pub has_errors: bool,
+}
+
+#[napi(object)]
+pub struct HostExternalSourceRequest {
+    pub owner_canonical_id: String,
+    pub block_kind: String,
+    pub index: u32,
+    pub specifier: String,
+    pub resolved_canonical_id: String,
+}
+
+#[napi(object)]
+pub struct HostUpdateResult {
+    pub canonical_id: String,
+    pub changed: bool,
+    pub slice_changes: HostSliceChanges,
+    pub changed_virtual_nodes: Vec<HostVirtualNodeKind>,
+    pub removed_virtual_nodes: Vec<HostVirtualNodeKind>,
+    pub changed_virtual_ids: Vec<String>,
+    pub removed_virtual_ids: Vec<String>,
+    pub changed_lsp_ids: Vec<String>,
+    pub removed_lsp_ids: Vec<String>,
+    pub diagnostics: HostDiagnosticsSnapshot,
+    pub external_source_requests: Vec<HostExternalSourceRequest>,
+}
+
+#[napi(object)]
+pub struct HostResolvedId {
+    pub canonical_id: String,
+    pub node_kind: HostVirtualNodeKind,
+    pub exists_in_host: bool,
+    pub bundler_id: String,
+    pub lsp_id: String,
+}
+
+#[napi(object)]
+pub struct HostVirtualMeta {
+    pub scope_id: Option<String>,
+    pub block_type: Option<String>,
+    pub style_index: Option<u32>,
+    pub custom_index: Option<u32>,
+}
+
+#[napi(object)]
+pub struct HostVirtualFileResponse {
+    pub id: String,
+    pub code: String,
+    pub source_map: Option<String>,
+    pub lang: Option<String>,
+    pub stale: bool,
+    pub diagnostics: HostDiagnosticsSnapshot,
+    pub meta: HostVirtualMeta,
+}
+
+#[napi(object)]
+pub struct HostUpsertRequest {
+    pub canonical_id: Option<String>,
+    pub input_id: String,
+    pub source: String,
+    pub file_kind: Option<String>,
+    pub aliases: Option<Vec<String>>,
+    pub compile_profile: Option<HostCompileProfile>,
+}
+
+#[napi(object)]
+pub struct HostStyleOverrideEntry {
+    pub index: u32,
+    pub code: String,
+    pub source_map: Option<String>,
+}
+
+#[napi(object)]
+pub struct HostStyleOverrideRequest {
+    pub canonical_id: String,
+    pub compile_profile: Option<HostCompileProfile>,
+    pub overrides: Vec<HostStyleOverrideEntry>,
+}
+
+#[napi(object)]
+pub struct HostVirtualQuery {
+    pub raw_id: Option<String>,
+    pub canonical_id: Option<String>,
+    pub node_kind: Option<HostVirtualNodeKind>,
+    pub compile_profile: Option<HostCompileProfile>,
+}
+
+#[napi(object)]
+pub struct HostRemoveResult {
+    pub canonical_id: String,
+}
+
+fn to_host_config(input: Option<HostConfig>) -> host::HostConfig {
+    let mut out = host::HostConfig::default();
+    if let Some(input) = input {
+        if let Some(dev_mode) = input.dev_mode {
+            out.dev_mode = dev_mode;
+        }
+        if let Some(policy) = input.compile_error_policy {
+            out.compile_error_policy = if policy.eq_ignore_ascii_case("strict")
+                || policy.eq_ignore_ascii_case("strict_error")
+            {
+                host::CompileErrorPolicy::StrictError
+            } else {
+                host::CompileErrorPolicy::DevServeLastKnownGood
+            };
+        }
+        if let Some(lsp_scheme) = input.lsp_scheme {
+            out.lsp_scheme = lsp_scheme;
+        }
+        if let Some(max_profiles) = input.max_profiles_per_file {
+            out.max_profiles_per_file = max_profiles as usize;
+        }
+    }
+    out
+}
+
+fn to_host_profile(input: Option<HostCompileProfile>) -> host::CompileProfile {
+    let mut out = host::CompileProfile::default();
+    if let Some(input) = input {
+        out.filename = input.filename;
+        if let Some(is_production) = input.is_production {
+            out.is_production = is_production;
+        }
+        if let Some(ssr) = input.ssr {
+            out.ssr = ssr;
+        }
+        if let Some(hmr_strategy) = input.hmr_strategy {
+            out.hmr_strategy = if hmr_strategy.eq_ignore_ascii_case("vite") {
+                host::HmrStrategy::Vite
+            } else if hmr_strategy.eq_ignore_ascii_case("webpack") {
+                host::HmrStrategy::Webpack
+            } else {
+                host::HmrStrategy::None
+            };
+        }
+        out.component_id = input.component_id;
+        out.delimiters = input.delimiters.and_then(|d| {
+            if d.len() == 2 {
+                Some((d[0].clone(), d[1].clone()))
+            } else {
+                None
+            }
+        });
+        out.custom_elements = input.custom_elements;
+        out.comments = input.comments;
+        if let Some(runtime) = input.runtime_module_name {
+            out.runtime_module_name = Some(runtime);
+        }
+        if let Some(force_vapor) = input.force_vapor {
+            out.force_vapor = force_vapor;
+        }
+        if let Some(strip_ts) = input.strip_ts {
+            out.strip_ts = strip_ts;
+        }
+        if let Some(source_map) = input.source_map {
+            out.source_map = source_map;
+        }
+    }
+    out
+}
+
+fn to_host_file_kind(input: Option<&str>) -> Result<host::FileKind> {
+    match input.unwrap_or("vue").to_ascii_lowercase().as_str() {
+        "vue" | "sfc" | "vue_sfc" => Ok(host::FileKind::VueSfc),
+        "non_sfc" | "text" | "file" => Ok(host::FileKind::NonSfc),
+        other => Err(Error::new(
+            Status::InvalidArg,
+            format!("invalid file_kind '{}'", other),
+        )),
+    }
+}
+
+fn to_host_node_kind(input: HostVirtualNodeKind) -> Result<host::VirtualNodeKind> {
+    match input.kind.to_ascii_lowercase().as_str() {
+        "main" => Ok(host::VirtualNodeKind::Main),
+        "script" => Ok(host::VirtualNodeKind::Script),
+        "template" => Ok(host::VirtualNodeKind::Template),
+        "style" => Ok(host::VirtualNodeKind::Style {
+            index: input.index.unwrap_or(0) as usize,
+        }),
+        "custom" => Ok(host::VirtualNodeKind::Custom {
+            index: input.index.unwrap_or(0) as usize,
+        }),
+        other => Err(Error::new(
+            Status::InvalidArg,
+            format!("invalid virtual node kind '{}'", other),
+        )),
+    }
+}
+
+fn from_host_node_kind(input: &host::VirtualNodeKind) -> HostVirtualNodeKind {
+    match input {
+        host::VirtualNodeKind::Main => HostVirtualNodeKind {
+            kind: "main".to_string(),
+            index: None,
+        },
+        host::VirtualNodeKind::Script => HostVirtualNodeKind {
+            kind: "script".to_string(),
+            index: None,
+        },
+        host::VirtualNodeKind::Template => HostVirtualNodeKind {
+            kind: "template".to_string(),
+            index: None,
+        },
+        host::VirtualNodeKind::Style { index } => HostVirtualNodeKind {
+            kind: "style".to_string(),
+            index: Some(*index as u32),
+        },
+        host::VirtualNodeKind::Custom { index } => HostVirtualNodeKind {
+            kind: "custom".to_string(),
+            index: Some(*index as u32),
+        },
+    }
+}
+
+fn from_host_diagnostics(input: &host::DiagnosticsSnapshot) -> HostDiagnosticsSnapshot {
+    HostDiagnosticsSnapshot {
+        diagnostics: input
+            .diagnostics
+            .iter()
+            .map(|d| HostDiagnostic {
+                severity: match d.severity {
+                    host::HostSeverity::Error => "error".to_string(),
+                    host::HostSeverity::Warning => "warning".to_string(),
+                    host::HostSeverity::Info => "info".to_string(),
+                },
+                code: d.code.clone(),
+                message: d.message.clone(),
+                span_start: d.span_start,
+                span_end: d.span_end,
+            })
+            .collect(),
+        has_errors: input.has_errors,
+    }
+}
+
+fn from_host_update(input: host::HostUpdateResult) -> HostUpdateResult {
+    HostUpdateResult {
+        canonical_id: input.canonical_id,
+        changed: input.changed,
+        slice_changes: HostSliceChanges {
+            script_changed: input.slice_changes.script_changed,
+            template_changed: input.slice_changes.template_changed,
+            style_indices_changed: input
+                .slice_changes
+                .style_indices_changed
+                .into_iter()
+                .map(|i| i as u32)
+                .collect(),
+            custom_indices_changed: input
+                .slice_changes
+                .custom_indices_changed
+                .into_iter()
+                .map(|i| i as u32)
+                .collect(),
+            structure_changed: input.slice_changes.structure_changed,
+            descriptor_changed: input.slice_changes.descriptor_changed,
+        },
+        changed_virtual_nodes: input
+            .changed_virtual_nodes
+            .iter()
+            .map(from_host_node_kind)
+            .collect(),
+        removed_virtual_nodes: input
+            .removed_virtual_nodes
+            .iter()
+            .map(from_host_node_kind)
+            .collect(),
+        changed_virtual_ids: input.changed_virtual_ids,
+        removed_virtual_ids: input.removed_virtual_ids,
+        changed_lsp_ids: input.changed_lsp_ids,
+        removed_lsp_ids: input.removed_lsp_ids,
+        diagnostics: from_host_diagnostics(&input.diagnostics),
+        external_source_requests: input
+            .external_source_requests
+            .into_iter()
+            .map(|req| HostExternalSourceRequest {
+                owner_canonical_id: req.owner_canonical_id,
+                block_kind: match req.block_kind {
+                    host::ExternalBlockKind::Script => "script".to_string(),
+                    host::ExternalBlockKind::Template => "template".to_string(),
+                    host::ExternalBlockKind::Style => "style".to_string(),
+                    host::ExternalBlockKind::Custom => "custom".to_string(),
+                },
+                index: req.index as u32,
+                specifier: req.specifier,
+                resolved_canonical_id: req.resolved_canonical_id,
+            })
+            .collect(),
+    }
+}
+
+fn from_host_virtual_file(input: host::VirtualFileResponse) -> HostVirtualFileResponse {
+    HostVirtualFileResponse {
+        id: input.id,
+        code: input.code.to_string(),
+        source_map: input.source_map.as_ref().map(|s| s.to_string()),
+        lang: input.lang,
+        stale: input.stale,
+        diagnostics: from_host_diagnostics(&input.diagnostics),
+        meta: HostVirtualMeta {
+            scope_id: input.meta.scope_id,
+            block_type: input.meta.block_type,
+            style_index: input.meta.style_index.map(|i| i as u32),
+            custom_index: input.meta.custom_index.map(|i| i as u32),
+        },
+    }
+}
+
+fn host_error(err: host::HostError) -> Error {
+    match err {
+        host::HostError::MissingSource { canonical_id } => Error::new(
+            Status::GenericFailure,
+            format!("HostError::MissingSource: {}", canonical_id),
+        ),
+        host::HostError::InvalidQuery => {
+            Error::new(Status::InvalidArg, "HostError::InvalidQuery".to_string())
+        }
+        host::HostError::MissingVirtualNode { canonical_id } => Error::new(
+            Status::GenericFailure,
+            format!("HostError::MissingVirtualNode: {}", canonical_id),
+        ),
+        host::HostError::CompileError { diagnostics } => {
+            let summary = diagnostics
+                .diagnostics
+                .iter()
+                .map(|d| format!("[{}] {}", d.code, d.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Error::new(
+                Status::GenericFailure,
+                format!("HostError::CompileError: {}", summary),
+            )
+        }
+    }
+}
+
+#[napi(js_name = "VerterHost")]
+pub struct NapiVerterHost {
+    inner: host::VerterHost,
+}
+
+#[napi]
+impl NapiVerterHost {
+    #[napi(constructor)]
+    pub fn new(config: Option<HostConfig>) -> Self {
+        Self {
+            inner: host::VerterHost::new(to_host_config(config)),
+        }
+    }
+
+    #[napi]
+    pub fn resolve(&self, raw_id: String) -> Option<HostResolvedId> {
+        self.inner.resolve(&raw_id).map(|resolved| HostResolvedId {
+            canonical_id: resolved.canonical_id,
+            node_kind: from_host_node_kind(&resolved.node_kind),
+            exists_in_host: resolved.exists_in_host,
+            bundler_id: resolved.bundler_id,
+            lsp_id: resolved.lsp_id,
+        })
+    }
+
+    #[napi]
+    pub fn upsert(&self, request: HostUpsertRequest) -> Result<HostUpdateResult> {
+        let req = host::UpsertRequest {
+            canonical_id: request.canonical_id,
+            input_id: request.input_id,
+            source: Arc::from(request.source),
+            file_kind: to_host_file_kind(request.file_kind.as_deref())?,
+            aliases: request.aliases.unwrap_or_default(),
+            compile_profile: to_host_profile(request.compile_profile),
+        };
+        self.inner
+            .upsert(req)
+            .map(from_host_update)
+            .map_err(host_error)
+    }
+
+    #[napi(js_name = "applyStyleOverrides")]
+    pub fn apply_style_overrides(
+        &self,
+        request: HostStyleOverrideRequest,
+    ) -> Result<HostUpdateResult> {
+        let req = host::StyleOverrideRequest {
+            canonical_id: request.canonical_id,
+            compile_profile: to_host_profile(request.compile_profile),
+            overrides: request
+                .overrides
+                .into_iter()
+                .map(|entry| host::StyleOverrideEntry {
+                    index: entry.index as usize,
+                    code: Arc::from(entry.code),
+                    source_map: entry.source_map.map(Arc::from),
+                })
+                .collect(),
+        };
+
+        self.inner
+            .apply_style_overrides(req)
+            .map(from_host_update)
+            .map_err(host_error)
+    }
+
+    #[napi(js_name = "getVirtualFile")]
+    pub fn get_virtual_file(&self, query: HostVirtualQuery) -> Result<HostVirtualFileResponse> {
+        let node_kind = query.node_kind.map(to_host_node_kind).transpose()?;
+        let q = host::VirtualQuery {
+            raw_id: query.raw_id,
+            canonical_id: query.canonical_id,
+            node_kind,
+            compile_profile: to_host_profile(query.compile_profile),
+        };
+
+        self.inner
+            .get_virtual_file(q)
+            .map(from_host_virtual_file)
+            .map_err(host_error)
+    }
+
+    #[napi(js_name = "listVirtualFiles")]
+    pub fn list_virtual_files(&self, canonical_id: String) -> Vec<HostVirtualNodeKind> {
+        self.inner
+            .list_virtual_files(&canonical_id)
+            .iter()
+            .map(from_host_node_kind)
+            .collect()
+    }
+
+    #[napi]
+    pub fn remove(&self, canonical_or_alias: String) -> Option<HostRemoveResult> {
+        self.inner
+            .remove(&canonical_or_alias)
+            .map(|r| HostRemoveResult {
+                canonical_id: r.canonical_id,
+            })
+    }
 }

@@ -515,6 +515,7 @@ pub fn process_element_leave<'alloc>(
             end: tag_open.end,
             kind: ChildKind::Element,
             condition: None,
+            condition_prefix: None,
         };
     }
 
@@ -563,6 +564,7 @@ pub fn process_element_leave<'alloc>(
         end: tag_close.end,
         kind: ChildKind::Element,
         condition: None,
+        condition_prefix: None,
     }
 }
 

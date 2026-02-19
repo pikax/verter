@@ -68,18 +68,169 @@ export interface StripTypesResult {
   errors: string[];
 }
 
+export interface HostConfig {
+  devMode?: boolean;
+  compileErrorPolicy?: "strict" | "strictError" | "devServeLastKnownGood";
+  lspScheme?: string;
+  maxProfilesPerFile?: number;
+}
+
+export interface HostCompileProfile {
+  filename?: string;
+  isProduction?: boolean;
+  ssr?: boolean;
+  hmrStrategy?: "none" | "vite" | "webpack";
+  componentId?: string;
+  delimiters?: [string, string];
+  customElements?: string[];
+  comments?: boolean;
+  runtimeModuleName?: string;
+  forceVapor?: boolean;
+  stripTs?: boolean;
+  sourceMap?: boolean;
+}
+
+export interface HostVirtualNodeKind {
+  kind: "main" | "script" | "template" | "style" | "custom";
+  index?: number;
+}
+
+export interface HostSliceChanges {
+  scriptChanged: boolean;
+  templateChanged: boolean;
+  styleIndicesChanged: number[];
+  customIndicesChanged: number[];
+  structureChanged: boolean;
+  descriptorChanged: boolean;
+}
+
+export interface HostDiagnostic {
+  severity: "error" | "warning" | "info";
+  code: string;
+  message: string;
+  spanStart?: number;
+  spanEnd?: number;
+}
+
+export interface HostDiagnosticsSnapshot {
+  diagnostics: HostDiagnostic[];
+  hasErrors: boolean;
+}
+
+export interface HostExternalSourceRequest {
+  ownerCanonicalId: string;
+  blockKind: "script" | "template" | "style" | "custom";
+  index: number;
+  specifier: string;
+  resolvedCanonicalId: string;
+}
+
+export interface HostUpdateResult {
+  canonicalId: string;
+  changed: boolean;
+  sliceChanges: HostSliceChanges;
+  changedVirtualNodes: HostVirtualNodeKind[];
+  removedVirtualNodes: HostVirtualNodeKind[];
+  changedVirtualIds: string[];
+  removedVirtualIds: string[];
+  changedLspIds: string[];
+  removedLspIds: string[];
+  diagnostics: HostDiagnosticsSnapshot;
+  externalSourceRequests: HostExternalSourceRequest[];
+}
+
+export interface HostResolvedId {
+  canonicalId: string;
+  nodeKind: HostVirtualNodeKind;
+  existsInHost: boolean;
+  bundlerId: string;
+  lspId: string;
+}
+
+export interface HostVirtualMeta {
+  scopeId?: string;
+  blockType?: string;
+  styleIndex?: number;
+  customIndex?: number;
+}
+
+export interface HostVirtualFileResponse {
+  id: string;
+  code: string;
+  sourceMap?: string;
+  lang?: string;
+  stale: boolean;
+  diagnostics: HostDiagnosticsSnapshot;
+  meta: HostVirtualMeta;
+}
+
+export interface HostUpsertRequest {
+  canonicalId?: string;
+  inputId: string;
+  source: string;
+  fileKind?: "vue" | "sfc" | "vue_sfc" | "non_sfc" | "text" | "file";
+  aliases?: string[];
+  compileProfile?: HostCompileProfile;
+}
+
+export interface HostStyleOverrideEntry {
+  index: number;
+  code: string;
+  sourceMap?: string;
+}
+
+export interface HostStyleOverrideRequest {
+  canonicalId: string;
+  compileProfile?: HostCompileProfile;
+  overrides: HostStyleOverrideEntry[];
+}
+
+export interface HostVirtualQuery {
+  rawId?: string;
+  canonicalId?: string;
+  nodeKind?: HostVirtualNodeKind;
+  compileProfile?: HostCompileProfile;
+}
+
+export interface HostRemoveResult {
+  canonicalId: string;
+}
+
 export type WasmInput = string | Uint8Array;
 
 type WasmCompileFn = (input: string, options?: unknown) => CodegenResult;
 type WasmCompileBytesFn = (input: Uint8Array, options?: unknown) => CodegenResult;
 type WasmStripTypesFn = (source: string) => StripTypesResult;
 type WasmInitFn = () => Promise<unknown>;
+type WasmHostResolveFn = (rawId: string) => HostResolvedId | null;
+type WasmHostUpsertFn = (request: HostUpsertRequest) => HostUpdateResult;
+type WasmHostApplyOverridesFn = (request: HostStyleOverrideRequest) => HostUpdateResult;
+type WasmHostGetVirtualFileFn = (query: HostVirtualQuery) => HostVirtualFileResponse;
+type WasmHostListVirtualFilesFn = (canonicalId: string) => HostVirtualNodeKind[];
+type WasmHostRemoveFn = (canonicalOrAlias: string) => HostRemoveResult | null;
+interface WasmHostBinding {
+  resolve: WasmHostResolveFn;
+  upsert: WasmHostUpsertFn;
+  applyStyleOverrides: WasmHostApplyOverridesFn;
+  getVirtualFile: WasmHostGetVirtualFileFn;
+  listVirtualFiles: WasmHostListVirtualFilesFn;
+  remove: WasmHostRemoveFn;
+}
+type WasmHostCtor = new (config?: HostConfig) => WasmHostBinding;
 
 let wasmCompile: WasmCompileFn | null = null;
 let wasmCompileBytes: WasmCompileBytesFn | null = null;
 let wasmStripTypes: WasmStripTypesFn | null = null;
+let wasmHostCtor: WasmHostCtor | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
+
+function getOptionalExport<T>(mod: object, key: string): T | null {
+  if (Object.prototype.hasOwnProperty.call(mod, key)) {
+    return (mod as Record<string, unknown>)[key] as T;
+  }
+  return null;
+}
 
 function decodeUtf8(input: Uint8Array): string {
   if (typeof TextDecoder === "undefined") {
@@ -102,8 +253,9 @@ export async function initialize(): Promise<void> {
     const wasm = await import("../wasm/verter_wasm.js");
     await (wasm.default as WasmInitFn)();
     wasmCompile = wasm.compile as WasmCompileFn;
-    wasmCompileBytes = (wasm.compileBytes as WasmCompileBytesFn) ?? null;
-    wasmStripTypes = (wasm.stripTypes as WasmStripTypesFn) ?? null;
+    wasmCompileBytes = getOptionalExport<WasmCompileBytesFn>(wasm, "compileBytes");
+    wasmStripTypes = getOptionalExport<WasmStripTypesFn>(wasm, "stripTypes");
+    wasmHostCtor = getOptionalExport<WasmHostCtor>(wasm, "VerterHost");
     initialized = true;
   })();
 
@@ -198,3 +350,49 @@ export function stripTypesSync(source: string): StripTypesResult {
 
   return wasmStripTypes(source);
 }
+
+/**
+ * In-memory host facade exposed by the WASM runtime.
+ * Requires initialize() (or createHost()) before construction.
+ */
+export class Host {
+  private readonly inner: WasmHostBinding;
+
+  constructor(config?: HostConfig) {
+    if (!initialized || !wasmHostCtor) {
+      throw new Error("WASM host not initialized. Call initialize() first.");
+    }
+    this.inner = new wasmHostCtor(config);
+  }
+
+  resolve(rawId: string): HostResolvedId | null {
+    return this.inner.resolve(rawId);
+  }
+
+  upsert(request: HostUpsertRequest): HostUpdateResult {
+    return this.inner.upsert(request);
+  }
+
+  applyStyleOverrides(request: HostStyleOverrideRequest): HostUpdateResult {
+    return this.inner.applyStyleOverrides(request);
+  }
+
+  getVirtualFile(query: HostVirtualQuery): HostVirtualFileResponse {
+    return this.inner.getVirtualFile(query);
+  }
+
+  listVirtualFiles(canonicalId: string): HostVirtualNodeKind[] {
+    return this.inner.listVirtualFiles(canonicalId);
+  }
+
+  remove(canonicalOrAlias: string): HostRemoveResult | null {
+    return this.inner.remove(canonicalOrAlias);
+  }
+}
+
+export async function createHost(config?: HostConfig): Promise<Host> {
+  await initialize();
+  return new Host(config);
+}
+
+export { Host as VerterHost };

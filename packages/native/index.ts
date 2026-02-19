@@ -447,4 +447,146 @@ export interface StripTypesResult {
  */
 export declare function stripTypes(source: InputBuffer): StripTypesResult;
 
+// =============================================================================
+// VerterHost (in-memory virtual file host)
+// =============================================================================
+
+export interface HostConfig {
+  dev_mode?: boolean;
+  compile_error_policy?: "strict" | "strict_error" | "dev" | "dev_serve_last_known_good";
+  lsp_scheme?: string;
+  max_profiles_per_file?: number;
+}
+
+export interface HostCompileProfile {
+  filename?: string;
+  is_production?: boolean;
+  ssr?: boolean;
+  hmr_strategy?: "none" | "vite" | "webpack";
+  component_id?: string;
+  delimiters?: [string, string];
+  custom_elements?: string[];
+  comments?: boolean;
+  runtime_module_name?: string;
+  force_vapor?: boolean;
+  strip_ts?: boolean;
+  source_map?: boolean;
+}
+
+export interface HostVirtualNodeKind {
+  kind: "main" | "script" | "template" | "style" | "custom";
+  index?: number;
+}
+
+export interface HostSliceChanges {
+  script_changed: boolean;
+  template_changed: boolean;
+  style_indices_changed: number[];
+  custom_indices_changed: number[];
+  structure_changed: boolean;
+  descriptor_changed: boolean;
+}
+
+export interface HostDiagnostic {
+  severity: "error" | "warning" | "info";
+  code: string;
+  message: string;
+  span_start?: number;
+  span_end?: number;
+}
+
+export interface HostDiagnosticsSnapshot {
+  diagnostics: HostDiagnostic[];
+  has_errors: boolean;
+}
+
+export interface HostExternalSourceRequest {
+  owner_canonical_id: string;
+  block_kind: "script" | "template" | "style" | "custom";
+  index: number;
+  specifier: string;
+  resolved_canonical_id: string;
+}
+
+export interface HostUpdateResult {
+  canonical_id: string;
+  changed: boolean;
+  slice_changes: HostSliceChanges;
+  changed_virtual_nodes: HostVirtualNodeKind[];
+  removed_virtual_nodes: HostVirtualNodeKind[];
+  changed_virtual_ids: string[];
+  removed_virtual_ids: string[];
+  changed_lsp_ids: string[];
+  removed_lsp_ids: string[];
+  diagnostics: HostDiagnosticsSnapshot;
+  external_source_requests: HostExternalSourceRequest[];
+}
+
+export interface HostResolvedId {
+  canonical_id: string;
+  node_kind: HostVirtualNodeKind;
+  exists_in_host: boolean;
+  bundler_id: string;
+  lsp_id: string;
+}
+
+export interface HostVirtualMeta {
+  scope_id?: string;
+  block_type?: string;
+  style_index?: number;
+  custom_index?: number;
+}
+
+export interface HostVirtualFileResponse {
+  id: string;
+  code: string;
+  source_map?: string;
+  lang?: string;
+  stale: boolean;
+  diagnostics: HostDiagnosticsSnapshot;
+  meta: HostVirtualMeta;
+}
+
+export interface HostUpsertRequest {
+  canonical_id?: string;
+  input_id: string;
+  source: string;
+  file_kind?: "vue" | "sfc" | "vue_sfc" | "non_sfc" | "text" | "file";
+  aliases?: string[];
+  compile_profile?: HostCompileProfile;
+}
+
+export interface HostStyleOverrideEntry {
+  index: number;
+  code: string;
+  source_map?: string;
+}
+
+export interface HostStyleOverrideRequest {
+  canonical_id: string;
+  compile_profile?: HostCompileProfile;
+  overrides: HostStyleOverrideEntry[];
+}
+
+export interface HostVirtualQuery {
+  raw_id?: string;
+  canonical_id?: string;
+  node_kind?: HostVirtualNodeKind;
+  compile_profile?: HostCompileProfile;
+}
+
+export interface HostRemoveResult {
+  canonical_id: string;
+}
+
+export declare class VerterHost {
+  constructor(config?: HostConfig);
+  resolve(raw_id: string): HostResolvedId | null;
+  upsert(request: HostUpsertRequest): HostUpdateResult;
+  applyStyleOverrides(request: HostStyleOverrideRequest): HostUpdateResult;
+  getVirtualFile(query: HostVirtualQuery): HostVirtualFileResponse;
+  listVirtualFiles(canonical_id: string): HostVirtualNodeKind[];
+  remove(canonical_or_alias: string): HostRemoveResult | null;
+}
+
 export {};

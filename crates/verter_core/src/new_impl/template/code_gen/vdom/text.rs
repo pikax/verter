@@ -136,6 +136,7 @@ pub fn process_text<'alloc>(
         end: text.end,
         kind,
         condition: None,
+        condition_prefix: None,
     })
 }
 

@@ -122,6 +122,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                             end: text_node.end,
                             kind,
                             condition: None,
+                            condition_prefix: None,
                         });
                     }
                 }
@@ -131,6 +132,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         end: interp.end,
                         kind: ChildKind::Interpolation,
                         condition: None,
+                        condition_prefix: None,
                     });
                 }
                 AstNodeKind::Element(el) => {
@@ -150,6 +152,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         end,
                         kind: ChildKind::Element,
                         condition,
+                        condition_prefix: None,
                     });
                 }
                 AstNodeKind::Comment(comment) => {
@@ -159,6 +162,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                             end: comment.end,
                             kind: ChildKind::Comment,
                             condition: None,
+                            condition_prefix: None,
                         });
                     }
                 }

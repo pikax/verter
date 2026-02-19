@@ -1,0 +1,19 @@
+[package]
+name = "verter_host"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+host_metrics = []
+single_threaded = []
+
+[dependencies]
+verter_core = { path = "../verter_core" }
+oxc_allocator = "0.112.0"
+sha2 = "0.10"
+smallvec = "1.13"
+thiserror = "2"
+serde = { version = "1.0", features = ["derive"], optional = true }
+

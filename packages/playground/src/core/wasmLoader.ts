@@ -21,6 +21,14 @@ export interface WasmModule {
   compileBytes?: (input: Uint8Array, options?: unknown) => unknown;
   compileVerter?: (input: string, options?: unknown) => unknown;
   stripTypes?: (source: string) => unknown;
+  VerterHost?: new (config?: unknown) => {
+    resolve: (rawId: string) => unknown;
+    upsert: (request: unknown) => unknown;
+    applyStyleOverrides: (request: unknown) => unknown;
+    getVirtualFile: (query: unknown) => unknown;
+    listVirtualFiles: (canonicalId: string) => unknown;
+    remove: (canonicalOrAlias: string) => unknown;
+  };
   default: (input?: unknown) => Promise<unknown>;
 }
 

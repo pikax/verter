@@ -14,20 +14,47 @@ const MOCK_RESULT = {
 const mockCompile = vi.fn(() => MOCK_RESULT);
 const mockCompileBytes = vi.fn(() => MOCK_RESULT);
 const mockInit = vi.fn(async () => {});
+const mockHostResolve = vi.fn(() => null);
+const mockHostUpsert = vi.fn(() => ({ changed: true }));
+const mockHostApplyStyleOverrides = vi.fn(() => ({ changed: true }));
+const mockHostGetVirtualFile = vi.fn(() => ({ code: "virtual", diagnostics: { diagnostics: [] } }));
+const mockHostListVirtualFiles = vi.fn(() => []);
+const mockHostRemove = vi.fn(() => null);
+const mockHostCtor = vi.fn<(config?: unknown) => void>();
+class MockHost {
+  constructor(config?: unknown) {
+    mockHostCtor(config);
+  }
+
+  resolve = mockHostResolve;
+  upsert = mockHostUpsert;
+  applyStyleOverrides = mockHostApplyStyleOverrides;
+  getVirtualFile = mockHostGetVirtualFile;
+  listVirtualFiles = mockHostListVirtualFiles;
+  remove = mockHostRemove;
+}
 
 vi.mock("../wasm/verter_wasm.js", () => ({
   default: mockInit,
   compile: mockCompile,
   compileBytes: mockCompileBytes,
+  VerterHost: MockHost,
 }));
 
 // Import after mock setup so the module picks up mocked dependencies
-const { compile, compileSync, initialize, isInitialized } = await import("./index.js");
+const { compile, compileSync, initialize, isInitialized, createHost } = await import("./index.js");
 
 beforeEach(async () => {
   mockCompile.mockClear();
   mockCompileBytes.mockClear();
   mockInit.mockClear();
+  mockHostCtor.mockClear();
+  mockHostResolve.mockClear();
+  mockHostUpsert.mockClear();
+  mockHostApplyStyleOverrides.mockClear();
+  mockHostGetVirtualFile.mockClear();
+  mockHostListVirtualFiles.mockClear();
+  mockHostRemove.mockClear();
 
   // Ensure module is initialized for each test
   await initialize();
@@ -97,6 +124,27 @@ describe("Uint8Array input support", () => {
     // @ai-generated - Reports initialization state correctly
     it("should return true after initialization", () => {
       expect(isInitialized()).toBe(true);
+    });
+  });
+
+  describe("host wrapper", () => {
+    it("should create host and forward methods", async () => {
+      const host = await createHost({ devMode: true });
+
+      host.resolve("Comp.vue");
+      host.upsert({ inputId: "Comp.vue", source: "<template/>", fileKind: "vue" });
+      host.applyStyleOverrides({ canonicalId: "Comp.vue", overrides: [] });
+      host.getVirtualFile({ rawId: "Comp.vue" });
+      host.listVirtualFiles("Comp.vue");
+      host.remove("Comp.vue");
+
+      expect(mockHostCtor).toHaveBeenCalledWith({ devMode: true });
+      expect(mockHostResolve).toHaveBeenCalledWith("Comp.vue");
+      expect(mockHostUpsert).toHaveBeenCalled();
+      expect(mockHostApplyStyleOverrides).toHaveBeenCalled();
+      expect(mockHostGetVirtualFile).toHaveBeenCalled();
+      expect(mockHostListVirtualFiles).toHaveBeenCalledWith("Comp.vue");
+      expect(mockHostRemove).toHaveBeenCalledWith("Comp.vue");
     });
   });
 });

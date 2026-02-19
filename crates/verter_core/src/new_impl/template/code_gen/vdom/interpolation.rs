@@ -42,6 +42,7 @@ pub fn process_interpolation<'alloc>(
         end: interp.end,
         kind: ChildKind::Interpolation,
         condition: None,
+        condition_prefix: None,
     }
 }
 

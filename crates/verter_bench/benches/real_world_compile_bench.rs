@@ -3,7 +3,10 @@ use oxc_allocator::Allocator;
 use std::hint::black_box;
 use std::path::PathBuf;
 
-use verter_core::builder::codegen::{compile, CodegenOptions};
+use verter_core::{
+    builder::codegen::{compile, CodegenOptions},
+    new_impl,
+};
 
 /// A loaded Vue file ready for benchmarking.
 struct VueFile {
@@ -26,6 +29,14 @@ fn find_test_repos_root() -> Option<PathBuf> {
         if p.is_dir() {
             return Some(p);
         }
+    }
+
+    let project_root_repos = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(".integration-tests")
+        .join("repos");
+    if project_root_repos.is_dir() {
+        return Some(project_root_repos);
     }
 
     // Known fallback paths
@@ -86,11 +97,31 @@ fn compile_all_files(files: &[VueFile]) -> usize {
     let mut error_count = 0;
     for file in files {
         let allocator = Allocator::new();
-        let options = CodegenOptions::new().with_filename(&file.filename);
+        let mut options = CodegenOptions::new().with_filename(&file.filename);
+        options.skip_source_map = true; // Skip source map generation for faster benchmarking
         let result = compile(&file.content, &options, &allocator);
         error_count += result.errors.len();
         black_box(&result.code);
         black_box(&result.source_map);
+    }
+    error_count
+}
+fn compile_all_files_new(files: &[VueFile]) -> usize {
+    let mut error_count = 0;
+    for file in files {
+        let allocator = Allocator::new();
+
+        let options = CodegenOptions::new().with_filename(&file.filename);
+        let compiler_options = new_impl::compile::VerterCompileOptions {
+            source_map: false,
+
+            ..Default::default()
+        };
+        let result =
+            new_impl::compile::compile(&file.content, &options, &compiler_options, &allocator);
+
+        error_count += result.errors.len();
+        black_box(&result.template);
     }
     error_count
 }
@@ -139,6 +170,13 @@ fn real_world_per_project(c: &mut Criterion) {
             &project,
             |b, project| {
                 b.iter(|| compile_all_files(&project.files));
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("compile_new", &project.name),
+            &project,
+            |b, project| {
+                b.iter(|| compile_all_files_new(&project.files));
             },
         );
     }
@@ -204,6 +242,29 @@ fn real_world_aggregate(c: &mut Criterion) {
                 error_count += result.errors.len();
                 black_box(&result.code);
                 black_box(&result.source_map);
+            }
+            black_box(error_count)
+        });
+    });
+
+    group.bench_function(format!("compile_all_new/{}_files", all_files.len()), |b| {
+        b.iter(|| {
+            let mut error_count = 0;
+            for file in &all_files {
+                let allocator = Allocator::new();
+                let options = CodegenOptions::new().with_filename(&file.filename);
+                let compiler_options = new_impl::compile::VerterCompileOptions {
+                    source_map: false,
+                    ..Default::default()
+                };
+                let result = new_impl::compile::compile(
+                    &file.content,
+                    &options,
+                    &compiler_options,
+                    &allocator,
+                );
+                error_count += result.errors.len();
+                black_box(&result.script);
             }
             black_box(error_count)
         });

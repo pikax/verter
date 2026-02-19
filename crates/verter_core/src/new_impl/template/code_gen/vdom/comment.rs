@@ -57,6 +57,7 @@ pub fn process_comment<'alloc>(
         end: comment.end,
         kind: ChildKind::Comment,
         condition: None,
+        condition_prefix: None,
     })
 }
 
