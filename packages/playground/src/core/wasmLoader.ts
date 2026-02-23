@@ -17,10 +17,6 @@ const GITHUB_RELEASE_BASE = `https://github.com/${GITHUB_REPO}/releases/download
 const JSDELIVR_BASE = "https://cdn.jsdelivr.net/npm/@verter/wasm";
 
 export interface WasmModule {
-  compile: (input: string, options?: unknown) => unknown;
-  compileBytes?: (input: Uint8Array, options?: unknown) => unknown;
-  compileVerter?: (input: string, options?: unknown) => unknown;
-  stripTypes?: (source: string) => unknown;
   VerterHost?: new (config?: unknown) => {
     resolve: (rawId: string) => unknown;
     upsert: (request: unknown) => unknown;

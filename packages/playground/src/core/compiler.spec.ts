@@ -2,13 +2,7 @@
  * @ai-generated - Tests for compiler pure functions.
  */
 import { describe, it, expect } from "vitest";
-import {
-  mergeRenderIntoComponent,
-  formatDiagnostics,
-  formatImportSpecifier,
-  assembleVerterResult,
-  type VerterCompileResult,
-} from "./compiler";
+import { mergeRenderIntoComponent, formatDiagnostics } from "./compiler";
 
 describe("formatDiagnostics", () => {
   it("returns empty array for undefined input", () => {
@@ -55,119 +49,6 @@ describe("formatDiagnostics", () => {
     expect(result).toHaveLength(2);
     expect(result[0]).toBe("[error] first");
     expect(result[1]).toBe("[warning] second (1:2)");
-  });
-});
-
-describe("formatImportSpecifier", () => {
-  it("converts _prefixed names to 'name as _name' format", () => {
-    expect(formatImportSpecifier("_createElementVNode")).toBe(
-      "createElementVNode as _createElementVNode",
-    );
-  });
-
-  it("converts single underscore prefix", () => {
-    expect(formatImportSpecifier("_h")).toBe("h as _h");
-  });
-
-  it("leaves non-prefixed names unchanged", () => {
-    expect(formatImportSpecifier("createApp")).toBe("createApp");
-  });
-
-  it("leaves single underscore unchanged", () => {
-    // A single underscore has length 1, so name.length > 1 is false
-    expect(formatImportSpecifier("_")).toBe("_");
-  });
-});
-
-describe("assembleVerterResult", () => {
-  function makeResult(overrides: Partial<VerterCompileResult> = {}): VerterCompileResult {
-    return {
-      script: null,
-      template: null,
-      styles: [],
-      customBlocks: [],
-      scopeId: "",
-      errors: [],
-      parseDurationMs: 0,
-      totalDurationMs: 0,
-      ...overrides,
-    };
-  }
-
-  it("returns empty string for empty result", () => {
-    expect(assembleVerterResult(makeResult())).toBe("");
-  });
-
-  it("includes script code", () => {
-    const result = assembleVerterResult(
-      makeResult({
-        script: {
-          code: "const x = 1;",
-          durationMs: 0,
-          sourceMap: "",
-          setup: true,
-          attrs: [],
-        },
-      }),
-    );
-    expect(result).toContain("const x = 1;");
-  });
-
-  it("includes template code", () => {
-    const result = assembleVerterResult(
-      makeResult({
-        template: {
-          code: "function render() {}",
-          sourceMap: "",
-          imports: [],
-          durationMs: 0,
-          attrs: [],
-        },
-      }),
-    );
-    expect(result).toContain("function render() {}");
-  });
-
-  it("generates import statement from template imports", () => {
-    const result = assembleVerterResult(
-      makeResult({
-        template: {
-          code: "function render() {}",
-          sourceMap: "",
-          imports: ["_createElementVNode", "_toDisplayString"],
-          durationMs: 0,
-          attrs: [],
-        },
-      }),
-    );
-    expect(result).toContain("import {");
-    expect(result).toContain("createElementVNode as _createElementVNode");
-    expect(result).toContain("toDisplayString as _toDisplayString");
-    expect(result).toContain('from "vue"');
-  });
-
-  it("combines script and template", () => {
-    const result = assembleVerterResult(
-      makeResult({
-        script: {
-          code: "const x = 1;",
-          durationMs: 0,
-          sourceMap: "",
-          setup: true,
-          attrs: [],
-        },
-        template: {
-          code: "function render() {}",
-          sourceMap: "",
-          imports: ["_h"],
-          durationMs: 0,
-          attrs: [],
-        },
-      }),
-    );
-    expect(result).toContain("const x = 1;");
-    expect(result).toContain("function render() {}");
-    expect(result).toContain("h as _h");
   });
 });
 
@@ -247,5 +128,43 @@ function render() { return "hi" }`;
     const code = `export default { setup() { const fn = function render() {} } };`;
     const result = mergeRenderIntoComponent(code);
     expect(result).not.toContain("__sfc__.render = render;");
+  });
+
+  // @ai-generated - Regression: template-only SFC (no script block) must define __sfc__
+  // The host produces only a render function + imports for template-only components.
+  // mergeRenderIntoComponent must create const __sfc__ = {} when no component object exists.
+  it("creates __sfc__ for template-only SFC (no script, only render function)", () => {
+    const code = `import { createElementVNode as _createElementVNode, openBlock as _openBlock } from "vue"
+function render(_ctx, _cache, $props, $setup, $data, $options) {
+return (_openBlock(), _createElementVNode("div", null, "hello"))
+}`;
+
+    const result = mergeRenderIntoComponent(code);
+
+    // Must define __sfc__ before referencing it
+    expect(result).toContain("const __sfc__ = {}");
+    expect(result).toContain("__sfc__.render = render;");
+    expect(result).toContain("export default __sfc__");
+
+    // __sfc__ definition must come before its first usage
+    const defIdx = result.indexOf("const __sfc__ = {}");
+    const renderIdx = result.indexOf("__sfc__.render = render;");
+    const exportIdx = result.indexOf("export default __sfc__");
+    expect(defIdx).toBeLessThan(renderIdx);
+    expect(defIdx).toBeLessThan(exportIdx);
+  });
+
+  // @ai-generated - Regression: render-only code (no component object, no export default)
+  // produces valid output with __sfc__ defined before usage
+  it("produces valid output for bare render function without any component object", () => {
+    const code = `function render(_ctx, _cache) {
+return "hello"
+}`;
+
+    const result = mergeRenderIntoComponent(code);
+
+    expect(result).toContain("const __sfc__ = {}");
+    expect(result).toContain("__sfc__.render = render;");
+    expect(result).toContain("export default __sfc__");
   });
 });

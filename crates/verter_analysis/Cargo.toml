@@ -1,0 +1,27 @@
+[package]
+name = "verter_analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+oxc_allocator = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_span = { workspace = true }
+sha2 = { workspace = true }
+bitflags = "2"
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+lightningcss = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "analysis_bench"
+harness = false
+
+[[bench]]
+name = "project_index_bench"
+harness = false

@@ -8,8 +8,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 use walkdir::WalkDir;
 
-use verter_core::builder::codegen::CodegenOptions;
-use verter_core::new_impl::compile::{compile, VerterCompileOptions};
+use verter_core::compile::{compile, CodegenOptions, VerterCompileOptions};
 
 // ── File discovery ──────────────────────────────────────────────────
 
@@ -147,8 +146,15 @@ fn main() {
         .collect();
     entries.sort_by_key(|e| e.file_name());
 
+    // Projects to skip (unsupported architectures, e.g. Vue Class Components)
+    let skip_projects: &[&str] = &["MQTTX"];
+
     for entry in entries {
         let project_name = entry.file_name().to_string_lossy().to_string();
+        if skip_projects.iter().any(|s| *s == project_name) {
+            println!("  {} — SKIPPED (unsupported)", project_name);
+            continue;
+        }
         let vue_files = find_vue_files(&entry.path());
         if !vue_files.is_empty() {
             println!("  {} — {} .vue files", project_name, vue_files.len());
@@ -203,7 +209,7 @@ fn main() {
                 ..Default::default()
             };
             let verter_opts = VerterCompileOptions {
-                strip_ts: false,
+                force_js: false,
                 ..Default::default()
             };
             compile(&content, &options, &verter_opts, &allocator)
@@ -459,7 +465,11 @@ fn main() {
         }
 
         if let Some(ref script) = fe.script_output {
-            if fe.errors.iter().any(|e| matches!(e, ErrorKind::ScriptParseError(_))) {
+            if fe
+                .errors
+                .iter()
+                .any(|e| matches!(e, ErrorKind::ScriptParseError(_)))
+            {
                 let out_path = failed_dir.join(format!("{}.script.js", base));
                 let mut content = String::with_capacity(script.len() + 200);
                 content.push_str("// SOURCE: ");
@@ -479,6 +489,10 @@ fn main() {
             }
         }
     }
-    println!("Saved {} failing outputs to: {}", saved, failed_dir.display());
+    println!(
+        "Saved {} failing outputs to: {}",
+        saved,
+        failed_dir.display()
+    );
     println!("\nSummary written to: {}", summary_path.display());
 }

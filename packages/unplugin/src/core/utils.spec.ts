@@ -1,15 +1,8 @@
 /**
- * @ai-generated - Tests for parseVueRequest and descriptor cache utilities.
+ * @ai-generated - Tests for parseVueRequest utility.
  */
-import { describe, it, expect, beforeEach } from "vitest";
-import {
-  parseVueRequest,
-  getDescriptor,
-  setDescriptor,
-  deleteDescriptor,
-  clearCache,
-} from "./utils";
-import type { ViteCodegenResult } from "@verter/native";
+import { describe, it, expect } from "vitest";
+import { parseVueRequest } from "./utils";
 
 describe("parseVueRequest", () => {
   it("parses a plain .vue filename with no query", () => {
@@ -56,44 +49,5 @@ describe("parseVueRequest", () => {
     );
     expect(result.query.lang).toBe("scss");
     expect(result.query.index).toBe(1);
-  });
-});
-
-describe("descriptor cache", () => {
-  const mockResult: ViteCodegenResult = {
-    script: {
-      code: "export default {}",
-      imports: [],
-      body_start_utf16: 0,
-    },
-    styles: [],
-    duration_ms: 1,
-  };
-
-  beforeEach(() => {
-    clearCache();
-  });
-
-  it("returns undefined for uncached files", () => {
-    expect(getDescriptor("/path/to/App.vue")).toBeUndefined();
-  });
-
-  it("stores and retrieves a descriptor", () => {
-    setDescriptor("/path/to/App.vue", mockResult);
-    expect(getDescriptor("/path/to/App.vue")).toBe(mockResult);
-  });
-
-  it("deletes a descriptor", () => {
-    setDescriptor("/path/to/App.vue", mockResult);
-    deleteDescriptor("/path/to/App.vue");
-    expect(getDescriptor("/path/to/App.vue")).toBeUndefined();
-  });
-
-  it("clears all cached descriptors", () => {
-    setDescriptor("/path/to/App.vue", mockResult);
-    setDescriptor("/path/to/Other.vue", mockResult);
-    clearCache();
-    expect(getDescriptor("/path/to/App.vue")).toBeUndefined();
-    expect(getDescriptor("/path/to/Other.vue")).toBeUndefined();
   });
 });

@@ -1,8 +1,15 @@
-//! Type resolution for Vue macro type parameters.
+//! Cross-file type resolution for Vue compiler macros.
 //!
-//! This module resolves TypeScript type annotations from Vue macros like
-//! `defineProps<{ title: string; count: number }>()` into structured type
-//! information that can be used for code generation.
+//! Resolves TypeScript type annotations used as type parameters in Vue macros
+//! (`defineProps<T>()`, `defineEmits<T>()`, `defineSlots<T>()`) into structured
+//! [`ResolvedElements`] that drive runtime props/emits code generation.
+//!
+//! When `T` is defined inline (e.g. `defineProps<{ title: string }>()`), resolution
+//! stays local. When `T` extends or references types from other files, the host
+//! must pre-resolve those external types and pass them in via
+//! [`VerterCompileOptions::external_types`](crate::VerterCompileOptions). The
+//! resolved data is merged into [`TypeResolutionContext::companion_types`] so that
+//! lookups for imported type names can fall back to pre-resolved definitions.
 //!
 //! Based on Vue's `resolveType.ts` implementation.
 
@@ -164,6 +171,9 @@ pub struct ResolvedProp {
     pub span: Span,
     /// Span of the property key (name) in the source
     pub key: Span,
+    /// Pre-resolved key name (set for external/cross-file types where spans
+    /// reference a different source than the consuming SFC).
+    pub key_name: Option<String>,
     /// Whether the property is optional (has `?`)
     pub optional: bool,
     /// Inferred runtime types for this property
@@ -184,7 +194,7 @@ pub struct ResolvedEmit {
 }
 
 /// Result of resolving type elements from a type annotation.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct ResolvedElements {
     /// Resolved properties from the type
     pub props: Vec<ResolvedProp>,
@@ -290,12 +300,22 @@ pub struct TypeResolutionContext<'ctx, 'a: 'ctx> {
     pub source: &'ctx [u8],
     /// Local type alias declarations: (name_span, type_node)
     pub type_aliases: Vec<(Span, &'ctx TSType<'a>)>,
-    /// Local interface declarations: (name_span, interface_body_members)
-    pub interfaces: Vec<(Span, &'ctx oxc_allocator::Vec<'a, TSSignature<'a>>)>,
+    /// Local interface declarations: (name_span, interface_body_members, extends_type_names)
+    /// The extends_type_names are extracted from heritage clauses as String names,
+    /// since we need to look them up recursively.
+    pub interfaces: Vec<(
+        Span,
+        &'ctx oxc_allocator::Vec<'a, TSSignature<'a>>,
+        Vec<String>,
+    )>,
     /// Generic type parameters with constraints: (name_span, constraint_type)
     pub type_params: Vec<(Span, Option<&'ctx TSType<'a>>)>,
     /// Diagnostics collected during resolution
     pub diagnostics: Vec<ResolutionDiagnostic>,
+    /// Pre-resolved types from companion `<script>` block.
+    /// Keyed by type name string, value is the resolved elements.
+    /// Used when a type reference can't be found in the local context.
+    pub companion_types: rustc_hash::FxHashMap<String, ResolvedElements>,
 }
 
 impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
@@ -307,6 +327,7 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             interfaces: Vec::new(),
             type_params: Vec::new(),
             diagnostics: Vec::new(),
+            companion_types: rustc_hash::FxHashMap::default(),
         }
     }
 
@@ -318,15 +339,16 @@ impl<'ctx, 'a: 'ctx> TypeResolutionContext<'ctx, 'a> {
             .map(|(_, ty)| *ty)
     }
 
-    /// Look up an interface by comparing spans against source bytes
+    /// Look up an interface by comparing spans against source bytes.
+    /// Returns (body_members, extends_type_names).
     pub fn find_interface(
         &self,
         name: &[u8],
-    ) -> Option<&'ctx oxc_allocator::Vec<'a, TSSignature<'a>>> {
+    ) -> Option<(&'ctx oxc_allocator::Vec<'a, TSSignature<'a>>, &[String])> {
         self.interfaces
             .iter()
-            .find(|(span, _)| &self.source[span.start as usize..span.end as usize] == name)
-            .map(|(_, members)| *members)
+            .find(|(span, _, _)| &self.source[span.start as usize..span.end as usize] == name)
+            .map(|(_, members, extends)| (*members, extends.as_slice()))
     }
 
     /// Look up a type parameter constraint by comparing spans against source bytes
@@ -360,7 +382,9 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
             Statement::TSInterfaceDeclaration(interface) => {
                 // interface.id.span is already adjusted by adjust_program_spans() to SFC coordinates.
                 let name_span = Span::from(interface.id.span);
-                ctx.interfaces.push((name_span, &interface.body.body));
+                let extends = extract_heritage_type_names(&interface.extends);
+                ctx.interfaces
+                    .push((name_span, &interface.body.body, extends));
             }
             // Collect exported type aliases and interfaces:
             // `export type Foo = { bar: string }` / `export interface Foo { bar: string }`
@@ -373,7 +397,9 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
                         }
                         Declaration::TSInterfaceDeclaration(interface) => {
                             let name_span = Span::from(interface.id.span);
-                            ctx.interfaces.push((name_span, &interface.body.body));
+                            let extends = extract_heritage_type_names(&interface.extends);
+                            ctx.interfaces
+                                .push((name_span, &interface.body.body, extends));
                         }
                         _ => {}
                     }
@@ -384,6 +410,85 @@ pub fn build_type_context<'ctx, 'a: 'ctx>(
     }
 
     ctx
+}
+
+/// Extract pre-resolved types from a companion `<script>` program.
+///
+/// Walks the program's statements and resolves any type aliases and interfaces,
+/// returning a map from type name → resolved elements. This allows the setup
+/// script's type resolver to look up types defined in the companion block.
+pub fn extract_companion_types(
+    program: &Program<'_>,
+    source: &[u8],
+    content_offset: u32,
+) -> rustc_hash::FxHashMap<String, ResolvedElements> {
+    // Build a full type context so we can resolve extends and cross-references
+    let ctx = build_type_context(program, source, content_offset);
+
+    let mut types = rustc_hash::FxHashMap::default();
+
+    for stmt in &program.body {
+        match stmt {
+            Statement::TSTypeAliasDeclaration(alias) => {
+                let name = alias.id.name.as_str().to_string();
+                let resolved = resolve_type_elements_with_ctx_ref(
+                    &alias.type_annotation,
+                    content_offset,
+                    &ctx,
+                );
+                types.insert(name, resolved);
+            }
+            Statement::TSInterfaceDeclaration(interface) => {
+                let name = interface.id.name.as_str().to_string();
+                let extends = extract_heritage_type_names(&interface.extends);
+                let mut resolved = ResolvedElements::default();
+                let mut guard = vec![name.clone()];
+                resolve_interface_with_extends_ctx_ref(
+                    &interface.body.body,
+                    &extends,
+                    content_offset,
+                    &mut resolved,
+                    &ctx,
+                    &mut guard,
+                );
+                types.insert(name, resolved);
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(decl) = &export.declaration {
+                    match decl {
+                        Declaration::TSTypeAliasDeclaration(alias) => {
+                            let name = alias.id.name.as_str().to_string();
+                            let resolved = resolve_type_elements_with_ctx_ref(
+                                &alias.type_annotation,
+                                content_offset,
+                                &ctx,
+                            );
+                            types.insert(name, resolved);
+                        }
+                        Declaration::TSInterfaceDeclaration(interface) => {
+                            let name = interface.id.name.as_str().to_string();
+                            let extends = extract_heritage_type_names(&interface.extends);
+                            let mut resolved = ResolvedElements::default();
+                            let mut guard = vec![name.clone()];
+                            resolve_interface_with_extends_ctx_ref(
+                                &interface.body.body,
+                                &extends,
+                                content_offset,
+                                &mut resolved,
+                                &ctx,
+                                &mut guard,
+                            );
+                            types.insert(name, resolved);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    types
 }
 
 /// Resolve type elements from a TSType node.
@@ -477,6 +582,102 @@ fn resolve_type_elements_inner(node: &TSType, base_offset: u32, result: &mut Res
     }
 }
 
+/// Resolve an interface including its extends clauses using mutable context.
+/// Recursion guard prevents infinite loops from circular extends.
+fn resolve_interface_with_extends_ctx<'ctx, 'a: 'ctx>(
+    members: &[TSSignature],
+    extends: &[String],
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    ctx: &mut TypeResolutionContext<'ctx, 'a>,
+    recursion_guard: &mut Vec<String>,
+) {
+    // Resolve own members
+    resolve_type_literal_members(members, base_offset, result);
+
+    // Resolve extends
+    for base_name in extends {
+        if recursion_guard.contains(base_name) {
+            continue; // Avoid infinite recursion
+        }
+        recursion_guard.push(base_name.clone());
+
+        let base_bytes = base_name.as_bytes();
+
+        // Check local type aliases
+        if let Some(aliased_type) = ctx.find_type_alias(base_bytes) {
+            resolve_type_elements_inner_with_ctx(aliased_type, base_offset, result, ctx);
+        }
+        // Check local interfaces (need to clone extends to avoid borrow conflict)
+        else if let Some((iface_members, iface_extends)) = ctx.find_interface(base_bytes) {
+            let iface_extends_owned: Vec<String> = iface_extends.to_vec();
+            resolve_interface_with_extends_ctx(
+                iface_members,
+                &iface_extends_owned,
+                base_offset,
+                result,
+                ctx,
+                recursion_guard,
+            );
+        }
+        // Check companion types
+        else if let Some(companion) = ctx.companion_types.get(base_name.as_str()) {
+            result.props.extend(companion.props.iter().cloned());
+            result.emits.extend(companion.emits.iter().cloned());
+            if companion.has_call_signature {
+                result.has_call_signature = true;
+            }
+        }
+
+        recursion_guard.pop();
+    }
+}
+
+/// Resolve an interface including its extends clauses using immutable context.
+fn resolve_interface_with_extends_ctx_ref<'ctx, 'a: 'ctx>(
+    members: &[TSSignature],
+    extends: &[String],
+    base_offset: u32,
+    result: &mut ResolvedElements,
+    ctx: &TypeResolutionContext<'ctx, 'a>,
+    recursion_guard: &mut Vec<String>,
+) {
+    // Resolve own members
+    resolve_type_literal_members(members, base_offset, result);
+
+    // Resolve extends
+    for base_name in extends {
+        if recursion_guard.contains(base_name) {
+            continue;
+        }
+        recursion_guard.push(base_name.clone());
+
+        let base_bytes = base_name.as_bytes();
+
+        if let Some(aliased_type) = ctx.find_type_alias(base_bytes) {
+            resolve_type_elements_inner_with_ctx_ref(aliased_type, base_offset, result, ctx);
+        } else if let Some((iface_members, iface_extends)) = ctx.find_interface(base_bytes) {
+            let iface_extends_owned: Vec<String> = iface_extends.to_vec();
+            resolve_interface_with_extends_ctx_ref(
+                iface_members,
+                &iface_extends_owned,
+                base_offset,
+                result,
+                ctx,
+                recursion_guard,
+            );
+        } else if let Some(companion) = ctx.companion_types.get(base_name.as_str()) {
+            result.props.extend(companion.props.iter().cloned());
+            result.emits.extend(companion.emits.iter().cloned());
+            if companion.has_call_signature {
+                result.has_call_signature = true;
+            }
+        }
+
+        recursion_guard.pop();
+    }
+}
+
 /// Inner resolution function that uses the context for type reference lookup.
 fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
     node: &'ctx TSType<'a>,
@@ -521,9 +722,18 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 2. Check local interfaces
-            if let Some(interface_members) = ctx.find_interface(type_name_bytes) {
-                resolve_type_literal_members(interface_members, base_offset, result);
+            // 2. Check local interfaces (with extends support)
+            if let Some((interface_members, iface_extends)) = ctx.find_interface(type_name_bytes) {
+                let extends_owned: Vec<String> = iface_extends.to_vec();
+                let mut guard = vec![type_name.clone()];
+                resolve_interface_with_extends_ctx(
+                    interface_members,
+                    &extends_owned,
+                    base_offset,
+                    result,
+                    ctx,
+                    &mut guard,
+                );
                 return;
             }
 
@@ -533,7 +743,17 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 4. Couldn't resolve - add diagnostic
+            // 4. Check companion <script> block's pre-resolved types
+            if let Some(companion) = ctx.companion_types.get(type_name.as_str()) {
+                result.props.extend(companion.props.iter().cloned());
+                result.emits.extend(companion.emits.iter().cloned());
+                if companion.has_call_signature {
+                    result.has_call_signature = true;
+                }
+                return;
+            }
+
+            // 5. Couldn't resolve - add diagnostic
             // Note: We don't add to result.props here because we can't determine the structure
             ctx.diagnostics.push(ResolutionDiagnostic {
                 span: Span {
@@ -603,18 +823,37 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
                 return;
             }
 
-            // 2. Check local interfaces
-            if let Some(interface_members) = ctx.find_interface(type_name_bytes) {
-                resolve_type_literal_members(interface_members, base_offset, result);
+            // 2. Check local interfaces (with extends support)
+            if let Some((interface_members, iface_extends)) = ctx.find_interface(type_name_bytes) {
+                let extends_owned: Vec<String> = iface_extends.to_vec();
+                let mut guard = vec![type_name.clone()];
+                resolve_interface_with_extends_ctx_ref(
+                    interface_members,
+                    &extends_owned,
+                    base_offset,
+                    result,
+                    ctx,
+                    &mut guard,
+                );
                 return;
             }
 
             // 3. Check generic type parameter constraints
             if let Some(constraint) = ctx.find_type_param(type_name_bytes) {
                 resolve_type_elements_inner_with_ctx_ref(constraint, base_offset, result, ctx);
+                return;
             }
 
-            // 4. Couldn't resolve - skip silently (no diagnostics in immutable version)
+            // 4. Check companion <script> block's pre-resolved types
+            if let Some(companion) = ctx.companion_types.get(type_name.as_str()) {
+                result.props.extend(companion.props.iter().cloned());
+                result.emits.extend(companion.emits.iter().cloned());
+                if companion.has_call_signature {
+                    result.has_call_signature = true;
+                }
+            }
+
+            // 5. Couldn't resolve - skip silently (no diagnostics in immutable version)
         }
 
         // Function type: () => Type
@@ -752,6 +991,7 @@ fn resolve_property_signature(
     Some(ResolvedProp {
         span,
         key,
+        key_name: None,
         optional,
         types,
     })
@@ -771,6 +1011,7 @@ fn resolve_method_signature(method: &TSMethodSignature, base_offset: u32) -> Opt
     Some(ResolvedProp {
         span,
         key,
+        key_name: None,
         optional,
         types: vec![RuntimeType::Function],
     })
@@ -993,6 +1234,17 @@ fn infer_type_reference(type_ref: &TSTypeReference) -> Vec<RuntimeType> {
     }
 }
 
+/// Extract type names from interface heritage/extends clauses.
+fn extract_heritage_type_names(extends: &[TSInterfaceHeritage]) -> Vec<String> {
+    extends
+        .iter()
+        .filter_map(|heritage| match &heritage.expression {
+            Expression::Identifier(id) => Some(id.name.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Get the name from a type reference's type name.
 fn get_type_reference_name(type_name: &TSTypeName) -> String {
     match type_name {
@@ -1003,6 +1255,125 @@ fn get_type_reference_name(type_name: &TSTypeName) -> String {
         }
         TSTypeName::ThisExpression(_) => "this".to_string(),
     }
+}
+
+/// Resolve an imported type by name from a dependency file's source.
+///
+/// Parses the dep file, builds a type resolution context, finds the named type
+/// (interface or type alias), and resolves it to structured property/emit information.
+///
+/// Returns `None` if the file can't be parsed or the named type isn't found.
+pub fn resolve_external_type(
+    type_name: &str,
+    dep_source: &str,
+    allocator: &oxc_allocator::Allocator,
+) -> Option<ResolvedElements> {
+    let source_type = oxc_span::SourceType::ts();
+    let parsed = oxc_parser::Parser::new(allocator, dep_source, source_type).parse();
+
+    if parsed.panicked {
+        return None;
+    }
+
+    let source_bytes = dep_source.as_bytes();
+    let ctx = build_type_context(&parsed.program, source_bytes, 0);
+
+    let name_bytes = type_name.as_bytes();
+
+    let mut result = None;
+
+    // Try type alias first
+    if let Some(ts_type) = ctx.find_type_alias(name_bytes) {
+        result = Some(resolve_type_elements_with_ctx_ref(ts_type, 0, &ctx));
+    }
+
+    // Try interface (with extends support)
+    if result.is_none() {
+        if let Some((members, extends)) = ctx.find_interface(name_bytes) {
+            let mut r = ResolvedElements::default();
+            let extends_owned: Vec<String> = extends.to_vec();
+            let mut guard = vec![type_name.to_string()];
+            resolve_interface_with_extends_ctx_ref(
+                members,
+                &extends_owned,
+                0,
+                &mut r,
+                &ctx,
+                &mut guard,
+            );
+            result = Some(r);
+        }
+    }
+
+    // Populate key_name on all props since spans reference the external file,
+    // not the consuming SFC. Consumers use key_name when available.
+    if let Some(ref mut resolved) = result {
+        for prop in &mut resolved.props {
+            let start = prop.key.start as usize;
+            let end = prop.key.end as usize;
+            if end <= source_bytes.len() {
+                if let Ok(name) = std::str::from_utf8(&source_bytes[start..end]) {
+                    prop.key_name = Some(name.to_string());
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Hash the resolved type shape for cache comparison.
+///
+/// Produces a stable hash from prop names + runtime types + optional flags + emits.
+/// Two different source texts that resolve to the same prop shape produce the same hash.
+///
+/// # Arguments
+/// * `resolved` - The resolved type elements
+/// * `source` - Source bytes needed to extract prop key names from spans
+pub fn hash_resolved_type(resolved: &ResolvedElements, source: &[u8]) -> [u8; 16] {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+
+    // Hash props sorted by key name for stability
+    let mut props: Vec<_> = resolved
+        .props
+        .iter()
+        .map(|p| {
+            let key_name = &source[p.key.start as usize..p.key.end as usize];
+            let mut runtime_types: Vec<&str> = p.types.iter().map(|t| t.as_str()).collect();
+            runtime_types.sort();
+            (key_name, runtime_types, p.optional)
+        })
+        .collect();
+    props.sort_by_key(|(name, _, _)| *name);
+
+    hasher.update((props.len() as u32).to_le_bytes());
+    for (name, types, optional) in &props {
+        hasher.update((name.len() as u32).to_le_bytes());
+        hasher.update(name);
+        hasher.update((types.len() as u32).to_le_bytes());
+        for t in types {
+            hasher.update(t.as_bytes());
+        }
+        hasher.update([*optional as u8]);
+    }
+
+    // Hash emits sorted by name
+    let mut emits: Vec<&str> = resolved.emits.iter().map(|e| e.name.as_str()).collect();
+    emits.sort();
+
+    hasher.update((emits.len() as u32).to_le_bytes());
+    for name in &emits {
+        hasher.update(name.as_bytes());
+    }
+
+    hasher.update([resolved.has_call_signature as u8]);
+
+    let hash = hasher.finalize();
+    let mut result = [0u8; 16];
+    result.copy_from_slice(&hash[..16]);
+    result
 }
 
 #[cfg(test)]
@@ -1454,5 +1825,334 @@ type Test = A & B;"#;
                 }
             }
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Cross-file type resolution (Tier 3)
+    // ═══════════════════════════════════════════════════════════
+
+    #[test]
+    fn resolve_external_type_interface() {
+        let alloc = Allocator::default();
+        let dep = "export interface Props { foo: string; bar: number }";
+        let resolved = resolve_external_type("Props", dep, &alloc).unwrap();
+        assert_eq!(resolved.props.len(), 2);
+    }
+
+    #[test]
+    fn resolve_external_type_alias() {
+        let alloc = Allocator::default();
+        let dep = "export type Props = { count: number; label?: string }";
+        let resolved = resolve_external_type("Props", dep, &alloc).unwrap();
+        assert_eq!(resolved.props.len(), 2);
+        let optional_count = resolved.props.iter().filter(|p| p.optional).count();
+        assert_eq!(optional_count, 1);
+    }
+
+    #[test]
+    fn resolve_external_type_not_found() {
+        let alloc = Allocator::default();
+        let dep = "export interface Other { x: string }";
+        assert!(resolve_external_type("Props", dep, &alloc).is_none());
+    }
+
+    #[test]
+    fn resolve_external_type_non_exported_still_found() {
+        let alloc = Allocator::default();
+        // build_type_context collects both exported and non-exported declarations
+        let dep = "interface Props { name: string }";
+        let resolved = resolve_external_type("Props", dep, &alloc).unwrap();
+        assert_eq!(resolved.props.len(), 1);
+    }
+
+    #[test]
+    fn resolve_external_type_with_intersection() {
+        let alloc = Allocator::default();
+        let dep = r#"
+type A = { foo: string };
+type B = { bar: number };
+export type Props = A & B;
+"#;
+        let resolved = resolve_external_type("Props", dep, &alloc).unwrap();
+        assert_eq!(resolved.props.len(), 2);
+    }
+
+    #[test]
+    fn resolve_external_type_parse_error_returns_none() {
+        let alloc = Allocator::default();
+        let dep = "export interface { broken syntax";
+        // Should not panic, just return None
+        assert!(resolve_external_type("Props", dep, &alloc).is_none());
+    }
+
+    #[test]
+    fn hash_resolved_type_stable_across_formatting() {
+        let alloc1 = Allocator::default();
+        let dep1 = "export interface Props { foo: string; bar: number }";
+        let resolved1 = resolve_external_type("Props", dep1, &alloc1).unwrap();
+        let hash1 = hash_resolved_type(&resolved1, dep1.as_bytes());
+
+        let alloc2 = Allocator::default();
+        // Same interface with different whitespace
+        let dep2 = "export interface Props {\n  foo: string;\n  bar: number;\n}";
+        let resolved2 = resolve_external_type("Props", dep2, &alloc2).unwrap();
+        let hash2 = hash_resolved_type(&resolved2, dep2.as_bytes());
+
+        assert_eq!(hash1, hash2, "Same prop shape should produce same hash");
+    }
+
+    #[test]
+    fn hash_resolved_type_differs_on_prop_added() {
+        let alloc1 = Allocator::default();
+        let dep1 = "export interface Props { foo: string }";
+        let resolved1 = resolve_external_type("Props", dep1, &alloc1).unwrap();
+        let hash1 = hash_resolved_type(&resolved1, dep1.as_bytes());
+
+        let alloc2 = Allocator::default();
+        let dep2 = "export interface Props { foo: string; bar: number }";
+        let resolved2 = resolve_external_type("Props", dep2, &alloc2).unwrap();
+        let hash2 = hash_resolved_type(&resolved2, dep2.as_bytes());
+
+        assert_ne!(
+            hash1, hash2,
+            "Different prop count should produce different hash"
+        );
+    }
+
+    #[test]
+    fn hash_resolved_type_differs_on_type_changed() {
+        let alloc1 = Allocator::default();
+        let dep1 = "export interface Props { foo: string }";
+        let resolved1 = resolve_external_type("Props", dep1, &alloc1).unwrap();
+        let hash1 = hash_resolved_type(&resolved1, dep1.as_bytes());
+
+        let alloc2 = Allocator::default();
+        let dep2 = "export interface Props { foo: number }";
+        let resolved2 = resolve_external_type("Props", dep2, &alloc2).unwrap();
+        let hash2 = hash_resolved_type(&resolved2, dep2.as_bytes());
+
+        assert_ne!(hash1, hash2, "Different type should produce different hash");
+    }
+
+    #[test]
+    fn hash_resolved_type_differs_on_optional_changed() {
+        let alloc1 = Allocator::default();
+        let dep1 = "export interface Props { foo: string }";
+        let resolved1 = resolve_external_type("Props", dep1, &alloc1).unwrap();
+        let hash1 = hash_resolved_type(&resolved1, dep1.as_bytes());
+
+        let alloc2 = Allocator::default();
+        let dep2 = "export interface Props { foo?: string }";
+        let resolved2 = resolve_external_type("Props", dep2, &alloc2).unwrap();
+        let hash2 = hash_resolved_type(&resolved2, dep2.as_bytes());
+
+        assert_ne!(
+            hash1, hash2,
+            "Optional change should produce different hash"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Interface extends / heritage clause tests
+    // ═══════════════════════════════════════════════════════════
+
+    /// @ai-generated - interface B extends A should include A's props
+    #[test]
+    fn interface_extends_single() {
+        let allocator = Allocator::default();
+        let source = r#"interface A { foo: string }
+interface B extends A { bar: number }
+type Test = B;"#;
+        let source_type = SourceType::ts();
+        let parser = Parser::new(&allocator, source, source_type);
+        let result = parser.parse();
+
+        let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+
+        for stmt in &result.program.body {
+            if let Statement::TSTypeAliasDeclaration(alias) = stmt {
+                if alias.id.name.as_str() == "Test" {
+                    let resolved =
+                        resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
+                    assert_eq!(
+                        resolved.props.len(),
+                        2,
+                        "B extends A should have 2 props (foo + bar)"
+                    );
+                    assert!(ctx.diagnostics.is_empty());
+                }
+            }
+        }
+    }
+
+    /// @ai-generated - interface extends multiple bases
+    #[test]
+    fn interface_extends_multiple() {
+        let allocator = Allocator::default();
+        let source = r#"interface A { foo: string }
+interface B { bar: number }
+interface C extends A, B { baz: boolean }
+type Test = C;"#;
+        let source_type = SourceType::ts();
+        let parser = Parser::new(&allocator, source, source_type);
+        let result = parser.parse();
+
+        let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+
+        for stmt in &result.program.body {
+            if let Statement::TSTypeAliasDeclaration(alias) = stmt {
+                if alias.id.name.as_str() == "Test" {
+                    let resolved =
+                        resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
+                    assert_eq!(
+                        resolved.props.len(),
+                        3,
+                        "C extends A, B should have 3 props (foo + bar + baz)"
+                    );
+                    assert!(ctx.diagnostics.is_empty());
+                }
+            }
+        }
+    }
+
+    /// @ai-generated - deep interface extends chain: C extends B extends A
+    #[test]
+    fn interface_extends_deep_chain() {
+        let allocator = Allocator::default();
+        let source = r#"interface A { a: string }
+interface B extends A { b: number }
+interface C extends B { c: boolean }
+type Test = C;"#;
+        let source_type = SourceType::ts();
+        let parser = Parser::new(&allocator, source, source_type);
+        let result = parser.parse();
+
+        let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+
+        for stmt in &result.program.body {
+            if let Statement::TSTypeAliasDeclaration(alias) = stmt {
+                if alias.id.name.as_str() == "Test" {
+                    let resolved =
+                        resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
+                    assert_eq!(
+                        resolved.props.len(),
+                        3,
+                        "C extends B extends A should have 3 props (a + b + c)"
+                    );
+                    assert!(ctx.diagnostics.is_empty());
+                }
+            }
+        }
+    }
+
+    /// @ai-generated - interface extends with companion types
+    #[test]
+    fn interface_extends_companion() {
+        let allocator = Allocator::default();
+        let source = r#"interface Local extends Base { own: string }
+type Test = Local;"#;
+        let source_type = SourceType::ts();
+        let parser = Parser::new(&allocator, source, source_type);
+        let result = parser.parse();
+
+        let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+
+        // Simulate companion type
+        let mut base_resolved = ResolvedElements::default();
+        base_resolved.props.push(ResolvedProp {
+            span: Span { start: 0, end: 0 },
+            key: Span { start: 0, end: 0 },
+            key_name: Some("baseField".to_string()),
+            optional: false,
+            types: vec![RuntimeType::String],
+        });
+        ctx.companion_types
+            .insert("Base".to_string(), base_resolved);
+
+        for stmt in &result.program.body {
+            if let Statement::TSTypeAliasDeclaration(alias) = stmt {
+                if alias.id.name.as_str() == "Test" {
+                    let resolved =
+                        resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
+                    assert_eq!(
+                        resolved.props.len(),
+                        2,
+                        "Local extends Base should have 2 props (baseField + own)"
+                    );
+                    assert!(ctx.diagnostics.is_empty());
+                }
+            }
+        }
+    }
+
+    /// @ai-generated - resolve_external_type handles interface extends within same file
+    #[test]
+    fn resolve_external_type_interface_extends() {
+        let alloc = Allocator::default();
+        let dep = r#"
+export interface Base { foo: string }
+export interface Props extends Base { bar: number }
+"#;
+        let resolved = resolve_external_type("Props", dep, &alloc).unwrap();
+        assert_eq!(
+            resolved.props.len(),
+            2,
+            "Props extends Base should have 2 props"
+        );
+    }
+
+    /// @ai-generated - resolve_external_type handles deep extends chain
+    #[test]
+    fn resolve_external_type_deep_extends() {
+        let alloc = Allocator::default();
+        let dep = r#"
+interface A { a: string }
+interface B extends A { b: number }
+export interface Props extends B { c: boolean }
+"#;
+        let resolved = resolve_external_type("Props", dep, &alloc).unwrap();
+        assert_eq!(
+            resolved.props.len(),
+            3,
+            "Props extends B extends A should have 3 props"
+        );
+    }
+
+    /// @ai-generated - extract_companion_types handles interface extends
+    #[test]
+    fn companion_types_interface_extends() {
+        let allocator = Allocator::default();
+        let source = r#"interface Base { base: string }
+interface Extended extends Base { own: number }"#;
+        let source_type = SourceType::ts();
+        let parser = Parser::new(&allocator, source, source_type);
+        let result = parser.parse();
+
+        let types = extract_companion_types(&result.program, source.as_bytes(), 0);
+
+        let extended = types.get("Extended").unwrap();
+        assert_eq!(
+            extended.props.len(),
+            2,
+            "Extended should include base + own props"
+        );
+    }
+
+    /// @ai-generated - circular extends doesn't cause infinite recursion
+    #[test]
+    fn interface_extends_circular_no_panic() {
+        let alloc = Allocator::default();
+        // This is invalid TS but shouldn't crash the resolver
+        let dep = r#"
+interface A extends B { a: string }
+interface B extends A { b: number }
+"#;
+        // Should return without panicking
+        let resolved = resolve_external_type("A", dep, &alloc).unwrap();
+        // Should have at least A's own prop
+        assert!(
+            !resolved.props.is_empty(),
+            "Should resolve at least some props without crashing"
+        );
     }
 }

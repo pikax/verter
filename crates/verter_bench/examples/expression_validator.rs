@@ -440,7 +440,7 @@ fn extract_identifiers_from_expression(content: &str, expr_type: &str) -> Extrac
     match parser.parse_expression() {
         Ok(expr) => {
             let ctx = BindingContext::new(0);
-            let result = extract_bindings_from_expression(&expr, content, &ctx);
+            let result = extract_bindings_from_expression(&expr, content, ctx);
             // Deduplicate and sort identifiers
             let mut seen = HashSet::new();
             let mut identifiers: Vec<String> = result

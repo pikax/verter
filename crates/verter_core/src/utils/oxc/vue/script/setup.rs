@@ -730,12 +730,20 @@ pub fn parse_macro_call<'a>(
             // Second arg is defaults object
             let defaults = extract_object_arg_from_call(call, 1, ctx);
 
+            // Capture the raw span of the second argument (any expression type)
+            let defaults_arg_span = call
+                .arguments
+                .get(1)
+                .and_then(|arg| arg.as_expression())
+                .map(|expr| Span::from(expr.span()));
+
             Some(ScriptMacro::WithDefaults {
                 span,
                 declarator,
                 define_props_span,
                 define_props_type_params,
                 defaults,
+                defaults_arg_span,
             })
         }
     }
@@ -859,6 +867,7 @@ fn extract_object_arg<'a>(
                     name,
                     name_span,
                     value_span,
+                    is_method: p.method,
                 });
             }
         }

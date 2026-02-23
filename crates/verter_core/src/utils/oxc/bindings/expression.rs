@@ -7,7 +7,7 @@ use oxc_ast::ast::*;
 use oxc_span::Span as OxcSpan;
 use smallvec::SmallVec;
 
-use super::keywords::is_keyword;
+use super::keywords::{is_global, is_keyword};
 use super::types::{
     Binding, BindingContext, BindingExtractionResult, FunctionBinding, LiteralBinding, ParamBytes,
 };
@@ -28,17 +28,17 @@ use super::types::{
 /// let parser = Parser::new(&allocator, "foo + bar", SourceType::tsx());
 /// let expr = parser.parse_expression().unwrap();
 /// let ctx = BindingContext::new(0);
-/// let result = extract_bindings_from_expression(&expr, "foo + bar", &ctx);
+/// let result = extract_bindings_from_expression(&expr, "foo + bar", ctx);
 /// assert_eq!(result.non_ignored_binding_names(), vec!["foo", "bar"]);
 /// ```
 pub fn extract_bindings_from_expression<'a>(
     expr: &Expression<'a>,
     source: &'a str,
-    ctx: &BindingContext<'a>,
+    ctx: BindingContext<'a>,
 ) -> BindingExtractionResult<'a> {
     let mut result = BindingExtractionResult::default();
     let source_bytes = source.as_bytes();
-    let mut visitor = BindingVisitor::new(source_bytes, ctx.clone(), &mut result);
+    let mut visitor = BindingVisitor::new(source_bytes, ctx, &mut result);
     visitor.visit_expression(expr);
     result
 }
@@ -50,11 +50,11 @@ pub fn extract_bindings_from_expression<'a>(
 pub fn extract_bindings_from_program<'a>(
     program: &'a Program<'a>,
     source: &'a str,
-    ctx: &BindingContext<'a>,
+    ctx: BindingContext<'a>,
 ) -> BindingExtractionResult<'a> {
     let mut result = BindingExtractionResult::default();
     let source_bytes = source.as_bytes();
-    let mut visitor = BindingVisitor::new(source_bytes, ctx.clone(), &mut result);
+    let mut visitor = BindingVisitor::new(source_bytes, ctx, &mut result);
 
     for stmt in &program.body {
         visitor.visit_statement(stmt);
@@ -318,6 +318,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
 
             Expression::ClassExpression(class) => {
                 if let Some(id) = &class.id {
+                    // SAFETY: The lifetime is tied to the OXC AST allocator which outlives our usage
                     self.ctx.add_ignored(unsafe {
                         std::mem::transmute::<&str, &'a str>(id.name.as_str())
                     });
@@ -576,6 +577,7 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
     fn visit_function(&mut self, func: &Function<'a>, span: OxcSpan) {
         let mut param_bytes: ParamBytes<'a> = SmallVec::new();
         if let Some(id) = &func.id {
+            // SAFETY: The lifetime is tied to the OXC AST allocator which outlives our usage
             param_bytes.push(unsafe { std::mem::transmute::<&str, &'a str>(id.name.as_str()) });
         }
 
@@ -710,8 +712,8 @@ impl<'a, 'r> BindingVisitor<'a, 'r> {
         // Incrementally update dynamism — avoids a separate post-extraction loop.
         // Dynamic trumps MaybeDynamic trumps Static.
         if self.result.dynamism != Dynamism::Dynamic {
-            if ignore && !is_keyword(name.as_bytes()) {
-                // Injected local (v-for/v-slot variable, not a JS keyword)
+            if ignore && !is_keyword(name.as_bytes()) && !is_global(name.as_bytes()) {
+                // Injected local (v-for/v-slot variable, not a JS keyword or global)
                 self.result.dynamism = Dynamism::Dynamic;
             } else if !ignore {
                 // Script-level identifier reference
@@ -758,7 +760,7 @@ mod tests {
         match parser.parse_expression() {
             Ok(expr) => {
                 let ctx = BindingContext::new(offset);
-                let result = extract_bindings_from_expression(&expr, source, &ctx);
+                let result = extract_bindings_from_expression(&expr, source, ctx);
                 let names: Vec<String> = result
                     .non_ignored_binding_names()
                     .into_iter()
@@ -1030,7 +1032,7 @@ mod tests {
         let parser = Parser::new(alloc, source, SourceType::tsx());
         let expr = parser.parse_expression().unwrap();
         let ctx = BindingContext::with_ignored(0, ignored.iter().copied());
-        extract_bindings_from_expression(&expr, source, &ctx)
+        extract_bindings_from_expression(&expr, source, ctx)
     }
 
     /// Pure literal → Static (no identifiers at all)
@@ -1128,5 +1130,80 @@ mod tests {
         let alloc = Allocator::default();
         let result = extract_result("() => item.name", &alloc, &["item"]);
         assert_eq!(result.dynamism, Dynamism::Dynamic);
+    }
+
+    // ===========================================
+    // JS globals should be ignored (not prefixed with _ctx.)
+    // ===========================================
+
+    #[test]
+    fn test_global_string_method() {
+        // String.fromCharCode(65) should NOT produce "String" as a non-ignored binding
+        let (names, _, _) = extract("String.fromCharCode(65)");
+        assert!(
+            names.is_empty(),
+            "String should be ignored as a global, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_global_math_method() {
+        let (names, _, _) = extract("Math.max(a, b)");
+        assert_eq!(names, vec!["a", "b"], "Math should be ignored as a global");
+    }
+
+    #[test]
+    fn test_global_array_method() {
+        let (names, _, _) = extract("Array.isArray(items)");
+        assert_eq!(names, vec!["items"], "Array should be ignored as a global");
+    }
+
+    #[test]
+    fn test_global_json() {
+        let (names, _, _) = extract("JSON.stringify(data)");
+        assert_eq!(names, vec!["data"], "JSON should be ignored as a global");
+    }
+
+    #[test]
+    fn test_global_object_keys() {
+        let (names, _, _) = extract("Object.keys(obj)");
+        assert_eq!(names, vec!["obj"], "Object should be ignored as a global");
+    }
+
+    #[test]
+    fn test_global_number_is_finite() {
+        let (names, _, _) = extract("Number.isFinite(val)");
+        assert_eq!(names, vec!["val"], "Number should be ignored as a global");
+    }
+
+    #[test]
+    fn test_global_console_log() {
+        let (names, _, _) = extract("console.log(msg)");
+        assert_eq!(names, vec!["msg"], "console should be ignored as a global");
+    }
+
+    #[test]
+    fn test_global_parseint() {
+        let (names, _, _) = extract("parseInt(str, 10)");
+        assert_eq!(names, vec!["str"], "parseInt should be ignored as a global");
+    }
+
+    #[test]
+    fn test_global_promise() {
+        let (names, _, _) = extract("Promise.resolve(val)");
+        assert_eq!(names, vec!["val"], "Promise should be ignored as a global");
+    }
+
+    #[test]
+    fn test_global_dynamism_is_static() {
+        // Pure global call with literal args should be Static
+        let alloc = Allocator::default();
+        let result = extract_result("String.fromCharCode(65)", &alloc, &[]);
+        assert_eq!(
+            result.dynamism,
+            Dynamism::Static,
+            "Global with literal args should be Static"
+        );
     }
 }

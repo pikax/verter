@@ -45,6 +45,8 @@ pub struct MacroProperty<'a> {
     pub name_span: Span,
     /// Span of the value (Some for { foo: String }, None for shorthand)
     pub value_span: Option<Span>,
+    /// Whether this property uses method shorthand (e.g., `foo() { ... }`)
+    pub is_method: bool,
 }
 
 /// Array argument info: defineEmits(['change', 'update'])
@@ -142,8 +144,12 @@ pub enum ScriptMacro<'a> {
         define_props_span: Option<Span>,
         /// Type parameters from the inner defineProps
         define_props_type_params: Option<MacroTypeParams>,
-        /// The defaults object
+        /// The defaults object (only populated when the second arg is an object literal)
         defaults: Option<MacroObjectArg<'a>>,
+        /// Raw span of the second argument expression (any expression type:
+        /// object literal, variable reference, function call, etc.)
+        /// Used for `_mergeDefaults` wrapping when the type can't be resolved.
+        defaults_arg_span: Option<Span>,
     },
 }
 

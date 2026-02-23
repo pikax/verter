@@ -11,9 +11,7 @@ test.describe("Compilation", () => {
   });
 
   test("default template compiles to JS with __sfc__", async ({ page }) => {
-    const jsTab = page.locator(".output-tabs .tab, .output-tabs button", {
-      hasText: /^JS$/i,
-    });
+    const jsTab = page.locator(".output-tabs button", { hasText: "JS" });
     await jsTab.click();
     await page.waitForTimeout(1000);
 
@@ -23,9 +21,7 @@ test.describe("Compilation", () => {
   });
 
   test("compiled output contains render function", async ({ page }) => {
-    const jsTab = page.locator(".output-tabs .tab, .output-tabs button", {
-      hasText: /^JS$/i,
-    });
+    const jsTab = page.locator(".output-tabs button", { hasText: "JS" });
     await jsTab.click();
     await page.waitForTimeout(1000);
 
@@ -34,9 +30,7 @@ test.describe("Compilation", () => {
   });
 
   test("CSS output contains scoped styles", async ({ page }) => {
-    const cssTab = page.locator(".output-tabs .tab, .output-tabs button", {
-      hasText: /^CSS$/i,
-    });
+    const cssTab = page.locator(".output-tabs button", { hasText: "CSS" });
     await cssTab.click();
     await page.waitForTimeout(1000);
 

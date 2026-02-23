@@ -1,9 +1,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::hint::black_box;
 
-use verter_core::new_impl::template::code_gen::shared::helpers::{
-    escape_js_string, escape_js_string_into,
-};
+use verter_core::template::code_gen::shared::helpers::{escape_js_string, escape_js_string_into};
 
 fn datasets() -> Vec<(&'static str, String)> {
     let no_escape = "plain_text_segment_".repeat(256);
@@ -31,7 +29,7 @@ fn datasets() -> Vec<(&'static str, String)> {
 }
 
 fn bench_escape_js_string(c: &mut Criterion) {
-    let mut group = c.benchmark_group("new_impl/escape_js_string");
+    let mut group = c.benchmark_group("escape_js_string");
 
     for (name, input) in datasets() {
         group.throughput(Throughput::Bytes(input.len() as u64));

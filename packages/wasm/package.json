@@ -30,6 +30,7 @@
     "test": "vitest run"
   },
   "devDependencies": {
+    "@verter/native": "workspace:^",
     "tsdown": "^0.12.4",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18"

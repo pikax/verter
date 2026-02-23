@@ -1,0 +1,9 @@
+[package]
+name = "verter_ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+verter_host = { path = "../verter_host", version = "0.0.1-alpha.3" }
+serde = { workspace = true }

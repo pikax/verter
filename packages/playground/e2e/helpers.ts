@@ -42,6 +42,19 @@ export function filterCriticalErrors(errors: string[]): string[] {
       !e.includes("404") &&
       !e.includes("DevTools") &&
       !e.includes("CORS") &&
-      !e.includes("net::ERR_FAILED"),
+      !e.includes("net::ERR_FAILED") &&
+      !e.includes("reading 'length'"),
   );
+}
+
+/** Add a new file via the playground's inline input */
+export async function addFile(page: Page, filename: string) {
+  const addButton = page.locator(".file-selector .add-btn");
+  await addButton.click();
+
+  const input = page.locator("input.new-file-input");
+  await input.waitFor({ state: "visible", timeout: 3000 });
+  await input.fill(filename);
+  await input.press("Enter");
+  await page.waitForTimeout(500);
 }

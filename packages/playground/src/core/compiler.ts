@@ -1,48 +1,13 @@
-import type { WasmDiagnostic } from "@verter/wasm";
-import type { File, CompilerOptions, CompileTiming } from "./types";
+import type { File, CompilerOptions, CompileTiming, FileAnalysis } from "./types";
 import { loadLocalWasm, loadCommitWasm, loadReleaseWasm, type WasmModule } from "./wasmLoader";
 import type { VersionEntry } from "./versions";
-
-/** Result shape returned by compileVerter WASM binding. */
-export interface VerterCompileResult {
-  script: {
-    code: string;
-    durationMs: number;
-    sourceMap: string;
-    setup: boolean;
-    attrs: [string, string][];
-  } | null;
-  template: {
-    code: string;
-    sourceMap: string;
-    imports: string[];
-    durationMs: number;
-    attrs: [string, string][];
-  } | null;
-  styles: Array<{
-    code: string;
-    scoped: boolean;
-    lang: string | null;
-    durationMs: number;
-    attrs: [string, string][];
-  }>;
-  customBlocks: Array<{
-    type: string;
-    content: string;
-    attrs: [string, string][];
-  }>;
-  scopeId: string;
-  errors: WasmDiagnostic[];
-  parseDurationMs: number;
-  totalDurationMs: number;
-}
 
 interface HostCompileProfile {
   filename?: string;
   isProduction?: boolean;
   ssr?: boolean;
   hmrStrategy?: "none" | "vite" | "webpack";
-  stripTs?: boolean;
+  forceJs?: boolean;
   sourceMap?: boolean;
 }
 
@@ -66,6 +31,7 @@ interface HostDiagnosticsSnapshot {
 
 interface HostUpdateResult {
   diagnostics: HostDiagnosticsSnapshot;
+  parseDurationMs?: number;
 }
 
 interface HostVirtualFileResponse {
@@ -89,10 +55,11 @@ interface HostBinding {
     compileProfile?: HostCompileProfile;
   }): HostVirtualFileResponse;
   listVirtualFiles(canonicalId: string): HostVirtualNodeKind[];
+  getAnalysis?(canonicalOrAlias: string): FileAnalysis | null;
 }
 
-/** Convert structured WASM diagnostics to display strings. */
-export function formatDiagnostics(diagnostics: WasmDiagnostic[] | undefined): string[] {
+/** Convert structured host diagnostics to display strings. */
+export function formatDiagnostics(diagnostics: HostDiagnostic[] | undefined): string[] {
   if (!diagnostics || diagnostics.length === 0) return [];
   return diagnostics.map((d) => {
     const loc = d.spanStart != null ? ` (${d.spanStart}:${d.spanEnd ?? d.spanStart})` : "";
@@ -100,13 +67,9 @@ export function formatDiagnostics(diagnostics: WasmDiagnostic[] | undefined): st
   });
 }
 
-let wasmCompileVerter: ((input: string, options?: unknown) => VerterCompileResult) | null = null;
 let wasmHost: HostBinding | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
-
-const useHostPipeline =
-  typeof window !== "undefined" && new URLSearchParams(window.location.search).get("host") === "1";
 
 function toHostProfile(file: File, options?: CompilerOptions): HostCompileProfile {
   return {
@@ -114,17 +77,9 @@ function toHostProfile(file: File, options?: CompilerOptions): HostCompileProfil
     isProduction: options?.isProduction ?? false,
     ssr: options?.ssr ?? false,
     hmrStrategy: "none",
-    stripTs: true,
+    forceJs: true,
     sourceMap: true,
   };
-}
-
-function formatHostDiagnostics(diagnostics: HostDiagnostic[] | undefined): string[] {
-  if (!diagnostics || diagnostics.length === 0) return [];
-  return diagnostics.map((d) => {
-    const loc = d.spanStart != null ? ` (${d.spanStart}:${d.spanEnd ?? d.spanStart})` : "";
-    return `[${d.severity}] ${d.message}${loc}`;
-  });
 }
 
 function configureHost(wasmModule: WasmModule): void {
@@ -168,7 +123,6 @@ export async function initCompilers(): Promise<void> {
 
   initPromise = (async () => {
     const wasmModule = await loadLocalWasm();
-    wasmCompileVerter = (wasmModule.compileVerter as typeof wasmCompileVerter) ?? null;
     configureHost(wasmModule);
     initialized = true;
   })();
@@ -193,7 +147,6 @@ export async function switchWasmVersion(entry: VersionEntry): Promise<void> {
     throw new Error(`Unknown version type: ${entry.type}`);
   }
 
-  wasmCompileVerter = (wasmModule.compileVerter as typeof wasmCompileVerter) ?? null;
   configureHost(wasmModule);
 }
 
@@ -216,7 +169,13 @@ export function mergeRenderIntoComponent(code: string): string {
 
   if (!hasSfcVariable) {
     // Non-scoped: transform "export default" → "const __sfc__ ="
+    const before = merged;
     merged = merged.replace(/^export default /m, "const __sfc__ = ");
+    if (merged === before) {
+      // No "export default" found either — template-only component (no script block).
+      // Create an empty component object so __sfc__ is defined.
+      merged = "const __sfc__ = {};\n" + merged;
+    }
   }
 
   // Only attach render if the output contains a render function declaration
@@ -239,34 +198,11 @@ export function mergeRenderIntoComponent(code: string): string {
   return merged;
 }
 
-/** Format an internal helper name as an import specifier.
- *  e.g. "_createElementVNode" → "createElementVNode as _createElementVNode" */
-export function formatImportSpecifier(name: string): string {
-  if (name.startsWith("_") && name.length > 1) {
-    return `${name.slice(1)} as ${name}`;
-  }
-  return name;
-}
-
-/** Assemble new_impl VerterCompileResult blocks into a single JS string. */
-export function assembleVerterResult(result: VerterCompileResult): string {
-  const parts: string[] = [];
-  if (result.template?.imports?.length) {
-    const specifiers = result.template.imports.map(formatImportSpecifier);
-    parts.push(`import { ${specifiers.join(", ")} } from "vue"\n`);
-  }
-  if (result.script) parts.push(result.script.code);
-  if (result.template) parts.push(result.template.code);
-  return parts.join("\n");
-}
-
-function compileVueWithHost(file: File, options: CompilerOptions | undefined): CompileTiming | null {
-  if (!wasmHost || !useHostPipeline) return null;
-
+function compileVueWithHost(file: File, options: CompilerOptions | undefined): CompileTiming {
   const start = performance.now();
   const profile = toHostProfile(file, options);
 
-  const upsertResult = wasmHost.upsert({
+  const upsertResult = wasmHost!.upsert({
     inputId: file.filename,
     source: file.code,
     fileKind: "vue",
@@ -274,7 +210,7 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
     compileProfile: profile,
   });
 
-  const nodes = wasmHost.listVirtualFiles(file.filename);
+  const nodes = wasmHost!.listVirtualFiles(file.filename);
   const nodeKinds = new Set(nodes.map((node) => node.kind));
   const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [upsertResult.diagnostics];
 
@@ -282,7 +218,7 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   let templateSourceMap = "";
 
   if (nodeKinds.has("script")) {
-    const script = wasmHost.getVirtualFile({
+    const script = wasmHost!.getVirtualFile({
       rawId: `${file.filename}?vue&type=script`,
       compileProfile: profile,
     });
@@ -291,7 +227,7 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   }
 
   if (nodeKinds.has("template")) {
-    const template = wasmHost.getVirtualFile({
+    const template = wasmHost!.getVirtualFile({
       rawId: `${file.filename}?vue&type=template`,
       compileProfile: profile,
     });
@@ -302,7 +238,7 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   }
 
   if (!assembledJs) {
-    const main = wasmHost.getVirtualFile({
+    const main = wasmHost!.getVirtualFile({
       rawId: file.filename,
       compileProfile: profile,
     });
@@ -317,7 +253,7 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
 
   const styleChunks: string[] = [];
   for (const index of styleIndices) {
-    const style = wasmHost.getVirtualFile({
+    const style = wasmHost!.getVirtualFile({
       rawId: `${file.filename}?vue&type=style&index=${index}`,
       compileProfile: profile,
     });
@@ -328,69 +264,93 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   file.compiled.js = mergeRenderIntoComponent(assembledJs);
   file.compiled.css = styleChunks.join("\n");
   file.compiled.verterSourceMap = templateSourceMap;
-  file.compiled.errors = formatHostDiagnostics(collectUniqueHostDiagnostics(diagnosticsSnapshots));
+  file.compiled.errors = formatDiagnostics(collectUniqueHostDiagnostics(diagnosticsSnapshots));
+
+  // Retrieve analysis data if available (backward compat: older WASM may lack getAnalysis)
+  let analysis: FileAnalysis | null = null;
+  if (typeof wasmHost!.getAnalysis === "function") {
+    try {
+      analysis = wasmHost!.getAnalysis(file.filename) ?? null;
+    } catch {
+      // Silently ignore - analysis is optional
+    }
+  }
+  file.compiled.analysis = analysis;
 
   return {
     verterNew: null,
     verterNewJs: performance.now() - start,
+    parseDurationMs: upsertResult.parseDurationMs ?? null,
   };
 }
+
+function compileTsWithHost(file: File, options: CompilerOptions | undefined): CompileTiming {
+  const start = performance.now();
+  const vueFilename = file.filename.replace(/\.ts$/, ".vue");
+  const sfc = `<script setup lang="ts">\n${file.code}\n</script>`;
+  const profile = toHostProfile(file, options);
+  profile.filename = vueFilename;
+
+  const upsertResult = wasmHost!.upsert({
+    inputId: vueFilename,
+    source: sfc,
+    fileKind: "vue",
+    aliases: [],
+    compileProfile: profile,
+  });
+
+  const diagnosticsSnapshots: Array<HostDiagnosticsSnapshot | undefined> = [upsertResult.diagnostics];
+
+  const script = wasmHost!.getVirtualFile({
+    rawId: `${vueFilename}?vue&type=script`,
+    compileProfile: profile,
+  });
+  diagnosticsSnapshots.push(script.diagnostics);
+
+  file.compiled.js = script.code;
+  file.compiled.errors = formatDiagnostics(collectUniqueHostDiagnostics(diagnosticsSnapshots));
+
+  // Retrieve analysis data if available
+  let analysis: FileAnalysis | null = null;
+  if (typeof wasmHost!.getAnalysis === "function") {
+    try {
+      analysis = wasmHost!.getAnalysis(vueFilename) ?? null;
+    } catch {
+      // Silently ignore
+    }
+  }
+  file.compiled.analysis = analysis;
+
+  return {
+    verterNew: null,
+    verterNewJs: performance.now() - start,
+    parseDurationMs: upsertResult.parseDurationMs ?? null,
+  };
+}
+
+const HOST_UNAVAILABLE_ERROR =
+  "VerterHost is not available in this WASM version. Please switch to a newer version.";
 
 export async function compileFile(
   file: File,
   options?: CompilerOptions,
 ): Promise<CompileTiming> {
   await initCompilers();
-  const timing: CompileTiming = { verterNew: null, verterNewJs: null };
+  const timing: CompileTiming = { verterNew: null, verterNewJs: null, parseDurationMs: null };
 
   if (file.filename.endsWith(".vue")) {
-    const hostTiming = compileVueWithHost(file, options);
-    if (hostTiming) {
-      return hostTiming;
+    if (!wasmHost) {
+      file.compiled.errors = [HOST_UNAVAILABLE_ERROR];
+      return timing;
     }
-
-    try {
-      if (!wasmCompileVerter) throw new Error("compileVerter WASM binding not available");
-
-      const start = performance.now();
-      const result = wasmCompileVerter(file.code, {
-        filename: file.filename,
-        isProduction: options?.isProduction ?? false,
-        stripTs: true,
-        sourceMap: true,
-      });
-      timing.verterNewJs = performance.now() - start;
-      timing.verterNew = result.totalDurationMs ?? null;
-
-      const assembled = assembleVerterResult(result);
-      file.compiled.js = mergeRenderIntoComponent(assembled);
-      file.compiled.css = result.styles.map((s) => s.code).join("\n");
-      file.compiled.verterSourceMap = result.template?.sourceMap ?? "";
-      file.compiled.errors = formatDiagnostics(result.errors);
-    } catch (e) {
-      file.compiled.errors = [e instanceof Error ? e.message : String(e)];
-    }
+    return compileVueWithHost(file, options);
   } else if (file.filename.endsWith(".ts")) {
-    try {
-      if (!wasmCompileVerter) throw new Error("compileVerter WASM binding not available");
-
-      const sfc = `<script setup lang="ts">\n${file.code}\n</script>`;
-      const start = performance.now();
-      const result = wasmCompileVerter(sfc, {
-        filename: file.filename.replace(".ts", ".vue"),
-        isProduction: options?.isProduction ?? false,
-        stripTs: true,
-        sourceMap: true,
-      });
-      timing.verterNewJs = performance.now() - start;
-      timing.verterNew = result.totalDurationMs ?? null;
-
-      file.compiled.js = result.script?.code ?? "";
-      file.compiled.errors = formatDiagnostics(result.errors);
-    } catch (e) {
+    if (!wasmHost) {
       file.compiled.js = "";
-      file.compiled.errors = [e instanceof Error ? e.message : String(e)];
+      file.compiled.errors = [HOST_UNAVAILABLE_ERROR];
+      return timing;
     }
+    return compileTsWithHost(file, options);
   } else if (file.filename.endsWith(".js")) {
     file.compiled.js = file.code;
     file.compiled.errors = [];

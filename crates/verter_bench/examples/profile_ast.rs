@@ -1,11 +1,18 @@
-//! AST construction profiler.
+//! Compilation pipeline profiler.
 //!
-//! Runs the new pipeline (tokenize → AST → OXC) on real-world Vue projects
-//! from verter-test-repos, with hotpath instrumentation to identify bottlenecks.
+//! Runs the compilation pipeline on real-world Vue projects from verter-test-repos,
+//! with hotpath instrumentation to identify bottlenecks.
+//!
+//! Two modes:
+//!   - **AST-only** (default): tokenize → AST → OXC expression parsing
+//!   - **Full compile** (`VERTER_PROFILE_FULL=1`): full SFC → JS/CSS pipeline
 //!
 //! Usage:
-//!   # Static timing report:
+//!   # AST-only timing report:
 //!   cargo run -p verter_bench --example profile_ast --release --features=hotpath
+//!
+//!   # Full compile timing report:
+//!   VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath
 //!
 //!   # With memory allocation tracking:
 //!   cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc
@@ -24,9 +31,10 @@ use std::path::PathBuf;
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 
-use verter_core::new_impl::syntax::Syntax as NewSyntax;
-use verter_core::new_impl::template::oxc::parse_template_expressions;
-use verter_core::syntax::plugin::{SyntaxPluginContext, SyntaxPluginOptions};
+use verter_core::compile::{compile, CodegenOptions, VerterCompileOptions};
+use verter_core::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
+use verter_core::parser::Syntax as NewSyntax;
+use verter_core::template::oxc::parse_template_expressions;
 use verter_core::tokenizer::byte::tokenize;
 
 struct VueFile {
@@ -89,6 +97,7 @@ fn load_fixture(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e))
 }
 
+/// AST-only pipeline: tokenize → AST → OXC expression parsing.
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn run_pipeline(source: &str) {
     let bytes = source.as_bytes();
@@ -113,8 +122,27 @@ fn run_pipeline(source: &str) {
     std::hint::black_box(ast);
 }
 
-#[cfg_attr(feature = "hotpath", hotpath::main(limit = 25))]
+/// Full compile pipeline: tokenize → parse → style → script → template codegen.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+fn run_compile(source: &str) {
+    let alloc = Allocator::default();
+    let options = CodegenOptions::default();
+    let verter_options = VerterCompileOptions::default();
+    let result = compile(source, &options, &verter_options, &alloc);
+    std::hint::black_box(result);
+}
+
+#[cfg_attr(feature = "hotpath", hotpath::main(limit = 40))]
 fn main() {
+    let full_mode = std::env::var("VERTER_PROFILE_FULL").is_ok();
+    let mode_label = if full_mode {
+        "full compile"
+    } else {
+        "AST-only"
+    };
+    eprintln!("Profiling mode: {mode_label}");
+    eprintln!("  (set VERTER_PROFILE_FULL=1 for full compile pipeline)\n");
+
     if let Some(root) = find_test_repos_root() {
         // Use real-world projects
         let projects = [
@@ -147,7 +175,11 @@ fn main() {
             total_bytes += project_bytes;
 
             for file in &files {
-                run_pipeline(&file.content);
+                if full_mode {
+                    run_compile(&file.content);
+                } else {
+                    run_pipeline(&file.content);
+                }
             }
         }
 
@@ -171,7 +203,11 @@ fn main() {
                 1000
             );
             for _ in 0..1000 {
-                run_pipeline(&source);
+                if full_mode {
+                    run_compile(&source);
+                } else {
+                    run_pipeline(&source);
+                }
             }
         }
     }

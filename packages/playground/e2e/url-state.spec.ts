@@ -4,12 +4,20 @@
 import { test, expect } from "@playwright/test";
 
 test.describe("URL state", () => {
-  test("hash is populated after page loads and compiles", async ({ page }) => {
+  test("hash is populated after a state change", async ({ page }) => {
     await page.goto("/");
-    await page.waitForTimeout(5000); // Wait for compilation + auto-save debounce
+    await page.waitForTimeout(4000);
+
+    // Trigger a state change by clicking the DEV/PROD toggle
+    const devProdToggle = page.locator("button.toggle-btn", {
+      hasText: /DEV|PROD/,
+    });
+    await devProdToggle.click();
+
+    // Wait for debounced save (500ms debounce + margin)
+    await page.waitForTimeout(2000);
 
     const hash = await page.evaluate(() => window.location.hash);
-    // Hash should be non-empty after auto-save
     expect(hash.length).toBeGreaterThan(1);
   });
 
@@ -23,9 +31,15 @@ test.describe("URL state", () => {
   });
 
   test("navigating to URL with hash restores state", async ({ page }) => {
-    // First, load the page and wait for hash to be set
+    // First, load the page and trigger a state change to populate the hash
     await page.goto("/");
-    await page.waitForTimeout(5000);
+    await page.waitForTimeout(4000);
+
+    const devProdToggle = page.locator("button.toggle-btn", {
+      hasText: /DEV|PROD/,
+    });
+    await devProdToggle.click();
+    await page.waitForTimeout(2000);
 
     const hash = await page.evaluate(() => window.location.hash);
 

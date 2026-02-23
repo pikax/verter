@@ -1,8 +1,7 @@
-//! Benchmark comparing the old event-based `compile()` pipeline with the
-//! new AST-based `new_impl` pipeline (Syntax → generate_script → generate_template → styles).
+//! Benchmark for the AST-based compilation pipeline
+//! (Syntax → generate_script → generate_template → styles).
 //!
-//! Both pipelines have source maps **disabled** for an apples-to-apples comparison.
-//! Both pipelines process styles (scoped CSS, v-bind()).
+//! Source maps disabled. Styles (scoped CSS, v-bind()) are processed.
 //!
 //! Run with:
 //!   cargo bench --bench new_impl_comparison --package verter_bench
@@ -14,18 +13,15 @@ use oxc_span::SourceType;
 use std::hint::black_box;
 use std::path::PathBuf;
 
-use verter_core::builder::codegen::{compile, CodegenOptions};
 use verter_core::code_transform::CodeTransform;
 use verter_core::css::process_style;
 use verter_core::css::types::ProcessStyleOptions;
-use verter_core::new_impl::script::{generate_script, ScriptCodeGenOptions};
-use verter_core::new_impl::style::generate_style;
-use verter_core::new_impl::syntax::Syntax as NewSyntax;
-use verter_core::new_impl::template::code_gen::{
-    generate_template, CodeGenMode, TemplateCodeGenOptions,
-};
-use verter_core::new_impl::template::oxc::parse_template_expressions;
-use verter_core::syntax::plugin::{SyntaxPluginContext, SyntaxPluginOptions};
+use verter_core::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
+use verter_core::parser::Syntax as NewSyntax;
+use verter_core::script::{generate_script, ScriptCodeGenOptions};
+use verter_core::style::generate_style;
+use verter_core::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
+use verter_core::template::oxc::parse_template_expressions;
 use verter_core::tokenizer::byte::tokenize;
 
 fn load_fixture(name: &str) -> String {
@@ -37,49 +33,9 @@ fn load_fixture(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("Failed to read {}: {}", path, e))
 }
 
-/// Old event-based pipeline: tokenizer → syntax plugins → codegen.
-/// Source maps disabled for fair comparison.
-fn compile_old(source: &str, filename: &str) -> String {
-    let allocator = Allocator::new();
-    let mut options = CodegenOptions::new().with_filename(filename);
-    options.skip_source_map = true;
-    let result = compile(source, &options, &allocator);
-    black_box(&result.styles);
-    result.code
-}
-
-/// Old event-based pipeline in **Vapor** mode.
-/// Injects `<template vapor>` to trigger the old pipeline's vapor backend.
-/// Source maps disabled for fair comparison.
-///
-/// Note: The old vapor backend may panic on some complex templates (capacity
-/// overflow). This function catches panics and returns empty string on failure.
-fn compile_old_vapor(source: &str, filename: &str) -> String {
-    let vapor_source = source.replacen("<template>", "<template vapor>", 1);
-    let allocator = Allocator::new();
-    let mut options = CodegenOptions::new().with_filename(filename);
-    options.skip_source_map = true;
-    let result = compile(&vapor_source, &options, &allocator);
-    black_box(&result.styles);
-    result.code
-}
-
-/// Check if old vapor can handle this source without panicking.
-fn old_vapor_is_safe(source: &str) -> bool {
-    let vapor_source = source.replacen("<template>", "<template vapor>", 1);
-    std::panic::catch_unwind(|| {
-        let allocator = Allocator::new();
-        let mut options = CodegenOptions::new().with_filename("test.vue");
-        options.skip_source_map = true;
-        let result = compile(&vapor_source, &options, &allocator);
-        black_box(&result.code);
-    })
-    .is_ok()
-}
-
-/// New AST-based pipeline: tokenize → Syntax → generate_script → generate_template → styles.
+/// AST-based pipeline: tokenize → Syntax → generate_script → generate_template → styles.
 /// No source maps generated.
-fn compile_new(source: &str) -> String {
+fn compile_full(source: &str) -> String {
     let alloc = Allocator::default();
 
     // Step 1: tokenize + build AST
@@ -114,6 +70,7 @@ fn compile_new(source: &str) -> String {
                         scope_id,
                         scoped: style_node.scoped,
                         is_module: style_node.module,
+                        module_name: None,
                         filename: None,
                         sourcemap: false,
                     },
@@ -128,6 +85,7 @@ fn compile_new(source: &str) -> String {
                         scope_id,
                         scoped: style_node.scoped,
                         is_module: style_node.module,
+                        module_name: None,
                         filename: None,
                         sourcemap: false,
                     },
@@ -176,7 +134,7 @@ fn compile_new(source: &str) -> String {
 }
 
 /// Benchmark only the tokenize + AST building step (no codegen).
-fn parse_new(source: &str) {
+fn parse_only(source: &str) {
     let opts = SyntaxPluginOptions::default();
     let ctx = SyntaxPluginContext {
         input: source,
@@ -236,35 +194,23 @@ fn bench_fixture(c: &mut Criterion, fixture_name: &str) {
     let group_name = format!("new_impl_{}", fixture_name.replace('-', "_"));
     let mut group = c.benchmark_group(&group_name);
 
-    // group.bench_function("old_compile", |b| {
-    //     let filename = format!("{}.vue", fixture_name);
-    //     b.iter(|| black_box(compile_old(black_box(&source), &filename)));
-    // });
-
-    // if old_vapor_is_safe(&source) {
-    //     group.bench_function("old_compile_vapor", |b| {
-    //         let filename = format!("{}.vue", fixture_name);
-    //         b.iter(|| black_box(compile_old_vapor(black_box(&source), &filename)));
-    //     });
-    // }
-
-    group.bench_function("new_compile", |b| {
-        b.iter(|| black_box(compile_new(black_box(&source))));
+    group.bench_function("compile", |b| {
+        b.iter(|| black_box(compile_full(black_box(&source))));
     });
 
-    group.bench_function("new_parse_only", |b| {
-        b.iter(|| parse_new(black_box(&source)));
+    group.bench_function("parse_only", |b| {
+        b.iter(|| parse_only(black_box(&source)));
     });
 
-    group.bench_function("new_template_vdom", |b| {
+    group.bench_function("template_vdom", |b| {
         b.iter(|| template_codegen(black_box(&source), CodeGenMode::Vdom));
     });
 
-    group.bench_function("new_template_vapor", |b| {
+    group.bench_function("template_vapor", |b| {
         b.iter(|| template_codegen(black_box(&source), CodeGenMode::Vapor));
     });
 
-    group.bench_function("new_template_vapor2", |b| {
+    group.bench_function("template_vapor2", |b| {
         b.iter(|| template_codegen(black_box(&source), CodeGenMode::Vapor2));
     });
 
@@ -373,7 +319,6 @@ const PROJECT_DIRS: &[&str] = &[
     "balancer-frontend-v2",
     "slidev",
     "zyronon-douyin",
-    "MQTTX",
     "FAIRshare",
     "requarks-wiki",
     "coreui-free-vue-admin-template",
@@ -398,57 +343,13 @@ fn real_world_per_project(c: &mut Criterion) {
 
         group.throughput(Throughput::Bytes(project.total_bytes));
 
-        // group.bench_with_input(
-        //     BenchmarkId::new("old_compile", &project.name),
-        //     &project,
-        //     |b, project| {
-        //         b.iter(|| {
-        //             for file in &project.files {
-        //                 let allocator = Allocator::new();
-        //                 let mut options = CodegenOptions::new().with_filename(&file.filename);
-        //                 options.skip_source_map = true;
-        //                 let result = compile(&file.content, &options, &allocator);
-        //                 black_box(&result.code);
-        //                 black_box(&result.styles);
-        //             }
-        //         });
-        //     },
-        // );
-
-        // Filter files safe for old vapor (some complex templates cause panics)
-        // let safe_files: Vec<&VueFile> = project
-        //     .files
-        //     .iter()
-        //     .filter(|f| old_vapor_is_safe(&f.content))
-        //     .collect();
-        // if !safe_files.is_empty() {
-        //     group.bench_with_input(
-        //         BenchmarkId::new("old_compile_vapor", &project.name),
-        //         &safe_files,
-        //         |b, safe_files| {
-        //             b.iter(|| {
-        //                 for file in safe_files.iter() {
-        //                     let vapor_source =
-        //                         file.content.replacen("<template>", "<template vapor>", 1);
-        //                     let allocator = Allocator::new();
-        //                     let mut options = CodegenOptions::new().with_filename(&file.filename);
-        //                     options.skip_source_map = true;
-        //                     let result = compile(&vapor_source, &options, &allocator);
-        //                     black_box(&result.code);
-        //                     black_box(&result.styles);
-        //                 }
-        //             });
-        //         },
-        //     );
-        // }
-
         group.bench_with_input(
-            BenchmarkId::new("new_compile", &project.name),
+            BenchmarkId::new("compile", &project.name),
             &project,
             |b, project| {
                 b.iter(|| {
                     for file in &project.files {
-                        black_box(compile_new(&file.content));
+                        black_box(compile_full(&file.content));
                     }
                 });
             },
@@ -519,47 +420,10 @@ fn real_world_aggregate(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(total_bytes));
     group.sample_size(10);
 
-    // group.bench_function(format!("old_compile/{}_files", all_files.len()), |b| {
-    //     b.iter(|| {
-    //         for file in &all_files {
-    //             let allocator = Allocator::new();
-    //             let mut options = CodegenOptions::new().with_filename(&file.filename);
-    //             options.skip_source_map = true;
-    //             let result = compile(&file.content, &options, &allocator);
-    //             black_box(&result.code);
-    //             black_box(&result.styles);
-    //         }
-    //     });
-    // });
-
-    // // Pre-compute vapor sources for old pipeline (filter out files that panic)
-    // let safe_vapor: Vec<(&VueFile, String)> = all_files
-    //     .iter()
-    //     .filter(|f| old_vapor_is_safe(&f.content))
-    //     .map(|f| (*f, f.content.replacen("<template>", "<template vapor>", 1)))
-    //     .collect();
-    // if !safe_vapor.is_empty() {
-    //     group.bench_function(
-    //         format!("old_compile_vapor/{}_files", safe_vapor.len()),
-    //         |b| {
-    //             b.iter(|| {
-    //                 for (file, vapor_source) in &safe_vapor {
-    //                     let allocator = Allocator::new();
-    //                     let mut options = CodegenOptions::new().with_filename(&file.filename);
-    //                     options.skip_source_map = true;
-    //                     let result = compile(vapor_source, &options, &allocator);
-    //                     black_box(&result.code);
-    //                     black_box(&result.styles);
-    //                 }
-    //             });
-    //         },
-    //     );
-    // }
-
-    group.bench_function(format!("new_compile/{}_files", all_files.len()), |b| {
+    group.bench_function(format!("compile/{}_files", all_files.len()), |b| {
         b.iter(|| {
             for file in &all_files {
-                black_box(compile_new(&file.content));
+                black_box(compile_full(&file.content));
             }
         });
     });
@@ -591,120 +455,9 @@ fn real_world_aggregate(c: &mut Criterion) {
     group.finish();
 }
 
-/// Quick template vapor benchmark: all fixtures + real-world aggregate in one group
-/// with reduced samples and warmup for fast feedback during optimization.
-///
-/// Run with: `cargo bench --bench new_impl_comparison -- "template_vapor_quick"`
-fn bench_template_vapor_quick(c: &mut Criterion) {
-    let fixtures = [
-        "simple",
-        "medium",
-        "large",
-        "kitchen-sink",
-        "template-heavy",
-        "composition-heavy",
-    ];
-
-    let mut group = c.benchmark_group("template_vapor_quick");
-    group.sample_size(10);
-    group.warm_up_time(std::time::Duration::from_secs(1));
-
-    for name in &fixtures {
-        let source = load_fixture(name);
-        let display_name = name.replace('-', "_");
-
-        // Old event-based pipeline with vapor mode (full compile, not template-only).
-        // Skip fixtures that cause panics in the old vapor backend.
-        if old_vapor_is_safe(&source) {
-            group.bench_function(&format!("old_vapor_{}", display_name), |b| {
-                let filename = format!("{}.vue", name);
-                b.iter(|| black_box(compile_old_vapor(black_box(&source), &filename)));
-            });
-        }
-        group.bench_function(&format!("vdom_{}", display_name), |b| {
-            b.iter(|| template_codegen(black_box(&source), CodeGenMode::Vdom));
-        });
-        group.bench_function(&format!("vapor_{}", display_name), |b| {
-            b.iter(|| template_codegen(black_box(&source), CodeGenMode::Vapor));
-        });
-        group.bench_function(&format!("vapor2_{}", display_name), |b| {
-            b.iter(|| template_codegen(black_box(&source), CodeGenMode::Vapor2));
-        });
-    }
-
-    // Quick aggregate with all real-world files
-    if let Some(root) = find_test_repos_root() {
-        let projects: Vec<ProjectFiles> = PROJECT_DIRS
-            .iter()
-            .filter_map(|dir| load_project_files(&root, dir))
-            .collect();
-        let all_files: Vec<&VueFile> = projects.iter().flat_map(|p| p.files.iter()).collect();
-        if !all_files.is_empty() {
-            // Old pipeline vapor aggregate (full compile, filter safe files)
-            let safe_vapor: Vec<(&VueFile, String)> = all_files
-                .iter()
-                .filter(|f| old_vapor_is_safe(&f.content))
-                .map(|f| (*f, f.content.replacen("<template>", "<template vapor>", 1)))
-                .collect();
-            if !safe_vapor.is_empty() {
-                group.bench_function(
-                    format!("old_vapor_aggregate_{}_files", safe_vapor.len()),
-                    |b| {
-                        b.iter(|| {
-                            for (file, vapor_source) in &safe_vapor {
-                                let allocator = Allocator::new();
-                                let mut options =
-                                    CodegenOptions::new().with_filename(&file.filename);
-                                options.skip_source_map = true;
-                                let result = compile(vapor_source, &options, &allocator);
-                                black_box(&result.code);
-                                black_box(&result.styles);
-                            }
-                        });
-                    },
-                );
-            }
-            group.bench_function(format!("vdom_aggregate_{}_files", all_files.len()), |b| {
-                b.iter(|| {
-                    for file in &all_files {
-                        template_codegen(&file.content, CodeGenMode::Vdom);
-                    }
-                });
-            });
-            group.bench_function(format!("vapor_aggregate_{}_files", all_files.len()), |b| {
-                b.iter(|| {
-                    for file in &all_files {
-                        template_codegen(&file.content, CodeGenMode::Vapor);
-                    }
-                });
-            });
-            group.bench_function(format!("vapor2_aggregate_{}_files", all_files.len()), |b| {
-                b.iter(|| {
-                    for file in &all_files {
-                        template_codegen(&file.content, CodeGenMode::Vapor2);
-                    }
-                });
-            });
-        }
-    }
-
-    group.finish();
-}
-
-// criterion_group!(
-//     fixture_benches,
-//     bench_simple,
-//     bench_medium,
-//     bench_large,
-//     bench_kitchen_sink,
-//     bench_template_heavy,
-//     bench_composition_heavy,
-// );
 criterion_group!(
     real_world_benches,
     real_world_per_project,
     real_world_aggregate,
 );
-// criterion_group!(quick_benches, bench_template_vapor_quick);
-// criterion_main!(fixture_benches, real_world_benches, quick_benches);
 criterion_main!(real_world_benches);

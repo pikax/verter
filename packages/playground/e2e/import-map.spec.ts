@@ -10,46 +10,28 @@ test.describe("Import map", () => {
   });
 
   test("Import Map tab/button exists", async ({ page }) => {
-    const importMapTab = page.locator(
-      ".file-selector .tab, .file-selector button, .import-map-tab",
-      { hasText: /import.?map/i },
-    );
-    // If import map is accessed via a special tab/button
-    const count = await importMapTab.count();
-    // It might be shown as a separate button or in the file list
-    expect(count).toBeGreaterThanOrEqual(0);
+    const importMapTab = page.locator(".import-map-tab");
+    await expect(importMapTab).toBeVisible({ timeout: 5000 });
   });
 
   test("clicking Import Map shows JSON content", async ({ page }) => {
-    const importMapTab = page.locator(
-      ".file-selector .tab, .file-selector button, .import-map-tab",
-      { hasText: /import.?map/i },
-    );
+    const importMapTab = page.locator(".import-map-tab");
+    await importMapTab.click();
+    await page.waitForTimeout(1000);
 
-    if ((await importMapTab.count()) > 0) {
-      await importMapTab.first().click();
-      await page.waitForTimeout(1000);
-
-      // The editor should show JSON with vue CDN
-      const editor = page.locator(".monaco-editor, .editor-container");
-      await expect(editor).toBeVisible({ timeout: 5000 });
-    }
+    // The editor should show JSON with vue CDN
+    const editor = page.locator(".editor-container");
+    await expect(editor).toBeVisible({ timeout: 5000 });
   });
 
   test("default import map contains vue CDN URL", async ({ page }) => {
-    const importMapTab = page.locator(
-      ".file-selector .tab, .file-selector button, .import-map-tab",
-      { hasText: /import.?map/i },
-    );
+    const importMapTab = page.locator(".import-map-tab");
+    await importMapTab.click();
+    await page.waitForTimeout(1000);
 
-    if ((await importMapTab.count()) > 0) {
-      await importMapTab.first().click();
-      await page.waitForTimeout(1000);
-
-      // Check page content for vue CDN reference
-      const content = await page.textContent("body");
-      expect(content).toContain("cdn.jsdelivr.net");
-    }
+    // Check page content for vue CDN reference
+    const content = await page.textContent("body");
+    expect(content).toContain("cdn.jsdelivr.net");
   });
 
   test("invalid JSON in import map does not crash the app", async ({ page }) => {

@@ -25,14 +25,14 @@
 //! let parser = Parser::new(&allocator, "foo + bar", SourceType::tsx());
 //! let expr = parser.parse_expression().unwrap();
 //! let ctx = BindingContext::new(0);
-//! let result = extract_bindings_from_expression(&expr, "foo + bar", &ctx);
+//! let result = extract_bindings_from_expression(&expr, "foo + bar", ctx);
 //!
 //! assert_eq!(result.non_ignored_binding_names(), vec!["foo", "bar"]);
 //! ```
 
 mod expression;
 mod helpers;
-mod keywords;
+pub(crate) mod keywords;
 mod slot;
 mod types;
 mod vfor;
@@ -48,8 +48,8 @@ pub use expression::{extract_bindings_from_expression, extract_bindings_from_pro
 pub use slot::{extract_bindings_from_formal_parameters, extract_slot_bindings};
 pub use vfor::extract_vfor_bindings;
 
-// Re-export keyword detection for advanced usage
-pub use keywords::is_keyword;
+// Re-export keyword and global detection for advanced usage
+pub use keywords::{is_global, is_keyword};
 
 // Re-export helpers for advanced usage
 pub use helpers::{

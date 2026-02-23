@@ -91,6 +91,100 @@ pub fn is_keyword(name: &[u8]) -> bool {
     }
 }
 
+/// Check if a byte slice is a JavaScript built-in global identifier.
+///
+/// These are globals that Vue's template compiler recognizes as built-in and
+/// should NOT be prefixed with `_ctx.` in compiled template expressions.
+///
+/// List from `@vue/shared` `makeMap(...)`:
+/// `Infinity, undefined, NaN, isFinite, isNaN, parseFloat, parseInt,
+/// decodeURI, decodeURIComponent, encodeURI, encodeURIComponent, Math,
+/// Number, Date, Array, Object, Boolean, String, RegExp, Map, Set, JSON,
+/// Intl, BigInt, console, Error, Symbol, WeakMap, WeakSet, WeakRef, Proxy,
+/// Reflect, Promise, globalThis, require`
+///
+/// Note: `undefined` is already covered by [`is_keyword`].
+///
+/// # Example
+/// ```ignore
+/// assert!(is_global(b"String"));
+/// assert!(is_global(b"Math"));
+/// assert!(!is_global(b"myVariable"));
+/// ```
+#[inline]
+pub fn is_global(name: &[u8]) -> bool {
+    let len = name.len();
+
+    // Globals range from 3 to 18 characters
+    if !(3..=18).contains(&len) {
+        return false;
+    }
+
+    let first = name[0];
+
+    match len {
+        3 => match first {
+            b'M' => name == b"Map",
+            b'N' => name == b"NaN",
+            b'S' => name == b"Set",
+            _ => false,
+        },
+        4 => match first {
+            b'D' => name == b"Date",
+            b'I' => name == b"Intl",
+            b'J' => name == b"JSON",
+            b'M' => name == b"Math",
+            _ => false,
+        },
+        5 => match first {
+            b'A' => name == b"Array",
+            b'E' => name == b"Error",
+            b'P' => name == b"Proxy",
+            b'i' => name == b"isNaN",
+            _ => false,
+        },
+        6 => match first {
+            b'B' => name == b"BigInt",
+            b'N' => name == b"Number",
+            b'O' => name == b"Object",
+            b'R' => name == b"RegExp",
+            b'S' => name == b"String" || name == b"Symbol",
+            _ => false,
+        },
+        7 => match first {
+            b'B' => name == b"Boolean",
+            b'P' => name == b"Promise",
+            b'R' => name == b"Reflect",
+            b'W' => name == b"WeakMap" || name == b"WeakRef" || name == b"WeakSet",
+            b'c' => name == b"console",
+            b'r' => name == b"require",
+            _ => false,
+        },
+        8 => match first {
+            b'I' => name == b"Infinity",
+            b'i' => name == b"isFinite",
+            b'p' => name == b"parseInt",
+            _ => false,
+        },
+        9 => match first {
+            b'd' => name == b"decodeURI",
+            b'e' => name == b"encodeURI",
+            _ => false,
+        },
+        10 => match first {
+            b'g' => name == b"globalThis",
+            b'p' => name == b"parseFloat",
+            _ => false,
+        },
+        18 => match first {
+            b'd' => name == b"decodeURIComponent",
+            b'e' => name == b"encodeURIComponent",
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +268,84 @@ mod tests {
         assert!(!is_keyword(b"x")); // 1 char
         assert!(!is_keyword(b"for_")); // almost a keyword
         assert!(!is_keyword(b"_for")); // almost a keyword
+    }
+
+    // ===========================================
+    // is_global tests
+    // ===========================================
+
+    #[test]
+    fn test_globals_3_char() {
+        assert!(is_global(b"NaN"));
+        assert!(is_global(b"Map"));
+        assert!(is_global(b"Set"));
+    }
+
+    #[test]
+    fn test_globals_4_char() {
+        assert!(is_global(b"Date"));
+        assert!(is_global(b"Math"));
+        assert!(is_global(b"JSON"));
+        assert!(is_global(b"Intl"));
+    }
+
+    #[test]
+    fn test_globals_5_char() {
+        assert!(is_global(b"Array"));
+        assert!(is_global(b"Error"));
+        assert!(is_global(b"Proxy"));
+        assert!(is_global(b"isNaN"));
+    }
+
+    #[test]
+    fn test_globals_6_char() {
+        assert!(is_global(b"Object"));
+        assert!(is_global(b"Number"));
+        assert!(is_global(b"String"));
+        assert!(is_global(b"BigInt"));
+        assert!(is_global(b"RegExp"));
+        assert!(is_global(b"Symbol"));
+    }
+
+    #[test]
+    fn test_globals_7_char() {
+        assert!(is_global(b"Boolean"));
+        assert!(is_global(b"Promise"));
+        assert!(is_global(b"Reflect"));
+        assert!(is_global(b"WeakMap"));
+        assert!(is_global(b"WeakRef"));
+        assert!(is_global(b"WeakSet"));
+        assert!(is_global(b"console"));
+        assert!(is_global(b"require"));
+    }
+
+    #[test]
+    fn test_globals_8_char() {
+        assert!(is_global(b"Infinity"));
+        assert!(is_global(b"isFinite"));
+        assert!(is_global(b"parseInt"));
+    }
+
+    #[test]
+    fn test_globals_9_10_18_char() {
+        assert!(is_global(b"decodeURI")); // 9
+        assert!(is_global(b"encodeURI")); // 9
+        assert!(is_global(b"globalThis")); // 10
+        assert!(is_global(b"parseFloat")); // 10
+        assert!(is_global(b"decodeURIComponent")); // 18
+        assert!(is_global(b"encodeURIComponent")); // 18
+    }
+
+    #[test]
+    fn test_non_globals() {
+        assert!(!is_global(b"foo"));
+        assert!(!is_global(b"bar"));
+        assert!(!is_global(b"myVariable"));
+        assert!(!is_global(b"")); // empty
+        assert!(!is_global(b"x")); // too short
+        assert!(!is_global(b"string")); // lowercase
+        assert!(!is_global(b"MATH")); // uppercase
+        assert!(!is_global(b"array")); // lowercase
+        assert!(!is_global(b"Console")); // wrong case
     }
 }

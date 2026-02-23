@@ -4,10 +4,14 @@ This folder contains the MCP config used to expose hotpath profiling data to AI 
 
 ## 1) Start the MCP server
 
-From repo root, run:
+From repo root, run one of the following:
 
 ```bash
+# AST-only pipeline (tokenize + parse + OXC expressions):
 pnpm run profile:hotpath:mcp
+
+# Full compile pipeline (tokenize + parse + style + script + template codegen):
+pnpm run profile:hotpath:full:mcp
 ```
 
 This starts profiling and serves MCP on:

@@ -239,7 +239,7 @@ jobs:
           - name: vuetify
             repo: vuetifyjs/vuetify
             branch: master
-            build-cmd: pnpm --filter vuetifyjs.com... build
+            build-cmd: pnpm --filter vuetify build && pnpm --filter vuetifyjs.com build
             test-cmd: ""
             e2e-cmd: ""
             package-manager: pnpm

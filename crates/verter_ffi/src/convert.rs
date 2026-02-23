@@ -1,0 +1,1325 @@
+//! Framework-agnostic conversion functions between FFI types and host types.
+//!
+//! Error-returning functions use `Result<T, FfiConversionError>`. Each consumer
+//! crate converts the error to its native type (`napi::Error` or `JsValue`)
+//! via the `Display` impl.
+
+use std::sync::Arc;
+
+use verter_host as host;
+
+use crate::types::*;
+
+/// Typed error for FFI → host conversion failures.
+#[derive(Debug, Clone)]
+pub enum FfiConversionError {
+    /// Invalid `compileErrorPolicy` string.
+    InvalidCompileErrorPolicy(String),
+    /// Invalid `analysisLevel` string.
+    InvalidAnalysisLevel(String),
+    /// Invalid `hmrStrategy` string.
+    InvalidHmrStrategy(String),
+    /// `delimiters` array must have exactly 2 elements.
+    InvalidDelimiters(usize),
+    /// Invalid `file_kind` string.
+    InvalidFileKind(String),
+    /// Invalid virtual node `kind` string.
+    InvalidNodeKind(String),
+}
+
+impl std::fmt::Display for FfiConversionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidCompileErrorPolicy(v) => {
+                write!(
+                    f,
+                    "invalid compileErrorPolicy '{v}' (expected 'strict' or 'dev')"
+                )
+            }
+            Self::InvalidAnalysisLevel(v) => {
+                write!(
+                    f,
+                    "invalid analysisLevel '{v}' (expected 'none', 'essential', or 'full')"
+                )
+            }
+            Self::InvalidHmrStrategy(v) => {
+                write!(
+                    f,
+                    "invalid hmrStrategy '{v}' (expected 'vite', 'webpack', or 'none')"
+                )
+            }
+            Self::InvalidDelimiters(len) => {
+                write!(f, "delimiters must have exactly 2 elements, got {len}")
+            }
+            Self::InvalidFileKind(v) => write!(f, "invalid file_kind '{v}'"),
+            Self::InvalidNodeKind(v) => write!(f, "invalid virtual node kind '{v}'"),
+        }
+    }
+}
+
+impl std::error::Error for FfiConversionError {}
+
+impl From<FfiConversionError> for String {
+    fn from(e: FfiConversionError) -> String {
+        e.to_string()
+    }
+}
+
+// =============================================================================
+// Input: FFI → Host
+// =============================================================================
+
+/// Convert FFI host config to internal host config.
+pub fn ffi_config_to_host(input: FfiHostConfig) -> Result<host::HostConfig, FfiConversionError> {
+    let mut out = host::HostConfig::default();
+    if let Some(dev_mode) = input.dev_mode {
+        out.dev_mode = dev_mode;
+    }
+    if let Some(policy) = input.compile_error_policy {
+        out.compile_error_policy = if policy.eq_ignore_ascii_case("strict")
+            || policy.eq_ignore_ascii_case("strict_error")
+            || policy.eq_ignore_ascii_case("strictError")
+        {
+            host::CompileErrorPolicy::StrictError
+        } else if policy.eq_ignore_ascii_case("dev")
+            || policy.eq_ignore_ascii_case("dev_serve_last_known_good")
+            || policy.eq_ignore_ascii_case("devServeLastKnownGood")
+        {
+            host::CompileErrorPolicy::DevServeLastKnownGood
+        } else {
+            return Err(FfiConversionError::InvalidCompileErrorPolicy(policy));
+        };
+    }
+    if let Some(lsp_scheme) = input.lsp_scheme {
+        out.lsp_scheme = lsp_scheme;
+    }
+    if let Some(max_profiles) = input.max_profiles_per_file {
+        out.max_profiles_per_file = max_profiles as usize;
+    }
+    if let Some(extensions) = input.resolve_extensions {
+        out.resolve_extensions = extensions;
+    }
+    if let Some(level) = input.analysis_level {
+        out.analysis_level = if level.eq_ignore_ascii_case("none") {
+            host::AnalysisLevel::None
+        } else if level.eq_ignore_ascii_case("essential") {
+            host::AnalysisLevel::Essential
+        } else if level.eq_ignore_ascii_case("full") {
+            host::AnalysisLevel::Full
+        } else {
+            return Err(FfiConversionError::InvalidAnalysisLevel(level));
+        };
+    }
+    Ok(out)
+}
+
+/// Convert FFI compile profile to internal compile profile.
+pub fn ffi_profile_to_host(
+    input: Option<FfiCompileProfile>,
+) -> Result<host::CompileProfile, FfiConversionError> {
+    let mut out = host::CompileProfile::default();
+    if let Some(input) = input {
+        out.filename = input.filename;
+        if let Some(is_production) = input.is_production {
+            out.is_production = is_production;
+        }
+        if let Some(ssr) = input.ssr {
+            out.ssr = ssr;
+        }
+        if let Some(hmr_strategy) = input.hmr_strategy {
+            out.hmr_strategy = if hmr_strategy.eq_ignore_ascii_case("vite") {
+                host::HmrStrategy::Vite
+            } else if hmr_strategy.eq_ignore_ascii_case("webpack") {
+                host::HmrStrategy::Webpack
+            } else if hmr_strategy.eq_ignore_ascii_case("none") {
+                host::HmrStrategy::None
+            } else {
+                return Err(FfiConversionError::InvalidHmrStrategy(hmr_strategy));
+            };
+        }
+        out.component_id = input.component_id;
+        out.delimiters = if let Some(d) = input.delimiters {
+            if d.len() != 2 {
+                return Err(FfiConversionError::InvalidDelimiters(d.len()));
+            }
+            Some((d[0].clone(), d[1].clone()))
+        } else {
+            None
+        };
+        out.custom_elements = input.custom_elements;
+        out.comments = input.comments;
+        if let Some(runtime_module_name) = input.runtime_module_name {
+            out.runtime_module_name = Some(runtime_module_name);
+        }
+        if let Some(force_vapor) = input.force_vapor {
+            out.force_vapor = force_vapor;
+        }
+        if let Some(force_js) = input.force_js {
+            out.force_js = force_js;
+        }
+        if let Some(source_map) = input.source_map {
+            out.source_map = source_map;
+        }
+    }
+    Ok(out)
+}
+
+/// Parse a file kind string to the host enum.
+pub fn ffi_file_kind_to_host(input: Option<&str>) -> Result<host::FileKind, FfiConversionError> {
+    match input.unwrap_or("vue").to_ascii_lowercase().as_str() {
+        "vue" | "sfc" | "vue_sfc" => Ok(host::FileKind::VueSfc),
+        "non_sfc" | "text" | "file" => Ok(host::FileKind::NonSfc),
+        other => Err(FfiConversionError::InvalidFileKind(other.to_string())),
+    }
+}
+
+/// Parse a virtual node kind from its FFI representation.
+pub fn ffi_node_kind_to_host(
+    input: FfiVirtualNodeKind,
+) -> Result<host::VirtualNodeKind, FfiConversionError> {
+    match input.kind.to_ascii_lowercase().as_str() {
+        "main" => Ok(host::VirtualNodeKind::Main),
+        "script" => Ok(host::VirtualNodeKind::Script),
+        "template" => Ok(host::VirtualNodeKind::Template),
+        "style" => Ok(host::VirtualNodeKind::Style {
+            index: input.index.unwrap_or(0) as usize,
+        }),
+        "custom" => Ok(host::VirtualNodeKind::Custom {
+            index: input.index.unwrap_or(0) as usize,
+        }),
+        other => Err(FfiConversionError::InvalidNodeKind(other.to_string())),
+    }
+}
+
+/// Convert FFI upsert request to host upsert request.
+pub fn ffi_upsert_to_host(
+    input: FfiUpsertRequest,
+) -> Result<host::UpsertRequest, FfiConversionError> {
+    Ok(host::UpsertRequest {
+        canonical_id: input.canonical_id,
+        input_id: input.input_id,
+        source: Arc::from(input.source),
+        file_kind: ffi_file_kind_to_host(input.file_kind.as_deref())?,
+        aliases: input.aliases.unwrap_or_default(),
+    })
+}
+
+/// Convert FFI style override request to host style override request.
+pub fn ffi_style_override_to_host(
+    input: FfiStyleOverrideRequest,
+) -> Result<host::StyleOverrideRequest, FfiConversionError> {
+    Ok(host::StyleOverrideRequest {
+        canonical_id: input.canonical_id,
+        compile_profile: ffi_profile_to_host(input.compile_profile)?,
+        overrides: input
+            .overrides
+            .into_iter()
+            .map(|entry| host::StyleOverrideEntry {
+                index: entry.index as usize,
+                code: Arc::from(entry.code),
+                source_map: entry.source_map.map(Arc::from),
+            })
+            .collect(),
+    })
+}
+
+/// Convert FFI virtual query to host virtual query.
+pub fn ffi_virtual_query_to_host(
+    input: FfiVirtualQuery,
+) -> Result<host::VirtualQuery, FfiConversionError> {
+    let node_kind = input.node_kind.map(ffi_node_kind_to_host).transpose()?;
+    Ok(host::VirtualQuery {
+        raw_id: input.raw_id,
+        canonical_id: input.canonical_id,
+        node_kind,
+        compile_profile: ffi_profile_to_host(input.compile_profile)?,
+    })
+}
+
+// =============================================================================
+// Output: Host → FFI
+// =============================================================================
+
+/// Convert a host virtual node kind to its FFI representation.
+pub fn host_node_kind_to_ffi(input: &host::VirtualNodeKind) -> FfiVirtualNodeKind {
+    match input {
+        host::VirtualNodeKind::Main => FfiVirtualNodeKind {
+            kind: "main".to_string(),
+            index: None,
+        },
+        host::VirtualNodeKind::Script => FfiVirtualNodeKind {
+            kind: "script".to_string(),
+            index: None,
+        },
+        host::VirtualNodeKind::Template => FfiVirtualNodeKind {
+            kind: "template".to_string(),
+            index: None,
+        },
+        host::VirtualNodeKind::Style { index } => FfiVirtualNodeKind {
+            kind: "style".to_string(),
+            index: Some(*index as u32),
+        },
+        host::VirtualNodeKind::Custom { index } => FfiVirtualNodeKind {
+            kind: "custom".to_string(),
+            index: Some(*index as u32),
+        },
+    }
+}
+
+/// Convert host diagnostics to FFI representation.
+pub fn host_diagnostics_to_ffi(input: &host::DiagnosticsSnapshot) -> FfiDiagnosticsSnapshot {
+    FfiDiagnosticsSnapshot {
+        diagnostics: input
+            .diagnostics
+            .iter()
+            .map(|d| FfiDiagnostic {
+                severity: match d.severity {
+                    host::HostSeverity::Error => "error".to_string(),
+                    host::HostSeverity::Warning => "warning".to_string(),
+                    host::HostSeverity::Info => "info".to_string(),
+                },
+                code: d.code.clone(),
+                message: d.message.clone(),
+                span_start: d.span_start,
+                span_end: d.span_end,
+            })
+            .collect(),
+        has_errors: input.has_errors,
+    }
+}
+
+/// Convert a host update result to its FFI representation.
+pub fn host_update_to_ffi(input: host::HostUpdateResult) -> FfiUpdateResult {
+    FfiUpdateResult {
+        canonical_id: input.canonical_id,
+        changed: input.changed,
+        slice_changes: FfiSliceChanges {
+            script_changed: input.slice_changes.script_changed,
+            template_changed: input.slice_changes.template_changed,
+            style_indices_changed: input
+                .slice_changes
+                .style_indices_changed
+                .into_iter()
+                .map(|i| i as u32)
+                .collect(),
+            custom_indices_changed: input
+                .slice_changes
+                .custom_indices_changed
+                .into_iter()
+                .map(|i| i as u32)
+                .collect(),
+            structure_changed: input.slice_changes.structure_changed,
+            descriptor_changed: input.slice_changes.descriptor_changed,
+        },
+        changed_virtual_nodes: input
+            .changed_virtual_nodes
+            .iter()
+            .map(host_node_kind_to_ffi)
+            .collect(),
+        removed_virtual_nodes: input
+            .removed_virtual_nodes
+            .iter()
+            .map(host_node_kind_to_ffi)
+            .collect(),
+        changed_virtual_ids: input.changed_virtual_ids,
+        removed_virtual_ids: input.removed_virtual_ids,
+        changed_lsp_ids: input.changed_lsp_ids,
+        removed_lsp_ids: input.removed_lsp_ids,
+        diagnostics: host_diagnostics_to_ffi(&input.diagnostics),
+        external_source_requests: input
+            .external_source_requests
+            .into_iter()
+            .map(|req| FfiExternalSourceRequest {
+                owner_canonical_id: req.owner_canonical_id,
+                block_kind: match req.block_kind {
+                    host::ExternalBlockKind::Script => "script".to_string(),
+                    host::ExternalBlockKind::Template => "template".to_string(),
+                    host::ExternalBlockKind::Style => "style".to_string(),
+                    host::ExternalBlockKind::Custom => "custom".to_string(),
+                },
+                index: req.index as u32,
+                specifier: req.specifier,
+                resolved_canonical_id: req.resolved_canonical_id,
+            })
+            .collect(),
+        import_specifiers: input
+            .import_specifiers
+            .into_iter()
+            .map(|imp| FfiScriptImportInfo {
+                source: imp.source,
+                is_type_only: imp.is_type_only,
+                bindings: imp.bindings,
+            })
+            .collect(),
+        parse_duration_ms: input.parse_duration_ms,
+    }
+}
+
+/// Convert a host virtual file response to its FFI representation.
+pub fn host_virtual_file_to_ffi(input: host::VirtualFileResponse) -> FfiVirtualFileResponse {
+    FfiVirtualFileResponse {
+        id: input.id,
+        code: input.code.to_string(),
+        source_map: input.source_map.as_ref().map(|s| s.to_string()),
+        lang: input.lang,
+        stale: input.stale,
+        diagnostics: host_diagnostics_to_ffi(&input.diagnostics),
+        meta: FfiVirtualMeta {
+            scope_id: input.meta.scope_id,
+            block_type: input.meta.block_type,
+            style_index: input.meta.style_index.map(|i| i as u32),
+            custom_index: input.meta.custom_index.map(|i| i as u32),
+        },
+    }
+}
+
+/// Convert a host resolved ID to its FFI representation.
+pub fn host_resolved_id_to_ffi(input: host::ResolvedId) -> FfiResolvedId {
+    FfiResolvedId {
+        canonical_id: input.canonical_id,
+        node_kind: host_node_kind_to_ffi(&input.node_kind),
+        exists_in_host: input.exists_in_host,
+        bundler_id: input.bundler_id,
+        lsp_id: input.lsp_id,
+    }
+}
+
+/// Convert a host remove result to its FFI representation.
+pub fn host_remove_to_ffi(input: host::HostRemoveResult) -> FfiRemoveResult {
+    FfiRemoveResult {
+        canonical_id: input.canonical_id,
+    }
+}
+
+/// Convert a host error to a human-readable string.
+///
+/// Each consumer crate wraps this string in its native error type
+/// (`napi::Error` or `JsValue`).
+pub fn host_error_to_string(err: &host::HostError) -> String {
+    match err {
+        host::HostError::MissingSource { canonical_id } => {
+            format!("HostError::MissingSource: {}", canonical_id)
+        }
+        host::HostError::InvalidQuery => "HostError::InvalidQuery".to_string(),
+        host::HostError::MissingVirtualNode { canonical_id } => {
+            format!("HostError::MissingVirtualNode: {}", canonical_id)
+        }
+        host::HostError::CompileError { diagnostics } => {
+            let summary = diagnostics
+                .diagnostics
+                .iter()
+                .map(|d| format!("[{}] {}", d.code, d.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            format!("HostError::CompileError: {}", summary)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Error path tests ──────────────────────────────────────────
+
+    #[test]
+    fn invalid_compile_error_policy() {
+        let config = FfiHostConfig {
+            compile_error_policy: Some("banana".to_string()),
+            ..Default::default()
+        };
+        let err = ffi_config_to_host(config).unwrap_err();
+        assert!(matches!(
+            err,
+            FfiConversionError::InvalidCompileErrorPolicy(_)
+        ));
+        assert!(err.to_string().contains("banana"));
+    }
+
+    #[test]
+    fn invalid_analysis_level() {
+        let config = FfiHostConfig {
+            analysis_level: Some("turbo".to_string()),
+            ..Default::default()
+        };
+        let err = ffi_config_to_host(config).unwrap_err();
+        assert!(matches!(err, FfiConversionError::InvalidAnalysisLevel(_)));
+    }
+
+    #[test]
+    fn invalid_hmr_strategy() {
+        let profile = FfiCompileProfile {
+            hmr_strategy: Some("rspack".to_string()),
+            ..Default::default()
+        };
+        let err = ffi_profile_to_host(Some(profile)).unwrap_err();
+        assert!(matches!(err, FfiConversionError::InvalidHmrStrategy(_)));
+    }
+
+    #[test]
+    fn invalid_delimiters_count() {
+        let profile = FfiCompileProfile {
+            delimiters: Some(vec!["{{".to_string()]),
+            ..Default::default()
+        };
+        let err = ffi_profile_to_host(Some(profile)).unwrap_err();
+        assert!(matches!(err, FfiConversionError::InvalidDelimiters(1)));
+    }
+
+    #[test]
+    fn invalid_file_kind() {
+        let err = ffi_file_kind_to_host(Some("binary")).unwrap_err();
+        assert!(matches!(err, FfiConversionError::InvalidFileKind(_)));
+    }
+
+    #[test]
+    fn invalid_node_kind() {
+        let kind = FfiVirtualNodeKind {
+            kind: "fragment".to_string(),
+            index: None,
+        };
+        let err = ffi_node_kind_to_host(kind).unwrap_err();
+        assert!(matches!(err, FfiConversionError::InvalidNodeKind(_)));
+    }
+
+    // ── Happy path smoke tests ────────────────────────────────────
+
+    #[test]
+    fn config_defaults_are_valid() {
+        let config = FfiHostConfig::default();
+        let result = ffi_config_to_host(config).unwrap();
+        assert!(result.dev_mode);
+    }
+
+    #[test]
+    fn profile_none_returns_default() {
+        let result = ffi_profile_to_host(None).unwrap();
+        assert!(!result.is_production);
+    }
+
+    #[test]
+    fn file_kind_vue_default() {
+        let kind = ffi_file_kind_to_host(None).unwrap();
+        assert_eq!(kind, host::FileKind::VueSfc);
+    }
+
+    #[test]
+    fn file_kind_non_sfc() {
+        let kind = ffi_file_kind_to_host(Some("non_sfc")).unwrap();
+        assert_eq!(kind, host::FileKind::NonSfc);
+    }
+
+    #[test]
+    fn node_kind_round_trip() {
+        let kinds = [
+            ("main", host::VirtualNodeKind::Main),
+            ("script", host::VirtualNodeKind::Script),
+            ("template", host::VirtualNodeKind::Template),
+        ];
+        for (s, expected) in &kinds {
+            let ffi = FfiVirtualNodeKind {
+                kind: s.to_string(),
+                index: None,
+            };
+            assert_eq!(ffi_node_kind_to_host(ffi).unwrap(), *expected);
+        }
+    }
+
+    #[test]
+    fn node_kind_style_with_index() {
+        let ffi = FfiVirtualNodeKind {
+            kind: "style".to_string(),
+            index: Some(2),
+        };
+        assert_eq!(
+            ffi_node_kind_to_host(ffi).unwrap(),
+            host::VirtualNodeKind::Style { index: 2 }
+        );
+    }
+
+    #[test]
+    fn config_case_insensitive_policy() {
+        let config = FfiHostConfig {
+            compile_error_policy: Some("STRICT".to_string()),
+            ..Default::default()
+        };
+        let result = ffi_config_to_host(config).unwrap();
+        assert_eq!(
+            result.compile_error_policy,
+            host::CompileErrorPolicy::StrictError
+        );
+    }
+
+    #[test]
+    fn ffi_conversion_error_display() {
+        let err = FfiConversionError::InvalidFileKind("xyz".to_string());
+        assert_eq!(err.to_string(), "invalid file_kind 'xyz'");
+
+        let err = FfiConversionError::InvalidDelimiters(3);
+        assert_eq!(
+            err.to_string(),
+            "delimiters must have exactly 2 elements, got 3"
+        );
+    }
+
+    #[test]
+    fn ffi_conversion_error_to_string_impl() {
+        let err = FfiConversionError::InvalidHmrStrategy("rspack".to_string());
+        let s: String = err.into();
+        assert!(s.contains("rspack"));
+    }
+
+    // ── Config: all fields populated ─────────────────────────────────
+
+    #[test]
+    fn config_all_fields() {
+        let config = FfiHostConfig {
+            dev_mode: Some(false),
+            compile_error_policy: Some("strict".to_string()),
+            lsp_scheme: Some("my-scheme".to_string()),
+            max_profiles_per_file: Some(4),
+            resolve_extensions: Some(vec![".vue".to_string(), ".ts".to_string()]),
+            analysis_level: Some("essential".to_string()),
+        };
+        let result = ffi_config_to_host(config).unwrap();
+        assert!(!result.dev_mode);
+        assert_eq!(
+            result.compile_error_policy,
+            host::CompileErrorPolicy::StrictError
+        );
+        assert_eq!(result.lsp_scheme, "my-scheme");
+        assert_eq!(result.max_profiles_per_file, 4);
+        assert_eq!(result.resolve_extensions, vec![".vue", ".ts"]);
+        assert_eq!(result.analysis_level, host::AnalysisLevel::Essential);
+    }
+
+    // ── Config: all policy string variants ───────────────────────────
+
+    #[test]
+    fn config_policy_all_variants() {
+        let strict_variants = ["strict", "strict_error", "strictError", "STRICT", "Strict"];
+        for v in &strict_variants {
+            let cfg = FfiHostConfig {
+                compile_error_policy: Some(v.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(
+                ffi_config_to_host(cfg).unwrap().compile_error_policy,
+                host::CompileErrorPolicy::StrictError,
+                "variant '{v}' should map to StrictError"
+            );
+        }
+
+        let dev_variants = [
+            "dev",
+            "dev_serve_last_known_good",
+            "devServeLastKnownGood",
+            "DEV",
+        ];
+        for v in &dev_variants {
+            let cfg = FfiHostConfig {
+                compile_error_policy: Some(v.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(
+                ffi_config_to_host(cfg).unwrap().compile_error_policy,
+                host::CompileErrorPolicy::DevServeLastKnownGood,
+                "variant '{v}' should map to DevServeLastKnownGood"
+            );
+        }
+    }
+
+    // ── Config: all analysis level variants ──────────────────────────
+
+    #[test]
+    fn config_analysis_level_all_variants() {
+        let cases = [
+            ("none", host::AnalysisLevel::None),
+            ("NONE", host::AnalysisLevel::None),
+            ("essential", host::AnalysisLevel::Essential),
+            ("ESSENTIAL", host::AnalysisLevel::Essential),
+            ("full", host::AnalysisLevel::Full),
+            ("FULL", host::AnalysisLevel::Full),
+        ];
+        for (input, expected) in &cases {
+            let cfg = FfiHostConfig {
+                analysis_level: Some(input.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(
+                ffi_config_to_host(cfg).unwrap().analysis_level,
+                *expected,
+                "analysis level '{input}' mismatch"
+            );
+        }
+    }
+
+    // ── Profile: all fields populated ────────────────────────────────
+
+    #[test]
+    fn profile_all_fields() {
+        let profile = FfiCompileProfile {
+            filename: Some("Comp.vue".to_string()),
+            is_production: Some(true),
+            ssr: Some(true),
+            hmr_strategy: Some("vite".to_string()),
+            component_id: Some("abc123".to_string()),
+            delimiters: Some(vec!["<%".to_string(), "%>".to_string()]),
+            custom_elements: Some(vec!["my-el".to_string()]),
+            comments: Some(true),
+            runtime_module_name: Some("vue/runtime".to_string()),
+            force_vapor: Some(true),
+            force_js: Some(true),
+            source_map: Some(true),
+        };
+        let result = ffi_profile_to_host(Some(profile)).unwrap();
+        assert_eq!(result.filename, Some("Comp.vue".to_string()));
+        assert!(result.is_production);
+        assert!(result.ssr);
+        assert_eq!(result.hmr_strategy, host::HmrStrategy::Vite);
+        assert_eq!(result.component_id, Some("abc123".to_string()));
+        assert_eq!(
+            result.delimiters,
+            Some(("<%".to_string(), "%>".to_string()))
+        );
+        assert_eq!(result.custom_elements, Some(vec!["my-el".to_string()]));
+        assert_eq!(result.comments, Some(true));
+        assert_eq!(result.runtime_module_name, Some("vue/runtime".to_string()));
+        assert!(result.force_vapor);
+        assert!(result.force_js);
+        assert!(result.source_map);
+    }
+
+    // ── Profile: all HMR strategy variants ───────────────────────────
+
+    #[test]
+    fn profile_hmr_strategy_all_variants() {
+        let cases = [
+            ("vite", host::HmrStrategy::Vite),
+            ("VITE", host::HmrStrategy::Vite),
+            ("webpack", host::HmrStrategy::Webpack),
+            ("WEBPACK", host::HmrStrategy::Webpack),
+            ("none", host::HmrStrategy::None),
+            ("NONE", host::HmrStrategy::None),
+        ];
+        for (input, expected) in &cases {
+            let profile = FfiCompileProfile {
+                hmr_strategy: Some(input.to_string()),
+                ..Default::default()
+            };
+            assert_eq!(
+                ffi_profile_to_host(Some(profile)).unwrap().hmr_strategy,
+                *expected,
+                "hmr strategy '{input}' mismatch"
+            );
+        }
+    }
+
+    // ── Profile: delimiters edge cases ───────────────────────────────
+
+    #[test]
+    fn profile_delimiters_three_elements() {
+        let profile = FfiCompileProfile {
+            delimiters: Some(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
+            ..Default::default()
+        };
+        let err = ffi_profile_to_host(Some(profile)).unwrap_err();
+        assert!(matches!(err, FfiConversionError::InvalidDelimiters(3)));
+    }
+
+    #[test]
+    fn profile_delimiters_empty_vec() {
+        let profile = FfiCompileProfile {
+            delimiters: Some(vec![]),
+            ..Default::default()
+        };
+        let err = ffi_profile_to_host(Some(profile)).unwrap_err();
+        assert!(matches!(err, FfiConversionError::InvalidDelimiters(0)));
+    }
+
+    // ── File kind: all accepted variants ─────────────────────────────
+
+    #[test]
+    fn file_kind_all_vue_variants() {
+        for v in &["vue", "sfc", "vue_sfc", "VUE", "SFC", "Vue_Sfc"] {
+            assert_eq!(
+                ffi_file_kind_to_host(Some(v)).unwrap(),
+                host::FileKind::VueSfc,
+                "'{v}' should map to VueSfc"
+            );
+        }
+    }
+
+    #[test]
+    fn file_kind_all_non_sfc_variants() {
+        for v in &["non_sfc", "text", "file", "NON_SFC", "TEXT", "FILE"] {
+            assert_eq!(
+                ffi_file_kind_to_host(Some(v)).unwrap(),
+                host::FileKind::NonSfc,
+                "'{v}' should map to NonSfc"
+            );
+        }
+    }
+
+    // ── Node kind: custom with index ─────────────────────────────────
+
+    #[test]
+    fn node_kind_custom_with_index() {
+        let ffi = FfiVirtualNodeKind {
+            kind: "custom".to_string(),
+            index: Some(5),
+        };
+        assert_eq!(
+            ffi_node_kind_to_host(ffi).unwrap(),
+            host::VirtualNodeKind::Custom { index: 5 }
+        );
+    }
+
+    #[test]
+    fn node_kind_style_default_index() {
+        let ffi = FfiVirtualNodeKind {
+            kind: "style".to_string(),
+            index: None,
+        };
+        assert_eq!(
+            ffi_node_kind_to_host(ffi).unwrap(),
+            host::VirtualNodeKind::Style { index: 0 }
+        );
+    }
+
+    #[test]
+    fn node_kind_case_insensitive() {
+        for kind in &["MAIN", "Main", "SCRIPT", "Script", "TEMPLATE", "Template"] {
+            let ffi = FfiVirtualNodeKind {
+                kind: kind.to_string(),
+                index: None,
+            };
+            assert!(
+                ffi_node_kind_to_host(ffi).is_ok(),
+                "'{kind}' should be accepted"
+            );
+        }
+    }
+
+    // ── Upsert conversion ────────────────────────────────────────────
+
+    #[test]
+    fn upsert_basic() {
+        let ffi = FfiUpsertRequest {
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            input_id: "src/Comp.vue".to_string(),
+            source: "<template>hi</template>".to_string(),
+            file_kind: None,
+            aliases: None,
+        };
+        let result = ffi_upsert_to_host(ffi).unwrap();
+        assert_eq!(result.canonical_id, Some("/src/Comp.vue".to_string()));
+        assert_eq!(result.input_id, "src/Comp.vue");
+        assert_eq!(&*result.source, "<template>hi</template>");
+        assert_eq!(result.file_kind, host::FileKind::VueSfc);
+        assert!(result.aliases.is_empty());
+    }
+
+    #[test]
+    fn upsert_with_aliases_and_non_sfc() {
+        let ffi = FfiUpsertRequest {
+            canonical_id: None,
+            input_id: "/src/types.ts".to_string(),
+            source: "export type Foo = string;".to_string(),
+            file_kind: Some("non_sfc".to_string()),
+            aliases: Some(vec!["@/types".to_string(), "~/types".to_string()]),
+        };
+        let result = ffi_upsert_to_host(ffi).unwrap();
+        assert!(result.canonical_id.is_none());
+        assert_eq!(result.file_kind, host::FileKind::NonSfc);
+        assert_eq!(result.aliases, vec!["@/types", "~/types"]);
+    }
+
+    #[test]
+    fn upsert_source_is_arc_str() {
+        let ffi = FfiUpsertRequest {
+            canonical_id: None,
+            input_id: "test.vue".to_string(),
+            source: "hello".to_string(),
+            file_kind: None,
+            aliases: None,
+        };
+        let result = ffi_upsert_to_host(ffi).unwrap();
+        // source should be Arc<str>, verify via reference counting
+        let arc: Arc<str> = result.source;
+        assert_eq!(&*arc, "hello");
+    }
+
+    #[test]
+    fn upsert_invalid_file_kind() {
+        let ffi = FfiUpsertRequest {
+            canonical_id: None,
+            input_id: "test.vue".to_string(),
+            source: "x".to_string(),
+            file_kind: Some("binary".to_string()),
+            aliases: None,
+        };
+        assert!(ffi_upsert_to_host(ffi).is_err());
+    }
+
+    // ── Style override conversion ────────────────────────────────────
+
+    #[test]
+    fn style_override_basic() {
+        let ffi = FfiStyleOverrideRequest {
+            canonical_id: "/src/Comp.vue".to_string(),
+            compile_profile: None,
+            overrides: vec![
+                FfiStyleOverrideEntry {
+                    index: 0,
+                    code: ".red { color: red }".to_string(),
+                    source_map: Some("sourcemap-json".to_string()),
+                },
+                FfiStyleOverrideEntry {
+                    index: 1,
+                    code: ".blue { color: blue }".to_string(),
+                    source_map: None,
+                },
+            ],
+        };
+        let result = ffi_style_override_to_host(ffi).unwrap();
+        assert_eq!(result.canonical_id, "/src/Comp.vue");
+        assert_eq!(result.overrides.len(), 2);
+        assert_eq!(result.overrides[0].index, 0);
+        assert_eq!(&*result.overrides[0].code, ".red { color: red }");
+        assert_eq!(
+            result.overrides[0].source_map.as_deref(),
+            Some("sourcemap-json")
+        );
+        assert_eq!(result.overrides[1].index, 1);
+        assert!(result.overrides[1].source_map.is_none());
+    }
+
+    // ── Virtual query conversion ─────────────────────────────────────
+
+    #[test]
+    fn virtual_query_with_raw_id() {
+        let ffi = FfiVirtualQuery {
+            raw_id: Some("Comp.vue?vue&type=style&index=0".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: None,
+        };
+        let result = ffi_virtual_query_to_host(ffi).unwrap();
+        assert_eq!(
+            result.raw_id,
+            Some("Comp.vue?vue&type=style&index=0".to_string())
+        );
+        assert!(result.canonical_id.is_none());
+        assert!(result.node_kind.is_none());
+    }
+
+    #[test]
+    fn virtual_query_with_explicit_kind() {
+        let ffi = FfiVirtualQuery {
+            raw_id: None,
+            canonical_id: Some("/src/Comp.vue".to_string()),
+            node_kind: Some(FfiVirtualNodeKind {
+                kind: "template".to_string(),
+                index: None,
+            }),
+            compile_profile: Some(FfiCompileProfile {
+                ssr: Some(true),
+                ..Default::default()
+            }),
+        };
+        let result = ffi_virtual_query_to_host(ffi).unwrap();
+        assert_eq!(result.canonical_id, Some("/src/Comp.vue".to_string()));
+        assert_eq!(result.node_kind, Some(host::VirtualNodeKind::Template));
+        assert!(result.compile_profile.ssr);
+    }
+
+    #[test]
+    fn virtual_query_invalid_node_kind_propagates() {
+        let ffi = FfiVirtualQuery {
+            raw_id: None,
+            canonical_id: None,
+            node_kind: Some(FfiVirtualNodeKind {
+                kind: "banana".to_string(),
+                index: None,
+            }),
+            compile_profile: None,
+        };
+        assert!(matches!(
+            ffi_virtual_query_to_host(ffi).unwrap_err(),
+            FfiConversionError::InvalidNodeKind(_)
+        ));
+    }
+
+    // ── Output direction: host_node_kind_to_ffi ──────────────────────
+
+    #[test]
+    fn node_kind_to_ffi_all_variants() {
+        let cases: &[(host::VirtualNodeKind, &str, Option<u32>)] = &[
+            (host::VirtualNodeKind::Main, "main", None),
+            (host::VirtualNodeKind::Script, "script", None),
+            (host::VirtualNodeKind::Template, "template", None),
+            (host::VirtualNodeKind::Style { index: 3 }, "style", Some(3)),
+            (
+                host::VirtualNodeKind::Custom { index: 7 },
+                "custom",
+                Some(7),
+            ),
+        ];
+        for (input, expected_kind, expected_index) in cases {
+            let ffi = host_node_kind_to_ffi(input);
+            assert_eq!(ffi.kind, *expected_kind);
+            assert_eq!(ffi.index, *expected_index);
+        }
+    }
+
+    // ── Output direction: host_diagnostics_to_ffi ────────────────────
+
+    #[test]
+    fn diagnostics_all_severity_levels() {
+        let snapshot = host::DiagnosticsSnapshot {
+            diagnostics: vec![
+                host::HostDiagnostic {
+                    severity: host::HostSeverity::Error,
+                    code: "E001".to_string(),
+                    message: "error msg".to_string(),
+                    span_start: Some(0),
+                    span_end: Some(10),
+                },
+                host::HostDiagnostic {
+                    severity: host::HostSeverity::Warning,
+                    code: "W001".to_string(),
+                    message: "warning msg".to_string(),
+                    span_start: None,
+                    span_end: None,
+                },
+                host::HostDiagnostic {
+                    severity: host::HostSeverity::Info,
+                    code: "I001".to_string(),
+                    message: "info msg".to_string(),
+                    span_start: Some(5),
+                    span_end: None,
+                },
+            ],
+            has_errors: true,
+        };
+        let ffi = host_diagnostics_to_ffi(&snapshot);
+        assert!(ffi.has_errors);
+        assert_eq!(ffi.diagnostics.len(), 3);
+        assert_eq!(ffi.diagnostics[0].severity, "error");
+        assert_eq!(ffi.diagnostics[0].code, "E001");
+        assert_eq!(ffi.diagnostics[0].span_start, Some(0));
+        assert_eq!(ffi.diagnostics[0].span_end, Some(10));
+        assert_eq!(ffi.diagnostics[1].severity, "warning");
+        assert_eq!(ffi.diagnostics[1].span_start, None);
+        assert_eq!(ffi.diagnostics[2].severity, "info");
+        assert_eq!(ffi.diagnostics[2].span_end, None);
+    }
+
+    #[test]
+    fn diagnostics_empty() {
+        let snapshot = host::DiagnosticsSnapshot::default();
+        let ffi = host_diagnostics_to_ffi(&snapshot);
+        assert!(!ffi.has_errors);
+        assert!(ffi.diagnostics.is_empty());
+    }
+
+    // ── Output direction: host_update_to_ffi ─────────────────────────
+
+    #[test]
+    fn update_result_full_round_trip() {
+        let host_result = host::HostUpdateResult {
+            canonical_id: "/src/App.vue".to_string(),
+            changed: true,
+            slice_changes: host::SliceChanges {
+                script_changed: true,
+                template_changed: false,
+                style_indices_changed: vec![0, 2],
+                custom_indices_changed: vec![1],
+                structure_changed: true,
+                descriptor_changed: false,
+            },
+            changed_virtual_nodes: vec![
+                host::VirtualNodeKind::Script,
+                host::VirtualNodeKind::Style { index: 0 },
+            ],
+            removed_virtual_nodes: vec![host::VirtualNodeKind::Style { index: 2 }],
+            changed_virtual_ids: vec!["App.vue?type=script".to_string()],
+            removed_virtual_ids: vec!["App.vue?type=style&index=2".to_string()],
+            changed_lsp_ids: vec!["App.vue._VERTER_.script.ts".to_string()],
+            removed_lsp_ids: vec!["App.vue._VERTER_.style.2.css".to_string()],
+            diagnostics: host::DiagnosticsSnapshot {
+                diagnostics: vec![host::HostDiagnostic {
+                    severity: host::HostSeverity::Warning,
+                    code: "W002".to_string(),
+                    message: "unused var".to_string(),
+                    span_start: Some(42),
+                    span_end: Some(45),
+                }],
+                has_errors: false,
+            },
+            external_source_requests: vec![host::ExternalSourceRequest {
+                owner_canonical_id: "/src/App.vue".to_string(),
+                block_kind: host::ExternalBlockKind::Script,
+                index: 0,
+                specifier: "./script.ts".to_string(),
+                resolved_canonical_id: "/src/script.ts".to_string(),
+            }],
+            import_specifiers: vec![host::ScriptImportInfo {
+                source: "vue".to_string(),
+                is_type_only: false,
+                bindings: vec!["ref".to_string(), "computed".to_string()],
+            }],
+            parse_duration_ms: 1.5,
+        };
+
+        let ffi = host_update_to_ffi(host_result);
+        assert_eq!(ffi.canonical_id, "/src/App.vue");
+        assert!(ffi.changed);
+
+        // slice changes
+        assert!(ffi.slice_changes.script_changed);
+        assert!(!ffi.slice_changes.template_changed);
+        assert_eq!(ffi.slice_changes.style_indices_changed, vec![0, 2]);
+        assert_eq!(ffi.slice_changes.custom_indices_changed, vec![1]);
+        assert!(ffi.slice_changes.structure_changed);
+        assert!(!ffi.slice_changes.descriptor_changed);
+
+        // virtual nodes (usize→u32 for indexed kinds)
+        assert_eq!(ffi.changed_virtual_nodes.len(), 2);
+        assert_eq!(ffi.changed_virtual_nodes[0].kind, "script");
+        assert_eq!(ffi.changed_virtual_nodes[1].kind, "style");
+        assert_eq!(ffi.changed_virtual_nodes[1].index, Some(0));
+        assert_eq!(ffi.removed_virtual_nodes.len(), 1);
+        assert_eq!(ffi.removed_virtual_nodes[0].kind, "style");
+        assert_eq!(ffi.removed_virtual_nodes[0].index, Some(2));
+
+        // IDs
+        assert_eq!(ffi.changed_virtual_ids, vec!["App.vue?type=script"]);
+        assert_eq!(ffi.removed_virtual_ids, vec!["App.vue?type=style&index=2"]);
+        assert_eq!(ffi.changed_lsp_ids, vec!["App.vue._VERTER_.script.ts"]);
+        assert_eq!(ffi.removed_lsp_ids, vec!["App.vue._VERTER_.style.2.css"]);
+
+        // diagnostics
+        assert!(!ffi.diagnostics.has_errors);
+        assert_eq!(ffi.diagnostics.diagnostics.len(), 1);
+        assert_eq!(ffi.diagnostics.diagnostics[0].severity, "warning");
+
+        // external source requests
+        assert_eq!(ffi.external_source_requests.len(), 1);
+        assert_eq!(
+            ffi.external_source_requests[0].owner_canonical_id,
+            "/src/App.vue"
+        );
+        assert_eq!(ffi.external_source_requests[0].block_kind, "script");
+        assert_eq!(ffi.external_source_requests[0].index, 0);
+        assert_eq!(ffi.external_source_requests[0].specifier, "./script.ts");
+
+        // import specifiers
+        assert_eq!(ffi.import_specifiers.len(), 1);
+        assert_eq!(ffi.import_specifiers[0].source, "vue");
+        assert!(!ffi.import_specifiers[0].is_type_only);
+        assert_eq!(ffi.import_specifiers[0].bindings, vec!["ref", "computed"]);
+
+        assert_eq!(ffi.parse_duration_ms, 1.5);
+    }
+
+    #[test]
+    fn update_result_external_block_kinds() {
+        let kinds = [
+            (host::ExternalBlockKind::Script, "script"),
+            (host::ExternalBlockKind::Template, "template"),
+            (host::ExternalBlockKind::Style, "style"),
+            (host::ExternalBlockKind::Custom, "custom"),
+        ];
+        for (host_kind, expected_str) in &kinds {
+            let result = host::HostUpdateResult {
+                external_source_requests: vec![host::ExternalSourceRequest {
+                    owner_canonical_id: "x".to_string(),
+                    block_kind: *host_kind,
+                    index: 0,
+                    specifier: "s".to_string(),
+                    resolved_canonical_id: "r".to_string(),
+                }],
+                ..host::HostUpdateResult::no_change("x".to_string())
+            };
+            let ffi = host_update_to_ffi(result);
+            assert_eq!(
+                ffi.external_source_requests[0].block_kind, *expected_str,
+                "block kind mismatch"
+            );
+        }
+    }
+
+    // ── Output direction: host_virtual_file_to_ffi ───────────────────
+
+    #[test]
+    fn virtual_file_arc_to_string() {
+        let response = host::VirtualFileResponse {
+            id: "Comp.vue._VERTER_.script.ts".to_string(),
+            code: Arc::from("export default {}"),
+            source_map: Some(Arc::from("{\"mappings\":\"\"}")),
+            lang: Some("ts".to_string()),
+            stale: true,
+            diagnostics: host::DiagnosticsSnapshot::default(),
+            meta: host::VirtualMeta {
+                scope_id: Some("data-v-abc123".to_string()),
+                block_type: None,
+                style_index: Some(2),
+                custom_index: None,
+            },
+        };
+        let ffi = host_virtual_file_to_ffi(response);
+        assert_eq!(ffi.id, "Comp.vue._VERTER_.script.ts");
+        assert_eq!(ffi.code, "export default {}");
+        assert_eq!(ffi.source_map, Some("{\"mappings\":\"\"}".to_string()));
+        assert_eq!(ffi.lang, Some("ts".to_string()));
+        assert!(ffi.stale);
+        assert_eq!(ffi.meta.scope_id, Some("data-v-abc123".to_string()));
+        assert!(ffi.meta.block_type.is_none());
+        assert_eq!(ffi.meta.style_index, Some(2));
+        assert!(ffi.meta.custom_index.is_none());
+    }
+
+    #[test]
+    fn virtual_file_no_source_map() {
+        let response = host::VirtualFileResponse {
+            id: "x".to_string(),
+            code: Arc::from(""),
+            source_map: None,
+            lang: None,
+            stale: false,
+            diagnostics: host::DiagnosticsSnapshot::default(),
+            meta: host::VirtualMeta::default(),
+        };
+        let ffi = host_virtual_file_to_ffi(response);
+        assert!(ffi.source_map.is_none());
+        assert!(ffi.lang.is_none());
+        assert!(!ffi.stale);
+    }
+
+    // ── Output direction: host_resolved_id_to_ffi ────────────────────
+
+    #[test]
+    fn resolved_id_conversion() {
+        let resolved = host::ResolvedId {
+            canonical_id: "/src/Comp.vue".to_string(),
+            node_kind: host::VirtualNodeKind::Style { index: 1 },
+            exists_in_host: true,
+            bundler_id: "Comp.vue?vue&type=style&index=1&lang.css".to_string(),
+            lsp_id: "Comp.vue._VERTER_.style.1.css".to_string(),
+        };
+        let ffi = host_resolved_id_to_ffi(resolved);
+        assert_eq!(ffi.canonical_id, "/src/Comp.vue");
+        assert_eq!(ffi.node_kind.kind, "style");
+        assert_eq!(ffi.node_kind.index, Some(1));
+        assert!(ffi.exists_in_host);
+        assert_eq!(ffi.bundler_id, "Comp.vue?vue&type=style&index=1&lang.css");
+        assert_eq!(ffi.lsp_id, "Comp.vue._VERTER_.style.1.css");
+    }
+
+    // ── Output direction: host_remove_to_ffi ─────────────────────────
+
+    #[test]
+    fn remove_result_conversion() {
+        let remove = host::HostRemoveResult {
+            canonical_id: "/src/Old.vue".to_string(),
+        };
+        let ffi = host_remove_to_ffi(remove);
+        assert_eq!(ffi.canonical_id, "/src/Old.vue");
+    }
+
+    // ── host_error_to_string: all 4 variants ─────────────────────────
+
+    #[test]
+    fn host_error_missing_source() {
+        let err = host::HostError::MissingSource {
+            canonical_id: "/src/X.vue".to_string(),
+        };
+        let s = host_error_to_string(&err);
+        assert!(s.contains("MissingSource"));
+        assert!(s.contains("/src/X.vue"));
+    }
+
+    #[test]
+    fn host_error_invalid_query() {
+        let s = host_error_to_string(&host::HostError::InvalidQuery);
+        assert!(s.contains("InvalidQuery"));
+    }
+
+    #[test]
+    fn host_error_missing_virtual_node() {
+        let err = host::HostError::MissingVirtualNode {
+            canonical_id: "/src/Y.vue".to_string(),
+        };
+        let s = host_error_to_string(&err);
+        assert!(s.contains("MissingVirtualNode"));
+        assert!(s.contains("/src/Y.vue"));
+    }
+
+    #[test]
+    fn host_error_compile_error_with_diagnostics() {
+        let err = host::HostError::CompileError {
+            diagnostics: host::DiagnosticsSnapshot {
+                diagnostics: vec![
+                    host::HostDiagnostic {
+                        severity: host::HostSeverity::Error,
+                        code: "PARSE_ERR".to_string(),
+                        message: "unexpected token".to_string(),
+                        span_start: None,
+                        span_end: None,
+                    },
+                    host::HostDiagnostic {
+                        severity: host::HostSeverity::Warning,
+                        code: "WARN_01".to_string(),
+                        message: "unused import".to_string(),
+                        span_start: None,
+                        span_end: None,
+                    },
+                ],
+                has_errors: true,
+            },
+        };
+        let s = host_error_to_string(&err);
+        assert!(s.contains("CompileError"));
+        assert!(s.contains("[PARSE_ERR] unexpected token"));
+        assert!(s.contains("[WARN_01] unused import"));
+        // Both diagnostics joined by "; "
+        assert!(s.contains("; "));
+    }
+
+    // ── FfiConversionError Display: all variants ─────────────────────
+
+    #[test]
+    fn ffi_conversion_error_display_all_variants() {
+        let cases: Vec<(FfiConversionError, &str)> = vec![
+            (
+                FfiConversionError::InvalidCompileErrorPolicy("x".to_string()),
+                "invalid compileErrorPolicy 'x' (expected 'strict' or 'dev')",
+            ),
+            (
+                FfiConversionError::InvalidAnalysisLevel("y".to_string()),
+                "invalid analysisLevel 'y' (expected 'none', 'essential', or 'full')",
+            ),
+            (
+                FfiConversionError::InvalidHmrStrategy("z".to_string()),
+                "invalid hmrStrategy 'z' (expected 'vite', 'webpack', or 'none')",
+            ),
+            (
+                FfiConversionError::InvalidDelimiters(5),
+                "delimiters must have exactly 2 elements, got 5",
+            ),
+            (
+                FfiConversionError::InvalidFileKind("bin".to_string()),
+                "invalid file_kind 'bin'",
+            ),
+            (
+                FfiConversionError::InvalidNodeKind("frag".to_string()),
+                "invalid virtual node kind 'frag'",
+            ),
+        ];
+        for (err, expected) in &cases {
+            assert_eq!(err.to_string(), *expected);
+        }
+    }
+}

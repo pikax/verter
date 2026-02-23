@@ -117,51 +117,76 @@ documents/
 
 ### Rust Compiler Architecture (`crates/verter_core/src/`)
 
-The Rust compiler uses an event-driven plugin pipeline. See [CLAUDE_IMPLEMENTATION_GUIDE.md](CLAUDE_IMPLEMENTATION_GUIDE.md) and [crates/verter_core/src/syntax/README.md](crates/verter_core/src/syntax/README.md) for details.
+The Rust compiler uses an AST-based pipeline. The `compile()` orchestrator drives a linear 5-phase pipeline:
 
 ```
 Vue SFC Source
     ↓
-[Tokenizer] → TokenizerEvent stream
+[Tokenizer]  byte-level SFC tokenization (tokenizer/byte.rs)
     ↓
-[Syntax/Pipeline] → Vec<Event> (template/style) + Vec<Event> (script)
+[Parser]     builds arena-based template AST + extracts script/style blocks (parser/)
     ↓
-[Plugin Pipeline] → Processed events + codegen output
+[Style]      v-bind() scan + CSS processing (style/ + css/)
+    ↓
+[Script]     macro expansion, binding extraction, component wrapper (script/)
+    ↓
+[Template]   render function codegen — VDOM or Vapor backends (template/)
+    ↓
+[Compile]    orchestrates the above, applies CodeTransform, emits output (compile.rs)
 ```
-
-**Plugin pipeline order:**
-- Script: `element_compiler → oxc_parser → code_gen/script`
-- Template: `element_compiler → css_parser → oxc_parser → code_gen/template`
-
-Where `code_gen/template` can target VDOM, Vapor, or TSX output modes.
 
 **Module overview:**
 
 ```
-syntax/
-├── types.rs              # All event and type definitions
-├── pipeline.rs           # Tokenizer → Event conversion
-├── plugin.rs             # SyntaxPlugin trait
-├── binding_types.rs      # BindingType, ReactivityLevel
-└── plugins/
-    ├── element_compiler/  # Raw events → Compiled events
-    ├── oxc_parser/        # Compiled → OXC-parsed events (expression parsing)
-    ├── css_parser/        # Scoped CSS, v-bind(), CSS Modules
-    └── code_gen/          # Codegen plugins
-        ├── script/        # Script codegen (macros, bindings, sections)
-        ├── template/      # Template codegen
-        │   ├── vdom/      # VDOM render function output
-        │   ├── vapor/     # Vapor mode output
-        │   └── shared/    # Shared codegen helpers
-        ├── css/           # CSS output generation
-        └── types.rs       # Shared codegen types
+compile.rs                # Pipeline orchestrator, options, result types
+tokenizer/
+├── byte.rs               # Zero-copy byte-level SFC tokenizer (production)
+├── helpers.rs            # Tokenizer utility functions
+└── types.rs              # Event, QuoteType
+parser/
+├── mod.rs                # Syntax state machine (tokenizer events → AST)
+└── types.rs              # RootNodeScript, RootNodeStyle, RootNodeTemplate
+ast/
+├── mod.rs                # TemplateAst (flat arena with O(1) navigation)
+├── builder.rs            # TemplateAstBuilder (incremental AST construction)
+└── types.rs              # AstNode, ElementNode, NodeId, pre-computed flags
+script/
+├── mod.rs                # generate_script() entry point
+├── process.rs            # Script setup processing, companion script merging
+├── macros.rs             # defineProps/Emits/Model/Slots/Expose/Options
+└── css_vars.rs           # _useCssVars() injection for v-bind() in styles
+template/
+├── oxc/                  # OXC expression parsing for template bindings
+│   ├── mod.rs            # parse_template_expressions()
+│   └── types.rs          # OxcParsedAst, OxcParsedElement, OxcParsedExpression
+└── code_gen/             # Render function codegen
+    ├── mod.rs            # generate_template() entry point
+    ├── walker.rs         # DFS tree walker (shared by all backends)
+    ├── types.rs          # TemplateCodeGen trait, CodeGenOutput
+    ├── binding.rs        # BindingResolver (_ctx./$setup. prefix resolution)
+    ├── shared/           # Shared codegen helpers
+    ├── vdom/             # VDOM render function output (_createElementVNode, etc.)
+    ├── vapor/            # Vapor mode output (_template, _renderEffect, etc.)
+    └── vapor2/           # Experimental: alternative Vapor codegen approach
+style/
+├── mod.rs                # generate_style() entry point
+└── v_bind.rs             # v-bind() scanning in CSS
 css/
-├── mod.rs                # CSS entry point
-├── prepass.rs            # CSS preprocessing
-├── scoped.rs             # Scoped CSS transformation
-├── modules.rs            # CSS Modules support
-├── walk.rs               # CSS AST walking
-└── types.rs              # CSS types
+├── mod.rs                # process_style() — CSS pipeline entry point
+├── prepass.rs            # Vue syntax → valid CSS markers (v-bind, :deep, :slotted)
+├── scoped.rs             # Scoped CSS: insert [data-v-xxx] selectors
+├── modules.rs            # CSS Modules: hash class names
+├── walk.rs               # String-level CSS selector walking
+└── types.rs              # ProcessStyleOptions, ProcessStyleResult
+code_transform/
+├── code_transform.rs     # Chunk-based deferred mutation engine (MagicString equivalent)
+├── chunk.rs              # Chunk types (Original, Overwritten, Inserted)
+└── source_map.rs         # Source map generation from chunk positions
+utils/
+├── oxc/                  # OXC parser utilities
+│   ├── bindings/         # Expression binding extraction
+│   └── vue/              # Vue-specific OXC helpers (macros, type resolution, v-for, v-slot)
+└── vue/                  # Vue runtime helpers (tag detection, patch flags)
 ```
 
 ## Build
@@ -177,6 +202,40 @@ pnpm run build:playground     # Build the playground for deployment
 
 `pnpm build` runs sequentially: native bindings first (needed by unplugin), then WASM (needed by playground), then all TS packages. This ensures F5 debugging in VS Code and `pnpm --filter @verter/playground dev` both work.
 
+### Build Dependency Chain
+
+When changing Rust code, you must rebuild downstream artifacts in order:
+
+```
+verter_core (Rust crate)
+    ↓ cargo build
+verter_napi (NAPI-RS cdylib)        verter_wasm (wasm-bindgen cdylib)
+    ↓ pnpm run build:native             ↓ pnpm run build:wasm
+@verter/native (.node binary)       @verter/wasm (WASM pkg)
+    ↓                                    ↓
+@verter/unplugin (bundler plugin)   @verter/playground (browser editor)
+    ↓
+playground build (Vite)
+    ↓
+playground E2E tests
+```
+
+**Common rebuild sequences:**
+
+| What changed | Rebuild commands (in order) |
+|---|---|
+| Rust crate (`verter_core`) | `pnpm run build:native` → rebuild any downstream consumer |
+| Unplugin (`packages/unplugin`) | `pnpm run build:ts` (or just rebuild unplugin) |
+| Playground after Rust/unplugin change | `pnpm run build:native` → `cd packages/playground && rm -rf dist node_modules/.vite && npx vite build` |
+| WASM (for playground browser editor) | `pnpm run build:wasm` |
+| Everything | `pnpm build` (runs native → wasm → ts in correct order) |
+
+**Key details:**
+- `@verter/unplugin` depends on `@verter/native` — compiles `.vue` files at build time via the Rust native binary
+- `@verter/playground` uses `@verter/unplugin` (devDep) for its own Vue SFC compilation, and `@verter/wasm` (dep) for the in-browser editor
+- The native binary lives in `packages/native/dist/` after `build:native`
+- Clear Vite cache (`node_modules/.vite`) when rebuilding playground after native changes
+
 ## Development
 
 ```bash
@@ -187,13 +246,25 @@ pnpm clean                    # Remove build artifacts
 
 ## Profiling with MCP (for agents)
 
-Use the real-world profiling example with hotpath instrumentation:
+Use the real-world profiling example with hotpath instrumentation. Two pipeline modes are available:
 
 ```bash
+# AST-only pipeline (tokenize → parse → OXC expressions):
 pnpm run profile:hotpath          # Timing hotspots
 pnpm run profile:hotpath:alloc    # Timing + allocation hotspots
 pnpm run profile:hotpath:mcp      # Starts MCP endpoint at http://localhost:6771/mcp
+
+# Full compile pipeline (tokenize → parse → style → script → template codegen):
+pnpm run profile:hotpath:full          # Timing hotspots
+pnpm run profile:hotpath:full:alloc    # Timing + allocation hotspots
+pnpm run profile:hotpath:full:mcp      # Starts MCP endpoint at http://localhost:6771/mcp
 ```
+
+The full pipeline exercises all instrumented functions across the compilation flow:
+compile, generate_script, process_script_setup, process_macro_item, generate_style,
+process_style, apply_scoped_normalized, parse_template_expressions, generate_template,
+walk_template, apply_to, batch_overwrite, batch_prepend_left_static, build_string,
+generate_map, generate_map_json, alloc_node, attach_to_parent.
 
 Agent MCP config template is checked in at:
 
@@ -231,13 +302,46 @@ cargo fmt --all
 
 ### Testing Requirements
 
-**IMPORTANT**: When making any code changes, always add corresponding tests whenever possible:
+**IMPORTANT — TDD (Test-Driven Development) is mandatory**:
+1. **Write failing tests first** — before implementing any feature or fix, write one or more tests that demonstrate the expected behavior and verify they fail
+2. **Implement the minimum code** to make the failing tests pass
+3. **Refactor** if needed while keeping tests green
+
+Coverage expectations:
 - New features: Add tests covering the new functionality
 - Bug fixes: Add tests that would have caught the bug
 - Refactoring: Ensure existing tests pass and add tests for edge cases discovered
 - Behavioral changes: Add tests verifying the new behavior
 
 Tests serve as documentation of expected behavior and prevent regressions.
+
+### Server Cleanup
+
+**IMPORTANT**: After starting any dev server, preview server, or other long-running process for testing purposes, **always kill it when done**. This prevents stale servers from interfering with subsequent test runs (e.g., Playwright's `reuseExistingServer: true` will use a stale server serving old builds).
+
+```bash
+# After finishing with a server, kill it
+# If started in background, use the process ID or port:
+kill $(lsof -t -i:4173)   # Unix
+taskkill //F //PID <pid>   # Windows
+
+# Or if using pnpm/npm scripts, Ctrl+C the process
+```
+
+### Test Output Best Practices
+
+When running E2E tests or test suites where you need to inspect output, **redirect output to a temp file first**, then grep/read the file. This avoids re-running expensive builds and tests just to search for different patterns:
+
+```bash
+# Good: capture once, search multiple times
+pnpm exec playwright test --project=preview 2>&1 | tee /tmp/e2e-output.log
+# Then search as needed:
+grep -i "fail\|error" /tmp/e2e-output.log
+
+# Bad: re-running the full test suite each time you need different output
+pnpm exec playwright test --project=preview 2>&1 | grep "fail"
+pnpm exec playwright test --project=preview 2>&1 | grep "error"  # wasteful re-run
+```
 
 ### TypeScript Test Patterns
 

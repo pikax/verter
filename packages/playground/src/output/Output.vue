@@ -4,6 +4,7 @@ import type { Store } from "../core/store";
 import type { OutputMode } from "../core/types";
 import Preview from "./Preview.vue";
 import CodeOutput from "./CodeOutput.vue";
+import AnalysisPanel from "./AnalysisPanel.vue";
 
 const props = defineProps<{
   store: Store;
@@ -13,6 +14,7 @@ const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "preview", label: "Preview" },
   { mode: "js", label: "JS" },
   { mode: "css", label: "CSS" },
+  { mode: "analysis", label: "Analysis" },
 ];
 
 const tabs = computed(() => allTabs);
@@ -51,10 +53,12 @@ const showSourceMapButton = computed(() => {
 });
 
 function getTabTiming(mode: OutputMode): string | null {
-  const { verterNew } = props.store.compileTiming;
+  const { verterNew, parseDurationMs } = props.store.compileTiming;
   switch (mode) {
     case "js":
       return verterNew !== null ? `${verterNew.toFixed(1)}ms` : null;
+    case "analysis":
+      return parseDurationMs !== null ? `${parseDurationMs.toFixed(1)}ms` : null;
     default:
       return null;
   }
@@ -87,6 +91,7 @@ function getTabTiming(mode: OutputMode): string | null {
     </div>
     <div class="output-content">
       <Preview v-if="store.outputMode === 'preview'" :store="store" />
+      <AnalysisPanel v-else-if="store.outputMode === 'analysis'" :store="store" />
       <CodeOutput v-else :store="store" :mode="store.outputMode" />
     </div>
   </div>

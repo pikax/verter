@@ -116,6 +116,133 @@ describe("unplugin hooks", () => {
   });
 });
 
+describe("type exports", () => {
+  // @ai-generated - Tests that Options type alias is re-exported
+  it("exports Options as alias for VerterPluginOptions", async () => {
+    const mod = await import("./index");
+    // Options is a type-only export, so it won't exist at runtime.
+    // Verify the module exports at least the expected runtime values.
+    expect(mod.unpluginFactory).toBeDefined();
+  });
+
+  // @ai-generated - Tests that VerterPluginOptions accepts template option
+  it("accepts template option in plugin factory", () => {
+    const plugin = unpluginFactory(
+      {
+        template: {
+          compilerOptions: {
+            isCustomElement: (tag: string) => tag.startsWith("td-"),
+          },
+        },
+      },
+      {
+        framework: "rollup",
+        versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+      } as any,
+    ) as any;
+    expect(plugin).toBeDefined();
+    expect(plugin.name).toBe("unplugin-verter");
+  });
+});
+
+describe("vite compat shim", () => {
+  // @ai-generated - Tests that vite entry returns array with vite:vue compat plugin
+  it("vite plugin returns array with vite:vue compat shim", async () => {
+    const mod = await import("./vite");
+    const result = mod.default();
+    // Should return an array (or single plugin if compiler-sfc not available)
+    if (Array.isArray(result)) {
+      expect(result.length).toBe(2);
+      const [main, compat] = result;
+      expect(main.name).toBe("unplugin-verter");
+      expect(compat.name).toBe("vite:vue");
+      expect((compat as any).api).toBeDefined();
+      expect((compat as any).api.options).toBeDefined();
+      // compiler is null by default; it's populated by configResolved
+      // which doesn't fire outside of an actual Vite build.
+      expect((compat as any).api.options).toHaveProperty("compiler");
+    } else {
+      // Single plugin returned when compiler-sfc not available
+      expect(result.name).toBe("unplugin-verter");
+    }
+  });
+
+  it("vite compat shim passes template options through", async () => {
+    const mod = await import("./vite");
+    const result = mod.default({
+      template: { compilerOptions: { isCustomElement: (tag: string) => tag === "x-foo" } },
+    });
+    if (Array.isArray(result)) {
+      const compat = result[1];
+      expect((compat as any).api.options.template.compilerOptions.isCustomElement("x-foo")).toBe(true);
+    }
+  });
+});
+
+describe("compilation output", () => {
+  function createPlugin() {
+    return unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+  }
+
+  // @ai-generated - Regression: setup() must return template ref bindings
+  it("setup returns template ref bindings for ref='name'", async () => {
+    const plugin = createPlugin();
+    const sfc = `<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+
+const container = ref<HTMLElement>()
+const msg = ref('hello')
+
+onMounted(() => {
+  console.log(container.value)
+})
+</script>
+
+<template>
+  <div class="wrapper">
+    <div ref="container" class="editor" />
+    <span>{{ msg }}</span>
+  </div>
+</template>
+`;
+    const result = await plugin.transform(sfc, "/test/Editor.vue");
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // The setup function must return container for the template ref to work
+    expect(code).toContain("container");
+    // It must not return an empty object
+    expect(code).not.toMatch(/return\s*\{\s*\}\s*;/);
+  });
+
+  // @ai-generated - Template ref bindings alongside $setup usage
+  it("keeps both template ref and interpolation bindings in return", async () => {
+    const plugin = createPlugin();
+    const sfc = `<script setup>
+import { ref } from 'vue'
+
+const el = ref()
+const count = ref(0)
+const unused = 'type-only'
+</script>
+
+<template>
+  <div ref="el">{{ count }}</div>
+</template>
+`;
+    const result = await plugin.transform(sfc, "/test/Mixed.vue");
+    expect(result).toBeDefined();
+    const code = result.code;
+
+    // el used as template ref, count used in interpolation
+    expect(code).toMatch(/return.*el/);
+    expect(code).toMatch(/return.*count/);
+  });
+});
+
 describe("bundler entry points", () => {
   // @ai-generated - Tests that each bundler export creates a function
   it("vite export creates a plugin factory", async () => {

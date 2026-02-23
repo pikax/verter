@@ -38,7 +38,7 @@ export const projects = [
     name: 'vuetify',
     repo: 'vuetifyjs/vuetify',
     branch: 'master',
-    buildCmd: 'pnpm --filter vuetifyjs.com build',
+    buildCmd: 'pnpm --filter vuetify build && pnpm --filter vuetifyjs.com build',
     testCmd: '',
     packageManager: 'pnpm',
     bundler: 'vite',

@@ -83,6 +83,7 @@ export function useStore(): Store {
   const compileTiming = reactive<CompileTiming>({
     verterNew: null,
     verterNewJs: null,
+    parseDurationMs: null,
   });
 
   const verterVersion = ref("local");
@@ -132,6 +133,7 @@ export function useStore(): Store {
     let lastTiming: CompileTiming = {
       verterNew: null,
       verterNewJs: null,
+      parseDurationMs: null,
     };
     for (const file of Object.values(files.value)) {
       lastTiming = await compileFile(file, compilerOptions);

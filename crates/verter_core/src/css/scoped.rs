@@ -7,6 +7,8 @@
 //! - `[__v_deep__]` → `[data-v-{scopeId}]` (scope parent only)
 //! - `[__v_slotted__]` → `[data-v-{scopeId}-s]` (slot scope)
 
+use smallvec::SmallVec;
+
 use super::prepass::{DEEP_MARKER, SLOTTED_MARKER};
 
 /// Apply scoped selectors on already-normalized CSS (no lightningcss re-parse).
@@ -15,6 +17,7 @@ use super::prepass::{DEEP_MARKER, SLOTTED_MARKER};
 /// lightningcss (via [`super::normalize_css`]). This ensures nested rules are
 /// flattened and comments/strings are well-formed. Calling this on raw CSS may
 /// skip selectors inside `@media` or `@supports` blocks.
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn apply_scoped_normalized(normalized_css: &str, scope_id: &str) -> String {
     let scope_attr = format!("[data-v-{}]", scope_id);
     let slotted_attr = format!("[data-v-{}-s]", scope_id);
@@ -26,7 +29,7 @@ pub fn apply_scoped_normalized(normalized_css: &str, scope_id: &str) -> String {
 /// Standalone entry point that normalizes CSS internally.
 /// Replaces pre-pass markers and adds `[data-v-{scopeId}]` to all selectors
 /// that don't contain `:global()`.
-pub fn apply_scoped(css: &str, scope_id: &str) -> Result<String, String> {
+pub fn apply_scoped(css: &str, scope_id: &str) -> Result<String, super::CssError> {
     let normalized = super::normalize_css(css)?;
     Ok(apply_scoped_normalized(&normalized, scope_id))
 }
@@ -45,11 +48,18 @@ fn apply_scoped_to_normalized(css: &str, scope_attr: &str, slotted_attr: &str) -
 
 /// Transform a comma-separated selector list.
 fn transform_selector_list(selectors: &str, scope_attr: &str, slotted_attr: &str) -> String {
-    selectors
-        .split(',')
-        .map(|s| transform_single_selector(s.trim(), scope_attr, slotted_attr))
-        .collect::<Vec<_>>()
-        .join(", ")
+    let mut result = String::with_capacity(selectors.len() + scope_attr.len() * 2);
+    for (i, s) in selectors.split(',').enumerate() {
+        if i > 0 {
+            result.push_str(", ");
+        }
+        result.push_str(&transform_single_selector(
+            s.trim(),
+            scope_attr,
+            slotted_attr,
+        ));
+    }
+    result
 }
 
 /// Transform a single selector, adding scope attributes.
@@ -112,44 +122,66 @@ fn transform_global(selector: &str) -> String {
 ///
 /// Matches Vue's official compiler behavior: only the rightmost compound selector
 /// receives the scope attribute (e.g., `.parent .child` → `.parent .child[data-v-xxx]`).
+///
+/// Uses byte-offset spans into the original selector string to avoid allocating
+/// intermediate `String`s for each segment and combinator.
 fn add_scope_to_selector(selector: &str, scope_attr: &str) -> String {
-    let mut segments: Vec<String> = Vec::new();
-    let mut combinators: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut chars = selector.chars().peekable();
+    let bytes = selector.as_bytes();
+    // Segment and combinator byte ranges — stack-allocated for typical selectors.
+    let mut segments: SmallVec<[(usize, usize); 4]> = SmallVec::new();
+    let mut combinators: SmallVec<[(usize, usize); 4]> = SmallVec::new();
+    let mut seg_start = 0usize;
+    let mut i = 0usize;
 
-    while let Some(c) = chars.next() {
-        match c {
-            ' ' | '>' | '+' | '~' => {
-                if !current.trim().is_empty() {
-                    segments.push(current.clone());
-                    current.clear();
+    while i < bytes.len() {
+        match bytes[i] {
+            b' ' | b'>' | b'+' | b'~' => {
+                // Record segment (trimmed)
+                let seg = selector[seg_start..i].trim();
+                if !seg.is_empty() {
+                    let offset = seg.as_ptr() as usize - selector.as_ptr() as usize;
+                    segments.push((offset, offset + seg.len()));
                 }
-                let mut comb = String::new();
-                comb.push(c);
-                // Consume additional spaces
-                while chars.peek() == Some(&' ') {
-                    comb.push(chars.next().unwrap());
+                // Record combinator span — consume all adjacent space/combinator chars.
+                // Merges ` > ` into a single combinator span (matching original behavior).
+                let comb_start = i;
+                let first = bytes[i];
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b' ' => i += 1,
+                        b'>' | b'+' | b'~'
+                            if first == b' ' || (i > comb_start + 1 && bytes[i - 1] == b' ') =>
+                        {
+                            i += 1;
+                        }
+                        _ => break,
+                    }
                 }
-                combinators.push(comb);
+                combinators.push((comb_start, i));
+                seg_start = i;
             }
-            _ => current.push(c),
+            _ => i += 1,
         }
     }
-    if !current.trim().is_empty() {
-        segments.push(current);
+    // Final segment
+    let seg = selector[seg_start..].trim();
+    if !seg.is_empty() {
+        let offset = seg.as_ptr() as usize - selector.as_ptr() as usize;
+        segments.push((offset, offset + seg.len()));
     }
 
-    // Build result: only the last segment gets the scope attribute
+    // Build result — only the last segment gets the scope attribute
     let mut result = String::with_capacity(selector.len() + scope_attr.len());
-    for (i, seg) in segments.iter().enumerate() {
-        if i == segments.len() - 1 {
-            result.push_str(&scope_simple_selector(seg, scope_attr));
+    for (idx, &(start, end)) in segments.iter().enumerate() {
+        if idx == segments.len() - 1 {
+            result.push_str(&scope_simple_selector(&selector[start..end], scope_attr));
         } else {
-            result.push_str(seg);
+            result.push_str(&selector[start..end]);
         }
-        if i < combinators.len() {
-            result.push_str(&combinators[i]);
+        if idx < combinators.len() {
+            let (cs, ce) = combinators[idx];
+            result.push_str(&selector[cs..ce]);
         }
     }
     result
@@ -178,13 +210,18 @@ fn scope_simple_selector(selector: &str, scope_attr: &str) -> String {
     result
 }
 
-/// Find the position of the first pseudo-class (:) that isn't part of a
-/// functional pseudo like :where(), :is(), :has(), :not(), :nth-child(), etc.
+/// Find the position of the first `:` in the selector, skipping attribute
+/// selectors (`[...]`) and backslash-escaped characters.
 fn find_pseudo_class_pos(selector: &str) -> Option<usize> {
     let bytes = selector.as_bytes();
     let mut i = 0;
 
     while i < bytes.len() {
+        // Skip backslash-escaped characters (e.g., `\:` in class names)
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
         if bytes[i] == b':' {
             return Some(i);
         }
@@ -363,6 +400,44 @@ mod tests {
         assert!(
             result.contains(".child[data-v-a4f2eed6]"),
             "Got: {}",
+            result
+        );
+        // The `>` combinator must NOT dangle after the scope attr
+        assert!(
+            !result.contains("]>"),
+            "Combinator should not dangle after scope attr. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_child_combinator_preserves_structure() {
+        // Regression: ` > ` was split into two combinators (` ` and `> `)
+        // causing `.horizontal > .divider` → `.horizontal .divider[data-v-xxx]>`
+        let result = scoped(".horizontal > .divider { border: 1px solid; }");
+        assert!(
+            result.contains(".horizontal > .divider[data-v-a4f2eed6]"),
+            "Child combinator structure must be preserved. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_sibling_combinator_preserves_structure() {
+        let result = scoped(".a + .b { color: red; }");
+        assert!(
+            result.contains(".a + .b[data-v-a4f2eed6]"),
+            "Adjacent sibling combinator must be preserved. Got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_general_sibling_combinator() {
+        let result = scoped(".a ~ .b { color: red; }");
+        assert!(
+            result.contains(".a ~ .b[data-v-a4f2eed6]"),
+            "General sibling combinator must be preserved. Got: {}",
             result
         );
     }

@@ -1313,3 +1313,160 @@ fn test_output_delta_complex_scenario() {
         (ct.original().len() as i64 + ct.output_delta()) as usize
     );
 }
+
+// ========================================================================
+// Review findings: nested overwrite no-op delta + batch after prior overwrite
+// ========================================================================
+
+/// @ai-generated — Verify output_delta remains accurate after the nested-overwrite
+/// no-op path (strict subset of an existing Overwritten chunk is skipped).
+/// This exercises the delta reversal at code_transform.rs lines 481-488.
+#[test]
+fn test_output_delta_after_nested_overwrite_noop() {
+    let allocator = Allocator::default();
+    // Source: "defineProps<{x: number}>()"
+    let source = "defineProps<{x: number}>()";
+    let mut ct = CodeTransform::new(source, &allocator);
+
+    // First overwrite: replace "defineProps<{x: number}>" (0..24) with "__props"
+    ct.overwrite(0, 24, "__props");
+    assert_eq!(ct.build_string(), "__props()");
+
+    // Second overwrite: try to remove the generic "<{x: number}>" (11..24)
+    // This is a strict subset of the already-overwritten range — should be a no-op
+    ct.overwrite(11, 24, "");
+    assert_eq!(ct.build_string(), "__props()");
+
+    // Verify output_delta is accurate (capacity prediction matches actual length)
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize,
+        "output_delta must remain accurate after nested no-op"
+    );
+}
+
+/// @ai-generated — Verify output_delta after nested no-op with non-empty replacement.
+#[test]
+fn test_output_delta_after_nested_overwrite_noop_with_content() {
+    let allocator = Allocator::default();
+    let source = "ABCDEFGHIJ";
+    let mut ct = CodeTransform::new(source, &allocator);
+
+    // Overwrite [2,8) with "XY"
+    ct.overwrite(2, 8, "XY");
+    assert_eq!(ct.build_string(), "ABXYIJ");
+
+    // Try to overwrite [4,6) (strict subset) with "ZZ" — should be no-op
+    ct.overwrite(4, 6, "ZZ");
+    assert_eq!(ct.build_string(), "ABXYIJ");
+
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize,
+        "output_delta must remain accurate after nested no-op with content"
+    );
+}
+
+/// @ai-generated — batch_overwrite after a prior overwrite: the Overwritten chunk
+/// should pass through unchanged, and batch items targeting Original ranges
+/// around it should work correctly.
+#[test]
+fn test_batch_overwrite_after_prior_overwrite() {
+    let allocator = Allocator::default();
+    // Source: "AABBCCDDEE"
+    //          0123456789(10)
+    let source = "AABBCCDDEE";
+    let mut ct = CodeTransform::new(source, &allocator);
+
+    // Prior overwrite: replace "CC" (4..6) with "XX"
+    ct.overwrite(4, 6, "XX");
+    assert_eq!(ct.build_string(), "AABBXXDDEE");
+
+    // Batch overwrite: replace "BB" (2..4) and "DD" (6..8) — ranges around the prior overwrite
+    ct.batch_overwrite(&[(2, 4, "YY"), (6, 8, "ZZ")]);
+    assert_eq!(ct.build_string(), "AAYYXXZZEE");
+
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize,
+        "output_delta must be accurate after batch_overwrite with prior overwrite"
+    );
+}
+
+/// @ai-generated — batch_overwrite preserves existing Overwritten chunk
+/// when batch items are on non-overlapping Original ranges.
+#[test]
+fn test_batch_overwrite_preserves_prior_overwrite_content() {
+    let allocator = Allocator::default();
+    let source = "abcdefghij";
+    let mut ct = CodeTransform::new(source, &allocator);
+
+    // Overwrite [3,6) with "XYZ"
+    ct.overwrite(3, 6, "XYZ");
+    assert_eq!(ct.build_string(), "abcXYZghij");
+
+    // Batch: overwrite [0,2) and [8,10)
+    ct.batch_overwrite(&[(0, 2, "11"), (8, 10, "22")]);
+    assert_eq!(ct.build_string(), "11cXYZgh22");
+}
+
+/// @ai-generated — batch_overwrite with a fully contained range: the inner
+/// overwrite is a no-op because its source region is already replaced by the
+/// outer overwrite. This reproduces the overlap from resolve_whitespace
+/// emitting a deletion for whitespace that the parent's tag extension already covers.
+#[test]
+fn test_batch_overwrite_contained_range_is_noop() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("0123456789", &allocator);
+    // Outer: replaces [0,5) with "VNODE", inner: deletes [3,5) — fully contained
+    ct.batch_overwrite(&[(0, 5, "VNODE"), (3, 5, "")]);
+    assert_eq!(ct.build_string(), "VNODE56789");
+
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize,
+        "output_delta must be accurate with contained overlap"
+    );
+}
+
+/// @ai-generated — batch_overwrite with duplicate ranges at the same position:
+/// second overwrite is a no-op because the region was already replaced.
+/// This reproduces the gap-filling + whitespace-removal duplicate.
+#[test]
+fn test_batch_overwrite_duplicate_range() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("0123456789", &allocator);
+    // Both delete [3,6) — second is redundant
+    ct.batch_overwrite(&[(3, 6, ""), (3, 6, "")]);
+    assert_eq!(ct.build_string(), "0126789");
+
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize,
+        "output_delta must be accurate with duplicate ranges"
+    );
+}
+
+/// @ai-generated — batch_overwrite with trailing contained range: the close
+/// tag extension covers trailing whitespace. Inner deletion of the trailing
+/// whitespace is a no-op.
+#[test]
+fn test_batch_overwrite_trailing_contained() {
+    let allocator = Allocator::default();
+    let mut ct = CodeTransform::new("0123456789", &allocator);
+    // First: delete trailing whitespace [7,8), then outer replaces [7,10) with ")"
+    ct.batch_overwrite(&[(7, 8, ""), (7, 10, ")")]);
+    assert_eq!(ct.build_string(), "0123456)");
+
+    let s = ct.build_string();
+    assert_eq!(
+        s.len(),
+        (ct.original().len() as i64 + ct.output_delta()) as usize,
+        "output_delta must be accurate with trailing contained overlap"
+    );
+}

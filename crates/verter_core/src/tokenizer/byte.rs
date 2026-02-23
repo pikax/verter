@@ -70,6 +70,33 @@ pub fn tokenize_with_delimiters(
     tokenizer.run();
 }
 
+/// Tokenize in SFC mode: root-level blocks that are not `<template>`, `<script>`,
+/// or `<style>` are treated as RCDATA (raw text), so their content is not parsed
+/// as HTML. This prevents e.g. `Array<string>` inside a `<docs>` block from being
+/// treated as an HTML element.
+pub fn tokenize_sfc(input: &[u8], callback: impl FnMut(Event<'static>)) {
+    let mut tokenizer = Tokenizer::new(
+        input,
+        callback,
+        DEFAULT_DELIMITER_OPEN,
+        DEFAULT_DELIMITER_CLOSE,
+    );
+    tokenizer.sfc_mode = true;
+    tokenizer.run();
+}
+
+/// Tokenize in SFC mode with custom delimiters.
+pub fn tokenize_sfc_with_delimiters(
+    input: &[u8],
+    callback: impl FnMut(Event<'static>),
+    delimiter_open: &[u8],
+    delimiter_close: &[u8],
+) {
+    let mut tokenizer = Tokenizer::new(input, callback, delimiter_open, delimiter_close);
+    tokenizer.sfc_mode = true;
+    tokenizer.run();
+}
+
 struct Tokenizer<'a, F: FnMut(Event<'static>)> {
     input: &'a [u8],
 
@@ -98,6 +125,17 @@ struct Tokenizer<'a, F: FnMut(Event<'static>)> {
     v_pre_found_by_prepass: bool,
     /// Cached first byte of open delimiter
     delim_open_first: u8,
+
+    // ── SFC mode ──────────────────────────────────────────────────
+    /// When true, root-level custom blocks (not template/script/style) enter
+    /// RCDATA mode so their content is not parsed as HTML.
+    sfc_mode: bool,
+    /// Element nesting depth in SFC mode. 0 = at root level.
+    sfc_depth: u32,
+    /// Dynamic RCDATA closing sequence for custom SFC blocks.
+    /// Format: `</tagname` (lowercased). Used when `rcdata_custom_seq_len > 0`.
+    rcdata_custom_seq: [u8; 36],
+    rcdata_custom_seq_len: u8,
 }
 
 impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
@@ -123,6 +161,33 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
             v_pre_depth: 0,
             v_pre_found_by_prepass: false,
             delim_open_first: delimiter_open.first().copied().unwrap_or(LEFT_BRACE),
+            sfc_mode: false,
+            sfc_depth: 0,
+            rcdata_custom_seq: [0; 36],
+            rcdata_custom_seq_len: 0,
+        }
+    }
+
+    // ── RCDATA sequence helpers ─────────────────────────────────
+    // When `rcdata_custom_seq_len > 0`, the custom buffer is used instead
+    // of the static `current_sequence`. This supports dynamic tag names
+    // for SFC custom blocks.
+
+    #[inline]
+    fn rcdata_seq_len(&self) -> usize {
+        if self.rcdata_custom_seq_len > 0 {
+            self.rcdata_custom_seq_len as usize
+        } else {
+            self.current_sequence.len()
+        }
+    }
+
+    #[inline]
+    fn rcdata_seq_byte(&self, idx: usize) -> u8 {
+        if self.rcdata_custom_seq_len > 0 {
+            self.rcdata_custom_seq[idx]
+        } else {
+            self.current_sequence[idx]
         }
     }
 
@@ -138,6 +203,9 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
 
     /// Emit OpenTagEnd with exclusive-end (after the `>`).
     fn emit_open_tag_end(&mut self, gt_index: u32) {
+        if self.sfc_mode {
+            self.sfc_depth += 1;
+        }
         self.emit(Event::OpenTagEnd { end: gt_index + 1 });
     }
 
@@ -154,6 +222,9 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
 
     fn emit_close_tag(&mut self, start: u32, end: u32, name_end: u32) {
         self.decrement_v_pre_depth();
+        if self.sfc_mode && self.sfc_depth > 0 {
+            self.sfc_depth -= 1;
+        }
         self.emit(Event::CloseTag {
             start,
             end,
@@ -252,6 +323,7 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
             self.emit_self_closing_tag(self.index as u32);
             self.in_rcdata = false;
             self.rcdata_allows_interpolation = false;
+            self.rcdata_custom_seq_len = 0;
             self.state = State::Text;
             self.section_start = self.index;
             true
@@ -398,10 +470,10 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
 
     fn state_in_rcdata(&mut self) {
         while self.index < self.input.len() {
-            if self.sequence_index == self.current_sequence.len() {
+            if self.sequence_index == self.rcdata_seq_len() {
                 let c = self.input[self.index];
                 if c == GT || is_whitespace(c) {
-                    let end_of_text = self.index - self.current_sequence.len();
+                    let end_of_text = self.index - self.rcdata_seq_len();
                     if self.section_start < end_of_text {
                         // Preserve whitespace in textarea (it's significant content)
                         self.flush_text(end_of_text, !self.rcdata_allows_interpolation);
@@ -410,6 +482,7 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                     self.state = State::InClosingTagName;
                     self.in_rcdata = false;
                     self.rcdata_allows_interpolation = false;
+                    self.rcdata_custom_seq_len = 0;
                     self.state_in_closing_tag_name();
                     return;
                 }
@@ -432,7 +505,7 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
                 }
             }
 
-            if (c | 0x20) == self.current_sequence[self.sequence_index] {
+            if (c | 0x20) == self.rcdata_seq_byte(self.sequence_index) {
                 self.sequence_index += 1;
             } else if self.sequence_index == 0 {
                 // Fast-forward: skip bytes until we find something interesting.
@@ -714,17 +787,39 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
             self.in_rcdata = true;
             self.rcdata_allows_interpolation = false;
             self.current_sequence = SCRIPT_END;
+            self.rcdata_custom_seq_len = 0;
             self.sequence_index = 0;
         } else if tag_name.eq_ignore_ascii_case(b"style") {
             self.in_rcdata = true;
             self.rcdata_allows_interpolation = false;
             self.current_sequence = STYLE_END;
+            self.rcdata_custom_seq_len = 0;
             self.sequence_index = 0;
         } else if tag_name.eq_ignore_ascii_case(b"textarea") {
             self.in_rcdata = true;
             self.rcdata_allows_interpolation = true;
             self.current_sequence = TEXTAREA_END;
+            self.rcdata_custom_seq_len = 0;
             self.sequence_index = 0;
+        } else if self.sfc_mode
+            && self.sfc_depth == 0
+            && !tag_name.eq_ignore_ascii_case(b"template")
+        {
+            // SFC custom block (e.g., <docs>, <i18n>): enter RCDATA so content
+            // is not parsed as HTML. Build dynamic closing sequence `</tagname`.
+            let seq_len = 2 + tag_name.len(); // "</".len() + tag_name.len()
+            if seq_len <= self.rcdata_custom_seq.len() {
+                self.rcdata_custom_seq[0] = LT;
+                self.rcdata_custom_seq[1] = SLASH;
+                for (i, &b) in tag_name.iter().enumerate() {
+                    // Lowercase for case-insensitive matching
+                    self.rcdata_custom_seq[2 + i] = b | 0x20;
+                }
+                self.rcdata_custom_seq_len = seq_len as u8;
+                self.in_rcdata = true;
+                self.rcdata_allows_interpolation = false;
+                self.sequence_index = 0;
+            }
         }
     }
 
@@ -1002,7 +1097,16 @@ impl<'a, F: FnMut(Event<'static>)> Tokenizer<'a, F> {
         let mut bracket_count = 1;
         while self.index < self.input.len() {
             let c = self.input[self.index];
-            if c == RIGHT_SQUARE {
+            // Skip quoted strings to avoid miscounting brackets inside them
+            if c == SINGLE_QUOTE || c == DOUBLE_QUOTE || c == b'`' {
+                self.index += 1;
+                while self.index < self.input.len() && self.input[self.index] != c {
+                    if self.input[self.index] == BACKSLASH && self.index + 1 < self.input.len() {
+                        self.index += 1;
+                    }
+                    self.index += 1;
+                }
+            } else if c == RIGHT_SQUARE {
                 bracket_count -= 1;
                 if bracket_count == 0 {
                     self.index += 1;
@@ -1414,25 +1518,24 @@ fn find_subslice(needle: &[u8], haystack: &[u8]) -> Option<usize> {
     memmem::find(haystack, needle)
 }
 
+/// Find the first occurrence of `needle` in `haystack` that is not preceded
+/// by an odd number of `escape` characters.
+///
+/// Uses a forward scan that skips escape+next-byte pairs in O(n) total,
+/// avoiding the backward escape-counting approach which is O(n²) on
+/// pathological inputs with many consecutive escape characters.
 #[inline(always)]
 fn find_unescaped(needle: u8, haystack: &[u8], escape: u8) -> Option<usize> {
     let mut i = 0;
     while i < haystack.len() {
-        let pos = memchr(needle, &haystack[i..])?;
-        let at = i + pos;
-
-        // Count consecutive escape characters before this position
-        let mut esc_count = 0;
-        let mut j = at;
-        while j > 0 && haystack[j - 1] == escape {
-            esc_count += 1;
-            j -= 1;
+        if haystack[i] == escape {
+            // Skip the escape and the byte it escapes
+            i += 2;
+        } else if haystack[i] == needle {
+            return Some(i);
+        } else {
+            i += 1;
         }
-        // Even number of escapes = not escaped
-        if esc_count % 2 == 0 {
-            return Some(at);
-        }
-        i = at + 1;
     }
     None
 }

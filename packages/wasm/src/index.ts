@@ -19,7 +19,7 @@ export interface CompiledStyleBlock {
   /** Whether this is a CSS module block */
   isModule: boolean;
   /** CSS module class mappings (each entry is [original, hashed]) */
-  moduleClasses: string[][];
+  moduleClasses: [string, string][];
   /** CSS processing errors */
   errors: string[];
 }
@@ -61,146 +61,50 @@ export interface CodegenResult {
   tsxDurationMs: number;
 }
 
-export interface StripTypesResult {
-  /** The JavaScript output with TypeScript syntax removed */
-  code: string;
-  /** Any parse errors encountered */
-  errors: string[];
-}
+// =============================================================================
+// VerterHost types — shared with @verter/native
+// =============================================================================
 
-export interface HostConfig {
-  devMode?: boolean;
-  compileErrorPolicy?: "strict" | "strictError" | "devServeLastKnownGood";
-  lspScheme?: string;
-  maxProfilesPerFile?: number;
-}
+export type {
+  HostConfig,
+  HostCompileProfile,
+  HostVirtualNodeKind,
+  HostSliceChanges,
+  HostDiagnostic,
+  HostDiagnosticsSnapshot,
+  HostExternalSourceRequest,
+  HostScriptImportInfo,
+  HostUpdateResult,
+  HostResolvedId,
+  HostVirtualMeta,
+  HostVirtualFileResponse,
+  HostUpsertRequest,
+  HostStyleOverrideEntry,
+  HostStyleOverrideRequest,
+  HostVirtualQuery,
+  HostRemoveResult,
+} from "@verter/native/host-types";
 
-export interface HostCompileProfile {
-  filename?: string;
-  isProduction?: boolean;
-  ssr?: boolean;
-  hmrStrategy?: "none" | "vite" | "webpack";
-  componentId?: string;
-  delimiters?: [string, string];
-  customElements?: string[];
-  comments?: boolean;
-  runtimeModuleName?: string;
-  forceVapor?: boolean;
-  stripTs?: boolean;
-  sourceMap?: boolean;
-}
+import type {
+  HostConfig,
+  HostResolvedId,
+  HostUpsertRequest,
+  HostStyleOverrideRequest,
+  HostUpdateResult,
+  HostVirtualQuery,
+  HostVirtualFileResponse,
+  HostVirtualNodeKind,
+  HostRemoveResult,
+} from "@verter/native/host-types";
 
-export interface HostVirtualNodeKind {
-  kind: "main" | "script" | "template" | "style" | "custom";
-  index?: number;
-}
-
-export interface HostSliceChanges {
-  scriptChanged: boolean;
-  templateChanged: boolean;
-  styleIndicesChanged: number[];
-  customIndicesChanged: number[];
-  structureChanged: boolean;
-  descriptorChanged: boolean;
-}
-
-export interface HostDiagnostic {
-  severity: "error" | "warning" | "info";
-  code: string;
-  message: string;
-  spanStart?: number;
-  spanEnd?: number;
-}
-
-export interface HostDiagnosticsSnapshot {
-  diagnostics: HostDiagnostic[];
-  hasErrors: boolean;
-}
-
-export interface HostExternalSourceRequest {
-  ownerCanonicalId: string;
-  blockKind: "script" | "template" | "style" | "custom";
-  index: number;
-  specifier: string;
-  resolvedCanonicalId: string;
-}
-
-export interface HostUpdateResult {
-  canonicalId: string;
-  changed: boolean;
-  sliceChanges: HostSliceChanges;
-  changedVirtualNodes: HostVirtualNodeKind[];
-  removedVirtualNodes: HostVirtualNodeKind[];
-  changedVirtualIds: string[];
-  removedVirtualIds: string[];
-  changedLspIds: string[];
-  removedLspIds: string[];
-  diagnostics: HostDiagnosticsSnapshot;
-  externalSourceRequests: HostExternalSourceRequest[];
-}
-
-export interface HostResolvedId {
-  canonicalId: string;
-  nodeKind: HostVirtualNodeKind;
-  existsInHost: boolean;
-  bundlerId: string;
-  lspId: string;
-}
-
-export interface HostVirtualMeta {
-  scopeId?: string;
-  blockType?: string;
-  styleIndex?: number;
-  customIndex?: number;
-}
-
-export interface HostVirtualFileResponse {
-  id: string;
-  code: string;
-  sourceMap?: string;
-  lang?: string;
-  stale: boolean;
-  diagnostics: HostDiagnosticsSnapshot;
-  meta: HostVirtualMeta;
-}
-
-export interface HostUpsertRequest {
-  canonicalId?: string;
-  inputId: string;
-  source: string;
-  fileKind?: "vue" | "sfc" | "vue_sfc" | "non_sfc" | "text" | "file";
-  aliases?: string[];
-  compileProfile?: HostCompileProfile;
-}
-
-export interface HostStyleOverrideEntry {
-  index: number;
-  code: string;
-  sourceMap?: string;
-}
-
-export interface HostStyleOverrideRequest {
-  canonicalId: string;
-  compileProfile?: HostCompileProfile;
-  overrides: HostStyleOverrideEntry[];
-}
-
-export interface HostVirtualQuery {
-  rawId?: string;
-  canonicalId?: string;
-  nodeKind?: HostVirtualNodeKind;
-  compileProfile?: HostCompileProfile;
-}
-
-export interface HostRemoveResult {
-  canonicalId: string;
-}
+// =============================================================================
+// WASM compile types
+// =============================================================================
 
 export type WasmInput = string | Uint8Array;
 
-type WasmCompileFn = (input: string, options?: unknown) => CodegenResult;
-type WasmCompileBytesFn = (input: Uint8Array, options?: unknown) => CodegenResult;
-type WasmStripTypesFn = (source: string) => StripTypesResult;
+type WasmCompileFn = (input: string, options?: CodegenOptions) => CodegenResult;
+type WasmCompileBytesFn = (input: Uint8Array, options?: CodegenOptions) => CodegenResult;
 type WasmInitFn = () => Promise<unknown>;
 type WasmHostResolveFn = (rawId: string) => HostResolvedId | null;
 type WasmHostUpsertFn = (request: HostUpsertRequest) => HostUpdateResult;
@@ -208,6 +112,8 @@ type WasmHostApplyOverridesFn = (request: HostStyleOverrideRequest) => HostUpdat
 type WasmHostGetVirtualFileFn = (query: HostVirtualQuery) => HostVirtualFileResponse;
 type WasmHostListVirtualFilesFn = (canonicalId: string) => HostVirtualNodeKind[];
 type WasmHostRemoveFn = (canonicalOrAlias: string) => HostRemoveResult | null;
+type WasmHostGetAnalysisFn = (canonicalOrAlias: string) => unknown | null;
+type WasmHostSetImportDependenciesFn = (canonicalOrAlias: string, resolvedDeps: string[]) => void;
 interface WasmHostBinding {
   resolve: WasmHostResolveFn;
   upsert: WasmHostUpsertFn;
@@ -215,12 +121,13 @@ interface WasmHostBinding {
   getVirtualFile: WasmHostGetVirtualFileFn;
   listVirtualFiles: WasmHostListVirtualFilesFn;
   remove: WasmHostRemoveFn;
+  getAnalysis: WasmHostGetAnalysisFn;
+  setImportDependencies: WasmHostSetImportDependenciesFn;
 }
 type WasmHostCtor = new (config?: HostConfig) => WasmHostBinding;
 
 let wasmCompile: WasmCompileFn | null = null;
 let wasmCompileBytes: WasmCompileBytesFn | null = null;
-let wasmStripTypes: WasmStripTypesFn | null = null;
 let wasmHostCtor: WasmHostCtor | null = null;
 let initialized = false;
 let initPromise: Promise<void> | null = null;
@@ -254,7 +161,6 @@ export async function initialize(): Promise<void> {
     await (wasm.default as WasmInitFn)();
     wasmCompile = wasm.compile as WasmCompileFn;
     wasmCompileBytes = getOptionalExport<WasmCompileBytesFn>(wasm, "compileBytes");
-    wasmStripTypes = getOptionalExport<WasmStripTypesFn>(wasm, "stripTypes");
     wasmHostCtor = getOptionalExport<WasmHostCtor>(wasm, "VerterHost");
     initialized = true;
   })();
@@ -269,17 +175,7 @@ export function isInitialized(): boolean {
   return initialized;
 }
 
-/**
- * Compile a Vue SFC to JavaScript.
- *
- * @param input - The Vue SFC source code (string or Uint8Array)
- * @param options - Optional compilation options
- * @returns The compiled result with code, source map, and code with inline source map
- * @throws If the WASM module has not been initialized
- */
-export async function compile(input: WasmInput, options?: CodegenOptions): Promise<CodegenResult> {
-  await initialize();
-
+function dispatchCompile(input: WasmInput, options?: CodegenOptions): CodegenResult {
   if (!wasmCompile) {
     throw new Error("WASM module not initialized");
   }
@@ -296,6 +192,19 @@ export async function compile(input: WasmInput, options?: CodegenOptions): Promi
 }
 
 /**
+ * Compile a Vue SFC to JavaScript.
+ *
+ * @param input - The Vue SFC source code (string or Uint8Array)
+ * @param options - Optional compilation options
+ * @returns The compiled result with code, source map, and code with inline source map
+ * @throws If the WASM module has not been initialized
+ */
+export async function compile(input: WasmInput, options?: CodegenOptions): Promise<CodegenResult> {
+  await initialize();
+  return dispatchCompile(input, options);
+}
+
+/**
  * Synchronous compile - requires initialize() to have been called first.
  *
  * @param input - The Vue SFC source code (string or Uint8Array)
@@ -304,51 +213,10 @@ export async function compile(input: WasmInput, options?: CodegenOptions): Promi
  * @throws If the WASM module has not been initialized
  */
 export function compileSync(input: WasmInput, options?: CodegenOptions): CodegenResult {
-  if (!initialized || !wasmCompile) {
+  if (!initialized) {
     throw new Error("WASM module not initialized. Call initialize() first.");
   }
-
-  if (typeof input === "string") {
-    return wasmCompile(input, options);
-  }
-
-  if (wasmCompileBytes) {
-    return wasmCompileBytes(input, options);
-  }
-
-  return wasmCompile(decodeUtf8(input), options);
-}
-
-/**
- * Strip TypeScript syntax from a standalone .ts/.tsx file.
- *
- * @param source - The TypeScript source code
- * @returns The stripped JavaScript code and any parse errors
- * @throws If the WASM module has not been initialized
- */
-export async function stripTypes(source: string): Promise<StripTypesResult> {
-  await initialize();
-
-  if (!wasmStripTypes) {
-    throw new Error("WASM module not initialized or stripTypes not available");
-  }
-
-  return wasmStripTypes(source);
-}
-
-/**
- * Synchronous stripTypes - requires initialize() to have been called first.
- *
- * @param source - The TypeScript source code
- * @returns The stripped JavaScript code and any parse errors
- * @throws If the WASM module has not been initialized
- */
-export function stripTypesSync(source: string): StripTypesResult {
-  if (!initialized || !wasmStripTypes) {
-    throw new Error("WASM module not initialized. Call initialize() first.");
-  }
-
-  return wasmStripTypes(source);
+  return dispatchCompile(input, options);
 }
 
 /**
@@ -387,6 +255,23 @@ export class Host {
 
   remove(canonicalOrAlias: string): HostRemoveResult | null {
     return this.inner.remove(canonicalOrAlias);
+  }
+
+  /**
+   * Returns the analysis snapshot for a file as a native JS object, or null
+   * if the file doesn't exist. When `analysisLevel` is not "full", computes
+   * analysis on demand.
+   */
+  getAnalysis(canonicalOrAlias: string): unknown | null {
+    return this.inner.getAnalysis(canonicalOrAlias);
+  }
+
+  /**
+   * Sets the resolved import dependencies for a file, enabling Tier 2/3
+   * smart invalidation (cross-file change tracking).
+   */
+  setImportDependencies(canonicalOrAlias: string, resolvedDeps: string[]): void {
+    this.inner.setImportDependencies(canonicalOrAlias, resolvedDeps);
   }
 }
 

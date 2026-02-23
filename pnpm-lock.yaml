@@ -60,9 +60,15 @@ importers:
       '@verter/native':
         specifier: workspace:*
         version: link:../native
+      '@verter/wasm':
+        specifier: workspace:*
+        version: link:../wasm
       '@vue/compiler-sfc':
         specifier: ^3.5.27
         version: 3.5.27
+      magic-string:
+        specifier: ^0.30.21
+        version: 0.30.21
       tinybench:
         specifier: ^2.9.0
         version: 2.9.0
@@ -264,6 +270,9 @@ importers:
       '@napi-rs/cli':
         specifier: ^3.5.1
         version: 3.5.1(@emnapi/runtime@1.8.1)(@types/node@25.2.1)(node-addon-api@7.1.1)
+      '@types/node':
+        specifier: ^25.2.1
+        version: 25.2.1
       typescript:
         specifier: ^5.7.3
         version: 5.9.3
@@ -550,6 +559,9 @@ importers:
 
   packages/wasm:
     devDependencies:
+      '@verter/native':
+        specifier: workspace:^
+        version: link:../native
       tsdown:
         specifier: ^0.12.4
         version: 0.12.9(typescript@5.9.3)

@@ -8,6 +8,20 @@ export default defineConfig({
     baseURL: "http://localhost:5173",
     headless: true,
   },
+  webServer: [
+    {
+      command: "npx vite --port 5173",
+      port: 5173,
+      reuseExistingServer: true,
+      timeout: 60000,
+    },
+    {
+      command: "npx vite build && npx vite preview --port 4173",
+      port: 4173,
+      reuseExistingServer: true,
+      timeout: 120000,
+    },
+  ],
   projects: [
     {
       name: "dev",
@@ -19,8 +33,8 @@ export default defineConfig({
       name: "preview",
       use: {
         baseURL: "http://localhost:4173",
+        navigationTimeout: 15000,
       },
     },
   ],
-  /* Do NOT start webServer here — we manage it externally */
 });

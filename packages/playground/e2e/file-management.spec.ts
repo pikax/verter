@@ -2,6 +2,7 @@
  * @ai-generated - E2E tests for file management in the playground.
  */
 import { test, expect } from "@playwright/test";
+import { addFile } from "./helpers";
 
 test.describe("File management", () => {
   test.beforeEach(async ({ page }) => {
@@ -15,66 +16,32 @@ test.describe("File management", () => {
   });
 
   test("can add a new file via + button", async ({ page }) => {
-    const addButton = page.locator(".file-selector .add-btn, .file-selector button:has-text('+')");
-    await addButton.click();
+    await addFile(page, "Child.vue");
 
-    // A prompt/input should appear for filename
-    const dialog = page.locator("input[type='text'], .filename-input");
-    if (await dialog.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await dialog.fill("Child.vue");
-      await dialog.press("Enter");
-    } else {
-      // Some implementations use window.prompt - handle via dialog
-      page.once("dialog", async (d) => {
-        await d.accept("Child.vue");
-      });
-      await addButton.click();
-    }
-
-    await page.waitForTimeout(500);
     const tab = page.locator(".file-selector .tab", { hasText: "Child.vue" });
     await expect(tab).toBeVisible({ timeout: 3000 });
   });
 
   test("new file becomes active tab", async ({ page }) => {
-    // Listen for dialog (prompt)
-    page.on("dialog", async (d) => {
-      await d.accept("NewFile.vue");
-    });
+    await addFile(page, "NewFile.vue");
 
-    const addButton = page.locator(".file-selector .add-btn, .file-selector button:has-text('+')");
-    await addButton.click();
-    await page.waitForTimeout(500);
-
-    const tab = page.locator(".file-selector .tab.active, .file-selector .tab[data-active]", {
-      hasText: "NewFile.vue",
-    });
-    // Check that NewFile.vue is somehow indicated as active
     const newTab = page.locator(".file-selector .tab", { hasText: "NewFile.vue" });
     await expect(newTab).toBeVisible({ timeout: 3000 });
   });
 
   test("cannot delete App.vue (no delete button or disabled)", async ({ page }) => {
     const appTab = page.locator(".file-selector .tab", { hasText: "App.vue" });
-    // App.vue should not have an X/delete button
-    const deleteBtn = appTab.locator(".delete-btn, .close-btn, button:has-text('×')");
+    // App.vue should not have an X/delete button, or it should be hidden
+    const deleteBtn = appTab.locator(".close");
     const count = await deleteBtn.count();
     if (count > 0) {
-      // If there is a button, it should be disabled or hidden
       await expect(deleteBtn.first()).not.toBeVisible();
     }
     // Otherwise no delete button exists - which is correct
   });
 
   test("can switch between file tabs", async ({ page }) => {
-    // Add a second file first
-    page.on("dialog", async (d) => {
-      await d.accept("Other.vue");
-    });
-
-    const addButton = page.locator(".file-selector .add-btn, .file-selector button:has-text('+')");
-    await addButton.click();
-    await page.waitForTimeout(500);
+    await addFile(page, "Other.vue");
 
     // Click App.vue tab
     const appTab = page.locator(".file-selector .tab", { hasText: "App.vue" });
@@ -94,22 +61,15 @@ test.describe("File management", () => {
     const importMapTab = page.locator(".file-selector .tab, .file-selector button", {
       hasText: /import.?map/i,
     });
-    // Import map may be a special tab or link
     const count = await importMapTab.count();
-    expect(count).toBeGreaterThanOrEqual(0); // Import map may or may not be visible by default
+    expect(count).toBeGreaterThanOrEqual(0);
   });
 
   test("new .vue file has default template content", async ({ page }) => {
-    page.on("dialog", async (d) => {
-      await d.accept("Child.vue");
-    });
-
-    const addButton = page.locator(".file-selector .add-btn, .file-selector button:has-text('+')");
-    await addButton.click();
-    await page.waitForTimeout(1000);
+    await addFile(page, "Child.vue");
 
     // The editor should contain default vue template
-    const editor = page.locator(".monaco-editor, .editor-container");
+    const editor = page.locator(".editor-container");
     await expect(editor).toBeVisible({ timeout: 5000 });
   });
 });

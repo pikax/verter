@@ -22,7 +22,7 @@ pub mod scoped;
 pub mod types;
 mod walk;
 
-pub use types::{ProcessStyleOptions, ProcessStyleResult, VBindVar};
+pub use types::{CssError, ProcessStyleOptions, ProcessStyleResult, VBindVar};
 
 use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
 
@@ -30,12 +30,12 @@ use lightningcss::stylesheet::{ParserOptions, PrinterOptions, StyleSheet};
 ///
 /// This normalizes comments, strings, at-rules, and nesting so downstream
 /// string-level transforms (scoped, modules) see well-formed CSS.
-fn normalize_css(css: &str) -> Result<String, String> {
+fn normalize_css(css: &str) -> Result<String, CssError> {
     let stylesheet = StyleSheet::parse(css, ParserOptions::default())
-        .map_err(|e| format!("CSS parse error: {}", e))?;
+        .map_err(|e| CssError::Parse(e.to_string()))?;
     let result = stylesheet
         .to_css(PrinterOptions::default())
-        .map_err(|e| format!("CSS serialization error: {}", e))?;
+        .map_err(|e| CssError::Serialize(e.to_string()))?;
     Ok(result.code)
 }
 
@@ -44,10 +44,11 @@ fn normalize_css(css: &str) -> Result<String, String> {
 /// This is the main entry point, called from:
 /// - The Rust `StyleCodegenPlugin` for plain CSS blocks (inline in compileForVite)
 /// - The NAPI `processStyle()` binding for preprocessed CSS (from vite-plugin)
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn process_style(
     css: &str,
     options: &ProcessStyleOptions<'_>,
-) -> Result<ProcessStyleResult, String> {
+) -> Result<ProcessStyleResult, CssError> {
     // Step 1: Pre-pass — replace v-bind() and Vue pseudo-selectors with valid CSS
     let prepass_result = prepass::prepass(css, options.scope_id);
     let mut current_css = prepass_result.css;
@@ -73,10 +74,17 @@ pub fn process_style(
         current_css = scoped::apply_scoped_normalized(&current_css, options.scope_id);
     }
 
+    let module_name = if options.is_module {
+        Some(options.module_name.unwrap_or("$style").to_string())
+    } else {
+        None
+    };
+
     Ok(ProcessStyleResult {
         code: current_css,
         source_map: None, // TODO: source map support
         module_classes,
+        module_name,
         v_bind_vars,
     })
 }
@@ -93,7 +101,7 @@ mod tests {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             },
@@ -115,7 +123,7 @@ mod tests {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             },
@@ -144,7 +152,7 @@ mod tests {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             },
@@ -173,7 +181,7 @@ mod tests {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             },
@@ -195,7 +203,7 @@ mod tests {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             },
@@ -218,7 +226,7 @@ mod tests {
                 scope_id: "a4f2eed6",
                 scoped: false,
                 is_module: true,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             },
@@ -246,7 +254,7 @@ mod tests {
                 scope_id: "a4f2eed6",
                 scoped: false,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             },
@@ -270,7 +278,7 @@ mod tests {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: true,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             },
@@ -305,7 +313,7 @@ mod tests {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             },
@@ -327,7 +335,7 @@ mod tests {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             },
@@ -350,7 +358,7 @@ mod tests {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             },

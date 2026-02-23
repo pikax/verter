@@ -196,7 +196,11 @@ function copyRecursive(src, dest, skipNames = []) {
     if (entry.isDirectory()) {
       copyRecursive(srcPath, destPath, skipNames);
     } else {
-      fs.copyFileSync(srcPath, destPath);
+      try {
+        fs.copyFileSync(srcPath, destPath);
+      } catch {
+        // Skip files that can't be copied (e.g. symlinked bins on Windows)
+      }
     }
   }
 }
@@ -427,6 +431,51 @@ function installVerterTarballs(project, repoDir) {
   }
 
   ensureVerterAccessible(project, repoDir);
+
+  // Always overwrite ALL @verter dist directories from source.
+  // pnpm uses hardlinks from a global content-addressable store. When tarballs
+  // are rebuilt with the same version, the installed dist may contain stale code.
+  // We must overwrite every copy — both top-level node_modules/@verter/*/dist
+  // AND deep .pnpm store entries — because vitest/SSR may resolve from either.
+  const srcDists = {
+    unplugin: path.join(ROOT, 'packages', 'unplugin', 'dist'),
+    native: path.join(ROOT, 'packages', 'native', 'dist'),
+  };
+  // Collect all @verter dist directories to overwrite
+  const distsToOverwrite = [];
+  for (const pkg of ['unplugin', 'native']) {
+    const topLevel = path.join(repoDir, 'node_modules', '@verter', pkg, 'dist');
+    if (fs.existsSync(topLevel)) distsToOverwrite.push({ pkg, dist: topLevel });
+  }
+  // Also find deep copies inside .pnpm (pnpm creates separate copies per resolution)
+  const pnpmDir = path.join(repoDir, 'node_modules', '.pnpm');
+  if (fs.existsSync(pnpmDir)) {
+    const findVerterDists = (dir, results) => {
+      try {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const fullPath = path.join(dir, entry.name);
+          if (entry.name === 'dist' && dir.includes('@verter')) {
+            results.push({ dist: fullPath, pkg: path.basename(path.dirname(fullPath)) });
+          } else if (entry.isDirectory() && entry.name !== '.cache') {
+            findVerterDists(fullPath, results);
+          }
+        }
+      } catch { /* permission/access errors */ }
+    };
+    findVerterDists(pnpmDir, distsToOverwrite);
+  }
+  let overwritten = 0;
+  for (const { dist: destDist, pkg } of distsToOverwrite) {
+    const srcDist = srcDists[pkg];
+    if (!srcDist || !fs.existsSync(srcDist)) continue;
+    fs.rmSync(destDist, { recursive: true, force: true });
+    copyRecursive(srcDist, destDist);
+    overwritten++;
+  }
+  if (overwritten > 0) {
+    log(project.name, `  Overwrote ${overwritten} @verter dist(s) from source`);
+  }
+
   log(project.name, 'Verter tarballs installed.');
 }
 
@@ -454,9 +503,74 @@ function ensureVerterAccessible(project, repoDir) {
     log(project.name, '  @verter/unplugin not properly hoisted, copying from source...');
     const srcUnplugin = path.join(ROOT, 'packages', 'unplugin');
     fs.mkdirSync(path.join(repoDir, 'node_modules', '@verter'), { recursive: true });
-    // Copy dist + package.json but skip src; keep node_modules since
-    // @verter/unplugin depends on 'unplugin' which lives in its own node_modules
-    copyRecursive(srcUnplugin, unpluginDir, ['src']);
+    // Copy dist + package.json but skip src and node_modules (pnpm's node_modules
+    // contains symlinks to the global store that can't be meaningfully copied).
+    copyRecursive(srcUnplugin, unpluginDir, ['src', 'node_modules']);
+  }
+
+  // Ensure the 'unplugin' dependency is resolvable from @verter/unplugin.
+  // This runs unconditionally because even properly-installed pnpm packages
+  // may have dangling symlinks or missing transitive dependencies.
+  ensureUnpluginResolvable(project, repoDir, unpluginDir);
+}
+
+/**
+ * Ensure that 'unplugin' is resolvable from @verter/unplugin.
+ * pnpm may not hoist 'unplugin' to the top level, so we search the .pnpm
+ * store and create a local symlink/copy.
+ */
+function ensureUnpluginResolvable(project, repoDir, unpluginDir) {
+  const localUnpluginNM = path.join(unpluginDir, 'node_modules');
+  const localUnpluginTarget = path.join(localUnpluginNM, 'unplugin');
+
+  // If already resolvable (valid symlink or directory), skip
+  if (fs.existsSync(path.join(localUnpluginTarget, 'package.json'))) return;
+
+  // Clean up any dangling symlinks from previous runs
+  try { fs.rmSync(localUnpluginTarget, { recursive: true, force: true }); } catch {}
+
+  // Find unplugin: check top-level first, then search .pnpm store
+  let unpluginSource = null;
+  const topLevel = path.join(repoDir, 'node_modules', 'unplugin');
+  if (fs.existsSync(path.join(topLevel, 'package.json'))) {
+    unpluginSource = topLevel;
+  } else {
+    const pnpmDir = path.join(repoDir, 'node_modules', '.pnpm');
+    if (fs.existsSync(pnpmDir)) {
+      for (const entry of fs.readdirSync(pnpmDir)) {
+        if (entry.startsWith('unplugin@')) {
+          const candidate = path.join(pnpmDir, entry, 'node_modules', 'unplugin');
+          if (fs.existsSync(candidate)) {
+            unpluginSource = candidate;
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  if (!unpluginSource) {
+    // Install unplugin into the project
+    const installCmd = project.packageManager === 'pnpm'
+      ? 'pnpm add unplugin'
+      : 'npm install --legacy-peer-deps unplugin';
+    const installResult = run(installCmd, repoDir, { timeout: 60_000 });
+    if (!installResult.ok) {
+      log(project.name, `  Warning: failed to install unplugin: ${(installResult.stderr || installResult.stdout).slice(0, 200)}`);
+    }
+    if (fs.existsSync(path.join(topLevel, 'package.json'))) {
+      unpluginSource = topLevel;
+    }
+  }
+
+  if (unpluginSource) {
+    fs.mkdirSync(localUnpluginNM, { recursive: true });
+    try {
+      fs.symlinkSync(unpluginSource, localUnpluginTarget, 'junction');
+    } catch {
+      copyRecursive(unpluginSource, localUnpluginTarget);
+    }
+    log(project.name, `  Linked unplugin from ${path.relative(repoDir, unpluginSource)}`);
   }
 }
 
@@ -470,6 +584,7 @@ function isConfigFile(name) {
     name.startsWith('vite.config') ||
     name.startsWith('vitest.config') ||
     name.startsWith('rollup.config') ||
+    name.startsWith('tsdown.config') ||
     REPLACEABLE_EXTS.has(path.extname(name))
   );
 }
@@ -543,6 +658,77 @@ function replaceVuePlugin(project, repoDir) {
 }
 
 /**
+ * Patch tsdown config files that use `fromVite: true`.
+ *
+ * When tsdown loads a vite.config with `fromVite: true`, it passes the vite
+ * plugins to rolldown. The vite variant of verter's unplugin doesn't work
+ * in the rolldown context (no `configResolved` hook called), so we inject an
+ * `inputOptions` callback that swaps the vite verter plugin for the rolldown
+ * variant.
+ */
+function patchTsdownConfigs(project, repoDir) {
+  const files = findFiles(repoDir, (name) => name.startsWith('tsdown.config'));
+  let patched = 0;
+
+  for (const filePath of files) {
+    let content;
+    try {
+      content = fs.readFileSync(filePath, 'utf8');
+    } catch {
+      continue;
+    }
+
+    // Only patch configs that use fromVite (these load vite.config plugins)
+    if (!content.includes('fromVite')) continue;
+
+    // Skip if already patched
+    if (content.includes('@verter/unplugin/rolldown')) continue;
+
+    // Inject the rolldown import and inputOptions callback
+    const importLine = `import verter from '@verter/unplugin/rolldown'\n`;
+    const inputOptionsBlock = `
+  inputOptions: (defaults) => {
+    const flattened = (defaults.plugins || []).flat(Infinity).filter(Boolean);
+    const withoutVerter = flattened.filter((p) => p?.name !== 'unplugin-verter');
+    return {
+      ...defaults,
+      plugins: [...withoutVerter, verter()],
+    }
+  },`;
+
+    // Add import at the top (after existing imports)
+    let modified = content;
+    const lastImportIdx = modified.lastIndexOf('\nimport ');
+    if (lastImportIdx >= 0) {
+      const lineEnd = modified.indexOf('\n', lastImportIdx + 1);
+      modified = modified.slice(0, lineEnd + 1) + importLine + modified.slice(lineEnd + 1);
+    } else {
+      modified = importLine + modified;
+    }
+
+    // Insert inputOptions before the first closing `}` or `})` of defineConfig
+    // Look for `fromVite: true` and insert after that line
+    const fromViteIdx = modified.indexOf('fromVite');
+    if (fromViteIdx >= 0) {
+      // Find the end of the fromVite line
+      const lineEnd = modified.indexOf('\n', fromViteIdx);
+      if (lineEnd >= 0) {
+        modified = modified.slice(0, lineEnd + 1) + inputOptionsBlock + '\n' + modified.slice(lineEnd + 1);
+      }
+    }
+
+    if (modified !== content) {
+      fs.writeFileSync(filePath, modified);
+      const rel = path.relative(repoDir, filePath);
+      log(project.name, `  Patched tsdown config: ${rel} (added rolldown verter + inputOptions)`);
+      patched++;
+    }
+  }
+
+  return patched;
+}
+
+/**
  * For each workspace sub-package that had source files modified, replace
  * `@vitejs/plugin-vue` with `@verter/unplugin` in its package.json dependencies.
  * This ensures the bundler (tsdown/tsup/rollup) treats `@verter/unplugin` as
@@ -606,7 +792,10 @@ import verter from '@verter/unplugin/vite'
 export default defineNuxtModule({
   meta: { name: 'verter-override' },
   setup(_options, nuxt) {
-    nuxt.hook('vite:extendConfig', (config) => {
+    // Use vite:configResolved (not vite:extendConfig) because Nuxt 4's
+    // @nuxt/vite-builder adds vite:vue AFTER vite:extendConfig but BEFORE
+    // vite:configResolved.
+    nuxt.hook('vite:configResolved', (config) => {
       // Remove the built-in vite:vue plugin
       config.plugins = (config.plugins || []).filter(
         (p) => !(p && typeof p === 'object' && 'name' in p && p.name === 'vite:vue')
@@ -780,6 +969,12 @@ async function processProject(project, opts) {
     if (opts.noClone) {
       log(project.name, 'Resetting git-tracked files to clean state...');
       run('git checkout .', repoDir);
+      // Clear turborepo cache to avoid stale builds
+      const turboDir = path.join(repoDir, '.turbo');
+      if (fs.existsSync(turboDir)) {
+        fs.rmSync(turboDir, { recursive: true, force: true });
+        log(project.name, 'Cleared .turbo cache');
+      }
     }
 
     installDeps(project, repoDir);
@@ -813,6 +1008,7 @@ async function processProject(project, opts) {
       project.bundler === 'nuxt'
         ? replaceNuxtPlugin(project, repoDir)
         : replaceVuePlugin(project, repoDir);
+    patchTsdownConfigs(project, repoDir);
     results.replacement.modified = modified;
     results.replacement.verified = verifyReplacement(project, repoDir);
 

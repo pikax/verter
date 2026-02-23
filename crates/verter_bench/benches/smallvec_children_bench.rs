@@ -12,11 +12,11 @@ use smallvec::SmallVec;
 use std::hint::black_box;
 use walkdir::WalkDir;
 
-use verter_core::new_impl::ast::types::{AstNodeKind, TemplateAst};
-use verter_core::new_impl::syntax::Syntax as NewSyntax;
-use verter_core::new_impl::types::NodeId;
-use verter_core::syntax::plugin::{SyntaxPluginContext, SyntaxPluginOptions};
+use verter_core::ast::types::{AstNodeKind, TemplateAst};
+use verter_core::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
+use verter_core::parser::Syntax as NewSyntax;
 use verter_core::tokenizer::byte::tokenize;
+use verter_core::types::NodeId;
 
 // ---------------------------------------------------------------------------
 // Helpers

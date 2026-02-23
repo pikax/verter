@@ -31,6 +31,9 @@
     ,"profile:hotpath": "cargo run -p verter_bench --example profile_ast --release --features=hotpath"
     ,"profile:hotpath:alloc": "cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc"
     ,"profile:hotpath:mcp": "cargo run -p verter_bench --example profile_ast --release --features=hotpath-mcp"
+    ,"profile:hotpath:full": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath"
+    ,"profile:hotpath:full:alloc": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-alloc"
+    ,"profile:hotpath:full:mcp": "VERTER_PROFILE_FULL=1 cargo run -p verter_bench --example profile_ast --release --features=hotpath-mcp"
   },
   "dependencies": {
     "@vue/compiler-core": "^3.6.0-beta.6",

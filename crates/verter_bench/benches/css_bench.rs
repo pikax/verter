@@ -134,7 +134,7 @@ fn bench_process_style(c: &mut Criterion) {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             };
@@ -155,7 +155,7 @@ fn bench_process_style(c: &mut Criterion) {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             };
@@ -176,7 +176,7 @@ fn bench_process_style(c: &mut Criterion) {
                 scope_id: "a4f2eed6",
                 scoped: false,
                 is_module: true,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             };
@@ -198,7 +198,7 @@ fn bench_process_style(c: &mut Criterion) {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: true,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             };
@@ -219,7 +219,7 @@ fn bench_process_style(c: &mut Criterion) {
                 scope_id: "a4f2eed6",
                 scoped: true,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             };
@@ -240,7 +240,7 @@ fn bench_process_style(c: &mut Criterion) {
                 scope_id: "a4f2eed6",
                 scoped: false,
                 is_module: false,
-
+                module_name: None,
                 filename: None,
                 sourcemap: false,
             };

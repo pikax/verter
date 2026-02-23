@@ -1,63 +1,84 @@
 /**
- * @ai-generated - Tests for Buffer input support in @verter/native compile functions.
- * Verifies that compile and compileForVite accept both string and Buffer inputs.
+ * @ai-generated - Tests for @verter/native exports.
+ * Verifies that VerterHost and processStyle work correctly with both string and Buffer inputs.
  */
 import { describe, it, expect } from "vitest";
-import { compile, compileForVite } from "./index.js";
+import { VerterHost, processStyle } from "./index.js";
 
-const SFC_INPUT = "<template><div>{{ msg }}</div></template>";
+const SFC_INPUT =
+  '<script setup>\nconst msg = "hello"\n</script>\n<template><div>{{ msg }}</div></template>';
 
-// NAPI-RS converts snake_case Rust fields to camelCase JS properties at runtime,
-// but the TS declarations in index.ts use snake_case. Access via bracket notation
-// to test the actual runtime properties.
-function getSourceMap(result: Record<string, unknown>): unknown {
-  return result["sourceMap"] ?? result["source_map"];
-}
-
-describe("Buffer input support", () => {
-  describe("compile", () => {
-    // @ai-generated - String and Buffer inputs produce identical output
-    it("should produce identical results for string and Buffer input", () => {
-      const stringResult = compile(SFC_INPUT, { filename: "Test.vue" });
-      const bufferResult = compile(Buffer.from(SFC_INPUT), { filename: "Test.vue" });
-
-      expect(bufferResult.code).toBe(stringResult.code);
-      expect(getSourceMap(bufferResult as any)).toBe(getSourceMap(stringResult as any));
+describe("VerterHost", () => {
+  it("should compile a simple SFC via upsert + getVirtualFile (string source)", () => {
+    const host = new VerterHost();
+    const result = host.upsert({
+      inputId: "Test.vue",
+      source: SFC_INPUT,
     });
 
-    // @ai-generated - Buffer input returns valid compilation result
-    it("should compile from Buffer and return valid result", () => {
-      const result = compile(Buffer.from(SFC_INPUT));
+    expect(result.canonicalId).toBeTruthy();
+    expect(result.changed).toBe(true);
 
-      expect(result.code).toContain("_createElementBlock");
-      expect(result.code).toBeTruthy();
-      expect(getSourceMap(result as any)).toBeTruthy();
+    const mainFile = host.getVirtualFile({
+      canonicalId: result.canonicalId,
+      nodeKind: { kind: "main" },
     });
 
-    // @ai-generated - Invalid UTF-8 Buffer throws descriptive error
-    it("should throw on invalid UTF-8 Buffer", () => {
-      const invalidUtf8 = Buffer.from([0x80, 0x81, 0x82]);
-
-      expect(() => compile(invalidUtf8)).toThrow("UTF-8");
-    });
+    expect(mainFile.code).toBeTruthy();
+    expect(mainFile.code).toContain("_sfc_main");
   });
 
-  describe("compileForVite", () => {
-    // @ai-generated - compileForVite accepts Buffer input
-    it("should produce identical results for string and Buffer input", () => {
-      const stringResult = compileForVite(SFC_INPUT, { filename: "Test.vue" });
-      const bufferResult = compileForVite(Buffer.from(SFC_INPUT), { filename: "Test.vue" });
-
-      expect(bufferResult.script?.code).toBe(stringResult.script?.code);
-      expect(bufferResult.template?.code).toBe(stringResult.template?.code);
-      expect(bufferResult.styles.length).toBe(stringResult.styles.length);
+  it("should accept Buffer as source in upsert", () => {
+    const host = new VerterHost();
+    const result = host.upsert({
+      inputId: "BufferTest.vue",
+      source: Buffer.from(SFC_INPUT, "utf-8"),
     });
 
-    // @ai-generated - compileForVite throws on invalid UTF-8
-    it("should throw on invalid UTF-8 Buffer", () => {
-      const invalidUtf8 = Buffer.from([0x80, 0x81, 0x82]);
+    expect(result.canonicalId).toBeTruthy();
+    expect(result.changed).toBe(true);
 
-      expect(() => compileForVite(invalidUtf8)).toThrow("UTF-8");
+    const mainFile = host.getVirtualFile({
+      canonicalId: result.canonicalId,
+      nodeKind: { kind: "main" },
     });
+    expect(mainFile.code).toContain("_sfc_main");
+  });
+
+  it("should strip TypeScript when forceJs is set in compile profile", () => {
+    const host = new VerterHost();
+    host.upsert({
+      inputId: "TypedComponent.vue",
+      source: '<script setup lang="ts">\nconst x: number = 1;\n</script>\n<template><div>{{ x }}</div></template>',
+    });
+
+    const mainFile = host.getVirtualFile({
+      canonicalId: "TypedComponent.vue",
+      nodeKind: { kind: "main" },
+      compileProfile: { forceJs: true },
+    });
+
+    expect(mainFile.code).toContain("const x");
+    expect(mainFile.code).not.toContain(": number");
+  });
+});
+
+describe("processStyle", () => {
+  it("should scope CSS selectors (string input)", () => {
+    const result = processStyle(".foo { color: red }", {
+      scopeId: "abc123",
+      scoped: true,
+    });
+
+    expect(result.code).toContain("abc123");
+  });
+
+  it("should scope CSS selectors (Buffer input)", () => {
+    const result = processStyle(Buffer.from(".foo { color: red }"), {
+      scopeId: "abc123",
+      scoped: true,
+    });
+
+    expect(result.code).toContain("abc123");
   });
 });

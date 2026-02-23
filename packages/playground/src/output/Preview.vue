@@ -46,13 +46,14 @@ function updatePreview() {
     }
   }
 
-  // Mount the app
+  // Mount the app (store reference for proper unmounting on next eval)
   const mainModule = "./" + props.store.mainFile.replace(/\.(vue|ts)$/, ".js");
   scripts.push(`
     const { createApp } = window.Vue
     const Component = window.__modules__["${mainModule}"]?.default
     if (Component) {
       const app = createApp(Component)
+      window.__currentApp__ = app
       app.mount('#app')
     }
   `);

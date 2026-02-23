@@ -33,9 +33,10 @@ pub use macros::{
     MacroProperty, MacroTypeParams, ScriptMacro, VueMacroKind,
 };
 pub use resolve_type::{
-    build_type_context, format_runtime_types, resolve_type_elements_with_ctx,
-    resolve_type_elements_with_ctx_ref, DiagnosticLocation, ResolutionDiagnostic,
-    ResolutionDiagnosticKind, ResolvedEmit, RuntimeType, TypeResolutionContext,
+    build_type_context, extract_companion_types, format_runtime_types, resolve_type_elements,
+    resolve_type_elements_with_ctx, resolve_type_elements_with_ctx_ref, DiagnosticLocation,
+    ResolutionDiagnostic, ResolutionDiagnosticKind, ResolvedElements, ResolvedEmit, RuntimeType,
+    TypeResolutionContext,
 };
 pub use shared::ScriptParseContext;
 pub use types::*;
@@ -107,6 +108,21 @@ pub fn parse_script<'a>(
     content_offset: u32,
     source: &'a str,
 ) -> ScriptParseResult<'a> {
+    parse_script_with_companion(program, mode, content_offset, source, None)
+}
+
+/// Parse a script program with optional companion type information.
+///
+/// When `companion_types` is `Some`, type references in `defineProps<T>()`
+/// that can't be resolved from the setup script's own declarations will
+/// fall back to these pre-resolved types from the companion `<script>` block.
+pub fn parse_script_with_companion<'a>(
+    program: &Program<'a>,
+    mode: ScriptMode,
+    content_offset: u32,
+    source: &'a str,
+    companion_types: Option<rustc_hash::FxHashMap<String, resolve_type::ResolvedElements>>,
+) -> ScriptParseResult<'a> {
     let ctx = ScriptParseContext::new(content_offset, source.as_bytes());
     let mut items = Vec::new();
     let mut errors = Vec::new();
@@ -125,7 +141,10 @@ pub fn parse_script<'a>(
     // Second pass: mode-specific processing
     match mode {
         ScriptMode::Setup => {
-            let type_ctx = build_type_context(program, source.as_bytes(), content_offset);
+            let mut type_ctx = build_type_context(program, source.as_bytes(), content_offset);
+            if let Some(companion) = companion_types {
+                type_ctx.companion_types = companion;
+            }
             let mut setup_ctx = SetupContext::new();
             process_setup_statements(
                 &program.body,

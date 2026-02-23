@@ -7,7 +7,7 @@ use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 use std::collections::HashSet;
 
-use super::keywords::is_keyword;
+use super::keywords::{is_global, is_keyword};
 
 // ======================== Dynamism ========================
 
@@ -189,7 +189,8 @@ impl<'a> BindingContext<'a> {
     /// Check if an identifier should be ignored
     #[inline]
     pub fn should_ignore(&self, name: &str) -> bool {
-        is_keyword(name.as_bytes()) || self.ignored_identifiers.contains(name)
+        let bytes = name.as_bytes();
+        is_keyword(bytes) || is_global(bytes) || self.ignored_identifiers.contains(name)
     }
 
     /// Add an identifier to the ignore list
@@ -242,6 +243,32 @@ mod tests {
         assert!(ctx.should_ignore("false"));
         assert!(ctx.should_ignore("null"));
         assert!(ctx.should_ignore("undefined"));
+        assert!(!ctx.should_ignore("myVar"));
+    }
+
+    #[test]
+    fn test_binding_context_globals() {
+        let ctx = BindingContext::new(0);
+        assert!(ctx.should_ignore("String"));
+        assert!(ctx.should_ignore("Array"));
+        assert!(ctx.should_ignore("Object"));
+        assert!(ctx.should_ignore("Math"));
+        assert!(ctx.should_ignore("Number"));
+        assert!(ctx.should_ignore("Boolean"));
+        assert!(ctx.should_ignore("Date"));
+        assert!(ctx.should_ignore("JSON"));
+        assert!(ctx.should_ignore("Map"));
+        assert!(ctx.should_ignore("Set"));
+        assert!(ctx.should_ignore("console"));
+        assert!(ctx.should_ignore("Infinity"));
+        assert!(ctx.should_ignore("parseInt"));
+        assert!(ctx.should_ignore("parseFloat"));
+        assert!(ctx.should_ignore("Promise"));
+        assert!(ctx.should_ignore("RegExp"));
+        assert!(ctx.should_ignore("Error"));
+        assert!(ctx.should_ignore("Symbol"));
+        assert!(ctx.should_ignore("globalThis"));
+        assert!(ctx.should_ignore("require"));
         assert!(!ctx.should_ignore("myVar"));
     }
 

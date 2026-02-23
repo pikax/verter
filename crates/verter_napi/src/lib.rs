@@ -1,507 +1,98 @@
-use std::sync::Arc;
+// NAPI-RS generates variables from camelCase struct fields — suppress warnings.
+#![allow(non_snake_case)]
+
+//! # verter_napi — Node.js bindings for Verter
+//!
+//! NAPI-RS binding layer that exposes [`verter_host::VerterHost`] and
+//! `processStyle` to Node.js.
+//!
+//! ## API parity
+//!
+//! This crate exposes the same `VerterHost` API as [`verter_wasm`] with
+//! one addition that requires a Node.js runtime:
+//!
+//! - **`processStyle`** — applies scoped CSS, CSS Modules, and `v-bind()`
+//!   replacement to preprocessed CSS (SCSS/Less/Stylus output).
+//!
+//! ## Performance
+//!
+//! Uses `#[napi(object)]` structs for zero-copy V8 ↔ Rust transfer.
+//! All panics are caught via [`catch_panic`] to prevent Node.js crashes.
+//!
+//! ## FFI architecture
+//!
+//! NAPI structs use camelCase field names matching the JS API convention.
+//! They map to/from `verter_ffi` types via zero-copy `From` impls
+//! (field-by-field moves, no serialization). The shared conversion logic
+//! in `verter_ffi::convert` handles the FFI ↔ host type mapping.
 
 use napi::bindgen_prelude::*;
 use napi::{Error, Status};
 use napi_derive::napi;
-use verter_core::builder::codegen::{compile as core_compile, CodegenOptions as CoreOptions};
-use verter_core::strip_types::strip_types as core_strip_types;
+use verter_ffi::convert::*;
+use verter_ffi::types::*;
 use verter_host as host;
 
-fn with_input_str<T>(input: Either<String, Buffer>, f: impl FnOnce(&str) -> T) -> Result<T> {
-    match input {
-        Either::A(input) => Ok(f(&input)),
-        Either::B(buf) => {
-            let input_str = std::str::from_utf8(buf.as_ref()).map_err(|e| {
-                Error::new(
-                    Status::InvalidArg,
-                    format!("input must be valid UTF-8: {}", e),
-                )
-            })?;
-            Ok(f(input_str))
-        }
-    }
-}
-
-#[napi(object)]
-#[derive(Default)]
-pub struct CodegenOptions {
-    /// The filename for source map generation
-    pub filename: Option<String>,
-    /// Production mode - affects component ID generation and optimizations
-    pub is_production: Option<bool>,
-    /// Custom component ID (overrides auto-generation from filename)
-    pub component_id: Option<String>,
-    /// Skip source map generation for faster compilation
-    pub skip_source_map: Option<bool>,
-    /// Custom interpolation delimiters [open, close]. Default: ["{{", "}}"]
-    pub delimiters: Option<Vec<String>>,
-    /// Tag name prefixes treated as custom elements (skip component resolution).
-    /// E.g. ["ion-", "my-"] matches <ion-button>, <my-card>
-    pub custom_elements: Option<Vec<String>>,
-    /// Whether to preserve HTML comments in output. Default: !isProduction
-    pub comments: Option<bool>,
-    /// Runtime module name to import helpers from. Default: "vue"
-    pub runtime_module_name: Option<String>,
-    /// Hoist static VNodes/props to constants. Default: true
-    pub hoist_static: Option<bool>,
-    /// Whitespace handling: "condense" or "preserve". Default: "condense"
-    pub whitespace: Option<String>,
-    /// Cache event handler expressions. Default: false
-    pub cache_handlers: Option<bool>,
-    /// Inline render function in setup(). Default: isProduction
-    pub inline: Option<bool>,
-    /// Indicates SFC uses :slotted() in styles. Default: true
-    pub slotted: Option<bool>,
-}
-
-#[napi(object)]
-pub struct JsDiagnostic {
-    /// Severity level: "error", "warning", or "info"
-    pub severity: String,
-    /// Vue-compatible error code (e.g., "XMissingEndTag", "XInvalidEndTag")
-    pub code: String,
-    /// Human-readable error message
-    pub message: String,
-    /// Optional source span start (byte offset)
-    pub span_start: Option<u32>,
-    /// Optional source span end (byte offset)
-    pub span_end: Option<u32>,
-}
-
-#[napi(object)]
-pub struct JsCompiledStyleBlock {
-    /// Compiled CSS code (scoped selectors, v-bind replacements, module hashing applied)
-    pub code: String,
-    /// Whether this style block is scoped
-    pub scoped: bool,
-    /// Style language (css, scss, less, stylus)
-    pub lang: Option<String>,
-    /// Whether this is a CSS module block
-    pub is_module: bool,
-    /// CSS module class mappings (each entry is [original, hashed])
-    pub module_classes: Vec<Vec<String>>,
-    /// CSS processing errors
-    pub errors: Vec<String>,
-}
-
-#[napi(object)]
-pub struct CodegenResult {
-    /// The transformed code
-    pub code: String,
-    /// The source map as JSON string
-    pub source_map: String,
-    /// The transformed code with inline source map appended
-    pub code_with_source_map: String,
-    /// Compiled CSS blocks from `<style>` tags
-    pub styles: Vec<JsCompiledStyleBlock>,
-    /// Scope ID for scoped styles (e.g., "data-v-a4f2eed6"). Empty if no scoped styles.
-    pub scope_id: String,
-    /// Compilation diagnostics (errors, warnings, info)
-    pub errors: Vec<JsDiagnostic>,
-    /// Time taken for the Rust pipeline in milliseconds
-    pub duration_ms: f64,
-}
-
-/// Internal compile implementation shared by sync and async APIs.
-fn compile_impl(
-    input: Either<String, Buffer>,
-    options: Option<CodegenOptions>,
-) -> Result<CodegenResult> {
-    let allocator = oxc_allocator::Allocator::new();
-
-    let opts = options.unwrap_or_default();
-
-    let delimiters = opts.delimiters.and_then(|d| {
-        if d.len() == 2 {
-            Some((d[0].clone(), d[1].clone()))
+/// Run a closure, converting any panic into a napi::Error.
+/// Prevents Rust panics from crashing the Node.js process.
+fn catch_panic<T>(f: impl FnOnce() -> T + std::panic::UnwindSafe) -> Result<T> {
+    std::panic::catch_unwind(f).map_err(|panic_info| {
+        let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+            s.clone()
         } else {
-            None
-        }
-    });
-
-    let whitespace = opts.whitespace.and_then(|w| match w.as_str() {
-        "preserve" => Some(verter_core::builder::codegen::WhitespaceStrategy::Preserve),
-        "condense" => Some(verter_core::builder::codegen::WhitespaceStrategy::Condense),
-        _ => None,
-    });
-
-    let core_options = CoreOptions {
-        filename: opts.filename,
-        is_production: opts.is_production.unwrap_or(false),
-        component_id: opts.component_id,
-        include_tsx: false,
-        skip_source_map: opts.skip_source_map.unwrap_or(false),
-        delimiters,
-        custom_elements: opts.custom_elements,
-        comments: opts.comments,
-        runtime_module_name: opts.runtime_module_name,
-        hoist_static: opts.hoist_static,
-        whitespace,
-        cache_handlers: opts.cache_handlers,
-        inline: opts.inline,
-        slotted: opts.slotted,
-        prefix_identifiers: None,
-    };
-
-    let result = with_input_str(input, |input| {
-        core_compile(input, &core_options, &allocator)
-    })?;
-
-    let styles = result
-        .styles
-        .into_iter()
-        .map(|s| {
-            let module_classes = s
-                .module
-                .as_ref()
-                .map(|m| {
-                    m.classes
-                        .iter()
-                        .map(|c| vec![c.original.clone(), c.hashed.clone()])
-                        .collect()
-                })
-                .unwrap_or_default();
-            JsCompiledStyleBlock {
-                code: s.code,
-                scoped: s.scoped,
-                lang: s.lang.map(|l| match l {
-                    verter_core::syntax::types::StyleLang::Css => "css".to_string(),
-                    verter_core::syntax::types::StyleLang::Scss => "scss".to_string(),
-                    verter_core::syntax::types::StyleLang::Sass => "sass".to_string(),
-                    verter_core::syntax::types::StyleLang::Less => "less".to_string(),
-                    verter_core::syntax::types::StyleLang::Stylus => "stylus".to_string(),
-                    verter_core::syntax::types::StyleLang::Unknown => "unknown".to_string(),
-                }),
-                is_module: s.module.is_some(),
-                module_classes,
-                errors: s.errors,
-            }
-        })
-        .collect();
-
-    let errors = result
-        .errors
-        .iter()
-        .map(|d| {
-            let severity = match d.severity {
-                verter_core::builder::codegen::CompileDiagnosticSeverity::Error => "error",
-                verter_core::builder::codegen::CompileDiagnosticSeverity::Warning => "warning",
-                verter_core::builder::codegen::CompileDiagnosticSeverity::Info => "info",
-            };
-            JsDiagnostic {
-                severity: severity.to_string(),
-                code: d.code.clone(),
-                message: d.message.clone(),
-                span_start: d.span.map(|s| s.start),
-                span_end: d.span.map(|s| s.end),
-            }
-        })
-        .collect();
-
-    Ok(CodegenResult {
-        code: result.code,
-        source_map: result.source_map,
-        code_with_source_map: result.code_with_source_map,
-        styles,
-        scope_id: result.scope_id,
-        errors,
-        duration_ms: result.duration_ms,
+            "unknown internal error".to_string()
+        };
+        Error::new(
+            Status::GenericFailure,
+            format!("internal compiler error: {msg}"),
+        )
     })
 }
 
-/// Compile a Vue SFC to JavaScript (synchronous).
-///
-/// @param input - The Vue SFC source code (string or Buffer)
-/// @param options - Optional compilation options
-/// @returns The compiled result with code, source map, and code with inline source map
-#[napi(js_name = "compileSync")]
-pub fn compile_sync(
-    input: Either<String, Buffer>,
-    options: Option<CodegenOptions>,
-) -> Result<CodegenResult> {
-    compile_impl(input, options)
+fn ffi_err(msg: impl std::fmt::Display) -> Error {
+    Error::new(Status::InvalidArg, msg.to_string())
 }
 
-/// Compile a Vue SFC to JavaScript (async, runs on libuv thread pool).
-///
-/// @param input - The Vue SFC source code (string or Buffer)
-/// @param options - Optional compilation options
-/// @returns Promise resolving to the compiled result
-#[napi]
-pub fn compile(
-    input: Either<String, Buffer>,
-    options: Option<CodegenOptions>,
-) -> Result<CodegenResult> {
-    compile_impl(input, options)
-}
-
-// =============================================================================
-// Vite-specific Compilation API (thin wrapper)
-// =============================================================================
-
-#[napi(object)]
-#[derive(Default)]
-pub struct ViteCodegenOptions {
-    /// The filename for source map generation
-    pub filename: Option<String>,
-    /// SSR mode
-    pub ssr: Option<bool>,
-    /// Production mode
-    pub is_production: Option<bool>,
-    /// Custom component ID
-    pub component_id: Option<String>,
-    /// Whether to generate source maps
-    pub sourcemap: Option<bool>,
-}
-
-/// An import statement in a block's output (with UTF-16 offsets for JS).
-#[napi(object)]
-pub struct JsBlockImport {
-    /// Import source (e.g., "vue")
-    pub source: String,
-    /// Specifier strings (e.g., ["openBlock as _openBlock", ...])
-    pub specifiers: Vec<String>,
-    /// UTF-16 code unit offset of import start in block's code
-    pub start_utf16: u32,
-    /// UTF-16 code unit offset of import end in block's code
-    pub end_utf16: u32,
-}
-
-/// Output block with code, source map, and import metadata (UTF-16 offsets for JS).
-#[napi(object)]
-pub struct JsBlockOutput {
-    /// Generated code for this block
-    pub code: String,
-    /// Source map as JSON string
-    pub source_map: Option<String>,
-    /// Import statements with UTF-16 offsets
-    pub imports: Vec<JsBlockImport>,
-    /// UTF-16 code unit offset where non-import code begins
-    pub body_start_utf16: u32,
-}
-
-#[napi(object)]
-pub struct JsStyleBlock {
-    /// Processed CSS content
-    pub code: String,
-    /// Source map for CSS transformations
-    pub source_map: Option<String>,
-    /// Is scoped style
-    pub scoped: bool,
-    /// Is CSS module
-    pub is_module: bool,
-    /// Language (css, scss, less)
-    pub lang: Option<String>,
-    /// Module name (e.g., "$style")
-    pub module_name: Option<String>,
-    /// CSS module class mappings (original → hashed)
-    pub module_classes: Vec<Vec<String>>,
-}
-
-#[napi(object)]
-pub struct JsCustomBlock {
-    /// The tag name (e.g., "i18n", "docs")
-    pub block_type: String,
-    /// Raw content between open and close tags
-    pub content: String,
-    /// Attributes as key-value pairs [[key, value], ...]
-    pub attrs: Vec<Vec<String>>,
-}
-
-#[napi(object)]
-pub struct ViteCodegenResult {
-    /// Script block (component definition)
-    pub script: Option<JsBlockOutput>,
-    /// Template block (render function)
-    pub template: Option<JsBlockOutput>,
-    /// Style blocks
-    pub styles: Vec<JsStyleBlock>,
-    /// Custom blocks (e.g., `<i18n>`, `<docs>`)
-    pub custom_blocks: Vec<JsCustomBlock>,
-    /// Whether the SFC has a default export (script setup or script with export default)
-    pub has_default_export: bool,
-    /// Whether the output contains a standalone `function render()` that must be
-    /// attached to the component via `_sfc_main.render = render`.
-    pub has_render: bool,
-    /// Build time in milliseconds
-    pub duration_ms: f64,
-}
-
-/// Internal compile_for_vite implementation shared by sync and async APIs.
-fn compile_for_vite_impl(
-    input: Either<String, Buffer>,
-    options: Option<ViteCodegenOptions>,
-) -> Result<ViteCodegenResult> {
-    let allocator = oxc_allocator::Allocator::new();
-
-    let opts = options.unwrap_or_default();
-
-    let core_options = CoreOptions {
-        filename: opts.filename,
-        is_production: opts.is_production.unwrap_or(false),
-        component_id: opts.component_id,
-        include_tsx: false,
-        skip_source_map: false,
-        ..Default::default()
-    };
-
-    let result = with_input_str(input, |input| {
-        core_compile(input, &core_options, &allocator)
-    })?;
-
-    let styles = result
-        .styles
-        .into_iter()
-        .map(|s| {
-            let module_classes = s
-                .module
-                .as_ref()
-                .map(|m| {
-                    m.classes
-                        .iter()
-                        .map(|c| vec![c.original.clone(), c.hashed.clone()])
-                        .collect()
-                })
-                .unwrap_or_default();
-            let module_name = s.module.as_ref().map(|m| {
-                m.custom_name
-                    .map(|_span| "custom".to_string())
-                    .unwrap_or_else(|| "$style".to_string())
-            });
-            JsStyleBlock {
-                code: s.code,
-                source_map: None,
-                scoped: s.scoped,
-                is_module: s.module.is_some(),
-                lang: s.lang.map(|l| match l {
-                    verter_core::syntax::types::StyleLang::Css => "css".to_string(),
-                    verter_core::syntax::types::StyleLang::Scss => "scss".to_string(),
-                    verter_core::syntax::types::StyleLang::Sass => "sass".to_string(),
-                    verter_core::syntax::types::StyleLang::Less => "less".to_string(),
-                    verter_core::syntax::types::StyleLang::Stylus => "stylus".to_string(),
-                    verter_core::syntax::types::StyleLang::Unknown => "unknown".to_string(),
-                }),
-                module_name,
-                module_classes,
-            }
-        })
-        .collect();
-
-    // The Rust compiler now emits `const __sfc__ = ...`, `__sfc__.__scopeId = "...";`,
-    // and `export default __sfc__;` at the end.  For the Vite path, strip these lines
-    // so that generateMainModule in TypeScript can handle metadata and export.
-    let mut code = result.code;
-    let mut has_default_export = false;
-
-    if let Some(pos) = code.rfind("\nexport default __sfc__;\n") {
-        code.replace_range(pos..pos + "\nexport default __sfc__;\n".len(), "\n");
-        has_default_export = true;
-    } else if code.ends_with("export default __sfc__;\n") {
-        let pos = code.len() - "export default __sfc__;\n".len();
-        code.truncate(pos);
-        has_default_export = true;
-    }
-
-    // Strip __sfc__.__scopeId line — generateMainModule handles scopeId via metadata
-    if let Some(start) = code.find("\n__sfc__.__scopeId = ") {
-        if let Some(end) = code[start + 1..].find('\n') {
-            code.replace_range(start..start + 1 + end, "");
-        }
-    }
-
-    // Merge dual script blocks: when both <script> and <script setup> exist,
-    // the compiler produces two `const __sfc__ = ...` declarations. Rename the
-    // first to `__default__` and inject `...__default__,` into the second one's
-    // _defineComponent({) so options (inheritAttrs, name, etc.) are preserved.
-    {
-        let first = code.find("const __sfc__ = ");
-        if let Some(first_pos) = first {
-            let after_first = first_pos + "const __sfc__ = ".len();
-            if let Some(second_offset) = code[after_first..].find("const __sfc__ = ") {
-                let second_pos = after_first + second_offset;
-                // Rename first declaration: __sfc__ → __default__
-                code.replace_range(
-                    first_pos..first_pos + "const __sfc__ = ".len(),
-                    "const __default__ = ",
-                );
-                // The second declaration shifted by 4 chars ("__default__" is 4 longer than "__sfc__")
-                let adjusted_second = second_pos + 4;
-                // Find the opening `{` of _defineComponent({ after the second declaration
-                if let Some(brace_offset) = code[adjusted_second..].find("_defineComponent({") {
-                    let brace_pos = adjusted_second + brace_offset + "_defineComponent({".len();
-                    code.insert_str(brace_pos, "...__default__,");
-                }
-            }
-        }
-    }
-
-    let custom_blocks = result
-        .custom_blocks
-        .into_iter()
-        .map(|b| JsCustomBlock {
-            block_type: b.block_type,
-            content: b.content,
-            attrs: b.attrs.into_iter().map(|(k, v)| vec![k, v]).collect(),
-        })
-        .collect();
-
-    Ok(ViteCodegenResult {
-        script: Some(JsBlockOutput {
-            code,
-            source_map: Some(result.source_map),
-            imports: vec![],
-            body_start_utf16: 0,
-        }),
-        template: None,
-        styles,
-        custom_blocks,
-        has_default_export,
-        has_render: result.has_render,
-        duration_ms: result.duration_ms,
+/// Convert a `Buffer` (raw bytes) to a `String`, validating UTF-8.
+fn buffer_to_string(buf: Buffer) -> Result<String> {
+    String::from_utf8(buf.into()).map_err(|e| {
+        Error::new(
+            Status::InvalidArg,
+            format!("Buffer is not valid UTF-8: {e}"),
+        )
     })
 }
 
-/// Compile a Vue SFC for Vite plugin usage (synchronous).
-///
-/// @param input - The Vue SFC source code (string or Buffer)
-/// @param options - Optional compilation options
-/// @returns Compiled result with split blocks for virtual modules
-#[napi(js_name = "compileForViteSync")]
-pub fn compile_for_vite_sync(
-    input: Either<String, Buffer>,
-    options: Option<ViteCodegenOptions>,
-) -> Result<ViteCodegenResult> {
-    compile_for_vite_impl(input, options)
-}
-
-/// Compile a Vue SFC for Vite plugin usage (async, runs on libuv thread pool).
-///
-/// @param input - The Vue SFC source code (string or Buffer)
-/// @param options - Optional compilation options
-/// @returns Promise resolving to the compiled result
-#[napi(js_name = "compileForVite")]
-pub fn compile_for_vite(
-    input: Either<String, Buffer>,
-    options: Option<ViteCodegenOptions>,
-) -> Result<ViteCodegenResult> {
-    compile_for_vite_impl(input, options)
+fn host_error(err: host::HostError) -> Error {
+    let status = match &err {
+        host::HostError::InvalidQuery
+        | host::HostError::MissingSource { .. }
+        | host::HostError::MissingVirtualNode { .. } => Status::InvalidArg,
+        host::HostError::CompileError { .. } => Status::GenericFailure,
+    };
+    Error::new(status, host_error_to_string(&err))
 }
 
 // =============================================================================
-// Standalone CSS Style Processing (for preprocessed CSS from Vite plugin)
+// Standalone CSS Style Processing (NAPI-only)
+//
+// Available in NAPI but not WASM because CSS preprocessing (LESS/SCSS/Stylus)
+// requires Node.js. The WASM host processes styles inline during compilation.
 // =============================================================================
 
 #[napi(object)]
 #[derive(Default)]
 pub struct ProcessStyleOptions {
     /// Scope ID string (e.g., "a4f2eed6")
-    pub scope_id: String,
+    pub scopeId: String,
     /// Whether this style block is scoped
     pub scoped: Option<bool>,
     /// Whether this is a CSS module block
-    pub is_module: Option<bool>,
+    pub isModule: Option<bool>,
     /// Custom module name (None = "$style")
-    pub module_name: Option<String>,
+    pub moduleName: Option<String>,
     /// Source filename for source map generation
     pub filename: Option<String>,
     /// Whether to generate source maps
@@ -513,7 +104,7 @@ pub struct ProcessStyleVBind {
     /// The original expression text (e.g., "color" or "theme.color")
     pub expression: String,
     /// The generated CSS variable name (e.g., "--a4f2eed6-color")
-    pub var_name: String,
+    pub varName: String,
 }
 
 #[napi(object)]
@@ -521,11 +112,13 @@ pub struct ProcessStyleResult {
     /// Transformed CSS code
     pub code: String,
     /// Source map as JSON string (if sourcemap was requested)
-    pub source_map: Option<String>,
+    pub sourceMap: Option<String>,
     /// CSS module class mappings (original → hashed), each entry is [original, hashed]
-    pub module_classes: Vec<Vec<String>>,
+    pub moduleClasses: Vec<Vec<String>>,
+    /// CSS module variable name (e.g. "$style" or custom name from `<style module="...">`)
+    pub moduleName: Option<String>,
     /// v-bind() expressions found and replaced
-    pub v_bind_vars: Vec<ProcessStyleVBind>,
+    pub vBindVars: Vec<ProcessStyleVBind>,
 }
 
 /// Process a CSS style block: apply scoping, CSS modules, and v-bind replacement.
@@ -537,464 +130,435 @@ pub struct ProcessStyleResult {
 /// @param options - Processing options (scope ID, scoped, modules, etc.)
 /// @returns Processed CSS with scoping/modules applied, plus v-bind metadata
 #[napi]
-pub fn process_style(css: String, options: ProcessStyleOptions) -> Result<ProcessStyleResult> {
-    let core_options = verter_core::css::ProcessStyleOptions {
-        scope_id: &options.scope_id,
-        scoped: options.scoped.unwrap_or(false),
-        is_module: options.is_module.unwrap_or(false),
-        filename: options.filename.as_deref(),
-        sourcemap: options.sourcemap.unwrap_or(false),
-    };
+pub fn process_style(css: Buffer, options: ProcessStyleOptions) -> Result<ProcessStyleResult> {
+    let css = buffer_to_string(css)?;
+    catch_panic(std::panic::AssertUnwindSafe(|| {
+        let core_options = verter_core::css::ProcessStyleOptions {
+            scope_id: &options.scopeId,
+            scoped: options.scoped.unwrap_or(false),
+            is_module: options.isModule.unwrap_or(false),
+            module_name: options.moduleName.as_deref(),
+            filename: options.filename.as_deref(),
+            sourcemap: options.sourcemap.unwrap_or(false),
+        };
 
-    let result = verter_core::css::process_style(&css, &core_options)
-        .map_err(|e| Error::new(Status::GenericFailure, e))?;
-
-    Ok(ProcessStyleResult {
+        verter_core::css::process_style(&css, &core_options)
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+    }))?
+    .map(|result| ProcessStyleResult {
         code: result.code,
-        source_map: result.source_map,
-        module_classes: result
+        sourceMap: result.source_map,
+        moduleClasses: result
             .module_classes
             .into_iter()
             .map(|(k, v)| vec![k, v])
             .collect(),
-        v_bind_vars: result
+        moduleName: result.module_name,
+        vBindVars: result
             .v_bind_vars
             .into_iter()
             .map(|v| ProcessStyleVBind {
                 expression: v.expression,
-                var_name: v.var_name,
+                varName: v.var_name,
             })
             .collect(),
     })
 }
 
 // =============================================================================
-// Standalone TypeScript Stripping
-// =============================================================================
-
-#[napi(object)]
-pub struct StripTypesResult {
-    /// The JavaScript output with TypeScript syntax removed.
-    pub code: String,
-    /// Any parse errors encountered.
-    pub errors: Vec<String>,
-}
-
-/// Strip TypeScript syntax from a standalone `.ts`/`.tsx` file.
-///
-/// Removes type annotations, interfaces, type aliases, and converts enums to JavaScript.
-///
-/// @param source - The TypeScript source code (string or Buffer)
-/// @returns The stripped JavaScript code and any parse errors
-#[napi]
-pub fn strip_types(source: Either<String, Buffer>) -> Result<StripTypesResult> {
-    let allocator = oxc_allocator::Allocator::new();
-
-    let result = with_input_str(source, |s| core_strip_types(s, &allocator))?;
-
-    Ok(StripTypesResult {
-        code: result.code,
-        errors: result.errors,
-    })
-}
-
-// =============================================================================
-// VerterHost (in-memory virtual file host)
+// NAPI ↔ FFI zero-copy boundary structs
+//
+// These use camelCase field names for JS convention. They map to/from
+// verter_ffi types via From impls (field-by-field moves, zero allocation).
 // =============================================================================
 
 #[napi(object)]
 #[derive(Default)]
-pub struct HostConfig {
-    pub dev_mode: Option<bool>,
-    pub compile_error_policy: Option<String>,
-    pub lsp_scheme: Option<String>,
-    pub max_profiles_per_file: Option<u32>,
+pub struct NapiHostConfig {
+    pub devMode: Option<bool>,
+    pub compileErrorPolicy: Option<String>,
+    pub lspScheme: Option<String>,
+    pub maxProfilesPerFile: Option<u32>,
+    pub resolveExtensions: Option<Vec<String>>,
+    pub analysisLevel: Option<String>,
+}
+
+impl From<NapiHostConfig> for FfiHostConfig {
+    fn from(n: NapiHostConfig) -> Self {
+        Self {
+            dev_mode: n.devMode,
+            compile_error_policy: n.compileErrorPolicy,
+            lsp_scheme: n.lspScheme,
+            max_profiles_per_file: n.maxProfilesPerFile,
+            resolve_extensions: n.resolveExtensions,
+            analysis_level: n.analysisLevel,
+        }
+    }
 }
 
 #[napi(object)]
 #[derive(Default, Clone)]
-pub struct HostCompileProfile {
+pub struct NapiCompileProfile {
     pub filename: Option<String>,
-    pub is_production: Option<bool>,
+    pub isProduction: Option<bool>,
     pub ssr: Option<bool>,
-    pub hmr_strategy: Option<String>,
-    pub component_id: Option<String>,
+    pub hmrStrategy: Option<String>,
+    pub componentId: Option<String>,
     pub delimiters: Option<Vec<String>>,
-    pub custom_elements: Option<Vec<String>>,
+    pub customElements: Option<Vec<String>>,
     pub comments: Option<bool>,
-    pub runtime_module_name: Option<String>,
-    pub force_vapor: Option<bool>,
-    pub strip_ts: Option<bool>,
-    pub source_map: Option<bool>,
+    pub runtimeModuleName: Option<String>,
+    pub forceVapor: Option<bool>,
+    pub forceJs: Option<bool>,
+    pub sourceMap: Option<bool>,
+}
+
+impl From<NapiCompileProfile> for FfiCompileProfile {
+    fn from(n: NapiCompileProfile) -> Self {
+        Self {
+            filename: n.filename,
+            is_production: n.isProduction,
+            ssr: n.ssr,
+            hmr_strategy: n.hmrStrategy,
+            component_id: n.componentId,
+            delimiters: n.delimiters,
+            custom_elements: n.customElements,
+            comments: n.comments,
+            runtime_module_name: n.runtimeModuleName,
+            force_vapor: n.forceVapor,
+            force_js: n.forceJs,
+            source_map: n.sourceMap,
+        }
+    }
 }
 
 #[napi(object)]
 #[derive(Clone)]
-pub struct HostVirtualNodeKind {
+pub struct NapiVirtualNodeKind {
     pub kind: String,
     pub index: Option<u32>,
 }
 
-#[napi(object)]
-pub struct HostSliceChanges {
-    pub script_changed: bool,
-    pub template_changed: bool,
-    pub style_indices_changed: Vec<u32>,
-    pub custom_indices_changed: Vec<u32>,
-    pub structure_changed: bool,
-    pub descriptor_changed: bool,
+impl From<NapiVirtualNodeKind> for FfiVirtualNodeKind {
+    fn from(n: NapiVirtualNodeKind) -> Self {
+        Self {
+            kind: n.kind,
+            index: n.index,
+        }
+    }
+}
+
+impl From<FfiVirtualNodeKind> for NapiVirtualNodeKind {
+    fn from(f: FfiVirtualNodeKind) -> Self {
+        Self {
+            kind: f.kind,
+            index: f.index,
+        }
+    }
 }
 
 #[napi(object)]
-pub struct HostDiagnostic {
+pub struct NapiUpsertRequest {
+    pub canonicalId: Option<String>,
+    pub inputId: String,
+    /// SFC source code as UTF-8 bytes (e.g., `fs.readFileSync(path)`).
+    pub source: Buffer,
+    pub fileKind: Option<String>,
+    pub aliases: Option<Vec<String>>,
+}
+
+#[napi(object)]
+pub struct NapiStyleOverrideEntry {
+    pub index: u32,
+    /// Preprocessed CSS as UTF-8 bytes.
+    pub code: Buffer,
+    pub sourceMap: Option<String>,
+}
+
+#[napi(object)]
+pub struct NapiStyleOverrideRequest {
+    pub canonicalId: String,
+    pub compileProfile: Option<NapiCompileProfile>,
+    pub overrides: Vec<NapiStyleOverrideEntry>,
+}
+
+#[napi(object)]
+pub struct NapiVirtualQuery {
+    pub rawId: Option<String>,
+    pub canonicalId: Option<String>,
+    pub nodeKind: Option<NapiVirtualNodeKind>,
+    pub compileProfile: Option<NapiCompileProfile>,
+}
+
+impl From<NapiVirtualQuery> for FfiVirtualQuery {
+    fn from(n: NapiVirtualQuery) -> Self {
+        Self {
+            raw_id: n.rawId,
+            canonical_id: n.canonicalId,
+            node_kind: n.nodeKind.map(Into::into),
+            compile_profile: n.compileProfile.map(Into::into),
+        }
+    }
+}
+
+// --- Output structs (Rust → V8) ---
+
+#[napi(object)]
+pub struct NapiSliceChanges {
+    pub scriptChanged: bool,
+    pub templateChanged: bool,
+    pub styleIndicesChanged: Vec<u32>,
+    pub customIndicesChanged: Vec<u32>,
+    pub structureChanged: bool,
+    pub descriptorChanged: bool,
+}
+
+#[napi(object)]
+pub struct NapiDiagnostic {
     pub severity: String,
     pub code: String,
     pub message: String,
-    pub span_start: Option<u32>,
-    pub span_end: Option<u32>,
+    pub spanStart: Option<u32>,
+    pub spanEnd: Option<u32>,
 }
 
 #[napi(object)]
-pub struct HostDiagnosticsSnapshot {
-    pub diagnostics: Vec<HostDiagnostic>,
-    pub has_errors: bool,
+pub struct NapiDiagnosticsSnapshot {
+    pub diagnostics: Vec<NapiDiagnostic>,
+    pub hasErrors: bool,
 }
 
 #[napi(object)]
-pub struct HostExternalSourceRequest {
-    pub owner_canonical_id: String,
-    pub block_kind: String,
+pub struct NapiExternalSourceRequest {
+    pub ownerCanonicalId: String,
+    pub blockKind: String,
     pub index: u32,
     pub specifier: String,
-    pub resolved_canonical_id: String,
+    pub resolvedCanonicalId: String,
 }
 
 #[napi(object)]
-pub struct HostUpdateResult {
-    pub canonical_id: String,
+pub struct NapiScriptImportInfo {
+    pub source: String,
+    pub isTypeOnly: bool,
+    pub bindings: Vec<String>,
+}
+
+#[napi(object)]
+pub struct NapiUpdateResult {
+    pub canonicalId: String,
     pub changed: bool,
-    pub slice_changes: HostSliceChanges,
-    pub changed_virtual_nodes: Vec<HostVirtualNodeKind>,
-    pub removed_virtual_nodes: Vec<HostVirtualNodeKind>,
-    pub changed_virtual_ids: Vec<String>,
-    pub removed_virtual_ids: Vec<String>,
-    pub changed_lsp_ids: Vec<String>,
-    pub removed_lsp_ids: Vec<String>,
-    pub diagnostics: HostDiagnosticsSnapshot,
-    pub external_source_requests: Vec<HostExternalSourceRequest>,
+    pub sliceChanges: NapiSliceChanges,
+    pub changedVirtualNodes: Vec<NapiVirtualNodeKind>,
+    pub removedVirtualNodes: Vec<NapiVirtualNodeKind>,
+    pub changedVirtualIds: Vec<String>,
+    pub removedVirtualIds: Vec<String>,
+    pub changedLspIds: Vec<String>,
+    pub removedLspIds: Vec<String>,
+    pub diagnostics: NapiDiagnosticsSnapshot,
+    pub externalSourceRequests: Vec<NapiExternalSourceRequest>,
+    pub importSpecifiers: Vec<NapiScriptImportInfo>,
+    pub parseDurationMs: f64,
 }
 
 #[napi(object)]
-pub struct HostResolvedId {
-    pub canonical_id: String,
-    pub node_kind: HostVirtualNodeKind,
-    pub exists_in_host: bool,
-    pub bundler_id: String,
-    pub lsp_id: String,
+pub struct NapiResolvedId {
+    pub canonicalId: String,
+    pub nodeKind: NapiVirtualNodeKind,
+    pub existsInHost: bool,
+    pub bundlerId: String,
+    pub lspId: String,
 }
 
 #[napi(object)]
-pub struct HostVirtualMeta {
-    pub scope_id: Option<String>,
-    pub block_type: Option<String>,
-    pub style_index: Option<u32>,
-    pub custom_index: Option<u32>,
+pub struct NapiVirtualMeta {
+    pub scopeId: Option<String>,
+    pub blockType: Option<String>,
+    pub styleIndex: Option<u32>,
+    pub customIndex: Option<u32>,
 }
 
 #[napi(object)]
-pub struct HostVirtualFileResponse {
+pub struct NapiVirtualFileResponse {
     pub id: String,
     pub code: String,
-    pub source_map: Option<String>,
+    pub sourceMap: Option<String>,
     pub lang: Option<String>,
     pub stale: bool,
-    pub diagnostics: HostDiagnosticsSnapshot,
-    pub meta: HostVirtualMeta,
+    pub diagnostics: NapiDiagnosticsSnapshot,
+    pub meta: NapiVirtualMeta,
 }
 
 #[napi(object)]
-pub struct HostUpsertRequest {
-    pub canonical_id: Option<String>,
-    pub input_id: String,
-    pub source: String,
-    pub file_kind: Option<String>,
-    pub aliases: Option<Vec<String>>,
-    pub compile_profile: Option<HostCompileProfile>,
+pub struct NapiRemoveResult {
+    pub canonicalId: String,
 }
 
-#[napi(object)]
-pub struct HostStyleOverrideEntry {
-    pub index: u32,
-    pub code: String,
-    pub source_map: Option<String>,
-}
+// =============================================================================
+// Direct Host → NAPI conversion (bypasses FFI intermediate types)
+// =============================================================================
 
-#[napi(object)]
-pub struct HostStyleOverrideRequest {
-    pub canonical_id: String,
-    pub compile_profile: Option<HostCompileProfile>,
-    pub overrides: Vec<HostStyleOverrideEntry>,
-}
-
-#[napi(object)]
-pub struct HostVirtualQuery {
-    pub raw_id: Option<String>,
-    pub canonical_id: Option<String>,
-    pub node_kind: Option<HostVirtualNodeKind>,
-    pub compile_profile: Option<HostCompileProfile>,
-}
-
-#[napi(object)]
-pub struct HostRemoveResult {
-    pub canonical_id: String,
-}
-
-fn to_host_config(input: Option<HostConfig>) -> host::HostConfig {
-    let mut out = host::HostConfig::default();
-    if let Some(input) = input {
-        if let Some(dev_mode) = input.dev_mode {
-            out.dev_mode = dev_mode;
-        }
-        if let Some(policy) = input.compile_error_policy {
-            out.compile_error_policy = if policy.eq_ignore_ascii_case("strict")
-                || policy.eq_ignore_ascii_case("strict_error")
-            {
-                host::CompileErrorPolicy::StrictError
-            } else {
-                host::CompileErrorPolicy::DevServeLastKnownGood
-            };
-        }
-        if let Some(lsp_scheme) = input.lsp_scheme {
-            out.lsp_scheme = lsp_scheme;
-        }
-        if let Some(max_profiles) = input.max_profiles_per_file {
-            out.max_profiles_per_file = max_profiles as usize;
-        }
-    }
-    out
-}
-
-fn to_host_profile(input: Option<HostCompileProfile>) -> host::CompileProfile {
-    let mut out = host::CompileProfile::default();
-    if let Some(input) = input {
-        out.filename = input.filename;
-        if let Some(is_production) = input.is_production {
-            out.is_production = is_production;
-        }
-        if let Some(ssr) = input.ssr {
-            out.ssr = ssr;
-        }
-        if let Some(hmr_strategy) = input.hmr_strategy {
-            out.hmr_strategy = if hmr_strategy.eq_ignore_ascii_case("vite") {
-                host::HmrStrategy::Vite
-            } else if hmr_strategy.eq_ignore_ascii_case("webpack") {
-                host::HmrStrategy::Webpack
-            } else {
-                host::HmrStrategy::None
-            };
-        }
-        out.component_id = input.component_id;
-        out.delimiters = input.delimiters.and_then(|d| {
-            if d.len() == 2 {
-                Some((d[0].clone(), d[1].clone()))
-            } else {
-                None
-            }
-        });
-        out.custom_elements = input.custom_elements;
-        out.comments = input.comments;
-        if let Some(runtime) = input.runtime_module_name {
-            out.runtime_module_name = Some(runtime);
-        }
-        if let Some(force_vapor) = input.force_vapor {
-            out.force_vapor = force_vapor;
-        }
-        if let Some(strip_ts) = input.strip_ts {
-            out.strip_ts = strip_ts;
-        }
-        if let Some(source_map) = input.source_map {
-            out.source_map = source_map;
-        }
-    }
-    out
-}
-
-fn to_host_file_kind(input: Option<&str>) -> Result<host::FileKind> {
-    match input.unwrap_or("vue").to_ascii_lowercase().as_str() {
-        "vue" | "sfc" | "vue_sfc" => Ok(host::FileKind::VueSfc),
-        "non_sfc" | "text" | "file" => Ok(host::FileKind::NonSfc),
-        other => Err(Error::new(
-            Status::InvalidArg,
-            format!("invalid file_kind '{}'", other),
-        )),
-    }
-}
-
-fn to_host_node_kind(input: HostVirtualNodeKind) -> Result<host::VirtualNodeKind> {
-    match input.kind.to_ascii_lowercase().as_str() {
-        "main" => Ok(host::VirtualNodeKind::Main),
-        "script" => Ok(host::VirtualNodeKind::Script),
-        "template" => Ok(host::VirtualNodeKind::Template),
-        "style" => Ok(host::VirtualNodeKind::Style {
-            index: input.index.unwrap_or(0) as usize,
-        }),
-        "custom" => Ok(host::VirtualNodeKind::Custom {
-            index: input.index.unwrap_or(0) as usize,
-        }),
-        other => Err(Error::new(
-            Status::InvalidArg,
-            format!("invalid virtual node kind '{}'", other),
-        )),
-    }
-}
-
-fn from_host_node_kind(input: &host::VirtualNodeKind) -> HostVirtualNodeKind {
+fn host_node_kind_to_napi(input: &host::VirtualNodeKind) -> NapiVirtualNodeKind {
     match input {
-        host::VirtualNodeKind::Main => HostVirtualNodeKind {
+        host::VirtualNodeKind::Main => NapiVirtualNodeKind {
             kind: "main".to_string(),
             index: None,
         },
-        host::VirtualNodeKind::Script => HostVirtualNodeKind {
+        host::VirtualNodeKind::Script => NapiVirtualNodeKind {
             kind: "script".to_string(),
             index: None,
         },
-        host::VirtualNodeKind::Template => HostVirtualNodeKind {
+        host::VirtualNodeKind::Template => NapiVirtualNodeKind {
             kind: "template".to_string(),
             index: None,
         },
-        host::VirtualNodeKind::Style { index } => HostVirtualNodeKind {
+        host::VirtualNodeKind::Style { index } => NapiVirtualNodeKind {
             kind: "style".to_string(),
             index: Some(*index as u32),
         },
-        host::VirtualNodeKind::Custom { index } => HostVirtualNodeKind {
+        host::VirtualNodeKind::Custom { index } => NapiVirtualNodeKind {
             kind: "custom".to_string(),
             index: Some(*index as u32),
         },
     }
 }
 
-fn from_host_diagnostics(input: &host::DiagnosticsSnapshot) -> HostDiagnosticsSnapshot {
-    HostDiagnosticsSnapshot {
-        diagnostics: input
-            .diagnostics
-            .iter()
-            .map(|d| HostDiagnostic {
-                severity: match d.severity {
-                    host::HostSeverity::Error => "error".to_string(),
-                    host::HostSeverity::Warning => "warning".to_string(),
-                    host::HostSeverity::Info => "info".to_string(),
-                },
-                code: d.code.clone(),
-                message: d.message.clone(),
-                span_start: d.span_start,
-                span_end: d.span_end,
-            })
-            .collect(),
-        has_errors: input.has_errors,
+fn host_severity_to_str(severity: &host::HostSeverity) -> &'static str {
+    match severity {
+        host::HostSeverity::Error => "error",
+        host::HostSeverity::Warning => "warning",
+        host::HostSeverity::Info => "info",
     }
 }
 
-fn from_host_update(input: host::HostUpdateResult) -> HostUpdateResult {
-    HostUpdateResult {
-        canonical_id: input.canonical_id,
+fn host_diagnostics_to_napi(input: &host::DiagnosticsSnapshot) -> NapiDiagnosticsSnapshot {
+    NapiDiagnosticsSnapshot {
+        diagnostics: input
+            .diagnostics
+            .iter()
+            .map(|d| NapiDiagnostic {
+                severity: host_severity_to_str(&d.severity).to_string(),
+                code: d.code.clone(),
+                message: d.message.clone(),
+                spanStart: d.span_start,
+                spanEnd: d.span_end,
+            })
+            .collect(),
+        hasErrors: input.has_errors,
+    }
+}
+
+fn host_block_kind_to_str(kind: &host::ExternalBlockKind) -> &'static str {
+    match kind {
+        host::ExternalBlockKind::Script => "script",
+        host::ExternalBlockKind::Template => "template",
+        host::ExternalBlockKind::Style => "style",
+        host::ExternalBlockKind::Custom => "custom",
+    }
+}
+
+fn host_update_to_napi(input: host::HostUpdateResult) -> NapiUpdateResult {
+    NapiUpdateResult {
+        canonicalId: input.canonical_id,
         changed: input.changed,
-        slice_changes: HostSliceChanges {
-            script_changed: input.slice_changes.script_changed,
-            template_changed: input.slice_changes.template_changed,
-            style_indices_changed: input
+        sliceChanges: NapiSliceChanges {
+            scriptChanged: input.slice_changes.script_changed,
+            templateChanged: input.slice_changes.template_changed,
+            styleIndicesChanged: input
                 .slice_changes
                 .style_indices_changed
                 .into_iter()
                 .map(|i| i as u32)
                 .collect(),
-            custom_indices_changed: input
+            customIndicesChanged: input
                 .slice_changes
                 .custom_indices_changed
                 .into_iter()
                 .map(|i| i as u32)
                 .collect(),
-            structure_changed: input.slice_changes.structure_changed,
-            descriptor_changed: input.slice_changes.descriptor_changed,
+            structureChanged: input.slice_changes.structure_changed,
+            descriptorChanged: input.slice_changes.descriptor_changed,
         },
-        changed_virtual_nodes: input
+        changedVirtualNodes: input
             .changed_virtual_nodes
             .iter()
-            .map(from_host_node_kind)
+            .map(host_node_kind_to_napi)
             .collect(),
-        removed_virtual_nodes: input
+        removedVirtualNodes: input
             .removed_virtual_nodes
             .iter()
-            .map(from_host_node_kind)
+            .map(host_node_kind_to_napi)
             .collect(),
-        changed_virtual_ids: input.changed_virtual_ids,
-        removed_virtual_ids: input.removed_virtual_ids,
-        changed_lsp_ids: input.changed_lsp_ids,
-        removed_lsp_ids: input.removed_lsp_ids,
-        diagnostics: from_host_diagnostics(&input.diagnostics),
-        external_source_requests: input
+        changedVirtualIds: input.changed_virtual_ids,
+        removedVirtualIds: input.removed_virtual_ids,
+        changedLspIds: input.changed_lsp_ids,
+        removedLspIds: input.removed_lsp_ids,
+        diagnostics: host_diagnostics_to_napi(&input.diagnostics),
+        externalSourceRequests: input
             .external_source_requests
             .into_iter()
-            .map(|req| HostExternalSourceRequest {
-                owner_canonical_id: req.owner_canonical_id,
-                block_kind: match req.block_kind {
-                    host::ExternalBlockKind::Script => "script".to_string(),
-                    host::ExternalBlockKind::Template => "template".to_string(),
-                    host::ExternalBlockKind::Style => "style".to_string(),
-                    host::ExternalBlockKind::Custom => "custom".to_string(),
-                },
+            .map(|req| NapiExternalSourceRequest {
+                ownerCanonicalId: req.owner_canonical_id,
+                blockKind: host_block_kind_to_str(&req.block_kind).to_string(),
                 index: req.index as u32,
                 specifier: req.specifier,
-                resolved_canonical_id: req.resolved_canonical_id,
+                resolvedCanonicalId: req.resolved_canonical_id,
             })
             .collect(),
+        importSpecifiers: input
+            .import_specifiers
+            .into_iter()
+            .map(|imp| NapiScriptImportInfo {
+                source: imp.source,
+                isTypeOnly: imp.is_type_only,
+                bindings: imp.bindings,
+            })
+            .collect(),
+        parseDurationMs: input.parse_duration_ms,
     }
 }
 
-fn from_host_virtual_file(input: host::VirtualFileResponse) -> HostVirtualFileResponse {
-    HostVirtualFileResponse {
+fn host_virtual_file_to_napi(input: host::VirtualFileResponse) -> NapiVirtualFileResponse {
+    NapiVirtualFileResponse {
         id: input.id,
         code: input.code.to_string(),
-        source_map: input.source_map.as_ref().map(|s| s.to_string()),
+        sourceMap: input.source_map.as_ref().map(|s| s.to_string()),
         lang: input.lang,
         stale: input.stale,
-        diagnostics: from_host_diagnostics(&input.diagnostics),
-        meta: HostVirtualMeta {
-            scope_id: input.meta.scope_id,
-            block_type: input.meta.block_type,
-            style_index: input.meta.style_index.map(|i| i as u32),
-            custom_index: input.meta.custom_index.map(|i| i as u32),
+        diagnostics: host_diagnostics_to_napi(&input.diagnostics),
+        meta: NapiVirtualMeta {
+            scopeId: input.meta.scope_id,
+            blockType: input.meta.block_type,
+            styleIndex: input.meta.style_index.map(|i| i as u32),
+            customIndex: input.meta.custom_index.map(|i| i as u32),
         },
     }
 }
 
-fn host_error(err: host::HostError) -> Error {
-    match err {
-        host::HostError::MissingSource { canonical_id } => Error::new(
-            Status::GenericFailure,
-            format!("HostError::MissingSource: {}", canonical_id),
-        ),
-        host::HostError::InvalidQuery => {
-            Error::new(Status::InvalidArg, "HostError::InvalidQuery".to_string())
-        }
-        host::HostError::MissingVirtualNode { canonical_id } => Error::new(
-            Status::GenericFailure,
-            format!("HostError::MissingVirtualNode: {}", canonical_id),
-        ),
-        host::HostError::CompileError { diagnostics } => {
-            let summary = diagnostics
-                .diagnostics
-                .iter()
-                .map(|d| format!("[{}] {}", d.code, d.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            Error::new(
-                Status::GenericFailure,
-                format!("HostError::CompileError: {}", summary),
-            )
-        }
+fn host_resolved_id_to_napi(input: host::ResolvedId) -> NapiResolvedId {
+    NapiResolvedId {
+        canonicalId: input.canonical_id,
+        nodeKind: host_node_kind_to_napi(&input.node_kind),
+        existsInHost: input.exists_in_host,
+        bundlerId: input.bundler_id,
+        lspId: input.lsp_id,
     }
 }
 
+// =============================================================================
+// VerterHost (in-memory virtual file host)
+//
+// API parity with WASM (crates/verter_wasm):
+// - Both: new, resolve, upsert, applyStyleOverrides, getVirtualFile,
+//         listVirtualFiles, remove, setImportDependencies, getAnalysis
+// - NAPI-only: processStyle (requires Node.js)
+// =============================================================================
+
+/// In-memory virtual file host for Vue SFC compilation.
+///
+/// Manages a collection of Vue SFCs and their compiled virtual files (script,
+/// template, styles). Files are upserted as source, then lazily compiled into
+/// virtual outputs that a bundler or LSP can request individually.
 #[napi(js_name = "VerterHost")]
 pub struct NapiVerterHost {
     inner: host::VerterHost,
@@ -1002,96 +566,202 @@ pub struct NapiVerterHost {
 
 #[napi]
 impl NapiVerterHost {
+    /// Creates a new `VerterHost` with the given configuration.
+    ///
+    /// - `config` — optional host settings (dev mode, compile error policy,
+    ///   LSP scheme, analysis level, etc.). Defaults are used when `None`.
+    ///
+    /// Returns an error if the configuration contains invalid values (e.g. an
+    /// unrecognised `compileErrorPolicy` string).
     #[napi(constructor)]
-    pub fn new(config: Option<HostConfig>) -> Self {
-        Self {
-            inner: host::VerterHost::new(to_host_config(config)),
-        }
-    }
-
-    #[napi]
-    pub fn resolve(&self, raw_id: String) -> Option<HostResolvedId> {
-        self.inner.resolve(&raw_id).map(|resolved| HostResolvedId {
-            canonical_id: resolved.canonical_id,
-            node_kind: from_host_node_kind(&resolved.node_kind),
-            exists_in_host: resolved.exists_in_host,
-            bundler_id: resolved.bundler_id,
-            lsp_id: resolved.lsp_id,
+    pub fn new(config: Option<NapiHostConfig>) -> Result<Self> {
+        let ffi_config: FfiHostConfig = config.unwrap_or_default().into();
+        Ok(Self {
+            inner: host::VerterHost::new(ffi_config_to_host(ffi_config).map_err(ffi_err)?),
         })
     }
 
+    /// Resolves a raw import ID (e.g. `./Foo.vue?type=style&index=0`) into its
+    /// canonical ID, virtual node kind, and bundler/LSP identifiers.
+    ///
+    /// Returns `None` if the ID does not match any file tracked by this host.
     #[napi]
-    pub fn upsert(&self, request: HostUpsertRequest) -> Result<HostUpdateResult> {
-        let req = host::UpsertRequest {
-            canonical_id: request.canonical_id,
-            input_id: request.input_id,
-            source: Arc::from(request.source),
-            file_kind: to_host_file_kind(request.file_kind.as_deref())?,
-            aliases: request.aliases.unwrap_or_default(),
-            compile_profile: to_host_profile(request.compile_profile),
+    pub fn resolve(&self, raw_id: String) -> Result<Option<NapiResolvedId>> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.resolve(&raw_id).map(host_resolved_id_to_napi)
+        }))
+    }
+
+    /// Inserts or updates a file in the host.
+    ///
+    /// Parses the SFC source, diffs it against the previously stored version
+    /// (if any), and returns a detailed changeset describing which virtual
+    /// nodes changed, any diagnostics, and external source requests that the
+    /// caller must resolve (e.g. `<script src="...">` references).
+    ///
+    /// - `request.inputId` — the file path used for import resolution.
+    /// - `request.source` — SFC source as a UTF-8 `Buffer`.
+    /// - `request.fileKind` — optional override (`"vue"` or `"ts"`); inferred
+    ///   from extension when `None`.
+    ///
+    /// Returns an error if the source is not valid UTF-8 or if the file kind
+    /// is unrecognised.
+    #[napi]
+    pub fn upsert(&self, request: NapiUpsertRequest) -> Result<NapiUpdateResult> {
+        let source = buffer_to_string(request.source)?;
+        let ffi_req = FfiUpsertRequest {
+            canonical_id: request.canonicalId,
+            input_id: request.inputId,
+            source,
+            file_kind: request.fileKind,
+            aliases: request.aliases,
         };
-        self.inner
-            .upsert(req)
-            .map(from_host_update)
+        let host_req = ffi_upsert_to_host(ffi_req).map_err(ffi_err)?;
+        catch_panic(std::panic::AssertUnwindSafe(|| self.inner.upsert(host_req)))?
+            .map(host_update_to_napi)
             .map_err(host_error)
     }
 
+    /// Replaces one or more style blocks with preprocessed CSS (e.g. the
+    /// output of SCSS/Less/Stylus) and recompiles affected virtual nodes.
+    ///
+    /// This is used by the Vite plugin after running a CSS preprocessor on
+    /// style blocks that have a `lang` attribute. The host then applies
+    /// scoping, CSS Modules, and `v-bind()` replacement on the preprocessed
+    /// CSS.
+    ///
+    /// Returns the same changeset structure as [`upsert`](Self::upsert).
+    ///
+    /// Returns an error if the canonical ID is unknown or the override code
+    /// is not valid UTF-8.
     #[napi(js_name = "applyStyleOverrides")]
     pub fn apply_style_overrides(
         &self,
-        request: HostStyleOverrideRequest,
-    ) -> Result<HostUpdateResult> {
-        let req = host::StyleOverrideRequest {
-            canonical_id: request.canonical_id,
-            compile_profile: to_host_profile(request.compile_profile),
-            overrides: request
-                .overrides
-                .into_iter()
-                .map(|entry| host::StyleOverrideEntry {
-                    index: entry.index as usize,
-                    code: Arc::from(entry.code),
-                    source_map: entry.source_map.map(Arc::from),
+        request: NapiStyleOverrideRequest,
+    ) -> Result<NapiUpdateResult> {
+        let overrides = request
+            .overrides
+            .into_iter()
+            .map(|e| {
+                Ok(FfiStyleOverrideEntry {
+                    index: e.index,
+                    code: buffer_to_string(e.code)?,
+                    source_map: e.sourceMap,
                 })
-                .collect(),
-        };
-
-        self.inner
-            .apply_style_overrides(req)
-            .map(from_host_update)
-            .map_err(host_error)
-    }
-
-    #[napi(js_name = "getVirtualFile")]
-    pub fn get_virtual_file(&self, query: HostVirtualQuery) -> Result<HostVirtualFileResponse> {
-        let node_kind = query.node_kind.map(to_host_node_kind).transpose()?;
-        let q = host::VirtualQuery {
-            raw_id: query.raw_id,
-            canonical_id: query.canonical_id,
-            node_kind,
-            compile_profile: to_host_profile(query.compile_profile),
-        };
-
-        self.inner
-            .get_virtual_file(q)
-            .map(from_host_virtual_file)
-            .map_err(host_error)
-    }
-
-    #[napi(js_name = "listVirtualFiles")]
-    pub fn list_virtual_files(&self, canonical_id: String) -> Vec<HostVirtualNodeKind> {
-        self.inner
-            .list_virtual_files(&canonical_id)
-            .iter()
-            .map(from_host_node_kind)
-            .collect()
-    }
-
-    #[napi]
-    pub fn remove(&self, canonical_or_alias: String) -> Option<HostRemoveResult> {
-        self.inner
-            .remove(&canonical_or_alias)
-            .map(|r| HostRemoveResult {
-                canonical_id: r.canonical_id,
             })
+            .collect::<Result<Vec<_>>>()?;
+        let ffi_req = FfiStyleOverrideRequest {
+            canonical_id: request.canonicalId,
+            compile_profile: request.compileProfile.map(Into::into),
+            overrides,
+        };
+        let host_req = ffi_style_override_to_host(ffi_req).map_err(ffi_err)?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.apply_style_overrides(host_req)
+        }))?
+        .map(host_update_to_napi)
+        .map_err(host_error)
+    }
+
+    /// Retrieves a single compiled virtual file (script, template, or style).
+    ///
+    /// The query can identify the file by raw import ID or by canonical ID +
+    /// node kind. A compile profile may be provided to control production
+    /// mode, SSR, source maps, etc.
+    ///
+    /// Returns the compiled code, optional source map, language hint, and
+    /// any compilation diagnostics.
+    ///
+    /// Returns an error if the query is invalid or the file is not found.
+    #[napi(js_name = "getVirtualFile")]
+    pub fn get_virtual_file(&self, query: NapiVirtualQuery) -> Result<NapiVirtualFileResponse> {
+        let ffi_query: FfiVirtualQuery = query.into();
+        let host_query = ffi_virtual_query_to_host(ffi_query).map_err(ffi_err)?;
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.get_virtual_file(host_query)
+        }))?
+        .map(host_virtual_file_to_napi)
+        .map_err(host_error)
+    }
+
+    /// Lists all virtual node kinds for a given canonical file ID.
+    ///
+    /// Returns an array of node kinds (e.g. `main`, `script`, `template`,
+    /// `style[0]`, `style[1]`, ...) that can be passed to
+    /// [`get_virtual_file`](Self::get_virtual_file). Returns an empty array
+    /// if the canonical ID is not tracked by the host.
+    #[napi(js_name = "listVirtualFiles")]
+    pub fn list_virtual_files(&self, canonical_id: String) -> Result<Vec<NapiVirtualNodeKind>> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner
+                .list_virtual_files(&canonical_id)
+                .iter()
+                .map(host_node_kind_to_napi)
+                .collect()
+        }))
+    }
+
+    /// Removes a file from the host by its canonical ID or any registered alias.
+    ///
+    /// All associated virtual nodes and cached compilations are discarded.
+    /// Returns `None` if no file matched the given ID.
+    #[napi]
+    pub fn remove(&self, canonical_or_alias: String) -> Result<Option<NapiRemoveResult>> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner
+                .remove(&canonical_or_alias)
+                .map(|r| NapiRemoveResult {
+                    canonicalId: r.canonical_id,
+                })
+        }))
+    }
+
+    /// Returns a serializable snapshot of the file's static analysis data.
+    ///
+    /// Returns `null` if the file doesn't exist in the host.
+    /// When `analysis_level` is not "full", computes analysis on demand from stored source.
+    ///
+    /// **Note:** Returns a JSON *string* — the caller must `JSON.parse()`.
+    /// The WASM variant (`verter_wasm`) returns a native JS object instead
+    /// (via `serde_wasm_bindgen`). This inconsistency is intentional:
+    /// defining NAPI structs for all `verter_analysis` types is high effort
+    /// for low value since `getAnalysis` is primarily used by the playground.
+    #[napi(js_name = "getAnalysis")]
+    pub fn get_analysis(&self, canonical_or_alias: String) -> Result<Option<String>> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.get_analysis(&canonical_or_alias)
+        }))
+        .map(|opt| {
+            opt.map(|snapshot| {
+                serde_json::to_string(&snapshot).map_err(|e| {
+                    Error::new(
+                        Status::GenericFailure,
+                        format!("analysis serialization error: {e}"),
+                    )
+                })
+            })
+            .transpose()
+        })?
+    }
+
+    /// Records the resolved import dependencies for a file.
+    ///
+    /// Called by the bundler plugin after resolving the `importSpecifiers`
+    /// returned by [`upsert`](Self::upsert). This enables cross-file type
+    /// resolution (e.g. following `import type { Props } from './types'`
+    /// chains) when recompiling dependent files.
+    ///
+    /// - `canonical_or_alias` — the file whose dependencies are being set.
+    /// - `resolved_deps` — canonical IDs of the resolved dependency files.
+    #[napi(js_name = "setImportDependencies")]
+    pub fn set_import_dependencies(
+        &self,
+        canonical_or_alias: String,
+        resolved_deps: Vec<String>,
+    ) -> Result<()> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner
+                .set_import_dependencies(&canonical_or_alias, resolved_deps);
+        }))
     }
 }

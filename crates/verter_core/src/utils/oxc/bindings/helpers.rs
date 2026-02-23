@@ -6,7 +6,7 @@
 use oxc_ast::ast::*;
 use rustc_hash::FxHashSet;
 
-use super::keywords::is_keyword;
+use super::keywords::{is_global, is_keyword};
 use crate::common::Span;
 
 /// Collect local binding names from a binding pattern.
@@ -82,7 +82,7 @@ pub fn collect_expression_references<'a>(
     match expr {
         Expression::Identifier(ident) => {
             let name_bytes = ident.name.as_bytes();
-            if !ignored.contains(name_bytes) && !is_keyword(name_bytes) {
+            if !ignored.contains(name_bytes) && !is_keyword(name_bytes) && !is_global(name_bytes) {
                 references.insert(ident.name.as_str());
             }
         }
@@ -127,7 +127,10 @@ pub fn collect_expression_references<'a>(
                     if p.shorthand {
                         if let PropertyKey::StaticIdentifier(ident) = &p.key {
                             let name_bytes = ident.name.as_bytes();
-                            if !ignored.contains(name_bytes) && !is_keyword(name_bytes) {
+                            if !ignored.contains(name_bytes)
+                                && !is_keyword(name_bytes)
+                                && !is_global(name_bytes)
+                            {
                                 references.insert(ident.name.as_str());
                             }
                         }
@@ -226,6 +229,7 @@ pub fn collect_type_references<'a>(ts_type: &'a TSType<'a>, references: &mut FxH
         TSType::TSTypeReference(type_ref) => {
             if let TSTypeName::IdentifierReference(ident) = &type_ref.type_name {
                 let name_bytes = ident.name.as_bytes();
+                // Note: don't filter globals here — Array, Map, Set etc. are valid TS types
                 if !is_keyword(name_bytes) {
                     references.insert(ident.name.as_str());
                 }
@@ -308,6 +312,7 @@ pub fn collect_type_references<'a>(ts_type: &'a TSType<'a>, references: &mut FxH
         TSType::TSTypeQuery(query) => {
             if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
                 let name_bytes = ident.name.as_bytes();
+                // Note: don't filter globals here — typeof Array etc. are valid TS type queries
                 if !is_keyword(name_bytes) {
                     references.insert(ident.name.as_str());
                 }
@@ -536,7 +541,7 @@ pub fn collect_expression_reference_spans(
     match expr {
         Expression::Identifier(ident) => {
             let name_bytes = ident.name.as_bytes();
-            if !ignored.contains(name_bytes) && !is_keyword(name_bytes) {
+            if !ignored.contains(name_bytes) && !is_keyword(name_bytes) && !is_global(name_bytes) {
                 references.insert(ident.span.into());
             }
         }
@@ -581,7 +586,10 @@ pub fn collect_expression_reference_spans(
                     if p.shorthand {
                         if let PropertyKey::StaticIdentifier(ident) = &p.key {
                             let name_bytes = ident.name.as_bytes();
-                            if !ignored.contains(name_bytes) && !is_keyword(name_bytes) {
+                            if !ignored.contains(name_bytes)
+                                && !is_keyword(name_bytes)
+                                && !is_global(name_bytes)
+                            {
                                 references.insert(ident.span.into());
                             }
                         }
@@ -680,6 +688,7 @@ pub fn collect_type_reference_spans(ts_type: &TSType<'_>, references: &mut FxHas
         TSType::TSTypeReference(type_ref) => {
             if let TSTypeName::IdentifierReference(ident) = &type_ref.type_name {
                 let name_bytes = ident.name.as_bytes();
+                // Note: don't filter globals here — Array, Map, Set etc. are valid TS types
                 if !is_keyword(name_bytes) {
                     references.insert(ident.span.into());
                 }
@@ -762,6 +771,7 @@ pub fn collect_type_reference_spans(ts_type: &TSType<'_>, references: &mut FxHas
         TSType::TSTypeQuery(query) => {
             if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
                 let name_bytes = ident.name.as_bytes();
+                // Note: don't filter globals here — typeof Array etc. are valid TS type queries
                 if !is_keyword(name_bytes) {
                     references.insert(ident.span.into());
                 }
@@ -911,6 +921,39 @@ mod tests {
         assert!(references.contains("foo"));
         assert!(references.contains("baz"));
         assert!(!references.contains("bar")); // property access, not reference
+    }
+
+    #[test]
+    fn test_collect_expression_references_globals_ignored() {
+        let allocator = Allocator::default();
+        let source = "String.fromCharCode(65)";
+        let parser = Parser::new(&allocator, source, SourceType::tsx());
+        let expr = parser.parse_expression().unwrap();
+
+        let ignored = FxHashSet::default();
+        let mut references = FxHashSet::default();
+        collect_expression_references(&expr, &ignored, &mut references);
+
+        assert!(
+            !references.contains("String"),
+            "String should be ignored as a global"
+        );
+    }
+
+    #[test]
+    fn test_collect_expression_references_globals_math() {
+        let allocator = Allocator::default();
+        let source = "Math.max(a, b)";
+        let parser = Parser::new(&allocator, source, SourceType::tsx());
+        let expr = parser.parse_expression().unwrap();
+
+        let ignored = FxHashSet::default();
+        let mut references = FxHashSet::default();
+        collect_expression_references(&expr, &ignored, &mut references);
+
+        assert!(!references.contains("Math"), "Math should be ignored");
+        assert!(references.contains("a"));
+        assert!(references.contains("b"));
     }
 
     #[test]

@@ -3,10 +3,7 @@ use oxc_allocator::Allocator;
 use std::hint::black_box;
 use std::path::PathBuf;
 
-use verter_core::{
-    builder::codegen::{compile, CodegenOptions},
-    new_impl,
-};
+use verter_core::compile::{compile, CodegenOptions, VerterCompileOptions};
 
 /// A loaded Vue file ready for benchmarking.
 struct VueFile {
@@ -92,45 +89,43 @@ fn load_project_files(root: &std::path::Path, project_dir: &str) -> Option<Proje
     })
 }
 
-/// Compile all Vue files in a project (with source maps), returning error count for diagnostics.
-fn compile_all_files(files: &[VueFile]) -> usize {
+fn compile_bench(files: &[VueFile], source_map: bool) -> usize {
     let mut error_count = 0;
     for file in files {
         let allocator = Allocator::new();
-        let mut options = CodegenOptions::new().with_filename(&file.filename);
-        options.skip_source_map = true; // Skip source map generation for faster benchmarking
-        let result = compile(&file.content, &options, &allocator);
-        error_count += result.errors.len();
-        black_box(&result.code);
-        black_box(&result.source_map);
-    }
-    error_count
-}
-fn compile_all_files_new(files: &[VueFile]) -> usize {
-    let mut error_count = 0;
-    for file in files {
-        let allocator = Allocator::new();
-
         let options = CodegenOptions::new().with_filename(&file.filename);
-        let compiler_options = new_impl::compile::VerterCompileOptions {
-            source_map: false,
-
+        let compiler_options = VerterCompileOptions {
+            source_map,
             ..Default::default()
         };
-        let result =
-            new_impl::compile::compile(&file.content, &options, &compiler_options, &allocator);
-
+        let result = compile(&file.content, &options, &compiler_options, &allocator);
         error_count += result.errors.len();
+        black_box(&result.script);
         black_box(&result.template);
     }
     error_count
 }
 
+const PROJECT_DIRS: &[&str] = &[
+    "primevue",
+    "shadcn-vue",
+    "vuetify",
+    "element-plus",
+    "ant-design-vue",
+    "nuxt-ui",
+    "balancer-frontend-v2",
+    "slidev",
+    "zyronon-douyin",
+    "FAIRshare",
+    "requarks-wiki",
+    "coreui-free-vue-admin-template",
+];
+
 // ============================================================================
-// Benchmark: Compile all .vue files per project (throughput)
+// Without source maps
 // ============================================================================
 
-fn real_world_per_project(c: &mut Criterion) {
+fn per_project_no_sourcemap(c: &mut Criterion) {
     let Some(root) = find_test_repos_root() else {
         eprintln!(
             "Skipping real_world_compile_bench: no test repos found. \
@@ -139,26 +134,9 @@ fn real_world_per_project(c: &mut Criterion) {
         return;
     };
 
-    // Projects ordered roughly by file count (descending) — matches integration-test/projects.mjs
-    let project_dirs = [
-        "primevue",
-        "shadcn-vue",
-        "vuetify",
-        "element-plus",
-        "ant-design-vue",
-        "nuxt-ui",
-        "balancer-frontend-v2",
-        "slidev",
-        "zyronon-douyin",
-        "MQTTX",
-        "FAIRshare",
-        "requarks-wiki",
-        "coreui-free-vue-admin-template",
-    ];
+    let mut group = c.benchmark_group("no_sourcemap/per_project");
 
-    let mut group = c.benchmark_group("real_world/per_project");
-
-    for &project_dir in &project_dirs {
+    for &project_dir in PROJECT_DIRS {
         let Some(project) = load_project_files(&root, project_dir) else {
             eprintln!("Skipping {project_dir}: not found or empty");
             continue;
@@ -169,14 +147,7 @@ fn real_world_per_project(c: &mut Criterion) {
             BenchmarkId::new("compile", &project.name),
             &project,
             |b, project| {
-                b.iter(|| compile_all_files(&project.files));
-            },
-        );
-        group.bench_with_input(
-            BenchmarkId::new("compile_new", &project.name),
-            &project,
-            |b, project| {
-                b.iter(|| compile_all_files_new(&project.files));
+                b.iter(|| compile_bench(&project.files, false));
             },
         );
     }
@@ -184,94 +155,133 @@ fn real_world_per_project(c: &mut Criterion) {
     group.finish();
 }
 
-// ============================================================================
-// Benchmark: Aggregate — all projects combined
-// ============================================================================
-
-fn real_world_aggregate(c: &mut Criterion) {
+fn aggregate_no_sourcemap(c: &mut Criterion) {
     let Some(root) = find_test_repos_root() else {
         return;
     };
 
-    // Load all projects that exist
-    let mut all_files: Vec<&VueFile> = Vec::new();
-    let mut total_bytes = 0u64;
-
-    // We need to own the data, so collect all project files first
-    let project_dirs = [
-        "primevue",
-        "shadcn-vue",
-        "vuetify",
-        "element-plus",
-        "ant-design-vue",
-        "nuxt-ui",
-        "balancer-frontend-v2",
-        "slidev",
-        "zyronon-douyin",
-        "MQTTX",
-        "FAIRshare",
-        "requarks-wiki",
-        "coreui-free-vue-admin-template",
-    ];
-
-    let projects: Vec<ProjectFiles> = project_dirs
+    let projects: Vec<ProjectFiles> = PROJECT_DIRS
         .iter()
         .filter_map(|dir| load_project_files(&root, dir))
         .collect();
 
-    for project in &projects {
-        total_bytes += project.total_bytes;
-        all_files.extend(project.files.iter());
-    }
+    let all_files: Vec<&VueFile> = projects.iter().flat_map(|p| p.files.iter()).collect();
+    let total_bytes: u64 = projects.iter().map(|p| p.total_bytes).sum();
 
     if all_files.is_empty() {
         return;
     }
 
-    let mut group = c.benchmark_group("real_world/aggregate");
+    let mut group = c.benchmark_group("no_sourcemap/aggregate");
     group.throughput(Throughput::Bytes(total_bytes));
-    group.sample_size(10); // Large workload — fewer samples needed
+    group.sample_size(10);
 
-    group.bench_function(format!("compile_all/{}_files", all_files.len()), |b| {
+    let owned_files: Vec<&VueFile> = all_files;
+    let file_count = owned_files.len();
+
+    group.bench_function(format!("compile/{file_count}_files"), |b| {
         b.iter(|| {
-            let mut error_count = 0;
-            for file in &all_files {
+            let mut errors = 0;
+            for file in &owned_files {
                 let allocator = Allocator::new();
                 let options = CodegenOptions::new().with_filename(&file.filename);
-                let result = compile(&file.content, &options, &allocator);
-                error_count += result.errors.len();
-                black_box(&result.code);
-                black_box(&result.source_map);
-            }
-            black_box(error_count)
-        });
-    });
-
-    group.bench_function(format!("compile_all_new/{}_files", all_files.len()), |b| {
-        b.iter(|| {
-            let mut error_count = 0;
-            for file in &all_files {
-                let allocator = Allocator::new();
-                let options = CodegenOptions::new().with_filename(&file.filename);
-                let compiler_options = new_impl::compile::VerterCompileOptions {
+                let compiler_options = VerterCompileOptions {
                     source_map: false,
                     ..Default::default()
                 };
-                let result = new_impl::compile::compile(
-                    &file.content,
-                    &options,
-                    &compiler_options,
-                    &allocator,
-                );
-                error_count += result.errors.len();
+                let result = compile(&file.content, &options, &compiler_options, &allocator);
+                errors += result.errors.len();
                 black_box(&result.script);
             }
-            black_box(error_count)
+            black_box(errors)
         });
     });
 
     group.finish();
 }
 
-criterion_group!(benches, real_world_per_project, real_world_aggregate);
-criterion_main!(benches);
+// ============================================================================
+// With source maps
+// ============================================================================
+
+fn per_project_with_sourcemap(c: &mut Criterion) {
+    let Some(root) = find_test_repos_root() else {
+        return;
+    };
+
+    let mut group = c.benchmark_group("with_sourcemap/per_project");
+
+    for &project_dir in PROJECT_DIRS {
+        let Some(project) = load_project_files(&root, project_dir) else {
+            continue;
+        };
+
+        group.throughput(Throughput::Bytes(project.total_bytes));
+        group.bench_with_input(
+            BenchmarkId::new("compile", &project.name),
+            &project,
+            |b, project| {
+                b.iter(|| compile_bench(&project.files, true));
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn aggregate_with_sourcemap(c: &mut Criterion) {
+    let Some(root) = find_test_repos_root() else {
+        return;
+    };
+
+    let projects: Vec<ProjectFiles> = PROJECT_DIRS
+        .iter()
+        .filter_map(|dir| load_project_files(&root, dir))
+        .collect();
+
+    let all_files: Vec<&VueFile> = projects.iter().flat_map(|p| p.files.iter()).collect();
+    let total_bytes: u64 = projects.iter().map(|p| p.total_bytes).sum();
+
+    if all_files.is_empty() {
+        return;
+    }
+
+    let mut group = c.benchmark_group("with_sourcemap/aggregate");
+    group.throughput(Throughput::Bytes(total_bytes));
+    group.sample_size(10);
+
+    let file_count = all_files.len();
+
+    group.bench_function(format!("compile/{file_count}_files"), |b| {
+        b.iter(|| {
+            let mut errors = 0;
+            for file in &all_files {
+                let allocator = Allocator::new();
+                let options = CodegenOptions::new().with_filename(&file.filename);
+                let compiler_options = VerterCompileOptions {
+                    source_map: true,
+                    ..Default::default()
+                };
+                let result = compile(&file.content, &options, &compiler_options, &allocator);
+                errors += result.errors.len();
+                black_box(&result.script);
+                black_box(&result.template);
+            }
+            black_box(errors)
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    no_sourcemap_benches,
+    per_project_no_sourcemap,
+    aggregate_no_sourcemap,
+);
+criterion_group!(
+    with_sourcemap_benches,
+    per_project_with_sourcemap,
+    aggregate_with_sourcemap,
+);
+criterion_main!(no_sourcemap_benches, with_sourcemap_benches);

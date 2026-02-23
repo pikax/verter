@@ -11,9 +11,19 @@ single_threaded = []
 
 [dependencies]
 verter_core = { path = "../verter_core" }
-oxc_allocator = "0.112.0"
-sha2 = "0.10"
-smallvec = "1.13"
+verter_analysis = { path = "../verter_analysis" }
+oxc_allocator = { workspace = true }
+oxc_span = { workspace = true }
+rustc-hash = { workspace = true }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+serde = { workspace = true }
 thiserror = "2"
-serde = { version = "1.0", features = ["derive"], optional = true }
+
+[dev-dependencies]
+smallvec = "1.13"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "host_bench"
+harness = false
 

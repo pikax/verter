@@ -137,6 +137,16 @@ fn transform_v_bind(css: &str, start: usize, scope_id: &str) -> Option<(String, 
     let mut j = expr_start;
     while j < bytes.len() && depth > 0 {
         match bytes[j] {
+            b'\'' | b'"' | b'`' => {
+                let quote = bytes[j];
+                j += 1;
+                while j < bytes.len() && bytes[j] != quote {
+                    if bytes[j] == b'\\' {
+                        j += 1;
+                    }
+                    j += 1;
+                }
+            }
             b'(' => depth += 1,
             b')' => depth -= 1,
             _ => {}

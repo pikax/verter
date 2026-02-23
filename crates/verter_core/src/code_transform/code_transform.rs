@@ -47,6 +47,10 @@ pub struct CodeTransform<'a> {
     /// Positioned chunks (Original and Overwritten) maintain monotonically
     /// increasing source positions.
     chunks: Vec<Chunk<'a>>,
+    /// Scratch buffer for batch operations. Swapped with `chunks` to avoid
+    /// allocating a new Vec on each batch call — after the first batch op,
+    /// both Vecs retain their capacity.
+    scratch: Vec<Chunk<'a>>,
     /// Content to prepend before everything
     intro: &'a str,
     /// Content to append after everything
@@ -59,6 +63,10 @@ pub struct CodeTransform<'a> {
     /// Running delta between output length and original length (excluding intro/outro).
     /// Tracked incrementally by each mutation to avoid a full scan in build_string().
     output_delta: i64,
+    /// Whether the original source is pure ASCII.
+    /// Precomputed once in `new()` to let source map generation skip `utf16_len()`
+    /// calls (where byte length == UTF-16 length) for Original/Moved chunks.
+    is_ascii: bool,
 }
 
 impl<'a> CodeTransform<'a> {
@@ -82,17 +90,24 @@ impl<'a> CodeTransform<'a> {
         Self {
             original: source,
             chunks,
+            scratch: Vec::with_capacity(estimated_chunks),
             intro: "",
             outro: "",
             allocator,
             cursor_hint: 0,
             output_delta: 0,
+            is_ascii: source.is_ascii(),
         }
     }
 
     /// Get the original source text
     pub fn original(&self) -> &str {
         self.original
+    }
+
+    /// Whether the original source is pure ASCII (byte length == UTF-16 length).
+    pub(super) fn is_ascii(&self) -> bool {
+        self.is_ascii
     }
 
     /// Allocate a string in the bump allocator, returning a reference with the
@@ -254,6 +269,10 @@ impl<'a> CodeTransform<'a> {
                     }
                 }
                 Chunk::Overwritten { start: s, .. } => {
+                    // Only match at the exact start boundary. If `index` falls
+                    // inside the Overwritten range (s < index < end), we skip
+                    // past it — Overwritten chunks cannot be split, and inserting
+                    // "at" a position inside replaced content is meaningless.
                     if s == index {
                         self.cursor_hint = i;
                         return SplitResult::ExactMatch { chunk_index: i };
@@ -623,6 +642,10 @@ impl<'a> CodeTransform<'a> {
         // (replaces ensure_split_at(start) + ensure_split_at(end) + identification loop)
         self.cursor_hint = 0;
         let mut indices_to_move: SmallVec<[usize; 8]> = SmallVec::new();
+        // Position watermark: tracks the end of the last positioned chunk we've
+        // seen. Used to decide whether unpositioned chunks (Inserted/Moved) fall
+        // within the [start, end) move range — they belong to the range if the
+        // watermark has entered it.
         let mut current_pos = 0u32;
         let mut i = 0;
         let mut past_start = false;
@@ -817,6 +840,7 @@ impl<'a> CodeTransform<'a> {
     /// This avoids O(n*m) Vec::insert cost by rebuilding the chunks Vec once.
     /// Specifically designed for batch-applying binding prefixes (`_ctx.`,
     /// `$setup.`, etc.) after all overwrites are complete.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn batch_prepend_left_static(&mut self, items: &[(u32, &'a str)]) -> &mut Self {
         if items.is_empty() {
             return self;
@@ -827,7 +851,13 @@ impl<'a> CodeTransform<'a> {
             self.output_delta += content.len() as i64;
         }
 
-        let mut result = Vec::with_capacity(self.chunks.len() + items.len() * 2);
+        // Use scratch buffer to avoid allocation on second+ batch call
+        let mut result = std::mem::take(&mut self.scratch);
+        result.clear();
+        let needed = self.chunks.len() + items.len() * 2;
+        if result.capacity() < needed {
+            result.reserve(needed - result.capacity());
+        }
         let mut item_idx = 0;
 
         for &chunk in &self.chunks {
@@ -881,7 +911,8 @@ impl<'a> CodeTransform<'a> {
             item_idx += 1;
         }
 
-        self.chunks = result;
+        // Swap: old chunks become scratch for next batch call (retains capacity)
+        self.scratch = std::mem::replace(&mut self.chunks, result);
         self.cursor_hint = 0;
         self
     }
@@ -893,18 +924,52 @@ impl<'a> CodeTransform<'a> {
     ///
     /// Only affects `Original` chunks; existing `Edited` chunks pass through unchanged.
     /// This avoids O(n*m) splice cost by rebuilding the chunks Vec once.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn batch_overwrite(&mut self, overwrites: &[(u32, u32, &'a str)]) -> &mut Self {
         if overwrites.is_empty() {
             return self;
         }
 
-        // Track output delta for all overwrites in one pass
-        for &(start, end, content) in overwrites {
-            self.output_delta += content.len() as i64 - (end - start) as i64;
+        // Precondition: inputs must be sorted by start position.
+        // Overlapping ranges are tolerated — the chunk-processing loop already
+        // handles them gracefully, and output_delta accounts for skipped regions.
+        debug_assert!(
+            overwrites.windows(2).all(|w| w[0].0 <= w[1].0),
+            "batch_overwrite requires sorted ranges"
+        );
+
+        // Track output delta, accounting for overlapping ranges.
+        //
+        // The chunk-processing loop handles overlaps gracefully: it tracks a
+        // `prev` cursor and uses `max()` to prevent it from moving backward.
+        // When a later range overlaps an earlier one:
+        //   - Fully contained (end <= max_end): skipped entirely, delta = 0.
+        //   - Extends past max_end: content is emitted, but only the extension
+        //     [max_end, end) is effectively removed from the original.
+        {
+            let mut max_end: u32 = 0;
+            for &(start, end, content) in overwrites {
+                if start >= max_end {
+                    // Non-overlapping: full delta
+                    self.output_delta += content.len() as i64 - (end - start) as i64;
+                    max_end = end;
+                } else if end > max_end {
+                    // Partially overlapping but extends past max_end:
+                    // content is fully emitted, only [max_end, end) is removed.
+                    self.output_delta += content.len() as i64 - (end - max_end) as i64;
+                    max_end = end;
+                }
+                // Fully contained (end <= max_end): delta = 0
+            }
         }
 
-        // Each overwrite splits at most 1 Original into up to 3 chunks
-        let mut result = Vec::with_capacity(self.chunks.len() + overwrites.len() * 2);
+        // Use scratch buffer to avoid allocation on second+ batch call
+        let mut result = std::mem::take(&mut self.scratch);
+        result.clear();
+        let needed = self.chunks.len() + overwrites.len() * 2;
+        if result.capacity() < needed {
+            result.reserve(needed - result.capacity());
+        }
         let mut ow_idx = 0;
 
         for &chunk in &self.chunks {
@@ -934,7 +999,11 @@ impl<'a> CodeTransform<'a> {
                             if !ow_content.is_empty() {
                                 result.push(Chunk::overwritten(ow_start, ow_end, ow_content));
                             }
-                            prev = ow_end;
+                            // Use max() to prevent prev from moving backward when
+                            // a later overwrite is fully contained within an earlier
+                            // one's range (e.g., comment deletion inside a close-tag
+                            // overwrite).
+                            prev = prev.max(ow_end);
                             ow_idx += 1;
                         }
 
@@ -952,7 +1021,8 @@ impl<'a> CodeTransform<'a> {
             }
         }
 
-        self.chunks = result;
+        // Swap: old chunks become scratch for next batch call (retains capacity)
+        self.scratch = std::mem::replace(&mut self.chunks, result);
         self.cursor_hint = 0;
         self
     }
@@ -961,6 +1031,7 @@ impl<'a> CodeTransform<'a> {
 impl<'a> CodeTransform<'a> {
     /// Build the final output string with pre-allocated capacity.
     #[must_use]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn build_string(&self) -> String {
         // Capacity from tracked delta — avoids a full scan of all chunks.
         let capacity = (self.original.len() as i64 + self.output_delta) as usize

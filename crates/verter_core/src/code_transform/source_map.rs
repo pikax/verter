@@ -66,6 +66,7 @@ impl<'a> CodeTransform<'a> {
     /// ```
     #[must_use]
     #[allow(unused_assignments)] // generated_line/column updated in outro but intentionally not read after
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn generate_map(&self, options: SourceMapOptions) -> SourceMap {
         let mut builder = SourceMapBuilder::default();
 
@@ -86,8 +87,10 @@ impl<'a> CodeTransform<'a> {
             builder.set_file(file);
         }
 
-        // Build position resolver for O(log N) byte-offset → (line, UTF-16 column) lookups
-        let resolver = PositionResolver::new(self.original());
+        // Build position resolver for O(log N) byte-offset → (line, UTF-16 column) lookups.
+        // Uses the sourcemap-optimized constructor that skips the UTF-16 cumulative offset
+        // cache (not needed here — we only use line and column).
+        let resolver = PositionResolver::new_for_sourcemap(self.original());
 
         let mut generated_line = 0u32;
         let mut generated_column = 0u32;
@@ -101,6 +104,8 @@ impl<'a> CodeTransform<'a> {
                 &mut generated_column,
             );
         }
+
+        let is_ascii = self.is_ascii();
 
         // Process chunks
         for chunk in self.chunks() {
@@ -119,6 +124,7 @@ impl<'a> CodeTransform<'a> {
                             *start,
                             &mut generated_line,
                             &mut generated_column,
+                            is_ascii,
                         );
                     }
                 }
@@ -140,6 +146,7 @@ impl<'a> CodeTransform<'a> {
                             *orig_start,
                             &mut generated_line,
                             &mut generated_column,
+                            is_ascii,
                         );
                     }
                 }
@@ -151,10 +158,13 @@ impl<'a> CodeTransform<'a> {
                     if content.is_empty() {
                         continue;
                     }
-                    // Overwritten content — only map start position
+                    // Overwritten content — emit a single token at the original start
+                    // position. Unlike Original/Moved chunks, there is no character-level
+                    // correspondence between replacement content and the source, so
+                    // per-line tokens would be misleading. This matches MagicString behavior.
                     if let Some(source_id) = source_id {
-                        let (src_line_1, src_col_1, _) =
-                            resolver.offset_to_line_col(*orig_start as usize);
+                        let (src_line_1, src_col_1) =
+                            resolver.offset_to_line_and_col(*orig_start as usize);
                         let source_line = (src_line_1 - 1) as u32;
                         let source_column = (src_col_1 - 1) as u32;
 
@@ -219,12 +229,13 @@ impl<'a> CodeTransform<'a> {
         original_start: u32,
         generated_line: &mut u32,
         generated_column: &mut u32,
+        is_ascii: bool,
     ) {
         let content_bytes = content.as_bytes();
         let content_len = content_bytes.len();
 
         // Single resolver lookup for the initial source position (O(log N) once per chunk)
-        let (sl, sc, _) = resolver.offset_to_line_col(original_start as usize);
+        let (sl, sc) = resolver.offset_to_line_and_col(original_start as usize);
         let mut source_line = (sl - 1) as u32;
 
         builder.add_token(
@@ -258,9 +269,14 @@ impl<'a> CodeTransform<'a> {
             }
         }
 
-        // Advance generated_column for remaining content after last newline
+        // Advance generated_column for remaining content after last newline.
+        // For ASCII sources, byte length == UTF-16 length, so skip utf16_len().
         let remaining = &content[prev..];
-        *generated_column += utf16_len(remaining) as u32;
+        *generated_column += if is_ascii {
+            remaining.len() as u32
+        } else {
+            utf16_len(remaining) as u32
+        };
     }
 
     /// Advance generated line/column position through a string using memchr.
@@ -284,6 +300,7 @@ impl<'a> CodeTransform<'a> {
 
     /// Generate source map and return as JSON string
     #[must_use]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn generate_map_json(&self, options: SourceMapOptions) -> String {
         let map = self.generate_map(options);
         map.to_json_string()

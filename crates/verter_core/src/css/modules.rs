@@ -30,7 +30,7 @@ pub fn apply_css_modules_normalized(
 pub fn apply_css_modules(
     css: &str,
     component_id: &str,
-) -> Result<(String, Vec<(String, String)>), String> {
+) -> Result<(String, Vec<(String, String)>), super::CssError> {
     let normalized = super::normalize_css(css)?;
     Ok(apply_css_modules_normalized(&normalized, component_id))
 }
@@ -74,6 +74,7 @@ impl CssModulesTransformer {
                 let mut class_name = String::new();
                 while let Some(&next_c) = chars.peek() {
                     if next_c.is_alphanumeric() || next_c == '-' || next_c == '_' {
+                        // SAFETY: .next() is guaranteed Some after successful .peek()
                         class_name.push(chars.next().unwrap());
                     } else {
                         break;

@@ -3,6 +3,7 @@ export interface CompiledFile {
   css: string;
   verterSourceMap: string;
   errors: string[];
+  analysis: FileAnalysis | null;
 }
 
 export class File {
@@ -13,6 +14,7 @@ export class File {
     css: "",
     verterSourceMap: "",
     errors: [],
+    analysis: null,
   };
 
   constructor(filename: string, code = "") {
@@ -39,7 +41,7 @@ export class File {
   }
 }
 
-export type OutputMode = "preview" | "js" | "css";
+export type OutputMode = "preview" | "js" | "css" | "analysis";
 
 export interface CompilerOptions {
   isProduction: boolean;
@@ -49,6 +51,7 @@ export interface CompilerOptions {
 export interface CompileTiming {
   verterNew: number | null; // ms for new_impl codegen pipeline (reported by Rust)
   verterNewJs: number | null; // ms for new_impl codegen (JS-measured)
+  parseDurationMs: number | null; // ms for Rust parse phase
 }
 
 export interface StoreState {
@@ -63,3 +66,162 @@ export interface StoreState {
   compilerOptions: CompilerOptions;
   compileTiming: CompileTiming;
 }
+
+// ── Analysis types (mirror Rust FileAnalysisSnapshot) ──
+
+export interface FileAnalysis {
+  imports: AnalysisImport[];
+  bindings: AnalysisBinding[];
+  macros: AnalysisMacro[];
+  macroTypeDeps: AnalysisMacroTypeDep[];
+  scriptFlags: number;
+  styles: AnalysisStyleBlock[];
+}
+
+export interface AnalysisImport {
+  source: string;
+  isTypeOnly: boolean;
+  bindings: AnalysisImportBinding[];
+}
+
+export interface AnalysisImportBinding {
+  name: string;
+  isTypeOnly: boolean;
+  vueApi: string | null;
+}
+
+export interface AnalysisBinding {
+  name: string;
+  kind: string;
+  isReactive: boolean;
+  initializer: AnalysisBindingInitializer | null;
+}
+
+export type AnalysisBindingInitializer =
+  | { FunctionCall: { callee: string; calleeImportSource: string | null; vueApi: string | null } }
+  | { Literal: { kind: string } }
+  | { Reference: { name: string } }
+  | "Other";
+
+export interface AnalysisMacro {
+  kind: string;
+  isTypeBased: boolean;
+  typeReferences: string[];
+  bindingName: string | null;
+}
+
+export interface AnalysisMacroTypeDep {
+  typeName: string;
+  importSource: string;
+  macroKind: string;
+}
+
+export interface AnalysisStyleBlock {
+  lang: string;
+  scoped: boolean;
+  isModule: boolean;
+  moduleName: string | null;
+  vBinds: AnalysisVBind[];
+  specialPseudos: AnalysisSpecialPseudo[];
+  css: AnalysisCss | null;
+  flags: number;
+}
+
+export interface AnalysisVBind {
+  expression: string;
+  quoted: boolean;
+  start: number;
+  end: number;
+}
+
+export interface AnalysisSpecialPseudo {
+  kind: string;
+  start: number;
+  end: number;
+  inner: string | null;
+}
+
+export interface AnalysisCss {
+  selectors: AnalysisCssSelector[];
+  classes: AnalysisCssClass[];
+  ids: AnalysisCssId[];
+  customProperties: AnalysisCssCustomProperty[];
+  atRules: AnalysisCssAtRule[];
+  ruleCount: number;
+}
+
+export interface AnalysisCssSelector {
+  text: string;
+  specificity: [number, number, number];
+  start: number;
+  end: number;
+}
+
+export interface AnalysisCssClass {
+  name: string;
+  start: number;
+  end: number;
+}
+
+export interface AnalysisCssId {
+  name: string;
+  start: number;
+  end: number;
+}
+
+export interface AnalysisCssCustomProperty {
+  name: string;
+  start: number;
+  end: number;
+}
+
+export interface AnalysisCssAtRule {
+  kind: string;
+  name: string;
+  start: number;
+  end: number;
+}
+
+/** Bitwise flags for quick analysis queries (mirrors Rust AnalysisFlags) */
+export const AnalysisFlags = {
+  ASYNC_SETUP: 1 << 0,
+  HAS_DEFINE_PROPS: 1 << 1,
+  HAS_DEFINE_EMITS: 1 << 2,
+  HAS_DEFINE_MODEL: 1 << 3,
+  HAS_DEFINE_EXPOSE: 1 << 4,
+  HAS_DEFINE_OPTIONS: 1 << 5,
+  HAS_DEFINE_SLOTS: 1 << 6,
+  HAS_WITH_DEFAULTS: 1 << 7,
+  HAS_TYPE_BASED_PROPS: 1 << 8,
+  HAS_TYPE_BASED_EMITS: 1 << 9,
+  HAS_TYPE_BASED_MODEL: 1 << 10,
+  HAS_REACTIVE_STATE: 1 << 11,
+  HAS_COMPUTED: 1 << 12,
+  HAS_WATCHERS: 1 << 13,
+  HAS_LIFECYCLE_HOOKS: 1 << 14,
+  HAS_PROVIDE: 1 << 15,
+  HAS_INJECT: 1 << 16,
+  HAS_EXTERNAL_TYPE_DEPS: 1 << 17,
+} as const;
+
+/** Human-readable labels for AnalysisFlags bits */
+export const AnalysisFlagLabels: Record<number, string> = {
+  [AnalysisFlags.ASYNC_SETUP]: "Async Setup",
+  [AnalysisFlags.HAS_DEFINE_PROPS]: "defineProps",
+  [AnalysisFlags.HAS_DEFINE_EMITS]: "defineEmits",
+  [AnalysisFlags.HAS_DEFINE_MODEL]: "defineModel",
+  [AnalysisFlags.HAS_DEFINE_EXPOSE]: "defineExpose",
+  [AnalysisFlags.HAS_DEFINE_OPTIONS]: "defineOptions",
+  [AnalysisFlags.HAS_DEFINE_SLOTS]: "defineSlots",
+  [AnalysisFlags.HAS_WITH_DEFAULTS]: "withDefaults",
+  [AnalysisFlags.HAS_TYPE_BASED_PROPS]: "Type-based Props",
+  [AnalysisFlags.HAS_TYPE_BASED_EMITS]: "Type-based Emits",
+  [AnalysisFlags.HAS_TYPE_BASED_MODEL]: "Type-based Model",
+  [AnalysisFlags.HAS_REACTIVE_STATE]: "Reactive State",
+  [AnalysisFlags.HAS_COMPUTED]: "Computed",
+  [AnalysisFlags.HAS_WATCHERS]: "Watchers",
+  [AnalysisFlags.HAS_LIFECYCLE_HOOKS]: "Lifecycle Hooks",
+  [AnalysisFlags.HAS_PROVIDE]: "Provide",
+  [AnalysisFlags.HAS_INJECT]: "Inject",
+  [AnalysisFlags.HAS_EXTERNAL_TYPE_DEPS]: "External Type Deps",
+};

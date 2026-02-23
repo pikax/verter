@@ -12,6 +12,7 @@ keywords = ["vue", "compiler", "sfc", "typescript", "codegen"]
 categories = ["compilers", "template-engine"]
 
 [features]
+bench = []
 dhat-heap = []
 hotpath = ["dep:hotpath", "hotpath/hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
@@ -19,24 +20,24 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 [dependencies]
 hotpath = { version = "0.10", optional = true }
 memchr = "2.7.6"
-rustc-hash = "2.1"
+rustc-hash = { workspace = true }
 smallvec = "1.13"
 lazy_static = "1.5"
-oxc_allocator = "0.112.0"
-oxc_ast = "0.112.0"
-oxc_parser = "0.112.0"
-oxc_span = "0.112.0"
-oxc_diagnostics = "0.112.0"
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
+oxc_diagnostics = "0.114.0"
 bumpalo = { version = "3.15.0", features = ["collections"] }
-serde = { version = "1.0", features = ["derive"] }
+serde = { workspace = true }
 serde_repr = "0.1"
-serde_json = "1.0"
+serde_json = { workspace = true }
 allocator-api2 = "0.4.0"
-oxc_sourcemap = "6.0.1"
+oxc_sourcemap = "6.0.2"
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = { workspace = true }
 hex = "0.4"
-lightningcss = { version = "1.0.0-alpha.70", features = ["visitor"] }
+lightningcss = { workspace = true }
 phf = { version = "0.13", features = ["macros"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

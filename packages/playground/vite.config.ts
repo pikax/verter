@@ -32,9 +32,15 @@ export default defineConfig({
       "Cross-Origin-Embedder-Policy": "require-corp",
     },
   },
+  preview: {
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+    },
+  },
   build: {
     target: "esnext",
-    minify: false,
+    minify: "esbuild",
     rollupOptions: {
       output: {
         format: "es",

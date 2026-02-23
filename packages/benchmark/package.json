@@ -6,11 +6,15 @@
   "description": "Performance benchmarks comparing Vue and Verter compilation",
   "scripts": {
     "bench": "node --import tsx src/index.ts",
-    "bench:json": "node --import tsx src/index.ts --json"
+    "bench:json": "node --import tsx src/index.ts --json",
+    "bench:ffi": "node --import tsx src/ffi-bench.ts",
+    "bench:edit-ops": "node --import tsx src/edit-ops-bench.ts"
   },
   "dependencies": {
     "@verter/native": "workspace:*",
+    "@verter/wasm": "workspace:*",
     "@vue/compiler-sfc": "^3.5.27",
+    "magic-string": "^0.30.21",
     "tinybench": "^2.9.0"
   },
   "devDependencies": {

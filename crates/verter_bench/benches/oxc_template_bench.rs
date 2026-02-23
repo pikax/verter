@@ -12,9 +12,9 @@ use std::hint::black_box;
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
 
-use verter_core::new_impl::syntax::Syntax as NewSyntax;
-use verter_core::new_impl::template::oxc::parse_template_expressions;
-use verter_core::syntax::plugin::{SyntaxPluginContext, SyntaxPluginOptions};
+use verter_core::diagnostics::{SyntaxPluginContext, SyntaxPluginOptions};
+use verter_core::parser::Syntax as NewSyntax;
+use verter_core::template::oxc::parse_template_expressions;
 use verter_core::tokenizer::byte::tokenize;
 
 // ---------------------------------------------------------------------------

@@ -110,6 +110,48 @@ mod tests {
     }
 
     #[test]
+    fn test_strip_as_in_optional_chaining() {
+        assert_eq!(
+            strip("const x = (el as HTMLElement)?.focus();"),
+            "const x = (el)?.focus();"
+        );
+    }
+
+    #[test]
+    fn test_strip_as_in_optional_member_chain() {
+        assert_eq!(
+            strip("const x = (event.currentTarget as HTMLElement)?.contains(event.target as HTMLElement);"),
+            "const x = (event.currentTarget)?.contains(event.target);"
+        );
+    }
+
+    #[test]
+    fn test_strip_non_null_in_optional_chain() {
+        assert_eq!(strip("const x = obj!.foo?.bar;"), "const x = obj.foo?.bar;");
+    }
+
+    #[test]
+    fn test_strip_generic_call_in_optional_chain() {
+        assert_eq!(
+            strip("const x = arr?.find<string>(v => v === 'a');"),
+            "const x = arr?.find(v => v === 'a');"
+        );
+    }
+
+    #[test]
+    fn test_strip_nested_optional_chain_with_as() {
+        assert_eq!(strip("const x = (a as B)?.c?.d;"), "const x = (a)?.c?.d;");
+    }
+
+    #[test]
+    fn test_strip_computed_member_in_chain() {
+        assert_eq!(
+            strip("const x = (obj as Record<string, any>)?.[key];"),
+            "const x = (obj)?.[key];"
+        );
+    }
+
+    #[test]
     fn test_strip_satisfies() {
         assert_eq!(strip("const x = y satisfies Foo;"), "const x = y;");
     }

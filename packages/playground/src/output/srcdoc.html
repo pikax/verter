@@ -95,7 +95,14 @@
                 document.head.appendChild(style);
               }
 
-              // Clear app
+              // Unmount the previous Vue app to clean up internal state,
+              // then clear the DOM. Without unmount(), Vue's internal component
+              // tree stays alive and interferes when re-mounting (e.g., causes
+              // nextSibling errors when switching from single-root to multi-root).
+              if (window.__currentApp__) {
+                window.__currentApp__.unmount();
+                window.__currentApp__ = null;
+              }
               const app = document.getElementById("app");
               if (app) app.innerHTML = "";
 

@@ -99,10 +99,44 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`);
 }
 
-const { compile, compileForVite, processStyle, stripTypes, VerterHost } = nativeBinding;
+// ---------------------------------------------------------------------------
+// JS-side string → Buffer coercion
+//
+// The native binding always receives bytes (Buffer). The JS wrapper accepts
+// both string and Buffer for convenience — strings are converted to UTF-8
+// Buffers before crossing the FFI boundary.
+// ---------------------------------------------------------------------------
 
-module.exports.compile = compile;
-module.exports.compileForVite = compileForVite;
+function toBuffer(v) {
+  return typeof v === "string" ? Buffer.from(v) : v;
+}
+
+const { processStyle: _processStyle, VerterHost } = nativeBinding;
+
+function processStyle(css, options) {
+  return _processStyle(toBuffer(css), options);
+}
+
+const _upsert = VerterHost.prototype.upsert;
+VerterHost.prototype.upsert = function (request) {
+  if (typeof request.source === "string") {
+    request = { ...request, source: Buffer.from(request.source) };
+  }
+  return _upsert.call(this, request);
+};
+
+const _applyStyleOverrides = VerterHost.prototype.applyStyleOverrides;
+VerterHost.prototype.applyStyleOverrides = function (request) {
+  if (request.overrides && request.overrides.some((o) => typeof o.code === "string")) {
+    request = {
+      ...request,
+      overrides: request.overrides.map((o) =>
+        typeof o.code === "string" ? { ...o, code: Buffer.from(o.code) } : o,
+      ),
+    };
+  }
+  return _applyStyleOverrides.call(this, request);
+};
+
 module.exports.processStyle = processStyle;
-module.exports.stripTypes = stripTypes;
 module.exports.VerterHost = VerterHost;

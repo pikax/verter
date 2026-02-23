@@ -10,9 +10,10 @@ crate-type = ["cdylib"]
 [dependencies]
 verter_core = { path = "../verter_core", version = "0.0.1-alpha.3" }
 verter_host = { path = "../verter_host", version = "0.0.1-alpha.3" }
-oxc_allocator = "0.112.0"
+verter_ffi = { path = "../verter_ffi", version = "0.0.1-alpha.3" }
 napi = { version = "2", default-features = false, features = ["napi8", "serde-json"] }
 napi-derive = "2"
+serde_json = { workspace = true }
 
 [build-dependencies]
 napi-build = "2"
