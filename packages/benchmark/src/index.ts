@@ -4,9 +4,22 @@ import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { compileVue } from './compilers/vue'
 import { createVerterHost, compileVerterHost } from './compilers/verter'
+import type { BenchmarkReport, FixtureResult } from './utils/report'
+import { determineStatus, generateJsonReport } from './utils/report'
+import { calculateThroughput, calculateSpeedup } from './utils/stats'
+import type { BenchmarkStats } from './utils/stats'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
+
+const JSON_MODE = process.argv.includes('--json')
+
+// In JSON mode, redirect console.log to stderr so only JSON goes to stdout
+if (JSON_MODE) {
+  console.log = (...args: unknown[]) => {
+    process.stderr.write(args.join(' ') + '\n')
+  }
+}
 
 const FIXTURES = [
   'tiny-template.vue',
@@ -29,6 +42,7 @@ interface CompilerResult {
   mean: number
   opsPerSec: number
   errors: string[]
+  stats: BenchmarkStats
 }
 
 interface FixtureResults {
@@ -53,12 +67,23 @@ function loadFixtures(): Fixture[] {
   })
 }
 
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0
+  const idx = (p / 100) * (sorted.length - 1)
+  const lo = Math.floor(idx)
+  const hi = Math.ceil(idx)
+  if (lo === hi) return sorted[lo]
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo)
+}
+
 async function benchSync(
   label: string,
   fn: () => { errors: string[] },
   iterations: number = 200
 ): Promise<CompilerResult> {
   const errors: string[] = []
+
+  const heapBefore = process.memoryUsage().heapUsed
 
   const bench = new Bench({
     time: 1000,
@@ -75,11 +100,29 @@ async function benchSync(
 
   await bench.run()
   const task = bench.tasks[0]!
+  const r = task.result!
+
+  const heapAfter = process.memoryUsage().heapUsed
+  const heapUsedMB = Math.max(0, (heapAfter - heapBefore) / (1024 * 1024))
+
+  const sorted = [...(r.samples || [])].sort((a, b) => a - b)
+
+  const stats: BenchmarkStats = {
+    mean: r.mean || 0,
+    median: percentile(sorted, 50),
+    p95: percentile(sorted, 95),
+    p99: r.p99 || percentile(sorted, 99),
+    min: r.min || 0,
+    max: r.max || 0,
+    stdDev: r.sd || 0,
+    heapUsedMB
+  }
 
   return {
-    mean: task.result?.mean || 0,
-    opsPerSec: task.result?.hz || 0,
-    errors
+    mean: stats.mean,
+    opsPerSec: r.hz || 0,
+    errors,
+    stats
   }
 }
 
@@ -233,6 +276,53 @@ async function main() {
     console.log(row)
   }
   console.log('')
+
+  // JSON output for CI
+  if (JSON_MODE) {
+    const fixtureResults: FixtureResult[] = results.map(r => {
+      const speedup = calculateSpeedup(r.vue.mean, r.hostNone.mean)
+      return {
+        name: r.name,
+        size: r.size,
+        vue: {
+          stats: r.vue.stats,
+          opsPerSec: r.vue.opsPerSec,
+          throughputMBs: calculateThroughput(r.size, r.vue.mean),
+          errors: r.vue.errors
+        },
+        verter: {
+          stats: r.hostNone.stats,
+          opsPerSec: r.hostNone.opsPerSec,
+          throughputMBs: calculateThroughput(r.size, r.hostNone.mean),
+          errors: r.hostNone.errors
+        },
+        speedup,
+        status: determineStatus(speedup)
+      }
+    })
+
+    const passed = fixtureResults.filter(f => f.status === 'pass').length
+    const warnings = fixtureResults.filter(f => f.status === 'warning').length
+    const failed = fixtureResults.filter(f => f.status === 'fail').length
+    const avgSpeedup = fixtureResults.reduce((sum, f) => sum + f.speedup, 0) / fixtureResults.length
+
+    const overallStatus = failed > 0 ? 'fail' : warnings > 0 ? 'warning' : 'pass'
+
+    const report: BenchmarkReport = {
+      fixtures: fixtureResults,
+      summary: {
+        totalFixtures: fixtureResults.length,
+        passed,
+        warnings,
+        failed,
+        avgSpeedup,
+        overallStatus
+      },
+      timestamp: new Date().toISOString()
+    }
+
+    process.stdout.write(generateJsonReport(report) + '\n')
+  }
 
   process.exit(0)
 }

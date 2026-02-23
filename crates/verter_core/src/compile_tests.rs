@@ -4747,6 +4747,309 @@ fn vapor_props_use_ctx_prefix() {
     );
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// Bug 3: Destructured props binding — template binding resolution tests
+// ══════════════════════════════════════════════════════════════════════
+
+/// @ai-generated — Destructured defineProps should resolve to $props. prefix in template
+#[test]
+fn destructured_define_props_resolves_to_props_prefix() {
+    let result = compile_sfc(
+        r#"<template><div>{{ msg }}</div></template>
+<script setup lang="ts">const { msg } = defineProps<{ msg: string }>()</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("$props.msg"),
+        "destructured defineProps prop should resolve to $props.msg, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        !tpl.code.contains("_ctx.msg"),
+        "destructured defineProps prop should NOT use _ctx prefix, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated — Aliased destructured defineProps: `const { msg: m }` → $props.m
+#[test]
+fn aliased_destructured_define_props_resolves_to_props_prefix() {
+    let result = compile_sfc(
+        r#"<template><div>{{ m }}</div></template>
+<script setup lang="ts">const { msg: m } = defineProps<{ msg: string }>()</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("$props.m"),
+        "aliased destructured prop should resolve to $props.m, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        !tpl.code.contains("_ctx.m"),
+        "aliased destructured prop should NOT use _ctx prefix, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated — Destructured withDefaults should resolve to $props. prefix
+#[test]
+fn destructured_with_defaults_resolves_to_props_prefix() {
+    let result = compile_sfc(
+        r#"<template><div>{{ msg }}</div></template>
+<script setup lang="ts">const { msg } = withDefaults(defineProps<{ msg?: string }>(), { msg: 'hello' })</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("$props.msg"),
+        "destructured withDefaults prop should resolve to $props.msg, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        !tpl.code.contains("_ctx.msg"),
+        "destructured withDefaults prop should NOT use _ctx prefix, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated — Multiple destructured props mixed with setup bindings
+#[test]
+fn destructured_props_mixed_with_setup_bindings() {
+    let result = compile_sfc(
+        r#"<template><div>{{ a }} {{ b }}</div></template>
+<script setup lang="ts">
+import { ref } from 'vue'
+const { a } = defineProps<{ a: string }>()
+const b = ref(0)
+</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("$props.a"),
+        "destructured prop 'a' should resolve to $props.a, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        tpl.code.contains("$setup.b"),
+        "setup ref 'b' should resolve to $setup.b, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated — Destructured prop in v-bind attribute
+#[test]
+fn destructured_prop_in_v_bind() {
+    let result = compile_sfc(
+        r#"<template><div :class="color"></div></template>
+<script setup lang="ts">const { color } = defineProps<{ color: string }>()</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("$props.color"),
+        "destructured prop in v-bind should resolve to $props.color, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated — Destructured prop in event handler expression
+#[test]
+fn destructured_prop_in_event_handler() {
+    let result = compile_sfc(
+        r#"<template><button @click="handler">click</button></template>
+<script setup lang="ts">const { handler } = defineProps<{ handler: () => void }>()</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("$props.handler"),
+        "destructured prop in event handler should resolve to $props.handler, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated — Destructured props should NOT appear in setup return object
+#[test]
+fn destructured_props_not_in_setup_return() {
+    let result = compile_sfc(
+        r#"<template><div>{{ msg }}</div></template>
+<script setup lang="ts">const { msg } = defineProps<{ msg: string }>()</script>"#,
+    );
+    let script = result.script.as_ref().expect("script block");
+    // The setup return should be empty or not contain 'msg' (props use $props, not $setup)
+    assert!(
+        !script.code.contains("return { msg }") && !script.code.contains("return { msg,"),
+        "destructured prop 'msg' should NOT be in setup return, got:\n{}",
+        script.code
+    );
+}
+
+/// @ai-generated — Destructured withDefaults with multiple props including rest
+#[test]
+fn destructured_with_defaults_multiple_props() {
+    let result = compile_sfc(
+        r#"<template><div>{{ a }} {{ b }}</div></template>
+<script setup lang="ts">const { a, b } = withDefaults(defineProps<{ a?: string, b?: number }>(), { a: 'x', b: 1 })</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("$props.a"),
+        "destructured withDefaults prop 'a' should resolve to $props.a, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        tpl.code.contains("$props.b"),
+        "destructured withDefaults prop 'b' should resolve to $props.b, got:\n{}",
+        tpl.code
+    );
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Bug 1: Duplicate event handler keys — merge into arrays
+// ══════════════════════════════════════════════════════════════════════
+
+/// @ai-generated — Two handlers on same event with different modifiers merged into array
+#[test]
+fn duplicate_event_handlers_same_event_merged_into_array() {
+    let result = compile_sfc(
+        r#"<template><div @keydown="a" @keydown.stop="b"></div></template>
+<script setup>const a = () => {}; const b = () => {}</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    // Should have exactly one "onKeydown" key, not two
+    let key_count = tpl.code.matches("onKeydown").count();
+    assert_eq!(
+        key_count, 1,
+        "should have exactly one onKeydown key (merged into array), got {} occurrences in:\n{}",
+        key_count, tpl.code
+    );
+}
+
+/// @ai-generated — Three+ handlers on same event all merged into array
+#[test]
+fn multiple_event_handlers_same_event_merged_into_array() {
+    let result = compile_sfc(
+        r#"<template><div @keydown="a" @keydown.stop="b" @keydown.prevent="c"></div></template>
+<script setup>const a = () => {}; const b = () => {}; const c = () => {}</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    let key_count = tpl.code.matches("onKeydown").count();
+    assert_eq!(
+        key_count, 1,
+        "should have exactly one onKeydown key (all merged), got {} occurrences in:\n{}",
+        key_count, tpl.code
+    );
+}
+
+/// @ai-generated — Different option modifiers produce DIFFERENT keys, not merged
+#[test]
+fn different_option_modifiers_produce_different_keys() {
+    let result = compile_sfc(
+        r#"<template><div @click="a" @click.capture="b"></div></template>
+<script setup>const a = () => {}; const b = () => {}</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("onClick") && tpl.code.contains("onClickCapture"),
+        "@click and @click.capture should produce two different keys, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated — Key modifiers on same event merged into array
+#[test]
+fn key_modifiers_same_event_merged() {
+    let result = compile_sfc(
+        r#"<template><div @keydown.enter="a" @keydown.tab="b"></div></template>
+<script setup>const a = () => {}; const b = () => {}</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    let key_count = tpl.code.matches("onKeydown").count();
+    assert_eq!(
+        key_count, 1,
+        "key modifier handlers should be merged, got {} occurrences in:\n{}",
+        key_count, tpl.code
+    );
+}
+
+/// @ai-generated — Mixed: some events have duplicates, others don't
+#[test]
+fn mixed_duplicate_and_unique_events() {
+    let result = compile_sfc(
+        r#"<template><div @click="a" @keydown="b" @keydown.stop="c" @mouseenter="d"></div></template>
+<script setup>const a = () => {}; const b = () => {}; const c = () => {}; const d = () => {}</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    // onClick and onMouseenter should appear once each, onKeydown should appear once (merged)
+    let keydown_count = tpl.code.matches("onKeydown").count();
+    assert_eq!(
+        keydown_count, 1,
+        "onKeydown should appear once (merged), got {} in:\n{}",
+        keydown_count, tpl.code
+    );
+    assert!(
+        tpl.code.contains("onClick"),
+        "onClick should be present, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        tpl.code.contains("onMouseenter"),
+        "onMouseenter should be present, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated — Single handler with modifier (no merge needed, regression test)
+#[test]
+fn single_event_handler_no_merge() {
+    let result = compile_sfc(
+        r#"<template><div @click.stop="a"></div></template>
+<script setup>const a = () => {}</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("onClick"),
+        "single handler should still produce onClick key, got:\n{}",
+        tpl.code
+    );
+    // Should NOT be wrapped in array
+    assert!(
+        !tpl.code.contains("[_withModifiers")
+            && !tpl.code.contains("[withModifiers"),
+        "single handler should NOT be wrapped in array, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated — Mouse left/right on non-keyboard event → runtime modifiers, same key
+#[test]
+fn mouse_left_right_as_runtime_modifiers_merged() {
+    let result = compile_sfc(
+        r#"<template><div @click.left="a" @click.right="b"></div></template>
+<script setup>const a = () => {}; const b = () => {}</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    let click_count = tpl.code.matches("onClick").count();
+    assert_eq!(
+        click_count, 1,
+        "@click.left and @click.right should be merged (same key onClick), got {} in:\n{}",
+        click_count, tpl.code
+    );
+}
+
+/// @ai-generated — Handler with both key and runtime modifiers sharing same key
+#[test]
+fn handler_with_mixed_key_and_runtime_modifiers_merged() {
+    let result = compile_sfc(
+        r#"<template><div @keydown.enter.prevent="a" @keydown.enter.stop="b"></div></template>
+<script setup>const a = () => {}; const b = () => {}</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    let key_count = tpl.code.matches("onKeydown").count();
+    assert_eq!(
+        key_count, 1,
+        "handlers with mixed modifiers sharing same key should be merged, got {} in:\n{}",
+        key_count, tpl.code
+    );
+}
+
 #[test]
 fn vdom_mode_no_vapor_flag() {
     let result = compile_sfc(
