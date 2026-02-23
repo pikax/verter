@@ -1,9 +1,12 @@
 # Verter Integration Test Limitations
 
-Known limitations discovered during integration testing of the `new_impl` AST-based
-compiler pipeline across 18 real-world Vue projects.
+Known limitations discovered during integration testing of the AST-based
+compiler pipeline (`refactor/use_ast_instead_of_events` branch) across 18
+real-world Vue projects.
 
 ## Integration Test Results Summary
+
+*Last verified: 2026-02-23 (after P0/P1/P2 fixes)*
 
 | # | Project | Build | Tests | Status | Notes |
 |---|---------|-------|-------|--------|-------|
@@ -11,18 +14,18 @@ compiler pipeline across 18 real-world Vue projects.
 | 2 | slidev | PASS | 8/8 | OK | |
 | 3 | vitepress | PASS | PASS | OK | |
 | 4 | tdesign-vue-next | PASS | - | OK | |
-| 5 | vue-vben-admin | PASS | - | OK | E2E timing issue (not Verter) |
-| 6 | primevue | PASS | - | OK | Rollup bundler |
-| 7 | element-plus | PASS | - | OK | Rollup bundler |
+| 5 | vue-vben-admin | PASS | - | OK | Fixed: cross-file withDefaults key_name (P0) |
+| 6 | primevue | PASS | - | OK | Fixed: interstitial comment leak (P1) |
+| 7 | element-plus | PASS | - | OK | Fixed: cross-file withDefaults key_name (P0) |
 | 8 | shadcn-vue | PASS | 17/20 | OK | 3 failures are Windows path separators (env) |
-| 9 | radix-vue | PASS | ~64/64 | OK | OOM at end of vitest run (env) |
+| 9 | radix-vue | PASS | ~64/64 | OK | Fixed: forceJs for rolldown/tsdown (P2) |
 | 10 | vant | PASS | 171/172 | OK | 1 failure is timer teardown (not Verter) |
 | 11 | nuxt-ui | PASS | 2510/5026 | OK* | Obsolete snapshot failures in nuxt env; all tests run |
 | 12 | oku-primitives | PASS | 1/1 | OK | 1 event handling regression — see note below |
 | 13 | hoppscotch | PASS | 50/50 | OK | Build fails due to vite-plugin-pages (not Verter) |
 | 14 | balancer-frontend-v2 | PASS | 92/92 | OK | Vite 4 |
 | 15 | naive-ui | PASS | 187/189 | OK | 2 failures: timezone + Card selector (env) |
-| 16 | ant-design-vue | PASS | 56/167 | OK | Identical results to baseline (61 failures each) |
+| 16 | ant-design-vue | PASS | 56/167 | OK | Fixed: style parse error. Type-only import issue remains (see below) |
 | 17 | vuetify | PASS | - | OK | Build fixed: now builds vuetify package first |
 | 18 | zyronon-douyin | PASS | - | OK | VueMacros + LESS preprocessing |
 
@@ -65,6 +68,23 @@ analysis when OXC panics during script analysis.
 **Status:** Upgraded to OXC 0.114.0. The specific panic may be fixed but
 `catch_unwind` remains as a safety net. Some OXC panics may cause segfaults
 that `catch_unwind` cannot catch (observed in radix-vue vitest).
+
+### 2. Type-Only Imports Not Stripped in forceJs Mode
+
+**Affected:** ant-design-vue (`dropdown/demo/loading.vue`)
+
+**Symptom:** `import { Ref, ref } from 'vue'` — `Ref` is a type-only import
+that should be removed when `forceJs: true`, but it remains in the output.
+Rollup then fails with `'Ref' is not exported by vue.runtime.esm-browser.prod.js`.
+
+**Root cause:** The script processor doesn't distinguish between value and
+type-only named imports when stripping TypeScript. In Vite mode, this is
+normally handled by `vite:esbuild` on the script sub-request, but
+ant-design-vue uses Vite 3 where the interaction differs.
+
+**Status:** Open. Workaround: in Vite mode, `vite:esbuild` handles TS
+stripping on script sub-requests, so this only manifests when esbuild
+doesn't process the output (e.g., older Vite versions or direct rollup).
 
 ---
 
@@ -187,3 +207,57 @@ building the vuetify package first.
 **Fix:** Investigation showed the baseline also has 61 test failures
 (identical count). The Verter results match baseline exactly — this was
 never a regression, just a pre-existing test suite issue in the project.
+
+### `withDefaults` Cross-File Type Prop Name Corruption (FIXED)
+
+**Previously affected:** element-plus, vue-vben-admin (build failures)
+
+**Fix:** `macros.rs` extracted prop names using `ctx.source[key_start..key_end]`
+for the `withDefaults` path, but for external/cross-file types (e.g.,
+`defineProps<ImportedInterface>()`), `key.start/end` spans point into the
+external file, not the SFC. This produced garbled prop names from random SFC
+text. Fixed by preferring `ResolvedProp.key_name` (pre-resolved by
+`resolve_external_type`) over span extraction — the same pattern already
+used in the `defineProps` branch.
+
+### HTML Comments Between v-if Branches Leak as Raw Text (FIXED)
+
+**Previously affected:** primevue (build failure — `<!-- comment -->` in JS ternary)
+
+**Fix:** `visit_comment` in vdom codegen skipped interstitial comments
+(between v-if chain members) without emitting a removal overwrite, relying
+on the parent's `strip_interstitial_condition_nodes`. But when
+`options.comments=false` (production mode), `build_child_records` excluded
+comments from records, so the strip function couldn't find them. At root
+level, there was also no gap-filling to cover the comment bytes. Fixed by
+emitting `overwrite(start, end, "")` directly in `visit_comment` when the
+comment is interstitial.
+
+### TypeScript Syntax Not Stripped for Rolldown/tsdown Builds (FIXED)
+
+**Previously affected:** radix-vue (build failure — TS annotations in JS output)
+
+**Fix:** The unplugin set `forceJs: !viteConfig`, but tsdown uses Vite's API
+internally, making `viteConfig` non-null. Vite itself strips TS via
+`vite:esbuild` on script sub-requests, but tsdown doesn't have that plugin.
+Changed to `forceJs: !viteConfig || meta.framework !== "vite"` so only
+Vite itself delegates TS stripping.
+
+### Unescaped JS String Literals in Template Codegen (FIXED)
+
+**Previously affected:** ant-design-vue (`horizontal.vue` — `Parse error @:5:3236`)
+
+**Fix:** `emit_static_style_object()` in `props.rs` pushed CSS property names
+directly into quoted JS string keys without escaping. When a `style` attribute
+contained literal newlines (e.g., multi-line braces in ant-design-vue), the
+output JS had unescaped newlines inside string literals, causing parse errors.
+
+Audited and fixed all codegen paths across VDOM, Vapor, and Vapor2 backends:
+- `vdom/props.rs`: style object property names
+- `vdom/element.rs`: ref values, prop keys, tag names, dynamic_props, modifiers
+- `vdom/slots.rs`: slot names, dynamic_props arrays
+- `vapor/mod.rs`: prop keys, delegated events
+- `vapor/props.rs`, `vapor2/events.rs`, `vapor2/mod.rs`: modifier/event arrays
+
+All now use `escape_js_string_into()` for content emitted inside JS string
+literals, matching Vue's official compiler behavior.

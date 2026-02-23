@@ -229,6 +229,17 @@ pub(super) fn resolve_expr(
 }
 
 /// Result from [`build_props_object_into`].
+/// Info about a v-model directive on a native element that needs
+/// `_withDirectives()` wrapping in the final output.
+pub struct NativeVModel {
+    /// The resolved expression (e.g. `$setup.msg`)
+    pub resolved_value: String,
+    /// The Vue runtime directive helper (e.g. `_vModelText`, `_vModelCheckbox`)
+    pub directive_helper: VdomHelper,
+    /// Modifier object string (e.g. `{ trim: true, number: true }`), empty if none
+    pub modifiers: String,
+}
+
 pub struct PropsResult {
     pub dynamic_props: Vec<String>,
     pub uses_merge: bool,
@@ -236,6 +247,60 @@ pub struct PropsResult {
     pub uses_normalize_style: bool,
     pub uses_with_modifiers: bool,
     pub uses_with_keys: bool,
+    /// v-model on a native element (input/textarea/select) that needs
+    /// `_withDirectives()` wrapping after the element VNode is created.
+    pub native_vmodel: Option<NativeVModel>,
+}
+
+/// Determine the appropriate vModel directive helper for a native element.
+///
+/// - `<select>` → `_vModelSelect`
+/// - `<textarea>` → `_vModelText`
+/// - `<input type="checkbox">` → `_vModelCheckbox`
+/// - `<input type="radio">` → `_vModelRadio`
+/// - `<input :type="dynamic">` → `_vModelDynamic`
+/// - `<input>` (text, default) → `_vModelText`
+fn determine_native_vmodel_directive(
+    element: &ElementNode,
+    source: &str,
+    tag_name: &str,
+) -> VdomHelper {
+    match tag_name {
+        "select" => VdomHelper::VModelSelect,
+        "textarea" => VdomHelper::VModelText,
+        "input" => {
+            // Check for static type="checkbox"|"radio" or dynamic :type
+            for prop in &element.props {
+                if prop.is_directive {
+                    let dname = &source[prop.start as usize..prop.name_end as usize];
+                    let is_bind = dname == ":" || dname == "v-bind";
+                    if is_bind {
+                        if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
+                            let arg = &source[as_ as usize..ae as usize];
+                            if arg == "type" {
+                                // Dynamic type binding → use _vModelDynamic
+                                return VdomHelper::VModelDynamic;
+                            }
+                        }
+                    }
+                } else {
+                    let name = &source[prop.start as usize..prop.name_end as usize];
+                    if name == "type" {
+                        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                            let type_value = &source[vs as usize..ve as usize];
+                            return match type_value {
+                                "checkbox" => VdomHelper::VModelCheckbox,
+                                "radio" => VdomHelper::VModelRadio,
+                                _ => VdomHelper::VModelText,
+                            };
+                        }
+                    }
+                }
+            }
+            VdomHelper::VModelText
+        }
+        _ => VdomHelper::VModelText,
+    }
 }
 
 /// Build the static props object into a buffer.
@@ -262,6 +327,7 @@ pub(crate) fn build_props_object_into(
     let mut uses_normalize_style = false;
     let mut uses_with_modifiers = false;
     let mut uses_with_keys = false;
+    let mut native_vmodel: Option<NativeVModel> = None;
 
     // Pre-scan: detect if both static `class`/`style` and dynamic `:class`/`:style` exist.
     // When both exist, we must merge them into a single `class:`/`style:` prop using
@@ -331,12 +397,13 @@ pub(crate) fn build_props_object_into(
             if prop.arg_start.is_some() {
                 has_regular_props = true;
             }
-            // v-model on components expands to prop-based modelValue + onUpdate:modelValue
-            if directive_name == "v-model" && element.tag_type.is_component() {
+            // v-model on components or native elements expands to props
+            if directive_name == "v-model" {
                 has_regular_props = true;
             }
-            // Directives with no arg and not v-bind/v-on (e.g., v-ripple, v-show, v-model native)
+            // Directives with no arg and not v-bind/v-on (e.g., v-ripple, v-show)
             // are not rendered as props — they use withDirectives() wrapping.
+            // (v-model is handled in the second pass below)
         } else {
             // Skip static class/style when it will be merged with dynamic `:class`/`:style`
             let name = &source[prop.start as usize..prop.name_end as usize];
@@ -372,7 +439,7 @@ pub(crate) fn build_props_object_into(
             if let (Some(vs), Some(ve)) = (ref_prop.value_start, ref_prop.value_end) {
                 let ref_value = &source[vs as usize..ve as usize];
                 buf.push('"');
-                buf.push_str(ref_value);
+                helpers::escape_js_string_into(buf, ref_value);
                 buf.push('"');
             } else {
                 // ref without value (rare, but handle gracefully)
@@ -636,7 +703,7 @@ pub(crate) fn build_props_object_into(
                         }
                         if props::needs_quoted_key(&key) {
                             buf.push('"');
-                            buf.push_str(&key);
+                            helpers::escape_js_string_into(buf, &key);
                             buf.push('"');
                         } else {
                             buf.push_str(&key);
@@ -729,6 +796,57 @@ pub(crate) fn build_props_object_into(
                                 }
                                 buf.push_str(" }");
                             }
+                        }
+                        continue;
+                    }
+
+                    // v-model on native element: emit "onUpdate:modelValue" prop
+                    // and collect directive info for _withDirectives() wrapping.
+                    if is_vmodel && !element.tag_type.is_component() {
+                        if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                            let raw_value = &source[vs as usize..ve as usize];
+                            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                            let resolved = resolve_expr(raw_value, vs, oxc_exp, resolver, force_js);
+
+                            if !first {
+                                buf.push_str(", ");
+                            }
+                            first = false;
+
+                            // Emit: "onUpdate:modelValue": $event => ((<resolved>) = $event)
+                            buf.push_str("\"onUpdate:modelValue\": $event => ((");
+                            buf.push_str(&resolved);
+                            buf.push_str(") = $event)");
+
+                            // Determine the directive helper based on tag and type attribute
+                            let tag_name = &source[element.tag_open.start as usize + 1
+                                ..element.tag_open.name_end as usize];
+                            let directive_helper =
+                                determine_native_vmodel_directive(element, source, tag_name);
+
+                            // Build modifiers object string
+                            let modifiers = if prop.modifiers.is_empty() {
+                                String::new()
+                            } else {
+                                let mut mods = String::from("{ ");
+                                for (mi, modifier) in prop.modifiers.iter().enumerate() {
+                                    if mi > 0 {
+                                        mods.push_str(", ");
+                                    }
+                                    let mod_name =
+                                        &source[modifier.start as usize..modifier.end as usize];
+                                    mods.push_str(mod_name);
+                                    mods.push_str(": true");
+                                }
+                                mods.push_str(" }");
+                                mods
+                            };
+
+                            native_vmodel = Some(NativeVModel {
+                                resolved_value: resolved,
+                                directive_helper,
+                                modifiers,
+                            });
                         }
                         continue;
                     }
@@ -878,7 +996,7 @@ pub(crate) fn build_props_object_into(
                             buf.push_str(", ");
                         }
                         buf.push('"');
-                        buf.push_str(km);
+                        helpers::escape_js_string_into(buf, km);
                         buf.push('"');
                     }
                     buf.push_str("])");
@@ -899,7 +1017,7 @@ pub(crate) fn build_props_object_into(
                             buf.push_str(", ");
                         }
                         buf.push('"');
-                        buf.push_str(rm);
+                        helpers::escape_js_string_into(buf, rm);
                         buf.push('"');
                     }
                     buf.push_str("])");
@@ -946,6 +1064,7 @@ pub(crate) fn build_props_object_into(
         uses_normalize_style,
         uses_with_modifiers,
         uses_with_keys,
+        native_vmodel,
     }
 }
 
@@ -989,6 +1108,16 @@ pub fn process_element_leave<'alloc>(
     let mut patch_flag =
         props::compute_patch_flags(element.prop_flag, expr_flag, element.children_mode);
 
+    // Pre-scan: detect v-model on native elements for _withDirectives() wrapping.
+    // We need to know this before building the open tag so we can prepend the wrapper.
+    let has_native_vmodel = !element.tag_type.is_component()
+        && element.props.iter().any(|p| {
+            p.is_directive && {
+                let dname = &source[p.start as usize..p.name_end as usize];
+                dname == "v-model"
+            }
+        });
+
     // Step 3: Build open tag overwrite (reusing caller's buffer)
     buf.clear();
     // Include v-for prefix (e.g., `(_openBlock(true), _createElementBlock(_Fragment, null,
@@ -997,6 +1126,10 @@ pub fn process_element_leave<'alloc>(
     // same position (overwrites come after prepends at the same position).
     if let Some(prefix) = v_for_prefix {
         buf.push_str(prefix);
+    }
+    // Wrap with _withDirectives() for native v-model
+    if has_native_vmodel {
+        buf.push_str("_withDirectives(");
     }
     // v-for direct children need their own block scope so that dynamic
     // component children are tracked in dynamicChildren and patched correctly.
@@ -1027,7 +1160,7 @@ pub fn process_element_leave<'alloc>(
     } else {
         // Plain element: string literal
         buf.push('"');
-        buf.push_str(tag_name);
+        helpers::escape_js_string_into(buf, tag_name);
         buf.push('"');
     }
 
@@ -1042,7 +1175,7 @@ pub fn process_element_leave<'alloc>(
     };
 
     // Props
-    let dynamic_props = if has_props {
+    let (dynamic_props, native_vmodel) = if has_props {
         buf.push_str(", ");
         let props_result = build_props_object_into(
             buf,
@@ -1068,13 +1201,13 @@ pub fn process_element_leave<'alloc>(
         if props_result.uses_with_keys {
             out.add_vdom_import(VdomHelper::WithKeys);
         }
-        props_result.dynamic_props
+        (props_result.dynamic_props, props_result.native_vmodel)
     } else {
         if has_children || patch_flag != 0 {
             // Need null placeholder for props when there are children or patch flags
             buf.push_str(", null");
         }
-        Vec::new()
+        (Vec::new(), None)
     };
     // For components with dynamic bound props, add PATCH_PROPS so that
     // shouldUpdateComponent can check listed dynamic props.
@@ -1122,7 +1255,7 @@ pub fn process_element_leave<'alloc>(
                     buf.push_str(", ");
                 }
                 buf.push('"');
-                buf.push_str(key);
+                helpers::escape_js_string_into(buf, key);
                 buf.push('"');
             }
             buf.push(']');
@@ -1148,6 +1281,20 @@ pub fn process_element_leave<'alloc>(
         // Close the outer (_openBlock(), ...) wrapper for v-for children
         if is_vfor_child {
             buf.push(')');
+        }
+        // Close _withDirectives() wrapper for native v-model
+        if let Some(ref nvm) = native_vmodel {
+            buf.push_str(", [[");
+            buf.push_str(nvm.directive_helper.name());
+            buf.push_str(", ");
+            buf.push_str(&nvm.resolved_value);
+            if !nvm.modifiers.is_empty() {
+                buf.push_str(", void 0, ");
+                buf.push_str(&nvm.modifiers);
+            }
+            buf.push_str("]])");
+            out.add_vdom_import(VdomHelper::WithDirectives);
+            out.add_vdom_import(nvm.directive_helper);
         }
         out.overwrite(tag_open.start, tag_open.end, buf);
 
@@ -1218,6 +1365,20 @@ pub fn process_element_leave<'alloc>(
     // Close the outer (_openBlock(), ...) wrapper for v-for children
     if is_vfor_child {
         buf.push(')');
+    }
+    // Close _withDirectives() wrapper for native v-model
+    if let Some(ref nvm) = native_vmodel {
+        buf.push_str(", [[");
+        buf.push_str(nvm.directive_helper.name());
+        buf.push_str(", ");
+        buf.push_str(&nvm.resolved_value);
+        if !nvm.modifiers.is_empty() {
+            buf.push_str(", void 0, ");
+            buf.push_str(&nvm.modifiers);
+        }
+        buf.push_str("]])");
+        out.add_vdom_import(VdomHelper::WithDirectives);
+        out.add_vdom_import(nvm.directive_helper);
     }
     // Extend the close tag overwrite start back to the last child's end
     // to consume trailing whitespace gaps (same reason as open tag above).

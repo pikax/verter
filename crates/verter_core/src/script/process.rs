@@ -206,47 +206,42 @@ pub fn process_script_setup<'alloc>(
     // Each defineModel('name') needs:
     //   props: { name: {}, nameModifiers: {} }
     //   emits: ['update:name']
+    //
+    // Vue's official compiler uses _mergeModels() to combine props/emits from
+    // defineProps/defineEmits with those from defineModel. This avoids brittle
+    // string-level insertion (rfind) that breaks on non-object-literal props
+    // sections (e.g., IIFE from withDefaults with runtime variable).
     if !macro_state.model_names.is_empty() {
-        // Build model prop entries
-        let mut model_props = String::new();
-        for name in &macro_state.model_names {
-            if !model_props.is_empty() {
-                model_props.push_str(",\n");
+        // Build model props object: { name: {}, nameModifiers: {} }
+        let mut model_props_obj = String::from("{\n");
+        for (i, name) in macro_state.model_names.iter().enumerate() {
+            if i > 0 {
+                model_props_obj.push_str(",\n");
             }
-            model_props.push_str("    ");
-            model_props.push_str(name);
-            model_props.push_str(": {},\n    ");
-            // Modifiers prop: "modelModifiers" for default name,
-            // "{name}Modifiers" for custom names
+            model_props_obj.push_str("    ");
+            model_props_obj.push_str(name);
+            model_props_obj.push_str(": {},\n    ");
             if name == "modelValue" {
-                model_props.push_str("modelModifiers: {}");
+                model_props_obj.push_str("modelModifiers: {}");
             } else {
-                model_props.push_str(name);
-                model_props.push_str("Modifiers: {}");
+                model_props_obj.push_str(name);
+                model_props_obj.push_str("Modifiers: {}");
             }
         }
+        model_props_obj.push_str("\n  }");
 
-        // Merge into existing props section or create new one
+        // Merge into existing props section using _mergeModels, or create new one
         match &mut macro_state.props_section {
             Some(existing) => {
-                // Existing props is "{ ... }" — insert model entries before the closing brace
-                if let Some(close_pos) = existing.rfind('}') {
-                    let needs_comma = existing[..close_pos]
-                        .trim_end()
-                        .ends_with(|c: char| c != ',' && c != '{');
-                    let mut merged = existing[..close_pos].to_string();
-                    if needs_comma {
-                        merged.push(',');
-                    }
-                    merged.push('\n');
-                    merged.push_str(&model_props);
-                    merged.push('\n');
-                    merged.push_str(&existing[close_pos..]);
-                    *existing = merged;
-                }
+                // Wrap: _mergeModels(existingProps, { modelProps })
+                *existing = format!(
+                    "/*@__PURE__*/_mergeModels({}, {})",
+                    existing, model_props_obj
+                );
+                ctx.imports.push("_mergeModels");
             }
             None => {
-                macro_state.props_section = Some(format!("{{\n{}\n}}", model_props));
+                macro_state.props_section = Some(model_props_obj);
             }
         }
 
@@ -256,27 +251,19 @@ pub fn process_script_setup<'alloc>(
             .iter()
             .map(|name| format!("\"update:{}\"", name))
             .collect();
-        let emits_str = model_emits.join(", ");
+        let model_emits_arr = format!("[{}]", model_emits.join(", "));
 
-        // Merge into existing emits section or create new one
+        // Merge into existing emits section using _mergeModels, or create new one
         match &mut macro_state.emits_section {
             Some(existing) => {
-                // Existing emits is "[...]" — insert model emits before the closing bracket
-                if let Some(close_pos) = existing.rfind(']') {
-                    let needs_comma = existing[..close_pos]
-                        .trim_end()
-                        .ends_with(|c: char| c != ',' && c != '[');
-                    let mut merged = existing[..close_pos].to_string();
-                    if needs_comma {
-                        merged.push_str(", ");
-                    }
-                    merged.push_str(&emits_str);
-                    merged.push_str(&existing[close_pos..]);
-                    *existing = merged;
-                }
+                *existing = format!(
+                    "/*@__PURE__*/_mergeModels({}, {})",
+                    existing, model_emits_arr
+                );
+                ctx.imports.push("_mergeModels");
             }
             None => {
-                macro_state.emits_section = Some(format!("[{}]", emits_str));
+                macro_state.emits_section = Some(model_emits_arr);
             }
         }
     }
@@ -310,6 +297,7 @@ pub fn process_script_setup<'alloc>(
         } else {
             None
         },
+        options.is_vapor,
     );
 
     // Handle close tag
@@ -382,6 +370,9 @@ pub fn process_script_only<'alloc>(
         // No default export — create a minimal __sfc__
         close_text.push_str("\nconst __sfc__ = {};\n");
     }
+    if options.is_vapor {
+        close_text.push_str("__sfc__.__vapor = true;\n");
+    }
     if options.has_scoped_style && !options.scope_id.is_empty() {
         close_text.push_str("__sfc__.__scopeId = \"");
         close_text.push_str(options.scope_id);
@@ -411,6 +402,9 @@ fn emit_minimal_component(
         s.push_str("',\n");
     }
     s.push_str("});\n");
+    if options.is_vapor {
+        s.push_str("__sfc__.__vapor = true;\n");
+    }
     if options.has_scoped_style && !options.scope_id.is_empty() {
         s.push_str("__sfc__.__scopeId = \"");
         s.push_str(options.scope_id);
@@ -513,14 +507,24 @@ fn build_setup_wrapper_start(
 /// __sfc__.__scopeId = "data-v-xxx";
 /// export default __sfc__;
 /// ```
-fn build_setup_wrapper_end(returned: Option<&str>, scope_id: Option<&str>) -> String {
+fn build_setup_wrapper_end(
+    returned: Option<&str>,
+    scope_id: Option<&str>,
+    is_vapor: bool,
+) -> String {
     let mut s = String::with_capacity(128);
     if let Some(ret) = returned {
-        s.push_str("\nreturn ");
+        // Match Vue's official compiler: assign returned bindings to a variable,
+        // mark it with __isScriptSetup so @vue/test-utils (and other tools) can
+        // identify script-setup components and apply stubs to setup-returned refs.
+        s.push_str("\nconst __returned__ = ");
         s.push_str(ret);
-        s.push_str(";\n");
+        s.push_str(";\nObject.defineProperty(__returned__, '__isScriptSetup', { enumerable: false, value: true });\nreturn __returned__;\n");
     }
     s.push_str("\n}});\n");
+    if is_vapor {
+        s.push_str("__sfc__.__vapor = true;\n");
+    }
     if let Some(id) = scope_id {
         s.push_str("__sfc__.__scopeId = \"");
         s.push_str(id);

@@ -31,7 +31,7 @@ fn format_slot_key(buf: &mut String, name: &str) {
         buf.push_str(name);
     } else {
         buf.push('"');
-        buf.push_str(name);
+        helpers::escape_js_string_into(buf, name);
         buf.push('"');
     }
 }
@@ -186,7 +186,8 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         let mut buf = std::mem::take(&mut self.buf);
         buf.clear();
 
-        // Open: `_withCtx((...params) => [`  (slot name prefix is added by parent)
+        // Build the _withCtx open: `_withCtx((...params) => [`
+        // Slot name prefix is added by parent (`leave_component_with_slots`).
         // If v_slot has a value (scoped slot params), inject them as arrow function params.
         buf.push_str("_withCtx(");
         if let Some(v_slot) = &el.v_slot {
@@ -207,39 +208,41 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
         }
         buf.push_str(" => [");
 
-        let open_end = if has_children {
-            children[0].start
-        } else {
-            el.tag_open.end
-        };
-        out.overwrite(el.tag_open.start, open_end, &buf);
-
-        // Remove gaps between children
-        for i in 1..children.len() {
-            let prev_end = children[i - 1].end;
-            let next_start = children[i].start;
-            if next_start > prev_end {
-                out.overwrite(prev_end, next_start, "");
-            }
-        }
-
-        // Add child separators
-        children::add_children_separators_array(&children, out, &self.options);
-
-        // Close: `])`
-        buf.clear();
-        buf.push_str("])");
         let tag_end = el
             .tag_close
             .as_ref()
             .map(|tc| tc.end)
             .unwrap_or(el.tag_open.end);
-        let close_start = if has_children {
-            children.last().unwrap().end
+
+        if has_children {
+            let open_end = children[0].start;
+            out.overwrite(el.tag_open.start, open_end, &buf);
+
+            // Remove gaps between children
+            for i in 1..children.len() {
+                let prev_end = children[i - 1].end;
+                let next_start = children[i].start;
+                if next_start > prev_end {
+                    out.overwrite(prev_end, next_start, "");
+                }
+            }
+
+            // Add child separators
+            children::add_children_separators_array(&children, out, &self.options);
+
+            // Close: `])`
+            buf.clear();
+            buf.push_str("])");
+            let close_start = children.last().unwrap().end;
+            out.overwrite(close_start, tag_end, &buf);
         } else {
-            tag_end
-        };
-        out.overwrite(close_start, tag_end, &buf);
+            // No children: single overwrite covers the entire element
+            // (open tag through close tag or self-closing tag end).
+            // This avoids leaving `</template>` unconsumed in the output
+            // and avoids zero-length overwrite conflicts with parent gap-filling.
+            buf.push_str("])");
+            out.overwrite(el.tag_open.start, tag_end, &buf);
+        }
 
         buf.clear();
         self.buf = buf;
@@ -449,7 +452,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                         buf.push_str(", ");
                     }
                     buf.push('"');
-                    buf.push_str(key);
+                    helpers::escape_js_string_into(&mut buf, key);
                     buf.push('"');
                 }
                 buf.push(']');
@@ -809,7 +812,7 @@ impl<'ast, 'alloc> VdomCodeGen<'ast, 'alloc> {
                     buf.push_str(", ");
                 }
                 buf.push('"');
-                buf.push_str(key);
+                helpers::escape_js_string_into(&mut buf, key);
                 buf.push('"');
             }
             buf.push(']');

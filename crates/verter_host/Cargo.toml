@@ -3,6 +3,7 @@ name = "verter_host"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [features]
 default = []
@@ -18,6 +19,9 @@ rustc-hash = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 serde = { workspace = true }
 thiserror = "2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
 
 [dev-dependencies]
 smallvec = "1.13"

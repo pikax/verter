@@ -74,22 +74,24 @@ fn build_wrapper_start_with_options() {
 
 #[test]
 fn build_wrapper_end_with_return() {
-    let result = build_setup_wrapper_end(Some("{ msg, count }"), None);
-    assert!(result.contains("return { msg, count }"));
+    let result = build_setup_wrapper_end(Some("{ msg, count }"), None, false);
+    assert!(result.contains("const __returned__ = { msg, count }"));
+    assert!(result.contains("__isScriptSetup"));
+    assert!(result.contains("return __returned__"));
     assert!(result.contains("}});"));
     assert!(result.contains("export default __sfc__"));
 }
 
 #[test]
 fn build_wrapper_end_no_return() {
-    let result = build_setup_wrapper_end(None, None);
+    let result = build_setup_wrapper_end(None, None, false);
     assert!(!result.contains("return"));
     assert!(result.contains("}});"));
 }
 
 #[test]
 fn build_wrapper_end_with_scope_id() {
-    let result = build_setup_wrapper_end(None, Some("data-v-abc"));
+    let result = build_setup_wrapper_end(None, Some("data-v-abc"), false);
     assert!(result.contains("__sfc__.__scopeId = \"data-v-abc\""));
 }
 
@@ -120,4 +122,33 @@ fn build_returned_sorted() {
     let alpha_pos = result.find("alpha").unwrap();
     let zebra_pos = result.find("zebra").unwrap();
     assert!(alpha_pos < zebra_pos);
+}
+
+// ── Vapor: __vapor flag ──────────────────────────────────────
+
+#[test]
+fn build_wrapper_end_vapor_adds_vapor_flag() {
+    let result = build_setup_wrapper_end(Some("{ msg }"), None, true);
+    assert!(
+        result.contains("__sfc__.__vapor = true"),
+        "Vapor mode should set __vapor flag, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn build_wrapper_end_non_vapor_no_vapor_flag() {
+    let result = build_setup_wrapper_end(Some("{ msg }"), None, false);
+    assert!(
+        !result.contains("__vapor"),
+        "Non-vapor mode should not set __vapor flag, got:\n{}",
+        result
+    );
+}
+
+#[test]
+fn build_wrapper_end_vapor_with_scope_id_has_both() {
+    let result = build_setup_wrapper_end(None, Some("data-v-abc"), true);
+    assert!(result.contains("__sfc__.__vapor = true"));
+    assert!(result.contains("__sfc__.__scopeId = \"data-v-abc\""));
 }

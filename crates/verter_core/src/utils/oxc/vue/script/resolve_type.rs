@@ -204,6 +204,22 @@ pub struct ResolvedElements {
     pub has_call_signature: bool,
 }
 
+impl ResolvedElements {
+    /// Deduplicate props by key name (first occurrence wins).
+    /// Matches Vue's `mergeElements()` behavior for union/intersection types.
+    fn dedup_props(&mut self) {
+        let mut seen = rustc_hash::FxHashSet::default();
+        self.props.retain(|prop| {
+            if let Some(ref name) = prop.key_name {
+                seen.insert(name.clone())
+            } else {
+                // No key_name — always keep (shouldn't happen after resolution)
+                true
+            }
+        });
+    }
+}
+
 // =============================================================================
 // Type Resolution Context (for resolving type references)
 // =============================================================================
@@ -557,6 +573,7 @@ fn resolve_type_elements_inner(node: &TSType, base_offset: u32, result: &mut Res
             for ty in &union.types {
                 resolve_type_elements_inner(ty, base_offset, result);
             }
+            result.dedup_props();
         }
 
         // Intersection: Type1 & Type2
@@ -564,6 +581,7 @@ fn resolve_type_elements_inner(node: &TSType, base_offset: u32, result: &mut Res
             for ty in &intersection.types {
                 resolve_type_elements_inner(ty, base_offset, result);
             }
+            result.dedup_props();
         }
 
         // Type reference: SomeType or SomeType<T>
@@ -701,6 +719,7 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
             for ty in &union.types {
                 resolve_type_elements_inner_with_ctx(ty, base_offset, result, ctx);
             }
+            result.dedup_props();
         }
 
         // Intersection: Type1 & Type2
@@ -708,6 +727,7 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
             for ty in &intersection.types {
                 resolve_type_elements_inner_with_ctx(ty, base_offset, result, ctx);
             }
+            result.dedup_props();
         }
 
         // Type reference: SomeType or SomeType<T>
@@ -765,6 +785,20 @@ fn resolve_type_elements_inner_with_ctx<'ctx, 'a: 'ctx>(
             });
         }
 
+        // Type query: typeof X — look up in companion types
+        TSType::TSTypeQuery(query) => {
+            if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
+                let type_name = ident.name.as_str();
+                if let Some(companion) = ctx.companion_types.get(type_name) {
+                    result.props.extend(companion.props.iter().cloned());
+                    result.emits.extend(companion.emits.iter().cloned());
+                    if companion.has_call_signature {
+                        result.has_call_signature = true;
+                    }
+                }
+            }
+        }
+
         // Function type: () => Type
         TSType::TSFunctionType(_) => {
             result.has_call_signature = true;
@@ -802,6 +836,7 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
             for ty in &union.types {
                 resolve_type_elements_inner_with_ctx_ref(ty, base_offset, result, ctx);
             }
+            result.dedup_props();
         }
 
         // Intersection: Type1 & Type2
@@ -809,6 +844,7 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
             for ty in &intersection.types {
                 resolve_type_elements_inner_with_ctx_ref(ty, base_offset, result, ctx);
             }
+            result.dedup_props();
         }
 
         // Type reference: SomeType or SomeType<T>
@@ -854,6 +890,20 @@ fn resolve_type_elements_inner_with_ctx_ref<'ctx, 'a: 'ctx>(
             }
 
             // 5. Couldn't resolve - skip silently (no diagnostics in immutable version)
+        }
+
+        // Type query: typeof X — look up in companion types
+        TSType::TSTypeQuery(query) => {
+            if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
+                let type_name = ident.name.as_str();
+                if let Some(companion) = ctx.companion_types.get(type_name) {
+                    result.props.extend(companion.props.iter().cloned());
+                    result.emits.extend(companion.emits.iter().cloned());
+                    if companion.has_call_signature {
+                        result.has_call_signature = true;
+                    }
+                }
+            }
         }
 
         // Function type: () => Type
@@ -991,7 +1041,7 @@ fn resolve_property_signature(
     Some(ResolvedProp {
         span,
         key,
-        key_name: None,
+        key_name: get_property_key_name(&prop.key),
         optional,
         types,
     })
@@ -1011,7 +1061,7 @@ fn resolve_method_signature(method: &TSMethodSignature, base_offset: u32) -> Opt
     Some(ResolvedProp {
         span,
         key,
-        key_name: None,
+        key_name: get_property_key_name(&method.key),
         optional,
         types: vec![RuntimeType::Function],
     })
@@ -1118,8 +1168,8 @@ pub fn infer_runtime_type(node: &TSType) -> Vec<RuntimeType> {
         // Template literal type: `${string}`
         TSType::TSTemplateLiteralType(_) => vec![RuntimeType::String],
 
-        // Type query: typeof x
-        TSType::TSTypeQuery(_) => vec![RuntimeType::Unknown],
+        // Type query: typeof x — in defineProps context, always refers to an object shape
+        TSType::TSTypeQuery(_) => vec![RuntimeType::Object],
 
         // Import type: import("...").Type
         TSType::TSImportType(_) => vec![RuntimeType::Unknown],
@@ -1257,6 +1307,97 @@ fn get_type_reference_name(type_name: &TSTypeName) -> String {
     }
 }
 
+/// Resolve a value declaration's type shape (for `typeof X` support).
+///
+/// Looks for variable declarations matching `type_name` in both exported and
+/// non-exported positions. If the variable has a type annotation, resolves that.
+/// Otherwise, if it has an object literal initializer, infers prop types from
+/// the property values.
+fn resolve_value_declaration_type<'a>(
+    type_name: &str,
+    program: &Program<'a>,
+    source_bytes: &[u8],
+    base_offset: u32,
+    ctx: &TypeResolutionContext<'_, 'a>,
+) -> Option<ResolvedElements> {
+    let name_bytes = type_name.as_bytes();
+
+    for stmt in &program.body {
+        // Check both `export const X` and plain `const X`
+        let var_decl = match stmt {
+            Statement::ExportNamedDeclaration(export) => match &export.declaration {
+                Some(Declaration::VariableDeclaration(decl)) => Some(decl.as_ref()),
+                _ => None,
+            },
+            Statement::VariableDeclaration(decl) => Some(decl.as_ref()),
+            _ => None,
+        };
+
+        if let Some(decl) = var_decl {
+            for declarator in &decl.declarations {
+                let BindingPattern::BindingIdentifier(id) = &declarator.id else {
+                    continue;
+                };
+                if id.name.as_bytes() != name_bytes {
+                    continue;
+                }
+
+                // 1. Type annotation on the declarator: `const X: { foo: string } = ...`
+                if let Some(ref annotation) = declarator.type_annotation {
+                    return Some(resolve_type_elements_with_ctx_ref(
+                        &annotation.type_annotation,
+                        base_offset,
+                        ctx,
+                    ));
+                }
+
+                // 2. Object literal initializer: `const X = { foo: 'str', bar: 42 }`
+                if let Some(Expression::ObjectExpression(obj)) = &declarator.init {
+                    return Some(infer_props_from_object_literal(obj, source_bytes));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Infer prop types from an object literal's property values.
+fn infer_props_from_object_literal(
+    obj: &oxc_ast::ast::ObjectExpression<'_>,
+    _source_bytes: &[u8],
+) -> ResolvedElements {
+    let mut result = ResolvedElements::default();
+
+    for prop in &obj.properties {
+        let ObjectPropertyKind::ObjectProperty(p) = prop else {
+            continue;
+        };
+        let key_span: oxc_span::Span = p.key.span();
+        let runtime_type = match &p.value {
+            Expression::StringLiteral(_) | Expression::TemplateLiteral(_) => {
+                vec![RuntimeType::String]
+            }
+            Expression::NumericLiteral(_) => vec![RuntimeType::Number],
+            Expression::BooleanLiteral(_) => vec![RuntimeType::Boolean],
+            Expression::ArrayExpression(_) => vec![RuntimeType::Array],
+            Expression::ObjectExpression(_) => vec![RuntimeType::Object],
+            Expression::NullLiteral(_) => vec![RuntimeType::Null],
+            _ => vec![RuntimeType::Unknown],
+        };
+
+        result.props.push(ResolvedProp {
+            span: crate::common::Span::new(key_span.start, key_span.end),
+            key: crate::common::Span::new(key_span.start, key_span.end),
+            key_name: None,
+            types: runtime_type,
+            optional: false,
+        });
+    }
+
+    result
+}
+
 /// Resolve an imported type by name from a dependency file's source.
 ///
 /// Parses the dep file, builds a type resolution context, finds the named type
@@ -1303,6 +1444,12 @@ pub fn resolve_external_type(
             );
             result = Some(r);
         }
+    }
+
+    // Try exported variable declarations: `export const X: { prop: Type } = ...`
+    // or non-exported `const X: { prop: Type } = ...` (for `typeof X`)
+    if result.is_none() {
+        result = resolve_value_declaration_type(type_name, &parsed.program, source_bytes, 0, &ctx);
     }
 
     // Populate key_name on all props since spans reference the external file,
@@ -2136,6 +2283,96 @@ interface Extended extends Base { own: number }"#;
             2,
             "Extended should include base + own props"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Union/Intersection deduplication tests
+    // ═══════════════════════════════════════════════════════════
+
+    /// @ai-generated - intersection of types with shared props should deduplicate
+    #[test]
+    fn resolve_intersection_deduplicates_shared_props() {
+        let parsed = parse_type("{ x: string; y: number } & { x: string; z: boolean }").unwrap();
+        // x appears in both branches — should appear only once
+        let x_count = parsed
+            .resolved
+            .props
+            .iter()
+            .filter(|p| parsed.key_name(p) == "x")
+            .count();
+        assert_eq!(
+            x_count, 1,
+            "Intersection should deduplicate shared prop 'x'"
+        );
+        assert_eq!(
+            parsed.resolved.props.len(),
+            3,
+            "Should have 3 unique props: x, y, z"
+        );
+    }
+
+    /// @ai-generated - union of types with shared props should deduplicate
+    #[test]
+    fn resolve_union_deduplicates_shared_props() {
+        let parsed = parse_type("{ x: string; y: number } | { x: string; z: boolean }").unwrap();
+        let x_count = parsed
+            .resolved
+            .props
+            .iter()
+            .filter(|p| parsed.key_name(p) == "x")
+            .count();
+        assert_eq!(x_count, 1, "Union should deduplicate shared prop 'x'");
+        assert_eq!(
+            parsed.resolved.props.len(),
+            3,
+            "Should have 3 unique props: x, y, z"
+        );
+    }
+
+    /// @ai-generated - mixed union and intersection with overlapping props
+    #[test]
+    fn resolve_intersection_union_combo_deduplicates() {
+        let parsed =
+            parse_type("({ a: string } | { a: number; b: boolean }) & { a: string; c: number }")
+                .unwrap();
+        let a_count = parsed
+            .resolved
+            .props
+            .iter()
+            .filter(|p| parsed.key_name(p) == "a")
+            .count();
+        assert_eq!(
+            a_count, 1,
+            "Combined union+intersection should deduplicate shared prop 'a'"
+        );
+    }
+
+    /// @ai-generated - intersection dedup with context (type references)
+    #[test]
+    fn resolve_intersection_dedup_with_context() {
+        let allocator = Allocator::default();
+        let source = r#"type A = { x: string; y: number };
+type B = { x: string; z: boolean };
+type Test = A & B;"#;
+        let source_type = SourceType::ts();
+        let parser = Parser::new(&allocator, source, source_type);
+        let result = parser.parse();
+
+        let mut ctx = build_type_context(&result.program, source.as_bytes(), 0);
+
+        for stmt in &result.program.body {
+            if let Statement::TSTypeAliasDeclaration(alias) = stmt {
+                if alias.id.name.as_str() == "Test" {
+                    let resolved =
+                        resolve_type_elements_with_ctx(&alias.type_annotation, 0, &mut ctx);
+                    assert_eq!(
+                        resolved.props.len(),
+                        3,
+                        "A & B with shared 'x' should have 3 unique props"
+                    );
+                }
+            }
+        }
     }
 
     /// @ai-generated - circular extends doesn't cause infinite recursion

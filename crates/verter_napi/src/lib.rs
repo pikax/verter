@@ -394,6 +394,34 @@ pub struct NapiRemoveResult {
     pub canonicalId: String,
 }
 
+/// Point-in-time snapshot of host performance metrics.
+///
+/// Only populated when built with the `host_metrics` feature.
+/// Obtain via [`NapiVerterHost::getMetrics`].
+#[napi(object)]
+pub struct NapiHostMetrics {
+    /// Total number of `upsert()` calls.
+    pub upserts: f64,
+    /// Total compile requests (cache misses that triggered Rust compilation).
+    pub compileRequests: f64,
+    /// Compile requests served from cache.
+    pub compileCacheHits: f64,
+    /// Cache hit rate (0.0 – 1.0).
+    pub compileCacheHitRate: f64,
+    /// Total `getVirtualFile()` calls.
+    pub virtualLoads: f64,
+    /// Total `resolve()` calls.
+    pub resolves: f64,
+    /// Total `applyStyleOverrides()` calls.
+    pub styleOverrideCalls: f64,
+    /// Cumulative parse/hash time across all upserts (microseconds).
+    pub sliceHashTimeUsTotal: f64,
+    /// Average parse/hash time per upsert (microseconds).
+    pub avgSliceHashTimeUs: f64,
+    /// Cumulative Rust compilation time (microseconds).
+    pub compileTimeUsTotal: f64,
+}
+
 // =============================================================================
 // Direct Host → NAPI conversion (bypasses FFI intermediate types)
 // =============================================================================
@@ -763,5 +791,33 @@ impl NapiVerterHost {
             self.inner
                 .set_import_dependencies(&canonical_or_alias, resolved_deps);
         }))
+    }
+
+    /// Returns a snapshot of host performance metrics.
+    ///
+    /// Only available when built with the `host_metrics` feature.
+    /// Returns `null` when the feature is disabled.
+    #[napi(js_name = "getMetrics")]
+    pub fn get_metrics(&self) -> Option<NapiHostMetrics> {
+        #[cfg(feature = "host_metrics")]
+        {
+            let m = self.inner.metrics_snapshot();
+            Some(NapiHostMetrics {
+                upserts: m.upserts as f64,
+                compileRequests: m.compile_requests as f64,
+                compileCacheHits: m.compile_cache_hits as f64,
+                compileCacheHitRate: m.compile_cache_hit_rate,
+                virtualLoads: m.virtual_loads as f64,
+                resolves: m.resolves as f64,
+                styleOverrideCalls: m.style_override_calls as f64,
+                sliceHashTimeUsTotal: m.slice_hash_time_us_total as f64,
+                avgSliceHashTimeUs: m.avg_slice_hash_time_us,
+                compileTimeUsTotal: m.compile_time_us_total as f64,
+            })
+        }
+        #[cfg(not(feature = "host_metrics"))]
+        {
+            None
+        }
     }
 }

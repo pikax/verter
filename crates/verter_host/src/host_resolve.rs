@@ -7,6 +7,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg(feature = "host_metrics")]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "host_metrics")]
+use web_time::Instant;
+
 use oxc_allocator::Allocator;
 use verter_core::compile::CodegenOptions;
 use verter_core::compile::{compile as compile_sfc, format_import_specifier, VerterCompileOptions};
@@ -176,7 +183,7 @@ impl VerterHost {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         #[cfg(feature = "host_metrics")]
-        let compile_start = std::time::Instant::now();
+        let compile_start = Instant::now();
 
         let style_override_hash = compile_input
             .style_override_layer
@@ -463,14 +470,16 @@ impl VerterHost {
             CachedVirtualFile {
                 code: Arc::from(main_code),
                 source_map: None,
-                lang: Some(
+                lang: Some(if profile.force_js {
+                    "js".to_string()
+                } else {
                     snapshot
                         .meta
                         .script_lang
                         .as_deref()
                         .unwrap_or("js")
-                        .to_string(),
-                ),
+                        .to_string()
+                }),
                 meta: VirtualMeta {
                     scope_id: if compiled.scope_id.is_empty() {
                         None

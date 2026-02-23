@@ -139,8 +139,13 @@ impl<'alloc> CodeGenOutput<'alloc> {
 
         ct.batch_overwrite(&self.overwrites);
 
-        // Sort prepends by position (required by batch_prepend_left_static)
-        self.prepends.sort_unstable_by_key(|(pos, _)| *pos);
+        // Sort prepends by position (required by batch_prepend_left_static).
+        // Must use stable sort to preserve insertion order for same-position
+        // prepends. Scope-close suffixes (e.g., ` : _createCommentVNode(...)`)
+        // are pushed before sibling comma separators during tree walking, and
+        // both land at the element's end position. Unstable sort can reorder
+        // them, producing invalid JS like `, : _createCommentVNode(...)`.
+        self.prepends.sort_by_key(|(pos, _)| *pos);
         ct.batch_prepend_left_static(&self.prepends);
 
         // Return whichever mode's imports are non-empty (only one is ever active)
@@ -568,6 +573,51 @@ mod tests {
         out.apply_to(&mut ct);
         let result = ct.build_string();
         assert_eq!(result, "ABXCDEYFGH");
+    }
+
+    /// @ai-generated - Regression test: prepends at the same position must
+    /// preserve insertion order (stable sort). This matters when scope_close
+    /// suffixes and sibling comma separators are both prepended at an
+    /// element's end position. Without stable sort, the comma can appear
+    /// before the scope_close, producing invalid JS like `, : _createCommentVNode`.
+    #[test]
+    fn apply_to_preserves_same_position_prepend_order() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+
+        // Simulate the real compilation pattern: scope_close is pushed early
+        // (during child's leave_element), then many other prepends are added
+        // for other parts of the template, then the sibling comma is pushed
+        // (during parent's add_children_separators).
+        // The target position where both scope_close and comma land:
+        let target = 50u32;
+
+        // First batch: prepends BEFORE the scope_close (from earlier template processing)
+        for i in 0..40u32 {
+            out.prepend_static(i, "x");
+        }
+        // scope_close is pushed at target position
+        out.prepend_static(target, "SCOPE_CLOSE");
+        // Second batch: many more prepends from other template elements
+        // (these go to positions AFTER target, interleaved)
+        for i in 0..60u32 {
+            out.prepend_static(target + 1 + i, "y");
+        }
+        // Sibling comma is pushed much later at the SAME target position
+        out.prepend_static(target, "COMMA");
+
+        let source = &"_".repeat(200);
+        let mut ct = crate::code_transform::CodeTransform::new(source, &alloc);
+        out.apply_to(&mut ct);
+        let result = ct.build_string();
+
+        // The two same-position prepends must appear in insertion order
+        assert!(
+            result.contains("SCOPE_CLOSECOMMA"),
+            "Same-position prepends must preserve insertion order.\n\
+             Expected 'SCOPE_CLOSECOMMA' but got:\n{}",
+            result
+        );
     }
 
     // ==================== Imports ====================

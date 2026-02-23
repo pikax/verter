@@ -143,7 +143,7 @@ pub fn emit_static_style_object(buf: &mut String, style: &str) {
             // Quote the property key if it contains hyphens (CSS properties)
             if needs_quoted_key(prop) {
                 buf.push('"');
-                buf.push_str(prop);
+                helpers::escape_js_string_into(buf, prop);
                 buf.push('"');
             } else {
                 buf.push_str(prop);
@@ -352,6 +352,95 @@ mod tests {
     fn quoted_key_alphanumeric() {
         assert!(!needs_quoted_key("prop1"));
         assert!(!needs_quoted_key("a123"));
+    }
+
+    // ==================== emit_static_style_object ====================
+
+    fn style_to_obj(style: &str) -> String {
+        let mut buf = String::new();
+        emit_static_style_object(&mut buf, style);
+        buf
+    }
+
+    #[test]
+    fn style_obj_simple() {
+        assert_eq!(style_to_obj("color: red"), r#"{ color: "red" }"#);
+    }
+
+    #[test]
+    fn style_obj_hyphenated_key() {
+        assert_eq!(
+            style_to_obj("margin-top: 15px"),
+            r#"{ "margin-top": "15px" }"#
+        );
+    }
+
+    #[test]
+    fn style_obj_multiple() {
+        assert_eq!(
+            style_to_obj("margin-top: 15px; color: red"),
+            r#"{ "margin-top": "15px", color: "red" }"#
+        );
+    }
+
+    #[test]
+    fn style_obj_empty() {
+        assert_eq!(style_to_obj(""), "{}");
+        assert_eq!(style_to_obj("   "), "{}");
+    }
+
+    #[test]
+    fn style_obj_trailing_semicolon() {
+        assert_eq!(style_to_obj("color: red;"), r#"{ color: "red" }"#);
+    }
+
+    #[test]
+    fn style_obj_newlines_in_key() {
+        // Matches Vue official: { "{\n        padding": "'20px'" }
+        // The key must have newlines escaped in the JS string
+        let style = "{\n        padding: '20px'";
+        let result = style_to_obj(style);
+        assert!(
+            !result.contains('\n'),
+            "output must not contain literal newlines: {result:?}"
+        );
+        assert_eq!(
+            result,
+            r#"{ "{\\n        padding": "'20px'" }"#.replace("\\\\n", "\\n")
+        );
+    }
+
+    #[test]
+    fn style_obj_quotes_in_key() {
+        // Key containing a double quote must be escaped
+        let style = r#"foo"bar: baz"#;
+        let result = style_to_obj(style);
+        assert!(
+            !result.contains(r#"foo"bar"#),
+            "output must escape quotes in key: {result:?}"
+        );
+    }
+
+    #[test]
+    fn style_obj_backslash_in_key() {
+        // Key containing a backslash must be escaped
+        let style = r"foo\bar: baz";
+        let result = style_to_obj(style);
+        assert!(
+            result.contains(r"foo\\bar"),
+            "output must escape backslashes in key: {result:?}"
+        );
+    }
+
+    #[test]
+    fn style_obj_newlines_in_value() {
+        // Values are already escaped through escape_js_string_into
+        let style = "color: red\nblue";
+        let result = style_to_obj(style);
+        assert!(
+            !result.contains('\n'),
+            "output must not contain literal newlines in value: {result:?}"
+        );
     }
 
     // ==================== compute_patch_flags ====================

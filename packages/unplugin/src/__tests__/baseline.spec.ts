@@ -1,23 +1,72 @@
 /**
  * @ai-generated - Baseline comparison tests for Verter vs official Vue compiler.
  *
- * These tests compile the same Vue SFC snippets with both Verter (via @verter/native)
- * and the official Vue compiler (@vue/compiler-sfc), then compare their output to
- * ensure behavioral equivalence.
+ * These tests compile the same Vue SFC snippets with both Verter (via VerterHost
+ * from @verter/native) and the official Vue compiler (@vue/compiler-sfc), then
+ * compare their output to ensure behavioral equivalence.
  *
- * The official Vue compiler output is the baseline — any difference in Verter's output
- * that would affect runtime behavior is flagged as a failure.
+ * The official Vue compiler output is the baseline — any difference in Verter's
+ * output that would affect runtime behavior is flagged as a failure.
  */
 
 import { describe, it, expect } from 'vitest'
 import { compileScript, parse } from '@vue/compiler-sfc'
-import native from '@verter/native'
+import { VerterHost } from '@verter/native'
+import type { HostCompileProfile } from '@verter/native'
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 interface CompileResult {
+  code: string
+  sourceMap?: string
+  lang?: string
+}
+
+/**
+ * One-shot compile helper: creates a fresh VerterHost, upserts the SFC,
+ * and returns the compiled main module output.
+ */
+function compile(
+  source: string,
+  options: {
+    filename?: string
+    isProduction?: boolean
+    componentId?: string
+    forceJs?: boolean
+    forceVapor?: boolean
+  } = {},
+): CompileResult {
+  const host = new VerterHost({ devMode: true })
+  const filename = options.filename ?? 'anonymous.vue'
+
+  host.upsert({ inputId: filename, source })
+
+  const profile: HostCompileProfile = {
+    filename,
+    isProduction: options.isProduction ?? false,
+    ssr: false,
+    componentId: options.componentId,
+    hmrStrategy: 'none',
+    sourceMap: false,
+    forceJs: options.forceJs ?? true,
+    forceVapor: options.forceVapor ?? false,
+  }
+
+  const result = host.getVirtualFile({
+    rawId: filename,
+    compileProfile: profile,
+  })
+
+  return {
+    code: result.code,
+    sourceMap: result.sourceMap,
+    lang: result.lang,
+  }
+}
+
+interface AnalyzedResult {
   /** Full compiled code (script + render) */
   code: string
   /** Extracted import specifiers as a set of identifiers */
@@ -33,7 +82,7 @@ interface CompileResult {
 function compileWithVue(
   sfc: string,
   opts: { inlineTemplate?: boolean; vapor?: boolean; isProduction?: boolean } = {},
-): CompileResult {
+): AnalyzedResult {
   const { descriptor } = parse(sfc, { filename: 'test.vue' })
   const result = compileScript(descriptor, {
     id: 'test123',
@@ -48,8 +97,8 @@ function compileWithVue(
 function compileWithVerter(
   sfc: string,
   opts: { isProduction?: boolean } = {},
-): CompileResult {
-  const result = native.compile(sfc, {
+): AnalyzedResult {
+  const result = compile(sfc, {
     filename: 'test.vue',
     isProduction: opts.isProduction ?? false,
     componentId: 'test123',
@@ -57,7 +106,7 @@ function compileWithVerter(
   return analyzeCode(result.code)
 }
 
-function analyzeCode(code: string): CompileResult {
+function analyzeCode(code: string): AnalyzedResult {
   const imports = new Set<string>()
   // Extract import specifiers: import { foo as _foo, bar as _bar } from 'vue'
   const importRegex = /import\s*\{([^}]+)\}\s*from\s*['"][^'"]+['"]/g
@@ -89,23 +138,6 @@ function analyzeCode(code: string): CompileResult {
   }
 
   return { code, imports, isVapor, isInline, renderBindings }
-}
-
-/**
- * Extract the render-function-specific section from compiled output.
- * This strips the script/setup boilerplate to focus on template compilation.
- */
-function extractRenderSection(code: string): string {
-  // Match function render(...) or (_ ctx,_cache) =>
-  const renderStart = code.indexOf('function render(')
-  if (renderStart !== -1) {
-    return code.slice(renderStart)
-  }
-  const arrowStart = code.indexOf('(_ctx,_cache) => {')
-  if (arrowStart !== -1) {
-    return code.slice(arrowStart)
-  }
-  return code
 }
 
 // ---------------------------------------------------------------------------
@@ -248,9 +280,6 @@ const onClick = () => {}
 
   for (const { name, sfc } of vaporCases) {
     it(`${name}: vapor binding prefix uses _ctx (not $setup)`, () => {
-      // Note: Official Vue's compileScript with vapor: true only produces the script portion.
-      // The vapor render function is compiled separately by @vue/compiler-vapor.
-      // Verter produces both in one pass, so we verify Verter's render uses _ctx. (not $setup.)
       const verter = compileWithVerter(sfc)
 
       const verterSetupBindings = verter.renderBindings.filter((b) => b.startsWith('$setup.'))

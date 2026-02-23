@@ -38,7 +38,21 @@ pub fn inject_use_css_vars<'alloc>(
 
     buf.push_str("\n_useCssVars(_ctx => ({\n");
 
-    for (i, v_bind) in v_binds.iter().enumerate() {
+    // Deduplicate by var_name (same v-bind() expression may appear multiple times in CSS)
+    let mut seen = rustc_hash::FxHashSet::default();
+    let mut first = true;
+
+    for v_bind in v_binds.iter() {
+        if !seen.insert(&v_bind.var_name) {
+            continue; // skip duplicate var_name
+        }
+
+        if !first {
+            buf.push(',');
+            buf.push('\n');
+        }
+        first = false;
+
         buf.push_str("  \"");
         buf.push_str(&v_bind.var_name);
         buf.push_str("\": (");
@@ -86,11 +100,9 @@ pub fn inject_use_css_vars<'alloc>(
         }
 
         buf.push(')');
-        if i < v_binds.len() - 1 {
-            buf.push(',');
-        }
-        buf.push('\n');
     }
+
+    buf.push('\n');
 
     buf.push_str("}))\n");
 
@@ -229,6 +241,65 @@ mod tests {
         assert!(content.contains("__props.color"), "content: {}", content);
         // Should have commas between entries (except last)
         assert!(content.contains("),\n"), "content: {}", content);
+    }
+
+    /// @ai-generated - duplicate v-bind vars with same var_name should be deduplicated
+    #[test]
+    fn duplicate_v_bind_vars_deduplicated() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        let mut imports = Vec::new();
+        let mut bindings = FxHashMap::default();
+        bindings.insert("duration", BindingType::SetupConst);
+
+        let v_binds = vec![
+            make_v_bind("duration", "abc-duration"),
+            make_v_bind("duration", "abc-duration"),
+        ];
+        inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
+
+        let content = out.prepends[0].1;
+        // Should only contain abc-duration once
+        let count = content.matches("abc-duration").count();
+        assert_eq!(
+            count, 1,
+            "Duplicate var_name should appear only once. Got: {}",
+            content
+        );
+    }
+
+    /// @ai-generated - duplicate v-bind vars interspersed with unique ones
+    #[test]
+    fn duplicate_v_bind_vars_preserves_unique() {
+        let alloc = Allocator::default();
+        let mut out = CodeGenOutput::new(&alloc);
+        let mut imports = Vec::new();
+        let mut bindings = FxHashMap::default();
+        bindings.insert("duration", BindingType::SetupConst);
+        bindings.insert("color", BindingType::Props);
+
+        let v_binds = vec![
+            make_v_bind("duration", "abc-duration"),
+            make_v_bind("color", "abc-color"),
+            make_v_bind("duration", "abc-duration"), // duplicate
+        ];
+        inject_use_css_vars(&v_binds, &bindings, 0, &mut out, &mut imports);
+
+        let content = out.prepends[0].1;
+        let dur_count = content.matches("abc-duration").count();
+        let color_count = content.matches("abc-color").count();
+        assert_eq!(
+            dur_count, 1,
+            "Duplicate should be removed. Got: {}",
+            content
+        );
+        assert_eq!(color_count, 1, "Unique should be kept. Got: {}", content);
+        // The trailing comma logic should still be correct
+        assert!(
+            content.contains("),\n  \"abc-color\"") || content.contains("),\n}"),
+            "Comma formatting should be correct. Got: {}",
+            content
+        );
     }
 
     #[test]

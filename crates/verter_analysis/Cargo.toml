@@ -3,6 +3,7 @@ name = "verter_analysis"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [dependencies]
 oxc_allocator = { workspace = true }

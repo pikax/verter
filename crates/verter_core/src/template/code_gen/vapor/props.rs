@@ -432,7 +432,7 @@ fn write_handler_expression(
                 buf.push_str(", ");
             }
             buf.push('"');
-            buf.push_str(m);
+            helpers::escape_js_string_into(buf, m);
             buf.push('"');
         }
         buf.push_str("])");

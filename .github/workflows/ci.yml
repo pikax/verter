@@ -42,6 +42,9 @@ jobs:
               - '.github/workflows/ci.yml'
             wasm:
               - 'crates/verter_core/**'
+              - 'crates/verter_analysis/**'
+              - 'crates/verter_host/**'
+              - 'crates/verter_ffi/**'
               - 'crates/verter_wasm/**'
               - 'packages/wasm/**'
               - '.cargo/**'

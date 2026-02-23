@@ -2105,6 +2105,158 @@ fn get_diagnostics_no_profile_match_returns_none() {
     assert!(host.get_diagnostics("Comp.vue", &profile_dev()).is_none());
 }
 
+// ═══════════════════════════════════════════════════════════
+// Custom block URL format tests (matching @vitejs/plugin-vue)
+// ═══════════════════════════════════════════════════════════
+
+/// @ai-generated - Main module custom block imports use type={blockType} format
+#[test]
+fn main_module_custom_block_import_uses_block_type_in_url() {
+    let host = VerterHost::new(HostConfig::default());
+    let src = r#"<script setup>const n = 1</script>
+<template><div>{{n}}</div></template>
+<route>{"path": "/sport"}</route>"#;
+    let _ = upsert_vue(&host, "Comp.vue", src);
+
+    let main = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("Comp.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
+    let code = main.code.as_ref();
+
+    // Must use type=route (the block's tag name), not type=custom&blockType=route
+    assert!(
+        code.contains("type=route&index=0"),
+        "custom block import should use type=route, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("type=custom"),
+        "custom block import should NOT use type=custom, got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("blockType="),
+        "custom block import should NOT use blockType= param, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Custom block retrieval via new type={blockType} URL format
+#[test]
+fn custom_block_retrieval_via_new_url_format() {
+    let host = VerterHost::new(HostConfig::default());
+    let src = r#"<script setup>const n = 1</script>
+<template><div>{{n}}</div></template>
+<i18n>{"en":{"hello":"world"}}</i18n>"#;
+    let _ = upsert_vue(&host, "Comp.vue", src);
+
+    // Request via new format: type=i18n&index=0
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("Comp.vue?vue&type=i18n&index=0".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
+
+    assert!(
+        !result.code.is_empty(),
+        "custom block should have content via type=i18n format"
+    );
+    assert!(
+        result.code.contains("hello"),
+        "content should contain i18n data, got: {}",
+        result.code
+    );
+}
+
+/// @ai-generated - Custom block content edit produces changed_virtual_ids with new format
+#[test]
+fn custom_block_edit_returns_changed_virtual_id_with_new_format() {
+    let host = VerterHost::new(HostConfig::default());
+
+    let src1 = r#"<script setup>const n = 1</script>
+<template><div>{{n}}</div></template>
+<i18n>{"en":{"hello":"world"}}</i18n>"#;
+    let src2 = r#"<script setup>const n = 1</script>
+<template><div>{{n}}</div></template>
+<i18n>{"en":{"hello":"universe"}}</i18n>"#;
+
+    let _ = upsert_vue(&host, "Comp.vue", src1);
+    let result = upsert_vue(&host, "Comp.vue", src2);
+
+    assert!(
+        result
+            .changed_virtual_nodes
+            .contains(&VirtualNodeKind::Custom { index: 0 }),
+        "custom block change should be reported, got: {:?}",
+        result.changed_virtual_nodes
+    );
+
+    // The changed ID should use the new format
+    let custom_id = result
+        .changed_virtual_ids
+        .iter()
+        .find(|id| id.contains("i18n"))
+        .expect("should have a changed ID containing 'i18n'");
+    assert!(
+        custom_id.contains("type=i18n"),
+        "changed ID should use type=i18n, got: {}",
+        custom_id
+    );
+    assert!(
+        !custom_id.contains("type=custom"),
+        "changed ID should NOT use type=custom, got: {}",
+        custom_id
+    );
+}
+
+/// @ai-generated - Multiple custom blocks of different types use correct type= in URLs
+#[test]
+fn multiple_custom_blocks_different_types_url_format() {
+    let host = VerterHost::new(HostConfig::default());
+    let src = r#"<script setup>const n = 1</script>
+<template><div>{{n}}</div></template>
+<i18n>{"en":{"hello":"world"}}</i18n>
+<route>{"path": "/test"}</route>"#;
+    let _ = upsert_vue(&host, "Comp.vue", src);
+
+    let main = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("Comp.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile_dev(),
+        })
+        .unwrap();
+    let code = main.code.as_ref();
+
+    // First custom block (i18n) should be type=i18n&index=0
+    assert!(
+        code.contains("type=i18n&index=0"),
+        "first custom block should use type=i18n&index=0, got:\n{}",
+        code
+    );
+    // Second custom block (route) should be type=route&index=1
+    assert!(
+        code.contains("type=route&index=1"),
+        "second custom block should use type=route&index=1, got:\n{}",
+        code
+    );
+    // Neither should use old format
+    assert!(
+        !code.contains("blockType="),
+        "should not contain blockType= param, got:\n{}",
+        code
+    );
+}
+
 /// @ai-generated - AnalysisLevel::None still provides analysis via get_analysis()
 #[test]
 fn analysis_level_none_get_analysis_computes_on_demand() {
@@ -2240,5 +2392,165 @@ fn cross_file_type_resolution_missing_dep_compiles_without_crash() {
     assert!(
         !result.code.is_empty(),
         "should produce output even without resolved external types"
+    );
+}
+
+// ======================== lang field + export type ========================
+
+/// @ai-generated - main module lang should be "js" when force_js: true, even for lang="ts" script
+#[test]
+fn main_module_lang_is_js_when_force_js() {
+    let host = VerterHost::new(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        r#"<script setup lang="ts">
+const x = 1
+</script>
+<template><div>{{ x }}</div></template>"#,
+    );
+
+    let mut profile = profile_prod();
+    profile.force_js = true;
+
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/Comp.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile,
+        })
+        .unwrap();
+
+    assert_eq!(
+        result.lang.as_deref(),
+        Some("js"),
+        "lang should be 'js' when force_js: true, got: {:?}",
+        result.lang
+    );
+}
+
+/// @ai-generated - main module lang should use script_lang when force_js: false
+#[test]
+fn main_module_lang_uses_script_lang_when_not_force_js() {
+    let host = VerterHost::new(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        r#"<script setup lang="ts">
+const x = 1
+</script>
+<template><div>{{ x }}</div></template>"#,
+    );
+
+    let mut profile = profile_dev();
+    profile.force_js = false;
+
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/Comp.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile,
+        })
+        .unwrap();
+
+    assert_eq!(
+        result.lang.as_deref(),
+        Some("ts"),
+        "lang should be 'ts' (from script_lang) when force_js: false, got: {:?}",
+        result.lang
+    );
+}
+
+/// @ai-generated - main module lang defaults to "js" when no script lang and force_js: false
+#[test]
+fn main_module_lang_defaults_to_js_when_no_script_lang() {
+    let host = VerterHost::new(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        r#"<script setup>
+const x = 1
+</script>
+<template><div>{{ x }}</div></template>"#,
+    );
+
+    let mut profile = profile_dev();
+    profile.force_js = false;
+
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/Comp.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile,
+        })
+        .unwrap();
+
+    assert_eq!(
+        result.lang.as_deref(),
+        Some("js"),
+        "lang should default to 'js' when no script lang attribute, got: {:?}",
+        result.lang
+    );
+}
+
+/// @ai-generated - export type must be stripped from main module when force_js: true
+#[test]
+fn main_module_strips_export_type_when_force_js() {
+    let host = VerterHost::new(HostConfig::default());
+    upsert_vue(
+        &host,
+        "/src/Comp.vue",
+        r#"<script setup lang="ts">
+import { computed } from 'vue'
+
+export type NavigatePayload =
+  | { type: 'notification'; to: string }
+  | { type: 'menu-item'; to: string }
+
+interface SideMenuProps {
+  visible?: boolean
+}
+
+const props = defineProps<SideMenuProps>()
+const isOpen = computed(() => props.visible)
+</script>
+
+<template><div>{{ isOpen }}</div></template>"#,
+    );
+
+    let mut profile = profile_prod();
+    profile.force_js = true;
+
+    let result = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("/src/Comp.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile,
+        })
+        .unwrap();
+
+    assert!(
+        !result.code.contains("export type"),
+        "export type should be stripped when force_js: true, got:\n{}",
+        result.code
+    );
+    assert!(
+        !result.code.contains("NavigatePayload"),
+        "NavigatePayload should not appear in JS output, got:\n{}",
+        result.code
+    );
+    assert!(
+        !result.code.contains("interface SideMenuProps"),
+        "interface should be stripped in JS output, got:\n{}",
+        result.code
+    );
+    assert_eq!(
+        result.lang.as_deref(),
+        Some("js"),
+        "lang should be 'js' when force_js: true"
     );
 }

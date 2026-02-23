@@ -154,7 +154,11 @@ fn collect_type_references_recursive(ts_type: &TSType<'_>, refs: &mut Vec<String
             collect_type_references_recursive(&ctor.return_type.type_annotation, refs);
         }
         TSType::TSInferType(_) => {}
-        TSType::TSTypeQuery(_) => {}
+        TSType::TSTypeQuery(query) => {
+            if let TSTypeQueryExprName::IdentifierReference(ident) = &query.expr_name {
+                refs.push(ident.name.to_string());
+            }
+        }
         TSType::TSImportType(_) => {}
         // Primitives and literals — no type references
         _ => {}
@@ -512,15 +516,11 @@ defineExpose({ props })
         );
     }
 
-    /// @ai-generated - typeof X in type refs returns empty (not tracked)
+    /// @ai-generated - typeof X in type refs extracts the identifier
     #[test]
-    fn typeof_in_type_refs_returns_empty() {
-        // TSTypeQuery (typeof) is intentionally not tracked — returns empty
+    fn typeof_in_type_refs_extracts_identifier() {
+        // TSTypeQuery (typeof) should collect the referenced identifier
         let refs = parse_type_refs("typeof X");
-        assert!(
-            refs.is_empty(),
-            "typeof type references should not be collected, got: {:?}",
-            refs
-        );
+        assert_eq!(refs, vec!["X".to_string()]);
     }
 }

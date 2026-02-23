@@ -25,6 +25,13 @@ pub fn walk_and_transform_selectors(
     let mut string_char = '"';
     let mut in_comment = false;
     let mut last_block_end: usize = 0;
+    // Track nesting depth inside @keyframes blocks so selectors within
+    // (from, to, 0%, 50%, etc.) are not transformed.
+    let mut keyframes_depth: usize = 0;
+    let mut brace_depth: usize = 0;
+    // The brace depth at which a @keyframes block was entered. We track
+    // multiple levels in case of (unlikely) nested at-rules.
+    let mut keyframes_entry_depths: Vec<usize> = Vec::new();
 
     while let Some((_i, c)) = chars.next() {
         match c {
@@ -74,6 +81,12 @@ pub fn walk_and_transform_selectors(
             // Track block boundaries
             '}' if !in_string => {
                 output.push(c);
+                brace_depth = brace_depth.saturating_sub(1);
+                // Check if we're closing a @keyframes block
+                if keyframes_entry_depths.last() == Some(&brace_depth) {
+                    keyframes_entry_depths.pop();
+                    keyframes_depth -= 1;
+                }
                 last_block_end = output.len();
             }
             // Handle rule blocks
@@ -85,8 +98,16 @@ pub fn walk_and_transform_selectors(
                     let raw_text = output[selector_start..selector_end].to_string();
                     let trimmed = raw_text.trim();
 
-                    // Skip @-rules (media, keyframes, etc.)
-                    if !trimmed.starts_with('@') && !trimmed.is_empty() {
+                    // Detect @keyframes entry
+                    if trimmed.starts_with("@keyframes")
+                        || trimmed.starts_with("@-webkit-keyframes")
+                    {
+                        keyframes_depth += 1;
+                        keyframes_entry_depths.push(brace_depth);
+                    }
+
+                    // Skip @-rules and selectors inside @keyframes blocks
+                    if !trimmed.starts_with('@') && !trimmed.is_empty() && keyframes_depth == 0 {
                         let transformed = transform_fn(trimmed);
                         output.truncate(selector_start);
                         // Preserve leading whitespace
@@ -97,6 +118,7 @@ pub fn walk_and_transform_selectors(
                 }
 
                 output.push('{');
+                brace_depth += 1;
             }
             _ => output.push(c),
         }
@@ -255,6 +277,79 @@ mod tests {
         // Same as test_at_rule_skipped: nested selectors inside @-rules are not found.
         let selectors = collect_selectors("@media screen { .inner { color: red; } }");
         assert!(selectors.is_empty());
+    }
+
+    // --- Keyframe selectors should NOT be transformed ---
+
+    /// @ai-generated - keyframe selectors (from/to) should not be transformed
+    #[test]
+    fn keyframe_selectors_not_transformed() {
+        let css = "@keyframes fade { from { opacity: 1; } to { opacity: 0; } }";
+        let result = walk_and_transform_selectors(css, |sel| format!("{}[scoped]", sel));
+        assert!(
+            !result.contains("from[scoped]"),
+            "from should not be transformed. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains("to[scoped]"),
+            "to should not be transformed. Got: {}",
+            result
+        );
+        assert!(result.contains("from"), "from should still be present");
+        assert!(result.contains("to"), "to should still be present");
+    }
+
+    /// @ai-generated - keyframe percentage selectors should not be transformed
+    #[test]
+    fn keyframe_percentage_selectors_not_transformed() {
+        let css = "@keyframes x { 0% { opacity: 0; } 50%, 100% { opacity: 1; } }";
+        let result = walk_and_transform_selectors(css, |sel| format!("{}[scoped]", sel));
+        assert!(
+            !result.contains("0%[scoped]"),
+            "0% should not be transformed. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains("50%[scoped]"),
+            "50% should not be transformed. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains("100%[scoped]"),
+            "100% should not be transformed. Got: {}",
+            result
+        );
+    }
+
+    /// @ai-generated - selectors after @keyframes block should still be transformed
+    #[test]
+    fn normal_selectors_after_keyframes_still_transformed() {
+        let css =
+            "@keyframes fade { from { opacity: 1; } to { opacity: 0; } } .box { color: red; }";
+        let result = walk_and_transform_selectors(css, |sel| format!("{}[scoped]", sel));
+        assert!(
+            result.contains(".box[scoped]"),
+            ".box after @keyframes should be transformed. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains("from[scoped]"),
+            "from should not be transformed. Got: {}",
+            result
+        );
+    }
+
+    /// @ai-generated - webkit keyframes should also skip selectors
+    #[test]
+    fn webkit_keyframes_selectors_not_transformed() {
+        let css = "@-webkit-keyframes slide { 0% { left: 0; } 100% { left: 100%; } }";
+        let result = walk_and_transform_selectors(css, |sel| format!("{}[scoped]", sel));
+        assert!(
+            !result.contains("0%[scoped]"),
+            "0% in webkit keyframes should not be transformed. Got: {}",
+            result
+        );
     }
 
     #[test]

@@ -199,10 +199,7 @@ pub(crate) fn render_ids(
                 .cloned()
                 .unwrap_or_else(|| "custom".to_string());
             (
-                format!(
-                    "{}?vue&type=custom&index={}&blockType={}",
-                    canonical_id, index, block_type
-                ),
+                format!("{}?vue&type={}&index={}", canonical_id, block_type, index),
                 format!("{}._VERTER_.custom.{}.{}", canonical_id, index, block_type),
             )
         }
@@ -403,6 +400,103 @@ mod tests {
                 parsed_l.was_lsp_like,
                 "lsp format not detected for {:?}",
                 node
+            );
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // Custom block URL format tests (matching @vitejs/plugin-vue)
+    // ═══════════════════════════════════════════════════════════
+
+    /// @ai-generated - render_ids for custom blocks must use type={blockType} (not type=custom&blockType=...)
+    #[test]
+    fn render_ids_custom_block_uses_block_type_as_type_param() {
+        let meta = FileMeta {
+            custom_types: vec!["route".to_string(), "i18n".to_string()],
+            custom_langs: vec![None, Some("json".to_string())],
+            ..FileMeta::default()
+        };
+
+        let (bundler_0, _) = render_ids(
+            "/src/Comp.vue",
+            &VirtualNodeKind::Custom { index: 0 },
+            &meta,
+        );
+        let (bundler_1, _) = render_ids(
+            "/src/Comp.vue",
+            &VirtualNodeKind::Custom { index: 1 },
+            &meta,
+        );
+
+        // Must match @vitejs/plugin-vue format: type={blockType}&index={idx}
+        assert_eq!(bundler_0, "/src/Comp.vue?vue&type=route&index=0");
+        assert_eq!(bundler_1, "/src/Comp.vue?vue&type=i18n&index=1");
+
+        // Must NOT contain type=custom or blockType=
+        assert!(!bundler_0.contains("type=custom"));
+        assert!(!bundler_0.contains("blockType="));
+        assert!(!bundler_1.contains("type=custom"));
+        assert!(!bundler_1.contains("blockType="));
+    }
+
+    /// @ai-generated - render_ids falls back to "custom" when custom_types is empty
+    #[test]
+    fn render_ids_custom_block_fallback_type() {
+        let meta = FileMeta::default(); // no custom_types
+        let (bundler, _) = render_ids(
+            "/src/Comp.vue",
+            &VirtualNodeKind::Custom { index: 0 },
+            &meta,
+        );
+        assert_eq!(bundler, "/src/Comp.vue?vue&type=custom&index=0");
+    }
+
+    /// @ai-generated - parse_raw_id treats type=route with index as Custom (new format)
+    #[test]
+    fn parse_raw_id_block_type_as_type_param() {
+        let result = parse_raw_id("Comp.vue?vue&type=route&index=0").unwrap();
+        assert_eq!(result.canonical_id, "Comp.vue");
+        assert_eq!(result.node_kind, VirtualNodeKind::Custom { index: 0 });
+
+        let result2 = parse_raw_id("Comp.vue?vue&type=i18n&index=2").unwrap();
+        assert_eq!(result2.node_kind, VirtualNodeKind::Custom { index: 2 });
+    }
+
+    /// @ai-generated - render_ids → parse_raw_id roundtrip for new custom block format
+    #[test]
+    fn render_parse_roundtrip_new_custom_format() {
+        let meta = FileMeta {
+            custom_types: vec!["route".to_string(), "i18n".to_string(), "docs".to_string()],
+            custom_langs: vec![None, Some("json".to_string()), None],
+            ..FileMeta::default()
+        };
+
+        for idx in 0..3 {
+            let node = VirtualNodeKind::Custom { index: idx };
+            let (bundler_id, lsp_id) = render_ids("/src/Comp.vue", &node, &meta);
+
+            let parsed_b = parse_raw_id(&bundler_id).unwrap();
+            assert_eq!(
+                parsed_b.canonical_id, "/src/Comp.vue",
+                "bundler roundtrip canonical_id for index {}",
+                idx
+            );
+            assert_eq!(
+                parsed_b.node_kind, node,
+                "bundler roundtrip node_kind for index {}",
+                idx
+            );
+
+            let parsed_l = parse_raw_id(&lsp_id).unwrap();
+            assert_eq!(
+                parsed_l.canonical_id, "/src/Comp.vue",
+                "lsp roundtrip canonical_id for index {}",
+                idx
+            );
+            assert_eq!(
+                parsed_l.node_kind, node,
+                "lsp roundtrip node_kind for index {}",
+                idx
             );
         }
     }

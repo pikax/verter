@@ -3,7 +3,7 @@
 //! Handles event delegation, modifiers, and dynamic events.
 
 use crate::ast::types::{ElementNode, PropFlags};
-use crate::template::code_gen::shared::helpers::{push_u32, VaporHelper};
+use crate::template::code_gen::shared::helpers::{self, push_u32, VaporHelper};
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::types::NodeId;
 
@@ -252,7 +252,7 @@ fn write_wrapped_handler(
                 buf.push_str(", ");
             }
             buf.push('"');
-            buf.push_str(m);
+            helpers::escape_js_string_into(buf, m);
             buf.push('"');
         }
         buf.push_str("])");
@@ -266,7 +266,7 @@ fn write_wrapped_handler(
                 buf.push_str(", ");
             }
             buf.push('"');
-            buf.push_str(m);
+            helpers::escape_js_string_into(buf, m);
             buf.push('"');
         }
         buf.push_str("])");

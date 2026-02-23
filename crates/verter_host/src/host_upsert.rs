@@ -7,6 +7,11 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
 use crate::cache::{invalidate_nodes, sorted_nodes};
 use crate::hash::{compile_profile_hash, style_override_hash};
 use crate::id::{canonicalize_id, render_ids};
@@ -33,7 +38,7 @@ impl VerterHost {
             .clone()
             .unwrap_or_else(|| canonicalize_id(&req.input_id).into_owned());
 
-        let parse_start = std::time::Instant::now();
+        let parse_start = Instant::now();
         let mut snapshot = match req.file_kind {
             FileKind::VueSfc => {
                 parse_vue_snapshot(&canonical_id, &req.source, self.config.analysis_level)

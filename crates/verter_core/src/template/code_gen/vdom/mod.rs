@@ -648,9 +648,12 @@ impl<'ast, 'alloc> TemplateCodeGen<'alloc> for VdomCodeGen<'ast, 'alloc> {
             "visit_comment",
         );
         // Skip comments between v-if chain members (Vue discards these).
-        // Don't emit an overwrite here — the parent's leave phase handles removal
-        // (via strip_interstitial_condition_nodes or gap-filling).
+        // Emit removal overwrite directly — the parent's leave phase may not
+        // include this comment in its child records (when options.comments=false,
+        // build_child_records excludes comments, so strip_interstitial_condition_nodes
+        // can't find them). At root level, gap-filling also doesn't cover these.
         if self.is_interstitial_condition_node(id) {
+            out.overwrite(comment_node.start, comment_node.end, "");
             return;
         }
         // Apply comment overwrites (or removal if disabled).

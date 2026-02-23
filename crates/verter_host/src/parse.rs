@@ -886,6 +886,42 @@ mod tests {
         assert_eq!(snap.meta.script_lang, Some("ts".to_string()));
     }
 
+    /// @ai-generated - script_lang extracted from multiline SFC with export type
+    #[test]
+    fn parse_vue_snapshot_script_lang_ts_multiline() {
+        let snap = parse_vue_snapshot(
+            "SideMenu.vue",
+            r#"<script setup lang="ts">
+import type { MenuItems } from './types.ts'
+import { computed } from 'vue'
+
+export type NavigatePayload =
+  | { type: 'notification'; to: string }
+  | { type: 'menu-item'; to: string }
+
+interface SideMenuProps {
+  visible?: boolean
+  menuItems?: MenuItems[]
+}
+
+const props = defineProps<SideMenuProps>()
+const isOpen = computed(() => props.visible)
+</script>
+
+<template><div>{{ isOpen }}</div></template>
+
+<style lang="scss" scoped>
+.menu { color: red; }
+</style>"#,
+            AnalysisLevel::Full,
+        );
+        assert_eq!(
+            snap.meta.script_lang,
+            Some("ts".to_string()),
+            "script_lang should be 'ts' for multiline SFC with lang=\"ts\""
+        );
+    }
+
     /// @ai-generated - script_lang is None when no lang attribute
     #[test]
     fn parse_vue_snapshot_script_lang_none() {

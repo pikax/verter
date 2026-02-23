@@ -476,6 +476,27 @@ function installVerterTarballs(project, repoDir) {
     log(project.name, `  Overwrote ${overwritten} @verter dist(s) from source`);
   }
 
+  // Also overwrite root-level JS/TS files (index.js, index.ts) for each
+  // @verter package. The dist overwrite only covers the dist/ subdirectory,
+  // but files like native/index.js (which contains Buffer coercion wrappers)
+  // live at the package root and may be stale in old tarballs.
+  const srcRoots = {
+    unplugin: path.join(ROOT, 'packages', 'unplugin'),
+    native: path.join(ROOT, 'packages', 'native'),
+  };
+  const rootFiles = ['index.js', 'index.ts'];
+  for (const { dist: destDist, pkg } of distsToOverwrite) {
+    const srcPkgDir = srcRoots[pkg];
+    if (!srcPkgDir) continue;
+    const destPkgDir = path.dirname(destDist); // parent of dist/ = package root
+    for (const file of rootFiles) {
+      const srcFile = path.join(srcPkgDir, file);
+      if (fs.existsSync(srcFile)) {
+        fs.copyFileSync(srcFile, path.join(destPkgDir, file));
+      }
+    }
+  }
+
   log(project.name, 'Verter tarballs installed.');
 }
 

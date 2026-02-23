@@ -97,8 +97,13 @@ fn test_script_setup_basic_dev() {
         script.code
     );
     assert!(
-        script.code.contains("return {"),
-        "Dev mode (non-inline) should have return statement, got:\n{}",
+        script.code.contains("const __returned__ = {"),
+        "Dev mode (non-inline) should have __returned__ statement, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("__isScriptSetup"),
+        "Dev mode should have __isScriptSetup marker, got:\n{}",
         script.code
     );
 }
@@ -1040,13 +1045,14 @@ import MyComp from './MyComp.vue'
     let result = compile(input, &options, &verter_opts, &allocator);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
-        script.code.contains("return {") || script.code.contains("return{"),
-        "Should have return statement, got:\n{}",
+        script.code.contains("const __returned__ = {"),
+        "Should have __returned__ statement, got:\n{}",
         script.code
     );
     let return_pos = script
         .code
-        .find("return {")
+        .find("const __returned__ = {")
+        .map(|p| p + "const __returned__ = ".len())
         .or_else(|| script.code.find("return{"))
         .expect("Should have return");
     let return_end = script.code[return_pos..].find('}').unwrap() + return_pos;
@@ -1075,7 +1081,8 @@ const x = SOME_CONST
     let script = result.script.as_ref().expect("should have script block");
     let return_pos = script
         .code
-        .find("return {")
+        .find("const __returned__ = {")
+        .map(|p| p + "const __returned__ = ".len())
         .or_else(|| script.code.find("return{"))
         .expect("Should have return");
     let return_end = script.code[return_pos..].find('}').unwrap() + return_pos;
@@ -1126,7 +1133,8 @@ const localVar = 'hello'
     let script = result.script.as_ref().expect("should have script block");
     let return_pos = script
         .code
-        .find("return {")
+        .find("const __returned__ = {")
+        .map(|p| p + "const __returned__ = ".len())
         .or_else(|| script.code.find("return{"))
         .expect("Should have return");
     let return_end = script.code[return_pos..].find('}').unwrap() + return_pos;
@@ -1162,7 +1170,8 @@ function increment() {}
     let script = result.script.as_ref().expect("should have script block");
     let return_pos = script
         .code
-        .find("return {")
+        .find("const __returned__ = {")
+        .map(|p| p + "const __returned__ = ".len())
         .or_else(|| script.code.find("return{"))
         .expect("Should have return");
     let return_end = script.code[return_pos..].find('}').unwrap() + return_pos;
@@ -1206,7 +1215,8 @@ const x = CONST_VAL
     let script = result.script.as_ref().expect("should have script block");
     let return_pos = script
         .code
-        .find("return {")
+        .find("const __returned__ = {")
+        .map(|p| p + "const __returned__ = ".len())
         .or_else(|| script.code.find("return{"))
         .expect("Should have return");
     let return_end = script.code[return_pos..].find('}').unwrap() + return_pos;
@@ -1293,7 +1303,7 @@ fn test_dev_template_before_script() {
 #[test]
 fn test_prod_script_has_return_statement() {
     // With is_inline: false (hardcoded in new pipeline), production mode
-    // still uses return { ... } in the script block
+    // still uses const __returned__ = { ... }; return __returned__;
     let input =
         "<script setup>\nconst msg = 'Hello'\n</script>\n<template><div>{{ msg }}</div></template>";
     let allocator = Allocator::new();
@@ -1307,8 +1317,8 @@ fn test_prod_script_has_return_statement() {
     let result = compile(input, &options, &verter_opts, &allocator);
     let script = result.script.as_ref().expect("should have script block");
     assert!(
-        script.code.contains("return {"),
-        "Non-inline production mode should have return statement, got:\n{}",
+        script.code.contains("const __returned__ = {"),
+        "Non-inline production mode should have __returned__ statement, got:\n{}",
         script.code
     );
 }

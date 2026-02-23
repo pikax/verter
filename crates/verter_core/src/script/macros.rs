@@ -305,44 +305,48 @@ pub(super) fn process_macro_item<'a>(
                 if !tp.resolved.props.is_empty() {
                     let mut props_obj = String::from("{\n");
                     for prop in &tp.resolved.props {
-                        // key spans are SFC-absolute. For same-block types they
-                        // point into the setup content; for cross-block types
-                        // (companion <script>) they point elsewhere in `source`.
-                        // Use the full SFC `source` so both cases work.
-                        let key_start = prop.key.start as usize;
-                        let key_end = prop.key.end as usize;
-                        if key_end <= ctx.source.len() {
-                            let name = &ctx.source[key_start..key_end];
-                            ctx.bindings.insert(name, BindingType::Props);
-
-                            let type_str = format_runtime_types(&prop.types);
-                            props_obj.push_str("    ");
-                            props_obj.push_str(name);
-                            props_obj.push_str(": { type: ");
-                            props_obj.push_str(&type_str);
-
-                            // Check if this prop has a default in the defaults object.
-                            // defaults spans are OXC-local (0-based within content_str).
-                            let default_prop = defaults
-                                .as_ref()
-                                .and_then(|d| d.properties.iter().find(|p| p.name == name));
-                            let default_value = default_prop.and_then(|p| {
-                                p.value_span
-                                    .map(|vs| &content_str[vs.start as usize..vs.end as usize])
-                            });
-
-                            if let Some(val) = default_value {
-                                props_obj.push_str(", default: ");
-                                if default_prop.is_some_and(|p| p.is_method) {
-                                    push_method_as_arrow(&mut props_obj, val);
-                                } else {
-                                    props_obj.push_str(val);
-                                }
-                            } else if !prop.optional {
-                                props_obj.push_str(", required: true");
+                        // Use pre-resolved key_name for external types (where spans
+                        // reference a different source), span extraction for intra-file.
+                        let name: &str = if let Some(ref kn) = prop.key_name {
+                            kn.as_str()
+                        } else {
+                            let key_start = prop.key.start as usize;
+                            let key_end = prop.key.end as usize;
+                            if key_end > ctx.source.len() {
+                                continue;
                             }
-                            props_obj.push_str(" },\n");
+                            &ctx.source[key_start..key_end]
+                        };
+                        ctx.bindings
+                            .insert(ctx.alloc.alloc_str(name), BindingType::Props);
+
+                        let type_str = format_runtime_types(&prop.types);
+                        props_obj.push_str("    ");
+                        props_obj.push_str(name);
+                        props_obj.push_str(": { type: ");
+                        props_obj.push_str(&type_str);
+
+                        // Check if this prop has a default in the defaults object.
+                        // defaults spans are OXC-local (0-based within content_str).
+                        let default_prop = defaults
+                            .as_ref()
+                            .and_then(|d| d.properties.iter().find(|p| p.name == name));
+                        let default_value = default_prop.and_then(|p| {
+                            p.value_span
+                                .map(|vs| &content_str[vs.start as usize..vs.end as usize])
+                        });
+
+                        if let Some(val) = default_value {
+                            props_obj.push_str(", default: ");
+                            if default_prop.is_some_and(|p| p.is_method) {
+                                push_method_as_arrow(&mut props_obj, val);
+                            } else {
+                                props_obj.push_str(val);
+                            }
+                        } else if !prop.optional {
+                            props_obj.push_str(", required: true");
                         }
+                        props_obj.push_str(" },\n");
                     }
                     props_obj.push('}');
                     state.props_section = Some(props_obj);

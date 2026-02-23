@@ -82,7 +82,7 @@ use super::{TemplateCodeGen, TemplateCodeGenOptions};
 fn push_prop_key(buf: &mut String, key: &str) {
     if needs_quoted_key(key) {
         buf.push('"');
-        buf.push_str(key);
+        helpers::escape_js_string_into(buf, key);
         buf.push('"');
     } else {
         buf.push_str(key);
@@ -1040,7 +1040,7 @@ impl<'ast, 'alloc> VaporCodeGen<'ast, 'alloc> {
                     buf.push_str(", ");
                 }
                 buf.push('"');
-                buf.push_str(event);
+                helpers::escape_js_string_into(&mut buf, event);
                 buf.push('"');
             }
             buf.push_str(")\n");

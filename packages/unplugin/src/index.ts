@@ -51,6 +51,16 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
   // matching @vitejs/plugin-vue's behavior.
   const scriptCache = new Map<string, { code: string; map: any }>();
 
+  // Build timing instrumentation — accumulates per-phase timings across all .vue transforms.
+  // Enabled when VERTER_TIMING=1 env var is set.
+  const timing = process.env.VERTER_TIMING === "1";
+  let tFileCount = 0;
+  let tUpsertMs = 0;
+  let tDepsMs = 0;
+  let tCompileMs = 0;
+  let tLoadFileCount = 0;
+  let tLoadMs = 0;
+
   return {
     name: "unplugin-verter",
 
@@ -101,10 +111,15 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       })();
 
       try {
+        const lt0 = timing ? performance.now() : 0;
         const file = host.getVirtualFile({
           rawId: id,
           compileProfile,
         });
+        if (timing) {
+          tLoadMs += performance.now() - lt0;
+          tLoadFileCount++;
+        }
 
         return {
           code: file.code,
@@ -175,19 +190,22 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         componentId,
         hmrStrategy: (isProd ? "none" : hmrStrategy) as HostCompileProfile["hmrStrategy"],
         sourceMap: true,
-        // In Vite mode, TS stripping is handled by vite:esbuild on the script sub-request.
-        // In non-Vite mode, the host strips TS during compilation.
-        forceJs: !viteConfig,
+        // Only Vite itself strips TS via vite:esbuild on script sub-requests.
+        // Rolldown/tsdown sets viteConfig (via Vite's API) but lacks vite:esbuild,
+        // so Verter must strip TS. Other bundlers (webpack, rspack) also need stripping.
+        forceJs: !viteConfig || meta.framework !== "vite",
       };
 
       // Cache the profile so load() can reuse it for virtual file requests
       profileCache.set(filename, profile);
 
       // Register file in host (handles parsing, caching, change detection)
+      const t0 = timing ? performance.now() : 0;
       const upsertResult = host.upsert({
         inputId: filename,
         source: code,
       });
+      const t1 = timing ? performance.now() : 0;
 
       // Resolve external sources (e.g., <style src="./foo.less">, <template src="./t.html">)
       if (upsertResult.externalSourceRequests.length > 0) {
@@ -218,12 +236,16 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
         const path = await import("path");
         const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"];
         for (const imp of upsertResult.importSpecifiers) {
-          if (!imp.isTypeOnly) continue;
           if (!imp.source.startsWith(".")) continue; // skip bare specifiers (node_modules)
 
           const absBase = path.resolve(path.dirname(filename), imp.source);
           for (const ext of exts) {
             const fullPath = absBase + ext;
+            // Skip .vue files — they'll be properly upserted as VueSfc when
+            // Vite's module graph processes them via transform(). Upserting
+            // them as non_sfc here would clobber their SFC-specific metadata
+            // (script_lang, style_langs, etc.).
+            if (fullPath.endsWith(".vue")) continue;
             try {
               const depSource = fs.readFileSync(fullPath);
               host.upsert({
@@ -238,12 +260,21 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
           }
         }
       }
+      const t2 = timing ? performance.now() : 0;
 
       // Get the main module from the host (assembled in Rust)
       const main = host.getVirtualFile({
         rawId: filename,
         compileProfile: profile,
       });
+      const t3 = timing ? performance.now() : 0;
+
+      if (timing) {
+        tUpsertMs += t1 - t0;
+        tDepsMs += t2 - t1;
+        tCompileMs += t3 - t2;
+        tFileCount++;
+      }
 
       // Determine the effective language of the compiled output.
       const mainLang: string = main.lang ?? "ts";
@@ -280,6 +311,25 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       // Non-Vite mode: inline everything (no sub-request support).
       // TS stripping is handled by the host via forceJs: true in the profile.
       return { code: main.code, map: null };
+    },
+
+    buildEnd() {
+      if (!timing) return;
+      const transformTotal = tUpsertMs + tDepsMs + tCompileMs;
+      const lines = [
+        `[verter] Build timing (${tFileCount} .vue files transformed):`,
+        `  transform: upsert=${tUpsertMs.toFixed(0)}ms  deps=${tDepsMs.toFixed(0)}ms  compile=${tCompileMs.toFixed(0)}ms  total=${transformTotal.toFixed(0)}ms`,
+        `  load: ${tLoadFileCount} virtual files, ${tLoadMs.toFixed(0)}ms`,
+      ];
+      const host = loadHost();
+      const metrics = (host as any).getMetrics?.();
+      if (metrics) {
+        lines.push(
+          `  host metrics: upserts=${metrics.upserts}  compileRequests=${metrics.compileRequests}  cacheHits=${metrics.compileCacheHits}  hitRate=${(metrics.compileCacheHitRate * 100).toFixed(1)}%`,
+          `    rustParseTotal=${(metrics.sliceHashTimeUsTotal / 1000).toFixed(0)}ms  rustCompileTotal=${(metrics.compileTimeUsTotal / 1000).toFixed(0)}ms`,
+        );
+      }
+      console.log(lines.join("\n"));
     },
 
     watchChange(id) {

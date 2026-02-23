@@ -86,6 +86,7 @@ pub enum ReactivityLevel {
 pub struct BindingResolver<'alloc> {
     bindings: FxHashMap<&'alloc str, BindingType>,
     is_inline: bool,
+    is_vapor: bool,
 }
 
 impl<'alloc> BindingResolver<'alloc> {
@@ -94,6 +95,19 @@ impl<'alloc> BindingResolver<'alloc> {
         Self {
             bindings,
             is_inline,
+            is_vapor: false,
+        }
+    }
+
+    /// Create a new resolver for vapor mode.
+    ///
+    /// In vapor mode, all bindings use `_ctx.` prefix (never `$setup.` or `$props.`),
+    /// and no `.value` suffix is needed. This matches Vue's official vapor compiler.
+    pub fn new_vapor(bindings: FxHashMap<&'alloc str, BindingType>) -> Self {
+        Self {
+            bindings,
+            is_inline: false,
+            is_vapor: true,
         }
     }
 
@@ -111,11 +125,16 @@ impl<'alloc> BindingResolver<'alloc> {
 
     /// Resolve the accessor prefix for an identifier.
     ///
-    /// - Props: `__props.` (inline) or `$props.` (standalone)
-    /// - Setup bindings: `""` (inline) or `$setup.` (standalone)
-    /// - Data/Options/Unresolved: `_ctx.`
+    /// - **Vapor mode**: all bindings use `_ctx.` (matching Vue's official vapor compiler)
+    /// - **VDOM mode**:
+    ///   - Props: `__props.` (inline) or `$props.` (standalone)
+    ///   - Setup bindings: `""` (inline) or `$setup.` (standalone)
+    ///   - Data/Options/Unresolved: `_ctx.`
     #[inline]
     pub fn resolve_prefix(&self, ident: &str) -> &'static str {
+        if self.is_vapor {
+            return "_ctx.";
+        }
         match self.bindings.get(ident) {
             Some(bt) if bt.is_props() => {
                 if self.is_inline {
@@ -141,10 +160,10 @@ impl<'alloc> BindingResolver<'alloc> {
     /// Resolve the accessor suffix for an identifier.
     ///
     /// Returns `.value` for `SetupRef` and `SetupMaybeRef` bindings in inline mode,
-    /// empty string otherwise.
+    /// empty string otherwise. Vapor mode never adds `.value`.
     #[inline]
     pub fn resolve_suffix(&self, ident: &str) -> &'static str {
-        if !self.is_inline {
+        if self.is_vapor || !self.is_inline {
             return "";
         }
         match self.bindings.get(ident) {
@@ -636,5 +655,63 @@ mod tests {
     fn resolve_simple_expr_trims_whitespace() {
         let resolver = make_resolver(&[("foo", BindingType::SetupConst)], false);
         assert_eq!(resolver.resolve_simple_expr("  foo  "), "$setup.foo");
+    }
+
+    // ==================== Vapor mode bindings ====================
+
+    fn make_vapor_resolver(entries: &[(&'static str, BindingType)]) -> BindingResolver<'static> {
+        let mut map = FxHashMap::default();
+        for &(name, bt) in entries {
+            map.insert(name, bt);
+        }
+        BindingResolver::new_vapor(map)
+    }
+
+    #[test]
+    fn vapor_setup_ref_prefix_is_ctx() {
+        let resolver = make_vapor_resolver(&[("count", BindingType::SetupRef)]);
+        assert_eq!(resolver.resolve_prefix("count"), "_ctx.");
+    }
+
+    #[test]
+    fn vapor_setup_const_prefix_is_ctx() {
+        let resolver = make_vapor_resolver(&[("fn", BindingType::SetupConst)]);
+        assert_eq!(resolver.resolve_prefix("fn"), "_ctx.");
+    }
+
+    #[test]
+    fn vapor_setup_let_prefix_is_ctx() {
+        let resolver = make_vapor_resolver(&[("x", BindingType::SetupLet)]);
+        assert_eq!(resolver.resolve_prefix("x"), "_ctx.");
+    }
+
+    #[test]
+    fn vapor_props_prefix_is_ctx() {
+        let resolver = make_vapor_resolver(&[("msg", BindingType::Props)]);
+        assert_eq!(resolver.resolve_prefix("msg"), "_ctx.");
+    }
+
+    #[test]
+    fn vapor_unresolved_prefix_is_ctx() {
+        let resolver = make_vapor_resolver(&[]);
+        assert_eq!(resolver.resolve_prefix("unknown"), "_ctx.");
+    }
+
+    #[test]
+    fn vapor_suffix_is_always_empty() {
+        let resolver = make_vapor_resolver(&[("count", BindingType::SetupRef)]);
+        assert_eq!(resolver.resolve_suffix("count"), "");
+    }
+
+    #[test]
+    fn vapor_resolve_simple_expr_uses_ctx() {
+        let resolver = make_vapor_resolver(&[("msg", BindingType::SetupRef)]);
+        assert_eq!(resolver.resolve_simple_expr("msg"), "_ctx.msg");
+    }
+
+    #[test]
+    fn vapor_resolve_simple_expr_props_uses_ctx() {
+        let resolver = make_vapor_resolver(&[("title", BindingType::Props)]);
+        assert_eq!(resolver.resolve_simple_expr("title"), "_ctx.title");
     }
 }

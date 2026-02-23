@@ -24,6 +24,7 @@ describe("File", () => {
         css: "",
         verterSourceMap: "",
         errors: [],
+        analysis: null,
       });
     });
   });

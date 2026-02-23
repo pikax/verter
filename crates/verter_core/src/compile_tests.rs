@@ -528,6 +528,40 @@ fn v_if_inside_v_for_with_whitespace() {
     );
 }
 
+/// @ai-generated - Regression test for playground AnalysisPanel.vue build failure.
+/// When a standalone v-if element (no v-else) is followed by another sibling,
+/// the scope_close suffix and sibling comma are both prepended at the same
+/// position (element's end). With sort_unstable_by_key, the ordering is not
+/// guaranteed, producing `, : _createCommentVNode(...)` instead of the
+/// correct `) : _createCommentVNode(...), `.
+#[test]
+fn v_if_followed_by_sibling_valid_js() {
+    // Minimal case: v-if without v-else, followed by a sibling
+    let code = compile_and_validate_template(
+        r#"<template><div><span v-if="show">yes</span><p>after</p></div></template>"#,
+    );
+    assert!(
+        code.contains(") : _createCommentVNode(\"v-if\", true), "),
+        "scope_close should come before sibling comma\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Regression test using the actual AnalysisPanel.vue template
+/// structure that triggered the playground build failure. This complex template
+/// produces enough prepends to trigger sort_unstable_by_key reordering.
+#[test]
+fn analysis_panel_regression_valid_js() {
+    let code = compile_and_validate_template(include_str!(
+        "../../../packages/playground/src/output/AnalysisPanel.vue"
+    ));
+    assert!(
+        !code.contains(",  : _createCommentVNode"),
+        "comma should not appear before ternary colon\n{}",
+        code
+    );
+}
+
 #[test]
 fn component_whitespace_children_clean_output() {
     // Component with whitespace-only children should not leak close tag
@@ -1328,6 +1362,180 @@ function onTitleChange(v) {}
     );
 }
 
+// ==================== v-model on native elements ====================
+
+// @ai-generated - Tests v-model on native <input> generates withDirectives + onUpdate:modelValue
+#[test]
+fn v_model_on_native_input_generates_with_directives() {
+    let result = compile_sfc(
+        r#"<template><div><input v-model="msg" /></div></template>
+<script setup>
+const msg = ref('')
+</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    let code = &tpl.code;
+    assert!(
+        code.contains("_withDirectives"),
+        "v-model on native input should use _withDirectives, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_vModelText"),
+        "v-model on native input should use _vModelText directive, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains(r#""onUpdate:modelValue""#),
+        "v-model on native input should emit onUpdate:modelValue handler, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("$event"),
+        "v-model update handler should use $event assignment, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - v-model on <textarea> uses _vModelText
+#[test]
+fn v_model_on_textarea_generates_with_directives() {
+    let result = compile_sfc(
+        r#"<template><div><textarea v-model="msg" /></div></template>
+<script setup>
+const msg = ref('')
+</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    let code = &tpl.code;
+    assert!(
+        code.contains("_withDirectives"),
+        "v-model on textarea should use _withDirectives, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_vModelText"),
+        "v-model on textarea should use _vModelText, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - v-model on <select> uses _vModelSelect
+#[test]
+fn v_model_on_select_generates_with_directives() {
+    let result = compile_sfc(
+        r#"<template><div><select v-model="choice"><option>A</option></select></div></template>
+<script setup>
+const choice = ref('')
+</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    let code = &tpl.code;
+    assert!(
+        code.contains("_withDirectives"),
+        "v-model on select should use _withDirectives, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_vModelSelect"),
+        "v-model on select should use _vModelSelect, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - v-model on checkbox input uses _vModelCheckbox
+#[test]
+fn v_model_on_checkbox_generates_with_directives() {
+    let result = compile_sfc(
+        r#"<template><div><input type="checkbox" v-model="checked" /></div></template>
+<script setup>
+const checked = ref(false)
+</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    let code = &tpl.code;
+    assert!(
+        code.contains("_withDirectives"),
+        "v-model on checkbox should use _withDirectives, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_vModelCheckbox"),
+        "v-model on checkbox should use _vModelCheckbox, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - v-model on radio input uses _vModelRadio
+#[test]
+fn v_model_on_radio_generates_with_directives() {
+    let result = compile_sfc(
+        r#"<template><div><input type="radio" v-model="picked" value="a" /></div></template>
+<script setup>
+const picked = ref('a')
+</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    let code = &tpl.code;
+    assert!(
+        code.contains("_withDirectives"),
+        "v-model on radio should use _withDirectives, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_vModelRadio"),
+        "v-model on radio should use _vModelRadio, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - v-model with .trim modifier generates modifier object in directive
+#[test]
+fn v_model_on_input_with_trim_modifier() {
+    let result = compile_sfc(
+        r#"<template><div><input v-model.trim="msg" /></div></template>
+<script setup>
+const msg = ref('')
+</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    let code = &tpl.code;
+    assert!(
+        code.contains("_withDirectives"),
+        "v-model.trim should use _withDirectives, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("trim: true"),
+        "v-model.trim should have modifier object with trim: true, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - v-model on dynamic input type uses _vModelDynamic
+#[test]
+fn v_model_on_dynamic_type_input_uses_dynamic() {
+    let result = compile_sfc(
+        r#"<template><div><input :type="inputType" v-model="val" /></div></template>
+<script setup>
+const inputType = ref('text')
+const val = ref('')
+</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    let code = &tpl.code;
+    assert!(
+        code.contains("_withDirectives"),
+        "v-model on dynamic type should use _withDirectives, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_vModelDynamic"),
+        "v-model on dynamic type input should use _vModelDynamic, got:\n{}",
+        code
+    );
+}
+
 // ==================== Component PatchFlags ====================
 
 // @ai-generated - Components with dynamic props should emit PATCH_PROPS flag
@@ -1730,6 +1938,223 @@ fn scoped_slot_parameters_passed_to_withctx() {
     assert!(
         code.contains("_withCtx(({ text }) => ["),
         "scoped slot params should be in _withCtx arrow function, got:\n{}",
+        code
+    );
+}
+
+// ==================== Empty template slots ====================
+
+// @ai-generated - TDD: empty named slot should not leak </template> into JS output
+#[test]
+fn empty_named_slot_no_close_tag_leak() {
+    let code = compile_and_validate_template(
+        r#"<template><Comp><template #title></template><template #default><span>content</span></template></Comp></template>
+<script setup>import Comp from "./Comp.vue";</script>"#,
+    );
+    assert!(
+        !code.contains("</template>"),
+        "empty slot should not leak </template> into JS, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("title:") && code.contains("_withCtx(() => [])"),
+        "empty slot should produce name: _withCtx(() => []), got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - TDD: empty named slot with whitespace-only content
+#[test]
+fn empty_named_slot_whitespace_only() {
+    let code = compile_and_validate_template(
+        r#"<template><Comp><template #header>   </template><template #default><span>ok</span></template></Comp></template>
+<script setup>import Comp from "./Comp.vue";</script>"#,
+    );
+    assert!(
+        !code.contains("</template>"),
+        "whitespace-only slot should not leak </template>, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - TDD: multiple empty named slots
+#[test]
+fn multiple_empty_named_slots() {
+    let code = compile_and_validate_template(
+        r#"<template><Comp><template #header></template><template #footer></template></Comp></template>
+<script setup>import Comp from "./Comp.vue";</script>"#,
+    );
+    assert!(
+        !code.contains("</template>"),
+        "empty slots should not leak </template>, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("header:") && code.contains("footer:"),
+        "should have both slot keys, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - TDD: empty scoped slot (with params but no children)
+#[test]
+fn empty_scoped_slot_no_children() {
+    let code = compile_and_validate_template(
+        r#"<template><Comp><template #item="{ data }"></template></Comp></template>
+<script setup>import Comp from "./Comp.vue";</script>"#,
+    );
+    assert!(
+        !code.contains("</template>"),
+        "empty scoped slot should not leak </template>, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_withCtx(({ data }) => [])"),
+        "empty scoped slot should have params and empty array, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - TDD: empty slot with v-if in dynamic _createSlots mode
+#[test]
+fn empty_slot_with_v_if_dynamic() {
+    let code = compile_and_validate_template(
+        r#"<template><Comp><template #header v-if="show"></template><template #footer><span>foot</span></template></Comp></template>
+<script setup>import Comp from "./Comp.vue"; const show = true;</script>"#,
+    );
+    assert!(
+        !code.contains("</template>"),
+        "empty conditional slot should not leak </template>, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createSlots("),
+        "should use _createSlots for conditional slots, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - TDD: empty slot mixed with non-empty (real-world pattern from avava)
+#[test]
+fn empty_slot_mixed_with_content_slots() {
+    let code = compile_and_validate_template(
+        r#"<template><Tab><template #title></template><div>content</div></Tab></template>
+<script setup>import Tab from "./Tab.vue";</script>"#,
+    );
+    assert!(
+        !code.contains("</template>"),
+        "empty title slot should not leak </template>, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - TDD: self-closing named slot (counterpart to empty_named_slot_no_close_tag_leak)
+#[test]
+fn self_closing_template_slot() {
+    let code = compile_and_validate_template(
+        r#"<template><Comp><template #title /><template #default><span>ok</span></template></Comp></template>
+<script setup>import Comp from "./Comp.vue";</script>"#,
+    );
+    assert!(
+        !code.contains("</template>") && !code.contains("<template"),
+        "self-closing slot should not leak any template tags, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("title:") && code.contains("_withCtx(() => [])"),
+        "self-closing slot should produce empty slot function, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - TDD: self-closing with whitespace (counterpart to empty_named_slot_whitespace_only)
+// Note: self-closing `<template #header />` can't have inner whitespace — this tests
+// that the self-closing form still works in a context with other normal slots.
+#[test]
+fn self_closing_slot_with_other_normal_slot() {
+    let code = compile_and_validate_template(
+        r#"<template><Comp><template #header /><template #default><span>ok</span></template></Comp></template>
+<script setup>import Comp from "./Comp.vue";</script>"#,
+    );
+    assert!(
+        !code.contains("<template"),
+        "self-closing slot should not leak template tags, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("header:") && code.contains("default:"),
+        "should have both slot keys, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - TDD: multiple self-closing slots (counterpart to multiple_empty_named_slots)
+#[test]
+fn multiple_self_closing_named_slots() {
+    let code = compile_and_validate_template(
+        r#"<template><Comp><template #header /><template #footer /></Comp></template>
+<script setup>import Comp from "./Comp.vue";</script>"#,
+    );
+    assert!(
+        !code.contains("<template"),
+        "self-closing slots should not leak template tags, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("header:") && code.contains("footer:"),
+        "should have both slot keys, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - TDD: self-closing scoped slot (counterpart to empty_scoped_slot_no_children)
+#[test]
+fn self_closing_scoped_template_slot() {
+    let code = compile_and_validate_template(
+        r#"<template><Comp><template #item="{ row }" /></Comp></template>
+<script setup>import Comp from "./Comp.vue";</script>"#,
+    );
+    assert!(
+        !code.contains("<template") && !code.contains("/>"),
+        "self-closing scoped slot should not leak template syntax, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_withCtx(({ row }) => [])"),
+        "self-closing scoped slot should have params and empty array, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - TDD: self-closing slot with v-if (counterpart to empty_slot_with_v_if_dynamic)
+#[test]
+fn self_closing_slot_with_v_if_dynamic() {
+    let code = compile_and_validate_template(
+        r#"<template><Comp><template #header v-if="show" /><template #footer><span>foot</span></template></Comp></template>
+<script setup>import Comp from "./Comp.vue"; const show = true;</script>"#,
+    );
+    assert!(
+        !code.contains("<template"),
+        "self-closing conditional slot should not leak template tags, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_createSlots("),
+        "should use _createSlots for conditional slots, got:\n{}",
+        code
+    );
+}
+
+// @ai-generated - TDD: self-closing slot mixed with default content (counterpart to empty_slot_mixed_with_content_slots)
+#[test]
+fn self_closing_slot_mixed_with_content() {
+    let code = compile_and_validate_template(
+        r#"<template><Tab><template #title /><div>content</div></Tab></template>
+<script setup>import Tab from "./Tab.vue";</script>"#,
+    );
+    assert!(
+        !code.contains("<template"),
+        "self-closing title slot should not leak template tags, got:\n{}",
         code
     );
 }
@@ -2953,42 +3378,49 @@ onMounted(() => {
     let script = result.script.unwrap();
     let code = &script.code;
 
-    // Extract the return statement specifically
-    let return_idx = code.find("return ");
+    // Extract the __returned__ assignment (matches Vue's official compiler pattern)
+    let returned_idx = code.find("const __returned__ = ");
     assert!(
-        return_idx.is_some(),
-        "Must have a return statement in setup(). Got:\n{}",
+        returned_idx.is_some(),
+        "Must have __returned__ in setup(). Got:\n{}",
         code
     );
-    let return_rest = &code[return_idx.unwrap()..];
-    let return_end = return_rest.find(';').unwrap_or(return_rest.len());
-    let return_stmt = &return_rest[..return_end];
+    let returned_rest = &code[returned_idx.unwrap()..];
+    let returned_end = returned_rest.find(';').unwrap_or(returned_rest.len());
+    let returned_stmt = &returned_rest[..returned_end];
 
-    // The return must NOT be empty
+    // The returned object must NOT be empty
     assert!(
-        !return_stmt.contains("return {}") && !return_stmt.contains("return { }"),
-        "setup() must NOT return empty object. Return was: '{}'. Full:\n{}",
-        return_stmt,
+        !returned_stmt.contains("= {}") && !returned_stmt.contains("= { }"),
+        "setup() must NOT return empty object. Returned was: '{}'. Full:\n{}",
+        returned_stmt,
+        code
+    );
+
+    // Must include __isScriptSetup marker (matches Vue's official compiler)
+    assert!(
+        code.contains("__isScriptSetup"),
+        "Must have __isScriptSetup marker. Full:\n{}",
         code
     );
 
     // Must return container, editor, msg bindings (like Vue's official compiler)
     assert!(
-        return_stmt.contains("container"),
-        "return must include 'container'. Return was: '{}'. Full:\n{}",
-        return_stmt,
+        returned_stmt.contains("container"),
+        "return must include 'container'. Returned was: '{}'. Full:\n{}",
+        returned_stmt,
         code
     );
     assert!(
-        return_stmt.contains("editor"),
-        "return must include 'editor'. Return was: '{}'. Full:\n{}",
-        return_stmt,
+        returned_stmt.contains("editor"),
+        "return must include 'editor'. Returned was: '{}'. Full:\n{}",
+        returned_stmt,
         code
     );
     assert!(
-        return_stmt.contains("msg"),
-        "return must include 'msg'. Return was: '{}'. Full:\n{}",
-        return_stmt,
+        returned_stmt.contains("msg"),
+        "return must include 'msg'. Returned was: '{}'. Full:\n{}",
+        returned_stmt,
         code
     );
 }
@@ -3040,28 +3472,28 @@ onMounted(() => {
     let script = result.script.unwrap();
     let code = &script.code;
 
-    // Extract the return statement
-    let return_idx = code.find("return ").expect(&format!(
-        "Must have a return statement. Full output:\n{}",
+    // Extract the __returned__ assignment
+    let returned_idx = code.find("const __returned__ = ").expect(&format!(
+        "Must have __returned__ assignment. Full output:\n{}",
         code
     ));
-    let return_rest = &code[return_idx..];
-    let return_end = return_rest.find(';').unwrap_or(return_rest.len());
-    let return_stmt = &return_rest[..return_end];
+    let returned_rest = &code[returned_idx..];
+    let returned_end = returned_rest.find(';').unwrap_or(returned_rest.len());
+    let returned_stmt = &returned_rest[..returned_end];
 
     // Must NOT return empty - Vue's official compiler returns all top-level bindings
     assert!(
-        !return_stmt.contains("return {}"),
-        "setup() must NOT return empty. Return was: '{}'. Full:\n{}",
-        return_stmt,
+        !returned_stmt.contains("= {}"),
+        "setup() must NOT return empty. Returned was: '{}'. Full:\n{}",
+        returned_stmt,
         code
     );
 
     // editorContainer must be in return for template ref binding
     assert!(
-        return_stmt.contains("editorContainer"),
-        "return must include 'editorContainer' for template ref. Return: '{}'. Full:\n{}",
-        return_stmt,
+        returned_stmt.contains("editorContainer"),
+        "return must include 'editorContainer' for template ref. Returned: '{}'. Full:\n{}",
+        returned_stmt,
         code
     );
 }
@@ -3736,6 +4168,607 @@ const x = { a: 1 }
     assert!(
         !tpl.code.contains("satisfies"),
         "force_js should strip 'satisfies' from template expression, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated — HTML comment between v-if branches must not leak into generated JS
+/// when comments are disabled (production mode). Regression: interstitial comments were
+/// skipped in visit_comment but not overwritten, and build_child_records excluded them
+/// when options.comments=false, so strip_interstitial_condition_nodes couldn't find them.
+#[test]
+fn comment_between_v_if_branches_does_not_leak_in_prod() {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        is_production: true, // comments=false (default is !is_production)
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        ..Default::default()
+    };
+
+    // Test 1: comment between v-if branches inside a parent element
+    let result = compile(
+        r#"<template><div><span v-if="a">A</span><!-- interstitial --><span v-else-if="b">B</span><!-- another --><span v-else>C</span></div></template>"#,
+        &options,
+        &verter_opts,
+        &alloc,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    let js_alloc = Allocator::new();
+    let source_type = oxc_span::SourceType::mjs();
+    let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
+    let parsed = oxc_parser::Parser::new(&js_alloc, &wrapped, source_type).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "Template JS parse error (nested): {:?}\n--- generated code ---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        tpl.code
+    );
+    assert!(
+        !tpl.code.contains("<!--"),
+        "HTML comment in nested case:\n{}",
+        tpl.code
+    );
+
+    // Test 2: comment between v-if branches at template root level
+    let alloc2 = Allocator::new();
+    let result2 = compile(
+        r#"<template><span v-if="a">A</span><!-- root interstitial --><span v-else-if="b">B</span><!-- root another --><span v-else>C</span></template>"#,
+        &options,
+        &verter_opts,
+        &alloc2,
+    );
+    assert!(
+        result2.errors.is_empty(),
+        "compile errors: {:?}",
+        result2.errors
+    );
+    let tpl2 = result2.template.as_ref().expect("template block");
+    let js_alloc2 = Allocator::new();
+    let wrapped2 = format!("import {{ }} from \"vue\";\n{}", tpl2.code);
+    let parsed2 = oxc_parser::Parser::new(&js_alloc2, &wrapped2, source_type).parse();
+    assert!(
+        parsed2.errors.is_empty(),
+        "Template JS parse error (root): {:?}\n--- generated code ---\n{}",
+        parsed2
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        tpl2.code
+    );
+    assert!(
+        !tpl2.code.contains("<!--"),
+        "HTML comment at root level:\n{}",
+        tpl2.code
+    );
+}
+
+/// @ai-generated — withDefaults + cross-block type reference from companion <script>
+/// should produce correct prop names (not garbled from wrong source offsets).
+/// Regression: macros.rs used span extraction into SFC source for external types
+/// where key spans reference the companion block, producing corrupted prop names.
+#[test]
+fn with_defaults_cross_block_type_uses_key_name() {
+    let result = compile_sfc(
+        r#"<script lang="ts">
+export interface ExternalProps {
+  title?: string
+  description?: string
+  color?: string
+}
+</script>
+<script setup lang="ts">
+const props = withDefaults(defineProps<ExternalProps>(), {
+  color: 'primary'
+})
+</script>
+<template><div>{{ props.title }}</div></template>"#,
+    );
+    let script = result.script.as_ref().expect("script block");
+    // The withDefaults path must use key_name (pre-resolved) for cross-block types,
+    // not span extraction which indexes into the wrong source region.
+    assert!(
+        script.code.contains("title:"),
+        "title prop should appear with correct name in withDefaults output, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("description:"),
+        "description prop should appear with correct name in withDefaults output, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("color:") && script.code.contains("default: 'primary'"),
+        "color prop should have default: 'primary' in withDefaults output, got:\n{}",
+        script.code
+    );
+}
+
+// ======================== defineModel + withDefaults (runtime variable) ========================
+
+/// @ai-generated - defineModel + withDefaults with resolvable type uses _mergeModels.
+/// Vue's official compiler always uses _mergeModels when both defineProps and defineModel
+/// are present in the same component.
+#[test]
+fn define_model_with_defaults_resolved_type() {
+    let result = compile_sfc_keep_ts(
+        r#"<script setup lang="ts">
+interface ChatInputProps {
+  placeholder?: string
+  maxLength?: number
+}
+
+const DEFAULT_PROPS = { placeholder: 'Type...', maxLength: 50 }
+
+const props = withDefaults(defineProps<ChatInputProps>(), DEFAULT_PROPS)
+const visible = defineModel('visible', { type: Boolean, default: false })
+</script>
+<template><div>{{ visible }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+
+    // Vue uses _mergeModels to merge typed props with model props
+    assert!(
+        script.code.contains("_mergeModels"),
+        "Should use _mergeModels to merge model props with withDefaults props.\nGot:\n{}",
+        script.code
+    );
+    // Model prop and modifiers must appear in the second arg to _mergeModels
+    assert!(
+        script.code.contains("visible"),
+        "Model prop 'visible' should be declared.\nGot:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("visibleModifiers"),
+        "Model modifiers prop should be declared.\nGot:\n{}",
+        script.code
+    );
+}
+
+/// @ai-generated - defineModel + withDefaults with unresolvable type + runtime variable
+/// must produce valid JS (IIFE fallback). The model props must NOT be inserted inside
+/// the IIFE body — _mergeModels wraps the IIFE.
+#[test]
+fn define_model_with_defaults_runtime_var_iife() {
+    // Simulate: imported type (unresolvable in standalone compile) + runtime defaults
+    let result = compile_sfc(
+        r#"<script setup lang="ts">
+import type { ChatInputProps } from './types'
+
+const DEFAULT_PROPS = { placeholder: 'Type...' }
+
+const props = withDefaults(defineProps<ChatInputProps>(), DEFAULT_PROPS)
+const visible = defineModel('visible', { type: Boolean, default: false })
+</script>
+<template><div>{{ visible }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+
+    // Even with IIFE fallback, _mergeModels must wrap the result
+    assert!(
+        script.code.contains("_mergeModels"),
+        "Should use _mergeModels to merge model props with withDefaults IIFE.\nGot:\n{}",
+        script.code
+    );
+    // Must NOT have the invalid pattern: `return p, visible: {}`
+    assert!(
+        !script.code.contains("return p,"),
+        "Model props must NOT be inserted inside the IIFE body.\nGot:\n{}",
+        script.code
+    );
+}
+
+/// @ai-generated - defineModel + defineProps with object literal merges correctly
+/// When defineProps uses an object literal (not IIFE), static merge is fine,
+/// but Vue still uses _mergeModels, so we should too.
+#[test]
+fn define_model_with_define_props_object_uses_merge_models() {
+    let result = compile_sfc(
+        r#"<script setup>
+const props = defineProps({ title: String })
+const visible = defineModel('visible')
+</script>
+<template><div>{{ props.title }} {{ visible }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+
+    // Vue uses _mergeModels even for object literal props + models
+    assert!(
+        script.code.contains("_mergeModels"),
+        "Should use _mergeModels for props + model merge.\nGot:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("update:visible"),
+        "Should declare 'update:visible' emit.\nGot:\n{}",
+        script.code
+    );
+}
+
+/// @ai-generated - defineModel + type-based withDefaults merges correctly
+#[test]
+fn define_model_with_typed_with_defaults() {
+    let result = compile_sfc_keep_ts(
+        r#"<script setup lang="ts">
+interface Props {
+  placeholder?: string
+}
+
+const props = withDefaults(defineProps<Props>(), { placeholder: 'Type...' })
+const open = defineModel('open', { type: Boolean })
+</script>
+<template><div>{{ props.placeholder }} {{ open }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+
+    assert!(
+        script.code.contains("_mergeModels"),
+        "Should use _mergeModels for typed withDefaults + defineModel.\nGot:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("open:") || script.code.contains("open "),
+        "Model prop 'open' should be declared.\nGot:\n{}",
+        script.code
+    );
+}
+
+/// @ai-generated - defineModel emits section also uses _mergeModels when defineEmits present
+#[test]
+fn define_model_with_define_emits_uses_merge_models_for_emits() {
+    let result = compile_sfc(
+        r#"<script setup>
+const emit = defineEmits(['click'])
+const visible = defineModel('visible')
+</script>
+<template><div @click="emit('click')">{{ visible }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+
+    // The emits section should merge ['click'] with ["update:visible"]
+    assert!(
+        script.code.contains("update:visible"),
+        "Model emit 'update:visible' should be present.\nGot:\n{}",
+        script.code
+    );
+}
+
+// ======================== export type stripping (force_js) ========================
+
+/// @ai-generated - export type inside script setup must be stripped when force_js: true
+#[test]
+fn export_type_stripped_when_force_js() {
+    let result = compile_sfc(
+        r#"<script setup lang="ts">
+import { computed } from 'vue'
+
+export type NavigatePayload =
+  | { type: 'notification'; to: string }
+  | { type: 'menu-item'; to: string }
+
+interface SideMenuProps {
+  visible?: boolean
+}
+
+const props = defineProps<SideMenuProps>()
+const isOpen = computed(() => props.visible)
+</script>
+
+<template><div>{{ isOpen }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+    // export type must be completely removed in force_js mode
+    assert!(
+        !script.code.contains("export type NavigatePayload"),
+        "export type should be stripped when force_js: true, got:\n{}",
+        script.code
+    );
+    assert!(
+        !script.code.contains("NavigatePayload"),
+        "NavigatePayload should not appear at all in JS output, got:\n{}",
+        script.code
+    );
+}
+
+/// @ai-generated - export interface inside script setup must be stripped when force_js: true
+#[test]
+fn export_interface_stripped_when_force_js() {
+    let result = compile_sfc(
+        r#"<script setup lang="ts">
+export interface FooProps {
+  title: string
+  count: number
+}
+
+const props = defineProps<FooProps>()
+</script>
+
+<template><div>{{ props.title }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        !script.code.contains("export interface FooProps"),
+        "export interface should be stripped when force_js: true, got:\n{}",
+        script.code
+    );
+}
+
+/// @ai-generated - bare type and interface (no export) stripped when force_js: true
+#[test]
+fn bare_type_and_interface_stripped_when_force_js() {
+    let result = compile_sfc(
+        r#"<script setup lang="ts">
+type LocalType = { a: string }
+
+interface LocalInterface {
+  b: number
+}
+
+const x = 1
+</script>
+
+<template><div>{{ x }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        !script.code.contains("type LocalType"),
+        "type alias should be stripped when force_js: true, got:\n{}",
+        script.code
+    );
+    assert!(
+        !script.code.contains("interface LocalInterface"),
+        "interface should be stripped when force_js: true, got:\n{}",
+        script.code
+    );
+}
+
+// ======================== export type hoisting (keep TS) ========================
+
+fn compile_sfc_keep_ts(source: &str) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: false,
+        ..Default::default()
+    };
+    compile(source, &options, &verter_opts, &alloc)
+}
+
+/// @ai-generated - export type is hoisted outside setup wrapper when keeping TS types
+#[test]
+fn export_type_hoisted_when_keep_ts() {
+    let result = compile_sfc_keep_ts(
+        r#"<script setup lang="ts">
+import { computed } from 'vue'
+
+export type NavigatePayload = { type: string; to: string }
+
+const x = computed(() => 1)
+</script>
+
+<template><div>{{ x }}</div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let script = result.script.as_ref().expect("script block");
+    // export type should be hoisted BEFORE the setup wrapper (before const __sfc__)
+    let type_pos = script
+        .code
+        .find("export type NavigatePayload")
+        .expect("export type should be present when keeping TS");
+    let wrapper_pos = script
+        .code
+        .find("const __sfc__")
+        .expect("const __sfc__ should be present");
+    assert!(
+        type_pos < wrapper_pos,
+        "export type should be hoisted before const __sfc__.\ntype_pos={}, wrapper_pos={}\ncode:\n{}",
+        type_pos, wrapper_pos, script.code
+    );
+    // Must NOT appear inside setup() body
+    let setup_start = script.code.find("setup(").expect("setup function");
+    assert!(
+        type_pos < setup_start,
+        "export type should be outside setup function, got:\n{}",
+        script.code
+    );
+}
+
+// ==================== JS string escaping in codegen ====================
+
+#[test]
+fn style_with_newlines_produces_valid_js() {
+    // Regression: ant-design-vue horizontal.vue has style with literal newlines.
+    // Verter must escape newlines in style property names to produce valid JS.
+    let code = compile_and_validate_template(
+        "<template><div style=\"\n  {\n    padding: '20px'\n  }\n\"></div></template>",
+    );
+    // The output must not contain raw newlines inside string literals
+    assert!(
+        !code.contains("\"{\n"),
+        "style object key must have newlines escaped\n{}",
+        code
+    );
+}
+
+#[test]
+fn style_normal_css_produces_valid_js() {
+    let code = compile_and_validate_template(
+        r#"<template><div style="margin-top: 15px; color: red"></div></template>"#,
+    );
+    assert!(
+        code.contains("\"margin-top\""),
+        "hyphenated CSS prop should be quoted\n{}",
+        code
+    );
+    assert!(
+        code.contains("\"15px\""),
+        "value should be quoted\n{}",
+        code
+    );
+}
+
+#[test]
+fn style_with_multiline_value_produces_valid_js() {
+    // Multi-line style attribute values are common in formatted templates
+    let code = compile_and_validate_template(
+        "<template><div style=\"\n  margin-top: 15px;\n  color: red;\n\"></div></template>",
+    );
+    assert!(
+        code.contains("\"margin-top\""),
+        "hyphenated prop should be parsed from multiline style\n{}",
+        code
+    );
+}
+
+#[test]
+fn title_attr_with_newline_produces_valid_js() {
+    // Static attributes with newlines must be properly escaped
+    let code =
+        compile_and_validate_template("<template><div title=\"line1\nline2\"></div></template>");
+    // The output must parse as valid JS (compile_and_validate_template checks this)
+    assert!(!code.is_empty());
+}
+
+// ==================== Vapor mode: __vapor flag and _ctx. prefix ====================
+
+#[test]
+fn vapor_script_contains_vapor_flag() {
+    let result = compile_sfc_vapor(
+        "<script setup>\nconst msg = 'hello'\n</script>\n<template><div>{{ msg }}</div></template>",
+    );
+    let script = result.script.as_ref().expect("should have script");
+    assert!(
+        script.code.contains("__vapor = true") || script.code.contains("__vapor: true"),
+        "Vapor script should contain __vapor flag, got:\n{}",
+        script.code
+    );
+}
+
+#[test]
+fn vapor_template_uses_ctx_prefix_not_setup() {
+    let result = compile_sfc_vapor(
+        "<script setup>\nconst msg = 'hello'\n</script>\n<template><div>{{ msg }}</div></template>",
+    );
+    let tpl = result.template.as_ref().expect("should have template");
+    assert!(
+        !tpl.code.contains("$setup."),
+        "Vapor template should not use $setup. prefix, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        tpl.code.contains("_ctx.msg"),
+        "Vapor template should use _ctx. prefix for bindings, got:\n{}",
+        tpl.code
+    );
+}
+
+#[test]
+fn vapor_event_handler_uses_ctx_prefix() {
+    let result = compile_sfc_vapor(
+        "<script setup>\nconst onClick = () => {}\n</script>\n<template><button @click=\"onClick\">click</button></template>",
+    );
+    let tpl = result.template.as_ref().expect("should have template");
+    assert!(
+        !tpl.code.contains("$setup."),
+        "Vapor event handler should not use $setup. prefix, got:\n{}",
+        tpl.code
+    );
+}
+
+#[test]
+fn vapor_template_attr_uses_ctx_prefix() {
+    let result = compile_sfc_vapor(
+        "<script setup>\nconst title = 'hello'\n</script>\n<template><div :title=\"title\"></div></template>",
+    );
+    let tpl = result.template.as_ref().expect("should have template");
+    assert!(
+        !tpl.code.contains("$setup."),
+        "Vapor dynamic attr should not use $setup. prefix, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        tpl.code.contains("_ctx.title"),
+        "Vapor dynamic attr should use _ctx. prefix, got:\n{}",
+        tpl.code
+    );
+}
+
+#[test]
+fn vapor_with_template_vapor_attr_contains_vapor_flag() {
+    // Using <template vapor> attribute (not force_vapor option)
+    let result = compile_sfc(
+        "<script setup>\nconst msg = 'hello'\n</script>\n<template vapor><div>{{ msg }}</div></template>",
+    );
+    let script = result.script.as_ref().expect("should have script");
+    assert!(
+        script.code.contains("__vapor = true") || script.code.contains("__vapor: true"),
+        "Component with <template vapor> should contain __vapor flag, got:\n{}",
+        script.code
+    );
+}
+
+#[test]
+fn vapor_props_use_ctx_prefix() {
+    let result = compile_sfc_vapor(
+        "<script setup>\nconst props = defineProps({ msg: String })\n</script>\n<template><div>{{ props.msg }}</div></template>",
+    );
+    let tpl = result.template.as_ref().expect("should have template");
+    assert!(
+        !tpl.code.contains("$setup.")
+            && !tpl.code.contains("$props.")
+            && !tpl.code.contains("__props."),
+        "Vapor props should not use $setup./$props./__props. prefix, got:\n{}",
+        tpl.code
+    );
+}
+
+#[test]
+fn vdom_mode_no_vapor_flag() {
+    let result = compile_sfc(
+        "<script setup>\nconst msg = 'hello'\n</script>\n<template><div>{{ msg }}</div></template>",
+    );
+    let script = result.script.as_ref().expect("should have script");
+    assert!(
+        !script.code.contains("__vapor"),
+        "VDOM mode should NOT contain __vapor flag, got:\n{}",
+        script.code
+    );
+}
+
+#[test]
+fn vdom_mode_uses_setup_prefix() {
+    let result = compile_sfc(
+        "<script setup>\nconst msg = 'hello'\n</script>\n<template><div>{{ msg }}</div></template>",
+    );
+    let tpl = result.template.as_ref().expect("should have template");
+    assert!(
+        tpl.code.contains("$setup.msg"),
+        "VDOM mode should use $setup. prefix for setup bindings, got:\n{}",
         tpl.code
     );
 }

@@ -29,6 +29,9 @@ verter-vscode (VS Code extension)
 ```
 crates/
   verter_core/       # Core template compiler (Rust)
+  verter_analysis/   # Static analysis: imports, exports, bindings, type resolution
+  verter_host/       # In-memory file host: caching, dependency tracking, multi-file compilation
+  verter_ffi/        # FFI types: shared serializable structs for NAPI/WASM boundaries
   verter_bench/      # Benchmarks and comparison examples (Rust)
   verter_napi/       # Native Node.js bindings (NAPI-RS cdylib)
   verter_wasm/       # WASM bindings (wasm-bindgen cdylib)
@@ -207,7 +210,7 @@ pnpm run build:playground     # Build the playground for deployment
 When changing Rust code, you must rebuild downstream artifacts in order:
 
 ```
-verter_core (Rust crate)
+verter_core + verter_analysis + verter_host + verter_ffi (Rust crates)
     ↓ cargo build
 verter_napi (NAPI-RS cdylib)        verter_wasm (wasm-bindgen cdylib)
     ↓ pnpm run build:native             ↓ pnpm run build:wasm
@@ -391,8 +394,6 @@ See [CLAUDE_IMPLEMENTATION_GUIDE.md](CLAUDE_IMPLEMENTATION_GUIDE.md) for detaile
 - **TDD workflow** — write failing tests first, then implement
 - **`gen_and_validate()`** — all codegen tests MUST validate JS syntax via oxc parser
 - **AST comparison** — E2E tests compare against Vue's official compiler output
-- **Event pipeline** — construct event Vecs, run through plugins, assert output
-- **Binding metadata** — `BindingType` and `ReactivityLevel` in `binding_types.rs`
 
 ## TypeScript Code Patterns
 
@@ -428,18 +429,21 @@ export const MyPlugin = definePlugin({
 | `packages/language-server/src/server.ts` | LSP server setup |
 | `packages/language-server/src/v5/documents/verter/manager/manager.ts` | TS service management |
 | `packages/types/src/helpers/helpers.ts` | Core type utilities |
-| `crates/verter_core/src/syntax/types.rs` | All event and type definitions |
-| `crates/verter_core/src/syntax/pipeline.rs` | Tokenizer → Event conversion pipeline |
-| `crates/verter_core/src/syntax/binding_types.rs` | BindingType, ReactivityLevel, binding resolution |
-| `crates/verter_core/src/syntax/plugin.rs` | SyntaxPlugin trait and SyntaxResult |
-| `crates/verter_core/src/syntax/plugins/element_compiler/` | Raw events → Compiled events |
-| `crates/verter_core/src/syntax/plugins/oxc_parser/` | Compiled events → OXC-parsed events |
-| `crates/verter_core/src/syntax/plugins/code_gen/script/mod.rs` | Script codegen (macros, bindings) |
-| `crates/verter_core/src/syntax/plugins/code_gen/template/vdom/` | VDOM render function codegen |
-| `crates/verter_core/src/syntax/plugins/code_gen/template/vapor/` | Vapor mode codegen |
-| `crates/verter_core/src/syntax/plugins/css_parser/` | CSS scoping, modules, v-bind() |
+| `crates/verter_core/src/compile.rs` | Pipeline orchestrator (tokenize → parse → style → script → template) |
+| `crates/verter_core/src/parser/mod.rs` | SFC parser: tokenizer events → root nodes + template AST |
+| `crates/verter_core/src/ast/types.rs` | AstNode, ElementNode, NodeId, PropFlags |
+| `crates/verter_core/src/script/macros.rs` | defineProps/Emits/Model/Slots/Expose/Options |
+| `crates/verter_core/src/script/process.rs` | Script setup processing, companion script merging |
+| `crates/verter_core/src/template/code_gen/mod.rs` | Template codegen entry point |
+| `crates/verter_core/src/template/code_gen/walker.rs` | DFS tree walker (shared by VDOM/Vapor backends) |
+| `crates/verter_core/src/template/code_gen/binding.rs` | BindingResolver (_ctx./$setup. prefix resolution) |
+| `crates/verter_core/src/template/code_gen/vdom/` | VDOM render function codegen |
+| `crates/verter_core/src/template/code_gen/vapor/` | Vapor mode codegen |
 | `crates/verter_core/src/css/` | CSS preprocessing and style transformation |
-| `crates/verter_core/src/builder/codegen.rs` | Pipeline setup, E2E tests |
+| `crates/verter_core/src/code_transform/code_transform.rs` | Chunk-based deferred mutation engine |
+| `crates/verter_analysis/src/lib.rs` | Static analysis entry: imports, exports, bindings |
+| `crates/verter_host/src/lib.rs` | Host entry: compile, cache, upsert, dependency tracking |
+| `crates/verter_ffi/src/lib.rs` | FFI types shared between NAPI and WASM |
 
 ## Rust Performance
 

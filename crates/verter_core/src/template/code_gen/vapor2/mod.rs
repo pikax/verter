@@ -267,7 +267,7 @@ impl<'ast, 'alloc> Vapor2CodeGen<'ast, 'alloc> {
                     buf.push_str(", ");
                 }
                 buf.push('"');
-                buf.push_str(evt);
+                helpers::escape_js_string_into(&mut buf, evt);
                 buf.push('"');
             }
             buf.push_str(")\n");

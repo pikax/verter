@@ -206,8 +206,13 @@ fn non_inline_has_return_statement() {
 
     let output = ct.build_string();
     assert!(
-        output.contains("return {"),
+        output.contains("const __returned__ = {"),
         "should have return statement. output: {}",
+        output
+    );
+    assert!(
+        output.contains("__isScriptSetup"),
+        "should have __isScriptSetup marker. output: {}",
         output
     );
 }
@@ -998,11 +1003,11 @@ fn returned_object_includes_only_setup_bindings() {
     let output = ct.build_string();
     // Return should include setup bindings (count, msg) but not props (title)
     assert!(
-        output.contains("return {"),
+        output.contains("const __returned__ = {"),
         "should have return statement. output: {}",
         output
     );
-    let return_idx = output.find("return {").unwrap();
+    let return_idx = output.find("const __returned__ = {").unwrap();
     let return_end = output[return_idx..].find('}').unwrap() + return_idx + 1;
     let return_obj = &output[return_idx..return_end];
     assert!(
@@ -1729,5 +1734,179 @@ fn external_type_props_dont_conflict_with_companion_types() {
         result.bindings.contains_key("shared"),
         "should have 'shared' from companion. Got: {:?}",
         result.bindings.keys().collect::<Vec<_>>()
+    );
+}
+
+/// @ai-generated — withDefaults + external type: prop names must use pre-resolved key_name,
+/// not span extraction (which indexes into the wrong source for external types).
+#[test]
+fn external_type_withdefaults_uses_key_name() {
+    let alloc = Allocator::default();
+    let external_types = make_external_types(
+        "ExternalProps",
+        "export interface ExternalProps { title?: string; description?: string; color?: string }",
+    );
+    let content =
+        "\nimport type { ExternalProps } from './types'\nconst props = withDefaults(defineProps<ExternalProps>(), {\n  color: 'primary'\n})\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+
+    let result = generate_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            external_types: Some(external_types),
+            ..Default::default()
+        },
+    );
+
+    let output = ct.build_string();
+
+    // All three props should appear with correct names
+    assert!(
+        output.contains("title:"),
+        "should have 'title' prop from external type. output:\n{}",
+        output
+    );
+    assert!(
+        output.contains("description:"),
+        "should have 'description' prop from external type. output:\n{}",
+        output
+    );
+    assert!(
+        output.contains("color:") && output.contains("default: 'primary'"),
+        "should have 'color' prop with default from withDefaults. output:\n{}",
+        output
+    );
+
+    // External props should be in bindings
+    assert!(
+        result.bindings.contains_key("title"),
+        "bindings should contain 'title'. Got: {:?}",
+        result.bindings.keys().collect::<Vec<_>>()
+    );
+
+    // Validate JS syntax
+    let js_alloc = oxc_allocator::Allocator::default();
+    let source_type = oxc_span::SourceType::mjs();
+    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
+    assert!(
+        parser_result.errors.is_empty(),
+        "External type withDefaults should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
+        output,
+        parser_result.errors
+    );
+}
+
+/// @ai-generated — typeof external value: `defineProps<typeof MyType>()` with exported const
+#[test]
+fn typeof_external_value_generates_runtime_props() {
+    let alloc = Allocator::default();
+    let external_types = make_external_types(
+        "MyType",
+        "export const MyType: { foo: string; bar: number } = { foo: '', bar: 0 }",
+    );
+    let content = "\nimport { MyType } from './types'\ndefineProps<typeof MyType>()\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+
+    let result = generate_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            external_types: Some(external_types),
+            ..Default::default()
+        },
+    );
+
+    // External props should be in bindings
+    assert!(
+        result.bindings.contains_key("foo"),
+        "bindings should contain 'foo'. Got: {:?}",
+        result.bindings.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        result.bindings.contains_key("bar"),
+        "bindings should contain 'bar'. Got: {:?}",
+        result.bindings.keys().collect::<Vec<_>>()
+    );
+
+    let output = ct.build_string();
+
+    // Runtime props should be generated
+    assert!(
+        output.contains("foo:"),
+        "should generate runtime props for 'foo'. output: {}",
+        output
+    );
+    assert!(
+        output.contains("bar:"),
+        "should generate runtime props for 'bar'. output: {}",
+        output
+    );
+
+    // Validate JS syntax
+    let js_alloc = oxc_allocator::Allocator::default();
+    let source_type = oxc_span::SourceType::mjs();
+    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
+    assert!(
+        parser_result.errors.is_empty(),
+        "typeof external value defineProps should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
+        output,
+        parser_result.errors
+    );
+}
+
+/// @ai-generated — typeof external value without type annotation (infer from object literal)
+#[test]
+fn typeof_external_value_infers_from_object_literal() {
+    let alloc = Allocator::default();
+    let external_types = make_external_types(
+        "defaults",
+        "export const defaults = { name: 'test', count: 42, active: true }",
+    );
+    let content = "\nimport { defaults } from './config'\ndefineProps<typeof defaults>()\n";
+    let (setup, full) = make_script(content, "<script setup lang=\"ts\">", true);
+    let mut ct = crate::code_transform::CodeTransform::new(&full, &alloc);
+
+    let result = generate_script(
+        None,
+        Some(&setup),
+        &full,
+        &mut ct,
+        &alloc,
+        &ScriptCodeGenOptions {
+            component_name: "Test",
+            external_types: Some(external_types),
+            ..Default::default()
+        },
+    );
+
+    // External props should be in bindings
+    assert!(
+        result.bindings.contains_key("name"),
+        "bindings should contain 'name'. Got: {:?}",
+        result.bindings.keys().collect::<Vec<_>>()
+    );
+
+    let output = ct.build_string();
+
+    // Validate JS syntax
+    let js_alloc = oxc_allocator::Allocator::default();
+    let source_type = oxc_span::SourceType::mjs();
+    let parser_result = oxc_parser::Parser::new(&js_alloc, &output, source_type).parse();
+    assert!(
+        parser_result.errors.is_empty(),
+        "typeof object literal defineProps should produce valid JS.\nOutput:\n{}\nErrors: {:?}",
+        output,
+        parser_result.errors
     );
 }

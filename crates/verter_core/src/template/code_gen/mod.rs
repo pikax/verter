@@ -170,7 +170,10 @@ pub fn generate_template<'alloc>(
     bindings: FxHashMap<&'alloc str, BindingType>,
     options: &TemplateCodeGenOptions,
 ) -> Vec<&'static str> {
-    let resolver = BindingResolver::new(bindings, options.is_inline);
+    let resolver = match options.mode {
+        CodeGenMode::Vapor | CodeGenMode::Vapor2 => BindingResolver::new_vapor(bindings),
+        CodeGenMode::Vdom => BindingResolver::new(bindings, options.is_inline),
+    };
     let mut out = CodeGenOutput::new(alloc);
 
     match options.mode {
