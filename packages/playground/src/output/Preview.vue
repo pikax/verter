@@ -63,7 +63,6 @@ function updatePreview() {
       action: "eval",
       scripts,
       css: allCss.value,
-      darkMode: props.store.darkMode,
     },
     "*",
   );
@@ -87,7 +86,7 @@ function onIframeLoad() {
 }
 
 watch(
-  () => [props.store.activeFile?.compiled.js, props.store.darkMode, allCss.value],
+  () => [props.store.activeFile?.compiled.js, allCss.value],
   () => {
     updatePreview();
   },
