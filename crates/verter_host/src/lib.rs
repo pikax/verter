@@ -290,9 +290,10 @@ mod tests {
         let result = upsert_vue(&host, "Comp.vue", source);
         let expected_div_start = source.find("<div>").unwrap() as u32;
 
-        let matches_byte_span = result.diagnostics.diagnostics.iter().any(|d| {
-            d.code.contains("XMissingEndTag") && d.span_start == Some(expected_div_start)
-        });
+        let matches_byte_span =
+            result.diagnostics.diagnostics.iter().any(|d| {
+                d.code.contains("XMissingEndTag") && d.span_start == Some(expected_div_start)
+            });
 
         assert!(
             matches_byte_span,

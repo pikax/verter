@@ -633,6 +633,7 @@ pub fn compile(
         let tsx_script_result = tsx::script::generate_tsx_script(
             syntax.script(),
             syntax.script_setup(),
+            taken_template_ast.as_ref(),
             input,
             &mut tsx_script_ct,
             &tsx_script_alloc,

@@ -6447,6 +6447,135 @@ const msg = 'hello'
 }
 
 #[test]
+fn tsx_infers_native_click_handler_param_type() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+function handleClick(e) {
+  return e
+}
+</script>
+<template>
+  <button @click="handleClick">Click</button>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains(
+            r#"function handleClick(...[e]: Parameters<import('vue').IntrinsicElementAttributes["button"]["onClick"]>)"#
+        ),
+        "Expected inferred click handler parameter type, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_infers_native_input_handler_multi_params() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+function handler(a, b, c) {
+  return [a, b, c]
+}
+</script>
+<template>
+  <input @input="handler" />
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains(
+            r#"...[a, b, c]: Parameters<import('vue').IntrinsicElementAttributes["input"]["onInput"]>"#
+        ),
+        "Expected inferred tuple rest parameter type, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_does_not_override_existing_typed_params() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+function handler(e: MouseEvent) {
+  return e.clientX
+}
+</script>
+<template>
+  <div @click="handler"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("function handler(e: MouseEvent)"),
+        "Typed function param should remain unchanged, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("...[e]: Parameters<"),
+        "Typed function param should not be replaced by inferred tuple rest, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_does_not_infer_unbound_function() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+function unused(x) {
+  return x
+}
+</script>
+<template>
+  <div>No event binding</div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("function unused(x)"),
+        "Function not used in template events should remain unchanged, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("IntrinsicElementAttributes"),
+        "No inferred event types should be injected for unbound function, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_does_not_infer_inline_call_event_handler() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+function handler(e) {
+  return e
+}
+</script>
+<template>
+  <div @click="handler()"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("function handler(e)"),
+        "Inline call handler should not trigger parameter inference, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("...[e]: Parameters<"),
+        "Inline call handler should not be rewritten with inferred tuple rest type, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_not_generated_when_disabled() {
     let result = compile_sfc(
         r#"<script setup>

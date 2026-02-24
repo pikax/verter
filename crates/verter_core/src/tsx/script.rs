@@ -28,13 +28,15 @@
 //! ```
 
 use oxc_allocator::Allocator;
+use oxc_ast::ast::{BindingPattern, Declaration, Function, Statement};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 use rustc_hash::FxHashMap;
 
+use crate::ast::types::{AstNodeKind, TagType, TemplateAst};
 use crate::code_transform::CodeTransform;
 use crate::parser::types::RootNodeScript;
-use crate::template::code_gen::binding::BindingType;
+use crate::template::code_gen::binding::{is_simple_ident, BindingType};
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::utils::oxc::vue::{parse_script, parse_script_with_companion, ScriptItem, ScriptMode};
 
@@ -52,6 +54,7 @@ pub struct TsxScriptGenResult<'alloc> {
 pub fn generate_tsx_script<'alloc>(
     script: Option<&RootNodeScript>,
     script_setup: Option<&RootNodeScript>,
+    template_ast: Option<&TemplateAst>,
     source: &'alloc str,
     ct: &mut CodeTransform<'alloc>,
     alloc: &'alloc Allocator,
@@ -65,6 +68,7 @@ pub fn generate_tsx_script<'alloc>(
             process_tsx_script_setup(
                 setup,
                 script,
+                template_ast,
                 source,
                 &mut out,
                 &mut bindings,
@@ -92,6 +96,7 @@ pub fn generate_tsx_script<'alloc>(
 fn process_tsx_script_setup<'alloc>(
     setup: &RootNodeScript,
     _normal_script: Option<&RootNodeScript>,
+    template_ast: Option<&TemplateAst>,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     bindings: &mut FxHashMap<&'alloc str, BindingType>,
@@ -122,6 +127,15 @@ fn process_tsx_script_setup<'alloc>(
         content_start,
         content_str,
         None, // No companion types needed for TSX — we preserve types as-is
+    );
+
+    // Infer event-handler parameter types from template usage (v5/process parity).
+    apply_event_handler_param_inference(
+        &parser_ret.program.body,
+        template_ast,
+        source,
+        content_start,
+        out,
     );
 
     // Hoist imports to file top (before component wrapper)
@@ -181,6 +195,225 @@ fn process_tsx_script_setup<'alloc>(
 
         out.overwrite(tag_close.start, tag_close.end, &wrapper_end);
     }
+}
+
+/// Infer untyped function-declaration parameters from template event bindings.
+///
+/// Mirrors the `v5/process` infer-function intent without porting plugin architecture:
+/// for simple native-element handlers like `<button @click="handleClick">`,
+/// rewrite `function handleClick(e) {}` into
+/// `function handleClick(...[e]: Parameters<import('vue').IntrinsicElementAttributes["button"]["onClick"]>) {}`.
+fn apply_event_handler_param_inference(
+    body: &[Statement<'_>],
+    template_ast: Option<&TemplateAst>,
+    source: &str,
+    content_start: u32,
+    out: &mut CodeGenOutput<'_>,
+) {
+    let Some(template_ast) = template_ast else {
+        return;
+    };
+
+    let handler_type_hints = collect_native_handler_type_hints(template_ast, source);
+    if handler_type_hints.is_empty() {
+        return;
+    }
+
+    for stmt in body {
+        match stmt {
+            Statement::FunctionDeclaration(func) => {
+                maybe_annotate_function_params(
+                    func,
+                    &handler_type_hints,
+                    source,
+                    content_start,
+                    out,
+                );
+            }
+            Statement::ExportNamedDeclaration(export) => {
+                if let Some(Declaration::FunctionDeclaration(func)) = &export.declaration {
+                    maybe_annotate_function_params(
+                        func,
+                        &handler_type_hints,
+                        source,
+                        content_start,
+                        out,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn maybe_annotate_function_params(
+    func: &Function<'_>,
+    handler_type_hints: &FxHashMap<String, String>,
+    source: &str,
+    content_start: u32,
+    out: &mut CodeGenOutput<'_>,
+) {
+    let Some(id) = &func.id else {
+        return;
+    };
+    let Some(type_expr) = handler_type_hints.get(id.name.as_str()) else {
+        return;
+    };
+
+    // Keep existing typing intact.
+    if func.params.rest.is_some() || func.params.items.is_empty() {
+        return;
+    }
+
+    let mut param_names: Vec<&str> = Vec::with_capacity(func.params.items.len());
+    for param in &func.params.items {
+        if param.type_annotation.is_some() {
+            return;
+        }
+        match &param.pattern {
+            BindingPattern::BindingIdentifier(ident) => {
+                param_names.push(ident.name.as_str());
+            }
+            _ => return,
+        }
+    }
+
+    if param_names.is_empty() {
+        return;
+    }
+
+    let params_start = content_start + func.params.span.start;
+    let params_end = content_start + func.params.span.end;
+    if params_end <= params_start {
+        return;
+    }
+
+    let params_src = &source[params_start as usize..params_end as usize];
+    let tuple_param = format!("...[{}]: {}", param_names.join(", "), type_expr);
+    let replacement = if params_src.starts_with('(') && params_src.ends_with(')') {
+        format!("({})", tuple_param)
+    } else {
+        tuple_param
+    };
+
+    out.overwrite(params_start, params_end, &replacement);
+}
+
+fn collect_native_handler_type_hints(ast: &TemplateAst, source: &str) -> FxHashMap<String, String> {
+    let mut hints = FxHashMap::default();
+
+    let Some(content) = &ast.root.content else {
+        return hints;
+    };
+
+    for &child in content.children.iter() {
+        collect_native_handler_type_hints_from_node(child, ast, source, &mut hints);
+    }
+
+    hints
+}
+
+fn collect_native_handler_type_hints_from_node(
+    id: crate::types::NodeId,
+    ast: &TemplateAst,
+    source: &str,
+    hints: &mut FxHashMap<String, String>,
+) {
+    let node = &ast.nodes[id.0];
+    let AstNodeKind::Element(el_box) = &node.kind else {
+        return;
+    };
+    let el = el_box.as_ref();
+
+    if el.tag_type == TagType::Element {
+        let tag_name = &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
+        for prop in &el.props {
+            if !is_event_directive(prop, source) {
+                continue;
+            }
+            if prop.is_dynamic == Some(true) {
+                continue;
+            }
+            let (Some(arg_start), Some(arg_end)) = (prop.arg_start, prop.arg_end) else {
+                continue;
+            };
+            let (Some(value_start), Some(value_end)) = (prop.value_start, prop.value_end) else {
+                continue;
+            };
+
+            let handler = source[value_start as usize..value_end as usize].trim();
+            if !is_simple_ident(handler) {
+                continue;
+            }
+
+            let event_name = source[arg_start as usize..arg_end as usize].trim();
+            if event_name.is_empty() {
+                continue;
+            }
+
+            let event_prop = event_to_jsx_name(event_name);
+            let type_expr = format!(
+                "Parameters<import('vue').IntrinsicElementAttributes[\"{}\"][\"{}\"]>",
+                tag_name, event_prop
+            );
+
+            // Keep first discovered hint for deterministic behavior.
+            hints.entry(handler.to_string()).or_insert(type_expr);
+        }
+    }
+
+    if let Some(content) = &el.content {
+        for &child in content.children.iter() {
+            collect_native_handler_type_hints_from_node(child, ast, source, hints);
+        }
+    }
+}
+
+fn is_event_directive(prop: &crate::types::NodeProp, source: &str) -> bool {
+    if !prop.is_directive {
+        return false;
+    }
+    get_directive_name(prop, source) == "on"
+}
+
+fn get_directive_name<'a>(prop: &crate::types::NodeProp, source: &'a str) -> &'a str {
+    let name = &source[prop.start as usize..prop.name_end as usize];
+
+    if name.starts_with(':') || name.starts_with('.') {
+        return "bind";
+    }
+    if name.starts_with('@') {
+        return "on";
+    }
+    if name.starts_with('#') {
+        return "slot";
+    }
+
+    // Full directive form: v-bind / v-on / v-if / ...
+    name.strip_prefix("v-").unwrap_or(name)
+}
+
+fn event_to_jsx_name(event_name: &str) -> String {
+    if let Some(rest) = event_name.strip_prefix("update:") {
+        return format!("onUpdate:{}", rest);
+    }
+
+    let mut result = String::with_capacity(event_name.len() + 2);
+    result.push_str("on");
+    let mut capitalize_next = true;
+    for ch in event_name.chars() {
+        if ch == '-' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            for upper in ch.to_uppercase() {
+                result.push(upper);
+            }
+            capitalize_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 // ── Script Only (Options API) Processing ──────────────────────────
@@ -290,6 +523,7 @@ mod tests {
         let result = generate_tsx_script(
             syntax.script(),
             syntax.script_setup(),
+            syntax.template_ast(),
             source,
             &mut ct,
             &alloc,
