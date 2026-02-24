@@ -8,7 +8,7 @@ use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::vapor::find_prop_oxc_exp;
 use crate::template::oxc::types::OxcParsedElement;
 
-use super::super::shared::helpers::VdomHelper;
+use super::super::shared::helpers::{is_builtin_component, VdomHelper};
 use super::super::types::CodeGenOutput;
 use super::element::resolve_expr;
 
@@ -55,6 +55,16 @@ pub(super) fn resolve_component_tag(
         s.push_str(&pascal);
         s.push_str(suffix);
         return s;
+    }
+
+    // Check for Vue built-in components (Suspense, Teleport, KeepAlive, etc.).
+    // These are imported directly from "vue" instead of using _resolveComponent().
+    // Check both original tag name and PascalCase form (for kebab-case like <keep-alive>).
+    if let Some((flag, helper_name)) =
+        is_builtin_component(tag_name).or_else(|| is_builtin_component(&pascal))
+    {
+        out.add_builtin_component(flag);
+        return helper_name.to_string();
     }
 
     // Check if this is a recursive self-reference (tag PascalCase matches self_name).

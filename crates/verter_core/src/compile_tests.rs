@@ -6328,3 +6328,208 @@ const msg = 'hello'
         tsx.code
     );
 }
+
+// ==================== Vue built-in components ====================
+//
+// Vue built-in components (Suspense, Teleport, KeepAlive, Transition,
+// TransitionGroup, BaseTransition) must be imported directly from "vue"
+// instead of using _resolveComponent(). Vue's compiler emits e.g.:
+//   import { Suspense as _Suspense } from "vue"
+//   _createBlock(_Suspense, null, { ... })
+
+/// @ai-generated - Suspense must be imported from "vue" and used directly,
+/// NOT via _resolveComponent("Suspense").
+#[test]
+fn builtin_component_suspense() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import Comp from './Comp.vue'
+</script>
+<template>
+  <Suspense>
+    <Comp />
+  </Suspense>
+</template>"#,
+    );
+    eprintln!("=== SUSPENSE OUTPUT ===\n{}", code);
+    // Must NOT use _resolveComponent for Suspense
+    assert!(
+        !code.contains("_resolveComponent(\"Suspense\")"),
+        "Suspense must NOT use _resolveComponent, got:\n{}",
+        code
+    );
+    // Must use _Suspense directly
+    assert!(
+        code.contains("_Suspense"),
+        "Suspense must be imported and used as _Suspense, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Teleport must be imported from "vue" and used directly.
+#[test]
+fn builtin_component_teleport() {
+    let code = compile_and_validate_template(
+        r#"<template>
+  <Teleport to="body">
+    <div>modal content</div>
+  </Teleport>
+</template>"#,
+    );
+    eprintln!("=== TELEPORT OUTPUT ===\n{}", code);
+    assert!(
+        !code.contains("_resolveComponent(\"Teleport\")"),
+        "Teleport must NOT use _resolveComponent, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_Teleport"),
+        "Teleport must be imported and used as _Teleport, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - KeepAlive must be imported from "vue" and used directly.
+#[test]
+fn builtin_component_keep_alive() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import Comp from './Comp.vue'
+</script>
+<template>
+  <KeepAlive>
+    <Comp />
+  </KeepAlive>
+</template>"#,
+    );
+    eprintln!("=== KEEPALIVE OUTPUT ===\n{}", code);
+    assert!(
+        !code.contains("_resolveComponent(\"KeepAlive\")"),
+        "KeepAlive must NOT use _resolveComponent, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_KeepAlive"),
+        "KeepAlive must be imported and used as _KeepAlive, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Transition must be imported from "vue" and used directly.
+#[test]
+fn builtin_component_transition() {
+    let code = compile_and_validate_template(
+        r#"<template>
+  <Transition name="fade">
+    <div>content</div>
+  </Transition>
+</template>"#,
+    );
+    eprintln!("=== TRANSITION OUTPUT ===\n{}", code);
+    assert!(
+        !code.contains("_resolveComponent(\"Transition\")"),
+        "Transition must NOT use _resolveComponent, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_Transition"),
+        "Transition must be imported and used as _Transition, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - TransitionGroup must be imported from "vue" and used directly.
+#[test]
+fn builtin_component_transition_group() {
+    let code = compile_and_validate_template(
+        r#"<template>
+  <TransitionGroup name="list" tag="ul">
+    <li v-for="item in items" :key="item">{{ item }}</li>
+  </TransitionGroup>
+</template>"#,
+    );
+    eprintln!("=== TRANSITION GROUP OUTPUT ===\n{}", code);
+    assert!(
+        !code.contains("_resolveComponent(\"TransitionGroup\")"),
+        "TransitionGroup must NOT use _resolveComponent, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_TransitionGroup"),
+        "TransitionGroup must be imported and used as _TransitionGroup, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - kebab-case built-in components must also be recognized.
+/// <keep-alive> is the same as <KeepAlive>.
+#[test]
+fn builtin_component_kebab_case_keep_alive() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import Comp from './Comp.vue'
+</script>
+<template>
+  <keep-alive>
+    <Comp />
+  </keep-alive>
+</template>"#,
+    );
+    eprintln!("=== KEBAB KEEP-ALIVE OUTPUT ===\n{}", code);
+    assert!(
+        !code.contains("_resolveComponent(\"keep-alive\")"),
+        "keep-alive must NOT use _resolveComponent, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_KeepAlive"),
+        "keep-alive must be imported and used as _KeepAlive, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - kebab-case <teleport> must be recognized as built-in.
+#[test]
+fn builtin_component_kebab_case_teleport() {
+    let code = compile_and_validate_template(
+        r#"<template>
+  <teleport to="body">
+    <div>modal</div>
+  </teleport>
+</template>"#,
+    );
+    assert!(
+        !code.contains("_resolveComponent(\"teleport\")"),
+        "teleport must NOT use _resolveComponent, got:\n{}",
+        code
+    );
+    assert!(
+        code.contains("_Teleport"),
+        "teleport must be imported and used as _Teleport, got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Built-in component imports should appear in template.imports.
+#[test]
+fn builtin_component_in_imports_list() {
+    let result = compile_sfc(
+        r#"<template>
+  <Suspense>
+    <div />
+  </Suspense>
+</template>"#,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    // The imports list should include _Suspense
+    assert!(
+        tpl.imports.contains(&"_Suspense"),
+        "template.imports should contain _Suspense, got: {:?}",
+        tpl.imports
+    );
+}

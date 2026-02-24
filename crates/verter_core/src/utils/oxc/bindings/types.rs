@@ -186,11 +186,18 @@ impl<'a> BindingContext<'a> {
         }
     }
 
-    /// Check if an identifier should be ignored
+    /// Check if an identifier should be ignored.
+    ///
+    /// `$event` is a Vue template built-in: the codegen wraps inline event
+    /// handlers in `$event => (...)`, so `$event` inside the expression is
+    /// the arrow parameter and must NOT be prefixed with `_ctx.`.
     #[inline]
     pub fn should_ignore(&self, name: &str) -> bool {
         let bytes = name.as_bytes();
-        is_keyword(bytes) || is_global(bytes) || self.ignored_identifiers.contains(name)
+        is_keyword(bytes)
+            || is_global(bytes)
+            || name == "$event"
+            || self.ignored_identifiers.contains(name)
     }
 
     /// Add an identifier to the ignore list

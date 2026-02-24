@@ -34,6 +34,17 @@ pub const V_MODEL_SELECT: &str = "_vModelSelect";
 pub const V_MODEL_DYNAMIC: &str = "_vModelDynamic";
 pub const V_SHOW: &str = "_vShow";
 
+// ======================== Vue built-in components ========================
+// These are imported directly from "vue" (e.g., `Suspense as _Suspense`)
+// instead of using `_resolveComponent()`.
+
+pub const SUSPENSE: &str = "_Suspense";
+pub const TELEPORT: &str = "_Teleport";
+pub const KEEP_ALIVE: &str = "_KeepAlive";
+pub const BASE_TRANSITION: &str = "_BaseTransition";
+pub const TRANSITION: &str = "_Transition";
+pub const TRANSITION_GROUP: &str = "_TransitionGroup";
+
 // ======================== Runtime helpers (Vapor) ========================
 
 pub const TEMPLATE: &str = "_template";
@@ -393,6 +404,95 @@ impl VaporHelperFlags {
             bits &= bits - 1; // clear lowest set bit
         }
         result
+    }
+}
+
+// ======================== Built-in component import bitflags ========================
+
+/// Bitflag set of Vue built-in components that need direct import from "vue".
+///
+/// These components (Suspense, Teleport, KeepAlive, etc.) must be imported
+/// directly from "vue" rather than resolved via `_resolveComponent()`.
+/// Uses a separate `u8` bitfield to avoid exhausting the `VdomHelper` `u32`.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub struct BuiltinComponentFlags(pub u8);
+
+impl BuiltinComponentFlags {
+    const SUSPENSE_BIT: u8 = 1;
+    const TELEPORT_BIT: u8 = 1 << 1;
+    const KEEP_ALIVE_BIT: u8 = 1 << 2;
+    const BASE_TRANSITION_BIT: u8 = 1 << 3;
+    const TRANSITION_BIT: u8 = 1 << 4;
+    const TRANSITION_GROUP_BIT: u8 = 1 << 5;
+
+    /// Empty set.
+    #[inline(always)]
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    /// True if no built-in components are recorded.
+    #[inline(always)]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// Add a built-in component flag.
+    #[inline(always)]
+    pub const fn add(self, flag: u8) -> Self {
+        Self(self.0 | flag)
+    }
+
+    /// Convert to a `Vec` of helper name strings for the import statement.
+    pub fn to_imports(self) -> Vec<&'static str> {
+        if self.0 == 0 {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        if self.0 & Self::SUSPENSE_BIT != 0 {
+            result.push(SUSPENSE);
+        }
+        if self.0 & Self::TELEPORT_BIT != 0 {
+            result.push(TELEPORT);
+        }
+        if self.0 & Self::KEEP_ALIVE_BIT != 0 {
+            result.push(KEEP_ALIVE);
+        }
+        if self.0 & Self::BASE_TRANSITION_BIT != 0 {
+            result.push(BASE_TRANSITION);
+        }
+        if self.0 & Self::TRANSITION_BIT != 0 {
+            result.push(TRANSITION);
+        }
+        if self.0 & Self::TRANSITION_GROUP_BIT != 0 {
+            result.push(TRANSITION_GROUP);
+        }
+        result
+    }
+}
+
+/// Check if a tag name is a Vue built-in component.
+///
+/// Returns `Some((flag_bit, helper_name))` if the tag is a built-in component,
+/// where `flag_bit` is the `BuiltinComponentFlags` bit and `helper_name` is
+/// the prefixed import name (e.g., `"_Suspense"`).
+///
+/// Handles both PascalCase (`<Suspense>`) and lowercase/kebab-case
+/// (`<suspense>`, `<keep-alive>`) variants.
+pub fn is_builtin_component(tag: &str) -> Option<(u8, &'static str)> {
+    match tag {
+        "Teleport" | "teleport" => Some((BuiltinComponentFlags::TELEPORT_BIT, TELEPORT)),
+        "Suspense" | "suspense" => Some((BuiltinComponentFlags::SUSPENSE_BIT, SUSPENSE)),
+        "KeepAlive" | "keep-alive" => Some((BuiltinComponentFlags::KEEP_ALIVE_BIT, KEEP_ALIVE)),
+        "BaseTransition" | "base-transition" => {
+            Some((BuiltinComponentFlags::BASE_TRANSITION_BIT, BASE_TRANSITION))
+        }
+        "Transition" | "transition" => Some((BuiltinComponentFlags::TRANSITION_BIT, TRANSITION)),
+        "TransitionGroup" | "transition-group" => Some((
+            BuiltinComponentFlags::TRANSITION_GROUP_BIT,
+            TRANSITION_GROUP,
+        )),
+        _ => None,
     }
 }
 

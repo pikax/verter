@@ -7,7 +7,9 @@ use oxc_allocator::Allocator;
 
 use crate::code_transform::CodeTransform;
 
-use super::shared::helpers::{VaporHelper, VaporHelperFlags, VdomHelper, VdomHelperFlags};
+use super::shared::helpers::{
+    BuiltinComponentFlags, VaporHelper, VaporHelperFlags, VdomHelper, VdomHelperFlags,
+};
 
 // ======================== CodeGenOutput ========================
 
@@ -32,6 +34,9 @@ pub struct CodeGenOutput<'alloc> {
     /// Vapor runtime helper imports (bitflags, O(1) dedup).
     vapor_imports: VaporHelperFlags,
 
+    /// Vue built-in component imports (Suspense, Teleport, etc.).
+    builtin_imports: BuiltinComponentFlags,
+
     /// Allocator reference for bump-allocating generated strings.
     alloc: &'alloc Allocator,
 }
@@ -44,6 +49,7 @@ impl<'alloc> CodeGenOutput<'alloc> {
             prepends: Vec::with_capacity(16),
             vdom_imports: VdomHelperFlags::empty(),
             vapor_imports: VaporHelperFlags::empty(),
+            builtin_imports: BuiltinComponentFlags::empty(),
             alloc,
         }
     }
@@ -91,6 +97,12 @@ impl<'alloc> CodeGenOutput<'alloc> {
     #[inline]
     pub fn add_vapor_import(&mut self, h: VaporHelper) {
         self.vapor_imports = self.vapor_imports.add(h);
+    }
+
+    /// Record a Vue built-in component import (Suspense, Teleport, etc.).
+    #[inline]
+    pub fn add_builtin_component(&mut self, flag: u8) {
+        self.builtin_imports = self.builtin_imports.add(flag);
     }
 
     /// Read-only access to VDOM import flags.
@@ -151,11 +163,18 @@ impl<'alloc> CodeGenOutput<'alloc> {
         ct.batch_prepend_left_static(&self.prepends);
 
         // Return whichever mode's imports are non-empty (only one is ever active)
-        if !self.vdom_imports.is_empty() {
+        let mut imports = if !self.vdom_imports.is_empty() {
             self.vdom_imports.to_imports()
         } else {
             self.vapor_imports.to_imports()
+        };
+
+        // Append built-in component imports (Suspense, Teleport, etc.)
+        if !self.builtin_imports.is_empty() {
+            imports.extend(self.builtin_imports.to_imports());
         }
+
+        imports
     }
 }
 
