@@ -176,8 +176,6 @@ pub enum VirtualNodeKind {
     Style { index: usize },
     /// A custom block (e.g. `<i18n>`) at the given index.
     Custom { index: usize },
-    /// Combined TSX output for LSP type checking (script types + template JSX).
-    Tsx,
 }
 
 /// A `src="..."` attribute on an SFC block that references an external file.
@@ -583,6 +581,22 @@ pub(crate) struct CachedVirtualFile {
     pub(crate) meta: VirtualMeta,
 }
 
+/// Cached TSX output for LSP type checking, stored separately from virtual files.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedTsx {
+    pub(crate) code: Arc<str>,
+    pub(crate) source_map: Option<Arc<str>>,
+}
+
+/// Response from [`VerterHost::get_tsx`].
+#[derive(Debug, Clone)]
+pub struct TsxResponse {
+    /// The generated TSX code.
+    pub code: Arc<str>,
+    /// JSON source map (if available).
+    pub source_map: Option<Arc<str>>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct CompileSlot {
     pub(crate) semantic_hash: Hash16,
@@ -591,6 +605,8 @@ pub(crate) struct CompileSlot {
     pub(crate) diagnostics: DiagnosticsSnapshot,
     pub(crate) last_good_outputs: Option<HashMap<VirtualNodeKind, CachedVirtualFile>>,
     pub(crate) last_access_tick: u64,
+    /// Combined TSX output for LSP type checking. Not a virtual file.
+    pub(crate) tsx: Option<CachedTsx>,
 }
 
 /// Lightweight extract of FileEntry fields needed for compilation,

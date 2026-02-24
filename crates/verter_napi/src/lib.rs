@@ -391,6 +391,13 @@ pub struct NapiVirtualFileResponse {
     pub meta: NapiVirtualMeta,
 }
 
+/// TSX output for LSP type checking (dedicated API, not a virtual file).
+#[napi(object)]
+pub struct NapiTsxResponse {
+    pub code: String,
+    pub sourceMap: Option<String>,
+}
+
 #[napi(object)]
 pub struct NapiRemoveResult {
     pub canonicalId: String,
@@ -449,10 +456,6 @@ fn host_node_kind_to_napi(input: &host::VirtualNodeKind) -> NapiVirtualNodeKind 
         host::VirtualNodeKind::Custom { index } => NapiVirtualNodeKind {
             kind: "custom".to_string(),
             index: Some(*index as u32),
-        },
-        host::VirtualNodeKind::Tsx => NapiVirtualNodeKind {
-            kind: "tsx".to_string(),
-            index: None,
         },
     }
 }
@@ -776,6 +779,30 @@ impl NapiVerterHost {
             })
             .transpose()
         })?
+    }
+
+    /// Retrieves the combined TSX output for LSP type checking.
+    ///
+    /// This is a dedicated API separate from virtual files. TSX output is
+    /// only consumed by the LSP, never by bundlers.
+    ///
+    /// Returns `{ code, sourceMap? }` or `null` if no TSX output is available.
+    #[napi(js_name = "getTsx")]
+    pub fn get_tsx(
+        &self,
+        canonical_id: String,
+        profile: Option<NapiCompileProfile>,
+    ) -> Result<Option<NapiTsxResponse>> {
+        let ffi_profile: Option<FfiCompileProfile> = profile.map(Into::into);
+        let host_profile = ffi_profile_to_host(ffi_profile)
+            .map_err(|e| Error::new(Status::InvalidArg, format!("invalid profile: {e}")))?;
+        let result = catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.get_tsx(&canonical_id, &host_profile)
+        }))?;
+        Ok(result.map(|r| NapiTsxResponse {
+            code: r.code.to_string(),
+            sourceMap: r.source_map.map(|s| s.to_string()),
+        }))
     }
 
     /// Records the resolved import dependencies for a file.

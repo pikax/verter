@@ -190,7 +190,6 @@ pub fn ffi_node_kind_to_host(
         "custom" => Ok(host::VirtualNodeKind::Custom {
             index: input.index.unwrap_or(0) as usize,
         }),
-        "tsx" => Ok(host::VirtualNodeKind::Tsx),
         other => Err(FfiConversionError::InvalidNodeKind(other.to_string())),
     }
 }
@@ -266,10 +265,6 @@ pub fn host_node_kind_to_ffi(input: &host::VirtualNodeKind) -> FfiVirtualNodeKin
         host::VirtualNodeKind::Custom { index } => FfiVirtualNodeKind {
             kind: "custom".to_string(),
             index: Some(*index as u32),
-        },
-        host::VirtualNodeKind::Tsx => FfiVirtualNodeKind {
-            kind: "tsx".to_string(),
-            index: None,
         },
     }
 }

@@ -13,8 +13,13 @@ interface HostCompileProfile {
 }
 
 interface HostVirtualNodeKind {
-  kind: "main" | "script" | "template" | "style" | "custom" | "tsx";
+  kind: "main" | "script" | "template" | "style" | "custom";
   index?: number;
+}
+
+interface HostTsxResponse {
+  code: string;
+  sourceMap?: string;
 }
 
 interface HostDiagnostic {
@@ -57,6 +62,7 @@ interface HostBinding {
   }): HostVirtualFileResponse;
   listVirtualFiles(canonicalId: string): HostVirtualNodeKind[];
   getAnalysis?(canonicalOrAlias: string): FileAnalysis | null;
+  getTsx?(canonicalId: string, profile?: HostCompileProfile): HostTsxResponse | null;
 }
 
 /** Convert structured host diagnostics to display strings. */
@@ -279,14 +285,11 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   }
   file.compiled.analysis = analysis;
 
-  // Retrieve TSX types output (backward compat: older WASM may not produce this node)
-  if (nodeKinds.has("tsx")) {
+  // Retrieve TSX types output via dedicated API (backward compat: older WASM may lack getTsx)
+  if (typeof wasmHost!.getTsx === "function") {
     try {
-      const tsx = wasmHost!.getVirtualFile({
-        rawId: `${file.filename}?vue&type=tsx`,
-        compileProfile: profile,
-      });
-      file.compiled.types = tsx.code ?? "";
+      const tsx = wasmHost!.getTsx(file.filename, profile);
+      file.compiled.types = tsx?.code ?? "";
     } catch {
       // Silently ignore - TSX output is optional
     }
@@ -338,14 +341,15 @@ function compileTsWithHost(file: File, options: CompilerOptions | undefined): Co
   }
   file.compiled.analysis = analysis;
 
-  // Retrieve TSX types output for .ts files (backward compat: older WASM may not produce this)
-  try {
-    const tsx = wasmHost!.getVirtualFile({
-      rawId: `${vueFilename}?vue&type=tsx`,
-      compileProfile: profile,
-    });
-    file.compiled.types = tsx.code ?? "";
-  } catch {
+  // Retrieve TSX types output via dedicated API
+  if (typeof wasmHost!.getTsx === "function") {
+    try {
+      const tsx = wasmHost!.getTsx(vueFilename, profile);
+      file.compiled.types = tsx?.code ?? "";
+    } catch {
+      file.compiled.types = "";
+    }
+  } else {
     file.compiled.types = "";
   }
 

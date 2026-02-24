@@ -191,15 +191,15 @@ impl VerterHost {
             .map(|o| o.hash)
             .unwrap_or(0);
 
-        let (compiled_outputs, diagnostics, stale) =
+        let (compiled_outputs, diagnostics, stale, compiled_tsx) =
             match self.compile_entry(&compile_input, &query.compile_profile) {
-                Ok((outputs, diagnostics)) => (outputs, diagnostics, false),
+                Ok((outputs, diagnostics, tsx)) => (outputs, diagnostics, false, tsx),
                 Err(diagnostics) => {
                     self.store_latest_diagnostics(&canonical_id, profile_hash, diagnostics.clone());
                     let policy = self.config.compile_error_policy;
                     if self.config.dev_mode && policy == CompileErrorPolicy::DevServeLastKnownGood {
                         if let Some(last_good) = fallback_last_good.clone() {
-                            (last_good, diagnostics, true)
+                            (last_good, diagnostics, true, None)
                         } else {
                             return Err(HostError::CompileError { diagnostics });
                         }
@@ -244,6 +244,7 @@ impl VerterHost {
                         diagnostics: diagnostics.clone(),
                         last_good_outputs,
                         last_access_tick: last_tick,
+                        tsx: compiled_tsx,
                     },
                 );
                 entry
@@ -281,6 +282,24 @@ impl VerterHost {
             .unwrap_or_default()
     }
 
+    /// Retrieve the combined TSX output for LSP type checking.
+    ///
+    /// Returns the TSX code and optional source map for the given file and profile.
+    /// This is a dedicated API separate from the virtual file system, since TSX
+    /// output is only consumed by the LSP and playground, never by bundlers.
+    pub fn get_tsx(&self, canonical_id: &str, profile: &CompileProfile) -> Option<TsxResponse> {
+        let canonical = self.resolve_alias_or_canonical(canonical_id);
+        let profile_hash = compile_profile_hash(profile);
+        let files = read_lock(&self.files);
+        let entry = files.get(&canonical)?;
+        let slot = entry.compile_slots.get(&profile_hash)?;
+        let tsx = slot.tsx.as_ref()?;
+        Some(TsxResponse {
+            code: tsx.code.clone(),
+            source_map: tsx.source_map.clone(),
+        })
+    }
+
     /// Store diagnostics from a failed compile without triggering recompilation.
     pub(crate) fn store_latest_diagnostics(
         &self,
@@ -294,6 +313,7 @@ impl VerterHost {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn compile_entry(
         &self,
         snapshot: &CompileInput,
@@ -302,6 +322,7 @@ impl VerterHost {
         (
             HashMap<VirtualNodeKind, CachedVirtualFile>,
             DiagnosticsSnapshot,
+            Option<CachedTsx>,
         ),
         DiagnosticsSnapshot,
     > {
@@ -576,23 +597,16 @@ impl VerterHost {
             );
         }
 
-        // Combined TSX output for LSP type checking
-        if let Some(tsx) = compiled.tsx {
-            outputs.insert(
-                VirtualNodeKind::Tsx,
-                CachedVirtualFile {
-                    code: Arc::from(tsx.code),
-                    source_map: if tsx.source_map.is_empty() {
-                        None
-                    } else {
-                        Some(Arc::from(tsx.source_map))
-                    },
-                    lang: Some("tsx".to_string()),
-                    meta: VirtualMeta::default(),
-                },
-            );
-        }
+        // Combined TSX output for LSP type checking — stored separately, not as virtual file
+        let cached_tsx = compiled.tsx.map(|tsx| CachedTsx {
+            code: Arc::from(tsx.code),
+            source_map: if tsx.source_map.is_empty() {
+                None
+            } else {
+                Some(Arc::from(tsx.source_map))
+            },
+        });
 
-        Ok((outputs, compile_diags))
+        Ok((outputs, compile_diags, cached_tsx))
     }
 }

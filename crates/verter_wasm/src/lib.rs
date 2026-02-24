@@ -232,6 +232,29 @@ impl WasmVerterHost {
         to_wasm_value(&output)
     }
 
+    /// Retrieves the combined TSX output for LSP type checking.
+    ///
+    /// This is a dedicated API separate from virtual files. TSX output is
+    /// only consumed by the LSP and playground, never by bundlers.
+    ///
+    /// Returns `{ code: string, sourceMap?: string }` or `null` if no TSX
+    /// output is available for the given file and profile.
+    #[wasm_bindgen(js_name = getTsx)]
+    pub fn get_tsx(&self, canonical_id: &str, profile: JsValue) -> Result<JsValue, JsValue> {
+        let ffi_profile: Option<FfiCompileProfile> = if profile.is_undefined() || profile.is_null()
+        {
+            None
+        } else {
+            Some(parse_wasm_input(profile)?)
+        };
+        let host_profile = ffi_profile_to_host(ffi_profile).map_err(ffi_err)?;
+        let result = catch_panic(|| self.inner.get_tsx(canonical_id, &host_profile))?;
+        to_wasm_value(&result.map(|r| FfiTsxResponse {
+            code: r.code.to_string(),
+            source_map: r.source_map.map(|s| s.to_string()),
+        }))
+    }
+
     /// Records the resolved import dependencies for a file.
     ///
     /// Called after resolving the `importSpecifiers` returned by

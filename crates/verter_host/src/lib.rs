@@ -887,6 +887,7 @@ mod tests {
                 diagnostics: DiagnosticsSnapshot::default(),
                 last_good_outputs: last_good,
                 last_access_tick: 1,
+                tsx: None,
             },
         );
 

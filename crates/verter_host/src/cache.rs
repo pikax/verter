@@ -11,7 +11,6 @@ pub(crate) fn node_sort_key(node: &VirtualNodeKind) -> (u8, usize) {
         VirtualNodeKind::Template => (2, 0),
         VirtualNodeKind::Style { index } => (3, *index),
         VirtualNodeKind::Custom { index } => (4, *index),
-        VirtualNodeKind::Tsx => (5, 0),
     }
 }
 
@@ -266,6 +265,7 @@ mod tests {
                     diagnostics: DiagnosticsSnapshot::default(),
                     last_good_outputs: None,
                     last_access_tick: i as u64,
+                    tsx: None,
                 },
             );
         }
@@ -349,6 +349,7 @@ mod tests {
                 diagnostics: DiagnosticsSnapshot::default(),
                 last_good_outputs: None,
                 last_access_tick: 1,
+                tsx: None,
             },
         );
 
