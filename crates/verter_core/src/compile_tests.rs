@@ -7129,6 +7129,134 @@ fn tsx_template_tag_empty_template_emits_empty_fragment() {
 }
 
 #[test]
+fn tsx_v_for_item_in_items_emits_map_expression() {
+    let result = compile_tsx(r#"<template><div v-for="item in items">{{ item }}</div></template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("items.map((item) => (") || tsx.code.contains("_ctx.items.map((item) => ("),
+        "v-for item in items should compile to .map expression, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_v_for_item_of_items_emits_map_expression() {
+    let result = compile_tsx(r#"<template><div v-for="item of items">{{ item + 1 }}</div></template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("items.map((item) => (") || tsx.code.contains("_ctx.items.map((item) => ("),
+        "v-for item of items should compile to .map expression, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("{ item + 1 }") || tsx.code.contains("{ _ctx.item + 1 }"),
+        "v-for loop body expression should be preserved, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_v_for_with_index_and_destructure_params() {
+    let result = compile_tsx(
+        r#"<template>
+<div v-for="(item, index) in items">{{ item + index }}</div>
+<div v-for="({obj}, key, index) of items">{{ obj + key + index }}</div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("map((item, index) => ("),
+        "v-for with (item, index) should preserve both params, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("map(({obj}, key, index) => (")
+            || tsx.code.contains("map(({ obj }, key, index) => ("),
+        "v-for with destructured value/key/index params should be preserved, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_v_for_nested_loop_emits_nested_maps() {
+    let result = compile_tsx(
+        r#"<template><li v-for="item in items"><span v-for="childItem in item.children">{{ item.message }} {{ childItem }}</span></li></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.matches(".map((").count() >= 2,
+        "Nested v-for should produce nested map expressions, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_v_for_on_template_tag_uses_fragment_children() {
+    let result = compile_tsx(
+        r#"<template><template v-for="item in items"><li>{{ item.msg }}</li><li class="divider" role="presentation"></li></template></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains(".map((item) => ("),
+        "template v-for should compile to map over item, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("<li>{ item.msg }</li>") || tsx.code.contains("<li>{ _ctx.item.msg }</li>"),
+        "template v-for branch should render li child content, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("</>))"),
+        "template v-for branch should close with fragment syntax, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_v_for_with_v_if_combination_contains_condition_and_map() {
+    let result = compile_tsx(r#"<template><li v-for="item in items" v-if="item.active"></li></template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains(".map((item) => ("),
+        "v-for branch should still emit map expression when combined with v-if, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("item.active ? (")
+            || tsx.code.contains("_ctx.item.active ? (")
+            || tsx.code.contains("item.active?("),
+        "v-if condition should be emitted for v-for + v-if branch, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_parent_v_if_with_child_v_for_contains_outer_condition() {
+    let result = compile_tsx(
+        r#"<template><div v-if="show"><div v-for="item in items">{{ item }}</div></div></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("show ? (") || tsx.code.contains("_ctx.show ? ("),
+        "Parent v-if should emit conditional branch, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains(".map((item) => ("),
+        "Child v-for under parent v-if should still emit map expression, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_not_generated_when_disabled() {
     let result = compile_sfc(
         r#"<script setup>

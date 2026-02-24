@@ -5560,7 +5560,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 108
 source_name = "nested"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_nested_loop_emits_nested_maps"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:121:with-v-if"
@@ -5569,7 +5569,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 121
 source_name = "with v-if"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_with_v_if_combination_contains_condition_and_map"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:132:template"
@@ -5578,7 +5578,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 132
 source_name = "template"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_on_template_tag_uses_fragment_children"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:146:parent-v-if"
@@ -5587,7 +5587,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 146
 source_name = "parent v-if"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_parent_v_if_with_child_v_for_contains_outer_condition"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:154:parent-to-narrow-type"
@@ -5596,7 +5596,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 154
 source_name = "parent to narrow type"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_parent_v_if_with_child_v_for_contains_outer_condition"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:165:v-for-with-slots-dynamic"
@@ -5605,7 +5605,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 165
 source_name = "v-for with slots dynamic"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_item_in_items_emits_map_expression"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:174:v-for-with-slots-children"
@@ -5614,7 +5614,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 174
 source_name = "v-for with slots children"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_item_in_items_emits_map_expression"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:32:div-v-for-item-in-items"
@@ -5623,7 +5623,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 32
 source_name = "<div v-for=\"item in items\"/>"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_item_in_items_emits_map_expression"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:40:div-v-for-item-in-items-item-div"
@@ -5632,7 +5632,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 40
 source_name = "<div v-for=\"item in items\">{{ item }}</div>"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_item_in_items_emits_map_expression"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:48:div-v-for-item-in-items-item-1-div"
@@ -5641,7 +5641,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 48
 source_name = "<div v-for=\"item in items\">{{ item + 1 }}</div>"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_item_of_items_emits_map_expression"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:56:div-v-for-item-of-items-item-1-div"
@@ -5650,7 +5650,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 56
 source_name = "<div v-for=\"item of items\">{{ item + 1 }}</div>"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_item_of_items_emits_map_expression"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:63:div-v-for-item-index-in-items-item-index-div"
@@ -5659,7 +5659,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 63
 source_name = "<div v-for=\"(item, index) in items\">{{ item + index }}</div>"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_with_index_and_destructure_params"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:70:div-v-for-item-index-of-items-item-index-div"
@@ -5668,7 +5668,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 70
 source_name = "<div v-for=\"(item, index) of items\">{{ item + index }}</div>"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_with_index_and_destructure_params"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:77:div-v-for-obj-in-items-test-obj-div"
@@ -5677,7 +5677,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 77
 source_name = "<div v-for=\"{obj} in items\">{{ test + obj }}</div>"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_with_index_and_destructure_params"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:84:div-v-for-obj-of-items-test-obj-div"
@@ -5686,7 +5686,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 84
 source_name = "<div v-for=\"{obj} of items\">{{ test + obj }}</div>"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_with_index_and_destructure_params"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:91:div-v-for-item-key-index-of-items-item-key-index-div"
@@ -5695,7 +5695,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 91
 source_name = "<div v-for=\"(item, key, index) of items\">{{ item + key + index }}</div>"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_with_index_and_destructure_params"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:99:div-v-for-obj-key-index-in-items-item-obj-key-index-div"
@@ -5704,7 +5704,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/loop/loop.spec.ts"
 source_line = 99
 source_name = "<div v-for=\"({obj}, key, index) in items\">{{ item + obj + key + index }}</div>"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_v_for_with_index_and_destructure_params"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:104:supports-dot-shorthand-for-prop-modifier"
