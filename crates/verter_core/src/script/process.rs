@@ -9,11 +9,14 @@
 use oxc_allocator::Allocator;
 use oxc_parser::Parser;
 use oxc_span::SourceType;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::BindingType;
-use crate::utils::oxc::vue::{parse_script, parse_script_with_companion, ScriptItem, ScriptMode};
+use crate::utils::oxc::vue::{
+    parse_script, parse_script_with_companion, ImportSpecifierKind, ScriptImport, ScriptItem,
+    ScriptMode,
+};
 
 use super::macros::{process_companion_script, process_macro_item, MacroState};
 use super::{ScriptCodeGenOptions, ScriptContext};
@@ -93,6 +96,14 @@ pub fn process_script_setup<'alloc>(
         companion_types,
     );
 
+    // In force_js mode, compute type-stripped script content (sans imports) to
+    // determine which import specifiers have runtime references vs type-only usage.
+    let runtime_text = if !options.keep_ts_types {
+        Some(compute_runtime_text(content_str, &parse_result.items))
+    } else {
+        None
+    };
+
     // Process items
     for item in &parse_result.items {
         match item {
@@ -103,26 +114,20 @@ pub fn process_script_setup<'alloc>(
                 if !options.keep_ts_types && imp.is_type_only {
                     // Type-only import — strip entirely when not keeping TS types
                     ctx.out.overwrite(abs_start, abs_end, "");
-                } else if !options.keep_ts_types && imp.bindings.iter().any(|b| b.is_type_only) {
-                    // Mixed import with per-specifier `type` keywords — reconstruct
-                    // keeping only runtime specifiers
-                    let runtime_bindings: Vec<&str> = imp
-                        .bindings
-                        .iter()
-                        .filter(|b| !b.is_type_only)
-                        .map(|b| b.name)
-                        .collect();
+                } else if !options.keep_ts_types {
+                    // force_js mode: reconstruct import keeping only specifiers
+                    // that have runtime usage (in script body or template)
+                    let kept = filter_import_specifiers(
+                        imp,
+                        runtime_text.as_deref(),
+                        options.template_used_vars.as_ref(),
+                    );
                     ctx.out.overwrite(abs_start, abs_end, "");
-                    if !runtime_bindings.is_empty() {
-                        let new_import = format!(
-                            "import {{ {} }} from '{}'\n",
-                            runtime_bindings.join(", "),
-                            imp.source,
-                        );
-                        ctx.out.prepend_alloc(hoist_pos, &new_import);
+                    if let Some(reconstructed) = kept {
+                        ctx.out.prepend_alloc(hoist_pos, &reconstructed);
                     }
                 } else {
-                    // Regular import — move to file top
+                    // Keep TS types mode — hoist verbatim
                     let import_text = &ctx.source[abs_start as usize..abs_end as usize];
                     ctx.out.overwrite(abs_start, abs_end, "");
                     ctx.out
@@ -165,16 +170,19 @@ pub fn process_script_setup<'alloc>(
         ctx.bindings.insert(name, *bt);
     }
 
-    // Add companion script import names as SetupConst bindings.
+    // Add companion script import names as SetupImport bindings.
     // Imports in the companion <script> block are available to the template at runtime
-    // because the component factory merges both script blocks. We mark them as SetupConst
-    // so they appear in the setup return object and template uses $setup.xxx prefix.
+    // because the component factory merges both script blocks. We mark them as SetupImport
+    // (not SetupConst) so they're filtered by template_used_vars — only companion imports
+    // actually referenced in the template appear in __returned__. This matches Vue's
+    // official compiler behavior and prevents type-only imports (e.g., CurrencyCodes used
+    // only as `"EUR" as CurrencyCodes`) from leaking into __returned__ as runtime references.
     for name in &companion_import_names {
         // Skip if setup script already declares the same name (setup takes precedence)
         let alloc_name = ctx.out.alloc_str(name);
         ctx.bindings
             .entry(alloc_name)
-            .or_insert(BindingType::SetupConst);
+            .or_insert(BindingType::SetupImport);
     }
 
     // Inject _useCssVars if CSS v-bind vars are present
@@ -290,7 +298,7 @@ pub fn process_script_setup<'alloc>(
     let returned = if !options.inline_template {
         Some(build_returned_object(
             &ctx.bindings,
-            options.template_source,
+            options.template_used_vars.as_ref(),
         ))
     } else {
         None
@@ -353,7 +361,10 @@ pub fn process_script_only<'alloc>(
         content_str,
     );
 
-    // Find default export and replace it
+    // Find default export and replace it.
+    // Regular <script> content is passed through as-is to the bundler
+    // (with only the export default tweak). Import elision and TS stripping
+    // are handled by the downstream toolchain (e.g., Vite's esbuild plugin).
     let mut has_default_export = false;
     for item in &parse_result.items {
         if let ScriptItem::DefaultExport(de) = item {
@@ -543,12 +554,12 @@ fn build_setup_wrapper_end(
 /// Build the `__returned__` object from bindings.
 ///
 /// Includes all setup-type bindings (not props, data, or options).
-/// `SetupImport` bindings are only included when their identifier appears as a
-/// whole word in `template_source` (matches Vue's `isUsedInTemplate` behaviour).
-/// Returns a JS object literal like `{ msg, count }`.
+/// `SetupImport` bindings are only included when their identifier appears in
+/// the `template_used_vars` set (AST-based, from expression bindings + component
+/// tag names). Returns a JS object literal like `{ msg, count }`.
 fn build_returned_object(
     bindings: &FxHashMap<&str, BindingType>,
-    template_source: Option<&str>,
+    template_used_vars: Option<&FxHashSet<String>>,
 ) -> String {
     let mut names: Vec<&str> = bindings
         .iter()
@@ -556,10 +567,10 @@ fn build_returned_object(
             if !bt.is_setup() {
                 return false;
             }
-            // SetupImport: only include if identifier appears in template text
+            // SetupImport: only include if identifier is used in the template
             if **bt == BindingType::SetupImport {
-                match template_source {
-                    Some(tpl) => is_identifier_used_in_text(name, tpl),
+                match template_used_vars {
+                    Some(vars) => vars.contains(name as &str),
                     // No template → include all (conservative)
                     None => true,
                 }
@@ -589,9 +600,9 @@ fn build_returned_object(
 
 /// Check whether `ident` appears as a whole-word in `text`.
 ///
-/// Uses `memchr::memmem` for fast substring search, then verifies word boundaries:
-/// the character before and after the match must not be alphanumeric or `_`.
-/// This matches Vue's `isUsedInTemplate` heuristic.
+/// Uses `memchr::memmem` for fast substring search, then verifies word boundaries.
+/// Used for checking if an identifier has runtime references in type-stripped
+/// script content (where type annotations have already been removed).
 fn is_identifier_used_in_text(ident: &str, text: &str) -> bool {
     let finder = memchr::memmem::Finder::new(ident.as_bytes());
     let text_bytes = text.as_bytes();
@@ -621,6 +632,123 @@ fn is_identifier_used_in_text(ident: &str, text: &str) -> bool {
         start = abs_pos + 1;
     }
     false
+}
+
+/// Compute type-stripped script content with import lines blanked out.
+///
+/// Used to determine which import specifiers have runtime references (appear in
+/// the script body after type annotations are removed) vs type-only usage.
+fn compute_runtime_text(content_str: &str, items: &[ScriptItem]) -> String {
+    let alloc = Allocator::new();
+    let stripped = crate::strip_types::strip_types(content_str, &alloc);
+
+    // Blank out import statement regions so specifier names in the import line
+    // itself don't cause false positives.
+    let mut result = stripped.code;
+    for item in items {
+        if let ScriptItem::Import(imp) = item {
+            let start = imp.span.start as usize;
+            let end = imp.span.end as usize;
+            if end <= result.len() {
+                // Replace with spaces to preserve byte positions
+                result.replace_range(start..end, &" ".repeat(end - start));
+            }
+        }
+    }
+    result
+}
+
+/// Filter import specifiers, keeping only those with runtime usage.
+///
+/// Returns `Some(reconstructed_import)` if any specifiers survive, `None` otherwise.
+/// Checks each specifier against `runtime_text` (type-stripped script body) and
+/// `template_used_vars` (AST-based identifier set from template expressions).
+fn filter_import_specifiers(
+    imp: &ScriptImport,
+    runtime_text: Option<&str>,
+    template_used_vars: Option<&FxHashSet<String>>,
+) -> Option<String> {
+    let mut default_name: Option<&str> = None;
+    let mut namespace_name: Option<&str> = None;
+    let mut named: Vec<&str> = Vec::new();
+
+    for b in &imp.bindings {
+        if b.is_type_only {
+            continue;
+        }
+
+        // Check if specifier is used at runtime
+        let is_runtime_used = is_specifier_runtime_used(b.name, runtime_text, template_used_vars);
+
+        if !is_runtime_used {
+            continue;
+        }
+
+        match b.import_kind {
+            Some(ImportSpecifierKind::Default) => default_name = Some(b.name),
+            Some(ImportSpecifierKind::Namespace) => namespace_name = Some(b.name),
+            Some(ImportSpecifierKind::Named) | None => named.push(b.name),
+        }
+    }
+
+    // Nothing survived → drop entire import
+    if default_name.is_none() && namespace_name.is_none() && named.is_empty() {
+        return None;
+    }
+
+    // Reconstruct import statement
+    let mut s = String::with_capacity(64);
+    s.push_str("import ");
+
+    if let Some(ns) = namespace_name {
+        s.push_str("* as ");
+        s.push_str(ns);
+    } else {
+        if let Some(def) = default_name {
+            s.push_str(def);
+            if !named.is_empty() {
+                s.push_str(", ");
+            }
+        }
+        if !named.is_empty() {
+            s.push_str("{ ");
+            for (i, name) in named.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(name);
+            }
+            s.push_str(" }");
+        }
+    }
+
+    s.push_str(" from '");
+    s.push_str(imp.source);
+    s.push_str("'\n");
+
+    Some(s)
+}
+
+/// Check whether an import specifier has runtime usage (in script body or template).
+fn is_specifier_runtime_used(
+    name: &str,
+    runtime_text: Option<&str>,
+    template_used_vars: Option<&FxHashSet<String>>,
+) -> bool {
+    // Check template identifier set (O(1) lookup)
+    if let Some(vars) = template_used_vars {
+        if vars.contains(name) {
+            return true;
+        }
+    }
+    // Check type-stripped script body
+    if let Some(rt) = runtime_text {
+        if is_identifier_used_in_text(name, rt) {
+            return true;
+        }
+    }
+    // If neither runtime_text nor template_used_vars is available, be conservative
+    runtime_text.is_none() && template_used_vars.is_none()
 }
 
 /// Strip TypeScript type annotations from a section string (props/emits/options).

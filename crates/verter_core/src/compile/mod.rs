@@ -20,7 +20,9 @@ use web_time::Instant;
 
 use oxc_allocator::Allocator;
 use oxc_span::SourceType;
+use rustc_hash::FxHashSet;
 
+use crate::ast::types::{AstNodeKind, TagType};
 use crate::code_transform::{CodeTransform, SourceMapOptions};
 use crate::css::{process_style, types::ProcessStyleOptions};
 use crate::diagnostics::{
@@ -30,8 +32,10 @@ use crate::parser::types::StyleLang;
 use crate::parser::Syntax;
 use crate::script::{generate_script, ScriptCodeGenOptions};
 use crate::style::generate_style;
+use crate::template::code_gen::vdom::element::to_pascal_case;
 use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenOptions};
 use crate::template::oxc::parse_template_expressions;
+use crate::template::oxc::types::OxcParsedAst;
 use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
 
 use helpers::{extract_attrs, extract_block_ranges};
@@ -229,13 +233,68 @@ pub fn compile(
 
     let mut ct = CodeTransform::new(input, allocator);
 
-    // Extract raw template text for import elision (SetupImport word-boundary scan)
-    let template_source = syntax.template_ast().and_then(|ast| {
-        ast.root
-            .content
-            .as_ref()
-            .map(|c| &input[c.start as usize..c.end as usize])
-    });
+    // Parse template expressions early so we can collect the set of identifiers
+    // actually used in the template (for import elision in script codegen).
+    // This avoids the text-based heuristic and correctly handles TS type positions.
+    let source_type = SourceType::tsx();
+    let early_oxc_ast: Option<OxcParsedAst<'_>> = if !has_parse_errors {
+        syntax.template_ast().map(|template_ast_ref| {
+            parse_template_expressions(template_ast_ref, input, allocator, source_type)
+        })
+    } else {
+        None
+    };
+
+    let template_used_vars: Option<FxHashSet<String>> = if let (
+        Some(ref oxc_ast),
+        Some(template_ast_ref),
+    ) =
+        (&early_oxc_ast, syntax.template_ast())
+    {
+        let mut vars = FxHashSet::default();
+
+        // 1. Collect identifiers from all expression bindings
+        //    (interpolations, v-if conditions, directive values, dynamic args)
+        for expr in oxc_ast.iter_expressions() {
+            if let Some(ref bindings) = expr.bindings {
+                for name in bindings.non_ignored_binding_names() {
+                    vars.insert(name.to_string());
+                }
+            }
+        }
+
+        // 2. Collect identifiers from v-for source expressions
+        for node_data in &oxc_ast.data {
+            if let crate::template::oxc::types::OxcNodeData::Element(el) = node_data {
+                if let Some(ref v_for) = el.v_for {
+                    for span in &v_for.parsed.references {
+                        let name = &input[span.start as usize..span.end as usize];
+                        vars.insert(name.to_string());
+                    }
+                }
+            }
+        }
+
+        // 3. Collect component tag names from the template AST
+        for node in &template_ast_ref.nodes {
+            if let AstNodeKind::Element(el) = &node.kind {
+                if el.tag_type == TagType::Component {
+                    // Tag name is between '<' and name_end
+                    let tag_name =
+                        &input[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
+                    vars.insert(tag_name.to_string());
+                    // Also add PascalCase version for kebab-case tags
+                    if tag_name.contains('-') {
+                        vars.insert(to_pascal_case(tag_name));
+                    }
+                }
+            }
+        }
+
+        Some(vars)
+    } else {
+        None
+    };
 
     let script_options = ScriptCodeGenOptions {
         component_name: &component_name,
@@ -248,7 +307,7 @@ pub fn compile(
         runtime_module_name: options.runtime_module_name.as_deref().unwrap_or("vue"),
         css_v_binds: &all_v_bind_vars,
         external_types: verter_options.external_types.clone(),
-        template_source,
+        template_used_vars,
     };
 
     let script_result = generate_script(
@@ -434,8 +493,11 @@ pub fn compile(
         } else {
             let tpl_start = Instant::now();
 
-            let source_type = SourceType::tsx();
-            let oxc_ast = parse_template_expressions(&template_ast, input, allocator, source_type);
+            // Reuse early-parsed OxcParsedAst if available, otherwise parse now
+            let oxc_ast = match early_oxc_ast {
+                Some(ast) => ast,
+                None => parse_template_expressions(&template_ast, input, allocator, source_type),
+            };
 
             let tpl_alloc = Allocator::new();
             // Use the full SFC input so AST positions (which are absolute) align correctly.
@@ -466,11 +528,7 @@ pub fn compile(
                 is_production: options.is_production,
                 comments: options.comments.unwrap_or(!options.is_production),
                 force_js: verter_options.force_js,
-                self_name: {
-                    // PascalCase of the component name for recursive self-reference detection
-                    use crate::template::code_gen::vdom::element::to_pascal_case;
-                    to_pascal_case(&component_name)
-                },
+                self_name: to_pascal_case(&component_name),
             };
 
             let imports = generate_template(

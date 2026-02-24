@@ -1247,8 +1247,9 @@ fn multiple_imports_all_hoisted() {
 
     let output = ct.build_string();
 
-    // Both imports should be before component definition
-    let vue_import_pos = output.find("import { ref, computed } from 'vue'").unwrap();
+    // Both imports should be before component definition.
+    // `computed` is not used in the script body so it gets elided in force_js mode.
+    let vue_import_pos = output.find("import { ref } from 'vue'").unwrap();
     let router_import_pos = output
         .find("import { useRoute } from 'vue-router'")
         .unwrap();

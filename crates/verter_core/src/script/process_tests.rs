@@ -124,6 +124,62 @@ fn build_returned_sorted() {
     assert!(alpha_pos < zebra_pos);
 }
 
+// ── SetupImport filtering in __returned__ ────────────────────
+
+#[test]
+fn build_returned_setup_import_excluded_without_template_vars() {
+    // SetupImport bindings are included when no template_used_vars is provided
+    // (conservative: no template → include all)
+    let mut bindings = FxHashMap::default();
+    bindings.insert("MyComp", BindingType::SetupImport);
+    bindings.insert("msg", BindingType::SetupConst);
+    let result = build_returned_object(&bindings, None);
+    assert!(result.contains("MyComp"));
+    assert!(result.contains("msg"));
+}
+
+#[test]
+fn build_returned_setup_import_filtered_by_template_vars() {
+    // SetupImport bindings are filtered: only included if in template_used_vars
+    let mut bindings = FxHashMap::default();
+    bindings.insert("UsedComp", BindingType::SetupImport);
+    bindings.insert("UnusedImport", BindingType::SetupImport);
+    bindings.insert("msg", BindingType::SetupConst);
+
+    let mut vars = FxHashSet::default();
+    vars.insert("UsedComp".to_string());
+
+    let result = build_returned_object(&bindings, Some(&vars));
+    assert!(
+        result.contains("UsedComp"),
+        "Used import should be in __returned__"
+    );
+    assert!(
+        !result.contains("UnusedImport"),
+        "Unused import should NOT be in __returned__"
+    );
+    assert!(
+        result.contains("msg"),
+        "SetupConst bindings are always included"
+    );
+}
+
+#[test]
+fn build_returned_setup_import_empty_template_vars_excludes_all() {
+    // With empty template_used_vars set, no SetupImport bindings are included
+    let mut bindings = FxHashMap::default();
+    bindings.insert("SomeImport", BindingType::SetupImport);
+    bindings.insert("msg", BindingType::SetupConst);
+
+    let vars = FxHashSet::default();
+    let result = build_returned_object(&bindings, Some(&vars));
+    assert!(
+        !result.contains("SomeImport"),
+        "SetupImport with empty template_used_vars should be excluded"
+    );
+    assert!(result.contains("msg"));
+}
+
 // ── Vapor: __vapor flag ──────────────────────────────────────
 
 #[test]

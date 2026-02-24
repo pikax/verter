@@ -5701,25 +5701,25 @@ doSomething();
     let returned_end = script.code[returned_brace..].find('}').unwrap() + returned_brace + 1;
     let returned_obj = &script.code[returned_brace..returned_end];
 
-    // AuthError should NOT appear in __returned__ — it's only used as a type annotation
-    // in the defineEmits validator, not in the template
+    // AuthError should NOT appear anywhere — it's only used as a type annotation
+    // in the defineEmits validator. After type stripping, it has no runtime references,
+    // so it's elided from both the import statement and __returned__.
     assert!(
-        !returned_obj.contains("AuthError"),
-        "AuthError should be elided from __returned__ (only used as type), got:\n{}",
-        returned_obj
+        !script.code.contains("AuthError"),
+        "AuthError should be fully elided (only used as type), got:\n{}",
+        script.code
     );
-    // doSomething should NOT appear in __returned__ either — it's used in the script
-    // body but not referenced in the template
-    assert!(
-        !returned_obj.contains("doSomething"),
-        "doSomething should not be in __returned__ (not used in template), got:\n{}",
-        returned_obj
-    );
-    // doSomething should still be present in the import (used at runtime in script body)
+    // doSomething should be in the import (used at runtime in script body)
     assert!(
         script.code.contains("doSomething"),
         "doSomething should remain in imports (used at runtime), got:\n{}",
         script.code
+    );
+    // doSomething should NOT be in __returned__ (not referenced in template)
+    assert!(
+        !returned_obj.contains("doSomething"),
+        "doSomething should not be in __returned__ (not used in template), got:\n{}",
+        returned_obj
     );
     // import type should be fully stripped
     assert!(
@@ -5771,6 +5771,155 @@ import { helperFn } from "./helpers";
     assert!(
         !returned_obj.contains("helperFn"),
         "helperFn (not used in template) should NOT be in __returned__, got:\n{}",
+        returned_obj
+    );
+}
+
+// ==================== Companion script import elision ====================
+
+#[test]
+fn companion_script_type_only_import_not_in_returned() {
+    // Companion <script> imports that are only used as type assertions should NOT
+    // be in __returned__. This matches Vue's official compiler behavior.
+    // Regression test for CurrencyCodes build failure in judis-app.
+    let result = compile_sfc(
+        r#"<script lang="ts">
+import { computed, defineComponent } from "vue";
+import { CurrencyCodes, isArray } from "vue-composable";
+import { CustomField as CustomFieldType } from "@judis/shared";
+
+function getDefaultValue(field: CustomFieldType) {
+  return { currency: "EUR" as CurrencyCodes, value: 0 };
+}
+
+export default defineComponent({});
+</script>
+<script setup lang="ts">
+import { HButton } from "@judis/ui";
+
+const props = defineProps<{ items: string[] }>();
+
+function doStuff() {
+  if (isArray(props.items)) {
+    return getDefaultValue({ type: "money" } as CustomFieldType);
+  }
+}
+</script>
+<template>
+  <HButton :label="doStuff()" />
+</template>"#,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let script = result.script.as_ref().expect("script block");
+
+    let returned_start = script
+        .code
+        .find("const __returned__ = ")
+        .expect("should have __returned__");
+    let returned_brace = script.code[returned_start..].find('{').unwrap() + returned_start;
+    let returned_end = script.code[returned_brace..].find('}').unwrap() + returned_brace + 1;
+    let returned_obj = &script.code[returned_brace..returned_end];
+
+    // CurrencyCodes is only used as a type assertion in the companion body.
+    // It should NOT be in __returned__ (would cause Rollup error if it's
+    // a type-only export from the source package).
+    assert!(
+        !returned_obj.contains("CurrencyCodes"),
+        "CurrencyCodes (type-only in companion) should NOT be in __returned__, got:\n{}",
+        returned_obj
+    );
+
+    // CustomFieldType is only used as a type annotation.
+    // Should NOT be in __returned__.
+    assert!(
+        !returned_obj.contains("CustomFieldType"),
+        "CustomFieldType (type-only in companion) should NOT be in __returned__, got:\n{}",
+        returned_obj
+    );
+
+    // computed and defineComponent are from vue and not used in template.
+    // Should NOT be in __returned__.
+    assert!(
+        !returned_obj.contains("computed"),
+        "computed (companion import, not used in template) should NOT be in __returned__, got:\n{}",
+        returned_obj
+    );
+    assert!(
+        !returned_obj.contains("defineComponent"),
+        "defineComponent (companion import, not used in template) should NOT be in __returned__, got:\n{}",
+        returned_obj
+    );
+
+    // isArray is used in setup body but NOT in template.
+    // Should NOT be in __returned__ (matches Vue's behavior).
+    assert!(
+        !returned_obj.contains("isArray"),
+        "isArray (companion import, not used in template) should NOT be in __returned__, got:\n{}",
+        returned_obj
+    );
+
+    // HButton IS used in template — should be in __returned__
+    assert!(
+        returned_obj.contains("HButton"),
+        "HButton (used in template) should be in __returned__, got:\n{}",
+        returned_obj
+    );
+
+    // doStuff IS a setup declaration used in template — should be in __returned__
+    assert!(
+        returned_obj.contains("doStuff"),
+        "doStuff (setup function used in template) should be in __returned__, got:\n{}",
+        returned_obj
+    );
+}
+
+#[test]
+fn companion_script_import_used_in_template_in_returned() {
+    // Companion <script> imports that ARE used in the template should be in __returned__.
+    let result = compile_sfc(
+        r#"<script lang="ts">
+import { formatCurrency } from "./utils";
+import { unusedHelper } from "./helpers";
+
+export default {};
+</script>
+<script setup lang="ts">
+const msg = "hello";
+</script>
+<template>
+  <div>{{ formatCurrency(42) }}</div>
+</template>"#,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let script = result.script.as_ref().expect("script block");
+
+    let returned_start = script
+        .code
+        .find("const __returned__ = ")
+        .expect("should have __returned__");
+    let returned_brace = script.code[returned_start..].find('{').unwrap() + returned_start;
+    let returned_end = script.code[returned_brace..].find('}').unwrap() + returned_brace + 1;
+    let returned_obj = &script.code[returned_brace..returned_end];
+
+    // formatCurrency is used in template — should be in __returned__
+    assert!(
+        returned_obj.contains("formatCurrency"),
+        "formatCurrency (companion import used in template) should be in __returned__, got:\n{}",
+        returned_obj
+    );
+
+    // unusedHelper is NOT used in template — should NOT be in __returned__
+    assert!(
+        !returned_obj.contains("unusedHelper"),
+        "unusedHelper (companion import, not used in template) should NOT be in __returned__, got:\n{}",
         returned_obj
     );
 }

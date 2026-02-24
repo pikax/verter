@@ -53,6 +53,17 @@ pub enum ScriptItem<'a> {
     Async(ScriptAsync),
 }
 
+/// Kind of import specifier (for proper import statement reconstruction).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportSpecifierKind {
+    /// Named import: `import { Foo } from '...'`
+    Named,
+    /// Default import: `import Foo from '...'`
+    Default,
+    /// Namespace import: `import * as Foo from '...'`
+    Namespace,
+}
+
 /// A binding extracted from import specifiers or declarations
 #[derive(Debug, Clone)]
 pub struct ScriptBinding<'a> {
@@ -62,6 +73,8 @@ pub struct ScriptBinding<'a> {
     pub span: Span,
     /// Whether this is a per-specifier type import (`import { type Foo }`)
     pub is_type_only: bool,
+    /// Import specifier kind (only relevant for import bindings)
+    pub import_kind: Option<ImportSpecifierKind>,
 }
 
 /// Import declaration item

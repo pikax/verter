@@ -9,7 +9,7 @@
 use oxc_ast::ast::*;
 use oxc_span::GetSpan;
 
-use super::types::{ScriptBinding, ScriptExport, ScriptImport, ScriptItem};
+use super::types::{ImportSpecifierKind, ScriptBinding, ScriptExport, ScriptImport, ScriptItem};
 use crate::common::Span;
 
 /// Context for script parsing.
@@ -60,6 +60,7 @@ pub fn process_import<'a>(
                         name: s.local.name.as_str(),
                         span: Span::from(s.local.span),
                         is_type_only: s.import_kind.is_type(),
+                        import_kind: Some(ImportSpecifierKind::Named),
                     });
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
@@ -67,6 +68,7 @@ pub fn process_import<'a>(
                         name: s.local.name.as_str(),
                         span: Span::from(s.local.span),
                         is_type_only: false,
+                        import_kind: Some(ImportSpecifierKind::Default),
                     });
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
@@ -74,6 +76,7 @@ pub fn process_import<'a>(
                         name: s.local.name.as_str(),
                         span: Span::from(s.local.span),
                         is_type_only: false,
+                        import_kind: Some(ImportSpecifierKind::Namespace),
                     });
                 }
             }
@@ -105,6 +108,7 @@ pub fn process_named_export<'a>(export: &ExportNamedDeclaration<'a>) -> ScriptEx
             name,
             span: Span::from(spec.exported.span()),
             is_type_only: false,
+            import_kind: None,
         });
     }
 
@@ -137,6 +141,7 @@ pub fn process_all_export<'a>(
             name,
             span: Span::from(exported.span()),
             is_type_only: false,
+            import_kind: None,
         }]
     } else {
         Vec::new()
@@ -164,6 +169,7 @@ fn extract_declaration_bindings<'a>(decl: &Declaration<'a>, bindings: &mut Vec<S
                     name: id.name.as_str(),
                     span: Span::from(id.span),
                     is_type_only: false,
+                    import_kind: None,
                 });
             }
         }
@@ -173,6 +179,7 @@ fn extract_declaration_bindings<'a>(decl: &Declaration<'a>, bindings: &mut Vec<S
                     name: id.name.as_str(),
                     span: Span::from(id.span),
                     is_type_only: false,
+                    import_kind: None,
                 });
             }
         }
@@ -197,6 +204,7 @@ fn collect_binding_pattern_names<'a>(
                 name: id.name.as_str(),
                 span: Span::from(id.span),
                 is_type_only: false,
+                import_kind: None,
             });
         }
         BindingPattern::ObjectPattern(obj) => {
