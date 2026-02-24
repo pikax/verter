@@ -51,6 +51,7 @@ pub struct FfiCompileProfile {
     pub force_vapor: Option<bool>,
     pub force_js: Option<bool>,
     pub source_map: Option<bool>,
+    pub enable_types: Option<bool>,
 }
 
 /// Request to upsert a file into the host.

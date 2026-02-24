@@ -37,6 +37,7 @@ use crate::template::code_gen::{generate_template, CodeGenMode, TemplateCodeGenO
 use crate::template::oxc::parse_template_expressions;
 use crate::template::oxc::types::OxcParsedAst;
 use crate::tokenizer::byte::{tokenize_sfc, tokenize_sfc_with_delimiters};
+use crate::tsx;
 
 use helpers::{extract_attrs, extract_block_ranges};
 
@@ -477,11 +478,17 @@ pub fn compile(
     };
 
     // ── 5. Template codegen ───────────────────────────────────────
+    // Take the template AST once (it may be needed for both normal and TSX codegen).
+    let taken_template_ast = if !has_parse_errors {
+        syntax.take_template_ast()
+    } else {
+        None
+    };
     let template_block = if has_parse_errors {
         // Template AST may be invalid after parse errors — skip codegen
         // but continue with script/style results.
         None
-    } else if let Some(template_ast) = syntax.take_template_ast() {
+    } else if let Some(ref template_ast) = taken_template_ast {
         // Skip codegen for non-HTML template languages (e.g. Pug).
         // The AST positions are from the raw source and don't represent HTML.
         let is_non_html_lang = template_ast.root.lang.as_ref().is_some_and(|span| {
@@ -496,7 +503,7 @@ pub fn compile(
             // Reuse early-parsed OxcParsedAst if available, otherwise parse now
             let oxc_ast = match early_oxc_ast {
                 Some(ast) => ast,
-                None => parse_template_expressions(&template_ast, input, allocator, source_type),
+                None => parse_template_expressions(template_ast, input, allocator, source_type),
             };
 
             let tpl_alloc = Allocator::new();
@@ -532,7 +539,7 @@ pub fn compile(
             };
 
             let imports = generate_template(
-                &template_ast,
+                template_ast,
                 &oxc_ast,
                 input,
                 &mut tpl_ct,
@@ -588,7 +595,165 @@ pub fn compile(
         None
     };
 
-    // ── 6. Assemble ───────────────────────────────────────────────
+    // ── 6. TSX codegen (optional) ────────────────────────────────
+    let (tsx_script_block, tsx_template_block) = if options.include_tsx {
+        let js_component_name =
+            tsx::sanitize_js_identifier(options.filename.as_deref().unwrap_or("App.vue"));
+        let tsx_script_opts = tsx::TsxScriptOptions {
+            component_name: &component_name,
+            js_component_name: &js_component_name,
+            scope_id: &scope_id_full,
+            has_scoped_style,
+            runtime_module_name: options.runtime_module_name.as_deref().unwrap_or("vue"),
+            is_vapor: use_vapor,
+        };
+
+        // TSX script pass — uses its own CodeTransform for independent source map
+        let tsx_script_start = Instant::now();
+        let tsx_script_alloc = Allocator::new();
+        let mut tsx_script_ct = CodeTransform::new(input, &tsx_script_alloc);
+
+        let tsx_script_result = tsx::script::generate_tsx_script(
+            syntax.script(),
+            syntax.script_setup(),
+            input,
+            &mut tsx_script_ct,
+            &tsx_script_alloc,
+            &tsx_script_opts,
+        );
+
+        // Remove template/style/custom blocks from script TSX output
+        if let Some(ref template_ast) = taken_template_ast {
+            let root = &template_ast.root;
+            let tpl_s = root.tag_open.start;
+            let tpl_e = root
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(root.tag_open.end);
+            tsx_script_ct.remove(tpl_s, tpl_e);
+        }
+        for style in syntax.style_nodes() {
+            let s_s = style.tag_open.start;
+            let s_e = style
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(style.tag_open.end);
+            tsx_script_ct.remove(s_s, s_e);
+        }
+        for node in syntax.unknown_nodes() {
+            let s_s = node.tag_open.start;
+            let s_e = node
+                .tag_close
+                .as_ref()
+                .map(|tc| tc.end)
+                .unwrap_or(node.tag_open.end);
+            tsx_script_ct.remove(s_s, s_e);
+        }
+        remove_inter_block_gaps(&mut tsx_script_ct, input.len() as u32, &block_ranges);
+
+        let tsx_script_code = tsx_script_ct.build_string();
+        let tsx_script_sm = if verter_options.source_map {
+            tsx_script_ct.generate_map_json(SourceMapOptions {
+                source: options.filename.as_deref(),
+                file: options.filename.as_deref(),
+                include_content: true,
+            })
+        } else {
+            String::new()
+        };
+        let tsx_script_dur = tsx_script_start.elapsed().as_secs_f64() * 1000.0;
+
+        let tsx_script = Some(VerterTsxBlock {
+            code: tsx_script_code,
+            source_map: tsx_script_sm,
+            duration_ms: tsx_script_dur,
+        });
+
+        // TSX template pass
+        let tsx_template = if !has_parse_errors {
+            if let Some(ref template_ast) = taken_template_ast {
+                let is_non_html = template_ast.root.lang.as_ref().is_some_and(|span| {
+                    let v = &input[span.start as usize..span.end as usize];
+                    !v.is_empty() && v != "html"
+                });
+                if is_non_html {
+                    None
+                } else {
+                    let tsx_t_start = Instant::now();
+                    let tsx_t_alloc = Allocator::new();
+                    let mut tsx_t_ct = CodeTransform::new(input, &tsx_t_alloc);
+                    let tsx_source_type = SourceType::tsx();
+                    let tsx_oxc = parse_template_expressions(
+                        template_ast,
+                        input,
+                        &tsx_t_alloc,
+                        tsx_source_type,
+                    );
+                    let mut tsx_out =
+                        crate::template::code_gen::types::CodeGenOutput::new(&tsx_t_alloc);
+                    let tsx_t_opts = tsx::TsxTemplateOptions {
+                        self_name: &to_pascal_case(&component_name),
+                        comments: options.comments.unwrap_or(!options.is_production),
+                    };
+                    tsx::template::generate_tsx_template(
+                        template_ast,
+                        &tsx_oxc,
+                        input,
+                        &mut tsx_out,
+                        &tsx_t_alloc,
+                        &tsx_script_result.bindings,
+                        &tsx_t_opts,
+                    );
+                    tsx_out.apply_to(&mut tsx_t_ct);
+
+                    let tpl_tag_s = template_ast.root.tag_open.start as usize;
+                    let tpl_tag_e = template_ast
+                        .root
+                        .tag_close
+                        .as_ref()
+                        .map(|tc| tc.end as usize)
+                        .unwrap_or(
+                            template_ast
+                                .root
+                                .content
+                                .as_ref()
+                                .map(|c| c.end as usize)
+                                .unwrap_or(template_ast.root.tag_open.end as usize),
+                        );
+                    let full = tsx_t_ct.build_string();
+                    let suffix = input.len() - tpl_tag_e;
+                    let tsx_t_code = full[tpl_tag_s..full.len() - suffix].to_string();
+                    let tsx_t_sm = if verter_options.source_map {
+                        tsx_t_ct.generate_map_json(SourceMapOptions {
+                            source: options.filename.as_deref(),
+                            file: options.filename.as_deref(),
+                            include_content: true,
+                        })
+                    } else {
+                        String::new()
+                    };
+                    let tsx_t_dur = tsx_t_start.elapsed().as_secs_f64() * 1000.0;
+                    Some(VerterTsxBlock {
+                        code: tsx_t_code,
+                        source_map: tsx_t_sm,
+                        duration_ms: tsx_t_dur,
+                    })
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        (tsx_script, tsx_template)
+    } else {
+        (None, None)
+    };
+
+    // ── 7. Assemble ───────────────────────────────────────────────
     let scope_id_result = if has_scoped_style {
         scope_id_full.clone()
     } else {
@@ -606,6 +771,8 @@ pub fn compile(
         errors: convert_diagnostics(&all_diagnostics),
         parse_duration_ms,
         total_duration_ms,
+        tsx_script: tsx_script_block,
+        tsx_template: tsx_template_block,
     }
 }
 

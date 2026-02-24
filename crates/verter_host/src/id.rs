@@ -114,6 +114,8 @@ pub(crate) fn parse_raw_id(raw: &str) -> Option<ParsedRawId> {
         Some("custom") => VirtualNodeKind::Custom {
             index: index.unwrap_or(0),
         },
+        Some("tsxScript") | Some("tsx_script") => VirtualNodeKind::TsxScript,
+        Some("tsxTemplate") | Some("tsx_template") => VirtualNodeKind::TsxTemplate,
         Some(_) => {
             if index.is_some() {
                 VirtualNodeKind::Custom {
@@ -203,6 +205,14 @@ pub(crate) fn render_ids(
                 format!("{}._VERTER_.custom.{}.{}", canonical_id, index, block_type),
             )
         }
+        VirtualNodeKind::TsxScript => (
+            format!("{}?vue&type=tsxScript", canonical_id),
+            format!("{}._VERTER_.types.script.tsx", canonical_id),
+        ),
+        VirtualNodeKind::TsxTemplate => (
+            format!("{}?vue&type=tsxTemplate", canonical_id),
+            format!("{}._VERTER_.types.template.tsx", canonical_id),
+        ),
     }
 }
 

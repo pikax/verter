@@ -67,6 +67,9 @@ pub mod template;
 #[cfg(not(feature = "bench"))]
 pub(crate) mod template;
 
+// TSX code generation for IDE type checking
+pub(crate) mod tsx;
+
 pub mod types;
 
 #[cfg(test)]

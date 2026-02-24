@@ -188,6 +188,10 @@ pub struct VerterCompileResult {
     pub errors: Vec<CompileDiagnostic>,
     pub parse_duration_ms: f64,
     pub total_duration_ms: f64,
+    /// TSX script block for IDE type checking. Present when `include_tsx` is true.
+    pub tsx_script: Option<VerterTsxBlock>,
+    /// TSX template block (JSX) for IDE type checking. Present when `include_tsx` is true.
+    pub tsx_template: Option<VerterTsxBlock>,
 }
 
 /// Generated output for the `<script>` or `<script setup>` block.
@@ -222,4 +226,14 @@ pub struct VerterCustomBlock {
     pub block_type: String,
     pub content: String,
     pub attrs: Vec<(String, String)>,
+}
+
+/// Generated TSX block for IDE type checking (script or template).
+pub struct VerterTsxBlock {
+    /// The generated TSX code.
+    pub code: String,
+    /// JSON source map string (empty if source maps disabled).
+    pub source_map: String,
+    /// Duration of generation in milliseconds.
+    pub duration_ms: f64,
 }

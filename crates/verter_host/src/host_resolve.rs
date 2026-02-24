@@ -360,6 +360,7 @@ impl VerterHost {
             custom_elements: profile.custom_elements.clone(),
             comments: profile.comments,
             runtime_module_name: profile.runtime_module_name.clone(),
+            include_tsx: profile.enable_types,
             ..CodegenOptions::default()
         };
 
@@ -571,6 +572,39 @@ impl VerterHost {
                         block_type: Some(block.block_type),
                         ..VirtualMeta::default()
                     },
+                },
+            );
+        }
+
+        // TSX blocks for IDE type checking
+        if let Some(tsx_script) = compiled.tsx_script {
+            outputs.insert(
+                VirtualNodeKind::TsxScript,
+                CachedVirtualFile {
+                    code: Arc::from(tsx_script.code),
+                    source_map: if tsx_script.source_map.is_empty() {
+                        None
+                    } else {
+                        Some(Arc::from(tsx_script.source_map))
+                    },
+                    lang: Some("tsx".to_string()),
+                    meta: VirtualMeta::default(),
+                },
+            );
+        }
+
+        if let Some(tsx_template) = compiled.tsx_template {
+            outputs.insert(
+                VirtualNodeKind::TsxTemplate,
+                CachedVirtualFile {
+                    code: Arc::from(tsx_template.code),
+                    source_map: if tsx_template.source_map.is_empty() {
+                        None
+                    } else {
+                        Some(Arc::from(tsx_template.source_map))
+                    },
+                    lang: Some("tsx".to_string()),
+                    meta: VirtualMeta::default(),
                 },
             );
         }

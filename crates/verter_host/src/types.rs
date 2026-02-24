@@ -135,6 +135,8 @@ pub struct CompileProfile {
     pub force_js: bool,
     /// Generate source maps for compiled output.
     pub source_map: bool,
+    /// Generate TSX output for IDE type checking (script + template JSX).
+    pub enable_types: bool,
 }
 
 impl Default for CompileProfile {
@@ -152,6 +154,7 @@ impl Default for CompileProfile {
             force_vapor: false,
             force_js: false,
             source_map: false,
+            enable_types: false,
         }
     }
 }
@@ -173,6 +176,10 @@ pub enum VirtualNodeKind {
     Style { index: usize },
     /// A custom block (e.g. `<i18n>`) at the given index.
     Custom { index: usize },
+    /// TSX script block for IDE type checking (preserves TypeScript types).
+    TsxScript,
+    /// TSX template block (JSX) for IDE type checking.
+    TsxTemplate,
 }
 
 /// A `src="..."` attribute on an SFC block that references an external file.

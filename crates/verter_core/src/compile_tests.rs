@@ -6176,3 +6176,169 @@ const name = item.name
         script.code
     );
 }
+
+// ── TSX codegen integration tests ─────────────────────────────────
+
+fn compile_tsx(source: &str) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        include_tsx: true,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        source_map: true,
+        ..Default::default()
+    };
+    compile(source, &options, &verter_opts, &alloc)
+}
+
+#[test]
+fn tsx_basic_sfc() {
+    let result = compile_tsx(
+        r#"<script setup>
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx_script = result.tsx_script.as_ref().expect("tsx_script block");
+    assert!(
+        !tsx_script.code.is_empty(),
+        "TSX script code should not be empty"
+    );
+    assert!(
+        tsx_script.code.contains("function __verter_tsx_App"),
+        "Should contain component wrapper function, got: {}",
+        tsx_script.code
+    );
+    assert!(
+        tsx_script.code.contains("const msg = 'hello'"),
+        "Should preserve setup content, got: {}",
+        tsx_script.code
+    );
+    assert!(
+        !tsx_script.source_map.is_empty(),
+        "Source map should be generated"
+    );
+
+    let tsx_template = result.tsx_template.as_ref().expect("tsx_template block");
+    assert!(
+        !tsx_template.code.is_empty(),
+        "TSX template code should not be empty"
+    );
+    assert!(
+        tsx_template.code.contains("<div>"),
+        "Template should contain JSX, got: {}",
+        tsx_template.code
+    );
+}
+
+#[test]
+fn tsx_script_with_imports() {
+    let result = compile_tsx(
+        r#"<script setup>
+import { ref } from 'vue'
+import type { Foo } from './types'
+const count = ref(0)
+</script>
+
+<template>
+  <div>{{ count }}</div>
+</template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx_script = result.tsx_script.as_ref().expect("tsx_script block");
+    // Imports should be hoisted above the wrapper function
+    let fn_pos = tsx_script
+        .code
+        .find("function __verter_tsx_App")
+        .expect("wrapper function");
+    let ref_pos = tsx_script
+        .code
+        .find("import { ref } from 'vue'")
+        .expect("ref import");
+    let type_pos = tsx_script
+        .code
+        .find("import type { Foo } from './types'")
+        .expect("type import");
+    assert!(ref_pos < fn_pos, "ref import should be hoisted");
+    assert!(type_pos < fn_pos, "type import should be hoisted");
+}
+
+#[test]
+fn tsx_template_interpolation_with_bindings() {
+    let result = compile_tsx(
+        r#"<script setup>
+import { ref } from 'vue'
+const count = ref(0)
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ count }} {{ msg }}</div>
+</template>
+"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx_template = result.tsx_template.as_ref().expect("tsx_template block");
+    // count is a SetupRef → gets .value suffix in inline mode
+    assert!(
+        tsx_template.code.contains("count.value"),
+        "SetupRef should get .value, got: {}",
+        tsx_template.code
+    );
+}
+
+#[test]
+fn tsx_not_generated_when_disabled() {
+    let result = compile_sfc(
+        r#"<script setup>
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#,
+    );
+    assert!(result.tsx_script.is_none(), "TSX script should be None");
+    assert!(result.tsx_template.is_none(), "TSX template should be None");
+}
+
+#[test]
+fn tsx_template_comment() {
+    let result = compile_tsx(r#"<template><!-- hello --></template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx_template = result.tsx_template.as_ref().expect("tsx_template block");
+    assert!(
+        tsx_template.code.contains("{/*"),
+        "Comment should be converted to JSX, got: {}",
+        tsx_template.code
+    );
+}
+
+#[test]
+fn tsx_no_template() {
+    let result = compile_tsx(
+        r#"<script setup>
+const msg = 'hello'
+</script>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    // TSX script should still be generated
+    assert!(result.tsx_script.is_some(), "TSX script should be present");
+    // No template → no TSX template
+    assert!(
+        result.tsx_template.is_none(),
+        "TSX template should be None when no template block"
+    );
+}

@@ -160,6 +160,9 @@ pub fn ffi_profile_to_host(
         if let Some(source_map) = input.source_map {
             out.source_map = source_map;
         }
+        if let Some(enable_types) = input.enable_types {
+            out.enable_types = enable_types;
+        }
     }
     Ok(out)
 }
@@ -187,6 +190,8 @@ pub fn ffi_node_kind_to_host(
         "custom" => Ok(host::VirtualNodeKind::Custom {
             index: input.index.unwrap_or(0) as usize,
         }),
+        "tsx_script" | "tsxscript" => Ok(host::VirtualNodeKind::TsxScript),
+        "tsx_template" | "tsxtemplate" => Ok(host::VirtualNodeKind::TsxTemplate),
         other => Err(FfiConversionError::InvalidNodeKind(other.to_string())),
     }
 }
@@ -262,6 +267,14 @@ pub fn host_node_kind_to_ffi(input: &host::VirtualNodeKind) -> FfiVirtualNodeKin
         host::VirtualNodeKind::Custom { index } => FfiVirtualNodeKind {
             kind: "custom".to_string(),
             index: Some(*index as u32),
+        },
+        host::VirtualNodeKind::TsxScript => FfiVirtualNodeKind {
+            kind: "tsxScript".to_string(),
+            index: None,
+        },
+        host::VirtualNodeKind::TsxTemplate => FfiVirtualNodeKind {
+            kind: "tsxTemplate".to_string(),
+            index: None,
         },
     }
 }
@@ -671,11 +684,13 @@ mod tests {
             force_vapor: Some(true),
             force_js: Some(true),
             source_map: Some(true),
+            enable_types: Some(true),
         };
         let result = ffi_profile_to_host(Some(profile)).unwrap();
         assert_eq!(result.filename, Some("Comp.vue".to_string()));
         assert!(result.is_production);
         assert!(result.ssr);
+        assert!(result.enable_types);
         assert_eq!(result.hmr_strategy, host::HmrStrategy::Vite);
         assert_eq!(result.component_id, Some("abc123".to_string()));
         assert_eq!(

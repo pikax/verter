@@ -211,6 +211,7 @@ pub struct NapiCompileProfile {
     pub forceVapor: Option<bool>,
     pub forceJs: Option<bool>,
     pub sourceMap: Option<bool>,
+    pub enableTypes: Option<bool>,
 }
 
 impl From<NapiCompileProfile> for FfiCompileProfile {
@@ -228,6 +229,7 @@ impl From<NapiCompileProfile> for FfiCompileProfile {
             force_vapor: n.forceVapor,
             force_js: n.forceJs,
             source_map: n.sourceMap,
+            enable_types: n.enableTypes,
         }
     }
 }
@@ -447,6 +449,14 @@ fn host_node_kind_to_napi(input: &host::VirtualNodeKind) -> NapiVirtualNodeKind 
         host::VirtualNodeKind::Custom { index } => NapiVirtualNodeKind {
             kind: "custom".to_string(),
             index: Some(*index as u32),
+        },
+        host::VirtualNodeKind::TsxScript => NapiVirtualNodeKind {
+            kind: "tsxScript".to_string(),
+            index: None,
+        },
+        host::VirtualNodeKind::TsxTemplate => NapiVirtualNodeKind {
+            kind: "tsxTemplate".to_string(),
+            index: None,
         },
     }
 }
