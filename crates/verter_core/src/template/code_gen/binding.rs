@@ -177,23 +177,48 @@ impl<'alloc> BindingResolver<'alloc> {
     /// If the expression is a simple identifier (no dots, brackets, operators),
     /// returns `prefix + ident + suffix`. Otherwise returns the expression unchanged.
     ///
+    /// When the identifier is a JS keyword (e.g., `class`) but exists as a registered
+    /// binding (e.g., a prop), bracket notation is used: `$props["class"]` instead of
+    /// `$props.class` which would be a syntax error.
+    ///
     /// This is useful for places that need a fully-resolved expression string
     /// but only have a raw expression (not OXC-parsed bindings).
     pub fn resolve_simple_expr(&self, expr: &str) -> String {
         let trimmed = expr.trim();
-        if is_simple_ident(trimmed)
-            && !is_keyword(trimmed.as_bytes())
-            && !is_global(trimmed.as_bytes())
-        {
-            let prefix = self.resolve_prefix(trimmed);
-            let suffix = self.resolve_suffix(trimmed);
+        if !is_simple_ident(trimmed) {
+            return trimmed.to_string();
+        }
+
+        let is_kw = is_keyword(trimmed.as_bytes());
+
+        // Keywords that are not registered bindings are left unchanged (e.g., `true`, `false`).
+        // Globals are also left unchanged.
+        if (is_kw && !self.bindings.contains_key(trimmed)) || is_global(trimmed.as_bytes()) {
+            return trimmed.to_string();
+        }
+
+        let prefix = self.resolve_prefix(trimmed);
+        let suffix = self.resolve_suffix(trimmed);
+
+        // Keywords used as member access require bracket notation:
+        // `$props["class"]` instead of `$props.class`.
+        if is_kw && !prefix.is_empty() {
+            // Convert dot prefix (e.g., "$props.") to bracket prefix (e.g., "$props[\"")
+            let base = prefix.trim_end_matches('.');
+            let mut result =
+                String::with_capacity(base.len() + 2 + trimmed.len() + 2 + suffix.len());
+            result.push_str(base);
+            result.push_str("[\"");
+            result.push_str(trimmed);
+            result.push_str("\"]");
+            result.push_str(suffix);
+            result
+        } else {
             let mut result = String::with_capacity(prefix.len() + trimmed.len() + suffix.len());
             result.push_str(prefix);
             result.push_str(trimmed);
             result.push_str(suffix);
             result
-        } else {
-            trimmed.to_string()
         }
     }
 
@@ -713,5 +738,37 @@ mod tests {
     fn vapor_resolve_simple_expr_props_uses_ctx() {
         let resolver = make_vapor_resolver(&[("title", BindingType::Props)]);
         assert_eq!(resolver.resolve_simple_expr("title"), "_ctx.title");
+    }
+
+    // ==================== Reserved word bindings ====================
+
+    #[test]
+    fn resolve_simple_expr_keyword_prop_uses_bracket_notation() {
+        let resolver = make_resolver(&[("class", BindingType::Props)], false);
+        assert_eq!(resolver.resolve_simple_expr("class"), r#"$props["class"]"#);
+    }
+
+    #[test]
+    fn resolve_simple_expr_keyword_prop_inline_uses_bracket_notation() {
+        let resolver = make_resolver(&[("class", BindingType::Props)], true);
+        assert_eq!(resolver.resolve_simple_expr("class"), r#"__props["class"]"#);
+    }
+
+    #[test]
+    fn resolve_simple_expr_keyword_not_in_bindings_unchanged() {
+        let resolver = make_resolver(&[], false);
+        assert_eq!(resolver.resolve_simple_expr("class"), "class");
+    }
+
+    #[test]
+    fn resolve_simple_expr_keyword_for_as_prop() {
+        let resolver = make_resolver(&[("for", BindingType::Props)], false);
+        assert_eq!(resolver.resolve_simple_expr("for"), r#"$props["for"]"#);
+    }
+
+    #[test]
+    fn vapor_resolve_simple_expr_keyword_prop_uses_bracket_notation() {
+        let resolver = make_vapor_resolver(&[("class", BindingType::Props)]);
+        assert_eq!(resolver.resolve_simple_expr("class"), r#"_ctx["class"]"#);
     }
 }

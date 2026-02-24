@@ -5230,3 +5230,490 @@ fn template_only_scoped_style_css_is_scoped() {
         result.styles[0].code
     );
 }
+
+/// @ai-generated - Template-only component with scoped grid CSS: scope IDs must
+/// match between script and CSS, and CSS selectors must all be scoped.
+#[test]
+fn template_only_scoped_style_grid_layout_scope_id_consistency() {
+    let source = r#"<template>
+  <div class="dashboard">
+    <header class="header">
+      <h1>Title</h1>
+    </header>
+    <aside class="sidebar">
+      <ul class="menu">
+        <li class="menu-item active"><span>Overview</span></li>
+        <li class="menu-item"><span>Settings</span></li>
+      </ul>
+    </aside>
+    <main class="content">
+      <section class="stats-grid">
+        <div class="stat-card">
+          <h3>Total Users</h3>
+          <p class="stat-value">12,345</p>
+          <span class="stat-change positive">+12.5%</span>
+        </div>
+      </section>
+      <section class="recent-activity">
+        <table class="activity-table">
+          <thead><tr><th>User</th><th>Action</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>John</td>
+              <td><span class="badge success">Done</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+    <footer class="footer">
+      <p>&copy; 2026</p>
+    </footer>
+  </div>
+</template>
+
+<style scoped>
+.dashboard {
+  display: grid;
+  grid-template-areas:
+    "header header"
+    "sidebar content"
+    "footer footer";
+  grid-template-columns: 250px 1fr;
+  grid-template-rows: auto 1fr auto;
+  min-height: 100vh;
+}
+.header {
+  grid-area: header;
+  display: flex;
+  justify-content: space-between;
+  padding: 1rem 2rem;
+  background: #fff;
+  border-bottom: 1px solid #ddd;
+}
+.sidebar { grid-area: sidebar; background: #f8f9fa; padding: 1rem; }
+.content { grid-area: content; padding: 2rem; background: #f5f5f5; }
+.footer {
+  grid-area: footer;
+  display: flex;
+  justify-content: space-between;
+  padding: 1rem 2rem;
+  background: #fff;
+  border-top: 1px solid #ddd;
+}
+.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
+.stat-card {
+  background: white;
+  padding: 1.5rem;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+.activity-table { width: 100%; border-collapse: collapse; }
+.activity-table th { text-align: left; padding: 0.75rem; border-bottom: 2px solid #ddd; }
+.activity-table td { padding: 0.75rem; border-bottom: 1px solid #eee; }
+.badge { padding: 0.25rem 0.5rem; border-radius: 4px; font-size: 0.875rem; }
+.badge.success { background: #d4edda; color: #155724; }
+</style>"#;
+
+    let result = compile_sfc(source);
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+
+    // 1. Script must have __scopeId
+    let script = result
+        .script
+        .as_ref()
+        .expect("should have synthetic script block");
+    assert!(
+        script.code.contains("__scopeId"),
+        "script should contain __scopeId assignment, got:\n{}",
+        script.code
+    );
+
+    // 2. Template must have a render function
+    let template = result
+        .template
+        .as_ref()
+        .expect("should have template block");
+    assert!(
+        template.code.contains("function render"),
+        "template should contain render function, got:\n{}",
+        template.code
+    );
+
+    // 3. Extract scope ID from script
+    let scope_marker = "__scopeId = \"";
+    let scope_pos = script
+        .code
+        .find(scope_marker)
+        .expect("scope marker in script");
+    let scope_value_start = scope_pos + scope_marker.len();
+    let scope_value_end = script.code[scope_value_start..]
+        .find('"')
+        .expect("closing quote for scope ID")
+        + scope_value_start;
+    let script_scope_id = &script.code[scope_value_start..scope_value_end];
+    assert!(
+        script_scope_id.starts_with("data-v-"),
+        "scope ID must start with data-v-, got: '{}'",
+        script_scope_id
+    );
+
+    // 4. CSS must have matching scope selectors
+    assert_eq!(result.styles.len(), 1);
+    let css = &result.styles[0].code;
+    let css_scope_attr = format!("[{}]", script_scope_id);
+    assert!(
+        css.contains(&css_scope_attr),
+        "CSS must contain scope selector '{}', got:\n{}",
+        css_scope_attr,
+        css
+    );
+
+    // 5. ALL CSS selectors that should be scoped must have the scope attribute.
+    //    Check every non-at-rule selector in the CSS output.
+    let expected_scoped_selectors = [
+        ".dashboard",
+        ".header",
+        ".sidebar",
+        ".content",
+        ".footer",
+        ".stats-grid",
+        ".stat-card",
+        // descendant selectors — only last part gets scope
+        "th", // from ".activity-table th"
+        "td", // from ".activity-table td"
+        ".badge",
+    ];
+    for sel in expected_scoped_selectors {
+        let scoped_sel = format!("{}{}", sel, css_scope_attr);
+        assert!(
+            css.contains(&scoped_sel),
+            "CSS should contain scoped selector '{}', got:\n{}",
+            scoped_sel,
+            css
+        );
+    }
+
+    // 6. Compound selector `.badge.success` should have scope on the compound
+    let compound_scoped = format!(".badge.success{}", css_scope_attr);
+    assert!(
+        css.contains(&compound_scoped),
+        "CSS should contain scoped compound selector '{}', got:\n{}",
+        compound_scoped,
+        css
+    );
+
+    // 7. Validate render function is valid JS
+    let alloc = Allocator::new();
+    let source_type = oxc_span::SourceType::mjs();
+    let wrapped = format!("import {{ }} from \"vue\";\n{}", template.code);
+    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "Render function should be valid JS:\n{}\nErrors: {:?}",
+        template.code,
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // 8. Verify template imports contain all referenced helpers.
+    // Extract helpers used in the render function (identifiers starting with _)
+    let re_helpers: Vec<&str> = template
+        .code
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|tok| tok.starts_with('_') && tok.len() > 1)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .filter(|h| {
+            // Only check Vue runtime helpers (e.g. _createElementVNode, _openBlock)
+            // Skip _ctx, _cache, etc.
+            !["_ctx", "_cache"].contains(h)
+        })
+        .collect();
+    for helper in &re_helpers {
+        // Each _helper should map to a Vue export (strip leading _)
+        let import_name = helper.strip_prefix('_').unwrap_or(helper);
+        assert!(
+            template
+                .imports
+                .iter()
+                .any(|imp| &**imp == *helper || imp.ends_with(import_name)),
+            "Template uses '{}' but it's not in imports {:?}",
+            helper,
+            template.imports
+        );
+    }
+
+    // Debug: print imports only (CSS/script verified above)
+    eprintln!("=== TEMPLATE IMPORTS ===\n{:?}", template.imports);
+}
+
+/// @ai-generated - Full template-heavy.vue integration test: compile the exact
+/// fixture content and verify every CSS selector is properly scoped.
+#[test]
+fn template_heavy_vue_full_css_scoping() {
+    let source = include_str!("../../../packages/benchmark/src/fixtures/template-heavy.vue");
+    let result = compile_sfc(source);
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+
+    // Must have exactly one scoped style block
+    assert_eq!(result.styles.len(), 1, "expected 1 style block");
+    let css = &result.styles[0].code;
+
+    // Extract scope ID from script
+    let script = result
+        .script
+        .as_ref()
+        .expect("should have synthetic script block");
+    let scope_marker = "__scopeId = \"";
+    let scope_pos = script
+        .code
+        .find(scope_marker)
+        .expect("scope marker in script");
+    let scope_value_start = scope_pos + scope_marker.len();
+    let scope_value_end = script.code[scope_value_start..]
+        .find('"')
+        .expect("closing quote for scope ID")
+        + scope_value_start;
+    let script_scope_id = &script.code[scope_value_start..scope_value_end];
+    let css_scope_attr = format!("[{}]", script_scope_id);
+
+    // Print full CSS for inspection
+    eprintln!("=== FULL SCOPED CSS OUTPUT ===\n{}", css);
+    eprintln!("=== SCOPE ATTR: {} ===", css_scope_attr);
+
+    // Every original class selector must be scoped in the output.
+    // For descendant selectors (e.g., .activity-table th), only the last
+    // compound selector gets the scope attribute.
+    let expected_scoped_selectors = [
+        // Layout
+        ".dashboard",
+        ".header",
+        ".sidebar",
+        ".content",
+        ".footer",
+        // Stats
+        ".stats-grid",
+        ".stat-card",
+        // Charts
+        ".charts",
+        ".chart-container",
+        ".chart-placeholder",
+        ".bar",
+        // Activity
+        ".recent-activity",
+        ".activity-table",
+        // Descendant selectors — last compound gets scope
+        "th", // from ".activity-table th"
+        "td", // from ".activity-table td"
+        // Badges (simple)
+        ".badge",
+        // Widgets
+        ".widgets",
+        ".widget",
+        ".indicator",
+    ];
+    for sel in expected_scoped_selectors {
+        let scoped_sel = format!("{}{}", sel, css_scope_attr);
+        assert!(
+            css.contains(&scoped_sel),
+            "CSS should contain scoped selector '{}', got:\n{}",
+            scoped_sel,
+            css
+        );
+    }
+
+    // Compound selectors — the scope attribute goes at the END of the compound
+    let expected_compound_selectors = [
+        ".badge.success",
+        ".badge.danger",
+        ".badge.warning",
+        ".badge.info",
+        ".indicator.online",
+        ".indicator.warning",
+    ];
+    for sel in expected_compound_selectors {
+        let scoped_sel = format!("{}{}", sel, css_scope_attr);
+        assert!(
+            css.contains(&scoped_sel),
+            "CSS should contain scoped compound selector '{}', got:\n{}",
+            scoped_sel,
+            css
+        );
+    }
+
+    // Key CSS properties must be preserved (not dropped or collapsed)
+    let preserved_properties = [
+        "grid-template-areas",
+        "grid-template-columns",
+        "grid-template-rows",
+        "min-height",
+        "grid-area",
+        "border-collapse",
+        "box-shadow",
+        "border-radius",
+    ];
+    for prop in preserved_properties {
+        assert!(
+            css.contains(prop),
+            "CSS must preserve property '{}', got:\n{}",
+            prop,
+            css
+        );
+    }
+
+    // Scope attribute count: every rule must have at least one scoped selector.
+    // Count number of `{` that are NOT inside @-rules, and count scope attributes.
+    let scope_count = css.matches(&css_scope_attr).count();
+    assert!(
+        scope_count >= 20, // template-heavy.vue has ~25 selectors
+        "Expected at least 20 scoped selectors, found {} in:\n{}",
+        scope_count,
+        css
+    );
+
+    // Validate template render function is valid JS
+    let template = result
+        .template
+        .as_ref()
+        .expect("should have template block");
+    eprintln!("=== TEMPLATE CODE ===\n{}", template.code);
+
+    let alloc = Allocator::new();
+    let source_type = oxc_span::SourceType::mjs();
+    let wrapped = format!("import {{ }} from \"vue\";\n{}", template.code);
+    let parsed = oxc_parser::Parser::new(&alloc, &wrapped, source_type).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "Template render function should be valid JS:\nErrors: {:?}\nCode:\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        template.code
+    );
+
+    // Validate script is valid JS
+    eprintln!("=== SCRIPT CODE ===\n{}", script.code);
+    let alloc2 = Allocator::new();
+    let parsed2 = oxc_parser::Parser::new(&alloc2, &script.code, source_type).parse();
+    assert!(
+        parsed2.errors.is_empty(),
+        "Script should be valid JS:\nErrors: {:?}\nCode:\n{}",
+        parsed2
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        script.code
+    );
+
+    // Simulate the playground's mergeRenderIntoComponent:
+    // script + "\n" + template (with import prepended by host)
+    let assembled = format!("{}\n{}", script.code, {
+        if template.imports.is_empty() {
+            template.code.clone()
+        } else {
+            let specifiers: Vec<String> = template
+                .imports
+                .iter()
+                .map(|name| {
+                    if name.starts_with('_') {
+                        format!("{} as {}", &name[1..], name)
+                    } else {
+                        name.to_string()
+                    }
+                })
+                .collect();
+            format!(
+                "import {{ {} }} from \"vue\"\n{}",
+                specifiers.join(", "),
+                template.code
+            )
+        }
+    });
+    eprintln!("=== ASSEMBLED CODE (script + template) ===\n{}", assembled);
+
+    // Verify the assembled code is valid JS
+    let alloc3 = Allocator::new();
+    let parsed3 = oxc_parser::Parser::new(&alloc3, &assembled, source_type).parse();
+    assert!(
+        parsed3.errors.is_empty(),
+        "Assembled code should be valid JS:\nErrors: {:?}\nCode:\n{}",
+        parsed3
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        assembled
+    );
+}
+
+// ==================== Reserved word props ====================
+
+#[test]
+fn class_prop_uses_bracket_notation_vdom() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+defineProps<{ class?: string }>()
+</script>
+<template>
+  <div :class="class"></div>
+</template>"#,
+    );
+    // Must use bracket notation for JS reserved word "class"
+    assert!(
+        code.contains(r#"$props["class"]"#),
+        "Expected $props[\"class\"] in VDOM output, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn class_prop_on_component_uses_bracket_notation_vdom() {
+    let code = compile_and_validate_template(
+        r#"<script setup>
+import Comp from './Comp.vue'
+const props = defineProps<{ class?: string }>()
+</script>
+<template>
+  <Comp :class="class" />
+</template>"#,
+    );
+    // Must use bracket notation for JS reserved word "class"
+    assert!(
+        code.contains(r#"$props["class"]"#),
+        "Expected $props[\"class\"] in VDOM output, got:\n{}",
+        code
+    );
+}
+
+#[test]
+fn class_prop_uses_bracket_notation_vapor() {
+    let code = compile_and_validate_vapor_template(
+        r#"<script setup>
+defineProps<{ class?: string }>()
+</script>
+<template>
+  <div :class="class"></div>
+</template>"#,
+    );
+    // Vapor uses _ctx prefix; must use bracket notation for "class"
+    assert!(
+        code.contains(r#"_ctx["class"]"#),
+        "Expected _ctx[\"class\"] in Vapor output, got:\n{}",
+        code
+    );
+}
