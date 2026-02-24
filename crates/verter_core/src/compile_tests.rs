@@ -7321,6 +7321,94 @@ fn tsx_binding_type_assertions_do_not_prefix_type_members() {
 }
 
 #[test]
+fn tsx_prop_v5_process_parity_matrix() {
+    let cases: [(&str, &[&str], &[&str]); 11] = [
+        (
+            r#"<template><div test="test" /></template>"#,
+            &[r#"<div test="test" />"#],
+            &[],
+        ),
+        (
+            r#"<template><div test /></template>"#,
+            &[r#"<div test />"#],
+            &[],
+        ),
+        (
+            r#"<template><div :test="test" /></template>"#,
+            &[r#"<div test={_ctx.test} />"#],
+            &[],
+        ),
+        (
+            r#"<template><div :test /></template>"#,
+            &[r#"<div test={_ctx.test} />"#],
+            &[],
+        ),
+        (
+            r#"<template><div :test-to-foo /></template>"#,
+            &[r#"<div test-to-foo={_ctx.testToFoo} />"#],
+            &[],
+        ),
+        (
+            r#"<template><div :[msg]="msg" /></template>"#,
+            &[r#"<div {...{[_ctx.msg]: _ctx.msg}} />"#],
+            &[],
+        ),
+        (
+            r#"<template><div v-bind="obj" /></template>"#,
+            &[r#"<div {..._ctx.obj} />"#],
+            &[],
+        ),
+        (
+            r#"<template><div @test="test" /></template>"#,
+            &[r#"<div onTest={_ctx.test} />"#],
+            &[],
+        ),
+        (
+            r#"<template><div @test-camel-case="test" /></template>"#,
+            &[r#"<div onTestCamelCase={_ctx.test} />"#],
+            &[],
+        ),
+        (
+            r#"<template><div aria-label="test" data-test="value" /></template>"#,
+            &[r#"<div aria-label="test" data-test="value" />"#],
+            &[],
+        ),
+        (
+            r#"<template><div :style="{ color: 'red' }" style="color: blue" :class="{ active: ok }" class="btn" /></template>"#,
+            &[
+                r#"style={{ color: 'red' }}"#,
+                r#"style="color: blue""#,
+                r#"class={{ active: _ctx.ok }}"#,
+                r#"class="btn""#,
+            ],
+            &[],
+        ),
+    ];
+
+    for (source, required_snippets, forbidden_snippets) in cases {
+        let result = compile_tsx(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let tsx = result.tsx.as_ref().expect("tsx block");
+        for required in required_snippets {
+            assert!(
+                tsx.code.contains(required),
+                "Expected snippet '{}' in TSX output:\n{}",
+                required,
+                tsx.code
+            );
+        }
+        for forbidden in forbidden_snippets {
+            assert!(
+                !tsx.code.contains(forbidden),
+                "Unexpected snippet '{}' in TSX output:\n{}",
+                forbidden,
+                tsx.code
+            );
+        }
+    }
+}
+
+#[test]
 fn tsx_event_call_expression_is_wrapped() {
     let result = compile_tsx(
         r#"<script setup lang="ts">

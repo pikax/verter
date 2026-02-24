@@ -5713,7 +5713,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 104
 source_name = "supports dot shorthand for prop modifier"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:111:should-handle-prop-with-v-on"
@@ -5722,7 +5722,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 111
 source_name = "should handle prop with v-on"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:115:should-handle-prop-with"
@@ -5731,7 +5731,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 115
 source_name = "should handle prop with @"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:120:camelise"
@@ -5740,7 +5740,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 120
 source_name = "camelise"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:127:should-camelise"
@@ -5749,7 +5749,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 127
 source_name = "should camelise"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:132:should-camelise-with-v-bind"
@@ -5758,7 +5758,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 132
 source_name = "should camelise with v-bind"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:137:should-camelise-with-v-on"
@@ -5767,7 +5767,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 137
 source_name = "should camelise with v-on"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:142:should-camelise-with"
@@ -5776,7 +5776,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 142
 source_name = "should camelise with @"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:147:should-camelise-with"
@@ -5785,7 +5785,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 147
 source_name = "should camelise with :"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:152:not-aria"
@@ -5794,7 +5794,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 152
 source_name = "not aria-*"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:156:not-data"
@@ -5803,7 +5803,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 156
 source_name = "not data-*"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:161:not-custom"
@@ -5812,7 +5812,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 161
 source_name = "not custom"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:172:style"
@@ -5821,7 +5821,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 172
 source_name = "style"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:178:class"
@@ -5830,7 +5830,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 178
 source_name = "class"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:185:style-and-class"
@@ -5839,7 +5839,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 185
 source_name = "style and class"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:194:with-other-props"
@@ -5848,7 +5848,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 194
 source_name = "with other props"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:43:should-handle-prop"
@@ -5857,7 +5857,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 43
 source_name = "should handle prop"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:48:prop-true"
@@ -5866,7 +5866,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 48
 source_name = "prop true"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:53:prop-to-camelcase"
@@ -5875,7 +5875,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 53
 source_name = "prop to camelCase"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:59:should-handle-prop-with-v-bind"
@@ -5884,7 +5884,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 59
 source_name = "should handle prop with v-bind"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:64:should-handle-prop-with-v-bind-shorthand"
@@ -5893,7 +5893,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 64
 source_name = "should handle prop with v-bind shorthand"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:69:should-handle-prop-with-v-bind-shorthand-sugar"
@@ -5902,7 +5902,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 69
 source_name = "should handle prop with v-bind shorthand sugar"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:74:should-camelise-prop-with-v-bind-shorthand-sugar"
@@ -5911,7 +5911,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 74
 source_name = "should camelise prop with v-bind shorthand sugar"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:79:camelcase"
@@ -5920,7 +5920,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 79
 source_name = "camelCase"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:84:msg-msg"
@@ -5929,7 +5929,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 84
 source_name = ":[msg]=\"msg\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:89:v-bind-msg-msg"
@@ -5938,7 +5938,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 89
 source_name = "v-bind:[msg]=\"msg\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:94:supports-xlink-attributes-in-svg-namespace"
@@ -5947,7 +5947,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 94
 source_name = "supports xlink attributes in svg namespace"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/prop/prop.spec.ts:99:keeps-prop-modifier-bound-properties"
@@ -5956,7 +5956,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/prop/prop.spec.ts"
 source_line = 99
 source_name = "keeps .prop modifier bound properties"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_prop_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/sfc-cleaner/sfcCleaner.spec.ts:104:handles-script-setup-blocks"
