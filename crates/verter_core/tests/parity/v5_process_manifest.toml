@@ -4201,7 +4201,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 100
 source_name = "dynamic binding"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:107:v-if-class"
@@ -4210,7 +4210,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 107
 source_name = "v-if + :class"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:115:test"
@@ -4219,7 +4219,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 115
 source_name = "{{ { test } }}"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:120:test"
@@ -4228,7 +4228,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 120
 source_name = "{{ [ test ] }}"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:125:const-foo-1"
@@ -4237,7 +4237,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 125
 source_name = "{{ ()=> { const foo = 1; } }}"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:130:const-c-new-comp-foo-props-verter-v-slot-c-props"
@@ -4246,7 +4246,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 130
 source_name = "{{  const c = new Comp<'foo'>().$props['___VERTER___v-slot'];c.$props; }}"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:141:array"
@@ -4255,7 +4255,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 141
 source_name = "array"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:146:array-with-object"
@@ -4264,7 +4264,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 146
 source_name = "array with object"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:153:array-with-object-and-array"
@@ -4273,7 +4273,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 153
 source_name = "array with object and array"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:162:does-not-prefix-inside-type-assertions"
@@ -4282,7 +4282,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 162
 source_name = "does not prefix inside type assertions"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:179:does-not-prefix-arrow-function-parameters"
@@ -4291,7 +4291,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 179
 source_name = "does not prefix arrow function parameters"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:194:ignores-arrow-function-parameters-when-binding"
@@ -4300,7 +4300,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 194
 source_name = "ignores arrow function parameters when binding"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:45:should-handle-binding"
@@ -4309,7 +4309,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 45
 source_name = "should handle binding"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:50:directive"
@@ -4318,7 +4318,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 50
 source_name = "directive"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:55:function"
@@ -4327,7 +4327,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 55
 source_name = "function"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:60:for"
@@ -4336,7 +4336,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 60
 source_name = "for"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:67:if"
@@ -4345,7 +4345,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 67
 source_name = "if"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:72:args"
@@ -4354,7 +4354,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 72
 source_name = "args"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:78:msg-msg"
@@ -4363,7 +4363,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 78
 source_name = ":[msg]=\"msg\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:83:msg-msg"
@@ -4372,7 +4372,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 83
 source_name = ":[msg]=\"msg\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:90:v-slot-msg"
@@ -4381,7 +4381,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 90
 source_name = "v-slot:[msg]"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:95:a-href-mailto-value"
@@ -4390,7 +4390,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/binding/binding.spec.ts"
 source_line = 95
 source_name = "a href=\"`mailto:value`\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_binding_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/block/block.spec.ts:102:v-slot-v-if"

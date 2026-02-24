@@ -7229,6 +7229,98 @@ let el = useTemplateRef('el')
 }
 
 #[test]
+fn tsx_binding_v5_process_parity_matrix() {
+    let cases: [(&str, &[&str], &[&str]); 8] = [
+        (
+            r#"<template>{{ test }}</template>"#,
+            &["{ _ctx.test }"],
+            &[],
+        ),
+        (
+            r#"<template><div :test="test" @click="handler"></div></template>"#,
+            &["test={_ctx.test}", "onClick={_ctx.handler}"],
+            &[],
+        ),
+        (
+            r#"<template><div v-for="item in items">{{ item + items.length }}</div></template>"#,
+            &["items.map((item) => (", "{ item + _ctx.items.length }"],
+            &[],
+        ),
+        (
+            r#"<template><div :[msg]="msg" /></template>"#,
+            &["{...{[_ctx.msg]: _ctx.msg}}"],
+            &[],
+        ),
+        (
+            r#"<template><Comp v-model:[`${msg}ss`]="msg" /></template>"#,
+            &[r#"v-model:[`${_ctx.msg}ss`]="_ctx.msg""#],
+            &[],
+        ),
+        (
+            r#"<template>{{ { test } }}</template>"#,
+            &["{ { test: _ctx.test } }"],
+            &[],
+        ),
+        (
+            r#"<template>{{ [ test, { test }, [test] ] }}</template>"#,
+            &["{ [ _ctx.test, { test: _ctx.test }, [_ctx.test] ] }"],
+            &[],
+        ),
+        (
+            r#"<template>{{ (foo:string)=> { foo.toLowerCase(); } }}</template>"#,
+            &["(foo:string)=> { foo.toLowerCase(); }"],
+            &["_ctx.foo"],
+        ),
+    ];
+
+    for (source, required_snippets, forbidden_snippets) in cases {
+        let result = compile_tsx(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let tsx = result.tsx.as_ref().expect("tsx block");
+        for required in required_snippets {
+            assert!(
+                tsx.code.contains(required),
+                "Expected snippet '{}' in TSX output:\n{}",
+                required,
+                tsx.code
+            );
+        }
+        for forbidden in forbidden_snippets {
+            assert!(
+                !tsx.code.contains(forbidden),
+                "Unexpected snippet '{}' in TSX output:\n{}",
+                forbidden,
+                tsx.code
+            );
+        }
+    }
+}
+
+#[test]
+fn tsx_binding_type_assertions_do_not_prefix_type_members() {
+    let result = compile_tsx(
+        r#"<template>{{
+  () => {
+    let a = {} as { foo: 1 };
+    a;
+  }
+}}</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        !tsx.code.contains("_ctx.foo"),
+        "Type-annotation members must not be treated as runtime bindings, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("_ctx.as"),
+        "Type assertion keyword context must not be prefixed as identifier, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_event_call_expression_is_wrapped() {
     let result = compile_tsx(
         r#"<script setup lang="ts">

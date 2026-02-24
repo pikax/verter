@@ -12,6 +12,7 @@ use oxc_allocator::Allocator;
 use crate::ast::types::{ElementNode, TagType};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
+use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedProp};
 use crate::types::NodeProp;
 
@@ -25,6 +26,9 @@ pub fn process_element_props<'alloc>(
     resolver: &BindingResolver<'alloc>,
 ) {
     for (i, prop) in el.props.iter().enumerate() {
+        // Find corresponding OXC data for this prop
+        let oxc_prop = oxc_el.and_then(|el| el.props.iter().find(|p| p.prop_index == i));
+
         // Skip structural directives (v-if, v-for, v-slot) — handled separately
         if is_structural_directive(prop, source) {
             // Remove the directive from output
@@ -32,14 +36,28 @@ pub fn process_element_props<'alloc>(
             continue;
         }
 
-        // Skip v-show, v-model — handled separately
-        if is_builtin_directive(prop, source, "show") || is_builtin_directive(prop, source, "model")
-        {
+        // Skip v-show — handled separately
+        if is_builtin_directive(prop, source, "show") {
             continue;
         }
 
-        // Find corresponding OXC data for this prop
-        let oxc_prop = oxc_el.and_then(|el| el.props.iter().find(|p| p.prop_index == i));
+        // Keep raw v-model for now, but still prefix its argument/value bindings
+        // so TSX type expressions stay aligned with v5 binding behavior.
+        if is_builtin_directive(prop, source, "model") {
+            if let Some(oxc_p) = oxc_prop {
+                if let Some(ref exp) = oxc_p.exp {
+                    if let Some(ref bindings) = exp.bindings {
+                        resolver.collect_binding_patches(bindings, out);
+                    }
+                }
+                if let Some(ref arg) = oxc_p.arg {
+                    if let Some(ref bindings) = arg.bindings {
+                        resolver.collect_binding_patches(bindings, out);
+                    }
+                }
+            }
+            continue;
+        }
 
         if !prop.is_directive {
             // Static attribute — pass through
@@ -91,23 +109,35 @@ fn process_v_bind<'alloc>(
     resolver: &BindingResolver<'alloc>,
 ) {
     let has_arg = prop.arg_start.is_some();
+    let raw_name = &source[prop.start as usize..prop.name_end as usize];
 
     if !has_arg {
+        // `.foo="bar"` shorthand for v-bind prop modifier
+        if raw_name.starts_with('.') {
+            let key = raw_name.trim_start_matches('.').trim();
+            if key.is_empty() {
+                return;
+            }
+            if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+                let value_expr = &source[vs as usize..ve as usize];
+                let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+                let prop_end = get_prop_end(prop);
+                out.overwrite(prop.start, prop_end, &format!("{}={{{}}}", key, resolved));
+            } else {
+                let resolved = resolver.resolve_simple_expr(&kebab_to_camel_case(key));
+                let prop_end = get_prop_end(prop);
+                out.overwrite(prop.start, prop_end, &format!("{}={{{}}}", key, resolved));
+            }
+            return;
+        }
+
         // v-bind="obj" → spread: `{...obj}`
         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
             let value_expr = &source[vs as usize..ve as usize];
+            let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
             // Replace entire prop with spread
             let prop_end = get_prop_end(prop);
-            out.overwrite(prop.start, prop_end, &format!("{{...{}}}", value_expr));
-
-            // Apply binding patches to value expression
-            if let Some(oxc_p) = oxc_prop {
-                if let Some(ref exp) = oxc_p.exp {
-                    if let Some(ref bindings) = exp.bindings {
-                        resolver.collect_binding_patches(bindings, out);
-                    }
-                }
-            }
+            out.overwrite(prop.start, prop_end, &format!("{{...{}}}", resolved));
         }
         return;
     }
@@ -120,53 +150,42 @@ fn process_v_bind<'alloc>(
     if prop.is_dynamic == Some(true) {
         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
             let value_expr = &source[vs as usize..ve as usize];
+            let value_resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+            let arg_expr = arg_name
+                .trim()
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(arg_name)
+                .trim();
+            let arg_resolved = resolve_prefixed_dynamic_arg(arg_expr, oxc_prop, resolver);
             let prop_end = get_prop_end(prop);
             out.overwrite(
                 prop.start,
                 prop_end,
-                &format!("{{...{{[{}]: {}}}}}", arg_name, value_expr),
+                &format!("{{...{{[{}]: {}}}}}", arg_resolved, value_resolved),
             );
-
-            // Apply binding patches
-            if let Some(oxc_p) = oxc_prop {
-                if let Some(ref exp) = oxc_p.exp {
-                    if let Some(ref bindings) = exp.bindings {
-                        resolver.collect_binding_patches(bindings, out);
-                    }
-                }
-                if let Some(ref arg) = oxc_p.arg {
-                    if let Some(ref bindings) = arg.bindings {
-                        resolver.collect_binding_patches(bindings, out);
-                    }
-                }
-            }
         }
         return;
     }
 
     // Static key: :prop="expr" → prop={expr}
+    let prop_end = get_prop_end(prop);
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-        // Replace the directive prefix and quotes
-        // :prop="expr" → prop={expr}
-        // v-bind:prop="expr" → prop={expr}
-
-        // Overwrite from directive start to arg start with nothing (remove v-bind: or : prefix)
-        out.overwrite(prop.start, arg_start, "");
-
-        // Replace opening quote with {
-        out.overwrite(vs - 1, vs, "{"); // -1 to include the quote char
-
-        // Replace closing quote with }
-        out.overwrite(ve, ve + 1, "}"); // +1 to include the quote char
-
-        // Apply binding patches to value expression
-        if let Some(oxc_p) = oxc_prop {
-            if let Some(ref exp) = oxc_p.exp {
-                if let Some(ref bindings) = exp.bindings {
-                    resolver.collect_binding_patches(bindings, out);
-                }
-            }
-        }
+        let value_expr = &source[vs as usize..ve as usize];
+        let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+        out.overwrite(
+            prop.start,
+            prop_end,
+            &format!("{}={{{}}}", arg_name, resolved),
+        );
+    } else {
+        // `:foo` shorthand → `foo={ctx.foo}`; `:foo-bar` uses camelCase lookup.
+        let resolved = resolver.resolve_simple_expr(&kebab_to_camel_case(arg_name.trim()));
+        out.overwrite(
+            prop.start,
+            prop_end,
+            &format!("{}={{{}}}", arg_name, resolved),
+        );
     }
 }
 
@@ -212,15 +231,17 @@ fn process_v_on<'alloc>(
     let jsx_event_name = event_to_jsx_name(event_name);
 
     if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
-        let value_expr = &source[vs as usize..ve as usize].trim();
+        let value_expr = &source[vs as usize..ve as usize];
+        let resolved_expr = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+        let resolved_expr = resolved_expr.trim();
 
         // Determine if the handler needs wrapping
-        let is_simple_ident = crate::template::code_gen::binding::is_simple_ident(value_expr);
-        let is_member_expr = value_expr.contains('.') && !value_expr.contains('(');
-        let is_fn_expr = value_expr.starts_with("(")
-            || value_expr.starts_with("function")
-            || value_expr.contains("=>");
-        let is_object_expr = value_expr.starts_with('{') && value_expr.ends_with('}');
+        let is_simple_ident = crate::template::code_gen::binding::is_simple_ident(resolved_expr);
+        let is_member_expr = resolved_expr.contains('.') && !resolved_expr.contains('(');
+        let is_fn_expr = resolved_expr.starts_with("(")
+            || resolved_expr.starts_with("function")
+            || resolved_expr.contains("=>");
+        let is_object_expr = resolved_expr.starts_with('{') && resolved_expr.ends_with('}');
 
         // Build prop end position (including modifiers and quotes)
         let prop_end = get_prop_end(prop);
@@ -230,33 +251,24 @@ fn process_v_on<'alloc>(
             out.overwrite(
                 prop.start,
                 prop_end,
-                &format!("{}={{{}}}", jsx_event_name, value_expr),
+                &format!("{}={{{}}}", jsx_event_name, resolved_expr),
             );
         } else {
             // Inline expression: @click="count++" → onClick={() => count++}
             // Or expression with $event: @click="handler($event)" → onClick={($event) => handler($event)}
-            let has_event_param = value_expr.contains("$event");
+            let has_event_param = resolved_expr.contains("$event");
             if has_event_param {
                 out.overwrite(
                     prop.start,
                     prop_end,
-                    &format!("{}={{($event) => {{{}}}}}", jsx_event_name, value_expr),
+                    &format!("{}={{($event) => {{{}}}}}", jsx_event_name, resolved_expr),
                 );
             } else {
                 out.overwrite(
                     prop.start,
                     prop_end,
-                    &format!("{}={{() => {{{}}}}}", jsx_event_name, value_expr),
+                    &format!("{}={{() => {{{}}}}}", jsx_event_name, resolved_expr),
                 );
-            }
-        }
-
-        // Apply binding patches to value expression
-        if let Some(oxc_p) = oxc_prop {
-            if let Some(ref exp) = oxc_p.exp {
-                if let Some(ref bindings) = exp.bindings {
-                    resolver.collect_binding_patches(bindings, out);
-                }
             }
         }
     } else {
@@ -376,6 +388,59 @@ fn event_to_jsx_name(event_name: &str) -> String {
     }
 
     result
+}
+
+fn resolve_prefixed_expr(
+    raw_expr: &str,
+    expr_start: u32,
+    oxc_prop: Option<&OxcParsedProp<'_>>,
+    resolver: &BindingResolver<'_>,
+) -> String {
+    if let Some(oxc_p) = oxc_prop {
+        if let Some(ref exp) = oxc_p.exp {
+            return build_prefixed_expr(raw_expr, expr_start, exp, resolver, &[]);
+        }
+    }
+    resolver.resolve_simple_expr(raw_expr)
+}
+
+fn resolve_prefixed_dynamic_arg(
+    raw_arg: &str,
+    oxc_prop: Option<&OxcParsedProp<'_>>,
+    resolver: &BindingResolver<'_>,
+) -> String {
+    if let Some(oxc_p) = oxc_prop {
+        if let Some(ref arg) = oxc_p.arg {
+            if let Some(ref bindings) = arg.bindings {
+                // Dynamic args are simple in practice for TSX parity cases (`[msg]`),
+                // so resolve via simple expression and avoid positional patches.
+                if bindings.bindings.len() == 1 {
+                    return resolver.resolve_simple_expr(raw_arg);
+                }
+            }
+        }
+    }
+    resolver.resolve_simple_expr(raw_arg)
+}
+
+fn kebab_to_camel_case(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut upper_next = false;
+    for ch in input.chars() {
+        if ch == '-' {
+            upper_next = true;
+            continue;
+        }
+        if upper_next {
+            for uc in ch.to_uppercase() {
+                out.push(uc);
+            }
+            upper_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
