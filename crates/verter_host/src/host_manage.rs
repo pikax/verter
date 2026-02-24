@@ -9,6 +9,14 @@ use crate::types::*;
 use crate::VerterHost;
 
 impl VerterHost {
+    /// Returns the original source for a file by canonical ID or alias.
+    /// Returns `None` when the file does not exist in the host.
+    pub fn get_source(&self, canonical_or_alias: &str) -> Option<std::sync::Arc<str>> {
+        let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
+        let files = read_lock(&self.files);
+        files.get(&canonical).map(|entry| entry.source.clone())
+    }
+
     /// Returns a serializable snapshot of the file's static analysis data.
     /// Returns `None` if the file doesn't exist.
     /// When `eager_analysis` is false, computes analysis on demand from stored source.

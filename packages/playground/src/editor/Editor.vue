@@ -5,6 +5,7 @@ import { IMPORT_MAP_FILENAME, type Store } from "../core/store";
 import type { HostDiagnostic, LintDiagnostic } from "../core/types";
 import { registerLspProviders } from "./lspProviders";
 import { TypeScriptService, type MappedDiagnostic } from "./tsService";
+import { getTypeDiagnosticsSourceMap } from "./diagnosticSourceMap";
 
 const props = defineProps<{
   store: Store;
@@ -149,11 +150,12 @@ async function syncTypeScript() {
   }
 
   try {
+    const diagnosticsSourceMap = getTypeDiagnosticsSourceMap(file.compiled);
     tsDiagnostics = await tsService.syncTsx(
       file.filename,
       tsxCode,
       file.code,
-      file.compiled.verterSourceMap || null,
+      diagnosticsSourceMap,
     );
   } catch {
     tsDiagnostics = [];
@@ -220,7 +222,7 @@ onMounted(() => {
 
   // Watch TSX output changes to trigger TS re-sync
   watch(
-    () => props.store.activeFile?.compiled.types,
+    () => [props.store.activeFile?.compiled.types, props.store.activeFile?.compiled.typesSourceMap],
     () => syncTypeScript(),
   );
 

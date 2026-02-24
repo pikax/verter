@@ -34,3 +34,6 @@ packages/benchmark/benchmark-results/
 
 # Integration test cloned repos
 .integration-tests/
+
+# Playwright transient artifacts
+packages/playground/test-results/

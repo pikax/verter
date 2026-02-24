@@ -311,12 +311,6 @@ pub(crate) fn parse_vue_snapshot(
     let semantic_hash = semantic_hash(&slices, &descriptor);
 
     let raw_diags = syntax.take_diagnostics();
-    // Build UTF-16 resolver lazily — only when diagnostics have spans
-    let resolver = if raw_diags.iter().any(|d| d.span.is_some()) {
-        Some(verter_core::cursor::position::PositionResolver::new(source))
-    } else {
-        None
-    };
     let parse_diagnostics = DiagnosticsSnapshot::from_vec(
         raw_diags
             .into_iter()
@@ -328,18 +322,8 @@ pub(crate) fn parse_vue_snapshot(
                 },
                 code: format!("{:?}", d.code),
                 message: d.message,
-                span_start: d.span.map(|s| {
-                    resolver
-                        .as_ref()
-                        .map(|r| r.offset_to_line_col(s.start as usize).2 as u32)
-                        .unwrap_or(s.start)
-                }),
-                span_end: d.span.map(|s| {
-                    resolver
-                        .as_ref()
-                        .map(|r| r.offset_to_line_col(s.end as usize).2 as u32)
-                        .unwrap_or(s.end)
-                }),
+                span_start: d.span.map(|s| s.start),
+                span_end: d.span.map(|s| s.end),
             })
             .collect(),
     );

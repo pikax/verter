@@ -445,14 +445,6 @@ impl VerterHost {
 
         let mut compile_diags = diagnostics.clone();
         if !compiled.errors.is_empty() {
-            // Build UTF-16 resolver lazily — only when diagnostics have spans
-            let resolver = if compiled.errors.iter().any(|d| d.span.is_some()) {
-                Some(verter_core::cursor::position::PositionResolver::new(
-                    &merged_source,
-                ))
-            } else {
-                None
-            };
             compile_diags = compile_diags.merge(DiagnosticsSnapshot::from_vec(
                 compiled
                     .errors
@@ -471,18 +463,8 @@ impl VerterHost {
                         },
                         code: d.code.clone(),
                         message: d.message.clone(),
-                        span_start: d.span.map(|s| {
-                            resolver
-                                .as_ref()
-                                .map(|r| r.offset_to_line_col(s.start as usize).2 as u32)
-                                .unwrap_or(s.start)
-                        }),
-                        span_end: d.span.map(|s| {
-                            resolver
-                                .as_ref()
-                                .map(|r| r.offset_to_line_col(s.end as usize).2 as u32)
-                                .unwrap_or(s.end)
-                        }),
+                        span_start: d.span.map(|s| s.start),
+                        span_end: d.span.map(|s| s.end),
                     })
                     .collect(),
             ));

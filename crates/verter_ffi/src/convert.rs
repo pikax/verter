@@ -270,7 +270,52 @@ pub fn host_node_kind_to_ffi(input: &host::VirtualNodeKind) -> FfiVirtualNodeKin
 }
 
 /// Convert host diagnostics to FFI representation.
-pub fn host_diagnostics_to_ffi(input: &host::DiagnosticsSnapshot) -> FfiDiagnosticsSnapshot {
+fn clamp_to_char_boundary(source: &str, byte_offset: usize) -> usize {
+    let mut clamped = byte_offset.min(source.len());
+    while clamped > 0 && !source.is_char_boundary(clamped) {
+        clamped -= 1;
+    }
+    clamped
+}
+
+fn byte_offset_to_utf16(source: &str, byte_offset: u32) -> u32 {
+    let clamped = clamp_to_char_boundary(source, byte_offset as usize);
+    source[..clamped].encode_utf16().count() as u32
+}
+
+fn maybe_utf16_offset(raw: Option<u32>, source: Option<&str>) -> Option<u32> {
+    raw.map(|offset| {
+        source
+            .map(|s| byte_offset_to_utf16(s, offset))
+            .unwrap_or(offset)
+    })
+}
+
+/// Convert linter diagnostics from UTF-8 byte spans to UTF-16 spans for JS interop.
+pub fn lint_diagnostics_to_utf16(
+    mut diagnostics: Vec<verter_linter::LintDiagnostic>,
+    source: Option<&str>,
+) -> Vec<verter_linter::LintDiagnostic> {
+    let Some(source) = source else {
+        return diagnostics;
+    };
+
+    for d in &mut diagnostics {
+        d.span_start = byte_offset_to_utf16(source, d.span_start);
+        d.span_end = byte_offset_to_utf16(source, d.span_end);
+        if let Some(fix) = &mut d.fix {
+            fix.span_start = byte_offset_to_utf16(source, fix.span_start);
+            fix.span_end = byte_offset_to_utf16(source, fix.span_end);
+        }
+    }
+
+    diagnostics
+}
+
+pub fn host_diagnostics_to_ffi(
+    input: &host::DiagnosticsSnapshot,
+    source: Option<&str>,
+) -> FfiDiagnosticsSnapshot {
     FfiDiagnosticsSnapshot {
         diagnostics: input
             .diagnostics
@@ -283,8 +328,8 @@ pub fn host_diagnostics_to_ffi(input: &host::DiagnosticsSnapshot) -> FfiDiagnost
                 },
                 code: d.code.clone(),
                 message: d.message.clone(),
-                span_start: d.span_start,
-                span_end: d.span_end,
+                span_start: maybe_utf16_offset(d.span_start, source),
+                span_end: maybe_utf16_offset(d.span_end, source),
             })
             .collect(),
         has_errors: input.has_errors,
@@ -292,7 +337,7 @@ pub fn host_diagnostics_to_ffi(input: &host::DiagnosticsSnapshot) -> FfiDiagnost
 }
 
 /// Convert a host update result to its FFI representation.
-pub fn host_update_to_ffi(input: host::HostUpdateResult) -> FfiUpdateResult {
+pub fn host_update_to_ffi(input: host::HostUpdateResult, source: Option<&str>) -> FfiUpdateResult {
     FfiUpdateResult {
         canonical_id: input.canonical_id,
         changed: input.changed,
@@ -328,7 +373,7 @@ pub fn host_update_to_ffi(input: host::HostUpdateResult) -> FfiUpdateResult {
         removed_virtual_ids: input.removed_virtual_ids,
         changed_lsp_ids: input.changed_lsp_ids,
         removed_lsp_ids: input.removed_lsp_ids,
-        diagnostics: host_diagnostics_to_ffi(&input.diagnostics),
+        diagnostics: host_diagnostics_to_ffi(&input.diagnostics, source),
         external_source_requests: input
             .external_source_requests
             .into_iter()
@@ -359,14 +404,17 @@ pub fn host_update_to_ffi(input: host::HostUpdateResult) -> FfiUpdateResult {
 }
 
 /// Convert a host virtual file response to its FFI representation.
-pub fn host_virtual_file_to_ffi(input: host::VirtualFileResponse) -> FfiVirtualFileResponse {
+pub fn host_virtual_file_to_ffi(
+    input: host::VirtualFileResponse,
+    source: Option<&str>,
+) -> FfiVirtualFileResponse {
     FfiVirtualFileResponse {
         id: input.id,
         code: input.code.to_string(),
         source_map: input.source_map.as_ref().map(|s| s.to_string()),
         lang: input.lang,
         stale: input.stale,
-        diagnostics: host_diagnostics_to_ffi(&input.diagnostics),
+        diagnostics: host_diagnostics_to_ffi(&input.diagnostics, source),
         meta: FfiVirtualMeta {
             scope_id: input.meta.scope_id,
             block_type: input.meta.block_type,
@@ -1031,7 +1079,7 @@ mod tests {
             ],
             has_errors: true,
         };
-        let ffi = host_diagnostics_to_ffi(&snapshot);
+        let ffi = host_diagnostics_to_ffi(&snapshot, None);
         assert!(ffi.has_errors);
         assert_eq!(ffi.diagnostics.len(), 3);
         assert_eq!(ffi.diagnostics[0].severity, "error");
@@ -1047,15 +1095,81 @@ mod tests {
     #[test]
     fn diagnostics_empty() {
         let snapshot = host::DiagnosticsSnapshot::default();
-        let ffi = host_diagnostics_to_ffi(&snapshot);
+        let ffi = host_diagnostics_to_ffi(&snapshot, None);
         assert!(!ffi.has_errors);
         assert!(ffi.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn host_diagnostics_to_ffi_converts_utf8_spans_to_utf16_with_unicode_source() {
+        // "😀" is 4 UTF-8 bytes and 2 UTF-16 code units.
+        let source = "a😀b";
+        let snapshot = host::DiagnosticsSnapshot {
+            diagnostics: vec![host::HostDiagnostic {
+                severity: host::HostSeverity::Error,
+                code: "E_UTF".to_string(),
+                message: "unicode".to_string(),
+                span_start: Some(1), // byte offset at 😀 start
+                span_end: Some(5),   // byte offset right after 😀
+            }],
+            has_errors: true,
+        };
+
+        let ffi = host_diagnostics_to_ffi(&snapshot, Some(source));
+        assert_eq!(ffi.diagnostics.len(), 1);
+        assert_eq!(ffi.diagnostics[0].span_start, Some(1));
+        assert_eq!(ffi.diagnostics[0].span_end, Some(3));
+    }
+
+    #[test]
+    fn host_diagnostics_to_ffi_preserves_none_spans() {
+        let snapshot = host::DiagnosticsSnapshot {
+            diagnostics: vec![host::HostDiagnostic {
+                severity: host::HostSeverity::Warning,
+                code: "W_NONE".to_string(),
+                message: "none".to_string(),
+                span_start: None,
+                span_end: None,
+            }],
+            has_errors: false,
+        };
+        let ffi = host_diagnostics_to_ffi(&snapshot, Some("abc"));
+        assert_eq!(ffi.diagnostics.len(), 1);
+        assert_eq!(ffi.diagnostics[0].span_start, None);
+        assert_eq!(ffi.diagnostics[0].span_end, None);
+    }
+
+    #[test]
+    fn lint_diagnostics_to_utf16_converts_spans_and_fixes() {
+        let source = "a😀b";
+        let input = vec![verter_linter::LintDiagnostic {
+            rule: "r".to_string(),
+            category: "c".to_string(),
+            severity: verter_linter::Severity::Error,
+            message: "m".to_string(),
+            span_start: 1,
+            span_end: 5,
+            fix: Some(verter_linter::LintFix {
+                description: "f".to_string(),
+                replacement: "x".to_string(),
+                span_start: 1,
+                span_end: 5,
+            }),
+        }];
+
+        let out = lint_diagnostics_to_utf16(input, Some(source));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].span_start, 1);
+        assert_eq!(out[0].span_end, 3);
+        assert_eq!(out[0].fix.as_ref().unwrap().span_start, 1);
+        assert_eq!(out[0].fix.as_ref().unwrap().span_end, 3);
     }
 
     // ── Output direction: host_update_to_ffi ─────────────────────────
 
     #[test]
     fn update_result_full_round_trip() {
+        let source = "a😀b";
         let host_result = host::HostUpdateResult {
             canonical_id: "/src/App.vue".to_string(),
             changed: true,
@@ -1101,7 +1215,7 @@ mod tests {
             parse_duration_ms: 1.5,
         };
 
-        let ffi = host_update_to_ffi(host_result);
+        let ffi = host_update_to_ffi(host_result, Some(source));
         assert_eq!(ffi.canonical_id, "/src/App.vue");
         assert!(ffi.changed);
 
@@ -1153,6 +1267,29 @@ mod tests {
     }
 
     #[test]
+    fn host_update_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
+        let source = "a😀b";
+        let result = host::HostUpdateResult {
+            diagnostics: host::DiagnosticsSnapshot {
+                diagnostics: vec![host::HostDiagnostic {
+                    severity: host::HostSeverity::Error,
+                    code: "E_UTF".to_string(),
+                    message: "unicode".to_string(),
+                    span_start: Some(1),
+                    span_end: Some(5),
+                }],
+                has_errors: true,
+            },
+            ..host::HostUpdateResult::no_change("x".to_string())
+        };
+
+        let ffi = host_update_to_ffi(result, Some(source));
+        assert_eq!(ffi.diagnostics.diagnostics.len(), 1);
+        assert_eq!(ffi.diagnostics.diagnostics[0].span_start, Some(1));
+        assert_eq!(ffi.diagnostics.diagnostics[0].span_end, Some(3));
+    }
+
+    #[test]
     fn update_result_external_block_kinds() {
         let kinds = [
             (host::ExternalBlockKind::Script, "script"),
@@ -1171,7 +1308,7 @@ mod tests {
                 }],
                 ..host::HostUpdateResult::no_change("x".to_string())
             };
-            let ffi = host_update_to_ffi(result);
+            let ffi = host_update_to_ffi(result, Some("source"));
             assert_eq!(
                 ffi.external_source_requests[0].block_kind, *expected_str,
                 "block kind mismatch"
@@ -1183,13 +1320,23 @@ mod tests {
 
     #[test]
     fn virtual_file_arc_to_string() {
+        let source = "a😀b";
         let response = host::VirtualFileResponse {
             id: "Comp.vue._VERTER_.script.ts".to_string(),
             code: Arc::from("export default {}"),
             source_map: Some(Arc::from("{\"mappings\":\"\"}")),
             lang: Some("ts".to_string()),
             stale: true,
-            diagnostics: host::DiagnosticsSnapshot::default(),
+            diagnostics: host::DiagnosticsSnapshot {
+                diagnostics: vec![host::HostDiagnostic {
+                    severity: host::HostSeverity::Warning,
+                    code: "W_UTF".to_string(),
+                    message: "unicode".to_string(),
+                    span_start: Some(1),
+                    span_end: Some(5),
+                }],
+                has_errors: false,
+            },
             meta: host::VirtualMeta {
                 scope_id: Some("data-v-abc123".to_string()),
                 block_type: None,
@@ -1197,7 +1344,7 @@ mod tests {
                 custom_index: None,
             },
         };
-        let ffi = host_virtual_file_to_ffi(response);
+        let ffi = host_virtual_file_to_ffi(response, Some(source));
         assert_eq!(ffi.id, "Comp.vue._VERTER_.script.ts");
         assert_eq!(ffi.code, "export default {}");
         assert_eq!(ffi.source_map, Some("{\"mappings\":\"\"}".to_string()));
@@ -1207,6 +1354,37 @@ mod tests {
         assert!(ffi.meta.block_type.is_none());
         assert_eq!(ffi.meta.style_index, Some(2));
         assert!(ffi.meta.custom_index.is_none());
+        assert_eq!(ffi.diagnostics.diagnostics.len(), 1);
+        assert_eq!(ffi.diagnostics.diagnostics[0].span_start, Some(1));
+        assert_eq!(ffi.diagnostics.diagnostics[0].span_end, Some(3));
+    }
+
+    #[test]
+    fn host_virtual_file_to_ffi_uses_utf16_conversion_for_embedded_diagnostics() {
+        let source = "a😀b";
+        let response = host::VirtualFileResponse {
+            id: "x".to_string(),
+            code: Arc::from(""),
+            source_map: None,
+            lang: None,
+            stale: false,
+            diagnostics: host::DiagnosticsSnapshot {
+                diagnostics: vec![host::HostDiagnostic {
+                    severity: host::HostSeverity::Error,
+                    code: "E_UTF".to_string(),
+                    message: "unicode".to_string(),
+                    span_start: Some(1),
+                    span_end: Some(5),
+                }],
+                has_errors: true,
+            },
+            meta: host::VirtualMeta::default(),
+        };
+
+        let ffi = host_virtual_file_to_ffi(response, Some(source));
+        assert_eq!(ffi.diagnostics.diagnostics.len(), 1);
+        assert_eq!(ffi.diagnostics.diagnostics[0].span_start, Some(1));
+        assert_eq!(ffi.diagnostics.diagnostics[0].span_end, Some(3));
     }
 
     #[test]
@@ -1220,7 +1398,7 @@ mod tests {
             diagnostics: host::DiagnosticsSnapshot::default(),
             meta: host::VirtualMeta::default(),
         };
-        let ffi = host_virtual_file_to_ffi(response);
+        let ffi = host_virtual_file_to_ffi(response, Some("source"));
         assert!(ffi.source_map.is_none());
         assert!(ffi.lang.is_none());
         assert!(!ffi.stale);

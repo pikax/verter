@@ -27,7 +27,7 @@ mod visitor;
 pub use comment_directives::parse_comment_directives;
 pub use config::{LintConfig, LintPreset};
 pub use context::LintContext;
-pub use diagnostic::{LintDiagnostic, Severity};
+pub use diagnostic::{LintDiagnostic, LintFix, Severity};
 pub use linter::Linter;
 pub use rules::LintRule;
 pub use visitor::LintVisitor;

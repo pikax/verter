@@ -7,4 +7,5 @@ publish = false
 
 [dependencies]
 verter_host = { path = "../verter_host", version = "0.0.1-alpha.3" }
+verter_linter = { path = "../verter_linter", version = "0.0.1-alpha.3" }
 serde = { workspace = true }

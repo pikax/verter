@@ -144,9 +144,10 @@ impl WasmVerterHost {
     #[wasm_bindgen]
     pub fn upsert(&self, request: JsValue) -> Result<JsValue, JsValue> {
         let ffi_req = parse_wasm_input::<FfiUpsertRequest>(request)?;
+        let source_for_spans = ffi_req.source.clone();
         let host_req = ffi_upsert_to_host(ffi_req).map_err(ffi_err)?;
         let result = catch_panic(|| self.inner.upsert(host_req))?.map_err(host_err)?;
-        to_wasm_value(&host_update_to_ffi(result))
+        to_wasm_value(&host_update_to_ffi(result, Some(source_for_spans.as_str())))
     }
 
     /// Replaces one or more style blocks with preprocessed CSS and recompiles
@@ -165,7 +166,8 @@ impl WasmVerterHost {
         let host_req = ffi_style_override_to_host(ffi_req).map_err(ffi_err)?;
         let result =
             catch_panic(|| self.inner.apply_style_overrides(host_req))?.map_err(host_err)?;
-        to_wasm_value(&host_update_to_ffi(result))
+        let source = self.inner.get_source(&result.canonical_id);
+        to_wasm_value(&host_update_to_ffi(result, source.as_deref()))
     }
 
     /// Retrieves a single compiled virtual file (script, template, or style).
@@ -181,9 +183,19 @@ impl WasmVerterHost {
     #[wasm_bindgen(js_name = getVirtualFile)]
     pub fn get_virtual_file(&self, query: JsValue) -> Result<JsValue, JsValue> {
         let ffi_query = parse_wasm_input::<FfiVirtualQuery>(query)?;
+        let canonical_for_source = if let Some(canonical) = ffi_query.canonical_id.as_ref() {
+            Some(canonical.clone())
+        } else if let Some(raw_id) = ffi_query.raw_id.as_ref() {
+            self.inner.resolve(raw_id).map(|r| r.canonical_id)
+        } else {
+            None
+        };
         let host_query = ffi_virtual_query_to_host(ffi_query).map_err(ffi_err)?;
         let result = catch_panic(|| self.inner.get_virtual_file(host_query))?.map_err(host_err)?;
-        to_wasm_value(&host_virtual_file_to_ffi(result))
+        let source = canonical_for_source
+            .as_deref()
+            .and_then(|canonical| self.inner.get_source(canonical));
+        to_wasm_value(&host_virtual_file_to_ffi(result, source.as_deref()))
     }
 
     /// Lists all virtual node kinds for a given canonical file ID.
@@ -328,7 +340,33 @@ impl WasmVerterHost {
             }
             None => Vec::new(),
         };
-
+        let source = self.inner.get_source(canonical_or_alias);
+        let diagnostics = lint_diagnostics_to_utf16(diagnostics, source.as_deref());
         to_wasm_value(&diagnostics)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::lint_diagnostics_to_utf16;
+
+    #[test]
+    fn lint_utf16_conversion_uses_shared_ffi_helper() {
+        let source = "a😀b";
+        let diagnostics = vec![verter_linter::LintDiagnostic {
+            rule: "r".to_string(),
+            category: "c".to_string(),
+            severity: verter_linter::Severity::Error,
+            message: "m".to_string(),
+            span_start: 1,
+            span_end: 5,
+            fix: None,
+        }];
+
+        let out = lint_diagnostics_to_utf16(diagnostics, Some(source));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].span_start, 1);
+        assert_eq!(out[0].span_end, 3);
+        assert!(out[0].fix.is_none());
     }
 }

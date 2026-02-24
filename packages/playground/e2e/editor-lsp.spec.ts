@@ -224,6 +224,48 @@ test.describe("Editor LSP Features", () => {
       const editorVisible = await page.locator(".monaco-editor").isVisible();
       expect(editorVisible).toBe(true);
     });
+
+    test("TS error squiggly is rendered on the exact failing token line (emoji-safe mapping)", async ({
+      page,
+    }) => {
+      const editorArea = page.locator(".monaco-editor");
+      await editorArea.click();
+      await page.keyboard.press("ControlOrMeta+a");
+      await page.keyboard.press("Delete");
+      await page.waitForTimeout(300);
+
+      const code = [
+        '<script setup lang="ts">',
+        'const face = "😀"',
+        'const count: number = "oops_marker"',
+        "</script>",
+        "",
+        "<template>",
+        "  <div>{{ count }}</div>",
+        "</template>",
+      ].join("\n");
+
+      await page.keyboard.type(code, { delay: 5 });
+
+      const errorLine = page
+        .locator(".monaco-editor .view-line")
+        .filter({ hasText: 'const count: number = "oops_marker"' })
+        .first();
+      await expect(errorLine).toBeVisible({ timeout: 10000 });
+
+      await expect
+        .poll(async () => errorLine.locator("span.squiggly-error", { hasText: "oops_marker" }).count(), {
+          timeout: 15000,
+        })
+        .toBeGreaterThan(0);
+
+      const emojiLine = page
+        .locator(".monaco-editor .view-line")
+        .filter({ hasText: 'const face = "😀"' })
+        .first();
+      await expect(emojiLine).toBeVisible({ timeout: 10000 });
+      await expect(emojiLine.locator(".squiggly-error")).toHaveCount(0);
+    });
   });
 
   // ── 5. Integration: markers + analysis + file switching ──

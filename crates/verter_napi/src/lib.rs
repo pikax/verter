@@ -460,28 +460,24 @@ fn host_node_kind_to_napi(input: &host::VirtualNodeKind) -> NapiVirtualNodeKind 
     }
 }
 
-fn host_severity_to_str(severity: &host::HostSeverity) -> &'static str {
-    match severity {
-        host::HostSeverity::Error => "error",
-        host::HostSeverity::Warning => "warning",
-        host::HostSeverity::Info => "info",
-    }
-}
-
-fn host_diagnostics_to_napi(input: &host::DiagnosticsSnapshot) -> NapiDiagnosticsSnapshot {
+fn host_diagnostics_to_napi(
+    input: &host::DiagnosticsSnapshot,
+    source: Option<&str>,
+) -> NapiDiagnosticsSnapshot {
+    let ffi = host_diagnostics_to_ffi(input, source);
     NapiDiagnosticsSnapshot {
-        diagnostics: input
+        diagnostics: ffi
             .diagnostics
-            .iter()
+            .into_iter()
             .map(|d| NapiDiagnostic {
-                severity: host_severity_to_str(&d.severity).to_string(),
-                code: d.code.clone(),
-                message: d.message.clone(),
+                severity: d.severity,
+                code: d.code,
+                message: d.message,
                 spanStart: d.span_start,
                 spanEnd: d.span_end,
             })
             .collect(),
-        hasErrors: input.has_errors,
+        hasErrors: ffi.has_errors,
     }
 }
 
@@ -494,7 +490,7 @@ fn host_block_kind_to_str(kind: &host::ExternalBlockKind) -> &'static str {
     }
 }
 
-fn host_update_to_napi(input: host::HostUpdateResult) -> NapiUpdateResult {
+fn host_update_to_napi(input: host::HostUpdateResult, source: Option<&str>) -> NapiUpdateResult {
     NapiUpdateResult {
         canonicalId: input.canonical_id,
         changed: input.changed,
@@ -530,7 +526,7 @@ fn host_update_to_napi(input: host::HostUpdateResult) -> NapiUpdateResult {
         removedVirtualIds: input.removed_virtual_ids,
         changedLspIds: input.changed_lsp_ids,
         removedLspIds: input.removed_lsp_ids,
-        diagnostics: host_diagnostics_to_napi(&input.diagnostics),
+        diagnostics: host_diagnostics_to_napi(&input.diagnostics, source),
         externalSourceRequests: input
             .external_source_requests
             .into_iter()
@@ -555,14 +551,17 @@ fn host_update_to_napi(input: host::HostUpdateResult) -> NapiUpdateResult {
     }
 }
 
-fn host_virtual_file_to_napi(input: host::VirtualFileResponse) -> NapiVirtualFileResponse {
+fn host_virtual_file_to_napi(
+    input: host::VirtualFileResponse,
+    source: Option<&str>,
+) -> NapiVirtualFileResponse {
     NapiVirtualFileResponse {
         id: input.id,
         code: input.code.to_string(),
         sourceMap: input.source_map.as_ref().map(|s| s.to_string()),
         lang: input.lang,
         stale: input.stale,
-        diagnostics: host_diagnostics_to_napi(&input.diagnostics),
+        diagnostics: host_diagnostics_to_napi(&input.diagnostics, source),
         meta: NapiVirtualMeta {
             scopeId: input.meta.scope_id,
             blockType: input.meta.block_type,
@@ -646,6 +645,7 @@ impl NapiVerterHost {
     #[napi]
     pub fn upsert(&self, request: NapiUpsertRequest) -> Result<NapiUpdateResult> {
         let source = buffer_to_string(request.source)?;
+        let source_for_spans = source.clone();
         let ffi_req = FfiUpsertRequest {
             canonical_id: request.canonicalId,
             input_id: request.inputId,
@@ -655,7 +655,7 @@ impl NapiVerterHost {
         };
         let host_req = ffi_upsert_to_host(ffi_req).map_err(ffi_err)?;
         catch_panic(std::panic::AssertUnwindSafe(|| self.inner.upsert(host_req)))?
-            .map(host_update_to_napi)
+            .map(|result| host_update_to_napi(result, Some(source_for_spans.as_str())))
             .map_err(host_error)
     }
 
@@ -676,6 +676,7 @@ impl NapiVerterHost {
         &self,
         request: NapiStyleOverrideRequest,
     ) -> Result<NapiUpdateResult> {
+        let canonical_for_source = request.canonicalId.clone();
         let overrides = request
             .overrides
             .into_iter()
@@ -693,11 +694,12 @@ impl NapiVerterHost {
             overrides,
         };
         let host_req = ffi_style_override_to_host(ffi_req).map_err(ffi_err)?;
-        catch_panic(std::panic::AssertUnwindSafe(|| {
+        let result = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.apply_style_overrides(host_req)
         }))?
-        .map(host_update_to_napi)
-        .map_err(host_error)
+        .map_err(host_error)?;
+        let source = self.inner.get_source(&canonical_for_source);
+        Ok(host_update_to_napi(result, source.as_deref()))
     }
 
     /// Retrieves a single compiled virtual file (script, template, or style).
@@ -712,13 +714,23 @@ impl NapiVerterHost {
     /// Returns an error if the query is invalid or the file is not found.
     #[napi(js_name = "getVirtualFile")]
     pub fn get_virtual_file(&self, query: NapiVirtualQuery) -> Result<NapiVirtualFileResponse> {
+        let canonical_for_source = if let Some(canonical) = query.canonicalId.as_ref() {
+            Some(canonical.clone())
+        } else if let Some(raw_id) = query.rawId.as_ref() {
+            self.inner.resolve(raw_id).map(|r| r.canonical_id)
+        } else {
+            None
+        };
         let ffi_query: FfiVirtualQuery = query.into();
         let host_query = ffi_virtual_query_to_host(ffi_query).map_err(ffi_err)?;
-        catch_panic(std::panic::AssertUnwindSafe(|| {
+        let result = catch_panic(std::panic::AssertUnwindSafe(|| {
             self.inner.get_virtual_file(host_query)
         }))?
-        .map(host_virtual_file_to_napi)
-        .map_err(host_error)
+        .map_err(host_error)?;
+        let source = canonical_for_source
+            .as_deref()
+            .and_then(|canonical| self.inner.get_source(canonical));
+        Ok(host_virtual_file_to_napi(result, source.as_deref()))
     }
 
     /// Lists all virtual node kinds for a given canonical file ID.

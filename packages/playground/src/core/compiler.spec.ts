@@ -2,7 +2,8 @@
  * @ai-generated - Tests for compiler pure functions.
  */
 import { describe, it, expect } from "vitest";
-import { mergeRenderIntoComponent, formatDiagnostics } from "./compiler";
+import { mergeRenderIntoComponent, formatDiagnostics, applyTsxOutput } from "./compiler";
+import { File } from "./types";
 
 describe("formatDiagnostics", () => {
   it("returns empty array for undefined input", () => {
@@ -203,5 +204,32 @@ return (_openBlock(), _createElementVNode("div", { class: "dashboard" }, "hello"
     const exportIdx = result.indexOf("export default __sfc__");
     expect(scopeIdx).toBeLessThan(renderIdx);
     expect(renderIdx).toBeLessThan(exportIdx);
+  });
+});
+
+describe("applyTsxOutput", () => {
+  it("stores TSX code and TSX source map separately from template map", () => {
+    const file = new File("App.vue", "<template><div/></template>");
+    file.compiled.verterSourceMap = '{"version":3,"mappings":"template"}';
+
+    applyTsxOutput(file, {
+      code: "tsx-code",
+      sourceMap: '{"version":3,"mappings":"tsx"}',
+    });
+
+    expect(file.compiled.types).toBe("tsx-code");
+    expect(file.compiled.typesSourceMap).toBe('{"version":3,"mappings":"tsx"}');
+    expect(file.compiled.verterSourceMap).toBe('{"version":3,"mappings":"template"}');
+  });
+
+  it("clears TSX fields when output is unavailable", () => {
+    const file = new File("App.vue", "<template><div/></template>");
+    file.compiled.types = "old";
+    file.compiled.typesSourceMap = '{"version":3,"mappings":"old"}';
+
+    applyTsxOutput(file, null);
+
+    expect(file.compiled.types).toBe("");
+    expect(file.compiled.typesSourceMap).toBe("");
   });
 });

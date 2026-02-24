@@ -10,6 +10,7 @@ export interface CompiledFile {
   js: string;
   css: string;
   types: string;
+  typesSourceMap: string;
   verterSourceMap: string;
   errors: string[];
   compilerDiagnostics: HostDiagnostic[];
@@ -24,6 +25,7 @@ export class File {
     js: "",
     css: "",
     types: "",
+    typesSourceMap: "",
     verterSourceMap: "",
     errors: [],
     compilerDiagnostics: [],

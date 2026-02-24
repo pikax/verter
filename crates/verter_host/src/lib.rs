@@ -263,6 +263,50 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn get_source_returns_source_for_canonical_and_alias() {
+        let host = VerterHost::new(HostConfig::default());
+        let source = "<template><div>hello</div></template>";
+
+        host.upsert(UpsertRequest {
+            canonical_id: None,
+            input_id: "Comp.vue".to_string(),
+            source: Arc::from(source),
+            file_kind: FileKind::VueSfc,
+            aliases: vec!["AliasComp.vue".to_string()],
+        })
+        .unwrap();
+
+        assert_eq!(host.get_source("Comp.vue").as_deref(), Some(source));
+        assert_eq!(host.get_source("AliasComp.vue").as_deref(), Some(source));
+        assert_eq!(host.get_source("Missing.vue"), None);
+    }
+
+    #[test]
+    fn host_internal_diagnostic_spans_remain_byte_offsets() {
+        let host = VerterHost::new(HostConfig::default());
+        let source = "<template>\n  😀<div>\n</template>\n";
+
+        let result = upsert_vue(&host, "Comp.vue", source);
+        let expected_div_start = source.find("<div>").unwrap() as u32;
+
+        let matches_byte_span = result.diagnostics.diagnostics.iter().any(|d| {
+            d.code.contains("XMissingEndTag") && d.span_start == Some(expected_div_start)
+        });
+
+        assert!(
+            matches_byte_span,
+            "expected byte span {} in XMissingEndTag diagnostics, got: {:?}",
+            expected_div_start,
+            result
+                .diagnostics
+                .diagnostics
+                .iter()
+                .map(|d| (d.code.clone(), d.span_start, d.span_end))
+                .collect::<Vec<_>>()
+        );
+    }
+
     fn file_entry_from_snapshot(canonical_id: &str, src: &str, snap: &ParseSnapshot) -> FileEntry {
         FileEntry {
             canonical_id: canonical_id.to_string(),

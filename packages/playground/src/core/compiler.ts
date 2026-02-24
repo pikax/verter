@@ -199,6 +199,12 @@ export function mergeRenderIntoComponent(code: string): string {
   return merged;
 }
 
+/** Apply TSX output and keep its source map isolated from template source maps. */
+export function applyTsxOutput(file: File, tsx: HostTsxResponse | null | undefined): void {
+  file.compiled.types = tsx?.code ?? "";
+  file.compiled.typesSourceMap = tsx?.sourceMap ?? "";
+}
+
 function compileVueWithHost(file: File, options: CompilerOptions | undefined): CompileTiming {
   const start = performance.now();
   const profile = toHostProfile(file, options);
@@ -295,12 +301,12 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   if (typeof wasmHost!.getTsx === "function") {
     try {
       const tsx = wasmHost!.getTsx(file.filename, profile);
-      file.compiled.types = tsx?.code ?? "";
+      applyTsxOutput(file, tsx);
     } catch {
-      // Silently ignore - TSX output is optional
+      applyTsxOutput(file, null);
     }
   } else {
-    file.compiled.types = "";
+    applyTsxOutput(file, null);
   }
 
   return {
@@ -364,12 +370,12 @@ function compileTsWithHost(file: File, options: CompilerOptions | undefined): Co
   if (typeof wasmHost!.getTsx === "function") {
     try {
       const tsx = wasmHost!.getTsx(vueFilename, profile);
-      file.compiled.types = tsx?.code ?? "";
+      applyTsxOutput(file, tsx);
     } catch {
-      file.compiled.types = "";
+      applyTsxOutput(file, null);
     }
   } else {
-    file.compiled.types = "";
+    applyTsxOutput(file, null);
   }
 
   return {

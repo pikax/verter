@@ -23,6 +23,7 @@ describe("File", () => {
         js: "",
         css: "",
         types: "",
+        typesSourceMap: "",
         verterSourceMap: "",
         errors: [],
         compilerDiagnostics: [],
