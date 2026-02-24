@@ -214,9 +214,39 @@ fn walk_element<'alloc>(
     }
 }
 
-/// Visit a text node — pass through as-is (text is valid in JSX).
-fn visit_text(_text: &TextNode, _source: &str, _out: &mut CodeGenOutput<'_>) {
-    // Text nodes pass through unchanged in JSX
+/// Visit a text node.
+///
+/// To keep TSX valid for content like `2 < 1`, non-empty trimmed text is wrapped
+/// as a string expression (`{"..."}`), matching v5/process text-plugin semantics.
+/// Whitespace-only text remains unchanged.
+fn visit_text(text: &TextNode, source: &str, out: &mut CodeGenOutput<'_>) {
+    if text.end <= text.start {
+        return;
+    }
+
+    let raw_text = &source[text.start as usize..text.end as usize];
+    let trimmed = raw_text.trim();
+    if trimmed.is_empty() || trimmed == "<" {
+        return;
+    }
+
+    let Some(rel_start) = raw_text.find(trimmed) else {
+        return;
+    };
+
+    let content_start = text.start + rel_start as u32;
+    let content_end = content_start + trimmed.len() as u32;
+
+    // Escape quotes inside the string literal body.
+    for (i, b) in trimmed.as_bytes().iter().enumerate() {
+        if *b == b'"' {
+            let pos = content_start + i as u32;
+            out.overwrite(pos, pos + 1, "\\\"");
+        }
+    }
+
+    out.prepend_alloc(content_start, "{\"");
+    out.prepend_alloc(content_end, "\"}");
 }
 
 /// Visit an interpolation node: `{{ expr }}` → `{expr}`.
@@ -412,7 +442,24 @@ mod tests {
     #[test]
     fn text_content() {
         let result = gen_tsx_template("<template><div>hello</div></template>");
-        assert!(result.contains("<div>hello</div>"), "got: {}", result);
+        assert!(result.contains("<div>{\"hello\"}</div>"), "got: {}", result);
+    }
+
+    #[test]
+    fn text_content_with_lt_wrapped() {
+        let result = gen_tsx_template("<template>2 < 1</template>");
+        assert!(
+            result.contains("{\"2 < 1\"}")
+                || (result.contains("{\"2\"}") && result.contains("{\"< 1\"}")),
+            "got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn text_content_escapes_quote() {
+        let result = gen_tsx_template("<template>\"</template>");
+        assert!(result.contains("{\"\\\"\"}"), "got: {}", result);
     }
 
     #[test]

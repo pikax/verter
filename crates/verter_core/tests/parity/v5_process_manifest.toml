@@ -6694,7 +6694,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/text/text.spec.ts"
 source_line = 42
 source_name = "should handle text"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_text_plain_content_wrapped_as_string_expression"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/text/text.spec.ts:47:should-not-handle-if-starts"
@@ -6703,7 +6703,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/text/text.spec.ts"
 source_line = 47
 source_name = "should not handle if starts <"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_text_single_lt_is_not_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/text/text.spec.ts:52:should-parse-text-if-has"
@@ -6712,7 +6712,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/text/text.spec.ts"
 source_line = 52
 source_name = "should parse text if has <"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_text_with_less_than_wrapped_as_string_expression"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/text/text.spec.ts:57:should-escape-in-text"
@@ -6721,7 +6721,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/text/text.spec.ts"
 source_line = 57
 source_name = "should escape \" in text"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_text_escapes_double_quotes_in_string_expression"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/text/text.spec.ts:62:should-ignore-empty-text"
@@ -6730,7 +6730,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/text/text.spec.ts"
 source_line = 62
 source_name = "should ignore empty text"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_text_whitespace_only_is_preserved_without_wrapping"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/template.spec.ts:105:slot-with-v-for"

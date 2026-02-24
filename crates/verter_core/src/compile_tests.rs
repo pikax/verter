@@ -7033,6 +7033,68 @@ fn tsx_interpolation_preserves_inner_newlines() {
 }
 
 #[test]
+fn tsx_text_plain_content_wrapped_as_string_expression() {
+    let result = compile_tsx(r#"<template>test</template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("{\"test\"}"),
+        "Plain text content should be wrapped as string expression, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_text_with_less_than_wrapped_as_string_expression() {
+    let result = compile_tsx(r#"<template>2 < 1</template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        (tsx.code.contains("{\"2 < 1\"}")
+            || (tsx.code.contains("{\"2\"}") && tsx.code.contains("{\"< 1\"}"))),
+        "Text containing '<' should be wrapped into string expressions, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_text_escapes_double_quotes_in_string_expression() {
+    let result = compile_tsx(r#"<template>"</template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("{\"\\\"\"}"),
+        "Text with quote should escape it inside string expression, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_text_whitespace_only_is_preserved_without_wrapping() {
+    let result = compile_tsx("<template>\n\n\r\n      \n\r\n</template>");
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        !tsx.code.contains("{\""),
+        "Whitespace-only text should not be wrapped as string expression, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_text_single_lt_is_not_wrapped() {
+    let result = compile_tsx(r#"<template><</template>"#);
+    // Parser may report a malformed-tag diagnostic, but TSX generation should still avoid
+    // wrapping a lone '<' into a string expression.
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        !tsx.code.contains("{\"<\"}"),
+        "A lone '<' text segment should not be wrapped, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_not_generated_when_disabled() {
     let result = compile_sfc(
         r#"<script setup>
