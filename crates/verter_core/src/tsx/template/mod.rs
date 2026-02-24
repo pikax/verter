@@ -284,10 +284,10 @@ fn visit_comment(
     }
 
     // Convert HTML comment to JSX comment
-    // <!-- → {/*
-    out.overwrite(comment.start, comment.content_start, "{/* ");
-    // --> → */}
-    out.overwrite(comment.content_end, comment.end, " */}");
+    // <!-- → {/*  and  --> → */}
+    // Keep original comment-inner spacing untouched.
+    out.overwrite(comment.start, comment.content_start, "{/*");
+    out.overwrite(comment.content_end, comment.end, "*/}");
 }
 
 #[cfg(test)]
@@ -482,7 +482,7 @@ mod tests {
     fn comment_preserved() {
         let result = gen_tsx_template("<template><!-- hello --></template>");
         assert!(
-            result.contains("{/*  hello  */}"),
+            result.contains("{/* hello */}"),
             "Comment should be converted to JSX, got: {}",
             result
         );

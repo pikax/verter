@@ -7149,8 +7149,44 @@ fn tsx_template_comment() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("{/*"),
-        "Comment should be converted to JSX, got: {}",
+        tsx.code.contains("{/* hello */}"),
+        "Comment should be converted to JSX comment with preserved spacing, got: {}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_comment_no_extra_spacing() {
+    let result = compile_tsx(r#"<template><!--comment--></template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("{/*comment*/}"),
+        "Comment without spaces should not gain extra padding, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_comment_with_nested_marker_text() {
+    let result = compile_tsx(r#"<template><!-- <!-- --></template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("{/* <!-- */}"),
+        "Comment containing '<!--' text should remain valid JSX comment, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_comment_with_angle_bracket_text() {
+    let result = compile_tsx(r#"<template><!-- <MyComp --></template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("{/* <MyComp */}"),
+        "Comment containing '<MyComp' text should remain wrapped in JSX comment, got:\n{}",
         tsx.code
     );
 }

@@ -4489,7 +4489,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/comment/comment.spec.ts"
 source_line = 42
 source_name = "should return comment"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_comment"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/comment/comment.spec.ts:48:it-should-keep-spacing"
@@ -4498,7 +4498,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/comment/comment.spec.ts"
 source_line = 48
 source_name = "it should keep spacing"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_comment_no_extra_spacing"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/comment/comment.spec.ts:54:should-keep-if-inside-comment"
@@ -4507,7 +4507,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/comment/comment.spec.ts"
 source_line = 54
 source_name = "should keep <!-- if inside comment"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_comment_with_nested_marker_text"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/comment/comment.spec.ts:60:if-containts-or-it-should-wrap-in"
@@ -4516,7 +4516,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/comment/comment.spec.ts"
 source_line = 60
 source_name = "if containts < or > it should wrap in { }"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_comment_with_angle_bracket_text"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/conditional/conditional.spec.ts:115:deep"
