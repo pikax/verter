@@ -146,6 +146,121 @@ pub fn strip_interstitial_condition_nodes<'alloc>(
 
 // ======================== VNode construction ========================
 
+/// Emit a single event handler's value into `buf`, with _withModifiers/_withKeys
+/// wrapping as needed. Used to emit subsequent handlers in merged duplicate event
+/// handler groups.
+///
+/// Returns `(uses_with_modifiers, uses_with_keys)`.
+fn emit_merged_event_handler_value(
+    buf: &mut String,
+    prop: &crate::types::NodeProp,
+    prop_idx: usize,
+    source: &str,
+    oxc_el: Option<&OxcParsedElement<'_>>,
+    resolver: &BindingResolver<'_>,
+    force_js: bool,
+) -> (bool, bool) {
+    let mut uses_wm = false;
+    let mut uses_wk = false;
+
+    let dname = &source[prop.start as usize..prop.name_end as usize];
+    let is_on = dname == "@" || dname == "v-on";
+
+    // Classify modifiers (only for @event directives, not :onXxx bindings)
+    let mut runtime_mods: Vec<&str> = Vec::new();
+    let mut key_mods: Vec<&str> = Vec::new();
+
+    if is_on {
+        if let (Some(as_), Some(ae)) = (prop.arg_start, prop.arg_end) {
+            let arg_name = &source[as_ as usize..ae as usize];
+            for modifier in &prop.modifiers {
+                let m = &source[modifier.start as usize..modifier.end as usize];
+                match m {
+                    "capture" | "once" | "passive" => {} // already in key name
+                    "enter" | "tab" | "delete" | "esc" | "space" | "up" | "down" | "left"
+                    | "right" => {
+                        if (m == "left" || m == "right") && !arg_name.starts_with("key") {
+                            runtime_mods.push(m);
+                        } else {
+                            key_mods.push(m);
+                        }
+                    }
+                    _ => runtime_mods.push(m),
+                }
+            }
+        }
+    }
+
+    let has_mods = !runtime_mods.is_empty() || !key_mods.is_empty();
+    let vsp = if has_mods { Some(buf.len()) } else { None };
+
+    // Emit the handler value
+    if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
+        let value = &source[vs as usize..ve as usize];
+        if is_on && value.trim().is_empty() {
+            buf.push_str("() => {}");
+        } else if is_on && (value.contains(';') || contains_assignment_operator(value)) {
+            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+            let resolved = resolve_expr(value, vs, oxc_exp, resolver, force_js);
+            buf.push_str("$event => {");
+            buf.push_str(&resolved);
+            buf.push('}');
+        } else if is_on && !is_member_expression(value) {
+            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+            let resolved = resolve_expr(value, vs, oxc_exp, resolver, force_js);
+            buf.push_str("$event => (");
+            buf.push_str(&resolved);
+            buf.push(')');
+        } else {
+            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+            let resolved = resolve_expr(value, vs, oxc_exp, resolver, force_js);
+            buf.push_str(&resolved);
+        }
+    } else if is_on {
+        buf.push_str("() => {}");
+    }
+
+    // Apply modifier wrapping
+    if let Some(vsp) = vsp {
+        let handler_value = buf.split_off(vsp);
+        if !key_mods.is_empty() {
+            uses_wk = true;
+            buf.push_str("_withKeys(");
+            buf.push_str(&handler_value);
+            buf.push_str(", [");
+            for (i, km) in key_mods.iter().enumerate() {
+                if i > 0 {
+                    buf.push_str(", ");
+                }
+                buf.push('"');
+                helpers::escape_js_string_into(buf, km);
+                buf.push('"');
+            }
+            buf.push_str("])");
+        } else {
+            buf.push_str(&handler_value);
+        }
+        if !runtime_mods.is_empty() {
+            uses_wm = true;
+            let inner = buf.split_off(vsp);
+            buf.push_str("_withModifiers(");
+            buf.push_str(&inner);
+            buf.push_str(", [");
+            for (i, rm) in runtime_mods.iter().enumerate() {
+                if i > 0 {
+                    buf.push_str(", ");
+                }
+                buf.push('"');
+                helpers::escape_js_string_into(buf, rm);
+                buf.push('"');
+            }
+            buf.push_str("])");
+        }
+    }
+
+    (uses_wm, uses_wk)
+}
+
 /// Check if a string contains an assignment operator (`=`, `+=`, `-=`, etc.)
 /// but NOT comparison operators (`===`, `!==`, `==`, `>=`, `<=`) or arrows (`=>`).
 ///
@@ -500,12 +615,88 @@ pub(crate) fn build_props_object_into(
         let merged_handler_indices: std::collections::HashSet<usize> =
             vmodel_merge_targets.iter().map(|&(_, hi)| hi).collect();
 
+        // Pre-scan: detect duplicate event handler keys on the same element.
+        // Vue's `dedupeProperties` merges props with the same key into arrays when
+        // the key matches `isOn` (starts with "on" + uppercase). This covers both
+        // @event directives and :onXxx bindings producing the same computed key.
+        let mut event_merge_first_to_group: std::collections::HashMap<usize, Vec<usize>> =
+            std::collections::HashMap::new();
+        let mut event_merge_secondary: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        {
+            let mut event_key_groups: std::collections::HashMap<String, Vec<usize>> =
+                std::collections::HashMap::new();
+            for (idx, prop) in element.props.iter().enumerate() {
+                if !prop.is_directive
+                    || skip_prop_index == Some(idx)
+                    || merged_handler_indices.contains(&idx)
+                {
+                    continue;
+                }
+                let dname = &source[prop.start as usize..prop.name_end as usize];
+                let is_on = dname == "@" || dname == "v-on";
+                let is_bind = dname == ":" || dname == "v-bind";
+                if !is_on && !is_bind {
+                    continue;
+                }
+                let (arg_start, arg_end) = match (prop.arg_start, prop.arg_end) {
+                    (Some(a), Some(b)) => (a, b),
+                    _ => continue, // no arg = spread, skip
+                };
+                // Skip dynamic event names — can't pre-compute key
+                if prop.is_dynamic == Some(true) {
+                    continue;
+                }
+                let arg_name = &source[arg_start as usize..arg_end as usize];
+                let key = if is_on {
+                    // @event → "on" + PascalCase(arg) + option modifier suffixes
+                    let mut k = String::with_capacity(arg_name.len() + 10);
+                    props::format_event_handler_key_into(&mut k, arg_name);
+                    for modifier in &prop.modifiers {
+                        let m = &source[modifier.start as usize..modifier.end as usize];
+                        if matches!(m, "capture" | "once" | "passive") {
+                            let first_char = m.as_bytes()[0].to_ascii_uppercase() as char;
+                            k.push(first_char);
+                            k.push_str(&m[1..]);
+                        }
+                    }
+                    k
+                } else {
+                    // :onXxx → camelize to onXxx; only merge if it matches isOn pattern
+                    let camelized = props::camelize(arg_name);
+                    // isOn check: starts with "on" followed by non-lowercase (Vue's isOn)
+                    if camelized.len() > 2
+                        && camelized.starts_with("on")
+                        && camelized.as_bytes()[2].is_ascii_uppercase()
+                    {
+                        camelized.to_string()
+                    } else {
+                        continue;
+                    }
+                };
+                event_key_groups.entry(key).or_default().push(idx);
+            }
+            // Only keep groups with >1 handler
+            for indices in event_key_groups.into_values() {
+                if indices.len() > 1 {
+                    for &idx in &indices[1..] {
+                        event_merge_secondary.insert(idx);
+                    }
+                    event_merge_first_to_group.insert(indices[0], indices);
+                }
+            }
+        }
+
         for (prop_idx, prop) in element.props.iter().enumerate() {
             if skip_prop_index == Some(prop_idx) {
                 continue;
             }
             // Skip explicit @update handlers that have been merged into a v-model array
             if merged_handler_indices.contains(&prop_idx) {
+                continue;
+            }
+            // Skip secondary event handlers — they'll be merged into the first handler's array
+            if event_merge_secondary.contains(&prop_idx) {
                 continue;
             }
             // Track prop kind for value wrapping decisions.
@@ -881,6 +1072,9 @@ pub(crate) fn build_props_object_into(
 
             buf.push_str(": ");
 
+            // Track position before the value for potential array merge wrapping
+            let handler_value_start = buf.len();
+
             // Track whether this event handler needs modifier wrapping
             let has_event_modifiers = prop_is_event
                 && (!event_runtime_modifiers.is_empty() || !event_key_modifiers.is_empty());
@@ -1022,6 +1216,28 @@ pub(crate) fn build_props_object_into(
                     }
                     buf.push_str("])");
                 }
+            }
+
+            // If this prop is the first handler in a merge group, wrap value in array
+            // and emit remaining handlers' values.
+            if let Some(group) = event_merge_first_to_group.get(&prop_idx) {
+                // Insert `[` before the first handler's value
+                buf.insert(handler_value_start, '[');
+                // Emit subsequent handlers' values
+                for &other_idx in &group[1..] {
+                    buf.push_str(", ");
+                    let other_prop = &element.props[other_idx];
+                    let (uwm, uwk) = emit_merged_event_handler_value(
+                        buf, other_prop, other_idx, source, oxc_el, resolver, force_js,
+                    );
+                    if uwm {
+                        uses_with_modifiers = true;
+                    }
+                    if uwk {
+                        uses_with_keys = true;
+                    }
+                }
+                buf.push(']');
             }
         }
         buf.push_str(" }");

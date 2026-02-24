@@ -151,11 +151,14 @@ pub fn process_script_setup<'alloc>(
 
     // Extract bindings from parse result.
     // Binding spans are content-relative (0-based within content_str).
-    // Skip Props/PropsAliased — those are extracted directly during macro processing
-    // (parse_script returns inconsistent span coordinate systems for prop bindings:
-    // object-syntax keys are SFC-absolute, array-syntax keys are content-relative).
+    // Skip `Props` bindings — those are extracted directly during macro processing
+    // via `extract_individual_props_from_expr` and have inconsistent span coordinate
+    // systems (object-syntax keys are SFC-absolute, array-syntax keys are content-relative).
+    // Allow `PropsAliased` through — those come from `extract_destructured_props` with
+    // consistent content-relative spans, and are needed for destructured defineProps
+    // (especially when the type parameter is unresolvable, e.g., an imported type).
     for (span, bt) in &parse_result.bindings {
-        if bt.is_props() {
+        if *bt == BindingType::Props {
             continue;
         }
         let name = &content_str[span.start as usize..span.end as usize];

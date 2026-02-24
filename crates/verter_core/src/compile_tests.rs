@@ -4901,6 +4901,30 @@ fn destructured_with_defaults_multiple_props() {
     );
 }
 
+/// @ai-generated — Destructured withDefaults with unresolvable imported type
+/// should still resolve destructured props to $props. prefix (the oku-primitives bug)
+#[test]
+fn destructured_with_defaults_unresolvable_type_resolves_to_props_prefix() {
+    let result = compile_sfc(
+        r#"<template><div>{{ label }}</div></template>
+<script setup lang="ts">
+import type { LabelProps } from './Label.ts'
+const { label } = withDefaults(defineProps<LabelProps>(), { label: 'hello' })
+</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("$props.label"),
+        "destructured prop with unresolvable type should resolve to $props.label, got:\n{}",
+        tpl.code
+    );
+    assert!(
+        !tpl.code.contains("_ctx.label"),
+        "destructured prop with unresolvable type should NOT use _ctx prefix, got:\n{}",
+        tpl.code
+    );
+}
+
 // ══════════════════════════════════════════════════════════════════════
 // Bug 1: Duplicate event handler keys — merge into arrays
 // ══════════════════════════════════════════════════════════════════════
@@ -4913,12 +4937,18 @@ fn duplicate_event_handlers_same_event_merged_into_array() {
 <script setup>const a = () => {}; const b = () => {}</script>"#,
     );
     let tpl = result.template.as_ref().expect("template block");
-    // Should have exactly one "onKeydown" key, not two
-    let key_count = tpl.code.matches("onKeydown").count();
+    // Should have merged array syntax: onKeydown: [handler1, handler2]
+    assert!(
+        tpl.code.contains("onKeydown: ["),
+        "should have merged array syntax onKeydown: [...], got:\n{}",
+        tpl.code
+    );
+    // Should NOT have duplicate keys (two separate "onKeydown:" entries)
     assert_eq!(
-        key_count, 1,
-        "should have exactly one onKeydown key (merged into array), got {} occurrences in:\n{}",
-        key_count, tpl.code
+        tpl.code.matches("onKeydown:").count(),
+        1,
+        "should have exactly one onKeydown: key (merged), got:\n{}",
+        tpl.code
     );
 }
 
@@ -4930,11 +4960,16 @@ fn multiple_event_handlers_same_event_merged_into_array() {
 <script setup>const a = () => {}; const b = () => {}; const c = () => {}</script>"#,
     );
     let tpl = result.template.as_ref().expect("template block");
-    let key_count = tpl.code.matches("onKeydown").count();
+    assert!(
+        tpl.code.contains("onKeydown: ["),
+        "should have merged array syntax, got:\n{}",
+        tpl.code
+    );
     assert_eq!(
-        key_count, 1,
-        "should have exactly one onKeydown key (all merged), got {} occurrences in:\n{}",
-        key_count, tpl.code
+        tpl.code.matches("onKeydown:").count(),
+        1,
+        "should have exactly one onKeydown: key (all merged), got:\n{}",
+        tpl.code
     );
 }
 
@@ -4961,11 +4996,16 @@ fn key_modifiers_same_event_merged() {
 <script setup>const a = () => {}; const b = () => {}</script>"#,
     );
     let tpl = result.template.as_ref().expect("template block");
-    let key_count = tpl.code.matches("onKeydown").count();
+    assert!(
+        tpl.code.contains("onKeydown: ["),
+        "key modifier handlers should be merged into array, got:\n{}",
+        tpl.code
+    );
     assert_eq!(
-        key_count, 1,
-        "key modifier handlers should be merged, got {} occurrences in:\n{}",
-        key_count, tpl.code
+        tpl.code.matches("onKeydown:").count(),
+        1,
+        "key modifier handlers should be merged, got:\n{}",
+        tpl.code
     );
 }
 
@@ -4977,20 +5017,25 @@ fn mixed_duplicate_and_unique_events() {
 <script setup>const a = () => {}; const b = () => {}; const c = () => {}; const d = () => {}</script>"#,
     );
     let tpl = result.template.as_ref().expect("template block");
-    // onClick and onMouseenter should appear once each, onKeydown should appear once (merged)
-    let keydown_count = tpl.code.matches("onKeydown").count();
+    // onKeydown should be merged into array
+    assert!(
+        tpl.code.contains("onKeydown: ["),
+        "onKeydown should be merged into array, got:\n{}",
+        tpl.code
+    );
     assert_eq!(
-        keydown_count, 1,
-        "onKeydown should appear once (merged), got {} in:\n{}",
-        keydown_count, tpl.code
+        tpl.code.matches("onKeydown:").count(),
+        1,
+        "onKeydown should appear as one key (merged), got:\n{}",
+        tpl.code
     );
     assert!(
-        tpl.code.contains("onClick"),
+        tpl.code.contains("onClick:"),
         "onClick should be present, got:\n{}",
         tpl.code
     );
     assert!(
-        tpl.code.contains("onMouseenter"),
+        tpl.code.contains("onMouseenter:"),
         "onMouseenter should be present, got:\n{}",
         tpl.code
     );
@@ -5011,8 +5056,7 @@ fn single_event_handler_no_merge() {
     );
     // Should NOT be wrapped in array
     assert!(
-        !tpl.code.contains("[_withModifiers")
-            && !tpl.code.contains("[withModifiers"),
+        !tpl.code.contains("[_withModifiers") && !tpl.code.contains("[withModifiers"),
         "single handler should NOT be wrapped in array, got:\n{}",
         tpl.code
     );
@@ -5026,11 +5070,16 @@ fn mouse_left_right_as_runtime_modifiers_merged() {
 <script setup>const a = () => {}; const b = () => {}</script>"#,
     );
     let tpl = result.template.as_ref().expect("template block");
-    let click_count = tpl.code.matches("onClick").count();
+    assert!(
+        tpl.code.contains("onClick: ["),
+        "@click.left and @click.right should be merged into array, got:\n{}",
+        tpl.code
+    );
     assert_eq!(
-        click_count, 1,
-        "@click.left and @click.right should be merged (same key onClick), got {} in:\n{}",
-        click_count, tpl.code
+        tpl.code.matches("onClick:").count(),
+        1,
+        "@click.left and @click.right should produce one onClick: key, got:\n{}",
+        tpl.code
     );
 }
 
@@ -5042,11 +5091,55 @@ fn handler_with_mixed_key_and_runtime_modifiers_merged() {
 <script setup>const a = () => {}; const b = () => {}</script>"#,
     );
     let tpl = result.template.as_ref().expect("template block");
-    let key_count = tpl.code.matches("onKeydown").count();
+    assert!(
+        tpl.code.contains("onKeydown: ["),
+        "handlers with mixed modifiers should be merged into array, got:\n{}",
+        tpl.code
+    );
     assert_eq!(
-        key_count, 1,
-        "handlers with mixed modifiers sharing same key should be merged, got {} in:\n{}",
-        key_count, tpl.code
+        tpl.code.matches("onKeydown:").count(),
+        1,
+        "handlers with mixed modifiers sharing same key should produce one key, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated — @input and :onInput produce the same key, must be merged (Vue official behavior)
+#[test]
+fn v_on_and_v_bind_on_same_event_merged() {
+    let result = compile_sfc(
+        r#"<template><input @input="foo" :onInput="bar" /></template>
+<script setup>const foo = () => {}; const bar = () => {}</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("onInput: ["),
+        "@input and :onInput should be merged into array, got:\n{}",
+        tpl.code
+    );
+    assert_eq!(
+        tpl.code.matches("onInput:").count(),
+        1,
+        "@input and :onInput should produce one onInput: key, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated — Dynamic event names cannot be pre-computed, should NOT be merged
+#[test]
+fn dynamic_event_names_not_merged() {
+    let result = compile_sfc(
+        r#"<template><div @[eventName]="a" @[eventName]="b"></div></template>
+<script setup>const eventName = 'click'; const a = () => {}; const b = () => {}</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    // Dynamic event names should both appear (can't pre-compute key)
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|e| e.message.contains("duplicate")),
+        "dynamic event names should not trigger duplicate errors"
     );
 }
 
