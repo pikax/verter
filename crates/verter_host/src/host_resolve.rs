@@ -191,15 +191,15 @@ impl VerterHost {
             .map(|o| o.hash)
             .unwrap_or(0);
 
-        let (compiled_outputs, diagnostics, stale, compiled_tsx) =
+        let (compiled_outputs, diagnostics, stale, compiled_tsx, compiled_template_analysis) =
             match self.compile_entry(&compile_input, &query.compile_profile) {
-                Ok((outputs, diagnostics, tsx)) => (outputs, diagnostics, false, tsx),
+                Ok((outputs, diagnostics, tsx, tpl)) => (outputs, diagnostics, false, tsx, tpl),
                 Err(diagnostics) => {
                     self.store_latest_diagnostics(&canonical_id, profile_hash, diagnostics.clone());
                     let policy = self.config.compile_error_policy;
                     if self.config.dev_mode && policy == CompileErrorPolicy::DevServeLastKnownGood {
                         if let Some(last_good) = fallback_last_good.clone() {
-                            (last_good, diagnostics, true, None)
+                            (last_good, diagnostics, true, None, None)
                         } else {
                             return Err(HostError::CompileError { diagnostics });
                         }
@@ -235,6 +235,10 @@ impl VerterHost {
                 } else {
                     Some(compiled_outputs.clone())
                 };
+                // Store template analysis on the FileEntry (latest wins).
+                if compiled_template_analysis.is_some() {
+                    entry.template_analysis = compiled_template_analysis.clone();
+                }
                 entry.compile_slots.insert(
                     profile_hash,
                     CompileSlot {
@@ -245,6 +249,7 @@ impl VerterHost {
                         last_good_outputs,
                         last_access_tick: last_tick,
                         tsx: compiled_tsx,
+                        template_analysis: compiled_template_analysis,
                     },
                 );
                 entry
@@ -323,6 +328,7 @@ impl VerterHost {
             HashMap<VirtualNodeKind, CachedVirtualFile>,
             DiagnosticsSnapshot,
             Option<CachedTsx>,
+            Option<verter_analysis::template::TemplateAnalysisSnapshot>,
         ),
         DiagnosticsSnapshot,
     > {
@@ -425,11 +431,14 @@ impl VerterHost {
             }
         };
 
+        let scope = self.config.effective_scope();
         let verter_opts = VerterCompileOptions {
             force_vapor: profile.force_vapor,
             force_js: profile.force_js,
             source_map: profile.source_map,
             external_types,
+            extract_template_data: scope.needs_template_analysis(),
+            prop_constness_overrides: None, // TODO(Phase 6): populated by cross-file optimizer
         };
 
         let compiled = compile_sfc(&merged_source, &core_opts, &verter_opts, &alloc);
@@ -607,6 +616,36 @@ impl VerterHost {
             },
         });
 
-        Ok((outputs, compile_diags, cached_tsx))
+        // Convert raw template data into analysis types when available
+        let template_analysis = compiled.template_data.as_ref().map(|raw| {
+            // Build script import pairs for component → source resolution
+            let script_imports: Vec<(String, String)> = snapshot
+                .macro_type_deps
+                .iter()
+                .map(|dep| (dep.type_name.clone(), dep.import_source.clone()))
+                .collect::<Vec<_>>();
+            // Also collect script imports from the file's analysis if available
+            let files = read_lock(&self.files);
+            let all_imports: Vec<(String, String)> =
+                if let Some(entry) = files.get(&snapshot.canonical_id) {
+                    entry
+                        .script_analysis
+                        .imports
+                        .iter()
+                        .flat_map(|imp| {
+                            imp.bindings
+                                .iter()
+                                .map(|b| (b.name.clone(), imp.source.clone()))
+                        })
+                        .chain(script_imports)
+                        .collect()
+                } else {
+                    script_imports
+                };
+            drop(files);
+            crate::template_convert::convert_raw_to_analysis(raw, &all_imports)
+        });
+
+        Ok((outputs, compile_diags, cached_tsx, template_analysis))
     }
 }

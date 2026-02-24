@@ -5,6 +5,7 @@ import type { OutputMode } from "../core/types";
 import Preview from "./Preview.vue";
 import CodeOutput from "./CodeOutput.vue";
 import AnalysisPanel from "./AnalysisPanel.vue";
+import LintPanel from "./LintPanel.vue";
 
 const props = defineProps<{
   store: Store;
@@ -16,6 +17,7 @@ const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "css", label: "CSS" },
   { mode: "types", label: "Types" },
   { mode: "analysis", label: "Analysis" },
+  { mode: "lint", label: "Lint" },
 ];
 
 const tabs = computed(() => allTabs);
@@ -53,6 +55,10 @@ const showSourceMapButton = computed(() => {
   return props.store.outputMode === "js" && !!file.compiled.verterSourceMap;
 });
 
+const lintCount = computed(() => {
+  return props.store.activeFile?.compiled.lintDiagnostics?.length ?? 0;
+});
+
 function getTabTiming(mode: OutputMode): string | null {
   const { verterNew, parseDurationMs } = props.store.compileTiming;
   switch (mode) {
@@ -63,6 +69,13 @@ function getTabTiming(mode: OutputMode): string | null {
     default:
       return null;
   }
+}
+
+function getTabBadge(mode: OutputMode): string | null {
+  if (mode === "lint" && lintCount.value > 0) {
+    return String(lintCount.value);
+  }
+  return null;
 }
 </script>
 
@@ -80,6 +93,9 @@ function getTabTiming(mode: OutputMode): string | null {
         <span v-if="getTabTiming(tab.mode)" class="timing-pill">
           {{ getTabTiming(tab.mode) }}
         </span>
+        <span v-if="getTabBadge(tab.mode)" class="lint-badge">
+          {{ getTabBadge(tab.mode) }}
+        </span>
       </button>
       <button
         v-if="showSourceMapButton"
@@ -93,6 +109,7 @@ function getTabTiming(mode: OutputMode): string | null {
     <div class="output-content">
       <Preview v-if="store.outputMode === 'preview'" :store="store" />
       <AnalysisPanel v-else-if="store.outputMode === 'analysis'" :store="store" />
+      <LintPanel v-else-if="store.outputMode === 'lint'" :store="store" />
       <CodeOutput v-else :store="store" :mode="store.outputMode" />
     </div>
   </div>
@@ -146,6 +163,18 @@ function getTabTiming(mode: OutputMode): string | null {
 .output-tab.active .timing-pill {
   background: var(--accent-color-light, rgba(66, 153, 225, 0.2));
   color: var(--accent-color);
+}
+
+.lint-badge {
+  margin-left: 4px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border-radius: 10px;
+  min-width: 16px;
+  text-align: center;
 }
 
 .sourcemap-btn {

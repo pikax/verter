@@ -2266,6 +2266,153 @@ fn element_with_only_static_props_no_dynamic_props_array() {
     );
 }
 
+// ==================== Cross-file const prop optimization ====================
+
+fn compile_sfc_with_const_props(source: &str, const_props: &[&str]) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("Child.vue".to_string()),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        prop_constness_overrides: Some(const_props.iter().map(|s| s.to_string()).collect()),
+        ..Default::default()
+    };
+    compile(source, &options, &verter_opts, &alloc)
+}
+
+fn compile_sfc_vapor_with_const_props(source: &str, const_props: &[&str]) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("Child.vue".to_string()),
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        force_vapor: true,
+        prop_constness_overrides: Some(const_props.iter().map(|s| s.to_string()).collect()),
+        ..Default::default()
+    };
+    compile(source, &options, &verter_opts, &alloc)
+}
+
+/// @ai-generated - Cross-file const prop is excluded from dynamicProps
+#[test]
+fn const_prop_excluded_from_dynamic_props() {
+    // A child component template: <Comp :msg="msg" :count="count">
+    // When `msg` is known to be const across all parents but `count` is not,
+    // only `count` should appear in the dynamicProps array.
+    let result = compile_sfc_with_const_props(
+        r#"<template><div :title="msg" :id="count">text</div></template>
+<script setup>const props = defineProps(['msg', 'count']);</script>"#,
+        &["msg"],
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    // `msg` (const prop) should NOT be in dynamicProps
+    assert!(
+        !tpl.code.contains("\"title\""),
+        "const prop 'msg' (bound as :title) should be excluded from dynamicProps, got:\n{}",
+        tpl.code
+    );
+    // `count` (non-const prop) should still be in dynamicProps
+    assert!(
+        tpl.code.contains("\"id\""),
+        "non-const prop 'count' (bound as :id) should remain in dynamicProps, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated - Without const_props data, all props are in dynamicProps (Vue compat)
+#[test]
+fn without_const_props_all_bound_props_in_dynamic_props() {
+    let result = compile_sfc(
+        r#"<template><div :title="msg" :id="count">text</div></template>
+<script setup>const props = defineProps(['msg', 'count']);</script>"#,
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    // Both should be in dynamicProps (standard Vue behavior)
+    assert!(
+        tpl.code.contains("\"title\"") && tpl.code.contains("\"id\""),
+        "without const_props, both bound props should be in dynamicProps, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated - Const prop still uses $props prefix (correct runtime access)
+#[test]
+fn const_prop_still_uses_props_prefix() {
+    let result = compile_sfc_with_const_props(
+        r#"<template><div :title="msg">text</div></template>
+<script setup>const props = defineProps(['msg']);</script>"#,
+        &["msg"],
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("$props.msg"),
+        "const prop should still use $props. prefix, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated - Vapor: const prop setter emitted as direct statement, not inside _renderEffect
+#[test]
+fn vapor_const_prop_skips_render_effect() {
+    let result = compile_sfc_vapor_with_const_props(
+        r#"<template><div :title="msg">text</div></template>
+<script setup>const props = defineProps(['msg']);</script>"#,
+        &["msg"],
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tpl = result.template.as_ref().expect("template block");
+    // Const prop should NOT be inside _renderEffect
+    assert!(
+        !tpl.code.contains("_renderEffect"),
+        "const prop setter should not be wrapped in _renderEffect, got:\n{}",
+        tpl.code
+    );
+    // The setter should still be present as a direct statement
+    assert!(
+        tpl.code.contains("_setProp") || tpl.code.contains("_setAttr"),
+        "const prop setter should still be emitted, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated - Vapor: non-const prop stays inside _renderEffect
+#[test]
+fn vapor_non_const_prop_in_render_effect() {
+    let result = compile_sfc_vapor_with_const_props(
+        r#"<template><div :title="msg" :id="count">text</div></template>
+<script setup>const props = defineProps(['msg', 'count']);</script>"#,
+        &["msg"], // only msg is const
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tpl = result.template.as_ref().expect("template block");
+    // Non-const prop `count` should be inside _renderEffect
+    assert!(
+        tpl.code.contains("_renderEffect"),
+        "non-const prop should be wrapped in _renderEffect, got:\n{}",
+        tpl.code
+    );
+}
+
+/// @ai-generated - Vapor: without const_props data, all dynamic props in _renderEffect
+#[test]
+fn vapor_without_const_props_all_in_render_effect() {
+    let result = compile_sfc_vapor(
+        r#"<template><div :title="msg">text</div></template>
+<script setup>const props = defineProps(['msg']);</script>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(
+        tpl.code.contains("_renderEffect"),
+        "without const_props, dynamic props should be in _renderEffect, got:\n{}",
+        tpl.code
+    );
+}
+
 #[test]
 fn dual_script_preserves_named_exports() {
     // Companion <script> with runtime named exports alongside <script setup>
@@ -5132,7 +5279,6 @@ fn dynamic_event_names_not_merged() {
         r#"<template><div @[eventName]="a" @[eventName]="b"></div></template>
 <script setup>const eventName = 'click'; const a = () => {}; const b = () => {}</script>"#,
     );
-    let tpl = result.template.as_ref().expect("template block");
     // Dynamic event names should both appear (can't pre-compute key)
     assert!(
         !result
@@ -6329,6 +6475,119 @@ const msg = 'hello'
     );
 }
 
+/// @ai-generated - TSX source map should be generated (not empty) for SFCs with template
+#[test]
+fn tsx_source_map_is_generated() {
+    let source = r#"<script setup>
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#;
+    let result = compile_tsx(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        !tsx.source_map.is_empty(),
+        "TSX source map should not be empty"
+    );
+
+    // Parse the source map JSON to validate structure
+    let sm: serde_json::Value =
+        serde_json::from_str(&tsx.source_map).expect("TSX source map should be valid JSON");
+    assert_eq!(sm.get("version").and_then(|v| v.as_u64()), Some(3));
+    assert!(
+        sm.get("mappings")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false),
+        "Mappings should not be empty"
+    );
+    assert!(
+        sm.get("sources")
+            .and_then(|v| v.as_array())
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "Sources array should not be empty"
+    );
+}
+
+/// @ai-generated - TSX source map should map `msg` in script back to the original position
+#[test]
+fn tsx_source_map_maps_script_binding() {
+    let source = r#"<script setup>
+const msg = 'hello'
+</script>
+
+<template>
+  <div>{{ msg }}</div>
+</template>
+"#;
+    let result = compile_tsx(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        !tsx.source_map.is_empty(),
+        "TSX source map should not be empty"
+    );
+
+    // Parse with oxc_sourcemap and verify we can look up a position
+    let sm = oxc_sourcemap::SourceMap::from_json_string(&tsx.source_map)
+        .expect("should parse source map");
+
+    // Find "const msg" in the TSX output and look it up
+    let msg_offset = tsx
+        .code
+        .find("const msg")
+        .expect("TSX should contain 'const msg'");
+    let tsx_line = tsx.code[..msg_offset].matches('\n').count() as u32;
+    let tsx_col = (msg_offset
+        - tsx.code[..msg_offset]
+            .rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0)) as u32;
+
+    let lookup_table = sm.generate_lookup_table();
+    let token = sm.lookup_token(&lookup_table, tsx_line, tsx_col);
+
+    assert!(
+        token.is_some(),
+        "Should find a source map token for 'const msg' at TSX line {tsx_line}, col {tsx_col}"
+    );
+
+    if let Some(token) = token {
+        // "const msg" is on line 1 (0-indexed) in the original source
+        let original_msg_line = source[..source.find("const msg").unwrap()]
+            .matches('\n')
+            .count() as u32;
+        assert_eq!(
+            token.get_src_line(),
+            original_msg_line,
+            "Source line should map back to the original 'const msg' line"
+        );
+    }
+}
+
+/// @ai-generated - TSX source map for script-only SFC (no template)
+#[test]
+fn tsx_source_map_script_only() {
+    let source = r#"<script setup>
+const msg = 'hello'
+</script>"#;
+    let result = compile_tsx(source);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        !tsx.source_map.is_empty(),
+        "TSX source map should not be empty even for script-only SFC"
+    );
+}
+
 // ==================== Vue built-in components ====================
 //
 // Vue built-in components (Suspense, Teleport, KeepAlive, Transition,
@@ -6507,6 +6766,107 @@ fn builtin_component_kebab_case_teleport() {
         code.contains("_Teleport"),
         "teleport must be imported and used as _Teleport, got:\n{}",
         code
+    );
+}
+
+/// @ai-generated - prop_constness_overrides threads through compile pipeline without error.
+/// Verifies that passing const prop overrides produces valid compiled output.
+#[test]
+fn const_props_override_compiles_successfully() {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        ..Default::default()
+    };
+    let mut const_set = rustc_hash::FxHashSet::default();
+    const_set.insert("msg".to_string());
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        prop_constness_overrides: Some(const_set),
+        ..Default::default()
+    };
+    let result = compile(
+        r#"<script setup>
+const props = defineProps({ msg: String, count: Number })
+</script>
+<template>
+  <div>{{ msg }} {{ count }}</div>
+</template>"#,
+        &options,
+        &verter_opts,
+        &alloc,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(!tpl.code.trim().is_empty(), "template code is empty");
+    // Validate the generated JS is syntactically valid
+    let alloc2 = Allocator::new();
+    let source_type = oxc_span::SourceType::mjs();
+    let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
+    let parsed = oxc_parser::Parser::new(&alloc2, &wrapped, source_type).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "Generated JS parse error: {:?}\n--- generated code ---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        tpl.code
+    );
+}
+
+/// @ai-generated - prop_constness_overrides threads through Vapor compile pipeline.
+#[test]
+fn const_props_override_compiles_vapor() {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        ..Default::default()
+    };
+    let mut const_set = rustc_hash::FxHashSet::default();
+    const_set.insert("msg".to_string());
+    let verter_opts = VerterCompileOptions {
+        force_js: true,
+        force_vapor: true,
+        prop_constness_overrides: Some(const_set),
+        ..Default::default()
+    };
+    let result = compile(
+        r#"<script setup>
+const props = defineProps({ msg: String, count: Number })
+</script>
+<template>
+  <div>{{ msg }} {{ count }}</div>
+</template>"#,
+        &options,
+        &verter_opts,
+        &alloc,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let tpl = result.template.as_ref().expect("template block");
+    assert!(!tpl.code.trim().is_empty(), "template code is empty");
+    let alloc2 = Allocator::new();
+    let source_type = oxc_span::SourceType::mjs();
+    let wrapped = format!("import {{ }} from \"vue\";\n{}", tpl.code);
+    let parsed = oxc_parser::Parser::new(&alloc2, &wrapped, source_type).parse();
+    assert!(
+        parsed.errors.is_empty(),
+        "Vapor generated JS parse error: {:?}\n--- generated code ---\n{}",
+        parsed
+            .errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>(),
+        tpl.code
     );
 }
 

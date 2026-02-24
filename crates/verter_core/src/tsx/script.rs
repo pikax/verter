@@ -150,8 +150,17 @@ fn process_tsx_script_setup<'alloc>(
     }
 
     // Extract bindings
+    // Note: binding spans have mixed coordinate systems (see script/macros.rs:93):
+    // - Props/PropsAliased spans are SFC-absolute (content_offset baked in by resolve_type)
+    // - All other bindings are relative to content_str (0-based from OXC parser)
     for (span, bt) in &parse_result.bindings {
-        let name = &content_str[span.start as usize..span.end as usize];
+        let name = if *bt == BindingType::Props || *bt == BindingType::PropsAliased {
+            // Absolute span — index into full SFC source
+            &source[span.start as usize..span.end as usize]
+        } else {
+            // Relative span — index into content_str (script content only)
+            &content_str[span.start as usize..span.end as usize]
+        };
         let alloc_name = alloc.alloc_str(name);
         bindings.insert(alloc_name, *bt);
     }
@@ -204,8 +213,13 @@ fn process_tsx_script_only<'alloc>(
     );
 
     // Extract bindings from Options API
+    // Same mixed-coordinate issue as script setup — see comment there.
     for (span, bt) in &parse_result.bindings {
-        let name = &content_str[span.start as usize..span.end as usize];
+        let name = if *bt == BindingType::Props || *bt == BindingType::PropsAliased {
+            &source[span.start as usize..span.end as usize]
+        } else {
+            &content_str[span.start as usize..span.end as usize]
+        };
         let alloc_name = out.alloc_str(name);
         bindings.insert(alloc_name, *bt);
     }
@@ -441,6 +455,82 @@ export default {
         assert!(
             code.contains("function __verter_tsx_App()"),
             "Should emit minimal component wrapper"
+        );
+    }
+
+    #[test]
+    fn script_setup_lang_ts_with_type_define_props() {
+        // Regression: lang="ts" with defineProps<{...}>() caused a panic because
+        // type-based prop binding spans include the content offset (absolute),
+        // while content_str is local (relative).
+        let (code, bindings) = gen_tsx_script(
+            r#"<script setup lang="ts">
+defineProps<{ msg: string }>()
+</script>
+<template><div>{{ msg }}</div></template>"#,
+        );
+
+        assert!(
+            code.contains("defineProps"),
+            "Should preserve defineProps call"
+        );
+        // "msg" should be classified as a Props binding
+        assert_eq!(
+            bindings.get("msg").copied(),
+            Some(BindingType::Props),
+            "msg should be Props, got: {:?}",
+            bindings.get("msg")
+        );
+    }
+
+    #[test]
+    fn script_setup_lang_ts_with_assigned_define_props() {
+        // const props = defineProps<{...}>() — "props" is SetupConst, "count" is Props
+        let (code, bindings) = gen_tsx_script(
+            r#"<script setup lang="ts">
+const props = defineProps<{ count: number }>()
+</script>"#,
+        );
+
+        assert!(code.contains("defineProps"));
+        assert_eq!(
+            bindings.get("props").copied(),
+            Some(BindingType::SetupConst),
+            "props variable should be SetupConst"
+        );
+        assert_eq!(
+            bindings.get("count").copied(),
+            Some(BindingType::Props),
+            "count should be Props, got: {:?}",
+            bindings.get("count")
+        );
+    }
+
+    #[test]
+    fn script_setup_lang_ts_with_interface_props() {
+        // defineProps with a type reference to a local interface
+        let (code, bindings) = gen_tsx_script(
+            r#"<script setup lang="ts">
+interface MyProps {
+  title: string
+  count?: number
+}
+defineProps<MyProps>()
+</script>"#,
+        );
+
+        assert!(code.contains("defineProps"));
+        assert_eq!(
+            bindings.get("title").copied(),
+            Some(BindingType::Props),
+            "title should be Props, got: {:?}",
+            bindings.get("title")
+        );
+        assert_eq!(
+            bindings.get("count").copied(),
+            Some(BindingType::Props),
+            "count should be Props, got: {:?}",
+            bindings.get("count")
         );
     }
 }

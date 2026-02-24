@@ -96,7 +96,7 @@ pub(crate) fn try_resolve_src_block(
 pub(crate) fn parse_vue_snapshot(
     canonical_id: &str,
     source: &str,
-    analysis_level: crate::types::AnalysisLevel,
+    analysis_scope: verter_analysis::AnalysisScope,
 ) -> ParseSnapshot {
     let whole_hash = hash_16(source.as_bytes());
 
@@ -344,9 +344,9 @@ pub(crate) fn parse_vue_snapshot(
             .collect(),
     );
 
-    // Build style analyses for each style block (only at Full level)
+    // Build style analyses for each style block (when style analysis flags are set)
     let style_analyses: Vec<verter_analysis::StyleBlockAnalysis> =
-        if analysis_level == crate::types::AnalysisLevel::Full {
+        if analysis_scope.needs_style_analysis() {
             syntax
                 .style_nodes()
                 .iter()
@@ -356,13 +356,12 @@ pub(crate) fn parse_vue_snapshot(
             Vec::new()
         };
 
-    // Build script analysis from script block contents (at Full or Essential level)
-    let (script_analysis, script_panic_diag) =
-        if analysis_level != crate::types::AnalysisLevel::None {
-            build_script_analysis_from_syntax(&syntax, source)
-        } else {
-            (verter_analysis::ScriptAnalysisSnapshot::default(), None)
-        };
+    // Build script analysis from script block contents (when script analysis flags are set)
+    let (script_analysis, script_panic_diag) = if analysis_scope.needs_script_analysis() {
+        build_script_analysis_from_syntax(&syntax, source)
+    } else {
+        (verter_analysis::ScriptAnalysisSnapshot::default(), None)
+    };
 
     // Merge any panic diagnostic into parse diagnostics
     let parse_diagnostics = if let Some(diag) = script_panic_diag {
@@ -583,8 +582,8 @@ pub(crate) fn parse_non_sfc_snapshot(_canonical_id: &str, source: &str) -> Parse
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::AnalysisLevel;
     use smallvec::SmallVec;
+    use verter_analysis::AnalysisScope;
     use verter_core::types::NodeProp;
 
     // ── Helper: build a NodeProp pointing into a source string ──
@@ -759,7 +758,7 @@ mod tests {
         let snap = parse_vue_snapshot(
             "Comp.vue",
             "<script setup>const n = 1</script>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert!(snap.meta.has_script);
         assert!(!snap.meta.has_template);
@@ -775,7 +774,7 @@ mod tests {
         let snap = parse_vue_snapshot(
             "Comp.vue",
             "<template><div>hello</div></template>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert!(snap.meta.has_template);
         assert!(!snap.meta.has_script);
@@ -791,7 +790,7 @@ mod tests {
         let snap = parse_vue_snapshot(
             "Comp.vue",
             "<script setup>const n = 1</script>\n<template><div>{{n}}</div></template>\n<style>.a{color:red}</style>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert!(snap.meta.has_script);
         assert!(snap.meta.has_template);
@@ -809,7 +808,7 @@ mod tests {
         let snap = parse_vue_snapshot(
             "Comp.vue",
             "<template><div/></template><style>.a{}</style><style lang=\"scss\">.b{}</style>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert_eq!(snap.slices.styles.len(), 2);
         assert_eq!(snap.descriptor.style_count, 2);
@@ -822,7 +821,7 @@ mod tests {
         let snap = parse_vue_snapshot(
             "Comp.vue",
             "<template><div/></template><i18n>{\"en\":{\"hi\":\"hello\"}}</i18n>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert_eq!(snap.descriptor.custom_count, 1);
         assert_eq!(snap.meta.custom_types, vec!["i18n"]);
@@ -832,7 +831,7 @@ mod tests {
     /// @ai-generated - Empty string doesn't panic, all counts zero
     #[test]
     fn parse_vue_snapshot_empty_sfc() {
-        let snap = parse_vue_snapshot("Comp.vue", "", AnalysisLevel::Full);
+        let snap = parse_vue_snapshot("Comp.vue", "", AnalysisScope::LSP);
         assert!(!snap.meta.has_script);
         assert!(!snap.meta.has_template);
         assert_eq!(snap.descriptor.script_count, 0);
@@ -847,7 +846,7 @@ mod tests {
         let snap = parse_vue_snapshot(
             "/src/Comp.vue",
             "<script setup src=\"./script.ts\"></script><template><div/></template>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert!(!snap.external_requests.is_empty());
         assert!(!snap.src_blocks.is_empty());
@@ -860,7 +859,7 @@ mod tests {
         let snap = parse_vue_snapshot(
             "Comp.vue",
             "<template><div/></template><style scoped>.a{}</style>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert_eq!(snap.descriptor.style_count, 1);
         let fp = &snap.descriptor.style_attr_fingerprints[0];
@@ -873,7 +872,7 @@ mod tests {
         let snap = parse_vue_snapshot(
             "Comp.vue",
             "<template><div/></template><style lang=\"scss\">.a{}</style>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert_eq!(snap.meta.style_langs[0], Some("scss".to_string()));
     }
@@ -884,7 +883,7 @@ mod tests {
         let snap = parse_vue_snapshot(
             "Comp.vue",
             "<script setup lang=\"ts\">const n = 1</script><template><div/></template>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert_eq!(snap.meta.script_lang, Some("ts".to_string()));
     }
@@ -916,7 +915,7 @@ const isOpen = computed(() => props.visible)
 <style lang="scss" scoped>
 .menu { color: red; }
 </style>"#,
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert_eq!(
             snap.meta.script_lang,
@@ -931,7 +930,7 @@ const isOpen = computed(() => props.visible)
         let snap = parse_vue_snapshot(
             "Comp.vue",
             "<script setup>const n = 1</script><template><div/></template>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert_eq!(snap.meta.script_lang, None);
     }
@@ -940,8 +939,8 @@ const isOpen = computed(() => props.visible)
     #[test]
     fn parse_vue_snapshot_deterministic_hashes() {
         let src = "<script setup>const n = 1</script><template><div>{{n}}</div></template>";
-        let snap1 = parse_vue_snapshot("Comp.vue", src, AnalysisLevel::Full);
-        let snap2 = parse_vue_snapshot("Comp.vue", src, AnalysisLevel::Full);
+        let snap1 = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
+        let snap2 = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
         assert_eq!(snap1.whole_hash, snap2.whole_hash);
         assert_eq!(snap1.semantic_hash, snap2.semantic_hash);
         assert_eq!(snap1.slices.script, snap2.slices.script);
@@ -987,7 +986,7 @@ const isOpen = computed(() => props.visible)
         let snap = parse_vue_snapshot(
             "/src/Comp.vue",
             "<template src=\"./t.html\"></template><script setup>const n=1</script>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert_eq!(snap.external_requests.len(), 1);
         assert_eq!(
@@ -1009,7 +1008,7 @@ const isOpen = computed(() => props.visible)
         let snap = parse_vue_snapshot(
             "/src/Comp.vue",
             "<template><div/></template><style src=\"./s.css\"></style>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert_eq!(snap.external_requests.len(), 1);
         assert_eq!(
@@ -1030,7 +1029,7 @@ const isOpen = computed(() => props.visible)
         let snap_normal = parse_vue_snapshot(
             "Comp.vue",
             "<template><div>hello</div></template>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert!(
             !snap_normal.descriptor.vapor,
@@ -1040,7 +1039,7 @@ const isOpen = computed(() => props.visible)
         let snap_vapor = parse_vue_snapshot(
             "Comp.vue",
             "<template vapor><div>hello</div></template>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         assert!(
             snap_vapor.descriptor.vapor,

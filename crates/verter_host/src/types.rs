@@ -40,6 +40,9 @@ pub enum CompileErrorPolicy {
 }
 
 /// Controls how much static analysis is performed during upsert().
+///
+/// **Deprecated**: Prefer [`AnalysisScope`](verter_analysis::AnalysisScope) bitflags
+/// for fine-grained control. This enum is retained for FFI backwards compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalysisLevel {
     /// Full analysis: OXC script parsing + lightningcss style analysis.
@@ -53,6 +56,17 @@ pub enum AnalysisLevel {
     /// compilation are performed. Smart invalidation falls back to Tier 1
     /// (full invalidation on any dependency change).
     None,
+}
+
+impl AnalysisLevel {
+    /// Convert this legacy level to the equivalent [`AnalysisScope`] flags.
+    pub fn to_scope(self) -> verter_analysis::AnalysisScope {
+        match self {
+            Self::Full => verter_analysis::AnalysisScope::LSP,
+            Self::Essential => verter_analysis::AnalysisScope::ESSENTIAL,
+            Self::None => verter_analysis::AnalysisScope::NONE,
+        }
+    }
 }
 
 /// Configuration for a [`VerterHost`](crate::VerterHost) instance.
@@ -79,7 +93,21 @@ pub struct HostConfig {
     /// - `None`: no extra analysis (only SFC parse for code_gen)
     ///
     /// When not `Full`, `get_analysis()` computes missing data on demand.
+    ///
+    /// **Deprecated**: Prefer `analysis_scope` for fine-grained control.
+    /// If `analysis_scope` is `Some`, it takes precedence over this field.
     pub analysis_level: AnalysisLevel,
+
+    /// Bitwise flags controlling which analysis passes run during upsert.
+    ///
+    /// When `Some`, takes precedence over `analysis_level`. When `None`,
+    /// falls back to `analysis_level.to_scope()`.
+    ///
+    /// Use preset constants for common configurations:
+    /// - [`AnalysisScope::BUILD`](verter_analysis::AnalysisScope::BUILD) — minimal for compilation
+    /// - [`AnalysisScope::LSP`](verter_analysis::AnalysisScope::LSP) — full for IDE features
+    /// - [`AnalysisScope::LINTER`](verter_analysis::AnalysisScope::LINTER) — for lint rules
+    pub analysis_scope: Option<verter_analysis::AnalysisScope>,
 }
 
 impl Default for HostConfig {
@@ -100,7 +128,17 @@ impl Default for HostConfig {
                 ".cjs".to_string(),
             ],
             analysis_level: AnalysisLevel::Full,
+            analysis_scope: None,
         }
+    }
+}
+
+impl HostConfig {
+    /// Returns the effective analysis scope, preferring `analysis_scope`
+    /// over the legacy `analysis_level` field.
+    pub fn effective_scope(&self) -> verter_analysis::AnalysisScope {
+        self.analysis_scope
+            .unwrap_or_else(|| self.analysis_level.to_scope())
     }
 }
 
@@ -300,7 +338,7 @@ impl HostUpdateResult {
 /// Serializable snapshot of file analysis data, suitable for WASM export.
 ///
 /// Returned by [`VerterHost::get_analysis`](crate::VerterHost::get_analysis).
-/// Contains the combined script and style analysis for an SFC.
+/// Contains the combined script, style, and template analysis for an SFC.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileAnalysisSnapshot {
@@ -316,6 +354,9 @@ pub struct FileAnalysisSnapshot {
     pub script_flags: u32,
     /// Per-style-block analysis (scoped, modules, v-bind usage).
     pub styles: Vec<verter_analysis::StyleBlockAnalysis>,
+    /// Template analysis (components, bindings, slots, refs, events).
+    /// Present after compilation when template analysis scope flags are active.
+    pub template: Option<verter_analysis::template::TemplateAnalysisSnapshot>,
 }
 
 /// Result of [`VerterHost::resolve`](crate::VerterHost::resolve).
@@ -607,6 +648,12 @@ pub(crate) struct CompileSlot {
     pub(crate) last_access_tick: u64,
     /// Combined TSX output for LSP type checking. Not a virtual file.
     pub(crate) tsx: Option<CachedTsx>,
+    /// Template analysis extracted during compilation. Populated when
+    /// the analysis scope includes template flags (TPL_COMPONENTS, etc.).
+    /// Stored per-slot for future per-profile access; the latest is also
+    /// copied to `FileEntry::template_analysis` for the public API.
+    #[allow(dead_code)]
+    pub(crate) template_analysis: Option<verter_analysis::template::TemplateAnalysisSnapshot>,
 }
 
 /// Lightweight extract of FileEntry fields needed for compilation,
@@ -641,6 +688,9 @@ pub(crate) struct FileEntry {
     pub(crate) script_analysis: verter_analysis::ScriptAnalysisSnapshot,
     pub(crate) export_signatures: Vec<verter_analysis::ExportSignature>,
     pub(crate) style_analyses: Vec<verter_analysis::StyleBlockAnalysis>,
+    /// Template analysis from the most recent compilation. Populated when
+    /// the analysis scope includes template flags and the file has a template.
+    pub(crate) template_analysis: Option<verter_analysis::template::TemplateAnalysisSnapshot>,
     /// Per-dep, per-type resolved type shape hash for Tier 3 precision.
     /// Key: (dep_canonical_id, type_name). Value: hash of resolved prop shape.
     pub(crate) resolved_type_hashes: HashMap<(String, String), Hash16>,

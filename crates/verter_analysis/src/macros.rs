@@ -277,6 +277,8 @@ fn try_extract_macro(expr: &Expression<'_>, binding_name: Option<String>) -> Opt
                 is_type_based,
                 type_references,
                 binding_name,
+                span_start: call.span.start,
+                span_end: call.span.end,
             })
         }
         _ => None,

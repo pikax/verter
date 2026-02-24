@@ -11,8 +11,10 @@ crate-type = ["cdylib", "rlib"]
 default = ["console_error_panic_hook"]
 
 [dependencies]
-verter_host = { path = "../verter_host", version = "0.0.1-alpha.3", features = ["single_threaded"] }
+verter_host = { path = "../verter_host", version = "0.0.1-alpha.3" }
 verter_ffi = { path = "../verter_ffi", version = "0.0.1-alpha.3" }
+verter_analysis = { path = "../verter_analysis", version = "0.0.1-alpha.3" }
+verter_linter = { path = "../verter_linter", version = "0.0.1-alpha.3" }
 wasm-bindgen = "0.2"
 serde = { workspace = true }
 serde-wasm-bindgen = "0.6"

@@ -25,7 +25,9 @@ describe("File", () => {
         types: "",
         verterSourceMap: "",
         errors: [],
+        compilerDiagnostics: [],
         analysis: null,
+        lintDiagnostics: [],
       });
     });
   });

@@ -511,6 +511,7 @@ mod tests {
             parse_duration_ms: 0.0,
             total_duration_ms: 0.0,
             tsx: None,
+            template_data: None,
         }
     }
 
@@ -567,6 +568,7 @@ mod tests {
             parse_duration_ms: 0.0,
             total_duration_ms: 0.0,
             tsx: None,
+            template_data: None,
         };
         let profile = CompileProfile::default();
         let result = assemble_main_module("Comp.vue", &compiled, &FileMeta::default(), &profile);
@@ -590,6 +592,7 @@ mod tests {
             parse_duration_ms: 0.0,
             total_duration_ms: 0.0,
             tsx: None,
+            template_data: None,
         };
         let profile = CompileProfile::default();
         let meta = FileMeta {
@@ -658,6 +661,7 @@ mod tests {
             parse_duration_ms: 0.0,
             total_duration_ms: 0.0,
             tsx: None,
+            template_data: None,
         };
         let meta = FileMeta {
             style_langs: vec![None, Some("scss".to_string())],

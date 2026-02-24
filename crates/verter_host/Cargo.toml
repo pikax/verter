@@ -8,7 +8,6 @@ publish = false
 [features]
 default = []
 host_metrics = []
-single_threaded = []
 
 [dependencies]
 verter_core = { path = "../verter_core" }

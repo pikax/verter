@@ -68,6 +68,9 @@ pub struct TemplateCodeGenOptions {
     /// when a component tag matches this name, the compiler emits
     /// `_resolveComponent("Name", true)` instead of `_resolveComponent("Name")`.
     pub self_name: String,
+    /// Props known to be const across all call sites (from cross-file analysis).
+    /// Passed through to the `BindingResolver` to override reactivity level.
+    pub const_props: Option<rustc_hash::FxHashSet<String>>,
 }
 
 impl Default for TemplateCodeGenOptions {
@@ -79,6 +82,7 @@ impl Default for TemplateCodeGenOptions {
             comments: true,
             force_js: false,
             self_name: String::new(),
+            const_props: None,
         }
     }
 }
@@ -171,9 +175,22 @@ pub fn generate_template<'alloc>(
     bindings: FxHashMap<&'alloc str, BindingType>,
     options: &TemplateCodeGenOptions,
 ) -> Vec<&'static str> {
+    // Convert owned const_props (FxHashSet<String>) to arena-allocated (&'alloc str)
+    // for the BindingResolver's lifetime.
+    let const_props_alloc: Option<rustc_hash::FxHashSet<&'alloc str>> = options
+        .const_props
+        .as_ref()
+        .map(|set| set.iter().map(|s| alloc.alloc_str(s) as &str).collect());
+
     let resolver = match options.mode {
-        CodeGenMode::Vapor | CodeGenMode::Vapor2 => BindingResolver::new_vapor(bindings),
-        CodeGenMode::Vdom => BindingResolver::new(bindings, options.is_inline),
+        CodeGenMode::Vapor | CodeGenMode::Vapor2 => {
+            let mut r = BindingResolver::new_with_const_props(bindings, false, const_props_alloc);
+            r.set_vapor(true);
+            r
+        }
+        CodeGenMode::Vdom => {
+            BindingResolver::new_with_const_props(bindings, options.is_inline, const_props_alloc)
+        }
     };
     let mut out = CodeGenOutput::new(alloc);
 

@@ -41,7 +41,7 @@ impl VerterHost {
         let parse_start = Instant::now();
         let mut snapshot = match req.file_kind {
             FileKind::VueSfc => {
-                parse_vue_snapshot(&canonical_id, &req.source, self.config.analysis_level)
+                parse_vue_snapshot(&canonical_id, &req.source, self.config.effective_scope())
             }
             FileKind::NonSfc => parse_non_sfc_snapshot(&canonical_id, &req.source),
         };
@@ -156,6 +156,7 @@ impl VerterHost {
                     script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
                     export_signatures: Vec::new(),
                     style_analyses: Vec::new(),
+                    template_analysis: None,
                     resolved_type_hashes: HashMap::new(),
                     style_overrides: HashMap::new(),
                     compile_slots: HashMap::new(),

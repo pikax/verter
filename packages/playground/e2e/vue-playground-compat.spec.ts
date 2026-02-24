@@ -58,7 +58,7 @@ test.describe("Vue playground URL compatibility", () => {
     await expect(appTab).toBeVisible({ timeout: 5000 });
 
     // JS output tab should be active (since _outputMode: "js")
-    const jsTab = page.locator(".output-tabs .tab.active", { hasText: "JS" });
+    const jsTab = page.locator(".output-tabs .output-tab.active", { hasText: "JS" });
     await expect(jsTab).toBeVisible({ timeout: 5000 });
   });
 

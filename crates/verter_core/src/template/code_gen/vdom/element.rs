@@ -890,7 +890,14 @@ pub(crate) fn build_props_object_into(
                         let is_class_or_style =
                             is_bind && (arg_name == "class" || arg_name == "style");
                         if !is_class_or_style || element.tag_type.is_component() {
-                            dynamic_props.push(key.to_string());
+                            // Cross-file optimization: skip adding to dynamic_props
+                            // when all bindings are const props (proven constant across
+                            // all parent call sites). Only active with const_props data.
+                            let oxc_exp = find_prop_oxc_exp(oxc_el, prop_idx);
+                            let expr_bindings = oxc_exp.and_then(|e| e.bindings.as_ref());
+                            if !resolver.all_bindings_const_props(expr_bindings) {
+                                dynamic_props.push(key.to_string());
+                            }
                         }
                         if props::needs_quoted_key(&key) {
                             buf.push('"');

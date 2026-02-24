@@ -215,3 +215,24 @@ pub struct FfiTsxResponse {
 pub struct FfiRemoveResult {
     pub canonical_id: String,
 }
+
+/// Result of cross-file optimization analysis.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiCrossFileResult {
+    /// Per-file const prop sets (canonical_id → list of const prop names).
+    pub const_prop_overrides: std::collections::HashMap<String, Vec<String>>,
+    /// Files whose constness changed since last computation (need recompilation).
+    pub changed_files: Vec<String>,
+    /// Diagnostics emitted during analysis.
+    pub diagnostics: Vec<FfiCrossFileDiagnostic>,
+}
+
+/// A diagnostic from cross-file analysis.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FfiCrossFileDiagnostic {
+    pub file_id: String,
+    pub code: String,
+    pub message: String,
+}

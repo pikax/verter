@@ -31,6 +31,7 @@ crates/
   verter_core/       # Core template compiler (Rust)
   verter_analysis/   # Static analysis: imports, exports, bindings, type resolution
   verter_host/       # In-memory file host: caching, dependency tracking, multi-file compilation
+  verter_linter/     # Vue SFC linter engine: rule trait, visitor, diagnostics (depends only on verter_analysis)
   verter_ffi/        # FFI types: shared serializable structs for NAPI/WASM boundaries
   verter_bench/      # Benchmarks and comparison examples (Rust)
   verter_napi/       # Native Node.js bindings (NAPI-RS cdylib)
@@ -74,6 +75,7 @@ scripts/
 | `componentId` | `(filename, source, isProd) => string` | hash-based | Custom component ID generator |
 | `include` | `string \| RegExp \| (string \| RegExp)[]` | `[/\.vue$/]` | File patterns to include |
 | `preCompile` | `boolean` | `false` | Pre-compile all `.vue` files during `buildStart`. Scans the project root, upserts files into the host cache (including type dependencies for macros), and compiles them. When `transform()` later receives the same content, the host returns the cached result instantly. `node_modules` are excluded from scanning. |
+| `crossFileOptimize` | `boolean` | `false` | Cross-file prop constness optimization. Requires `preCompile: true`. After pre-compilation, analyzes the render tree to determine which props are always passed constant values, skipping dynamic tracking in compiled output. |
 | `template` | `object` | — | Template compiler options (compat with `@vitejs/plugin-vue`) |
 
 **`preCompile` architecture:**

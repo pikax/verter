@@ -826,6 +826,31 @@ impl NapiVerterHost {
         }))
     }
 
+    /// Compute cross-file prop constness optimizations.
+    ///
+    /// Builds a render tree from all compiled files and determines which
+    /// child component props are const across all call sites.
+    /// Returns JSON with `constPropOverrides`, `changedFiles`, and `diagnostics`.
+    ///
+    /// Call after all files are compiled (e.g., after `preCompile` loop).
+    /// On subsequent calls, `changedFiles` lists only files whose constness
+    /// changed since the last computation.
+    #[napi(js_name = "computeCrossFileOptimizations")]
+    pub fn compute_cross_file_optimizations(&self) -> Result<String> {
+        catch_panic(std::panic::AssertUnwindSafe(|| {
+            self.inner.compute_cross_file_optimizations()
+        }))
+        .and_then(|result| {
+            let ffi = host_cross_file_result_to_ffi(result);
+            serde_json::to_string(&ffi).map_err(|e| {
+                Error::new(
+                    Status::GenericFailure,
+                    format!("cross-file result serialization error: {e}"),
+                )
+            })
+        })
+    }
+
     /// Returns a snapshot of host performance metrics.
     ///
     /// Only available when built with the `host_metrics` feature.

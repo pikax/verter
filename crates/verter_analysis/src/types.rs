@@ -59,6 +59,14 @@ pub struct ScriptAnalysisSnapshot {
         deserialize_with = "deserialize_analysis_flags"
     )]
     pub flags: AnalysisFlags,
+
+    /// Exported functions with return type analysis (when FUNC_RETURNS scope is active).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exported_functions: Vec<AnalyzedExportedFunction>,
+
+    /// TODO(type-provider): Enhanced type info populated by TSGO when connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_enhancements: Option<ScriptTypeEnhancements>,
 }
 
 /// A single import declaration extracted from a script block.
@@ -71,6 +79,16 @@ pub struct AnalyzedImport {
     pub is_type_only: bool,
     /// Individual bindings imported.
     pub bindings: Vec<AnalyzedImportBinding>,
+    /// Byte offset of import declaration start in the script content.
+    #[serde(default)]
+    pub span_start: u32,
+    /// Byte offset of import declaration end in the script content.
+    #[serde(default)]
+    pub span_end: u32,
+    /// Canonical file ID resolved by the host (None during standalone analysis).
+    /// Populated by verter_host after path resolution for cross-file go-to-definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_canonical_id: Option<String>,
 }
 
 /// A single specifier within an import declaration (e.g., `Foo` in `import { Foo } from "bar"`).
@@ -83,6 +101,12 @@ pub struct AnalyzedImportBinding {
     pub is_type_only: bool,
     /// Vue API classification if the import source is 'vue'.
     pub vue_api: Option<VueApiClassification>,
+    /// Byte offset of specifier name start in the script content.
+    #[serde(default)]
+    pub span_start: u32,
+    /// Byte offset of specifier name end in the script content.
+    #[serde(default)]
+    pub span_end: u32,
 }
 
 /// Rich classification of Vue imports.
@@ -154,6 +178,28 @@ pub enum VueApiClassification {
     Other,
 }
 
+/// Granular reactivity classification of a binding.
+/// Distinguishes ref-like (needs `.value`) from reactive-like (direct property access).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum ReactivityKind {
+    /// Not reactive: const literal, function, class, plain const.
+    #[default]
+    None,
+    /// Ref-like: `ref()`, `shallowRef()`, `customRef()`, `toRef()` — needs `.value` unwrap.
+    Ref,
+    /// Computed: `computed()` — needs `.value` unwrap, read-only.
+    Computed,
+    /// Reactive-like: `reactive()`, `shallowReactive()` — direct property access.
+    Reactive,
+    /// Composable return: `useSomething()` — may or may not be ref.
+    MaybeRef,
+    /// Mutable: `let` binding — reassignable.
+    Mutable,
+}
+
 /// A top-level variable, function, or class binding declared in the script block.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -164,8 +210,20 @@ pub struct AnalyzedBinding {
     pub kind: AnalyzedBindingKind,
     /// Whether the binding holds reactive state (e.g., initialized via `ref()` or `reactive()`).
     pub is_reactive: bool,
+    /// Granular reactivity classification (replaces `is_reactive` semantically).
+    #[serde(default)]
+    pub reactivity_kind: ReactivityKind,
+    /// TypeScript type annotation from the AST (e.g., `"Ref<number>"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_annotation: Option<String>,
     /// What expression created this binding, if classifiable.
     pub initializer: Option<BindingInitializer>,
+    /// Byte offset of binding name start in the script content.
+    #[serde(default)]
+    pub span_start: u32,
+    /// Byte offset of binding name end in the script content.
+    #[serde(default)]
+    pub span_end: u32,
 }
 
 /// Tracks what function/expression created a binding.
@@ -222,6 +280,12 @@ pub struct AnalyzedMacro {
     pub type_references: Vec<String>,
     /// The binding name if `const X = defineProps<...>()`.
     pub binding_name: Option<String>,
+    /// Byte offset of macro call start in the script content.
+    #[serde(default)]
+    pub span_start: u32,
+    /// Byte offset of macro call end in the script content.
+    #[serde(default)]
+    pub span_end: u32,
 }
 
 /// Identifies which Vue compiler macro was called.
@@ -283,4 +347,145 @@ pub struct ImportSourceInfo {
     pub is_type_only: bool,
     /// Names imported from this source.
     pub bindings: Vec<String>,
+}
+
+// ── Phase 1c: Non-SFC Deep Analysis ──
+
+/// Analyzed exported function from a non-SFC file.
+/// Used for composable return type analysis and function parameter info.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnalyzedExportedFunction {
+    /// Function name.
+    pub name: String,
+    /// Whether this is a default export.
+    pub is_default: bool,
+    /// Parameters (name + optional type annotation string).
+    pub params: Vec<FunctionParam>,
+    /// TypeScript return type annotation extracted directly from the AST.
+    /// e.g., `"Ref<number>"`, `"{ count: Ref<number>, increment: () => void }"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_type_annotation: Option<String>,
+    /// Inferred return reactivity from body analysis (heuristic).
+    pub return_reactivity: ReturnReactivity,
+    /// Whether this is async.
+    pub is_async: bool,
+    /// Composable info (None if not a composable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composable: Option<ComposableInfo>,
+}
+
+/// First-class composable info (functions following the `useXxx` convention).
+/// Composables are Vue's primary code reuse pattern and warrant dedicated tracking.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposableInfo {
+    /// Composable name (e.g., `"useCounter"`, `"useFetch"`).
+    pub name: String,
+    /// Vue lifecycle hooks called inside (onMounted, onUnmounted, etc.).
+    pub lifecycle_hooks: Vec<VueApiClassification>,
+    /// Whether it calls `provide()`.
+    pub has_provide: bool,
+    /// Whether it calls `inject()`.
+    pub has_inject: bool,
+    /// Whether it calls `watch`/`watchEffect`.
+    pub has_watchers: bool,
+    /// Reactive state created inside (ref, reactive, computed).
+    pub internal_reactive_state: Vec<(String, ReactivityKind)>,
+    /// What it returns (structured).
+    pub return_shape: ComposableReturn,
+}
+
+/// What a composable returns.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ComposableReturn {
+    /// Returns a single ref/reactive value.
+    Single(ReactivityKind),
+    /// Returns a destructurable object: `{ count, increment, reset }`.
+    Object(Vec<ComposableReturnField>),
+    /// Returns a tuple-like array: `[value, setValue]`.
+    Tuple(Vec<ReactivityKind>),
+    /// Cannot determine.
+    Unknown,
+}
+
+/// A field in a composable return object.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposableReturnField {
+    /// Field name.
+    pub name: String,
+    /// Reactivity classification.
+    pub reactivity: ReactivityKind,
+    /// Whether this field is a function (method).
+    pub is_function: bool,
+}
+
+/// A function parameter with optional type annotation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FunctionParam {
+    /// Parameter name.
+    pub name: String,
+    /// TypeScript type annotation extracted directly from the AST.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_annotation: Option<String>,
+    /// Whether this parameter is optional.
+    pub is_optional: bool,
+    /// Whether this parameter has a default value.
+    pub has_default: bool,
+}
+
+/// What a function returns in terms of reactivity.
+///
+/// Determined via two levels:
+/// 1. **AST-level** (immediate, from OXC): explicit TS return type annotations
+/// 2. **Body-level** (heuristic): walk return statements to detect patterns
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ReturnReactivity {
+    /// Returns a ref-like value (detected via return type annotation or `return ref(...)`).
+    Ref,
+    /// Returns a reactive object (detected via `return reactive(...)`).
+    Reactive,
+    /// Returns a plain object with known reactive properties.
+    ObjectWithReactiveFields(Vec<(String, ReactivityKind)>),
+    /// Returns a plain non-reactive value.
+    Plain,
+    /// Cannot determine (complex control flow, dynamic returns).
+    #[default]
+    Unknown,
+}
+
+// ── Phase 2b: Type Enhancement Placeholders ──
+
+/// TODO(type-provider): Script-level type enhancements.
+/// Populated by external type providers (TS language service, TSGO, etc.).
+/// Enhances `ScriptAnalysisSnapshot` with resolved type info.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptTypeEnhancements {
+    /// Resolved return types for functions (keyed by function name).
+    pub function_return_types: rustc_hash::FxHashMap<String, ResolvedTypeInfo>,
+    /// Resolved types for bindings (keyed by binding name).
+    pub binding_resolved_types: rustc_hash::FxHashMap<String, ResolvedTypeInfo>,
+    /// Generic type parameter resolutions.
+    pub generic_resolutions: rustc_hash::FxHashMap<String, Vec<ResolvedTypeInfo>>,
+}
+
+/// TODO(type-provider): Resolved type from TSGO or other type checker.
+/// Initially empty — filled in by the type checker integration layer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedTypeInfo {
+    /// e.g., `"Ref<number>"`, `"string"`, `"() => void"`.
+    pub type_string: String,
+    /// Whether the type includes `null` or `undefined`.
+    pub is_nullable: bool,
+    /// Whether the type is `readonly`.
+    pub is_readonly: bool,
+    /// For object types: member name → type string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<Vec<(String, String)>>,
 }

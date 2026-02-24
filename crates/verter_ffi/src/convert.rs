@@ -394,6 +394,29 @@ pub fn host_remove_to_ffi(input: host::HostRemoveResult) -> FfiRemoveResult {
     }
 }
 
+/// Convert a `CrossFileResult` from the host to its FFI representation.
+pub fn host_cross_file_result_to_ffi(
+    input: host::cross_file::CrossFileResult,
+) -> FfiCrossFileResult {
+    FfiCrossFileResult {
+        const_prop_overrides: input
+            .const_prop_overrides
+            .into_iter()
+            .map(|(k, v)| (k, v.into_iter().collect()))
+            .collect(),
+        changed_files: input.changed_files,
+        diagnostics: input
+            .diagnostics
+            .into_iter()
+            .map(|d| FfiCrossFileDiagnostic {
+                file_id: d.file_id,
+                code: d.code,
+                message: d.message,
+            })
+            .collect(),
+    }
+}
+
 /// Convert a host error to a human-readable string.
 ///
 /// Each consumer crate wraps this string in its native error type

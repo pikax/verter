@@ -1,0 +1,14 @@
+[package]
+name = "verter_linter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vue SFC linter engine for Verter"
+
+[dependencies]
+verter_analysis = { path = "../verter_analysis" }
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]

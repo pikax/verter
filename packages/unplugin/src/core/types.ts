@@ -12,6 +12,15 @@ export interface VerterPluginOptions {
    */
   preCompile?: boolean;
   /**
+   * Cross-file analysis for prop constness optimization.
+   * Requires `preCompile: true`. Only effective in production builds.
+   * After all files are pre-compiled, analyzes the render tree to determine
+   * which props are always passed constant values by every parent component.
+   * Those props skip dynamic tracking in the compiled output.
+   * @default false
+   */
+  crossFileOptimize?: boolean;
+  /**
    * Template compiler options. Accepted for compatibility with `@vitejs/plugin-vue`
    * but currently only `isCustomElement` is forwarded.
    */

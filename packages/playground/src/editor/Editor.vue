@@ -2,6 +2,9 @@
 import { ref, watch, onMounted, onUnmounted, shallowRef } from "vue";
 import * as monaco from "monaco-editor-core";
 import { IMPORT_MAP_FILENAME, type Store } from "../core/store";
+import type { HostDiagnostic, LintDiagnostic } from "../core/types";
+import { registerLspProviders } from "./lspProviders";
+import { TypeScriptService, type MappedDiagnostic } from "./tsService";
 
 const props = defineProps<{
   store: Store;
@@ -10,6 +13,9 @@ const props = defineProps<{
 const editorContainer = ref<HTMLElement>();
 const editor = shallowRef<monaco.editor.IStandaloneCodeEditor>();
 const pendingCode = ref<string | null>(null);
+let lspDisposables: monaco.IDisposable[] = [];
+const tsService = new TypeScriptService();
+let tsDiagnostics: MappedDiagnostic[] = [];
 
 function getLanguage(filename: string): string {
   if (filename.endsWith(".vue")) return "vue";
@@ -29,6 +35,132 @@ function saveAndCompile() {
   }
 }
 
+function lintSeverityToMarkerSeverity(
+  severity: LintDiagnostic["severity"],
+): monaco.MarkerSeverity {
+  switch (severity) {
+    case "error":
+      return monaco.MarkerSeverity.Error;
+    case "warning":
+      return monaco.MarkerSeverity.Warning;
+    case "info":
+      return monaco.MarkerSeverity.Hint;
+  }
+}
+
+function hostSeverityToMarkerSeverity(
+  severity: HostDiagnostic["severity"],
+): monaco.MarkerSeverity {
+  switch (severity) {
+    case "error":
+      return monaco.MarkerSeverity.Error;
+    case "warning":
+      return monaco.MarkerSeverity.Warning;
+    case "info":
+      return monaco.MarkerSeverity.Info;
+  }
+}
+
+function tsSeverityToMarkerSeverity(
+  severity: MappedDiagnostic["severity"],
+): monaco.MarkerSeverity {
+  switch (severity) {
+    case "error":
+      return monaco.MarkerSeverity.Error;
+    case "warning":
+      return monaco.MarkerSeverity.Warning;
+    case "info":
+      return monaco.MarkerSeverity.Info;
+  }
+}
+
+function updateMarkers() {
+  const model = editor.value?.getModel();
+  if (!model) return;
+
+  const file = props.store.activeFile;
+  if (!file) {
+    monaco.editor.setModelMarkers(model, "verter", []);
+    monaco.editor.setModelMarkers(model, "typescript", []);
+    return;
+  }
+
+  // Verter markers (lint + compiler)
+  const verterMarkers: monaco.editor.IMarkerData[] = [];
+
+  for (const d of file.compiled.lintDiagnostics) {
+    const startPos = model.getPositionAt(d.spanStart);
+    const endPos = model.getPositionAt(d.spanEnd);
+    verterMarkers.push({
+      severity: lintSeverityToMarkerSeverity(d.severity),
+      message: `[${d.rule}] ${d.message}`,
+      startLineNumber: startPos.lineNumber,
+      startColumn: startPos.column,
+      endLineNumber: endPos.lineNumber,
+      endColumn: endPos.column,
+      source: "verter-lint",
+    });
+  }
+
+  for (const d of file.compiled.compilerDiagnostics) {
+    if (d.spanStart == null || d.spanEnd == null) continue;
+    const startPos = model.getPositionAt(d.spanStart);
+    const endPos = model.getPositionAt(d.spanEnd);
+    verterMarkers.push({
+      severity: hostSeverityToMarkerSeverity(d.severity),
+      message: d.message,
+      startLineNumber: startPos.lineNumber,
+      startColumn: startPos.column,
+      endLineNumber: endPos.lineNumber,
+      endColumn: endPos.column,
+      source: "verter",
+    });
+  }
+
+  monaco.editor.setModelMarkers(model, "verter", verterMarkers);
+
+  // TypeScript markers
+  const tsMarkers: monaco.editor.IMarkerData[] = [];
+  for (const d of tsDiagnostics) {
+    const startPos = model.getPositionAt(d.start);
+    const endPos = model.getPositionAt(d.end);
+    tsMarkers.push({
+      severity: tsSeverityToMarkerSeverity(d.severity),
+      message: `TS${d.code}: ${d.message}`,
+      startLineNumber: startPos.lineNumber,
+      startColumn: startPos.column,
+      endLineNumber: endPos.lineNumber,
+      endColumn: endPos.column,
+      source: "typescript",
+    });
+  }
+  monaco.editor.setModelMarkers(model, "typescript", tsMarkers);
+}
+
+async function syncTypeScript() {
+  const file = props.store.activeFile;
+  if (!file) return;
+
+  const tsxCode = file.compiled.types;
+  if (!tsxCode) {
+    tsDiagnostics = [];
+    updateMarkers();
+    return;
+  }
+
+  try {
+    tsDiagnostics = await tsService.syncTsx(
+      file.filename,
+      tsxCode,
+      file.code,
+      file.compiled.verterSourceMap || null,
+    );
+  } catch {
+    tsDiagnostics = [];
+  }
+  updateMarkers();
+}
+
 onMounted(() => {
   if (!editorContainer.value) return;
 
@@ -45,6 +177,15 @@ onMounted(() => {
     tabSize: 2,
     wordWrap: "on",
   });
+
+  // Initialize TypeScript service in background (non-blocking)
+  tsService.init().then(() => {
+    // Re-sync on init if we already have compiled output
+    syncTypeScript();
+  });
+
+  // Register LSP providers with TS bridge
+  lspDisposables = registerLspProviders(props.store, tsService);
 
   // Add Ctrl+S / Cmd+S keybinding
   editor.value.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
@@ -67,6 +208,22 @@ onMounted(() => {
     }
   });
 
+  // Watch diagnostics and update markers (Verter lint + compiler)
+  watch(
+    () => [
+      props.store.activeFile?.compiled.lintDiagnostics,
+      props.store.activeFile?.compiled.compilerDiagnostics,
+    ],
+    () => updateMarkers(),
+    { deep: true },
+  );
+
+  // Watch TSX output changes to trigger TS re-sync
+  watch(
+    () => props.store.activeFile?.compiled.types,
+    () => syncTypeScript(),
+  );
+
   watch(
     () => props.store.activeFilename,
     (filename) => {
@@ -75,6 +232,9 @@ onMounted(() => {
         const model = monaco.editor.createModel(file.code, getLanguage(filename));
         editor.value.setModel(model);
         pendingCode.value = null;
+        tsDiagnostics = [];
+        updateMarkers();
+        syncTypeScript();
       }
     },
   );
@@ -85,9 +245,15 @@ onMounted(() => {
       monaco.editor.setTheme(dark ? "vs-dark" : "vs");
     },
   );
+
+  // Initial markers
+  updateMarkers();
 });
 
 onUnmounted(() => {
+  lspDisposables.forEach((d) => d.dispose());
+  lspDisposables = [];
+  tsService.dispose();
   editor.value?.dispose();
 });
 </script>

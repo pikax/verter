@@ -29,7 +29,7 @@ const activeFlags = computed<string[]>(() => {
 
 function formatInitializer(init: AnalysisBinding["initializer"]): string {
   if (!init) return "";
-  if (init === "Other") return "...";
+  if (typeof init === "string") return init === "Other" ? "..." : init;
   if ("FunctionCall" in init) {
     const fc = init.FunctionCall;
     let s = `${fc.callee}()`;
@@ -102,7 +102,11 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
           <div v-for="(b, i) in analysis.bindings" :key="i" class="binding-item">
             <code class="binding-name">{{ b.name }}</code>
             <span class="badge badge-kind">{{ b.kind }}</span>
-            <span v-if="b.isReactive" class="badge badge-reactive">reactive</span>
+            <span v-if="b.reactivityKind && b.reactivityKind !== 'none'" class="badge badge-reactive">
+              {{ b.reactivityKind }}
+            </span>
+            <span v-else-if="b.isReactive" class="badge badge-reactive">reactive</span>
+            <span v-if="b.typeAnnotation" class="badge badge-type">{{ b.typeAnnotation }}</span>
             <span v-if="b.initializer" class="binding-init">
               = <code>{{ formatInitializer(b.initializer) }}</code>
             </span>

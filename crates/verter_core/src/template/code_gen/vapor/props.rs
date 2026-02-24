@@ -212,35 +212,68 @@ pub fn process_dynamic_props(
         let resolved = resolve_expr(value, value_start, oxc_exp, ctx.resolver, ctx.force_js);
         let resolved_expr = ctx.out.alloc_str(&resolved);
 
+        // Cross-file optimization: if all bindings in the expression are const props,
+        // emit the setter as a one-time direct statement instead of a reactive effect.
+        let expr_bindings = oxc_exp.and_then(|e| e.bindings.as_ref());
+        let is_const = ctx.resolver.all_bindings_const_props(expr_bindings);
+
         match classify_directive(arg, &element.prop_flag) {
             DirectiveKind::Class => {
-                ctx.state.own_effects.push(VaporEffect::SetClass {
+                let effect = VaporEffect::SetClass {
                     node_ref,
                     expr: resolved_expr,
-                });
+                };
+                if is_const {
+                    ctx.state
+                        .child_statements
+                        .push(ctx.out.alloc_str(&effect.to_statement()));
+                } else {
+                    ctx.state.own_effects.push(effect);
+                }
                 ctx.out.add_vapor_import(VaporHelper::SetClass);
             }
             DirectiveKind::Style => {
-                ctx.state.own_effects.push(VaporEffect::SetStyle {
+                let effect = VaporEffect::SetStyle {
                     node_ref,
                     expr: resolved_expr,
-                });
+                };
+                if is_const {
+                    ctx.state
+                        .child_statements
+                        .push(ctx.out.alloc_str(&effect.to_statement()));
+                } else {
+                    ctx.state.own_effects.push(effect);
+                }
                 ctx.out.add_vapor_import(VaporHelper::SetStyle);
             }
             DirectiveKind::Prop(attr) => {
-                ctx.state.own_effects.push(VaporEffect::SetProp {
+                let effect = VaporEffect::SetProp {
                     node_ref,
                     attr,
                     expr: resolved_expr,
-                });
+                };
+                if is_const {
+                    ctx.state
+                        .child_statements
+                        .push(ctx.out.alloc_str(&effect.to_statement()));
+                } else {
+                    ctx.state.own_effects.push(effect);
+                }
                 ctx.out.add_vapor_import(VaporHelper::SetProp);
             }
             DirectiveKind::Attr(attr) => {
-                ctx.state.own_effects.push(VaporEffect::SetAttr {
+                let effect = VaporEffect::SetAttr {
                     node_ref,
                     attr,
                     expr: resolved_expr,
-                });
+                };
+                if is_const {
+                    ctx.state
+                        .child_statements
+                        .push(ctx.out.alloc_str(&effect.to_statement()));
+                } else {
+                    ctx.state.own_effects.push(effect);
+                }
                 ctx.out.add_vapor_import(VaporHelper::SetAttr);
             }
             DirectiveKind::Unknown => {}

@@ -264,7 +264,6 @@ fn visit_comment(
 mod tests {
     use super::*;
     use crate::code_transform::CodeTransform;
-    use crate::compile::{compile, CodegenOptions, VerterCompileOptions};
 
     /// Helper: compile a full SFC with TSX template generation.
     /// Returns the template portion of the TSX output.

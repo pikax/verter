@@ -174,6 +174,14 @@ pub struct VerterCompileOptions {
     /// The host is responsible for resolving these from its file store before compilation.
     pub external_types:
         Option<rustc_hash::FxHashMap<String, crate::utils::oxc::vue::ResolvedElements>>,
+    /// When true, extract raw template data for cross-file analysis.
+    /// Produces `RawTemplateData` in the compile result alongside the rendered code.
+    pub extract_template_data: bool,
+    /// Props known to be const across all call sites (from cross-file analysis).
+    /// These are treated as `Static` for reactivity purposes while keeping
+    /// `$props.`/`__props.` prefix for correct runtime access.
+    /// The codegen skips dynamic tracking (patch flags / renderEffect) for these props.
+    pub prop_constness_overrides: Option<rustc_hash::FxHashSet<String>>,
 }
 
 // ── Result types ───────────────────────────────────────────────────
@@ -191,6 +199,8 @@ pub struct VerterCompileResult {
     /// Combined TSX output for IDE type checking. Present when `include_tsx` is true.
     /// Contains both script types and template JSX in a single `.tsx` file.
     pub tsx: Option<VerterTsxBlock>,
+    /// Raw template data for cross-file analysis. Present when `extract_template_data` is true.
+    pub template_data: Option<super::template_data::RawTemplateData>,
 }
 
 /// Generated output for the `<script>` or `<script setup>` block.

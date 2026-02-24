@@ -249,6 +249,7 @@ mod tests {
             script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
             export_signatures: Vec::new(),
             style_analyses: Vec::new(),
+            template_analysis: None,
             resolved_type_hashes: HashMap::new(),
             style_overrides: HashMap::new(),
             compile_slots: HashMap::new(),
@@ -266,6 +267,7 @@ mod tests {
                     last_good_outputs: None,
                     last_access_tick: i as u64,
                     tsx: None,
+                    template_analysis: None,
                 },
             );
         }
@@ -350,6 +352,7 @@ mod tests {
                 last_good_outputs: None,
                 last_access_tick: 1,
                 tsx: None,
+                template_analysis: None,
             },
         );
 

@@ -43,6 +43,7 @@
 
 mod cache;
 mod compile;
+pub mod cross_file;
 mod deps;
 mod hash;
 mod host_manage;
@@ -51,6 +52,7 @@ mod host_upsert;
 mod id;
 mod parse;
 mod shared;
+pub mod template_convert;
 mod types;
 mod upsert;
 
@@ -71,8 +73,7 @@ use shared::{default_shared, read_lock, write_lock, Shared};
 /// 2. [`resolve`](Self::resolve) — map a raw import ID to canonical + virtual IDs
 /// 3. [`get_virtual_file`](Self::get_virtual_file) — compile on demand (or cache hit) and return code
 ///
-/// Thread safety is controlled by the `single_threaded` feature flag:
-/// when enabled, internal locks use `RefCell` instead of `RwLock`.
+/// Internal state is protected by `RwLock` for thread-safe concurrent access.
 #[derive(Debug)]
 pub struct VerterHost {
     pub(crate) config: HostConfig,
@@ -80,6 +81,10 @@ pub struct VerterHost {
     pub(crate) alias_to_canonical: Shared<HashMap<String, String>>,
     pub(crate) reverse_dependencies: Shared<HashMap<String, BTreeSet<String>>>,
     pub(crate) tick: std::sync::atomic::AtomicU64,
+    /// Last computed cross-file prop constness overrides.
+    /// Used to detect changes on re-computation (Phase 7 invalidation).
+    pub(crate) last_const_prop_overrides:
+        Shared<rustc_hash::FxHashMap<String, rustc_hash::FxHashSet<String>>>,
     #[cfg(feature = "host_metrics")]
     pub(crate) metrics: HostMetrics,
 }
@@ -93,6 +98,7 @@ impl VerterHost {
             alias_to_canonical: default_shared(HashMap::new()),
             reverse_dependencies: default_shared(HashMap::new()),
             tick: std::sync::atomic::AtomicU64::new(1),
+            last_const_prop_overrides: default_shared(rustc_hash::FxHashMap::default()),
             #[cfg(feature = "host_metrics")]
             metrics: HostMetrics::default(),
         }
@@ -236,6 +242,7 @@ mod tests {
         UpsertResultData,
     };
     use super::*;
+    use verter_analysis::AnalysisScope;
 
     fn profile_dev() -> CompileProfile {
         CompileProfile {
@@ -274,6 +281,7 @@ mod tests {
             script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
             export_signatures: Vec::new(),
             style_analyses: Vec::new(),
+            template_analysis: None,
             resolved_type_hashes: HashMap::new(),
             style_overrides: HashMap::new(),
             compile_slots: HashMap::new(),
@@ -331,7 +339,7 @@ mod tests {
     fn build_upsert_result_first_insert() {
         let src =
             "<script setup>const n = 1</script><template><div/></template><style>.a{}</style>";
-        let snapshot = parse_vue_snapshot("Comp.vue", src, AnalysisLevel::Full);
+        let snapshot = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
         let data = UpsertResultData {
             new_meta: snapshot.meta,
             parse_diagnostics: snapshot.parse_diagnostics,
@@ -377,7 +385,7 @@ mod tests {
     #[test]
     fn build_upsert_result_no_change() {
         let src = "<script setup>const n = 1</script><template><div/></template>";
-        let snapshot = parse_vue_snapshot("Comp.vue", src, AnalysisLevel::Full);
+        let snapshot = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
         let data = UpsertResultData {
             new_meta: snapshot.meta,
             parse_diagnostics: snapshot.parse_diagnostics,
@@ -540,7 +548,7 @@ mod tests {
         let new = parse_vue_snapshot(
             "Comp.vue",
             "<script setup>const n = 1</script><template><div/></template>",
-            AnalysisLevel::Full,
+            AnalysisScope::LSP,
         );
         let result = compute_upsert_changes(None, &new);
         assert!(result.changed, "first insert should be changed");
@@ -558,8 +566,8 @@ mod tests {
     #[test]
     fn compute_upsert_changes_identical_content() {
         let src = "<script setup>const n = 1</script><template><div/></template>";
-        let old_snap = parse_vue_snapshot("Comp.vue", src, AnalysisLevel::Full);
-        let new_snap = parse_vue_snapshot("Comp.vue", src, AnalysisLevel::Full);
+        let old_snap = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
+        let new_snap = parse_vue_snapshot("Comp.vue", src, AnalysisScope::LSP);
         let old_entry = file_entry_from_snapshot("Comp.vue", src, &old_snap);
         let result = compute_upsert_changes(Some(&old_entry), &new_snap);
         assert!(!result.changed, "identical content should not be changed");
@@ -571,8 +579,8 @@ mod tests {
     fn compute_upsert_changes_script_change() {
         let src1 = "<script setup>const n = 1</script><template><div/></template>";
         let src2 = "<script setup>const n = 2</script><template><div/></template>";
-        let old_snap = parse_vue_snapshot("Comp.vue", src1, AnalysisLevel::Full);
-        let new_snap = parse_vue_snapshot("Comp.vue", src2, AnalysisLevel::Full);
+        let old_snap = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
+        let new_snap = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
         let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
         let result = compute_upsert_changes(Some(&old_entry), &new_snap);
         assert!(result.changed);
@@ -586,8 +594,8 @@ mod tests {
         let src1 = "<script setup>const n = 1</script><template><div/></template>";
         let src2 =
             "<script setup>const n = 1</script><template><div/></template><style>.a{}</style>";
-        let old_snap = parse_vue_snapshot("Comp.vue", src1, AnalysisLevel::Full);
-        let new_snap = parse_vue_snapshot("Comp.vue", src2, AnalysisLevel::Full);
+        let old_snap = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
+        let new_snap = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
         let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
         let result = compute_upsert_changes(Some(&old_entry), &new_snap);
         assert!(result.changed);
@@ -599,8 +607,8 @@ mod tests {
     fn compute_upsert_changes_template_change() {
         let src1 = "<script setup>const n = 1</script><template><div/></template>";
         let src2 = "<script setup>const n = 1</script><template><section/></template>";
-        let old_snap = parse_vue_snapshot("Comp.vue", src1, AnalysisLevel::Full);
-        let new_snap = parse_vue_snapshot("Comp.vue", src2, AnalysisLevel::Full);
+        let old_snap = parse_vue_snapshot("Comp.vue", src1, AnalysisScope::LSP);
+        let new_snap = parse_vue_snapshot("Comp.vue", src2, AnalysisScope::LSP);
         let old_entry = file_entry_from_snapshot("Comp.vue", src1, &old_snap);
         let result = compute_upsert_changes(Some(&old_entry), &new_snap);
         assert!(result.changed);
@@ -735,6 +743,7 @@ mod tests {
             script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
             export_signatures: Vec::new(),
             style_analyses: Vec::new(),
+            template_analysis: None,
             resolved_type_hashes: HashMap::new(),
             style_overrides: HashMap::new(),
             compile_slots: HashMap::new(),
@@ -771,6 +780,7 @@ mod tests {
             script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
             export_signatures: Vec::new(),
             style_analyses: Vec::new(),
+            template_analysis: None,
             resolved_type_hashes: HashMap::new(),
             style_overrides: HashMap::new(),
             compile_slots: HashMap::new(),
@@ -801,6 +811,7 @@ mod tests {
             script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
             export_signatures: Vec::new(),
             style_analyses: Vec::new(),
+            template_analysis: None,
             resolved_type_hashes: HashMap::new(),
             style_overrides: HashMap::new(),
             compile_slots: HashMap::new(),
@@ -835,6 +846,7 @@ mod tests {
             script_analysis: verter_analysis::ScriptAnalysisSnapshot::default(),
             export_signatures: Vec::new(),
             style_analyses: Vec::new(),
+            template_analysis: None,
             resolved_type_hashes: HashMap::new(),
             style_overrides: HashMap::new(),
             compile_slots: HashMap::new(),
@@ -888,6 +900,7 @@ mod tests {
                 last_good_outputs: last_good,
                 last_access_tick: 1,
                 tsx: None,
+                template_analysis: None,
             },
         );
 

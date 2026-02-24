@@ -27,10 +27,14 @@ pub mod file_usage;
 mod imports;
 mod macros;
 pub mod project_index;
+pub mod scope;
 pub mod style;
+pub mod template;
 pub mod types;
 
-pub use analysis::{build_export_signatures, build_script_analysis};
+pub use analysis::{
+    build_export_signatures, build_script_analysis, build_script_analysis_with_scope,
+};
 pub use classify::{classify_vue_api, is_lifecycle_api, is_reactivity_api, is_watcher_api};
 pub use exports::extract_export_signatures;
 pub use file_usage::{
@@ -43,14 +47,25 @@ pub use project_index::{
     ComponentEdge, ComponentUsageSummary, DynamicInjectEntry, FileInjectValidation,
     InjectValidation, InjectValidationEntry, ProjectIndex, ProjectStats, ProvideInjectSummary,
 };
+pub use scope::AnalysisScope;
 pub use style::{
     build_css_style_analysis, build_preprocessor_style_analysis, SpecialPseudoInput,
     SpecialPseudoKind, StyleAnalysisFlags, StyleAnalysisLang, StyleBlockAnalysis, VBindInput,
     VueStyleInput,
 };
+pub use template::{
+    AnalyzedEmitDefinition, AnalyzedMacroUsage, AnalyzedPropDefinition, BindingUsageKind,
+    CommentDirective, CommentDirectiveKind, DefinedSlot, ElementNamespace, IfChain, MacroKind,
+    PropValueConstness, TemplateAnalysisSnapshot, TemplateAttribute, TemplateBindingOccurrence,
+    TemplateComponentUsage, TemplateDirective, TemplateElement, TemplateEventHandler,
+    TemplatePropUsage, TemplateRef, TemplateTypeEnhancements, TypeMismatch, UnresolvedBinding,
+    VForDirective, VModelDirective,
+};
 pub use types::hash_16;
 pub use types::{
-    AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedImport, AnalyzedImportBinding,
-    AnalyzedMacro, AnalyzedMacroKind, BindingInitializer, ExportSignature, Hash16,
-    ImportSourceInfo, LiteralKind, MacroTypeDep, ScriptAnalysisSnapshot, VueApiClassification,
+    AnalysisFlags, AnalyzedBinding, AnalyzedBindingKind, AnalyzedExportedFunction, AnalyzedImport,
+    AnalyzedImportBinding, AnalyzedMacro, AnalyzedMacroKind, BindingInitializer, ComposableInfo,
+    ComposableReturn, ComposableReturnField, ExportSignature, FunctionParam, Hash16,
+    ImportSourceInfo, LiteralKind, MacroTypeDep, ReactivityKind, ResolvedTypeInfo,
+    ReturnReactivity, ScriptAnalysisSnapshot, ScriptTypeEnhancements, VueApiClassification,
 };

@@ -12,22 +12,28 @@ impl VerterHost {
     /// Returns a serializable snapshot of the file's static analysis data.
     /// Returns `None` if the file doesn't exist.
     /// When `eager_analysis` is false, computes analysis on demand from stored source.
+    ///
+    /// Template analysis is included when it has been computed during a prior
+    /// compilation (requires template scope flags and a `get_virtual_file()` call).
     pub fn get_analysis(&self, canonical_or_alias: &str) -> Option<FileAnalysisSnapshot> {
         let canonical = self.resolve_alias_or_canonical(canonical_or_alias);
         let files = read_lock(&self.files);
         let entry = files.get(&canonical)?;
 
         // If analysis wasn't fully computed during upsert, compute missing parts on demand
-        if self.config.analysis_level != AnalysisLevel::Full && entry.file_kind == FileKind::VueSfc
+        let scope = self.config.effective_scope();
+        if entry.file_kind == FileKind::VueSfc
+            && (!scope.needs_script_analysis() || !scope.needs_style_analysis())
         {
             let source = entry.source.clone();
             let stored_script = entry.script_analysis.clone();
+            let template = entry.template_analysis.clone();
             drop(files);
 
-            let script_analysis = if self.config.analysis_level == AnalysisLevel::None {
+            let script_analysis = if !scope.needs_script_analysis() {
                 crate::parse::build_script_analysis_from_source(&source)
             } else {
-                // Essential level: script analysis was already computed
+                // Script analysis was already computed during upsert
                 stored_script
             };
             let style_analyses = crate::parse::build_style_analyses_from_source(&source);
@@ -38,6 +44,7 @@ impl VerterHost {
                 macro_type_deps: script_analysis.macro_type_deps,
                 script_flags: script_analysis.flags.bits(),
                 styles: style_analyses,
+                template,
             });
         }
 
@@ -48,6 +55,7 @@ impl VerterHost {
             macro_type_deps: entry.script_analysis.macro_type_deps.clone(),
             script_flags: entry.script_analysis.flags.bits(),
             styles: entry.style_analyses.clone(),
+            template: entry.template_analysis.clone(),
         })
     }
 

@@ -1,10 +1,20 @@
+export interface HostDiagnostic {
+  severity: "error" | "warning" | "info";
+  code: string;
+  message: string;
+  spanStart?: number;
+  spanEnd?: number;
+}
+
 export interface CompiledFile {
   js: string;
   css: string;
   types: string;
   verterSourceMap: string;
   errors: string[];
+  compilerDiagnostics: HostDiagnostic[];
   analysis: FileAnalysis | null;
+  lintDiagnostics: LintDiagnostic[];
 }
 
 export class File {
@@ -16,7 +26,9 @@ export class File {
     types: "",
     verterSourceMap: "",
     errors: [],
+    compilerDiagnostics: [],
     analysis: null,
+    lintDiagnostics: [],
   };
 
   constructor(filename: string, code = "") {
@@ -43,7 +55,7 @@ export class File {
   }
 }
 
-export type OutputMode = "preview" | "js" | "css" | "types" | "analysis";
+export type OutputMode = "preview" | "js" | "css" | "types" | "analysis" | "lint";
 
 export interface CompilerOptions {
   isProduction: boolean;
@@ -96,6 +108,8 @@ export interface AnalysisBinding {
   name: string;
   kind: string;
   isReactive: boolean;
+  reactivityKind?: string;
+  typeAnnotation?: string | null;
   initializer: AnalysisBindingInitializer | null;
 }
 
@@ -227,3 +241,24 @@ export const AnalysisFlagLabels: Record<number, string> = {
   [AnalysisFlags.HAS_INJECT]: "Inject",
   [AnalysisFlags.HAS_EXTERNAL_TYPE_DEPS]: "External Type Deps",
 };
+
+// ── Lint diagnostic types (mirror Rust verter_linter) ──
+
+export type LintSeverity = "error" | "warning" | "info";
+
+export interface LintDiagnostic {
+  rule: string;
+  category: string;
+  severity: LintSeverity;
+  message: string;
+  spanStart: number;
+  spanEnd: number;
+  fix?: LintFix;
+}
+
+export interface LintFix {
+  description: string;
+  replacement: string;
+  spanStart: number;
+  spanEnd: number;
+}

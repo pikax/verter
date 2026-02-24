@@ -419,12 +419,21 @@ impl VaporEffect<'_> {
         }
     }
 
-    /// Render this effect as a JS statement string (convenience wrapper for tests).
-    #[cfg(test)]
-    pub fn to_code(&self) -> String {
+    /// Render this effect as a standalone JS statement string.
+    ///
+    /// Used when cross-file const prop analysis determines the prop doesn't need
+    /// reactive tracking — the setter is emitted as a one-time direct statement
+    /// instead of being wrapped in `_renderEffect`.
+    pub fn to_statement(&self) -> String {
         let mut buf = String::with_capacity(64);
         self.write_code_into(&mut buf);
         buf
+    }
+
+    /// Alias for `to_statement()` used in tests.
+    #[cfg(test)]
+    pub fn to_code(&self) -> String {
+        self.to_statement()
     }
 }
 

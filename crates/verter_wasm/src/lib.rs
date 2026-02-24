@@ -255,6 +255,22 @@ impl WasmVerterHost {
         }))
     }
 
+    /// Runs cross-file analysis and returns prop constness optimizations.
+    ///
+    /// Builds a render tree from all compiled SFCs' template analysis data,
+    /// aggregates prop constness across all parent call sites, and validates
+    /// provide/inject chains. Returns which files have changed constness
+    /// hints and any diagnostics.
+    ///
+    /// Should be called after all files are upserted and compiled (e.g.
+    /// after a preCompile pass).
+    #[wasm_bindgen(js_name = computeCrossFileOptimizations)]
+    pub fn compute_cross_file_optimizations(&self) -> Result<JsValue, JsValue> {
+        let result = catch_panic(|| self.inner.compute_cross_file_optimizations())?;
+        let ffi = host_cross_file_result_to_ffi(result);
+        to_wasm_value(&ffi)
+    }
+
     /// Records the resolved import dependencies for a file.
     ///
     /// Called after resolving the `importSpecifiers` returned by
@@ -273,5 +289,46 @@ impl WasmVerterHost {
     ) -> Result<(), JsValue> {
         let deps: Vec<String> = parse_wasm_input(resolved_deps)?;
         catch_panic(|| self.inner.set_import_dependencies(canonical_or_alias, deps))
+    }
+
+    /// Runs lint rules against a file's analysis data and returns diagnostics.
+    ///
+    /// Takes a canonical ID (or alias), retrieves its analysis data from the
+    /// host, and runs the linter with the given config. Returns an array of
+    /// lint diagnostics.
+    ///
+    /// - `canonical_or_alias` — the file to lint.
+    /// - `config` — optional JS object with lint config (preset, rule overrides).
+    ///   Pass `undefined` or `null` for defaults.
+    #[wasm_bindgen]
+    pub fn lint(&self, canonical_or_alias: &str, config: JsValue) -> Result<JsValue, JsValue> {
+        let lint_config = if config.is_undefined() || config.is_null() {
+            verter_linter::LintConfig::default()
+        } else {
+            parse_wasm_input::<verter_linter::LintConfig>(config)?
+        };
+
+        let analysis = catch_panic(|| self.inner.get_analysis(canonical_or_alias))?;
+
+        let diagnostics = match analysis {
+            Some(snapshot) => {
+                let linter = verter_linter::Linter::new(lint_config);
+                let script = verter_analysis::types::ScriptAnalysisSnapshot {
+                    imports: snapshot.imports,
+                    bindings: snapshot.bindings,
+                    macros: snapshot.macros,
+                    macro_type_deps: snapshot.macro_type_deps,
+                    flags: verter_analysis::types::AnalysisFlags::from_bits_truncate(
+                        snapshot.script_flags,
+                    ),
+                    exported_functions: Vec::new(),
+                    type_enhancements: None,
+                };
+                linter.lint(Some(&script), snapshot.template.as_ref(), &snapshot.styles)
+            }
+            None => Vec::new(),
+        };
+
+        to_wasm_value(&diagnostics)
     }
 }

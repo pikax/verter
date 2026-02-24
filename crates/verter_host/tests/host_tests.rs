@@ -2624,3 +2624,310 @@ fn template_only_scoped_style_exposes_script_node_with_scope_id() {
         main.code
     );
 }
+
+// ── Phase 4: Template analysis through host API ────────────────────
+
+/// @ai-generated - Template analysis is populated after compilation when scope includes template flags
+#[test]
+fn template_analysis_populated_after_compile() {
+    // Default config has Full analysis (LSP scope) which includes template flags
+    let host = VerterHost::new(HostConfig::default());
+
+    let sfc = r#"<script setup lang="ts">
+import Child from './Child.vue'
+const msg = "hello"
+</script>
+<template>
+  <Child :msg="msg" />
+</template>"#;
+
+    upsert_vue(&host, "App.vue", sfc);
+
+    // Before compilation, template analysis may not be present
+    // Trigger compilation by requesting a virtual file
+    host.get_virtual_file(VirtualQuery {
+        raw_id: Some("App.vue?vue&type=template".to_string()),
+        canonical_id: None,
+        node_kind: None,
+        compile_profile: profile_dev(),
+    })
+    .unwrap();
+
+    // Now get_analysis should include template data
+    let analysis = host.get_analysis("App.vue").unwrap();
+    assert!(
+        analysis.template.is_some(),
+        "template analysis should be populated after compilation"
+    );
+
+    let tpl = analysis.template.unwrap();
+    // Should detect the <Child> component usage
+    assert!(
+        !tpl.components.is_empty(),
+        "should detect component usage in template"
+    );
+    assert_eq!(tpl.components[0].name, "Child");
+}
+
+/// @ai-generated - Template analysis detects binding occurrences
+#[test]
+fn template_analysis_detects_binding_occurrences() {
+    let host = VerterHost::new(HostConfig::default());
+
+    let sfc = r#"<script setup lang="ts">
+const msg = "hello"
+const count = 42
+</script>
+<template>
+  <div>{{ msg }}</div>
+  <span>{{ count }}</span>
+</template>"#;
+
+    upsert_vue(&host, "Comp.vue", sfc);
+    host.get_virtual_file(VirtualQuery {
+        raw_id: Some("Comp.vue?vue&type=template".to_string()),
+        canonical_id: None,
+        node_kind: None,
+        compile_profile: profile_dev(),
+    })
+    .unwrap();
+
+    let analysis = host.get_analysis("Comp.vue").unwrap();
+    let tpl = analysis.template.expect("template analysis should exist");
+
+    // Should have binding occurrences for msg and count
+    let binding_names: Vec<&str> = tpl
+        .binding_occurrences
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect();
+    assert!(
+        binding_names.contains(&"msg"),
+        "should detect 'msg' binding occurrence, got: {:?}",
+        binding_names
+    );
+    assert!(
+        binding_names.contains(&"count"),
+        "should detect 'count' binding occurrence, got: {:?}",
+        binding_names
+    );
+}
+
+/// @ai-generated - Template analysis not populated when scope excludes template flags
+#[test]
+fn template_analysis_none_when_scope_excludes_template() {
+    use verter_analysis::AnalysisScope;
+
+    // BUILD scope does NOT include template flags
+    let host = VerterHost::new(HostConfig {
+        analysis_scope: Some(AnalysisScope::BUILD),
+        ..HostConfig::default()
+    });
+
+    let sfc = r#"<script setup lang="ts">
+const msg = "hello"
+</script>
+<template>
+  <div>{{ msg }}</div>
+</template>"#;
+
+    upsert_vue(&host, "Comp.vue", sfc);
+    host.get_virtual_file(VirtualQuery {
+        raw_id: Some("Comp.vue?vue&type=template".to_string()),
+        canonical_id: None,
+        node_kind: None,
+        compile_profile: profile_dev(),
+    })
+    .unwrap();
+
+    let analysis = host.get_analysis("Comp.vue").unwrap();
+    assert!(
+        analysis.template.is_none(),
+        "template analysis should NOT be populated when BUILD scope is used"
+    );
+}
+
+/// @ai-generated - Template analysis detects template refs
+#[test]
+fn template_analysis_detects_template_refs() {
+    let host = VerterHost::new(HostConfig::default());
+
+    let sfc = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const el = ref<HTMLDivElement | null>(null)
+</script>
+<template>
+  <div ref="el">content</div>
+</template>"#;
+
+    upsert_vue(&host, "Comp.vue", sfc);
+    host.get_virtual_file(VirtualQuery {
+        raw_id: Some("Comp.vue?vue&type=template".to_string()),
+        canonical_id: None,
+        node_kind: None,
+        compile_profile: profile_dev(),
+    })
+    .unwrap();
+
+    let analysis = host.get_analysis("Comp.vue").unwrap();
+    let tpl = analysis.template.expect("template analysis should exist");
+
+    assert!(
+        !tpl.template_refs.is_empty(),
+        "should detect template ref, got: {:?}",
+        tpl.template_refs
+    );
+    assert_eq!(tpl.template_refs[0].name, "el");
+    assert!(!tpl.template_refs[0].is_dynamic);
+}
+
+/// @ai-generated - Template analysis detects event handlers
+#[test]
+fn template_analysis_detects_event_handlers() {
+    let host = VerterHost::new(HostConfig::default());
+
+    let sfc = r#"<script setup lang="ts">
+function handleClick() {}
+</script>
+<template>
+  <button @click="handleClick">Click</button>
+</template>"#;
+
+    upsert_vue(&host, "Comp.vue", sfc);
+    host.get_virtual_file(VirtualQuery {
+        raw_id: Some("Comp.vue?vue&type=template".to_string()),
+        canonical_id: None,
+        node_kind: None,
+        compile_profile: profile_dev(),
+    })
+    .unwrap();
+
+    let analysis = host.get_analysis("Comp.vue").unwrap();
+    let tpl = analysis.template.expect("template analysis should exist");
+
+    assert!(
+        !tpl.event_handlers.is_empty(),
+        "should detect event handler"
+    );
+    assert_eq!(tpl.event_handlers[0].event_name, "click");
+}
+
+/// @ai-generated - Template analysis detects slot definitions
+#[test]
+fn template_analysis_detects_slot_definitions() {
+    let host = VerterHost::new(HostConfig::default());
+
+    let sfc = r#"<script setup lang="ts">
+</script>
+<template>
+  <div>
+    <slot name="header" />
+    <slot />
+  </div>
+</template>"#;
+
+    upsert_vue(&host, "Comp.vue", sfc);
+    host.get_virtual_file(VirtualQuery {
+        raw_id: Some("Comp.vue?vue&type=template".to_string()),
+        canonical_id: None,
+        node_kind: None,
+        compile_profile: profile_dev(),
+    })
+    .unwrap();
+
+    let analysis = host.get_analysis("Comp.vue").unwrap();
+    let tpl = analysis.template.expect("template analysis should exist");
+
+    let slot_names: Vec<&str> = tpl.defined_slots.iter().map(|s| s.name.as_str()).collect();
+    assert!(
+        slot_names.contains(&"header"),
+        "should detect named slot 'header', got: {:?}",
+        slot_names
+    );
+    assert!(
+        slot_names.contains(&"default"),
+        "should detect default slot, got: {:?}",
+        slot_names
+    );
+}
+
+/// @ai-generated - Template analysis is updated on recompile after source change
+#[test]
+fn template_analysis_updated_on_recompile() {
+    let host = VerterHost::new(HostConfig::default());
+
+    // Initial version with one component
+    let sfc_v1 = r#"<script setup lang="ts">
+import Child from './Child.vue'
+</script>
+<template>
+  <Child />
+</template>"#;
+
+    upsert_vue(&host, "App.vue", sfc_v1);
+    host.get_virtual_file(VirtualQuery {
+        raw_id: Some("App.vue?vue&type=template".to_string()),
+        canonical_id: None,
+        node_kind: None,
+        compile_profile: profile_dev(),
+    })
+    .unwrap();
+
+    let analysis_v1 = host.get_analysis("App.vue").unwrap();
+    let tpl_v1 = analysis_v1
+        .template
+        .expect("v1 should have template analysis");
+    assert_eq!(tpl_v1.components.len(), 1);
+    assert_eq!(tpl_v1.components[0].name, "Child");
+
+    // Updated version with two components
+    let sfc_v2 = r#"<script setup lang="ts">
+import Child from './Child.vue'
+import Other from './Other.vue'
+</script>
+<template>
+  <Child />
+  <Other />
+</template>"#;
+
+    upsert_vue(&host, "App.vue", sfc_v2);
+    host.get_virtual_file(VirtualQuery {
+        raw_id: Some("App.vue?vue&type=template".to_string()),
+        canonical_id: None,
+        node_kind: None,
+        compile_profile: profile_dev(),
+    })
+    .unwrap();
+
+    let analysis_v2 = host.get_analysis("App.vue").unwrap();
+    let tpl_v2 = analysis_v2
+        .template
+        .expect("v2 should have template analysis");
+    assert_eq!(
+        tpl_v2.components.len(),
+        2,
+        "should detect both components after recompile"
+    );
+}
+
+/// @ai-generated - get_analysis returns template: None before any compilation
+#[test]
+fn template_analysis_none_before_compile() {
+    let host = VerterHost::new(HostConfig::default());
+
+    let sfc = r#"<script setup lang="ts">
+const msg = "hello"
+</script>
+<template>
+  <div>{{ msg }}</div>
+</template>"#;
+
+    upsert_vue(&host, "Comp.vue", sfc);
+
+    // Don't trigger compilation — just get analysis
+    let analysis = host.get_analysis("Comp.vue").unwrap();
+    assert!(
+        analysis.template.is_none(),
+        "template analysis should be None before compilation"
+    );
+}

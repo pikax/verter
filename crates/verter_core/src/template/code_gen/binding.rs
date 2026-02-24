@@ -93,6 +93,10 @@ pub struct BindingResolver<'alloc> {
     bindings: FxHashMap<&'alloc str, BindingType>,
     is_inline: bool,
     is_vapor: bool,
+    /// Props known to be constant across all call sites (from cross-file analysis).
+    /// These are treated as `Static` for reactivity purposes while keeping
+    /// their `$props.`/`__props.` prefix for correct runtime access.
+    const_props: Option<rustc_hash::FxHashSet<&'alloc str>>,
 }
 
 impl<'alloc> BindingResolver<'alloc> {
@@ -102,25 +106,70 @@ impl<'alloc> BindingResolver<'alloc> {
             bindings,
             is_inline,
             is_vapor: false,
+            const_props: None,
         }
     }
 
-    /// Create a new resolver for vapor mode.
+    /// Create a new resolver with cross-file const prop overrides.
     ///
-    /// In vapor mode, all bindings use `_ctx.` prefix (never `$setup.` or `$props.`),
-    /// and no `.value` suffix is needed. This matches Vue's official vapor compiler.
-    pub fn new_vapor(bindings: FxHashMap<&'alloc str, BindingType>) -> Self {
+    /// Props in the `const_props` set are treated as `Static` for reactivity,
+    /// but still use `$props.`/`__props.` prefix for correct runtime access.
+    pub fn new_with_const_props(
+        bindings: FxHashMap<&'alloc str, BindingType>,
+        is_inline: bool,
+        const_props: Option<rustc_hash::FxHashSet<&'alloc str>>,
+    ) -> Self {
         Self {
             bindings,
-            is_inline: false,
-            is_vapor: true,
+            is_inline,
+            is_vapor: false,
+            const_props,
         }
+    }
+
+    /// Set the vapor mode flag.
+    #[inline]
+    pub fn set_vapor(&mut self, vapor: bool) {
+        self.is_vapor = vapor;
     }
 
     /// Look up the binding type for an identifier.
     #[inline]
     pub fn get(&self, ident: &str) -> Option<BindingType> {
         self.bindings.get(ident).copied()
+    }
+
+    /// Check if all non-ignored bindings in an expression are const props (cross-file override).
+    ///
+    /// Returns `true` ONLY when cross-file `const_props` data is available AND every
+    /// non-ignored identifier is either a const prop or a literal/setup const. This is
+    /// conservative: without `const_props` data, always returns `false` to match Vue's
+    /// official compiler output (which never elides bound props from `dynamicProps`).
+    ///
+    /// Used to skip adding props to the VDOM `dynamicProps` array when cross-file analysis
+    /// proves the prop value cannot change across re-renders.
+    pub fn all_bindings_const_props(&self, bindings: Option<&BindingExtractionResult<'_>>) -> bool {
+        // No const_props data → no optimization (match Vue's behavior)
+        let Some(ref const_props) = self.const_props else {
+            return false;
+        };
+        let Some(b) = bindings else {
+            return false;
+        };
+        let names = b.non_ignored_binding_names();
+        if names.is_empty() {
+            // Pure literal expression — always static, but Vue still includes
+            // the prop in dynamicProps so we stay compatible.
+            return false;
+        }
+        // All identifiers must be either:
+        // - A const prop (from cross-file analysis), or
+        // - A setup const / literal const / import (inherently static)
+        names.iter().all(|name| match self.bindings.get(*name) {
+            Some(bt) if bt.is_props() => const_props.contains(*name),
+            Some(bt) => bt.reactivity_level() == ReactivityLevel::Static,
+            None => false,
+        })
     }
 
     /// Whether this resolver is in inline mode.
@@ -696,7 +745,9 @@ mod tests {
         for &(name, bt) in entries {
             map.insert(name, bt);
         }
-        BindingResolver::new_vapor(map)
+        let mut r = BindingResolver::new(map, false);
+        r.set_vapor(true);
+        r
     }
 
     #[test]
@@ -777,5 +828,149 @@ mod tests {
     fn vapor_resolve_simple_expr_keyword_prop_uses_bracket_notation() {
         let resolver = make_vapor_resolver(&[("class", BindingType::Props)]);
         assert_eq!(resolver.resolve_simple_expr("class"), r#"_ctx["class"]"#);
+    }
+
+    // ==================== Const prop overrides ====================
+
+    fn make_resolver_with_const_props(
+        entries: &[(&'static str, BindingType)],
+        is_inline: bool,
+        const_props: &[&'static str],
+    ) -> BindingResolver<'static> {
+        let mut map = FxHashMap::default();
+        for &(name, bt) in entries {
+            map.insert(name, bt);
+        }
+        let const_set: rustc_hash::FxHashSet<&str> = const_props.iter().copied().collect();
+        BindingResolver::new_with_const_props(map, is_inline, Some(const_set))
+    }
+
+    /// @ai-generated - Const prop still uses $props. prefix (not $setup.)
+    #[test]
+    fn const_prop_still_uses_props_prefix() {
+        let resolver =
+            make_resolver_with_const_props(&[("msg", BindingType::Props)], false, &["msg"]);
+        assert_eq!(resolver.resolve_prefix("msg"), "$props.");
+    }
+
+    /// @ai-generated - Const prop still uses __props. prefix in inline mode
+    #[test]
+    fn const_prop_still_uses_dunder_props_prefix_inline() {
+        let resolver =
+            make_resolver_with_const_props(&[("msg", BindingType::Props)], true, &["msg"]);
+        assert_eq!(resolver.resolve_prefix("msg"), "__props.");
+    }
+
+    /// @ai-generated - Const prop has no .value suffix
+    #[test]
+    fn const_prop_still_no_value_suffix() {
+        let resolver =
+            make_resolver_with_const_props(&[("msg", BindingType::Props)], true, &["msg"]);
+        assert_eq!(resolver.resolve_suffix("msg"), "");
+    }
+
+    // ==================== all_bindings_const_props ====================
+
+    use crate::utils::oxc::BindingExtractionResult;
+
+    fn make_bindings_result<'a>(names: &[(&'a str, bool)]) -> BindingExtractionResult<'a> {
+        use crate::common::Span;
+        use crate::utils::oxc::bindings::Binding;
+        BindingExtractionResult {
+            bindings: names
+                .iter()
+                .map(|&(name, ignore)| Binding {
+                    name,
+                    span: Span {
+                        start: 0,
+                        end: name.len() as u32,
+                    },
+                    pos: 0,
+                    ignore,
+                    is_shorthand: false,
+                })
+                .collect(),
+            functions: vec![],
+            literals: vec![],
+            has_errors: false,
+            dynamism: crate::utils::oxc::Dynamism::MaybeDynamic,
+        }
+    }
+
+    /// Without const_props data, always returns false (Vue compatibility)
+    #[test]
+    fn all_const_props_no_data_returns_false() {
+        let resolver = make_resolver(&[("msg", BindingType::Props)], false);
+        let bindings = make_bindings_result(&[("msg", false)]);
+        assert!(!resolver.all_bindings_const_props(Some(&bindings)));
+    }
+
+    /// With const_props, a const prop expression returns true
+    #[test]
+    fn all_const_props_with_const_prop_returns_true() {
+        let resolver =
+            make_resolver_with_const_props(&[("msg", BindingType::Props)], false, &["msg"]);
+        let bindings = make_bindings_result(&[("msg", false)]);
+        assert!(resolver.all_bindings_const_props(Some(&bindings)));
+    }
+
+    /// Non-const prop expression returns false
+    #[test]
+    fn all_const_props_with_non_const_prop_returns_false() {
+        let resolver = make_resolver_with_const_props(
+            &[("msg", BindingType::Props), ("count", BindingType::Props)],
+            false,
+            &["msg"], // only msg is const
+        );
+        let bindings = make_bindings_result(&[("count", false)]);
+        assert!(!resolver.all_bindings_const_props(Some(&bindings)));
+    }
+
+    /// Mixed const prop + setup const returns true
+    #[test]
+    fn all_const_props_mixed_const_prop_and_setup_const() {
+        let resolver = make_resolver_with_const_props(
+            &[
+                ("msg", BindingType::Props),
+                ("LABEL", BindingType::SetupConst),
+            ],
+            false,
+            &["msg"],
+        );
+        let bindings = make_bindings_result(&[("msg", false), ("LABEL", false)]);
+        assert!(resolver.all_bindings_const_props(Some(&bindings)));
+    }
+
+    /// Mixed const prop + reactive ref returns false
+    #[test]
+    fn all_const_props_mixed_const_prop_and_ref_returns_false() {
+        let resolver = make_resolver_with_const_props(
+            &[
+                ("msg", BindingType::Props),
+                ("count", BindingType::SetupRef),
+            ],
+            false,
+            &["msg"],
+        );
+        let bindings = make_bindings_result(&[("msg", false), ("count", false)]);
+        assert!(!resolver.all_bindings_const_props(Some(&bindings)));
+    }
+
+    /// No bindings data returns false (conservative)
+    #[test]
+    fn all_const_props_none_bindings_returns_false() {
+        let resolver =
+            make_resolver_with_const_props(&[("msg", BindingType::Props)], false, &["msg"]);
+        assert!(!resolver.all_bindings_const_props(None));
+    }
+
+    /// Empty non-ignored names returns false (literal expression — Vue compat)
+    #[test]
+    fn all_const_props_pure_literal_returns_false() {
+        let resolver =
+            make_resolver_with_const_props(&[("msg", BindingType::Props)], false, &["msg"]);
+        // All identifiers are ignored (v-for locals, etc.)
+        let bindings = make_bindings_result(&[("item", true)]);
+        assert!(!resolver.all_bindings_const_props(Some(&bindings)));
     }
 }

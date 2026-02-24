@@ -1,4 +1,4 @@
-import type { File, CompilerOptions, CompileTiming, FileAnalysis } from "./types";
+import type { File, CompilerOptions, CompileTiming, FileAnalysis, LintDiagnostic, HostDiagnostic } from "./types";
 import { loadLocalWasm, loadCommitWasm, loadReleaseWasm, type WasmModule } from "./wasmLoader";
 import type { VersionEntry } from "./versions";
 
@@ -20,14 +20,6 @@ interface HostVirtualNodeKind {
 interface HostTsxResponse {
   code: string;
   sourceMap?: string;
-}
-
-interface HostDiagnostic {
-  severity: "error" | "warning" | "info";
-  code: string;
-  message: string;
-  spanStart?: number;
-  spanEnd?: number;
 }
 
 interface HostDiagnosticsSnapshot {
@@ -63,6 +55,7 @@ interface HostBinding {
   listVirtualFiles(canonicalId: string): HostVirtualNodeKind[];
   getAnalysis?(canonicalOrAlias: string): FileAnalysis | null;
   getTsx?(canonicalId: string, profile?: HostCompileProfile): HostTsxResponse | null;
+  lint?(canonicalOrAlias: string, config?: unknown): LintDiagnostic[];
 }
 
 /** Convert structured host diagnostics to display strings. */
@@ -269,10 +262,12 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
     styleChunks.push(style.code);
   }
 
+  const allDiagnostics = collectUniqueHostDiagnostics(diagnosticsSnapshots);
   file.compiled.js = mergeRenderIntoComponent(assembledJs);
   file.compiled.css = styleChunks.join("\n");
   file.compiled.verterSourceMap = templateSourceMap;
-  file.compiled.errors = formatDiagnostics(collectUniqueHostDiagnostics(diagnosticsSnapshots));
+  file.compiled.errors = formatDiagnostics(allDiagnostics);
+  file.compiled.compilerDiagnostics = allDiagnostics;
 
   // Retrieve analysis data if available (backward compat: older WASM may lack getAnalysis)
   let analysis: FileAnalysis | null = null;
@@ -284,6 +279,17 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
     }
   }
   file.compiled.analysis = analysis;
+
+  // Run linter (backward compat: older WASM may lack lint)
+  if (typeof wasmHost!.lint === "function") {
+    try {
+      file.compiled.lintDiagnostics = wasmHost!.lint(file.filename) ?? [];
+    } catch {
+      file.compiled.lintDiagnostics = [];
+    }
+  } else {
+    file.compiled.lintDiagnostics = [];
+  }
 
   // Retrieve TSX types output via dedicated API (backward compat: older WASM may lack getTsx)
   if (typeof wasmHost!.getTsx === "function") {
@@ -327,8 +333,10 @@ function compileTsWithHost(file: File, options: CompilerOptions | undefined): Co
   });
   diagnosticsSnapshots.push(script.diagnostics);
 
+  const allDiagnostics = collectUniqueHostDiagnostics(diagnosticsSnapshots);
   file.compiled.js = script.code;
-  file.compiled.errors = formatDiagnostics(collectUniqueHostDiagnostics(diagnosticsSnapshots));
+  file.compiled.errors = formatDiagnostics(allDiagnostics);
+  file.compiled.compilerDiagnostics = allDiagnostics;
 
   // Retrieve analysis data if available
   let analysis: FileAnalysis | null = null;
@@ -340,6 +348,17 @@ function compileTsWithHost(file: File, options: CompilerOptions | undefined): Co
     }
   }
   file.compiled.analysis = analysis;
+
+  // Run linter
+  if (typeof wasmHost!.lint === "function") {
+    try {
+      file.compiled.lintDiagnostics = wasmHost!.lint(vueFilename) ?? [];
+    } catch {
+      file.compiled.lintDiagnostics = [];
+    }
+  } else {
+    file.compiled.lintDiagnostics = [];
+  }
 
   // Retrieve TSX types output via dedicated API
   if (typeof wasmHost!.getTsx === "function") {

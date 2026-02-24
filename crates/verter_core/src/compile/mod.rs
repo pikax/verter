@@ -8,9 +8,11 @@
 //!   5. Assemble results
 
 mod helpers;
+pub mod template_data;
 pub mod types;
 
 pub use helpers::*;
+pub use template_data::*;
 pub use types::*;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -482,10 +484,10 @@ pub fn compile(
     } else {
         None
     };
-    let template_block = if has_parse_errors {
+    let (template_block, extracted_template_data) = if has_parse_errors {
         // Template AST may be invalid after parse errors — skip codegen
         // but continue with script/style results.
-        None
+        (None, None)
     } else if let Some(ref template_ast) = taken_template_ast {
         // Skip codegen for non-HTML template languages (e.g. Pug).
         // The AST positions are from the raw source and don't represent HTML.
@@ -494,7 +496,7 @@ pub fn compile(
             !lang_val.is_empty() && lang_val != "html"
         });
         if is_non_html_lang {
-            None
+            (None, None)
         } else {
             let tpl_start = Instant::now();
 
@@ -534,6 +536,19 @@ pub fn compile(
                 comments: options.comments.unwrap_or(!options.is_production),
                 force_js: verter_options.force_js,
                 self_name: to_pascal_case(&component_name),
+                const_props: verter_options.prop_constness_overrides.clone(),
+            };
+
+            // Extract raw template data for cross-file analysis (before bindings are moved)
+            let raw_template_data = if verter_options.extract_template_data {
+                Some(template_data::extract_raw_template_data(
+                    template_ast,
+                    &oxc_ast,
+                    input,
+                    &script_result.bindings,
+                ))
+            } else {
+                None
             };
 
             let imports = generate_template(
@@ -581,16 +596,19 @@ pub fn compile(
 
             let tpl_attrs = extract_attrs(&template_ast.root.attributes, input);
 
-            Some(VerterTemplateBlock {
-                code: tpl_code,
-                source_map: tpl_source_map,
-                imports,
-                duration_ms: tpl_duration_ms,
-                attrs: tpl_attrs,
-            })
+            (
+                Some(VerterTemplateBlock {
+                    code: tpl_code,
+                    source_map: tpl_source_map,
+                    imports,
+                    duration_ms: tpl_duration_ms,
+                    attrs: tpl_attrs,
+                }),
+                raw_template_data,
+            )
         } // close `else` for is_non_html_lang
     } else {
-        None
+        (None, None)
     };
 
     // ── 6. TSX codegen (optional) ────────────────────────────────
@@ -653,80 +671,117 @@ pub fn compile(
         remove_inter_block_gaps(&mut tsx_script_ct, input.len() as u32, &block_ranges);
 
         let tsx_script_code = tsx_script_ct.build_string();
-
-        // Template pass — generate JSX from template AST
-        let tsx_template_code = if !has_parse_errors {
-            if let Some(ref template_ast) = taken_template_ast {
-                let is_non_html = template_ast.root.lang.as_ref().is_some_and(|span| {
-                    let v = &input[span.start as usize..span.end as usize];
-                    !v.is_empty() && v != "html"
-                });
-                if is_non_html {
-                    None
-                } else {
-                    let tsx_t_alloc = Allocator::new();
-                    let mut tsx_t_ct = CodeTransform::new(input, &tsx_t_alloc);
-                    let tsx_source_type = SourceType::tsx();
-                    let tsx_oxc = parse_template_expressions(
-                        template_ast,
-                        input,
-                        &tsx_t_alloc,
-                        tsx_source_type,
-                    );
-                    let mut tsx_out =
-                        crate::template::code_gen::types::CodeGenOutput::new(&tsx_t_alloc);
-                    let tsx_t_opts = tsx::TsxTemplateOptions {
-                        self_name: &to_pascal_case(&component_name),
-                        comments: options.comments.unwrap_or(!options.is_production),
-                    };
-                    tsx::template::generate_tsx_template(
-                        template_ast,
-                        &tsx_oxc,
-                        input,
-                        &mut tsx_out,
-                        &tsx_t_alloc,
-                        &tsx_script_result.bindings,
-                        &tsx_t_opts,
-                    );
-                    tsx_out.apply_to(&mut tsx_t_ct);
-
-                    let tpl_tag_s = template_ast.root.tag_open.start as usize;
-                    let tpl_tag_e = template_ast
-                        .root
-                        .tag_close
-                        .as_ref()
-                        .map(|tc| tc.end as usize)
-                        .unwrap_or(
-                            template_ast
-                                .root
-                                .content
-                                .as_ref()
-                                .map(|c| c.end as usize)
-                                .unwrap_or(template_ast.root.tag_open.end as usize),
-                        );
-                    let full = tsx_t_ct.build_string();
-                    let suffix = input.len() - tpl_tag_e;
-                    Some(full[tpl_tag_s..full.len() - suffix].to_string())
-                }
-            } else {
-                None
-            }
+        let tsx_script_map = if verter_options.source_map {
+            let sm_opts = SourceMapOptions {
+                source: options.filename.as_deref(),
+                file: options.filename.as_deref(),
+                include_content: true,
+            };
+            Some(tsx_script_ct.generate_map(sm_opts))
         } else {
             None
         };
 
+        // Template pass — generate JSX from template AST
+        // (template_code, template_map, template_start_line_in_full_output)
+        let tsx_template_result: Option<(String, Option<oxc_sourcemap::SourceMap>, u32)> =
+            if !has_parse_errors {
+                if let Some(ref template_ast) = taken_template_ast {
+                    let is_non_html = template_ast.root.lang.as_ref().is_some_and(|span| {
+                        let v = &input[span.start as usize..span.end as usize];
+                        !v.is_empty() && v != "html"
+                    });
+                    if is_non_html {
+                        None
+                    } else {
+                        let tsx_t_alloc = Allocator::new();
+                        let mut tsx_t_ct = CodeTransform::new(input, &tsx_t_alloc);
+                        let tsx_source_type = SourceType::tsx();
+                        let tsx_oxc = parse_template_expressions(
+                            template_ast,
+                            input,
+                            &tsx_t_alloc,
+                            tsx_source_type,
+                        );
+                        let mut tsx_out =
+                            crate::template::code_gen::types::CodeGenOutput::new(&tsx_t_alloc);
+                        let tsx_t_opts = tsx::TsxTemplateOptions {
+                            self_name: &to_pascal_case(&component_name),
+                            comments: options.comments.unwrap_or(!options.is_production),
+                        };
+                        tsx::template::generate_tsx_template(
+                            template_ast,
+                            &tsx_oxc,
+                            input,
+                            &mut tsx_out,
+                            &tsx_t_alloc,
+                            &tsx_script_result.bindings,
+                            &tsx_t_opts,
+                        );
+                        tsx_out.apply_to(&mut tsx_t_ct);
+
+                        let tpl_tag_s = template_ast.root.tag_open.start as usize;
+                        let tpl_tag_e = template_ast
+                            .root
+                            .tag_close
+                            .as_ref()
+                            .map(|tc| tc.end as usize)
+                            .unwrap_or(
+                                template_ast
+                                    .root
+                                    .content
+                                    .as_ref()
+                                    .map(|c| c.end as usize)
+                                    .unwrap_or(template_ast.root.tag_open.end as usize),
+                            );
+
+                        let tsx_t_map = if verter_options.source_map {
+                            let sm_opts = SourceMapOptions {
+                                source: options.filename.as_deref(),
+                                file: options.filename.as_deref(),
+                                include_content: true,
+                            };
+                            Some(tsx_t_ct.generate_map(sm_opts))
+                        } else {
+                            None
+                        };
+
+                        let full = tsx_t_ct.build_string();
+                        // Count lines before the template slice to know which generated line
+                        // the template starts at in the full output
+                        let tpl_start_line = full[..tpl_tag_s].matches('\n').count() as u32;
+                        let suffix = input.len() - tpl_tag_e;
+                        let tpl_code = full[tpl_tag_s..full.len() - suffix].to_string();
+                        Some((tpl_code, tsx_t_map, tpl_start_line))
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
         // Combine script + template into a single TSX file
-        let mut tsx_code = tsx_script_code;
-        if let Some(tpl_code) = tsx_template_code {
+        let mut tsx_code = tsx_script_code.clone();
+        let tsx_template_code = tsx_template_result
+            .as_ref()
+            .map(|(code, _, _)| code.clone());
+        if let Some(ref tpl_code) = tsx_template_code {
             if !tsx_code.is_empty() {
                 tsx_code.push('\n');
             }
-            tsx_code.push_str(&tpl_code);
+            tsx_code.push_str(tpl_code);
         }
 
         let tsx_sm = if verter_options.source_map {
-            // TODO: combine source maps from both passes
-            String::new()
+            combine_tsx_source_maps(
+                tsx_script_map.as_ref(),
+                tsx_template_result
+                    .as_ref()
+                    .and_then(|(_, map, _)| map.as_ref()),
+                tsx_template_result.as_ref().map(|(_, _, line)| *line),
+                &tsx_script_code,
+            )
         } else {
             String::new()
         };
@@ -760,7 +815,108 @@ pub fn compile(
         parse_duration_ms,
         total_duration_ms,
         tsx: tsx_block,
+        template_data: extracted_template_data,
     }
+}
+
+/// Combine TSX source maps from the script and template CodeTransform passes
+/// into a single source map for the combined TSX output.
+///
+/// The combined TSX is: `tsx_script_code + "\n" + tsx_template_code`
+/// Script map tokens are used as-is. Template map tokens are shifted so their
+/// generated positions start after the script portion.
+fn combine_tsx_source_maps(
+    script_map: Option<&oxc_sourcemap::SourceMap>,
+    template_map: Option<&oxc_sourcemap::SourceMap>,
+    template_start_line_in_full: Option<u32>,
+    tsx_script_code: &str,
+) -> String {
+    let mut builder = oxc_sourcemap::SourceMapBuilder::default();
+
+    // Both maps share the same source file (the original Vue SFC).
+    // Extract the source filename and content from whichever map has it.
+    let (source_name, source_content): (String, Option<String>) = script_map
+        .or(template_map)
+        .and_then(|m| {
+            let sources: Vec<_> = m.get_sources().collect();
+            let contents: Vec<_> = m.get_source_contents().collect();
+            if sources.is_empty() {
+                None
+            } else {
+                let content = contents
+                    .first()
+                    .and_then(|opt| opt.as_ref())
+                    .map(|arc| arc.to_string());
+                Some((sources[0].to_string(), content))
+            }
+        })
+        .unwrap_or_else(|| (String::new(), None));
+
+    let source_id = if !source_name.is_empty() {
+        Some(builder.set_source_and_content(&source_name, source_content.as_deref().unwrap_or("")))
+    } else {
+        None
+    };
+
+    // Copy all tokens from the script source map as-is
+    if let Some(smap) = script_map {
+        for token in smap.get_tokens() {
+            let sid = if token.get_source_id().is_some() {
+                source_id
+            } else {
+                None
+            };
+            builder.add_token(
+                token.get_dst_line(),
+                token.get_dst_col(),
+                token.get_src_line(),
+                token.get_src_col(),
+                sid,
+                None,
+            );
+        }
+    }
+
+    // Copy template tokens with adjusted generated line positions
+    if let (Some(tmap), Some(tpl_start_line)) = (template_map, template_start_line_in_full) {
+        // In the combined output, the template starts after the script code + newline separator
+        let script_line_count = tsx_script_code.matches('\n').count() as u32;
+        // +1 for the "\n" separator between script and template
+        let combined_template_start = if tsx_script_code.is_empty() {
+            0
+        } else {
+            script_line_count + 1
+        };
+
+        for token in tmap.get_tokens() {
+            let gen_line = token.get_dst_line();
+
+            // Skip tokens before the template slice region in the full output
+            if gen_line < tpl_start_line {
+                continue;
+            }
+
+            // Adjust: subtract the template's start line in the full output,
+            // add the offset where the template starts in the combined output
+            let adjusted_line = gen_line - tpl_start_line + combined_template_start;
+
+            let sid = if token.get_source_id().is_some() {
+                source_id
+            } else {
+                None
+            };
+            builder.add_token(
+                adjusted_line,
+                token.get_dst_col(),
+                token.get_src_line(),
+                token.get_src_col(),
+                sid,
+                None,
+            );
+        }
+    }
+
+    builder.into_sourcemap().to_json_string()
 }
 
 #[cfg(test)]

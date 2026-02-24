@@ -255,6 +255,32 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
           });
         }
       }
+
+      // Cross-file optimization: analyze render tree for prop constness
+      if (opts.crossFileOptimize && isProd) {
+        const resultJson = host.computeCrossFileOptimizations();
+        const result = JSON.parse(resultJson);
+        // Recompile files whose constness hints changed
+        for (const file of result.changedFiles) {
+          const cachedProfile = profileCache.get(file);
+          if (cachedProfile) {
+            const recompiled = host.getVirtualFile({
+              rawId: file,
+              compileProfile: cachedProfile,
+            });
+            if (viteConfig) {
+              scriptCache.set(file, {
+                code: recompiled.code,
+                map: recompiled.sourceMap ?? null,
+              });
+            }
+          }
+        }
+        // Emit diagnostics as warnings
+        for (const diag of result.diagnostics) {
+          console.warn(`[verter] ${diag.code}: ${diag.message} (${diag.fileId})`);
+        }
+      }
     },
 
     async transform(code, id) {
