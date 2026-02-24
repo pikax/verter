@@ -76,3 +76,5 @@ pub mod types;
 mod compile_ported_tests;
 #[cfg(test)]
 pub(crate) mod test_helpers;
+#[cfg(test)]
+mod v5_process_ported_tests;

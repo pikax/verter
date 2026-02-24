@@ -2,8 +2,48 @@
  * @ai-generated - Tests for compiler pure functions.
  */
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { mergeRenderIntoComponent, formatDiagnostics, applyTsxOutput } from "./compiler";
 import { File } from "./types";
+
+async function generateRealTsxOutput(vueSource: string): Promise<{ code: string; sourceMap: string }> {
+  const thisDir = dirname(fileURLToPath(import.meta.url));
+  const wasmJs = resolve(thisDir, "../../../wasm/wasm/verter_wasm.js");
+  const wasmBin = resolve(thisDir, "../../../wasm/wasm/verter_wasm_bg.wasm");
+
+  const wasmModule = (await import(pathToFileURL(wasmJs).href)) as any;
+  const wasmBytes = readFileSync(wasmBin);
+  await wasmModule.default({ module_or_path: wasmBytes });
+
+  const host = new wasmModule.VerterHost({
+    devMode: true,
+    compileErrorPolicy: "devServeLastKnownGood",
+    maxProfilesPerFile: 8,
+  });
+
+  const profile = { sourceMap: true, enableTypes: true, forceJs: true };
+  host.upsert({
+    inputId: "App.vue",
+    source: vueSource,
+    fileKind: "vue",
+    aliases: [],
+    compileProfile: profile,
+  });
+
+  host.getVirtualFile({
+    rawId: "App.vue",
+    compileProfile: profile,
+  });
+
+  const tsx = host.getTsx("App.vue", profile);
+  if (!tsx?.code || !tsx?.sourceMap) {
+    throw new Error("expected host.getTsx() to return code + sourceMap");
+  }
+
+  return { code: tsx.code, sourceMap: tsx.sourceMap };
+}
 
 describe("formatDiagnostics", () => {
   it("returns empty array for undefined input", () => {
@@ -231,5 +271,17 @@ describe("applyTsxOutput", () => {
 
     expect(file.compiled.types).toBe("");
     expect(file.compiled.typesSourceMap).toBe("");
+  });
+
+  it("stores real host TSX output and source map unchanged", async () => {
+    const file = new File("App.vue", "<template><div>{{ msg }}</div></template>");
+    const vueCode = `<script setup lang=\"ts\">\\nconst msg: string = 'hello'\\n</script>\\n<template><div>{{ msg }}</div></template>`;
+    const tsx = await generateRealTsxOutput(vueCode);
+
+    applyTsxOutput(file, tsx);
+
+    expect(file.compiled.types).toBe(tsx.code);
+    expect(file.compiled.typesSourceMap).toBe(tsx.sourceMap);
+    expect(file.compiled.typesSourceMap.length).toBeGreaterThan(0);
   });
 });

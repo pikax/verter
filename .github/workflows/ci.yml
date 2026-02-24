@@ -19,6 +19,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       js: ${{ steps.filter.outputs.js }}
       wasm: ${{ steps.filter.outputs.wasm }}
+      playground: ${{ steps.filter.outputs.playground }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -31,6 +32,7 @@ jobs:
               - 'Cargo.lock'
               - '.cargo/**'
               - 'rust-toolchain.toml'
+              - 'scripts/v5-process/**'
               - '.github/workflows/ci.yml'
             js:
               - 'packages/**'
@@ -39,6 +41,7 @@ jobs:
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - 'tsconfig*.json'
+              - 'scripts/v5-process/**'
               - '.github/workflows/ci.yml'
             wasm:
               - 'crates/verter_core/**'
@@ -48,6 +51,12 @@ jobs:
               - 'crates/verter_wasm/**'
               - 'packages/wasm/**'
               - '.cargo/**'
+              - '.github/workflows/ci.yml'
+            playground:
+              - 'crates/verter_core/**'
+              - 'crates/verter_host/**'
+              - 'crates/verter_lsp/**'
+              - 'packages/playground/**'
               - '.github/workflows/ci.yml'
 
   rust-fmt:
@@ -100,7 +109,17 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-      - run: cargo test --workspace --verbose
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Validate v5/process parity manifest
+        run: node scripts/v5-process/validate_manifest.mjs
+      - name: Prewarm tsgo cache
+        run: npx -y @typescript/native-preview --version
+      - name: Rust tests (strict tsgo)
+        env:
+          VERTER_REQUIRE_TSGO: "1"
+        run: cargo test --workspace --verbose
 
   js-build-test:
     name: JS Build & Test
@@ -115,10 +134,28 @@ jobs:
           node-version: lts/*
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Validate v5/process parity manifest
+        run: node scripts/v5-process/validate_manifest.mjs
       - name: Build TS packages
         run: pnpm run build:ts
       - name: Run tests
         run: pnpm test
+
+  playground-test:
+    name: Playground Unit Tests
+    needs: detect-changes
+    if: needs.detect-changes.outputs.playground == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Playground tests
+        run: pnpm --filter @verter/playground test
 
   wasm-build:
     name: WASM Build

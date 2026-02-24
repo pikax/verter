@@ -1295,6 +1295,24 @@ pub fn create_test_project(dir: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    fn tsgo_bin_or_skip() -> Option<String> {
+        match find_tsgo_binary() {
+            Some(bin) => Some(bin),
+            None => {
+                if std::env::var("VERTER_REQUIRE_TSGO")
+                    .map(|v| v == "1")
+                    .unwrap_or(false)
+                {
+                    panic!(
+                        "tsgo not found, but VERTER_REQUIRE_TSGO=1 is set; install tsgo or prewarm npx cache",
+                    );
+                }
+                eprintln!("skipping: tsgo not found");
+                None
+            }
+        }
+    }
+
     /// @ai-generated — path_to_uri produces correct file URIs
     #[test]
     fn test_path_to_uri() {
@@ -1325,12 +1343,8 @@ mod tests {
     /// @ai-generated — TSGO process spawns and initializes successfully
     #[tokio::test]
     async fn test_tsgo_spawn_and_initialize() {
-        let tsgo_bin = match find_tsgo_binary() {
-            Some(bin) => bin,
-            None => {
-                eprintln!("skipping: tsgo not found");
-                return;
-            }
+        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
+            return;
         };
 
         let tmp = std::env::temp_dir().join("verter_tsgo_test_init");
@@ -1353,12 +1367,8 @@ mod tests {
     /// @ai-generated — TSGO processes open_file and hover for a .ts file
     #[tokio::test]
     async fn test_tsgo_hover_on_ts_file() {
-        let tsgo_bin = match find_tsgo_binary() {
-            Some(bin) => bin,
-            None => {
-                eprintln!("skipping: tsgo not found");
-                return;
-            }
+        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
+            return;
         };
 
         let tmp = std::env::temp_dir().join("verter_tsgo_test_hover");
@@ -1403,12 +1413,8 @@ mod tests {
     /// @ai-generated — Full E2E: Vue → verter TSX → TSGO hover
     #[tokio::test]
     async fn test_e2e_vue_to_tsgo_hover() {
-        let tsgo_bin = match find_tsgo_binary() {
-            Some(bin) => bin,
-            None => {
-                eprintln!("skipping: tsgo not found");
-                return;
-            }
+        let Some(tsgo_bin) = tsgo_bin_or_skip() else {
+            return;
         };
 
         let tmp = std::env::temp_dir().join("verter_tsgo_e2e_hover");

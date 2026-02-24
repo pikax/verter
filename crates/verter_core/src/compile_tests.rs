@@ -6339,6 +6339,21 @@ fn compile_tsx(source: &str) -> VerterCompileResult {
     compile(source, &options, &verter_opts, &alloc)
 }
 
+fn compile_tsx_with_force_js(source: &str, force_js: bool) -> VerterCompileResult {
+    let alloc = Allocator::new();
+    let options = CodegenOptions {
+        filename: Some("App.vue".to_string()),
+        include_tsx: true,
+        ..Default::default()
+    };
+    let verter_opts = VerterCompileOptions {
+        source_map: true,
+        force_js,
+        ..Default::default()
+    };
+    compile(source, &options, &verter_opts, &alloc)
+}
+
 #[test]
 fn tsx_basic_sfc() {
     let result = compile_tsx(
@@ -6585,6 +6600,76 @@ const msg = 'hello'
     assert!(
         !tsx.source_map.is_empty(),
         "TSX source map should not be empty even for script-only SFC"
+    );
+}
+
+/// @ai-generated - TSX output must be independent from force_js mode.
+#[test]
+fn tsx_force_js_toggle_does_not_change_code() {
+    let source = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count: number = 1
+const msg: string = 'hello'
+</script>
+<template>
+  <button @click="count++">{{ msg }} {{ count }}</button>
+</template>"#;
+
+    let force_js_true = compile_tsx_with_force_js(source, true);
+    let force_js_false = compile_tsx_with_force_js(source, false);
+
+    assert!(
+        force_js_true.errors.is_empty(),
+        "force_js=true compile errors: {:?}",
+        force_js_true.errors
+    );
+    assert!(
+        force_js_false.errors.is_empty(),
+        "force_js=false compile errors: {:?}",
+        force_js_false.errors
+    );
+
+    let tsx_true = force_js_true.tsx.expect("tsx block (force_js=true)");
+    let tsx_false = force_js_false.tsx.expect("tsx block (force_js=false)");
+
+    assert_eq!(
+        tsx_true.code, tsx_false.code,
+        "TSX code must be identical regardless of force_js"
+    );
+}
+
+/// @ai-generated - TSX source map must be independent from force_js mode.
+#[test]
+fn tsx_force_js_toggle_does_not_change_source_map() {
+    let source = r#"<script setup lang="ts">
+import { ref } from 'vue'
+const count: number = 1
+const msg: string = 'hello'
+</script>
+<template>
+  <button @click="count++">{{ msg }} {{ count }}</button>
+</template>"#;
+
+    let force_js_true = compile_tsx_with_force_js(source, true);
+    let force_js_false = compile_tsx_with_force_js(source, false);
+
+    assert!(
+        force_js_true.errors.is_empty(),
+        "force_js=true compile errors: {:?}",
+        force_js_true.errors
+    );
+    assert!(
+        force_js_false.errors.is_empty(),
+        "force_js=false compile errors: {:?}",
+        force_js_false.errors
+    );
+
+    let tsx_true = force_js_true.tsx.expect("tsx block (force_js=true)");
+    let tsx_false = force_js_false.tsx.expect("tsx block (force_js=false)");
+
+    assert_eq!(
+        tsx_true.source_map, tsx_false.source_map,
+        "TSX source map must be identical regardless of force_js"
     );
 }
 
