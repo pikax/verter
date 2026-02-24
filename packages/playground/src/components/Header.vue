@@ -19,7 +19,7 @@ function verterTimingTitle(): string {
 <template>
   <header class="header">
     <div class="logo">
-      <img src="/verter-logo.svg" alt="Verter" class="logo-img" />
+      <img src="/logo.svg" alt="Verter" class="logo-img" />
       <span class="logo-text">Verter Playground</span>
     </div>
     <VersionSelect :store="store" />
