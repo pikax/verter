@@ -112,6 +112,9 @@ pub(crate) fn assemble_main_module(
         }
     } else {
         out.push_str("const _sfc_main = {}\n");
+        if !compiled.scope_id.is_empty() {
+            let _ = writeln!(out, "_sfc_main.__scopeId = \"{}\"", compiled.scope_id);
+        }
     }
 
     if let Some(template) = &compiled.template {

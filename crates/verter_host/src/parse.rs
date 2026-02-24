@@ -211,6 +211,7 @@ pub(crate) fn parse_vue_snapshot(
     let mut style_hashes = Vec::new();
     let mut style_attrs_fp = Vec::new();
     let mut style_langs = Vec::new();
+    let mut has_scoped_style = false;
 
     for (idx, style) in syntax.style_nodes().iter().enumerate() {
         let content = if let Some(span) = style.content {
@@ -222,6 +223,7 @@ pub(crate) fn parse_vue_snapshot(
 
         let mut attrs = extract_attrs(&style.attributes, source);
         if style.scoped {
+            has_scoped_style = true;
             attrs.push(("scoped", "true"));
         }
         if style.module {
@@ -377,6 +379,7 @@ pub(crate) fn parse_vue_snapshot(
         meta: FileMeta {
             has_script,
             has_template,
+            has_scoped_style,
             script_lang,
             style_langs,
             custom_types,

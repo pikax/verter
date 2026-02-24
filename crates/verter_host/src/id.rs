@@ -358,6 +358,7 @@ mod tests {
             style_langs: vec![Some("scss".to_string()), None],
             custom_types: vec!["i18n".to_string()],
             custom_langs: vec![None],
+            ..FileMeta::default()
         };
         let cases: Vec<VirtualNodeKind> = vec![
             VirtualNodeKind::Main,

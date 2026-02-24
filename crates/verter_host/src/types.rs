@@ -530,6 +530,10 @@ pub(crate) struct SliceHashes {
 pub(crate) struct FileMeta {
     pub(crate) has_script: bool,
     pub(crate) has_template: bool,
+    /// True when any `<style scoped>` block exists. Used to expose a
+    /// synthetic Script virtual node for template-only components that
+    /// need `__scopeId` on the component object.
+    pub(crate) has_scoped_style: bool,
     pub(crate) script_lang: Option<String>,
     pub(crate) style_langs: Vec<Option<String>>,
     pub(crate) custom_types: Vec<String>,
@@ -628,7 +632,9 @@ pub(crate) struct FileEntry {
 impl FileMeta {
     pub(crate) fn virtual_nodes(&self) -> Vec<VirtualNodeKind> {
         let mut nodes = vec![VirtualNodeKind::Main];
-        if self.has_script {
+        if self.has_script || self.has_scoped_style {
+            // Include Script for template-only components with scoped styles:
+            // the compiler emits a synthetic script block with __scopeId.
             nodes.push(VirtualNodeKind::Script);
         }
         if self.has_template {

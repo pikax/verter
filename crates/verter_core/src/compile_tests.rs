@@ -5168,3 +5168,65 @@ fn vdom_mode_uses_setup_prefix() {
         tpl.code
     );
 }
+
+// ==================== Template-only + scoped styles ====================
+
+/// Template-only component with `<style scoped>` should emit a synthetic
+/// script block containing `__scopeId` so Vue's runtime applies the
+/// scoped `data-v-*` attributes to DOM elements.
+#[test]
+fn template_only_scoped_style_emits_scope_id_in_script() {
+    let result = compile_sfc(
+        "<template><div class=\"app\">hello</div></template>\n<style scoped>\n.app { color: red; }\n</style>",
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert!(!result.scope_id.is_empty(), "should have scope_id");
+
+    let script = result
+        .script
+        .as_ref()
+        .expect("template-only component with scoped style should emit a synthetic script block");
+    assert!(
+        script.code.contains("__scopeId"),
+        "script should contain __scopeId assignment, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains(&result.scope_id),
+        "script should reference the scope_id '{}', got:\n{}",
+        result.scope_id,
+        script.code
+    );
+    assert!(
+        script.code.contains("export default __sfc__"),
+        "script should export __sfc__, got:\n{}",
+        script.code
+    );
+}
+
+/// Template-only component WITHOUT scoped styles should NOT emit a
+/// synthetic script block (no __scopeId needed).
+#[test]
+fn template_only_no_scoped_style_no_script_block() {
+    let result = compile_sfc("<template><div>hello</div></template>");
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert!(
+        result.script.is_none(),
+        "template-only without scoped style should not have a script block",
+    );
+}
+
+/// Template-only with scoped style: CSS should contain scoped selectors.
+#[test]
+fn template_only_scoped_style_css_is_scoped() {
+    let result = compile_sfc(
+        "<template><div class=\"app\">hello</div></template>\n<style scoped>\n.app { color: red; }\n</style>",
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    assert_eq!(result.styles.len(), 1);
+    assert!(
+        result.styles[0].code.contains("[data-v-"),
+        "scoped CSS should contain [data-v-] selector, got:\n{}",
+        result.styles[0].code
+    );
+}

@@ -1612,6 +1612,7 @@ mod tests {
             style_langs: vec![None, Some("scss".to_string())],
             custom_types: vec!["i18n".to_string()],
             custom_langs: vec![None],
+            ..FileMeta::default()
         };
         let nodes = meta.virtual_nodes();
         assert_eq!(

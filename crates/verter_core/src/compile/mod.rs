@@ -382,6 +382,28 @@ pub fn compile(
             setup: has_script_setup,
             attrs: script_attrs,
         })
+    } else if has_scoped_style || use_vapor {
+        // Template-only component with scoped styles or vapor mode:
+        // Emit a synthetic script block so __scopeId / __vapor propagates
+        // to consumers (playground, bundler, etc.).
+        let mut code = String::with_capacity(128);
+        code.push_str("const __sfc__ = {};\n");
+        if has_scoped_style {
+            code.push_str("__sfc__.__scopeId = \"");
+            code.push_str(&scope_id_full);
+            code.push_str("\";\n");
+        }
+        if use_vapor {
+            code.push_str("__sfc__.__vapor = true;\n");
+        }
+        code.push_str("export default __sfc__;\n");
+        Some(VerterScriptBlock {
+            code,
+            duration_ms: script_duration_ms,
+            source_map: String::new(),
+            setup: false,
+            attrs: Vec::new(),
+        })
     } else {
         None
     };

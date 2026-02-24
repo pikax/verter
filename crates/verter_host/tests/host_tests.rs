@@ -2554,3 +2554,73 @@ const isOpen = computed(() => props.visible)
         "lang should be 'js' when force_js: true"
     );
 }
+
+// ==================== Template-only + scoped styles ====================
+
+/// Template-only component with `<style scoped>` should expose a Script
+/// virtual node (synthetic script block with __scopeId) and the script
+/// code should contain the scope_id assignment.
+#[test]
+fn template_only_scoped_style_exposes_script_node_with_scope_id() {
+    let host = VerterHost::new(HostConfig::default());
+    let src = "<template><div class=\"app\">hello</div></template>\n<style scoped>\n.app { color: red; }\n</style>";
+    let _ = upsert_vue(&host, "Comp.vue", src);
+
+    let nodes = host.list_virtual_files("Comp.vue");
+    assert!(
+        nodes.contains(&VirtualNodeKind::Script),
+        "template-only + scoped style should expose Script node, got: {:?}",
+        nodes
+    );
+    assert!(
+        nodes.contains(&VirtualNodeKind::Template),
+        "should have Template node, got: {:?}",
+        nodes
+    );
+    assert!(
+        nodes
+            .iter()
+            .any(|n| matches!(n, VirtualNodeKind::Style { .. })),
+        "should have Style node, got: {:?}",
+        nodes
+    );
+
+    // Fetch the script virtual file — it should contain __scopeId
+    let profile = CompileProfile {
+        force_js: true,
+        ..CompileProfile::default()
+    };
+    let script = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("Comp.vue?vue&type=script".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile.clone(),
+        })
+        .unwrap();
+    assert!(
+        script.code.contains("__scopeId"),
+        "script should contain __scopeId, got:\n{}",
+        script.code
+    );
+    assert!(
+        script.code.contains("data-v-"),
+        "script should contain data-v- scope id, got:\n{}",
+        script.code
+    );
+
+    // The main module should also have __scopeId
+    let main = host
+        .get_virtual_file(VirtualQuery {
+            raw_id: Some("Comp.vue".to_string()),
+            canonical_id: None,
+            node_kind: None,
+            compile_profile: profile,
+        })
+        .unwrap();
+    assert!(
+        main.code.contains("__scopeId") || main.code.contains("scopeId"),
+        "main module should contain scopeId, got:\n{}",
+        main.code
+    );
+}
