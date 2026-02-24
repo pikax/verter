@@ -9,7 +9,7 @@
 
 use oxc_allocator::Allocator;
 
-use crate::ast::types::ElementNode;
+use crate::ast::types::{ElementNode, TagType};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::oxc::types::{OxcParsedElement, OxcParsedProp};
@@ -47,6 +47,21 @@ pub fn process_element_props<'alloc>(
         }
 
         let dir_name = get_directive_name(prop, source);
+
+        // `<component :is="...">` is rewritten at the element level.
+        // Skip prop-level bind transform to avoid overlapping rewrites.
+        if el.tag_type == TagType::Component
+            && &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize]
+                == "component"
+            && dir_name == "bind"
+            && prop.is_dynamic != Some(true)
+        {
+            if let (Some(arg_start), Some(arg_end)) = (prop.arg_start, prop.arg_end) {
+                if source[arg_start as usize..arg_end as usize].trim() == "is" {
+                    continue;
+                }
+            }
+        }
 
         match dir_name {
             "bind" => process_v_bind(prop, oxc_prop, source, out, alloc, resolver),

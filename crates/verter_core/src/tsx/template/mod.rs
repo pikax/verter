@@ -154,13 +154,15 @@ fn walk_element<'alloc>(
     }
 
     // Handle the element tag itself
-    let _tag_name = &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
+    let tag_name = &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
 
     // Convert tag for components
     match el.tag_type {
         TagType::Component => {
-            // Component tags stay as-is (PascalCase or kebab-case)
-            // For kebab-case, TS/JSX resolves via imports
+            // Handle `<component is="...">` / `<component :is="...">`.
+            if tag_name == "component" {
+                rewrite_component_is(el, source, out);
+            }
         }
         TagType::Template => {
             // <template> in template context → fragment
@@ -212,6 +214,128 @@ fn walk_element<'alloc>(
     if has_v_for {
         directives::emit_v_for_close(el, source, out);
     }
+}
+
+fn rewrite_component_is(
+    el: &ElementNode,
+    source: &str,
+    out: &mut CodeGenOutput<'_>,
+) {
+    let static_is_prop = el.props.iter().find(|prop| {
+        if prop.is_directive {
+            return false;
+        }
+        &source[prop.start as usize..prop.name_end as usize] == "is"
+    });
+
+    // 1) Static `is="div"`
+    if let Some(is_prop) = static_is_prop {
+        let (Some(value_start), Some(value_end)) = (is_prop.value_start, is_prop.value_end) else {
+            return;
+        };
+        if value_end <= value_start {
+            return;
+        }
+
+        let target_tag = source[value_start as usize..value_end as usize].trim();
+        if target_tag.is_empty() {
+            return;
+        }
+
+        rewrite_component_tag_name(el, target_tag, out);
+
+        // Remove `is="..."`
+        let is_prop_end = props::get_prop_end(is_prop);
+        out.overwrite(is_prop.start, is_prop_end, "");
+        return;
+    }
+
+    // 2) Dynamic `:is="expr"` / `v-bind:is="expr"`
+    let bind_is_prop = el.props.iter().find(|prop| {
+        if !prop.is_directive || prop.is_dynamic == Some(true) {
+            return false;
+        }
+        if directive_name(prop, source) != "bind" {
+            return false;
+        }
+        let (Some(arg_start), Some(arg_end)) = (prop.arg_start, prop.arg_end) else {
+            return false;
+        };
+        source[arg_start as usize..arg_end as usize].trim() == "is"
+    });
+
+    let Some(bind_is_prop) = bind_is_prop else {
+        return;
+    };
+
+    let (Some(value_start), Some(value_end)) = (bind_is_prop.value_start, bind_is_prop.value_end)
+    else {
+        return;
+    };
+    if value_end <= value_start {
+        return;
+    }
+
+    let value_expr = source[value_start as usize..value_end as usize].trim();
+    if value_expr.is_empty() {
+        return;
+    }
+
+    if let Some(literal_tag) = parse_string_literal(value_expr) {
+        rewrite_component_tag_name(el, literal_tag, out);
+    } else {
+        let temp_name = format!("__verter_component_render_{}", el.tag_open.start);
+        out.prepend_alloc(
+            el.tag_open.start,
+            &format!("const {} = ({});\n", temp_name, value_expr),
+        );
+        rewrite_component_tag_name(el, &temp_name, out);
+    }
+
+    // Remove `:is="..."`
+    let prop_end = props::get_prop_end(bind_is_prop);
+    out.overwrite(bind_is_prop.start, prop_end, "");
+}
+
+fn rewrite_component_tag_name(
+    el: &ElementNode,
+    target_tag: &str,
+    out: &mut CodeGenOutput<'_>,
+) {
+    // Rewrite opening `<component` to `<targetTag`.
+    out.overwrite(el.tag_open.start + 1, el.tag_open.name_end, target_tag);
+
+    // Rewrite closing `</component>` if present.
+    if let Some(tag_close) = &el.tag_close {
+        out.overwrite(tag_close.start + 2, tag_close.name_end, target_tag);
+    }
+}
+
+fn directive_name<'a>(prop: &crate::types::NodeProp, source: &'a str) -> &'a str {
+    let name = &source[prop.start as usize..prop.name_end as usize];
+    if name.starts_with(':') || name.starts_with('.') {
+        return "bind";
+    }
+    if name.starts_with('@') {
+        return "on";
+    }
+    if name.starts_with('#') {
+        return "slot";
+    }
+    name.strip_prefix("v-").unwrap_or(name)
+}
+
+fn parse_string_literal(value_expr: &str) -> Option<&str> {
+    let bytes = value_expr.as_bytes();
+    if bytes.len() < 2 {
+        return None;
+    }
+    let first = bytes[0];
+    let last = bytes[bytes.len() - 1];
+    if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+        return Some(&value_expr[1..value_expr.len() - 1]);
+    }
+    None
 }
 
 /// Visit a text node.

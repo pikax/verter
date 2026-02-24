@@ -7257,6 +7257,151 @@ fn tsx_parent_v_if_with_child_v_for_contains_outer_condition() {
 }
 
 #[test]
+fn tsx_component_pascal_and_dotted_names_are_preserved() {
+    let result = compile_tsx(
+        r#"<template>
+  <Comp></Comp>
+  <Calendar.Root />
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("<Comp></Comp>"),
+        "PascalCase component tag should be preserved in TSX output, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("<Calendar.Root />") || tsx.code.contains("<Calendar.Root/>"),
+        "Dotted component tag should be preserved in TSX output, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_component_static_is_rewrites_to_target_tag() {
+    let result = compile_tsx(r#"<template><component is="div"></component></template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("<div ></div>") || tsx.code.contains("<div></div>"),
+        "Static component is=\"div\" should rewrite tag to <div>, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("<component"),
+        "Static component is=\"...\" should not keep <component> tag, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_component_static_is_keeps_other_attributes() {
+    let result = compile_tsx(
+        r#"<template><component is="div" tabindex="1"></component></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("<div  tabindex=\"1\"></div>")
+            || tsx.code.contains("<div tabindex=\"1\"></div>")
+            || tsx.code.contains("<div tabindex={\"1\"}></div>"),
+        "Static component is rewrite should preserve other attrs, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_component_dynamic_is_literal_string_rewrites_to_target_tag() {
+    let result = compile_tsx(r#"<template><component :is="'div'"></component></template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("<div ></div>") || tsx.code.contains("<div></div>"),
+        "Dynamic :is with literal string should rewrite to static tag, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_component_dynamic_is_expression_rewrites_to_temp_component() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const as = 'div'
+</script>
+<template><component :is="as || 'div'"></component></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("const __verter_component_render_"),
+        "Dynamic :is expression should emit temp component binding, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("<__verter_component_render_"),
+        "Dynamic :is expression should rewrite element tag to temp component binding, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_component_with_v_if_and_v_for_preserves_component_tags() {
+    let result = compile_tsx(
+        r#"<template>
+  <Comp v-if="test"></Comp>
+  <Comp v-for="item in items"></Comp>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("test ? (<Comp") || tsx.code.contains("_ctx.test ? (<Comp"),
+        "Component with v-if should keep Comp tag in conditional branch, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains(".map((item) => (<Comp") || tsx.code.contains(".map((item) => (<Comp "),
+        "Component with v-for should keep Comp tag inside map branch, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_component_kebab_and_mixed_case_names_are_preserved() {
+    let result = compile_tsx(
+        r#"<template>
+  <item-render></item-render>
+  <hello-moto />
+  <helloMoto />
+  <Hello-Moto />
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("<item-render></item-render>"),
+        "kebab-case component tag should be preserved, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("<hello-moto />") || tsx.code.contains("<hello-moto/>"),
+        "lower-kebab component tag should be preserved, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("<helloMoto />") || tsx.code.contains("<helloMoto/>"),
+        "mixed camelCase component tag should be preserved, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("<Hello-Moto />") || tsx.code.contains("<Hello-Moto/>"),
+        "mixed Pascal-kebab component tag should be preserved, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_not_generated_when_disabled() {
     let result = compile_sfc(
         r#"<script setup>
