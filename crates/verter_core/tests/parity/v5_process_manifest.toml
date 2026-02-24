@@ -7,7 +7,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 106
 source_name = "change event on select element"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:114:submit-event-on-form-element"
@@ -16,7 +16,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 114
 source_name = "submit event on form element"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:122:keydown-event-on-input-element"
@@ -25,7 +25,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 122
 source_name = "keydown event on input element"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:130:focus-event-on-input-element"
@@ -34,7 +34,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 130
 source_name = "focus event on input element"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:138:blur-event-on-input-element"
@@ -43,7 +43,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 138
 source_name = "blur event on input element"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:146:mouseenter-event-on-div-element"
@@ -52,7 +52,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 146
 source_name = "mouseenter event on div element"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:154:mouseleave-event-on-div-element"
@@ -61,7 +61,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 154
 source_name = "mouseleave event on div element"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:166:function-with-multiple-parameters"
@@ -70,7 +70,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 166
 source_name = "function with multiple parameters"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infers_native_input_handler_multi_params"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:178:function-not-used-in-template"
@@ -79,7 +79,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 178
 source_name = "function not used in template"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_does_not_infer_unbound_function"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:194:function-with-typed-parameter"
@@ -88,7 +88,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 194
 source_name = "function with typed parameter"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_does_not_override_existing_typed_params"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:206:arrow-function-handler"
@@ -97,7 +97,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 206
 source_name = "arrow function handler"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_does_not_transform_arrow_function_handlers"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:219:click-on-anchor-element"
@@ -106,7 +106,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 219
 source_name = "click on anchor element"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:227:double-click-on-div"
@@ -115,7 +115,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 227
 source_name = "double click on div"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:235:contextmenu-event"
@@ -124,7 +124,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 235
 source_name = "contextmenu event"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:247:function-with-no-parameters"
@@ -133,7 +133,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 247
 source_name = "function with no parameters"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_does_not_transform_no_param_functions"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:260:component-event-with-change-handler"
@@ -142,7 +142,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 260
 source_name = "component event with change handler"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_component_events_from_imported_components"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:269:component-event-with-click-handler"
@@ -151,7 +151,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 269
 source_name = "component event with click handler"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_component_events_from_imported_components"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:278:component-event-with-custom-event"
@@ -160,7 +160,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 278
 source_name = "component event with custom event"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_component_events_from_imported_components"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:286:component-event-with-update-event"
@@ -169,7 +169,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 286
 source_name = "component event with update event"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_component_events_from_imported_components"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:82:click-event-on-button"
@@ -178,7 +178,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 82
 source_name = "click event on button"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infers_native_click_handler_param_type"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts:98:input-event-on-input-element"
@@ -187,7 +187,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.fixtures.ts"
 source_line = 98
 source_name = "input event on input element"
-rust_test = "v5_process_ported_tests::v5_process_fixture_manifest_contract"
+rust_test = "compile::tests::tsx_infers_native_input_handler_multi_params"
 
 [[entry]]
 id = "fixture:packages/core/src/v5/process/script/plugins/macros/macros.fixtures.ts:100:defineprops-with-object-syntax"
@@ -1627,7 +1627,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 101
 source_name = "infers submit event type on form"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:114:infers-keydown-event-type"
@@ -1636,7 +1636,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 114
 source_name = "infers keydown event type"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:127:infers-focus-event-type"
@@ -1645,7 +1645,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 127
 source_name = "infers focus event type"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:146:handles-function-with-multiple-parameters"
@@ -1654,7 +1654,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 146
 source_name = "handles function with multiple parameters"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infers_native_input_handler_multi_params"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:161:does-not-transform-function-not-used-in-template"
@@ -1663,7 +1663,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 161
 source_name = "does not transform function not used in template"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_does_not_infer_unbound_function"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:180:transforms-function-with-typed-parameters-adds-spread-syntax"
@@ -1672,7 +1672,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 180
 source_name = "transforms function with typed parameters (adds spread syntax)"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_does_not_override_existing_typed_params"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:195:does-not-transform-arrow-functions-only-function-declarations"
@@ -1681,7 +1681,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 195
 source_name = "does not transform arrow functions (only function declarations)"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_does_not_transform_arrow_function_handlers"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:210:does-not-transform-in-js-files-only-ts"
@@ -1690,7 +1690,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 210
 source_name = "does not transform in JS files (only TS)"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_skips_js_scripts"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:225:handles-functions-in-non-setup-scripts"
@@ -1699,7 +1699,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 225
 source_name = "handles functions in non-setup scripts"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_supports_non_setup_scripts"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:240:infers-event-type-from-vue-component-props"
@@ -1708,7 +1708,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 240
 source_name = "infers event type from Vue component props"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_component_events_from_imported_components"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:254:infers-event-type-with-capitalized-event-name-for-components"
@@ -1717,7 +1717,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 254
 source_name = "infers event type with capitalized event name for components"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_component_events_from_imported_components"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:267:infers-event-type-from-locally-registered-component"
@@ -1726,7 +1726,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 267
 source_name = "infers event type from locally registered component"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_component_events_from_imported_components"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:62:infers-click-event-type-for-single-parameter"
@@ -1735,7 +1735,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 62
 source_name = "infers click event type for single parameter"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infers_native_click_handler_param_type"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:75:infers-input-event-type"
@@ -1744,7 +1744,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 75
 source_name = "infers input event type"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infers_native_input_handler_multi_params"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts:88:infers-change-event-type"
@@ -1753,7 +1753,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/infer-function/infer-function.spec.ts"
 source_line = 88
 source_name = "infers change event type"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_infer_function_native_event_matrix_matches_v5_process_cases"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/macros/macros.spec.ts:101:const-props-defineprops-a-string"

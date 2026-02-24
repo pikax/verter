@@ -31,10 +31,11 @@ use oxc_allocator::Allocator;
 use oxc_ast::ast::{BindingPattern, Declaration, Function, Statement};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ast::types::{AstNodeKind, TagType, TemplateAst};
 use crate::code_transform::CodeTransform;
+use crate::cursor::ScriptLanguage;
 use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::{is_simple_ident, BindingType};
 use crate::template::code_gen::types::CodeGenOutput;
@@ -77,7 +78,15 @@ pub fn generate_tsx_script<'alloc>(
             );
         }
         (Some(normal), None) => {
-            process_tsx_script_only(normal, source, &mut out, &mut bindings, alloc, options);
+            process_tsx_script_only(
+                normal,
+                template_ast,
+                source,
+                &mut out,
+                &mut bindings,
+                alloc,
+                options,
+            );
         }
         (None, None) => {
             // No script blocks — emit minimal component wrapper
@@ -130,13 +139,17 @@ fn process_tsx_script_setup<'alloc>(
     );
 
     // Infer event-handler parameter types from template usage (v5/process parity).
-    apply_event_handler_param_inference(
-        &parser_ret.program.body,
-        template_ast,
-        source,
-        content_start,
-        out,
-    );
+    if should_infer_function_types(setup.lang) {
+        let available_bindings = collect_binding_names(&parse_result.bindings, source, content_str);
+        apply_event_handler_param_inference(
+            &parser_ret.program.body,
+            template_ast,
+            source,
+            content_start,
+            &available_bindings,
+            out,
+        );
+    }
 
     // Hoist imports to file top (before component wrapper)
     for item in &parse_result.items {
@@ -208,13 +221,15 @@ fn apply_event_handler_param_inference(
     template_ast: Option<&TemplateAst>,
     source: &str,
     content_start: u32,
+    available_bindings: &FxHashSet<String>,
     out: &mut CodeGenOutput<'_>,
 ) {
     let Some(template_ast) = template_ast else {
         return;
     };
 
-    let handler_type_hints = collect_native_handler_type_hints(template_ast, source);
+    let handler_type_hints =
+        collect_event_handler_type_hints(template_ast, source, available_bindings);
     if handler_type_hints.is_empty() {
         return;
     }
@@ -299,7 +314,11 @@ fn maybe_annotate_function_params(
     out.overwrite(params_start, params_end, &replacement);
 }
 
-fn collect_native_handler_type_hints(ast: &TemplateAst, source: &str) -> FxHashMap<String, String> {
+fn collect_event_handler_type_hints(
+    ast: &TemplateAst,
+    source: &str,
+    available_bindings: &FxHashSet<String>,
+) -> FxHashMap<String, String> {
     let mut hints = FxHashMap::default();
 
     let Some(content) = &ast.root.content else {
@@ -307,16 +326,23 @@ fn collect_native_handler_type_hints(ast: &TemplateAst, source: &str) -> FxHashM
     };
 
     for &child in content.children.iter() {
-        collect_native_handler_type_hints_from_node(child, ast, source, &mut hints);
+        collect_event_handler_type_hints_from_node(
+            child,
+            ast,
+            source,
+            available_bindings,
+            &mut hints,
+        );
     }
 
     hints
 }
 
-fn collect_native_handler_type_hints_from_node(
+fn collect_event_handler_type_hints_from_node(
     id: crate::types::NodeId,
     ast: &TemplateAst,
     source: &str,
+    available_bindings: &FxHashSet<String>,
     hints: &mut FxHashMap<String, String>,
 ) {
     let node = &ast.nodes[id.0];
@@ -325,48 +351,104 @@ fn collect_native_handler_type_hints_from_node(
     };
     let el = el_box.as_ref();
 
-    if el.tag_type == TagType::Element {
-        let tag_name = &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
-        for prop in &el.props {
-            if !is_event_directive(prop, source) {
-                continue;
-            }
-            if prop.is_dynamic == Some(true) {
-                continue;
-            }
-            let (Some(arg_start), Some(arg_end)) = (prop.arg_start, prop.arg_end) else {
-                continue;
-            };
-            let (Some(value_start), Some(value_end)) = (prop.value_start, prop.value_end) else {
-                continue;
-            };
-
-            let handler = source[value_start as usize..value_end as usize].trim();
-            if !is_simple_ident(handler) {
-                continue;
-            }
-
-            let event_name = source[arg_start as usize..arg_end as usize].trim();
-            if event_name.is_empty() {
-                continue;
-            }
-
-            let event_prop = event_to_jsx_name(event_name);
-            let type_expr = format!(
-                "Parameters<import('vue').IntrinsicElementAttributes[\"{}\"][\"{}\"]>",
-                tag_name, event_prop
-            );
-
-            // Keep first discovered hint for deterministic behavior.
-            hints.entry(handler.to_string()).or_insert(type_expr);
+    let tag_name = &source[(el.tag_open.start + 1) as usize..el.tag_open.name_end as usize];
+    for prop in &el.props {
+        if !is_event_directive(prop, source) {
+            continue;
         }
+        if prop.is_dynamic == Some(true) {
+            continue;
+        }
+        let (Some(arg_start), Some(arg_end)) = (prop.arg_start, prop.arg_end) else {
+            continue;
+        };
+        let (Some(value_start), Some(value_end)) = (prop.value_start, prop.value_end) else {
+            continue;
+        };
+
+        let handler = source[value_start as usize..value_end as usize].trim();
+        if !is_simple_ident(handler) {
+            continue;
+        }
+
+        let event_name = source[arg_start as usize..arg_end as usize].trim();
+        if event_name.is_empty() {
+            continue;
+        }
+
+        let event_prop = event_to_jsx_name(event_name);
+        let type_expr = match el.tag_type {
+            TagType::Element => format!(
+                "Parameters<NonNullable<import('vue').IntrinsicElementAttributes[\"{}\"][\"{}\"]>>",
+                tag_name, event_prop
+            ),
+            TagType::Component => {
+                let Some(component_binding) =
+                    resolve_component_binding_name(tag_name, available_bindings)
+                else {
+                    continue;
+                };
+                format!(
+                    "Parameters<NonNullable<Required<InstanceType<typeof {}>[\"$props\"]>[\"{}\"]>>",
+                    component_binding, event_prop
+                )
+            }
+            _ => continue,
+        };
+
+        // Keep first discovered hint for deterministic behavior.
+        hints.entry(handler.to_string()).or_insert(type_expr);
     }
 
     if let Some(content) = &el.content {
         for &child in content.children.iter() {
-            collect_native_handler_type_hints_from_node(child, ast, source, hints);
+            collect_event_handler_type_hints_from_node(
+                child,
+                ast,
+                source,
+                available_bindings,
+                hints,
+            );
         }
     }
+}
+
+fn resolve_component_binding_name(
+    tag_name: &str,
+    available_bindings: &FxHashSet<String>,
+) -> Option<String> {
+    if is_simple_ident(tag_name) && available_bindings.contains(tag_name) {
+        return Some(tag_name.to_string());
+    }
+
+    if tag_name.contains('-') {
+        let pascal = kebab_to_pascal_case(tag_name);
+        if available_bindings.contains(&pascal) {
+            return Some(pascal);
+        }
+    }
+
+    None
+}
+
+fn kebab_to_pascal_case(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut upper_next = true;
+    for ch in input.chars() {
+        if ch == '-' || ch == '_' {
+            upper_next = true;
+            continue;
+        }
+        if upper_next {
+            for up in ch.to_uppercase() {
+                out.push(up);
+            }
+            upper_next = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn is_event_directive(prop: &crate::types::NodeProp, source: &str) -> bool {
@@ -416,10 +498,34 @@ fn event_to_jsx_name(event_name: &str) -> String {
     result
 }
 
+fn should_infer_function_types(lang: Option<ScriptLanguage>) -> bool {
+    matches!(lang, Some(ScriptLanguage::TypeScript | ScriptLanguage::TSX))
+}
+
+fn collect_binding_names(
+    bindings: &[(crate::common::Span, BindingType)],
+    source: &str,
+    content_str: &str,
+) -> FxHashSet<String> {
+    let mut out = FxHashSet::default();
+    for (span, bt) in bindings {
+        let name = if *bt == BindingType::Props || *bt == BindingType::PropsAliased {
+            &source[span.start as usize..span.end as usize]
+        } else {
+            &content_str[span.start as usize..span.end as usize]
+        };
+        if !name.is_empty() {
+            out.insert(name.to_string());
+        }
+    }
+    out
+}
+
 // ── Script Only (Options API) Processing ──────────────────────────
 
 fn process_tsx_script_only<'alloc>(
     script: &RootNodeScript,
+    template_ast: Option<&TemplateAst>,
     source: &'alloc str,
     out: &mut CodeGenOutput<'alloc>,
     bindings: &mut FxHashMap<&'alloc str, BindingType>,
@@ -444,6 +550,18 @@ fn process_tsx_script_only<'alloc>(
         content_start,
         content_str,
     );
+
+    if should_infer_function_types(script.lang) {
+        let available_bindings = collect_binding_names(&parse_result.bindings, source, content_str);
+        apply_event_handler_param_inference(
+            &parser_ret.program.body,
+            template_ast,
+            source,
+            content_start,
+            &available_bindings,
+            out,
+        );
+    }
 
     // Extract bindings from Options API
     // Same mixed-coordinate issue as script setup — see comment there.
