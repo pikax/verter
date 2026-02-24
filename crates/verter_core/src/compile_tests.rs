@@ -7095,6 +7095,40 @@ fn tsx_text_single_lt_is_not_wrapped() {
 }
 
 #[test]
+fn tsx_template_tag_replacement_wraps_content_in_fragment() {
+    let result = compile_tsx(r#"<template><div></div></template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("function __verter_tsx_App()"),
+        "Template should be emitted inside component function wrapper, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("<div></div>"),
+        "Template root content should be preserved after template-tag replacement, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("<template>"),
+        "Raw <template> tag should be removed from TSX output, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_tag_empty_template_emits_empty_fragment() {
+    let result = compile_tsx(r#"<template></template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("<></>"),
+        "Empty template should still emit an empty fragment, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_not_generated_when_disabled() {
     let result = compile_sfc(
         r#"<script setup>

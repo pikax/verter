@@ -6676,7 +6676,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/template-tag/templateTag.spec.ts"
 source_line = 30
 source_name = "should replace tag"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_tag_replacement_wraps_content_in_fragment"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/template-tag/templateTag.spec.ts:39:empty"
@@ -6685,7 +6685,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/template-tag/templateTag.spec.ts"
 source_line = 39
 source_name = "empty"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_tag_empty_template_emits_empty_fragment"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/text/text.spec.ts:42:should-handle-text"
