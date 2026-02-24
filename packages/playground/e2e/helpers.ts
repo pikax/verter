@@ -42,8 +42,7 @@ export function filterCriticalErrors(errors: string[]): string[] {
       !e.includes("404") &&
       !e.includes("DevTools") &&
       !e.includes("CORS") &&
-      !e.includes("net::ERR_FAILED") &&
-      !e.includes("reading 'length'"),
+      !e.includes("net::ERR_FAILED"),
   );
 }
 

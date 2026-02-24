@@ -76,7 +76,7 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
       </details>
 
       <!-- Imports -->
-      <details v-if="analysis.imports.length > 0" class="analysis-section" open>
+      <details v-if="analysis.imports?.length > 0" class="analysis-section" open>
         <summary class="section-title">Imports ({{ analysis.imports.length }})</summary>
         <div class="import-list">
           <div v-for="(imp, i) in analysis.imports" :key="i" class="import-item">
@@ -84,7 +84,7 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
               <code>{{ imp.source }}</code>
               <span v-if="imp.isTypeOnly" class="badge badge-type">type</span>
             </div>
-            <div v-if="imp.bindings.length > 0" class="import-bindings">
+            <div v-if="imp.bindings?.length > 0" class="import-bindings">
               <span v-for="(b, j) in imp.bindings" :key="j" class="binding-tag">
                 <code>{{ b.name }}</code>
                 <span v-if="b.isTypeOnly" class="badge badge-type">type</span>
@@ -96,7 +96,7 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
       </details>
 
       <!-- Bindings -->
-      <details v-if="analysis.bindings.length > 0" class="analysis-section" open>
+      <details v-if="analysis.bindings?.length > 0" class="analysis-section" open>
         <summary class="section-title">Bindings ({{ analysis.bindings.length }})</summary>
         <div class="binding-list">
           <div v-for="(b, i) in analysis.bindings" :key="i" class="binding-item">
@@ -111,7 +111,7 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
       </details>
 
       <!-- Macros -->
-      <details v-if="analysis.macros.length > 0" class="analysis-section" open>
+      <details v-if="analysis.macros?.length > 0" class="analysis-section" open>
         <summary class="section-title">Macros ({{ analysis.macros.length }})</summary>
         <div class="macro-list">
           <div v-for="(m, i) in analysis.macros" :key="i" class="macro-item">
@@ -120,7 +120,7 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
             <span v-if="m.bindingName" class="macro-binding">
               &rarr; <code>{{ m.bindingName }}</code>
             </span>
-            <span v-if="m.typeReferences.length > 0" class="macro-refs">
+            <span v-if="m.typeReferences?.length > 0" class="macro-refs">
               refs: <code v-for="(r, j) in m.typeReferences" :key="j">{{ r }}</code>
             </span>
           </div>
@@ -128,7 +128,7 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
       </details>
 
       <!-- Style Analysis -->
-      <details v-if="analysis.styles.length > 0" class="analysis-section" open>
+      <details v-if="analysis.styles?.length > 0" class="analysis-section" open>
         <summary class="section-title">Styles ({{ analysis.styles.length }})</summary>
         <div v-for="(style, i) in analysis.styles" :key="i" class="style-block">
           <div class="style-header">
@@ -138,19 +138,19 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
             <span v-if="style.moduleName" class="badge badge-kind">{{ style.moduleName }}</span>
           </div>
           <div v-if="style.css" class="style-details">
-            <div v-if="style.css.classes.length > 0" class="style-sub">
+            <div v-if="style.css.classes?.length > 0" class="style-sub">
               <span class="sub-label">Classes:</span>
               <code v-for="(c, j) in style.css.classes" :key="j" class="style-tag">.{{ c.name }}</code>
             </div>
-            <div v-if="style.css.ids.length > 0" class="style-sub">
+            <div v-if="style.css.ids?.length > 0" class="style-sub">
               <span class="sub-label">IDs:</span>
               <code v-for="(id, j) in style.css.ids" :key="j" class="style-tag">#{{ id.name }}</code>
             </div>
-            <div v-if="style.css.customProperties.length > 0" class="style-sub">
+            <div v-if="style.css.customProperties?.length > 0" class="style-sub">
               <span class="sub-label">Custom Props:</span>
               <code v-for="(cp, j) in style.css.customProperties" :key="j" class="style-tag">{{ cp.name }}</code>
             </div>
-            <div v-if="style.css.atRules.length > 0" class="style-sub">
+            <div v-if="style.css.atRules?.length > 0" class="style-sub">
               <span class="sub-label">At-rules:</span>
               <span v-for="(ar, j) in style.css.atRules" :key="j" class="style-tag">
                 @{{ ar.kind.toLowerCase() }} <code>{{ ar.name }}</code>
@@ -163,11 +163,11 @@ function formatInitializer(init: AnalysisBinding["initializer"]): string {
               <span>{{ style.css.selectors.length }}</span>
             </div>
           </div>
-          <div v-if="style.vBinds.length > 0" class="style-sub">
+          <div v-if="style.vBinds?.length > 0" class="style-sub">
             <span class="sub-label">v-bind:</span>
             <code v-for="(vb, j) in style.vBinds" :key="j" class="style-tag">{{ vb.expression }}</code>
           </div>
-          <div v-if="style.specialPseudos.length > 0" class="style-sub">
+          <div v-if="style.specialPseudos?.length > 0" class="style-sub">
             <span class="sub-label">Pseudos:</span>
             <span v-for="(sp, j) in style.specialPseudos" :key="j" class="badge badge-kind">
               :{{ sp.kind.toLowerCase() }}

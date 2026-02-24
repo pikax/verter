@@ -58,6 +58,7 @@ pub enum SpecialPseudoKind {
 
 /// Complete analysis of a single `<style>` block.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StyleBlockAnalysis {
     pub lang: StyleAnalysisLang,
     pub scoped: bool,
@@ -101,6 +102,7 @@ pub struct AnalyzedSpecialPseudo {
 
 /// Full CSS analysis produced by lightningcss parsing.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CssAnalysis {
     pub selectors: Vec<AnalyzedSelector>,
     pub classes: Vec<AnalyzedCssClass>,
@@ -912,6 +914,77 @@ mod tests {
         assert_eq!(
             container_rule.name, "sidebar",
             "should capture container name"
+        );
+    }
+
+    /// @ai-generated - Style analysis types serialize to camelCase JSON keys
+    /// for compatibility with the TypeScript playground AnalysisPanel.
+    #[test]
+    fn test_style_block_analysis_serializes_camel_case() {
+        let vue_input = VueStyleInput {
+            v_binds: vec![VBindInput {
+                expression: "color".to_string(),
+                quoted: false,
+                start: 10,
+                end: 25,
+            }],
+            special_pseudos: vec![SpecialPseudoInput {
+                kind: SpecialPseudoKind::Deep,
+                start: 30,
+                end: 50,
+                inner: Some(".inner".to_string()),
+            }],
+        };
+
+        let analysis = build_css_style_analysis(
+            r#":root { --my-var: red; } @keyframes slide { from {} to {} }"#,
+            vue_input,
+            true,
+            true,
+            Some("styles"),
+        );
+
+        let json = serde_json::to_value(&analysis).expect("should serialize");
+        let obj = json.as_object().expect("should be an object");
+
+        // StyleBlockAnalysis fields must be camelCase
+        assert!(
+            obj.contains_key("isModule"),
+            "expected 'isModule', got keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            obj.contains_key("moduleName"),
+            "expected 'moduleName', got keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            obj.contains_key("vBinds"),
+            "expected 'vBinds', got keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            obj.contains_key("specialPseudos"),
+            "expected 'specialPseudos', got keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
+
+        // CssAnalysis fields must also be camelCase
+        let css_obj = obj["css"].as_object().expect("css should be an object");
+        assert!(
+            css_obj.contains_key("customProperties"),
+            "expected 'customProperties', got keys: {:?}",
+            css_obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            css_obj.contains_key("atRules"),
+            "expected 'atRules', got keys: {:?}",
+            css_obj.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            css_obj.contains_key("ruleCount"),
+            "expected 'ruleCount', got keys: {:?}",
+            css_obj.keys().collect::<Vec<_>>()
         );
     }
 
