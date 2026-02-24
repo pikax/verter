@@ -216,11 +216,7 @@ fn walk_element<'alloc>(
     }
 }
 
-fn rewrite_component_is(
-    el: &ElementNode,
-    source: &str,
-    out: &mut CodeGenOutput<'_>,
-) {
+fn rewrite_component_is(el: &ElementNode, source: &str, out: &mut CodeGenOutput<'_>) {
     let static_is_prop = el.props.iter().find(|prop| {
         if prop.is_directive {
             return false;
@@ -297,11 +293,7 @@ fn rewrite_component_is(
     out.overwrite(bind_is_prop.start, prop_end, "");
 }
 
-fn rewrite_component_tag_name(
-    el: &ElementNode,
-    target_tag: &str,
-    out: &mut CodeGenOutput<'_>,
-) {
+fn rewrite_component_tag_name(el: &ElementNode, target_tag: &str, out: &mut CodeGenOutput<'_>) {
     // Rewrite opening `<component` to `<targetTag`.
     out.overwrite(el.tag_open.start + 1, el.tag_open.name_end, target_tag);
 

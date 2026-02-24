@@ -6844,6 +6844,391 @@ function handler(e) {
 }
 
 #[test]
+fn tsx_template_ref_use_template_ref_infers_static_element_type() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+let el = useTemplateRef('el')
+</script>
+<template>
+  <div ref="el"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains(
+            r#"useTemplateRef<("div" extends keyof HTMLElementTagNameMap ? HTMLElementTagNameMap["div"] : "div" extends keyof SVGElementTagNameMap ? SVGElementTagNameMap["div"] : Element),"el">('el')"#
+        ),
+        "Expected inferred useTemplateRef generic for static ref, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_use_template_ref_skips_js_scripts() {
+    let result = compile_tsx(
+        r#"<script setup lang="js">
+let el = useTemplateRef('el')
+</script>
+<template>
+  <div ref="el"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("let el = useTemplateRef('el')"),
+        "JS scripts should not inject template-ref generics, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("useTemplateRef<"),
+        "JS scripts should not inject useTemplateRef type arguments, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_use_template_ref_dynamic_ref_with_const_match() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+let x = useTemplateRef('test')
+const foo = 'test'
+</script>
+<template>
+  <my-comp :ref="foo"></my-comp>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code
+            .contains(r#"useTemplateRef<InstanceType<typeof MyComp>,typeof foo>('test')"#),
+        "Expected dynamic ref const-value matching to infer component type, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_use_template_ref_dynamic_ref_unknown_when_unmatched() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+let x = useTemplateRef('test')
+const foo = 'testx'
+</script>
+<template>
+  <my-comp :ref="foo"></my-comp>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code
+            .contains(r#"useTemplateRef<unknown,typeof foo>('test')"#),
+        "Expected unmatched dynamic ref selector to fall back to unknown, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_dynamic_component_is_union_from_literals() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+let a = useTemplateRef('a')
+</script>
+<template>
+  <component :is="true ? 'div' : 'span'" ref="a"></component>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains(r#"HTMLElementTagNameMap["div"]"#)
+            && tsx.code.contains(r#"HTMLElementTagNameMap["span"]"#),
+        "Expected dynamic component :is string-literal union to infer both tag types, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_ref_variable_matching_template_ref_gets_type() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const myDiv = ref()
+</script>
+<template>
+  <div ref="myDiv"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("const myDiv = ref<") && tsx.code.contains("|null>()"),
+        "Expected ref() variable to receive inferred template-ref type, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_ref_variable_inside_v_for_becomes_array_type() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const itemRef = ref()
+</script>
+<template>
+  <div v-for="item in items" :key="item" ref="itemRef"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("const itemRef = ref<") && tsx.code.contains("[]|null>()"),
+        "Expected ref() inside v-for scope to infer array element type, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_ref_variable_not_matching_template_ref_is_unchanged() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const other = ref()
+</script>
+<template>
+  <div ref="myDiv"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("const other = ref()"),
+        "Non-matching ref() variable should remain unchanged, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_skips_calls_with_explicit_type_arguments() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+import { ref } from 'vue'
+const myDiv = ref<HTMLInputElement>()
+const x = useTemplateRef<HTMLInputElement>('myDiv')
+</script>
+<template>
+  <div ref="myDiv"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("const myDiv = ref<HTMLInputElement>()"),
+        "Explicit ref<T>() should remain unchanged, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code
+            .contains("useTemplateRef<HTMLInputElement>('myDiv')"),
+        "Explicit useTemplateRef<T>() should remain unchanged, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_without_argument_uses_all_template_ref_names() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+let x = useTemplateRef()
+</script>
+<template>
+  <div ref="foo"></div>
+  <span ref="bar"></span>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains(r#""foo""#) && tsx.code.contains(r#""bar""#),
+        "Expected no-arg useTemplateRef() to include all template ref names, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_dynamic_function_ref_expression_is_ignored() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+let x = useTemplateRef()
+</script>
+<template>
+  <div :ref="el => (x = el)"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("let x = useTemplateRef()"),
+        "Function-like dynamic ref expressions should not drive inference, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_options_api_setup_function_is_supported() {
+    let result = compile_tsx(
+        r#"<script lang="ts">
+import { defineComponent, useTemplateRef } from 'vue'
+export default defineComponent({
+  setup() {
+    const myRef = useTemplateRef('myRef')
+    return { myRef }
+  }
+})
+</script>
+<template>
+  <div ref="myRef"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("useTemplateRef<") && tsx.code.contains(r#","myRef">('myRef')"#),
+        "Expected nested setup() call to receive inferred generic, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_template_ref_v5_process_parity_matrix() {
+    let ts_cases: [(&str, &[&str], &[&str]); 7] = [
+        (
+            r#"<script setup lang="ts">
+let el = useTemplateRef('el')
+</script>
+<template><div ref="el"></div></template>"#,
+            &[
+                r#"useTemplateRef<("div" extends keyof HTMLElementTagNameMap"#,
+                r#","el">('el')"#,
+            ],
+            &[],
+        ),
+        (
+            r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+let x = useTemplateRef('test')
+const foo = 'test'
+</script>
+<template><my-comp :ref="foo"></my-comp></template>"#,
+            &[r#"useTemplateRef<InstanceType<typeof MyComp>,typeof foo>('test')"#],
+            &[r#"useTemplateRef<unknown,typeof foo>('test')"#],
+        ),
+        (
+            r#"<script setup lang="ts">
+import MyComp from './MyComp.vue'
+let x = useTemplateRef('test')
+const foo = 'testx'
+</script>
+<template><my-comp :ref="foo"></my-comp></template>"#,
+            &[r#"useTemplateRef<unknown,typeof foo>('test')"#],
+            &[],
+        ),
+        (
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const itemRef = ref()
+</script>
+<template><div v-for="item in items" :key="item" ref="itemRef"></div></template>"#,
+            &[r#"const itemRef = ref<"#, r#"[]|null>()"#],
+            &[],
+        ),
+        (
+            r#"<script setup lang="ts">
+let a = useTemplateRef('a')
+</script>
+<template><component :is="true ? 'div' : 'span'" ref="a"></component></template>"#,
+            &[
+                r#"HTMLElementTagNameMap["div"]"#,
+                r#"HTMLElementTagNameMap["span"]"#,
+            ],
+            &[],
+        ),
+        (
+            r#"<script setup lang="ts">
+import { ref } from 'vue'
+const myDiv = ref()
+</script>
+<template><div ref="myDiv"></div></template>"#,
+            &[r#"const myDiv = ref<"#, r#"|null>()"#],
+            &[],
+        ),
+        (
+            r#"<script lang="ts">
+import { defineComponent, useTemplateRef } from 'vue'
+export default defineComponent({
+  setup() {
+    const myRef = useTemplateRef('myRef')
+    return { myRef }
+  }
+})
+</script>
+<template><div ref="myRef"></div></template>"#,
+            &[r#"useTemplateRef<"#, r#","myRef">('myRef')"#],
+            &[],
+        ),
+    ];
+
+    for (source, required_snippets, forbidden_snippets) in ts_cases {
+        let result = compile_tsx(source);
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let tsx = result.tsx.as_ref().expect("tsx block");
+        for required in required_snippets {
+            assert!(
+                tsx.code.contains(required),
+                "Expected snippet '{}' in TSX output:\n{}",
+                required,
+                tsx.code
+            );
+        }
+        for forbidden in forbidden_snippets {
+            assert!(
+                !tsx.code.contains(forbidden),
+                "Unexpected snippet '{}' in TSX output:\n{}",
+                forbidden,
+                tsx.code
+            );
+        }
+    }
+
+    let js_result = compile_tsx(
+        r#"<script setup lang="js">
+let el = useTemplateRef('el')
+</script>
+<template><div ref="el"></div></template>"#,
+    );
+    assert!(
+        js_result.errors.is_empty(),
+        "errors: {:?}",
+        js_result.errors
+    );
+    let js_tsx = js_result.tsx.as_ref().expect("tsx block");
+    assert!(
+        js_tsx.code.contains("let el = useTemplateRef('el')"),
+        "JS parity case should preserve plain useTemplateRef call, got:\n{}",
+        js_tsx.code
+    );
+    assert!(
+        !js_tsx.code.contains("useTemplateRef<"),
+        "JS parity case should not inject generic type parameters, got:\n{}",
+        js_tsx.code
+    );
+}
+
+#[test]
 fn tsx_event_call_expression_is_wrapped() {
     let result = compile_tsx(
         r#"<script setup lang="ts">
@@ -6907,7 +7292,8 @@ const handler = (event) => event
         tsx.code
     );
     assert!(
-        tsx.code.contains("onClick={function (...args) { return args }}"),
+        tsx.code
+            .contains("onClick={function (...args) { return args }}"),
         "Inline function with spread params should not be wrapped, got:\n{}",
         tsx.code
     );
@@ -7134,7 +7520,8 @@ fn tsx_v_for_item_in_items_emits_map_expression() {
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("items.map((item) => (") || tsx.code.contains("_ctx.items.map((item) => ("),
+        tsx.code.contains("items.map((item) => (")
+            || tsx.code.contains("_ctx.items.map((item) => ("),
         "v-for item in items should compile to .map expression, got:\n{}",
         tsx.code
     );
@@ -7142,11 +7529,13 @@ fn tsx_v_for_item_in_items_emits_map_expression() {
 
 #[test]
 fn tsx_v_for_item_of_items_emits_map_expression() {
-    let result = compile_tsx(r#"<template><div v-for="item of items">{{ item + 1 }}</div></template>"#);
+    let result =
+        compile_tsx(r#"<template><div v-for="item of items">{{ item + 1 }}</div></template>"#);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx.code.contains("items.map((item) => (") || tsx.code.contains("_ctx.items.map((item) => ("),
+        tsx.code.contains("items.map((item) => (")
+            || tsx.code.contains("_ctx.items.map((item) => ("),
         "v-for item of items should compile to .map expression, got:\n{}",
         tsx.code
     );
@@ -7207,7 +7596,8 @@ fn tsx_v_for_on_template_tag_uses_fragment_children() {
         tsx.code
     );
     assert!(
-        tsx.code.contains("<li>{ item.msg }</li>") || tsx.code.contains("<li>{ _ctx.item.msg }</li>"),
+        tsx.code.contains("<li>{ item.msg }</li>")
+            || tsx.code.contains("<li>{ _ctx.item.msg }</li>"),
         "template v-for branch should render li child content, got:\n{}",
         tsx.code
     );
@@ -7220,7 +7610,8 @@ fn tsx_v_for_on_template_tag_uses_fragment_children() {
 
 #[test]
 fn tsx_v_for_with_v_if_combination_contains_condition_and_map() {
-    let result = compile_tsx(r#"<template><li v-for="item in items" v-if="item.active"></li></template>"#);
+    let result =
+        compile_tsx(r#"<template><li v-for="item in items" v-if="item.active"></li></template>"#);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
@@ -7297,9 +7688,8 @@ fn tsx_component_static_is_rewrites_to_target_tag() {
 
 #[test]
 fn tsx_component_static_is_keeps_other_attributes() {
-    let result = compile_tsx(
-        r#"<template><component is="div" tabindex="1"></component></template>"#,
-    );
+    let result =
+        compile_tsx(r#"<template><component is="div" tabindex="1"></component></template>"#);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(

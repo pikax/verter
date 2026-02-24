@@ -3184,7 +3184,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1000
 source_name = "ref() with kebab-case template ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1010:multiple-ref-calls-with-different-template-refs"
@@ -3193,7 +3193,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1010
 source_name = "multiple ref() calls with different template refs"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:102:unknown-if-ref-foo"
@@ -3202,7 +3202,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 102
 source_name = "unknown if :ref=\"foo\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1021:ref-with-nested-element-template-ref"
@@ -3211,7 +3211,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1021
 source_name = "ref() with nested element template ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1034:ref-variable-matching-template-ref-name-js-does-not-add-type"
@@ -3220,7 +3220,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1034
 source_name = "ref() variable matching template ref name - js does not add type"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1045:ref-variable-not-matching-template-ref"
@@ -3229,7 +3229,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1045
 source_name = "ref() variable not matching template ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1064:ref-with-generic-type-parameter-should-not-be-modified"
@@ -3238,7 +3238,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1064
 source_name = "ref() with generic type parameter should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1075:ref-with-union-type-parameter-should-not-be-modified"
@@ -3247,7 +3247,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1075
 source_name = "ref() with union type parameter should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1086:ref-with-complex-type-parameter-should-not-be-modified"
@@ -3256,7 +3256,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1086
 source_name = "ref() with complex type parameter should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1097:ref-with-any-type-parameter-should-not-be-modified"
@@ -3265,7 +3265,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1097
 source_name = "ref() with any type parameter should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1108:ref-with-unknown-type-parameter-should-not-be-modified"
@@ -3274,7 +3274,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1108
 source_name = "ref() with unknown type parameter should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1127:ref-with-string-argument-should-not-be-modified"
@@ -3283,7 +3283,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1127
 source_name = "ref() with string argument should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:113:multiple-mycomp-ref-foo-with-string-matching"
@@ -3292,7 +3292,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 113
 source_name = "multiple MyComp :ref='foo' with string matching"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1138:ref-with-number-argument-should-not-be-modified"
@@ -3301,7 +3301,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1138
 source_name = "ref() with number argument should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1149:ref-with-boolean-argument-should-not-be-modified"
@@ -3310,7 +3310,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1149
 source_name = "ref() with boolean argument should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1160:ref-with-object-argument-should-not-be-modified"
@@ -3319,7 +3319,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1160
 source_name = "ref() with object argument should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1171:ref-with-array-argument-should-not-be-modified"
@@ -3328,7 +3328,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1171
 source_name = "ref() with array argument should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1182:ref-with-undefined-argument-should-not-be-modified"
@@ -3337,7 +3337,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1182
 source_name = "ref() with undefined argument should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1193:ref-with-variable-argument-should-not-be-modified"
@@ -3346,7 +3346,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1193
 source_name = "ref() with variable argument should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1204:ref-with-function-call-argument-should-not-be-modified"
@@ -3355,7 +3355,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1204
 source_name = "ref() with function call argument should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1215:ref-with-multiple-arguments-should-not-be-modified"
@@ -3364,7 +3364,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1215
 source_name = "ref() with multiple arguments should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1226:ref-with-null-argument-should-be-modified"
@@ -3373,7 +3373,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1226
 source_name = "ref() with null argument SHOULD be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1236:ref-with-no-arguments-should-be-modified"
@@ -3382,7 +3382,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1236
 source_name = "ref() with no arguments SHOULD be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:124:multiple-mycomp-ref-foo-with-string-matching-but-incorrect"
@@ -3391,7 +3391,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 124
 source_name = "multiple MyComp :ref='foo' with string matching but incorrect"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1248:ref-with-string-argument-should-not-be-modified"
@@ -3400,7 +3400,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1248
 source_name = "ref() with string argument should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1259:ref-with-object-argument-should-not-be-modified"
@@ -3409,7 +3409,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1259
 source_name = "ref() with object argument should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1278:should-not-modify-when-variable-name-is-a-prefix-of-ref-name"
@@ -3418,7 +3418,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1278
 source_name = "should NOT modify when variable name is a prefix of ref name"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1289:should-not-modify-when-variable-name-is-a-suffix-of-ref-name"
@@ -3427,7 +3427,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1289
 source_name = "should NOT modify when variable name is a suffix of ref name"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1300:should-not-modify-when-variable-name-contains-ref-name"
@@ -3436,7 +3436,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1300
 source_name = "should NOT modify when variable name contains ref name"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1311:should-not-modify-when-ref-name-contains-variable-name"
@@ -3445,7 +3445,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1311
 source_name = "should NOT modify when ref name contains variable name"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1322:should-not-modify-when-variable-name-differs-only-by-case"
@@ -3454,7 +3454,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1322
 source_name = "should NOT modify when variable name differs only by case"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1333:should-not-modify-when-variable-name-differs-only-by-case-uppercase"
@@ -3463,7 +3463,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1333
 source_name = "should NOT modify when variable name differs only by case (uppercase)"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1344:should-only-modify-when-exact-name-matches"
@@ -3472,7 +3472,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1344
 source_name = "should ONLY modify when exact name matches"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1354:should-not-modify-ref-used-in-expression-not-assigned-to-variable"
@@ -3481,7 +3481,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1354
 source_name = "should NOT modify ref() used in expression (not assigned to variable)"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:136:mycomp-ref-foo-bar"
@@ -3490,7 +3490,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 136
 source_name = "MyComp :ref='foo.bar'"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1365:should-not-modify-ref-assigned-to-object-property"
@@ -3499,7 +3499,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1365
 source_name = "should NOT modify ref() assigned to object property"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1376:should-not-modify-ref-assigned-to-array-element"
@@ -3508,7 +3508,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1376
 source_name = "should NOT modify ref() assigned to array element"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1387:should-not-modify-ref-returned-from-function"
@@ -3517,7 +3517,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1387
 source_name = "should NOT modify ref() returned from function"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1398:should-not-modify-ref-passed-as-argument"
@@ -3526,7 +3526,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1398
 source_name = "should NOT modify ref() passed as argument"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:1409:should-handle-multiple-variables-only-exact-matches-modified"
@@ -3535,7 +3535,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 1409
 source_name = "should handle multiple variables - only exact matches modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:148:mycomp-ref-foo-bar-with-argument"
@@ -3544,7 +3544,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 148
 source_name = "MyComp :ref='foo.bar' with argument"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:160:components-mycomp-ref"
@@ -3553,7 +3553,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 160
 source_name = "components.MyComp ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:172:ref-el-name-el"
@@ -3562,7 +3562,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 172
 source_name = "ref (el)=>name=el"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:184:component-is-div"
@@ -3571,7 +3571,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 184
 source_name = "component is=\"div\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:194:component-is-foo"
@@ -3580,7 +3580,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 194
 source_name = "component :is=\"foo\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:205:component-is-true-div-span"
@@ -3589,7 +3589,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 205
 source_name = "component :is=\"true ? \"div\" : \"span\"\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:217:explicit-type"
@@ -3598,7 +3598,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 217
 source_name = "explicit type"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:231:no-ref"
@@ -3607,7 +3607,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 231
 source_name = "no ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:236:ref"
@@ -3616,7 +3616,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 236
 source_name = "ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:247:mycomp-ref-a"
@@ -3625,7 +3625,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 247
 source_name = "MyComp :ref='a'"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:258:mycomp-ref-foo"
@@ -3634,7 +3634,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 258
 source_name = "MyComp :ref='foo'"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:269:mycomp-ref-foo-with-string-matching"
@@ -3643,7 +3643,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 269
 source_name = "MyComp :ref='foo' with string matching"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:280:unknown-if-ref-foo"
@@ -3652,7 +3652,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 280
 source_name = "unknown if :ref=\"foo\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:290:multiple-mycomp-ref-foo-with-string-matching"
@@ -3661,7 +3661,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 290
 source_name = "multiple MyComp :ref='foo' with string matching"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:300:multiple-mycomp-ref-foo-with-string-matching-but-incorrect"
@@ -3670,7 +3670,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 300
 source_name = "multiple MyComp :ref='foo' with string matching but incorrect"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:311:mycomp-ref-foo-bar"
@@ -3679,7 +3679,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 311
 source_name = "MyComp :ref='foo.bar'"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:322:mycomp-ref-foo-bar-with-argument"
@@ -3688,7 +3688,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 322
 source_name = "MyComp :ref='foo.bar' with argument"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:334:components-mycomp-ref"
@@ -3697,7 +3697,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 334
 source_name = "components.MyComp ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:345:ref-el-name-el"
@@ -3706,7 +3706,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 345
 source_name = "ref (el)=>name=el"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:355:component-is-div"
@@ -3715,7 +3715,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 355
 source_name = "component is=\"div\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:365:component-is-foo"
@@ -3724,7 +3724,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 365
 source_name = "component :is=\"foo\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:375:component-is-true-div-span"
@@ -3733,7 +3733,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 375
 source_name = "component :is=\"true ? \"div\" : \"span\"\""
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:386:explicit-type"
@@ -3742,7 +3742,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 386
 source_name = "explicit type"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:406:transforms-usetemplateref-inside-definecomponent-setup"
@@ -3751,7 +3751,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 406
 source_name = "transforms useTemplateRef inside defineComponent setup"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:419:transforms-usetemplateref-with-component-ref"
@@ -3760,7 +3760,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 419
 source_name = "transforms useTemplateRef with component ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:431:transforms-usetemplateref-with-dynamic-ref-binding"
@@ -3769,7 +3769,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 431
 source_name = "transforms useTemplateRef with dynamic ref binding"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:443:does-not-transform-usetemplateref-with-explicit-type-parameters"
@@ -3778,7 +3778,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 443
 source_name = "does not transform useTemplateRef with explicit type parameters"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:455:handles-arrow-function-setup"
@@ -3787,7 +3787,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 455
 source_name = "handles arrow function setup"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:467:handles-plain-object-export-with-setup"
@@ -3796,7 +3796,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 467
 source_name = "handles plain object export with setup"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:47:no-ref"
@@ -3805,7 +3805,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 47
 source_name = "no ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:479:handles-custom-wrapper-function"
@@ -3814,7 +3814,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 479
 source_name = "handles custom wrapper function"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:500:ref-inside-v-for-should-be-an-array"
@@ -3823,7 +3823,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 500
 source_name = "ref inside v-for should be an array"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:513:ref-inside-v-for-with-component-should-be-an-array"
@@ -3832,7 +3832,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 513
 source_name = "ref inside v-for with component should be an array"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:526:ref-inside-nested-v-for-should-be-an-array"
@@ -3841,7 +3841,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 526
 source_name = "ref inside nested v-for should be an array"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:539:ref-inside-child-of-v-for-element-should-be-an-array"
@@ -3850,7 +3850,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 539
 source_name = "ref inside child of v-for element should be an array"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:54:ref"
@@ -3859,7 +3859,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 54
 source_name = "ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:552:ref-inside-grandchild-of-v-for-element-should-be-an-array"
@@ -3868,7 +3868,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 552
 source_name = "ref inside grandchild of v-for element should be an array"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:565:dynamic-ref-inside-v-for-should-be-an-array"
@@ -3877,7 +3877,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 565
 source_name = "dynamic ref inside v-for should be an array"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:578:multiple-refs-with-one-inside-v-for"
@@ -3886,7 +3886,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 578
 source_name = "multiple refs with one inside v-for"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:598:ref-inside-v-for-js-does-not-add-type-parameters"
@@ -3895,7 +3895,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 598
 source_name = "ref inside v-for - js does not add type parameters"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:617:multiple-refs-on-different-elements"
@@ -3904,7 +3904,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 617
 source_name = "multiple refs on different elements"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:633:multiple-refs-on-same-element-type"
@@ -3913,7 +3913,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 633
 source_name = "multiple refs on same element type"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:649:multiple-refs-with-one-unmatched"
@@ -3922,7 +3922,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 649
 source_name = "multiple refs with one unmatched"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:66:mycomp-ref-a"
@@ -3931,7 +3931,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 66
 source_name = "MyComp :ref='a'"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:660:multiple-dynamic-refs"
@@ -3940,7 +3940,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 660
 source_name = "multiple dynamic refs"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:678:ref-on-deeply-nested-element"
@@ -3949,7 +3949,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 678
 source_name = "ref on deeply nested element"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:689:refs-at-different-nesting-levels"
@@ -3958,7 +3958,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 689
 source_name = "refs at different nesting levels"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:705:ref-inside-slot-content"
@@ -3967,7 +3967,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 705
 source_name = "ref inside slot content"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:723:ref-on-v-if-element"
@@ -3976,7 +3976,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 723
 source_name = "ref on v-if element"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:735:ref-on-v-else-element"
@@ -3985,7 +3985,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 735
 source_name = "ref on v-else element"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:746:ref-on-v-show-element"
@@ -3994,7 +3994,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 746
 source_name = "ref on v-show element"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:756:same-ref-name-on-v-if-and-v-else-branches"
@@ -4003,7 +4003,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 756
 source_name = "same ref name on v-if and v-else branches"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:776:ref-on-teleport-content"
@@ -4012,7 +4012,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 776
 source_name = "ref on Teleport content"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:78:mycomp-ref-foo"
@@ -4021,7 +4021,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 78
 source_name = "MyComp :ref='foo'"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:787:ref-on-suspense-fallback"
@@ -4030,7 +4030,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 787
 source_name = "ref on Suspense fallback"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:798:ref-on-keepalive-child"
@@ -4039,7 +4039,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 798
 source_name = "ref on KeepAlive child"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:816:usetemplateref-with-empty-string-argument"
@@ -4048,7 +4048,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 816
 source_name = "useTemplateRef with empty string argument"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:827:usetemplateref-with-numeric-string-argument"
@@ -4057,7 +4057,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 827
 source_name = "useTemplateRef with numeric string argument"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:837:usetemplateref-with-special-characters-in-name"
@@ -4066,7 +4066,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 837
 source_name = "useTemplateRef with special characters in name"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:847:multiple-refs-with-same-name-on-different-elements"
@@ -4075,7 +4075,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 847
 source_name = "multiple refs with same name on different elements"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:860:ref-on-root-element"
@@ -4084,7 +4084,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 860
 source_name = "ref on root element"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:870:ref-with-variable-as-argument-that-matches-ref-name"
@@ -4093,7 +4093,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 870
 source_name = "ref with variable as argument that matches ref name"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:888:pascalcase-component-with-pascalcase-usage"
@@ -4102,7 +4102,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 888
 source_name = "PascalCase component with PascalCase usage"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:898:pascalcase-component-with-kebab-case-usage"
@@ -4111,7 +4111,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 898
 source_name = "PascalCase component with kebab-case usage"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:90:mycomp-ref-foo-with-string-matching"
@@ -4120,7 +4120,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 90
 source_name = "MyComp :ref='foo' with string matching"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:908:camelcase-imported-component"
@@ -4129,7 +4129,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 908
 source_name = "camelCase imported component"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:918:locally-registered-component"
@@ -4138,7 +4138,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 918
 source_name = "locally registered component"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:937:ref-variable-matching-template-ref-name"
@@ -4147,7 +4147,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 937
 source_name = "ref() variable matching template ref name"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:947:ref-with-initial-value-matching-template-ref"
@@ -4156,7 +4156,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 947
 source_name = "ref() with initial value matching template ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:957:ref-variable-not-matching-any-template-ref"
@@ -4165,7 +4165,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 957
 source_name = "ref() variable not matching any template ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:969:ref-with-component-template-ref"
@@ -4174,7 +4174,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 969
 source_name = "ref() with component template ref"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:979:ref-with-explicit-type-parameters-should-not-be-modified"
@@ -4183,7 +4183,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 979
 source_name = "ref() with explicit type parameters should not be modified"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts:990:ref-inside-v-for-should-be-array-type"
@@ -4192,7 +4192,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/script/plugins/template-ref/template-ref.spec.ts"
 source_line = 990
 source_name = "ref() inside v-for should be array type"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_template_ref_v5_process_parity_matrix"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/binding/binding.spec.ts:100:dynamic-binding"
