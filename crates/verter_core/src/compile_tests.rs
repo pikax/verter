@@ -7408,6 +7408,360 @@ fn tsx_prop_v5_process_parity_matrix() {
     }
 }
 
+// ==================== v5/process parity matrices (ported/adapted suites) ====================
+
+/// Adapted parity matrix for:
+/// - script/plugins/macros/macros.spec.ts
+/// - script/plugins/macros/macros.fixtures.ts
+#[test]
+fn tsx_macros_v5_process_parity_matrix() {
+    type_based_define_props_resolves_to_props_prefix();
+    with_defaults_merges_defaults_into_props();
+    with_defaults_type_reference();
+    define_props_type_with_imported_types();
+    with_defaults_imported_types_all_props_present();
+    with_defaults_unresolvable_type_no_declarator();
+    with_defaults_unresolvable_type_with_declarator();
+    with_defaults_unresolvable_type_object_literal_defaults();
+    with_defaults_unresolvable_type_function_call_defaults();
+    with_defaults_unresolvable_type_no_defaults();
+    with_defaults_resolvable_type_still_works();
+    with_defaults_unresolvable_type_mixed_defaults();
+    with_defaults_unresolvable_type_complex_expression_defaults();
+    cross_block_type_resolution_for_define_props();
+    with_defaults_cross_block_type_uses_key_name();
+
+    define_model_declares_prop_and_emit();
+    define_model_named_declares_prop_and_emit();
+    define_model_with_defaults_resolved_type();
+    define_model_with_defaults_runtime_var_iife();
+    define_model_with_define_props_object_uses_merge_models();
+    define_model_with_typed_with_defaults();
+    define_model_with_define_emits_uses_merge_models_for_emits();
+
+    type_based_define_emits_generates_emits_option();
+    type_based_define_emits_call_signature_generates_emits_option();
+    optional_tuple_element_in_define_emits();
+
+    destructured_define_props_resolves_to_props_prefix();
+    aliased_destructured_define_props_resolves_to_props_prefix();
+    destructured_with_defaults_resolves_to_props_prefix();
+    destructured_props_mixed_with_setup_bindings();
+    destructured_prop_in_v_bind();
+    destructured_prop_in_event_handler();
+    destructured_props_not_in_setup_return();
+    destructured_with_defaults_multiple_props();
+    destructured_with_defaults_unresolvable_type_resolves_to_props_prefix();
+}
+
+/// Adapted parity matrix for:
+/// - template/plugins/slot/slot.spec.ts
+/// - template/plugins/slot-type-check/slotTypeCheck.spec.ts
+#[test]
+fn tsx_slot_v5_process_parity_matrix() {
+    slot_outlet_default_compiles_to_render_slot();
+    slot_outlet_named_compiles_to_render_slot();
+    slot_outlet_self_closing();
+    slot_outlet_with_v_if_gets_ternary();
+    slot_outlet_with_fallback_children();
+    slot_outlet_with_v_for_gets_render_list();
+    component_named_slots_compiled_as_slot_object();
+    component_default_slot_compiled_as_slot_object();
+    conditional_slot_v_if_uses_create_slots();
+    conditional_slot_v_if_else_chain();
+    static_slots_no_create_slots();
+    component_hyphenated_slot_names_quoted();
+    component_named_slot_plus_default_text();
+    scoped_slot_parameters_passed_to_withctx();
+    empty_named_slot_no_close_tag_leak();
+    empty_named_slot_whitespace_only();
+    multiple_empty_named_slots();
+    empty_scoped_slot_no_children();
+    empty_slot_with_v_if_dynamic();
+    empty_slot_mixed_with_content_slots();
+    self_closing_template_slot();
+    self_closing_slot_with_other_normal_slot();
+    multiple_self_closing_named_slots();
+    self_closing_scoped_template_slot();
+    self_closing_slot_with_v_if_dynamic();
+    self_closing_slot_mixed_with_content();
+    component_v_slot_params_in_default_slot();
+    v_for_locals_no_ctx_prefix_in_slot();
+}
+
+/// Adapted parity matrix for:
+/// - template/plugins/directive/directive.spec.ts
+#[test]
+fn tsx_directive_v5_process_parity_matrix() {
+    v_model_on_component_expands_to_props();
+    v_model_named_on_component();
+    v_model_on_unresolved_component();
+    v_model_with_explicit_update_handler_merges_into_array();
+    v_model_named_with_explicit_update_handler_merges_into_array();
+    v_model_on_native_input_generates_with_directives();
+    v_model_on_textarea_generates_with_directives();
+    v_model_on_select_generates_with_directives();
+    v_model_on_checkbox_generates_with_directives();
+    v_model_on_radio_generates_with_directives();
+    v_model_on_input_with_trim_modifier();
+    v_model_on_dynamic_type_input_uses_dynamic();
+
+    event_modifier_prevent_uses_with_modifiers();
+    event_modifier_stop_prevent_combined();
+    event_modifier_capture_goes_into_key();
+    event_modifier_once_goes_into_key();
+    event_modifier_passive_goes_into_key();
+    event_modifier_keyup_enter_uses_with_keys();
+    event_modifier_empty_handler_with_prevent();
+    event_modifier_prevent_only_no_value();
+    event_modifier_on_component_generates_import();
+
+    duplicate_event_handlers_same_event_merged_into_array();
+    multiple_event_handlers_same_event_merged_into_array();
+    different_option_modifiers_produce_different_keys();
+    key_modifiers_same_event_merged();
+    mixed_duplicate_and_unique_events();
+    single_event_handler_no_merge();
+    mouse_left_right_as_runtime_modifiers_merged();
+    handler_with_mixed_key_and_runtime_modifiers_merged();
+    v_on_and_v_bind_on_same_event_merged();
+    dynamic_event_names_not_merged();
+
+    static_style_compiled_to_object();
+    static_style_multiple_properties();
+    static_and_dynamic_class_merged_into_single_prop();
+    data_and_aria_attributes_not_camelized();
+    literal_boolean_in_bind_no_ctx_prefix();
+    html_entities_in_bind_value_decoded();
+    test_vbind_template_literal_with_html_entities();
+}
+
+/// Adapted parity matrix for:
+/// - template/plugins/conditional/conditional.spec.ts
+/// - template/plugins/conditional/generateConditionText.spec.ts
+#[test]
+fn tsx_conditional_v5_process_parity_matrix() {
+    v_if_only_emits_comment_fallback();
+    v_if_v_else_no_comment_fallback();
+    v_if_v_else_if_no_v_else_emits_comment_fallback();
+    v_if_v_else_if_v_else_complete_chain();
+    v_if_after_sibling_has_comma_separator();
+    v_if_chain_after_sibling();
+    v_if_chain_without_v_else_after_sibling();
+    v_if_as_root_single_child();
+    v_if_v_else_as_root();
+    v_if_in_multi_root_fragment();
+    multiple_v_if_chains_in_same_parent();
+    v_if_with_whitespace_between_branches();
+    v_if_nested_inside_v_for();
+    v_if_standalone_emits_comment_vnode();
+    v_if_else_chain_with_whitespace_valid_output();
+    v_if_inside_v_for_with_whitespace();
+    v_if_followed_by_sibling_valid_js();
+    nested_v_if_chains_no_overlap();
+    v_if_with_comment_between_branches();
+    comment_between_v_if_branches_does_not_leak_in_prod();
+
+    template_v_if_renders_as_fragment();
+    template_v_for_with_v_if_children_renders_as_fragment();
+    tsx_v_for_with_v_if_combination_contains_condition_and_map();
+    tsx_parent_v_if_with_child_v_for_contains_outer_condition();
+}
+
+/// Adapted parity matrix for:
+/// - template/template.spec.ts
+/// - template/plugins/block/block.spec.ts
+/// - template/plugins/sfc-cleaner/sfcCleaner.spec.ts
+#[test]
+fn tsx_template_v5_process_parity_matrix() {
+    template_output_contains_render_function_vdom();
+    template_output_contains_render_function_vapor();
+    template_heavy_vue_full_css_scoping();
+    template_only_no_scoped_style_no_script_block();
+    template_only_scoped_style_emits_scope_id_in_script();
+    template_only_scoped_style_css_is_scoped();
+    template_only_scoped_style_grid_layout_scope_id_consistency();
+    component_whitespace_children_clean_output();
+    component_whitespace_only_children_no_close_tag_leak();
+    analysis_panel_regression_valid_js();
+
+    tsx_template_interpolation_with_bindings();
+    tsx_template_tag_replacement_wraps_content_in_fragment();
+    tsx_template_tag_empty_template_emits_empty_fragment();
+    tsx_template_comment();
+    tsx_template_comment_no_extra_spacing();
+    tsx_template_comment_with_nested_marker_text();
+    tsx_template_comment_with_angle_bracket_text();
+    tsx_no_template();
+    html_entity_copy_decoded();
+    html_entity_nbsp_decoded_in_text();
+}
+
+/// Adapted parity matrix for:
+/// - script/plugins/component-type/component-type.spec.ts
+#[test]
+fn tsx_component_type_v5_process_parity_matrix() {
+    component_resolves_to_setup_binding();
+    component_kebab_case_resolves_to_pascal_setup_binding();
+    unknown_component_uses_resolve_component();
+    self_referencing_component_uses_maybe_self_reference();
+    self_referencing_component_kebab_case();
+    component_is_uses_resolve_dynamic_component();
+    component_is_self_closing_uses_resolve_dynamic_component();
+    component_is_empty_uses_resolve_dynamic_component();
+    component_is_self_closing_with_props();
+    component_static_is_uses_resolve_dynamic_component();
+    component_is_with_prop_binding_and_vbind();
+    imported_component_uses_setup_binding_not_resolve_component();
+    builtin_component_suspense();
+    builtin_component_teleport();
+    builtin_component_keep_alive();
+    builtin_component_transition();
+    builtin_component_transition_group();
+    builtin_component_kebab_case_keep_alive();
+    builtin_component_kebab_case_teleport();
+    builtin_component_in_imports_list();
+
+    tsx_component_pascal_and_dotted_names_are_preserved();
+    tsx_component_static_is_rewrites_to_target_tag();
+    tsx_component_static_is_keeps_other_attributes();
+    tsx_component_dynamic_is_literal_string_rewrites_to_target_tag();
+    tsx_component_dynamic_is_expression_rewrites_to_temp_component();
+    tsx_component_with_v_if_and_v_for_preserves_component_tags();
+    tsx_component_kebab_and_mixed_case_names_are_preserved();
+}
+
+/// Adapted parity matrix for:
+/// - script/plugins/component-instance/componentInstance.spec.ts
+#[test]
+fn tsx_component_instance_v5_process_parity_matrix() {
+    tsx_infer_function_component_events_from_imported_components();
+    tsx_template_ref_dynamic_component_is_union_from_literals();
+    tsx_template_ref_use_template_ref_dynamic_ref_with_const_match();
+    tsx_template_ref_use_template_ref_dynamic_ref_unknown_when_unmatched();
+    tsx_template_ref_options_api_setup_function_is_supported();
+    tsx_template_ref_v5_process_parity_matrix();
+}
+
+/// Adapted parity matrix for:
+/// - script/builders/bundle/bundle.spec.ts
+#[test]
+fn tsx_script_bundle_v5_process_parity_matrix() {
+    basic_sfc_compiles();
+    style_block_extracted();
+    custom_blocks_extracted();
+    export_type_hoisted_when_keep_ts();
+    tsx_basic_sfc();
+    tsx_source_map_script_only();
+    tsx_source_map_is_generated();
+    tsx_source_map_maps_script_binding();
+    tsx_force_js_toggle_does_not_change_code();
+    tsx_force_js_toggle_does_not_change_source_map();
+}
+
+/// Adapted parity matrix for:
+/// - script/plugins/script-default/script-default.spec.ts
+#[test]
+fn tsx_script_default_v5_process_parity_matrix() {
+    dual_script_preserves_named_exports();
+    dual_script_export_default_merged_as_options();
+    companion_script_import_available_in_template();
+    companion_script_type_only_import_not_in_returned();
+    companion_script_import_used_in_template_in_returned();
+    cross_block_type_resolution_for_define_props();
+    with_defaults_cross_block_type_uses_key_name();
+}
+
+/// Adapted parity matrix for:
+/// - script/plugins/script-block/script-block.spec.ts
+#[test]
+fn tsx_script_block_v5_process_parity_matrix() {
+    ts_return_type_annotation_in_computed();
+    ts_return_type_no_strip_mode();
+    top_level_await_produces_async_setup();
+    async_setup_wraps_await_with_async_context();
+    async_setup_wraps_dynamic_import_await();
+    tsx_basic_sfc();
+    tsx_script_with_imports();
+}
+
+/// Adapted parity matrix for:
+/// - script/plugins/define-options/defineOptions.spec.ts
+#[test]
+fn tsx_define_options_v5_process_parity_matrix() {
+    ts_return_type_annotation_in_computed();
+    ts_return_type_no_strip_mode();
+    dual_script_export_default_merged_as_options();
+
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+defineOptions({ name: 'App', inheritAttrs: false })
+</script>
+<template><div /></template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code
+            .contains("defineOptions({ name: 'App', inheritAttrs: false })"),
+        "defineOptions call should be preserved in TSX output, got:\n{}",
+        tsx.code
+    );
+}
+
+/// Adapted parity matrix for:
+/// - script/plugins/sfc-cleaner/sfcCleaner.spec.ts
+#[test]
+fn tsx_script_sfc_cleaner_v5_process_parity_matrix() {
+    export_type_stripped_when_force_js();
+    export_interface_stripped_when_force_js();
+    bare_type_and_interface_stripped_when_force_js();
+    import_specifier_used_only_as_type_should_be_elided();
+    export_type_hoisted_when_keep_ts();
+}
+
+/// Adapted parity matrix for:
+/// - script/plugins/template-binding/template-binding.spec.ts
+#[test]
+fn tsx_template_binding_plugin_v5_process_parity_matrix() {
+    tsx_binding_v5_process_parity_matrix();
+    tsx_binding_type_assertions_do_not_prefix_type_members();
+    imported_function_in_template_gets_setup_prefix();
+    companion_script_import_available_in_template();
+    companion_script_import_used_in_template_in_returned();
+    tsx_template_interpolation_with_bindings();
+}
+
+/// Adapted parity matrix for:
+/// - script/plugins/attributes/attributes.spec.ts
+#[test]
+fn tsx_script_attributes_v5_process_parity_matrix() {
+    script_attrs_contain_lang();
+    export_type_hoisted_when_keep_ts();
+    tsx_basic_sfc();
+}
+
+/// Adapted parity matrix for:
+/// - script/plugins/full-context/full-context.spec.ts
+#[test]
+fn tsx_full_context_v5_process_parity_matrix() {
+    setup_returns_bindings_for_template_refs();
+    setup_returns_bindings_with_define_props();
+    import_used_in_template_should_be_in_returned();
+    companion_script_import_used_in_template_in_returned();
+    companion_script_type_only_import_not_in_returned();
+}
+
+/// Adapted parity matrix for:
+/// - script/plugins/imports/imports.spec.ts
+#[test]
+fn tsx_imports_plugin_v5_process_parity_matrix() {
+    script_imports_use_as_syntax();
+    tsx_script_with_imports();
+    import_specifier_used_only_as_type_should_be_elided();
+    imported_function_in_template_gets_setup_prefix();
+}
+
 #[test]
 fn tsx_event_call_expression_is_wrapped() {
     let result = compile_tsx(
