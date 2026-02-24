@@ -32,7 +32,7 @@ import {
 import ts, { CompletionsTriggerCharacter } from "typescript";
 
 import { patchClient, RequestType } from "@verter/language-shared";
-import { compile as nativeCompile } from "@verter/native";
+import { VerterHost } from "@verter/native";
 import { VueSubDocument } from "./v5/documents/verter/vue/sub/sub";
 import { VueBundleDocument, VueStyleDocument } from "./v5/documents/verter/vue/sub";
 import { DiagnosticsManager } from "./v5/DiagnosticsManager";
@@ -482,17 +482,37 @@ export function startServer(options: LsConnectionOption = {}) {
 
     console.log("found", doc.docs);
 
-    // Compile with native/WASM compiler (Rust-based verter_core)
+    // Compile with native compiler (Rust-based verter_core via VerterHost)
     let wasmResult = { code: "", map: undefined as any };
     try {
       const sourceCode = doc.getText();
       const filename = uriToPath(doc.uri) || doc.uri;
-      const compiled = nativeCompile(sourceCode, {
-        filename,
+      const host = new VerterHost({ devMode: true });
+      const compileProfile = { filename, sourceMap: true };
+      const upsertResult = host.upsert({
+        inputId: filename,
+        source: sourceCode,
       });
+
+      let code = "";
+      const scriptFile = host.getVirtualFile({
+        canonicalId: upsertResult.canonicalId,
+        nodeKind: { kind: "script" },
+        compileProfile,
+      });
+      if (scriptFile) code += scriptFile.code;
+
+      const templateFile = host.getVirtualFile({
+        canonicalId: upsertResult.canonicalId,
+        nodeKind: { kind: "template" },
+        compileProfile,
+      });
+      if (templateFile) code += "\n\n" + templateFile.code;
+
+      const sourceMap = scriptFile?.sourceMap ?? templateFile?.sourceMap;
       wasmResult = {
-        code: compiled.code,
-        map: compiled.source_map ? JSON.parse(compiled.source_map) : undefined,
+        code,
+        map: sourceMap ? JSON.parse(sourceMap) : undefined,
       };
     } catch (e) {
       wasmResult = {
