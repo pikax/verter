@@ -8031,6 +8031,51 @@ const a = {}
 }
 
 #[test]
+fn tsx_issue_48_event_identifier_does_not_prefix_dollar_event_with_ctx() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const a = {}
+</script>
+<template>
+  <div @click="$event"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("onClick={$event}"),
+        "Bare $event should be emitted as $event in TSX handler, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("_ctx.$event"),
+        "$event must not be context-prefixed, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_issue_79_v_on_object_syntax_supports_explicit_event_map() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const doThis = () => {}
+const doThat = () => {}
+</script>
+<template>
+  <button v-on="{ mousedown: doThis, mouseup: doThat }" />
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    let normalized: String = tsx.code.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        normalized.contains("onMousedown:doThis") && normalized.contains("onMouseup:doThat"),
+        "v-on object explicit map should convert to on* keys, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_interpolation_without_spaces() {
     let result = compile_tsx(r#"<template>{{test}}</template>"#);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
