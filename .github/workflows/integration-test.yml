@@ -380,12 +380,12 @@ jobs:
             e2e-cmd: npx playwright install chromium --with-deps && pnpm test:e2e-dev
             package-manager: pnpm
             bundler: vite
-          - name: unplugin-vue-router
-            repo: posva/unplugin-vue-router
+          - name: vue-router
+            repo: vuejs/router
             branch: main
-            build-cmd: pnpm run build:core && pnpm run build:runtime
-            test-cmd: pnpm run vitest
-            e2e-cmd: npx playwright install webkit --with-deps && pnpm run playwright
+            build-cmd: pnpm -C packages/router build
+            test-cmd: pnpm -C packages/router test:unit
+            e2e-cmd: ""
             package-manager: pnpm
             bundler: vite
           - name: npmx

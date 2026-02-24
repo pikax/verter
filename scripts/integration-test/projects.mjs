@@ -212,18 +212,14 @@ export const projects = [
     bundler: 'vite',
   },
 
-  // ── Plugin ecosystem ─────────────────────────────────────────────
+  // ── Vue ecosystem ───────────────────────────────────────────────
   {
-    name: 'unplugin-vue-router',
-    repo: 'posva/unplugin-vue-router',
+    name: 'vue-router',
+    repo: 'vuejs/router',
     branch: 'main',
-    // Explicit sub-scripts: project's `build` uses pnpm regex `/^build:/` which Git Bash mangles on Windows.
-    // Playground build is excluded: it fails on baseline too (<route lang="ts"> unsupported by unplugin-vue-router).
-    buildCmd: 'pnpm run build:core && pnpm run build:runtime',
+    buildCmd: 'pnpm -C packages/router build',
     // vitest uses @vitejs/plugin-vue in vitest.config.ts — exercises Vue SFC compilation
-    testCmd: 'pnpm run vitest',
-    // Playwright HMR tests use webkit (Desktop Safari)
-    e2eCmd: 'npx playwright install webkit --with-deps && pnpm run playwright',
+    testCmd: 'pnpm -C packages/router test:unit',
     packageManager: 'pnpm',
     bundler: 'vite',
   },
