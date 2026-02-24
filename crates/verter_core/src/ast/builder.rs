@@ -370,6 +370,7 @@ impl TemplateAstBuilder {
     // ---------------------------------------------------
 
     /// Returns true if there are still unclosed elements on the open stack.
+    #[cfg(test)]
     pub fn has_open_elements(&self) -> bool {
         !self.open_stack.is_empty()
     }

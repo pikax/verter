@@ -13,7 +13,7 @@ pub mod v_bind;
 use oxc_allocator::Allocator;
 
 use crate::css::types::VBindVar;
-use crate::parser::types::{RootNodeStyle, StyleLang};
+use crate::parser::types::RootNodeStyle;
 use crate::template::code_gen::types::CodeGenOutput;
 
 /// Result of style codegen for a single `<style>` block.
@@ -31,26 +31,6 @@ use crate::template::code_gen::types::CodeGenOutput;
 pub struct StyleCodeGenResult<'alloc> {
     /// CodeGenOutput with v-bind() overwrites (absolute SFC positions).
     pub out: CodeGenOutput<'alloc>,
-    /// Extracted v-bind() variables for `_useCssVars` injection.
-    pub v_bind_vars: Vec<VBindVar>,
-}
-
-/// Processed CSS output for a single `<style>` block.
-///
-/// Produced by the orchestrator after applying [`StyleCodeGenResult`]'s
-/// CodeGenOutput and (for CSS lang) running `process_style()`.
-#[derive(Debug, Clone)]
-pub struct StyleOutput {
-    /// Processed CSS code (with v-bind replaced, and for CSS lang: scoped/modules applied).
-    pub code: String,
-    /// Whether this block has the `scoped` attribute.
-    pub scoped: bool,
-    /// The style preprocessor language.
-    pub lang: Option<StyleLang>,
-    /// CSS Modules class mappings (original → hashed). `None` if not a module block.
-    pub module: Option<Vec<(String, String)>>,
-    /// Errors encountered during CSS processing.
-    pub errors: Vec<String>,
     /// Extracted v-bind() variables for `_useCssVars` injection.
     pub v_bind_vars: Vec<VBindVar>,
 }

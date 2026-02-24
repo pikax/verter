@@ -158,6 +158,7 @@ pub fn write_template_decl<'alloc>(
 }
 
 /// Write template instantiation line: `  const n{id} = t{id}()`
+#[allow(dead_code)]
 pub fn write_template_instantiation<'alloc>(
     id: NodeId,
     body_lines: &mut Vec<&'alloc str>,

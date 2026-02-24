@@ -25,6 +25,7 @@ impl Default for SourceMapOptions<'_> {
     }
 }
 
+#[allow(dead_code)] // Builder API used in tests
 impl<'a> SourceMapOptions<'a> {
     pub fn new() -> Self {
         Self::default()

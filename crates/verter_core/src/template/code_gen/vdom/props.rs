@@ -55,6 +55,7 @@ pub fn camelize(s: &str) -> std::borrow::Cow<'_, str> {
 /// - `"my-event"` → `"onMyEvent"`
 /// - `"update:modelValue"` → `"onUpdate:modelValue"`
 /// - `"keyup"` → `"onKeyup"`
+#[cfg(test)]
 pub fn format_event_handler_key(event_name: &str) -> String {
     let mut result = String::with_capacity(event_name.len() + 2);
     format_event_handler_key_into(&mut result, event_name);

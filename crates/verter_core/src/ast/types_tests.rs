@@ -98,8 +98,12 @@ mod children_flag_tests {
 
     #[test]
     fn union_flags() {
-        let a = HAS_TEXT.union(HAS_INTERPOLATION);
-        let b = HAS_ELEMENT.union(HAS_V_IF);
+        let a = ChildrenFlags::HasText
+            .into_flag()
+            .union(ChildrenFlags::HasInterpolation.into_flag());
+        let b = ChildrenFlags::HasElement
+            .into_flag()
+            .union(ChildrenFlags::HasVIf.into_flag());
         let combined = a.union(b);
 
         assert!(combined.has(ChildrenFlags::HasText));
@@ -109,19 +113,12 @@ mod children_flag_tests {
     }
 
     #[test]
-    fn constants_work() {
-        assert!(HAS_TEXT.has(ChildrenFlags::HasText));
-        assert!(HAS_INTERPOLATION.has(ChildrenFlags::HasInterpolation));
-        assert!(HAS_ELEMENT.has(ChildrenFlags::HasElement));
-        assert!(HAS_COMMENT.has(ChildrenFlags::HasComment));
-        assert!(SINGLE_CHILD.has(ChildrenFlags::SingleChild));
-        assert!(HAS_V_IF.has(ChildrenFlags::HasVIf));
-        assert!(HAS_V_FOR.has(ChildrenFlags::HasVFor));
-    }
-
-    #[test]
     fn clear_resets_all() {
-        let f = HAS_TEXT.union(HAS_ELEMENT).union(HAS_V_IF).clear();
+        let f = ChildrenFlags::HasText
+            .into_flag()
+            .union(ChildrenFlags::HasElement.into_flag())
+            .union(ChildrenFlags::HasVIf.into_flag())
+            .clear();
         assert_eq!(f.0, 0);
         assert!(!f.has_children());
     }
@@ -351,8 +348,12 @@ mod prop_flag_tests {
 
     #[test]
     fn union_flags() {
-        let a = P_HAS_DYNAMIC_CLASS.union(P_HAS_STATIC_CLASS);
-        let b = P_HAS_REF.union(P_HAS_MODEL);
+        let a = PropFlags::HasDynamicClass
+            .into_flag()
+            .union(PropFlags::HasStaticClass.into_flag());
+        let b = PropFlags::HasRef
+            .into_flag()
+            .union(PropFlags::HasModel.into_flag());
         let combined = a.union(b);
 
         assert!(combined.has(PropFlags::HasDynamicClass));
@@ -363,9 +364,10 @@ mod prop_flag_tests {
 
     #[test]
     fn clear_resets_all() {
-        let f = P_HAS_DYNAMIC_KEY
-            .union(P_HAS_REF)
-            .union(P_HAS_MODEL)
+        let f = PropFlags::HasDynamicKey
+            .into_flag()
+            .union(PropFlags::HasRef.into_flag())
+            .union(PropFlags::HasModel.into_flag())
             .clear();
         assert_eq!(f.0, 0);
         assert!(f.is_empty());
@@ -486,24 +488,44 @@ mod prop_flag_tests {
             .has_directive());
     }
 
-    // @ai-generated - Tests top-level constants
+    // @ai-generated - Tests into_flag round-trip
     #[test]
-    fn top_level_constants() {
-        assert!(P_HAS_DYNAMIC_KEY.has(PropFlags::HasDynamicKey));
-        assert!(P_HAS_DYNAMIC_CLASS.has(PropFlags::HasDynamicClass));
-        assert!(P_HAS_DYNAMIC_STYLE.has(PropFlags::HasDynamicStyle));
-        assert!(P_HAS_REF.has(PropFlags::HasRef));
-        assert!(P_HAS_EVENT_LISTENER.has(PropFlags::HasEventListener));
-        assert!(P_HAS_CUSTOM_DIRECTIVE.has(PropFlags::HasCustomDirective));
-        assert!(P_HAS_STATIC_CLASS.has(PropFlags::HasStaticClass));
-        assert!(P_HAS_STATIC_STYLE.has(PropFlags::HasStaticStyle));
-        assert!(P_HAS_BIND_SPREAD.has(PropFlags::HasBindSpread));
-        assert!(P_HAS_ON_SPREAD.has(PropFlags::HasOnSpread));
-        assert!(P_HAS_MODEL.has(PropFlags::HasModel));
-        assert!(P_HAS_SHOW.has(PropFlags::HasShow));
-        assert!(P_HAS_V_HTML.has(PropFlags::HasVHtml));
-        assert!(P_HAS_V_TEXT.has(PropFlags::HasVText));
-        assert!(P_HAS_DYNAMIC_BINDING.has(PropFlags::HasDynamicBinding));
+    fn into_flag_round_trip() {
+        assert!(PropFlags::HasDynamicKey
+            .into_flag()
+            .has(PropFlags::HasDynamicKey));
+        assert!(PropFlags::HasDynamicClass
+            .into_flag()
+            .has(PropFlags::HasDynamicClass));
+        assert!(PropFlags::HasDynamicStyle
+            .into_flag()
+            .has(PropFlags::HasDynamicStyle));
+        assert!(PropFlags::HasRef.into_flag().has(PropFlags::HasRef));
+        assert!(PropFlags::HasEventListener
+            .into_flag()
+            .has(PropFlags::HasEventListener));
+        assert!(PropFlags::HasCustomDirective
+            .into_flag()
+            .has(PropFlags::HasCustomDirective));
+        assert!(PropFlags::HasStaticClass
+            .into_flag()
+            .has(PropFlags::HasStaticClass));
+        assert!(PropFlags::HasStaticStyle
+            .into_flag()
+            .has(PropFlags::HasStaticStyle));
+        assert!(PropFlags::HasBindSpread
+            .into_flag()
+            .has(PropFlags::HasBindSpread));
+        assert!(PropFlags::HasOnSpread
+            .into_flag()
+            .has(PropFlags::HasOnSpread));
+        assert!(PropFlags::HasModel.into_flag().has(PropFlags::HasModel));
+        assert!(PropFlags::HasShow.into_flag().has(PropFlags::HasShow));
+        assert!(PropFlags::HasVHtml.into_flag().has(PropFlags::HasVHtml));
+        assert!(PropFlags::HasVText.into_flag().has(PropFlags::HasVText));
+        assert!(PropFlags::HasDynamicBinding
+            .into_flag()
+            .has(PropFlags::HasDynamicBinding));
     }
 
     // @ai-generated - Tests PropFlags::name()

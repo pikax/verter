@@ -21,7 +21,7 @@ use crate::template::code_gen::binding::BindingType;
 use crate::template::code_gen::types::CodeGenOutput;
 
 /// Options for script code generation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScriptCodeGenOptions<'a> {
     /// Component name (used in `__name` property).
     pub component_name: &'a str,
@@ -30,16 +30,12 @@ pub struct ScriptCodeGenOptions<'a> {
     /// When true, keep TypeScript syntax (interfaces, type aliases, enums)
     /// by hoisting them to file top instead of stripping.
     pub keep_ts_types: bool,
-    /// Production mode — strips dev-only code.
-    pub is_production: bool,
     /// Inline template mode — template is inlined inside `setup()`.
     pub inline_template: bool,
     /// Vapor mode output.
     pub is_vapor: bool,
     /// Whether any `<style scoped>` block exists.
     pub has_scoped_style: bool,
-    /// Runtime module name (e.g., `"vue"`).
-    pub runtime_module_name: &'a str,
     /// CSS v-bind vars from style codegen (for `_useCssVars` injection).
     pub css_v_binds: &'a [VBindVar],
     /// Pre-resolved external types for cross-file type resolution.
@@ -50,24 +46,6 @@ pub struct ScriptCodeGenOptions<'a> {
     /// only included in `__returned__` when their name appears in this set.
     /// `None` means no template — all imports are included.
     pub template_used_vars: Option<rustc_hash::FxHashSet<String>>,
-}
-
-impl<'a> Default for ScriptCodeGenOptions<'a> {
-    fn default() -> Self {
-        Self {
-            component_name: "",
-            scope_id: "",
-            keep_ts_types: false,
-            is_production: false,
-            inline_template: false,
-            is_vapor: false,
-            has_scoped_style: false,
-            runtime_module_name: "vue",
-            css_v_binds: &[],
-            external_types: None,
-            template_used_vars: None,
-        }
-    }
 }
 
 /// Shared mutable context for script processing functions.
@@ -84,6 +62,7 @@ pub struct ScriptContext<'alloc> {
 }
 
 /// Result of script code generation.
+#[allow(dead_code)] // Fields read by tests and downstream consumers
 pub struct ScriptCodeGenResult<'alloc> {
     /// Binding metadata for template codegen.
     /// Maps identifier name → BindingType for `BindingResolver`.

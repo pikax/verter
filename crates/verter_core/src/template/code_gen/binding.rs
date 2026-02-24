@@ -125,6 +125,7 @@ impl<'alloc> BindingResolver<'alloc> {
 
     /// Whether this resolver is in inline mode.
     #[inline]
+    #[allow(dead_code)]
     pub fn is_inline(&self) -> bool {
         self.is_inline
     }

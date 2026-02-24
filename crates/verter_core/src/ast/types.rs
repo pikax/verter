@@ -496,19 +496,6 @@ impl ChildrenFlag {
     }
 }
 
-pub const HAS_TEXT: ChildrenFlag = ChildrenFlag(ChildrenFlags::HasText as u16);
-pub const HAS_INTERPOLATION: ChildrenFlag = ChildrenFlag(ChildrenFlags::HasInterpolation as u16);
-pub const HAS_ELEMENT: ChildrenFlag = ChildrenFlag(ChildrenFlags::HasElement as u16);
-pub const HAS_COMMENT: ChildrenFlag = ChildrenFlag(ChildrenFlags::HasComment as u16);
-pub const SINGLE_CHILD: ChildrenFlag = ChildrenFlag(ChildrenFlags::SingleChild as u16);
-pub const HAS_V_IF: ChildrenFlag = ChildrenFlag(ChildrenFlags::HasVIf as u16);
-pub const HAS_V_FOR: ChildrenFlag = ChildrenFlag(ChildrenFlags::HasVFor as u16);
-pub const HAS_CHILD_WITH_V_SLOT: ChildrenFlag =
-    ChildrenFlag(ChildrenFlags::HasChildWithVSlot as u16);
-pub const HAS_DYNAMIC_SLOT_CHILD: ChildrenFlag =
-    ChildrenFlag(ChildrenFlags::HasDynamicSlotChild as u16);
-pub const HAS_CHILD_WITH_KEY: ChildrenFlag = ChildrenFlag(ChildrenFlags::HasChildWithKey as u16);
-
 // ======================== Prop flags ========================
 
 /// Element-local prop characteristics for codegen optimization.
@@ -746,24 +733,6 @@ impl PropFlag {
         self.has_any(Self::NEEDS_OXC_MASK)
     }
 }
-
-// ---- top-level PropFlag constants (mirrors ChildrenFlag pattern) ----
-
-pub const P_HAS_DYNAMIC_KEY: PropFlag = PropFlag(PropFlags::HasDynamicKey as u16);
-pub const P_HAS_DYNAMIC_CLASS: PropFlag = PropFlag(PropFlags::HasDynamicClass as u16);
-pub const P_HAS_DYNAMIC_STYLE: PropFlag = PropFlag(PropFlags::HasDynamicStyle as u16);
-pub const P_HAS_REF: PropFlag = PropFlag(PropFlags::HasRef as u16);
-pub const P_HAS_EVENT_LISTENER: PropFlag = PropFlag(PropFlags::HasEventListener as u16);
-pub const P_HAS_CUSTOM_DIRECTIVE: PropFlag = PropFlag(PropFlags::HasCustomDirective as u16);
-pub const P_HAS_STATIC_CLASS: PropFlag = PropFlag(PropFlags::HasStaticClass as u16);
-pub const P_HAS_STATIC_STYLE: PropFlag = PropFlag(PropFlags::HasStaticStyle as u16);
-pub const P_HAS_BIND_SPREAD: PropFlag = PropFlag(PropFlags::HasBindSpread as u16);
-pub const P_HAS_ON_SPREAD: PropFlag = PropFlag(PropFlags::HasOnSpread as u16);
-pub const P_HAS_MODEL: PropFlag = PropFlag(PropFlags::HasModel as u16);
-pub const P_HAS_SHOW: PropFlag = PropFlag(PropFlags::HasShow as u16);
-pub const P_HAS_V_HTML: PropFlag = PropFlag(PropFlags::HasVHtml as u16);
-pub const P_HAS_V_TEXT: PropFlag = PropFlag(PropFlags::HasVText as u16);
-pub const P_HAS_DYNAMIC_BINDING: PropFlag = PropFlag(PropFlags::HasDynamicBinding as u16);
 
 /// The content region between an element's open and close tags.
 ///

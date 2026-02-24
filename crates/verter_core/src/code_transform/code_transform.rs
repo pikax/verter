@@ -4,6 +4,7 @@ use super::chunk::Chunk;
 use oxc_allocator::Allocator;
 
 /// Result of scanning chunks for a target position.
+#[allow(dead_code)] // Used by move_slice() which is test/API only for now
 enum SplitResult {
     /// An Original chunk was split at `index`; `chunk_index` is the new
     /// chunk starting at `index` (the second half).
@@ -69,6 +70,7 @@ pub struct CodeTransform<'a> {
     is_ascii: bool,
 }
 
+#[allow(dead_code)] // Many API methods only exercised by tests currently
 impl<'a> CodeTransform<'a> {
     /// Create a new CodeTransform from source text and an allocator
     pub fn new(source: &'a str, allocator: &'a Allocator) -> Self {

@@ -94,12 +94,14 @@ impl<'alloc> CodeGenOutput<'alloc> {
     }
 
     /// Read-only access to VDOM import flags.
+    #[cfg(test)]
     #[inline]
     pub fn vdom_imports(&self) -> VdomHelperFlags {
         self.vdom_imports
     }
 
     /// Read-only access to Vapor import flags.
+    #[cfg(test)]
     #[inline]
     pub fn vapor_imports(&self) -> VaporHelperFlags {
         self.vapor_imports
@@ -218,6 +220,7 @@ pub enum ScopeClose {
     /// Close a v-for renderList.
     For { is_keyed: bool },
     /// Close a v-slot wrapper.
+    #[allow(dead_code)]
     SlotWrapper,
 }
 
@@ -287,6 +290,7 @@ impl VaporTextPart<'_> {
     }
 
     /// Returns true if this is a dynamic part.
+    #[cfg(test)]
     pub fn is_dynamic(&self) -> bool {
         matches!(self, VaporTextPart::Dynamic(_))
     }
@@ -397,6 +401,7 @@ impl VaporEffect<'_> {
     }
 
     /// Render this effect as a JS statement string (convenience wrapper for tests).
+    #[cfg(test)]
     pub fn to_code(&self) -> String {
         let mut buf = String::with_capacity(64);
         self.write_code_into(&mut buf);

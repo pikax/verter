@@ -44,6 +44,7 @@ pub enum ExpressionFlags {
     AllInterpolationsStatic = 1 << 4,
 }
 
+#[allow(dead_code)] // Used in tests
 impl ExpressionFlags {
     /// Convert a single flag into an [`ExpressionFlag`] wrapper.
     #[inline(always)]
@@ -79,13 +80,8 @@ impl ExpressionFlag {
         Self(0)
     }
 
-    /// Create from a raw `u16` value.
-    #[inline(always)]
-    pub const fn new(value: u16) -> Self {
-        Self(value)
-    }
-
     /// True if no flags are set.
+    #[cfg(test)]
     #[inline(always)]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
@@ -103,22 +99,10 @@ impl ExpressionFlag {
         self.contains(flag)
     }
 
-    /// Returns true if any bits from `mask` are set.
-    #[inline(always)]
-    pub const fn has_any(self, mask: u16) -> bool {
-        (self.0 & mask) != 0
-    }
-
     /// Add a flag.
     #[inline(always)]
     pub const fn add(self, flag: ExpressionFlags) -> Self {
         Self(self.0 | (flag as u16))
-    }
-
-    /// Alias for [`add`](Self::add).
-    #[inline(always)]
-    pub const fn with(self, flag: ExpressionFlags) -> Self {
-        self.add(flag)
     }
 
     /// Remove a flag.
@@ -126,37 +110,7 @@ impl ExpressionFlag {
     pub const fn remove(self, flag: ExpressionFlags) -> Self {
         Self(self.0 & !(flag as u16))
     }
-
-    /// Alias for [`remove`](Self::remove).
-    #[inline(always)]
-    pub const fn without(self, flag: ExpressionFlags) -> Self {
-        self.remove(flag)
-    }
-
-    /// Combine two values (bitwise OR).
-    #[inline(always)]
-    pub const fn union(self, other: ExpressionFlag) -> Self {
-        Self(self.0 | other.0)
-    }
-
-    /// Clear all flags.
-    #[inline(always)]
-    pub const fn clear(self) -> Self {
-        Self(0)
-    }
 }
-
-// ---- top-level constants ----
-
-pub const E_STATIC_CLASS_EXPR: ExpressionFlag =
-    ExpressionFlag(ExpressionFlags::StaticClassExpr as u16);
-pub const E_STATIC_STYLE_EXPR: ExpressionFlag =
-    ExpressionFlag(ExpressionFlags::StaticStyleExpr as u16);
-pub const E_STATIC_KEY_EXPR: ExpressionFlag = ExpressionFlag(ExpressionFlags::StaticKeyExpr as u16);
-pub const E_STATIC_CONDITION: ExpressionFlag =
-    ExpressionFlag(ExpressionFlags::StaticCondition as u16);
-pub const E_ALL_INTERPOLATIONS_STATIC: ExpressionFlag =
-    ExpressionFlag(ExpressionFlags::AllInterpolationsStatic as u16);
 
 // ======================== Parsed expression ========================
 
@@ -179,6 +133,7 @@ pub struct OxcParsedExpression<'alloc> {
     pub expression: Option<Expression<'alloc>>,
 
     /// Parse errors, if any. Spans are **file-relative** (adjusted for reporting).
+    #[allow(dead_code)] // Read by tests and downstream consumers
     pub errors: Option<Vec<OxcDiagnostic>>,
 
     /// Extracted identifier bindings. Positions are **file-relative**
@@ -222,6 +177,7 @@ pub struct OxcParsedVFor<'alloc> {
 #[derive(Debug)]
 pub struct OxcParsedVSlot<'alloc> {
     /// Parsed v-slot expression with extracted locals and references.
+    #[allow(dead_code)] // Populated for codegen consumers
     pub parsed: VSlotWithBindings<'alloc>,
 }
 
@@ -240,6 +196,7 @@ pub struct OxcParsedElement<'alloc> {
     pub v_for: Option<OxcParsedVFor<'alloc>>,
 
     /// Parsed v-slot directive. `None` if no v-slot.
+    #[allow(dead_code)] // Populated for codegen consumers
     pub v_slot: Option<OxcParsedVSlot<'alloc>>,
 
     /// Parsed regular props (only those with expressions to parse).
@@ -324,7 +281,7 @@ mod expression_flag_tests {
     #[test]
     fn empty_flag() {
         let f = ExpressionFlag::empty();
-        assert!(f.is_empty());
+        assert_eq!(f.0, 0);
         assert!(!f.has(ExpressionFlags::StaticClassExpr));
     }
 
@@ -336,7 +293,6 @@ mod expression_flag_tests {
         assert!(f.has(ExpressionFlags::StaticClassExpr));
         assert!(f.has(ExpressionFlags::StaticCondition));
         assert!(!f.has(ExpressionFlags::StaticStyleExpr));
-        assert!(!f.is_empty());
     }
 
     #[test]
@@ -350,32 +306,22 @@ mod expression_flag_tests {
     }
 
     #[test]
-    fn union_flags() {
-        let a = E_STATIC_CLASS_EXPR.union(E_STATIC_CONDITION);
-        let b = E_STATIC_STYLE_EXPR.union(E_STATIC_KEY_EXPR);
-        let combined = a.union(b);
-        assert!(combined.has(ExpressionFlags::StaticClassExpr));
-        assert!(combined.has(ExpressionFlags::StaticStyleExpr));
-        assert!(combined.has(ExpressionFlags::StaticKeyExpr));
-        assert!(combined.has(ExpressionFlags::StaticCondition));
-    }
-
-    #[test]
-    fn clear_resets_all() {
-        let f = E_STATIC_CLASS_EXPR
-            .union(E_STATIC_STYLE_EXPR)
-            .union(E_STATIC_KEY_EXPR)
-            .clear();
-        assert!(f.is_empty());
-    }
-
-    #[test]
-    fn constants_match_flags() {
-        assert!(E_STATIC_CLASS_EXPR.has(ExpressionFlags::StaticClassExpr));
-        assert!(E_STATIC_STYLE_EXPR.has(ExpressionFlags::StaticStyleExpr));
-        assert!(E_STATIC_KEY_EXPR.has(ExpressionFlags::StaticKeyExpr));
-        assert!(E_STATIC_CONDITION.has(ExpressionFlags::StaticCondition));
-        assert!(E_ALL_INTERPOLATIONS_STATIC.has(ExpressionFlags::AllInterpolationsStatic));
+    fn into_flag_round_trip() {
+        assert!(ExpressionFlags::StaticClassExpr
+            .into_flag()
+            .has(ExpressionFlags::StaticClassExpr));
+        assert!(ExpressionFlags::StaticStyleExpr
+            .into_flag()
+            .has(ExpressionFlags::StaticStyleExpr));
+        assert!(ExpressionFlags::StaticKeyExpr
+            .into_flag()
+            .has(ExpressionFlags::StaticKeyExpr));
+        assert!(ExpressionFlags::StaticCondition
+            .into_flag()
+            .has(ExpressionFlags::StaticCondition));
+        assert!(ExpressionFlags::AllInterpolationsStatic
+            .into_flag()
+            .has(ExpressionFlags::AllInterpolationsStatic));
     }
 
     #[test]
@@ -388,15 +334,5 @@ mod expression_flag_tests {
             ExpressionFlags::AllInterpolationsStatic.name(),
             "ALL_INTERPOLATIONS_STATIC"
         );
-    }
-
-    #[test]
-    fn with_and_without_aliases() {
-        let f = ExpressionFlag::empty()
-            .with(ExpressionFlags::StaticClassExpr)
-            .with(ExpressionFlags::StaticKeyExpr)
-            .without(ExpressionFlags::StaticKeyExpr);
-        assert!(f.has(ExpressionFlags::StaticClassExpr));
-        assert!(!f.has(ExpressionFlags::StaticKeyExpr));
     }
 }

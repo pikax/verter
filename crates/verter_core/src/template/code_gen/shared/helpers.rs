@@ -192,6 +192,7 @@ impl VdomHelperFlags {
     }
 
     /// Check membership.
+    #[cfg(test)]
     #[inline(always)]
     pub const fn has(self, h: VdomHelper) -> bool {
         (self.0 & (h as u32)) != 0
@@ -204,6 +205,7 @@ impl VdomHelperFlags {
     }
 
     /// Merge two flag sets.
+    #[cfg(test)]
     #[inline(always)]
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -352,12 +354,14 @@ impl VaporHelperFlags {
     }
 
     /// True if no helpers are recorded.
+    #[cfg(test)]
     #[inline(always)]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
     /// Check membership.
+    #[cfg(test)]
     #[inline(always)]
     pub const fn has(self, h: VaporHelper) -> bool {
         (self.0 & (h as u32)) != 0
@@ -370,6 +374,7 @@ impl VaporHelperFlags {
     }
 
     /// Merge two flag sets.
+    #[cfg(test)]
     #[inline(always)]
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -486,9 +491,8 @@ pub fn escape_js_string_into(buf: &mut String, s: &str) {
     }
 }
 
-/// Escape a string for use in a JS string literal. Returns new `String` only if
-/// escaping is needed; the caller should check [`needs_js_escaping`] first to
-/// avoid allocation for the common case.
+/// Escape a string for use in a JS string literal.
+#[cfg(test)]
 pub fn escape_js_string(s: &str) -> String {
     let mut buf = String::with_capacity(s.len() + 8);
     escape_js_string_into(&mut buf, s);
@@ -717,16 +721,6 @@ pub fn has_html_entities(s: &str) -> bool {
 
 // ======================== Vapor HTML helpers ========================
 
-/// Wrap a Vapor HTML string in a `_template("...", true)` call.
-///
-/// The `is_single_root` parameter adds `, true` for single-root templates
-/// which enables the optimization of using `firstChild` directly.
-pub fn format_template_declaration(idx: u32, html: &str, is_single_root: bool) -> String {
-    let mut buf = String::with_capacity(html.len() + 32);
-    write_template_declaration_into(&mut buf, idx, html, is_single_root);
-    buf
-}
-
 /// Write a `_template("...", true)` declaration directly into a buffer.
 pub fn write_template_declaration_into(
     buf: &mut String,
@@ -745,7 +739,16 @@ pub fn write_template_declaration_into(
     buf.push(')');
 }
 
+/// Wrap a Vapor HTML string in a `_template("...", true)` call.
+#[cfg(test)]
+pub fn format_template_declaration(idx: u32, html: &str, is_single_root: bool) -> String {
+    let mut buf = String::with_capacity(html.len() + 32);
+    write_template_declaration_into(&mut buf, idx, html, is_single_root);
+    buf
+}
+
 /// Format a `_renderEffect(() => { ... })` wrapper around effect statements.
+#[cfg(test)]
 pub fn format_render_effect(effects: &[String]) -> String {
     if effects.is_empty() {
         return String::new();
@@ -961,40 +964,6 @@ fn find_v_for_separator_any(expr: &str) -> Option<usize> {
             && (bytes[i + 3] == b' ')
             && ((bytes[i + 1] == b'i' && bytes[i + 2] == b'n')
                 || (bytes[i + 1] == b'o' && bytes[i + 2] == b'f'))
-        {
-            return Some(i);
-        }
-    }
-    None
-}
-
-/// Find ` in ` or ` of ` separator in a v-for expression, respecting nesting.
-pub fn find_v_for_separator(expr: &str, sep: &str) -> Option<usize> {
-    let mut depth_paren = 0i32;
-    let mut depth_bracket = 0i32;
-    let mut depth_brace = 0i32;
-    let bytes = expr.as_bytes();
-    let sep_bytes = sep.as_bytes();
-
-    if bytes.len() < sep_bytes.len() {
-        return None;
-    }
-
-    for i in 0..=bytes.len() - sep_bytes.len() {
-        match bytes[i] {
-            b'(' => depth_paren += 1,
-            b')' => depth_paren -= 1,
-            b'[' => depth_bracket += 1,
-            b']' => depth_bracket -= 1,
-            b'{' => depth_brace += 1,
-            b'}' => depth_brace -= 1,
-            _ => {}
-        }
-
-        if depth_paren == 0
-            && depth_bracket == 0
-            && depth_brace == 0
-            && bytes[i..].starts_with(sep_bytes)
         {
             return Some(i);
         }

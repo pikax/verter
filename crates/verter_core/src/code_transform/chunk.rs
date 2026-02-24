@@ -17,6 +17,7 @@ pub(super) enum Chunk<'a> {
     },
     /// Content moved from its original position — maps back to source
     /// line-by-line for accurate source maps
+    #[allow(dead_code)] // Used by move_slice() which is test/API only for now
     Moved {
         start: u32,
         end: u32,
@@ -45,6 +46,7 @@ impl<'a> Chunk<'a> {
     }
 
     /// Create a moved chunk (content moved from original position, maps back to source)
+    #[allow(dead_code)]
     pub fn moved(start: u32, end: u32, content: &'a str) -> Self {
         Self::Moved {
             start,
@@ -54,6 +56,7 @@ impl<'a> Chunk<'a> {
     }
 
     /// Check if this chunk represents original content
+    #[allow(dead_code)]
     pub fn is_original(&self) -> bool {
         matches!(self, Self::Original { .. })
     }

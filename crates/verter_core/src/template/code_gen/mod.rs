@@ -48,6 +48,7 @@ pub enum CodeGenMode {
     /// Vapor mode (direct DOM manipulation) output.
     Vapor,
     /// Vapor2 — stateless vapor codegen using NodeId-based variable naming.
+    #[allow(dead_code)]
     Vapor2,
 }
 

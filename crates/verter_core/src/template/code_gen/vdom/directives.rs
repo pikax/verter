@@ -187,22 +187,12 @@ pub fn collect_scope_imports(close: &ScopeClose, out: &mut CodeGenOutput<'_>) {
     }
 }
 
-// ======================== Runtime directive wrapping ========================
-
 /// Format a runtime directive entry for `_withDirectives()`.
-///
-/// Each directive entry is: `[identifier, value?, arg?, modifiers?]`
-///
-/// Examples:
-/// - `[_vModelText, msg]` (v-model on input)
-/// - `[_vShow, show]` (v-show)
-/// - `[_directive_focus]` (custom, no value)
-/// - `[_vModelText, msg, void 0, { trim: true }]` (v-model with modifiers)
+#[cfg(test)]
 pub fn format_directive_entry(directive: &str, value: &str, arg: &str, modifiers: &str) -> String {
     let mut buf = String::with_capacity(32);
     buf.push('[');
     buf.push_str(directive);
-
     if !value.is_empty() || !arg.is_empty() || !modifiers.is_empty() {
         buf.push_str(", ");
         if value.is_empty() {
@@ -211,7 +201,6 @@ pub fn format_directive_entry(directive: &str, value: &str, arg: &str, modifiers
             buf.push_str(value);
         }
     }
-
     if !arg.is_empty() || !modifiers.is_empty() {
         buf.push_str(", ");
         if arg.is_empty() {
@@ -220,12 +209,10 @@ pub fn format_directive_entry(directive: &str, value: &str, arg: &str, modifiers
             buf.push_str(arg);
         }
     }
-
     if !modifiers.is_empty() {
         buf.push_str(", ");
         buf.push_str(modifiers);
     }
-
     buf.push(']');
     buf
 }

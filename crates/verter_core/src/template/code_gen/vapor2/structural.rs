@@ -10,6 +10,7 @@ use crate::types::NodeProp;
 /// - v-if: `_createIf(() => (condition), () => {`
 /// - v-else-if: `, () => _createIf(() => (condition), () => {`
 /// - v-else: `, () => {`
+#[allow(dead_code)]
 pub fn build_condition_prefix(
     kind: &ElementNodeConditionKind,
     prop: &NodeProp,
@@ -40,6 +41,7 @@ pub fn build_condition_prefix(
 }
 
 /// Build the closing code for a v-if / v-else-if / v-else structural directive.
+#[allow(dead_code)]
 pub fn build_condition_suffix(kind: &ElementNodeConditionKind) -> &'static str {
     match kind {
         ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf => "})",
@@ -55,6 +57,7 @@ pub fn collect_condition_imports(out: &mut CodeGenOutput<'_>) {
 /// Build the opening code for a v-for structural directive.
 ///
 /// Output: `_createFor(() => (iterable), (params) => {`
+#[allow(dead_code)]
 pub fn build_for_prefix(v_for: &NodeProp, source: &str) -> String {
     let expr = match (v_for.value_start, v_for.value_end) {
         (Some(s), Some(e)) => &source[s as usize..e as usize],
@@ -73,6 +76,7 @@ pub fn build_for_prefix(v_for: &NodeProp, source: &str) -> String {
 }
 
 /// Build the closing code for v-for.
+#[allow(dead_code)]
 pub fn build_for_suffix() -> &'static str {
     "})"
 }
