@@ -188,10 +188,9 @@ pub struct VerterCompileResult {
     pub errors: Vec<CompileDiagnostic>,
     pub parse_duration_ms: f64,
     pub total_duration_ms: f64,
-    /// TSX script block for IDE type checking. Present when `include_tsx` is true.
-    pub tsx_script: Option<VerterTsxBlock>,
-    /// TSX template block (JSX) for IDE type checking. Present when `include_tsx` is true.
-    pub tsx_template: Option<VerterTsxBlock>,
+    /// Combined TSX output for IDE type checking. Present when `include_tsx` is true.
+    /// Contains both script types and template JSX in a single `.tsx` file.
+    pub tsx: Option<VerterTsxBlock>,
 }
 
 /// Generated output for the `<script>` or `<script setup>` block.

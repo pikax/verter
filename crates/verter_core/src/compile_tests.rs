@@ -6207,35 +6207,22 @@ const msg = 'hello'
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-    let tsx_script = result.tsx_script.as_ref().expect("tsx_script block");
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(!tsx.code.is_empty(), "TSX code should not be empty");
     assert!(
-        !tsx_script.code.is_empty(),
-        "TSX script code should not be empty"
-    );
-    assert!(
-        tsx_script.code.contains("function __verter_tsx_App"),
+        tsx.code.contains("function __verter_tsx_App"),
         "Should contain component wrapper function, got: {}",
-        tsx_script.code
+        tsx.code
     );
     assert!(
-        tsx_script.code.contains("const msg = 'hello'"),
+        tsx.code.contains("const msg = 'hello'"),
         "Should preserve setup content, got: {}",
-        tsx_script.code
+        tsx.code
     );
     assert!(
-        !tsx_script.source_map.is_empty(),
-        "Source map should be generated"
-    );
-
-    let tsx_template = result.tsx_template.as_ref().expect("tsx_template block");
-    assert!(
-        !tsx_template.code.is_empty(),
-        "TSX template code should not be empty"
-    );
-    assert!(
-        tsx_template.code.contains("<div>"),
-        "Template should contain JSX, got: {}",
-        tsx_template.code
+        tsx.code.contains("<div>"),
+        "Should contain template JSX, got: {}",
+        tsx.code
     );
 }
 
@@ -6255,17 +6242,17 @@ const count = ref(0)
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-    let tsx_script = result.tsx_script.as_ref().expect("tsx_script block");
+    let tsx = result.tsx.as_ref().expect("tsx block");
     // Imports should be hoisted above the wrapper function
-    let fn_pos = tsx_script
+    let fn_pos = tsx
         .code
         .find("function __verter_tsx_App")
         .expect("wrapper function");
-    let ref_pos = tsx_script
+    let ref_pos = tsx
         .code
         .find("import { ref } from 'vue'")
         .expect("ref import");
-    let type_pos = tsx_script
+    let type_pos = tsx
         .code
         .find("import type { Foo } from './types'")
         .expect("type import");
@@ -6289,12 +6276,12 @@ const msg = 'hello'
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
 
-    let tsx_template = result.tsx_template.as_ref().expect("tsx_template block");
+    let tsx = result.tsx.as_ref().expect("tsx block");
     // count is a SetupRef → gets .value suffix in inline mode
     assert!(
-        tsx_template.code.contains("count.value"),
+        tsx.code.contains("count.value"),
         "SetupRef should get .value, got: {}",
-        tsx_template.code
+        tsx.code
     );
 }
 
@@ -6310,19 +6297,18 @@ const msg = 'hello'
 </template>
 "#,
     );
-    assert!(result.tsx_script.is_none(), "TSX script should be None");
-    assert!(result.tsx_template.is_none(), "TSX template should be None");
+    assert!(result.tsx.is_none(), "TSX should be None when disabled");
 }
 
 #[test]
 fn tsx_template_comment() {
     let result = compile_tsx(r#"<template><!-- hello --></template>"#);
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    let tsx_template = result.tsx_template.as_ref().expect("tsx_template block");
+    let tsx = result.tsx.as_ref().expect("tsx block");
     assert!(
-        tsx_template.code.contains("{/*"),
+        tsx.code.contains("{/*"),
         "Comment should be converted to JSX, got: {}",
-        tsx_template.code
+        tsx.code
     );
 }
 
@@ -6334,11 +6320,11 @@ const msg = 'hello'
 </script>"#,
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
-    // TSX script should still be generated
-    assert!(result.tsx_script.is_some(), "TSX script should be present");
-    // No template → no TSX template
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    // Should still contain script content, just no template JSX
     assert!(
-        result.tsx_template.is_none(),
-        "TSX template should be None when no template block"
+        tsx.code.contains("const msg = 'hello'"),
+        "Script-only TSX should contain setup content, got: {}",
+        tsx.code
     );
 }

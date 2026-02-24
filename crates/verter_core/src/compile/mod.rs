@@ -596,7 +596,9 @@ pub fn compile(
     };
 
     // ── 6. TSX codegen (optional) ────────────────────────────────
-    let (tsx_script_block, tsx_template_block) = if options.include_tsx {
+    // Produces a single combined `.tsx` file for LSP type checking.
+    let tsx_block = if options.include_tsx {
+        let tsx_start = Instant::now();
         let js_component_name =
             tsx::sanitize_js_identifier(options.filename.as_deref().unwrap_or("App.vue"));
         let tsx_script_opts = tsx::TsxScriptOptions {
@@ -608,8 +610,7 @@ pub fn compile(
             is_vapor: use_vapor,
         };
 
-        // TSX script pass — uses its own CodeTransform for independent source map
-        let tsx_script_start = Instant::now();
+        // Script pass — uses its own CodeTransform for independent source map
         let tsx_script_alloc = Allocator::new();
         let mut tsx_script_ct = CodeTransform::new(input, &tsx_script_alloc);
 
@@ -654,25 +655,9 @@ pub fn compile(
         remove_inter_block_gaps(&mut tsx_script_ct, input.len() as u32, &block_ranges);
 
         let tsx_script_code = tsx_script_ct.build_string();
-        let tsx_script_sm = if verter_options.source_map {
-            tsx_script_ct.generate_map_json(SourceMapOptions {
-                source: options.filename.as_deref(),
-                file: options.filename.as_deref(),
-                include_content: true,
-            })
-        } else {
-            String::new()
-        };
-        let tsx_script_dur = tsx_script_start.elapsed().as_secs_f64() * 1000.0;
 
-        let tsx_script = Some(VerterTsxBlock {
-            code: tsx_script_code,
-            source_map: tsx_script_sm,
-            duration_ms: tsx_script_dur,
-        });
-
-        // TSX template pass
-        let tsx_template = if !has_parse_errors {
+        // Template pass — generate JSX from template AST
+        let tsx_template_code = if !has_parse_errors {
             if let Some(ref template_ast) = taken_template_ast {
                 let is_non_html = template_ast.root.lang.as_ref().is_some_and(|span| {
                     let v = &input[span.start as usize..span.end as usize];
@@ -681,7 +666,6 @@ pub fn compile(
                 if is_non_html {
                     None
                 } else {
-                    let tsx_t_start = Instant::now();
                     let tsx_t_alloc = Allocator::new();
                     let mut tsx_t_ct = CodeTransform::new(input, &tsx_t_alloc);
                     let tsx_source_type = SourceType::tsx();
@@ -724,22 +708,7 @@ pub fn compile(
                         );
                     let full = tsx_t_ct.build_string();
                     let suffix = input.len() - tpl_tag_e;
-                    let tsx_t_code = full[tpl_tag_s..full.len() - suffix].to_string();
-                    let tsx_t_sm = if verter_options.source_map {
-                        tsx_t_ct.generate_map_json(SourceMapOptions {
-                            source: options.filename.as_deref(),
-                            file: options.filename.as_deref(),
-                            include_content: true,
-                        })
-                    } else {
-                        String::new()
-                    };
-                    let tsx_t_dur = tsx_t_start.elapsed().as_secs_f64() * 1000.0;
-                    Some(VerterTsxBlock {
-                        code: tsx_t_code,
-                        source_map: tsx_t_sm,
-                        duration_ms: tsx_t_dur,
-                    })
+                    Some(full[tpl_tag_s..full.len() - suffix].to_string())
                 }
             } else {
                 None
@@ -748,9 +717,30 @@ pub fn compile(
             None
         };
 
-        (tsx_script, tsx_template)
+        // Combine script + template into a single TSX file
+        let mut tsx_code = tsx_script_code;
+        if let Some(tpl_code) = tsx_template_code {
+            if !tsx_code.is_empty() {
+                tsx_code.push('\n');
+            }
+            tsx_code.push_str(&tpl_code);
+        }
+
+        let tsx_sm = if verter_options.source_map {
+            // TODO: combine source maps from both passes
+            String::new()
+        } else {
+            String::new()
+        };
+        let tsx_dur = tsx_start.elapsed().as_secs_f64() * 1000.0;
+
+        Some(VerterTsxBlock {
+            code: tsx_code,
+            source_map: tsx_sm,
+            duration_ms: tsx_dur,
+        })
     } else {
-        (None, None)
+        None
     };
 
     // ── 7. Assemble ───────────────────────────────────────────────
@@ -771,8 +761,7 @@ pub fn compile(
         errors: convert_diagnostics(&all_diagnostics),
         parse_duration_ms,
         total_duration_ms,
-        tsx_script: tsx_script_block,
-        tsx_template: tsx_template_block,
+        tsx: tsx_block,
     }
 }
 

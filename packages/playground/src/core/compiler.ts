@@ -13,7 +13,7 @@ interface HostCompileProfile {
 }
 
 interface HostVirtualNodeKind {
-  kind: "main" | "script" | "template" | "style" | "custom" | "tsxScript" | "tsxTemplate";
+  kind: "main" | "script" | "template" | "style" | "custom" | "tsx";
   index?: number;
 }
 
@@ -279,31 +279,20 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   }
   file.compiled.analysis = analysis;
 
-  // Retrieve TSX types output (backward compat: older WASM may not produce these nodes)
-  const tsxParts: string[] = [];
-  if (nodeKinds.has("tsxScript")) {
+  // Retrieve TSX types output (backward compat: older WASM may not produce this node)
+  if (nodeKinds.has("tsx")) {
     try {
-      const tsxScript = wasmHost!.getVirtualFile({
-        rawId: `${file.filename}?vue&type=tsxScript`,
+      const tsx = wasmHost!.getVirtualFile({
+        rawId: `${file.filename}?vue&type=tsx`,
         compileProfile: profile,
       });
-      if (tsxScript.code) tsxParts.push(tsxScript.code);
+      file.compiled.types = tsx.code ?? "";
     } catch {
       // Silently ignore - TSX output is optional
     }
+  } else {
+    file.compiled.types = "";
   }
-  if (nodeKinds.has("tsxTemplate")) {
-    try {
-      const tsxTemplate = wasmHost!.getVirtualFile({
-        rawId: `${file.filename}?vue&type=tsxTemplate`,
-        compileProfile: profile,
-      });
-      if (tsxTemplate.code) tsxParts.push(tsxTemplate.code);
-    } catch {
-      // Silently ignore - TSX output is optional
-    }
-  }
-  file.compiled.types = tsxParts.join("\n");
 
   return {
     verterNew: null,
@@ -349,18 +338,16 @@ function compileTsWithHost(file: File, options: CompilerOptions | undefined): Co
   }
   file.compiled.analysis = analysis;
 
-  // Retrieve TSX types output for .ts files (backward compat: older WASM may not produce these)
-  const tsxParts: string[] = [];
+  // Retrieve TSX types output for .ts files (backward compat: older WASM may not produce this)
   try {
-    const tsxScript = wasmHost!.getVirtualFile({
-      rawId: `${vueFilename}?vue&type=tsxScript`,
+    const tsx = wasmHost!.getVirtualFile({
+      rawId: `${vueFilename}?vue&type=tsx`,
       compileProfile: profile,
     });
-    if (tsxScript.code) tsxParts.push(tsxScript.code);
+    file.compiled.types = tsx.code ?? "";
   } catch {
-    // Silently ignore
+    file.compiled.types = "";
   }
-  file.compiled.types = tsxParts.join("\n");
 
   return {
     verterNew: null,

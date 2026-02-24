@@ -11,8 +11,7 @@ pub(crate) fn node_sort_key(node: &VirtualNodeKind) -> (u8, usize) {
         VirtualNodeKind::Template => (2, 0),
         VirtualNodeKind::Style { index } => (3, *index),
         VirtualNodeKind::Custom { index } => (4, *index),
-        VirtualNodeKind::TsxScript => (5, 0),
-        VirtualNodeKind::TsxTemplate => (6, 0),
+        VirtualNodeKind::Tsx => (5, 0),
     }
 }
 

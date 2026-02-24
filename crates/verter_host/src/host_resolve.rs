@@ -576,32 +576,16 @@ impl VerterHost {
             );
         }
 
-        // TSX blocks for IDE type checking
-        if let Some(tsx_script) = compiled.tsx_script {
+        // Combined TSX output for LSP type checking
+        if let Some(tsx) = compiled.tsx {
             outputs.insert(
-                VirtualNodeKind::TsxScript,
+                VirtualNodeKind::Tsx,
                 CachedVirtualFile {
-                    code: Arc::from(tsx_script.code),
-                    source_map: if tsx_script.source_map.is_empty() {
+                    code: Arc::from(tsx.code),
+                    source_map: if tsx.source_map.is_empty() {
                         None
                     } else {
-                        Some(Arc::from(tsx_script.source_map))
-                    },
-                    lang: Some("tsx".to_string()),
-                    meta: VirtualMeta::default(),
-                },
-            );
-        }
-
-        if let Some(tsx_template) = compiled.tsx_template {
-            outputs.insert(
-                VirtualNodeKind::TsxTemplate,
-                CachedVirtualFile {
-                    code: Arc::from(tsx_template.code),
-                    source_map: if tsx_template.source_map.is_empty() {
-                        None
-                    } else {
-                        Some(Arc::from(tsx_template.source_map))
+                        Some(Arc::from(tsx.source_map))
                     },
                     lang: Some("tsx".to_string()),
                     meta: VirtualMeta::default(),

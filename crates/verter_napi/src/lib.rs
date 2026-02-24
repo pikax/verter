@@ -450,12 +450,8 @@ fn host_node_kind_to_napi(input: &host::VirtualNodeKind) -> NapiVirtualNodeKind 
             kind: "custom".to_string(),
             index: Some(*index as u32),
         },
-        host::VirtualNodeKind::TsxScript => NapiVirtualNodeKind {
-            kind: "tsxScript".to_string(),
-            index: None,
-        },
-        host::VirtualNodeKind::TsxTemplate => NapiVirtualNodeKind {
-            kind: "tsxTemplate".to_string(),
+        host::VirtualNodeKind::Tsx => NapiVirtualNodeKind {
+            kind: "tsx".to_string(),
             index: None,
         },
     }

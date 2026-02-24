@@ -176,10 +176,8 @@ pub enum VirtualNodeKind {
     Style { index: usize },
     /// A custom block (e.g. `<i18n>`) at the given index.
     Custom { index: usize },
-    /// TSX script block for IDE type checking (preserves TypeScript types).
-    TsxScript,
-    /// TSX template block (JSX) for IDE type checking.
-    TsxTemplate,
+    /// Combined TSX output for LSP type checking (script types + template JSX).
+    Tsx,
 }
 
 /// A `src="..."` attribute on an SFC block that references an external file.
