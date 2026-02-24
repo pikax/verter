@@ -8,6 +8,9 @@
 //! - `v-on="{ ... }"` → `{...{ ... }}` (spread events, #49)
 
 use oxc_allocator::Allocator;
+use oxc_ast::ast::{Expression, ObjectPropertyKind};
+use oxc_parser::Parser;
+use oxc_span::{GetSpan, SourceType};
 
 use crate::ast::types::{ElementNode, TagType};
 use crate::template::code_gen::binding::BindingResolver;
@@ -208,17 +211,10 @@ fn process_v_on<'alloc>(
         // v-on="{ mousedown: doThis }" → spread: {...{ mousedown: doThis }}
         if let (Some(vs), Some(ve)) = (prop.value_start, prop.value_end) {
             let value_expr = &source[vs as usize..ve as usize];
+            let resolved = resolve_prefixed_expr(value_expr, vs, oxc_prop, resolver);
+            let rewritten = rewrite_v_on_object_literal_expr(&resolved);
             let prop_end = get_prop_end(prop);
-            out.overwrite(prop.start, prop_end, &format!("{{...{}}}", value_expr));
-
-            // Apply binding patches
-            if let Some(oxc_p) = oxc_prop {
-                if let Some(ref exp) = oxc_p.exp {
-                    if let Some(ref bindings) = exp.bindings {
-                        resolver.collect_binding_patches(bindings, out);
-                    }
-                }
-            }
+            out.overwrite(prop.start, prop_end, &format!("{{...{}}}", rewritten));
         }
         return;
     }
@@ -363,7 +359,7 @@ pub(crate) fn get_prop_end(prop: &NodeProp) -> u32 {
 ///
 /// - `click` → `onClick`
 /// - `update:modelValue` → `onUpdate:modelValue`
-/// - `custom-event` → `onCustomEvent`  (camelCase)
+/// - `custom-event` → `onCustom-event` (v5 parity)
 fn event_to_jsx_name(event_name: &str) -> String {
     // Special case: update: prefix (for v-model)
     if let Some(rest) = event_name.strip_prefix("update:") {
@@ -372,22 +368,108 @@ fn event_to_jsx_name(event_name: &str) -> String {
 
     let mut result = String::with_capacity(event_name.len() + 2);
     result.push_str("on");
-
-    let mut capitalize_next = true;
-    for ch in event_name.chars() {
-        if ch == '-' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            for upper in ch.to_uppercase() {
-                result.push(upper);
-            }
-            capitalize_next = false;
-        } else {
-            result.push(ch);
+    let mut chars = event_name.chars();
+    if let Some(first) = chars.next() {
+        for upper in first.to_uppercase() {
+            result.push(upper);
         }
+        result.extend(chars);
+    }
+    result
+}
+
+fn rewrite_v_on_object_literal_expr(expr: &str) -> String {
+    let trimmed = expr.trim();
+    if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
+        return expr.to_string();
     }
 
-    result
+    let alloc = Allocator::new();
+    let Ok(parsed) = Parser::new(&alloc, trimmed, SourceType::mjs()).parse_expression() else {
+        return expr.to_string();
+    };
+    let Expression::ObjectExpression(obj) = parsed else {
+        return expr.to_string();
+    };
+
+    let mut rebuilt = String::from("{");
+    let mut first = true;
+
+    for prop in &obj.properties {
+        let piece = match prop {
+            ObjectPropertyKind::SpreadProperty(spread) => {
+                let span = spread.argument.span();
+                if span.end <= span.start {
+                    continue;
+                }
+                format!(
+                    "...{}",
+                    trimmed[span.start as usize..span.end as usize].trim()
+                )
+            }
+            ObjectPropertyKind::ObjectProperty(p) => {
+                if p.computed {
+                    let key_span = p.key.span();
+                    let value_span = p.value.span();
+                    if key_span.end <= key_span.start || value_span.end <= value_span.start {
+                        continue;
+                    }
+                    let key_src = trimmed[key_span.start as usize..key_span.end as usize].trim();
+                    let value_src =
+                        trimmed[value_span.start as usize..value_span.end as usize].trim();
+                    format!("[{}]: {}", key_src, value_src)
+                } else {
+                    let key_span = p.key.span();
+                    let value_span = p.value.span();
+                    if key_span.end <= key_span.start || value_span.end <= value_span.start {
+                        continue;
+                    }
+
+                    let raw_key = trimmed[key_span.start as usize..key_span.end as usize].trim();
+                    let Some(event_key) = parse_static_event_key(raw_key) else {
+                        return expr.to_string();
+                    };
+                    let mapped = event_to_jsx_name(event_key);
+                    let key = if crate::template::code_gen::binding::is_simple_ident(&mapped) {
+                        mapped
+                    } else {
+                        format!("\"{}\"", mapped)
+                    };
+                    let value_src =
+                        trimmed[value_span.start as usize..value_span.end as usize].trim();
+                    format!("{}: {}", key, value_src)
+                }
+            }
+        };
+
+        if !first {
+            rebuilt.push_str(", ");
+        }
+        first = false;
+        rebuilt.push_str(&piece);
+    }
+
+    rebuilt.push('}');
+    rebuilt
+}
+
+fn parse_static_event_key(raw_key: &str) -> Option<&str> {
+    let trimmed = raw_key.trim();
+    if let Some(stripped) = trimmed
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|s| s.strip_suffix('\''))
+        })
+    {
+        return Some(stripped.trim());
+    }
+    if crate::template::code_gen::binding::is_simple_ident(trimmed) {
+        return Some(trimmed);
+    }
+    None
 }
 
 fn resolve_prefixed_expr(
@@ -462,7 +544,7 @@ mod tests {
 
     #[test]
     fn event_to_jsx_kebab() {
-        assert_eq!(event_to_jsx_name("custom-event"), "onCustomEvent");
+        assert_eq!(event_to_jsx_name("custom-event"), "onCustom-event");
     }
 
     #[test]

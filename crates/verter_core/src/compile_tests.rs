@@ -7365,7 +7365,7 @@ fn tsx_prop_v5_process_parity_matrix() {
         ),
         (
             r#"<template><div @test-camel-case="test" /></template>"#,
-            &[r#"<div onTestCamelCase={_ctx.test} />"#],
+            &[r#"<div onTest-camel-case={_ctx.test} />"#],
             &[],
         ),
         (
@@ -7909,6 +7909,123 @@ const test = () => {}
     assert!(
         tsx.code.contains("onVue:mounted={test}"),
         "Namespaced vue event should map to onVue:mounted, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_event_hyphenated_name_preserves_v5_tail_segments() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const test = () => {}
+</script>
+<template>
+  <div @test-camel-case="test" />
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("onTest-camel-case={test}")
+            || tsx.code.contains("onTest-camel-case={_ctx.test}"),
+        "Hyphenated event name should preserve tail segments as v5 does, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_v_on_object_literal_rewrites_to_on_event_keys() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const click = () => {}
+const mouseenter = () => {}
+</script>
+<template>
+  <button v-on="{ click, mouseenter }" />
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    let normalized: String = tsx.code.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        normalized.contains("{...{onClick:") && normalized.contains("onMouseenter:"),
+        "v-on object literal should map event keys to JSX on* props, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !normalized.contains("{...{click:"),
+        "Raw DOM event keys should not remain inside v-on object spread, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_issue_49_event_handlers_with_spread_params_do_not_bind_args_to_ctx() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const a = {}
+</script>
+<template>
+  <div
+    @click="function (...args) {}"
+    @input="(...args) => {}"
+    @touchmove="
+      (event) => {
+        event;
+      }
+    "
+  />
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        !tsx.code.contains("..._ctx.args"),
+        "Spread event parameters must never be prefixed to _ctx, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("...___VERTER___ctx.args"),
+        "Spread event parameters must never be prefixed to ___VERTER___ctx, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("onClick={function (...args) {}}"),
+        "Function handler with spread args should be preserved, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("onInput={(...args) => {}}"),
+        "Arrow handler with spread args should be preserved, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("onTouchmove={(event) => {") && tsx.code.contains("event;"),
+        "Arrow handler with explicit param should stay direct (no wrapper), got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_issue_46_bare_click_does_not_bind_click_identifier_from_context() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const a = {}
+</script>
+<template>
+  <div @click></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        !tsx.code.contains("onclick={"),
+        "Bare @click must not be emitted as lowercase onclick binding, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("_ctx.click"),
+        "Bare @click must not bind synthetic click identifier from context, got:\n{}",
         tsx.code
     );
 }

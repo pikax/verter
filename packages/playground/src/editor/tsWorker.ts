@@ -21,7 +21,7 @@ const files = new Map<string, VirtualFile>();
 let tsLib: typeof ts | null = null;
 let languageService: ts.LanguageService | null = null;
 
-const TS_CDN_BASE = "https://cdn.jsdelivr.net/npm/typescript@5.9/lib/";
+const TS_CDN_BASE = "https://cdn.jsdelivr.net/npm/typescript@6/lib/";
 
 // Lib files to load for a reasonable type checking experience
 const LIB_FILES = [
@@ -156,7 +156,7 @@ function createLanguageServiceHost(): ts.LanguageServiceHost {
 async function init(verterTypesContent?: string): Promise<void> {
   // Load TypeScript from CDN
   // @ts-expect-error -- dynamic import from CDN
-  const tsModule = await import("https://cdn.jsdelivr.net/npm/typescript@5.9/+esm");
+  const tsModule = await import("https://cdn.jsdelivr.net/npm/typescript@6/+esm");
   tsLib = tsModule.default ?? tsModule;
 
   // Load lib files

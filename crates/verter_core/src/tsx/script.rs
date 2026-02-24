@@ -494,18 +494,12 @@ fn event_to_jsx_name(event_name: &str) -> String {
 
     let mut result = String::with_capacity(event_name.len() + 2);
     result.push_str("on");
-    let mut capitalize_next = true;
-    for ch in event_name.chars() {
-        if ch == '-' {
-            capitalize_next = true;
-        } else if capitalize_next {
-            for upper in ch.to_uppercase() {
-                result.push(upper);
-            }
-            capitalize_next = false;
-        } else {
-            result.push(ch);
+    let mut chars = event_name.chars();
+    if let Some(first) = chars.next() {
+        for upper in first.to_uppercase() {
+            result.push(upper);
         }
+        result.extend(chars);
     }
     result
 }

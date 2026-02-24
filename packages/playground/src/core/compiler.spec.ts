@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import ts from "typescript";
 import { mergeRenderIntoComponent, formatDiagnostics, applyTsxOutput } from "./compiler";
 import { File } from "./types";
 
@@ -43,6 +44,83 @@ async function generateRealTsxOutput(vueSource: string): Promise<{ code: string;
   }
 
   return { code: tsx.code, sourceMap: tsx.sourceMap };
+}
+
+const VUE_TYPE_STUB = `
+declare module "vue" {
+  export interface IntrinsicElementAttributes {
+    div: {}
+    button: {
+      onClick?: (...args: unknown[]) => unknown
+      onMouseenter?: (...args: unknown[]) => unknown
+      "onTest-camel-case"?: (...args: unknown[]) => unknown
+    }
+  }
+}
+`;
+
+const JSX_GLOBAL_STUB = `
+import type { IntrinsicElementAttributes } from "vue"
+declare global {
+  namespace JSX {
+    interface IntrinsicElements extends IntrinsicElementAttributes {}
+  }
+}
+export {}
+`;
+
+function createTypecheckService(tsxCode: string) {
+  const fileName = "/App.vue.tsx";
+  const files = new Map<string, { version: number; content: string }>([
+    [fileName, { version: 1, content: tsxCode }],
+    ["/node_modules/vue/index.d.ts", { version: 1, content: VUE_TYPE_STUB }],
+    ["/types/jsx-global.d.ts", { version: 1, content: JSX_GLOBAL_STUB }],
+  ]);
+
+  const options: ts.CompilerOptions = {
+    target: ts.ScriptTarget.ES2022,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    jsx: ts.JsxEmit.Preserve,
+    strict: true,
+    noEmit: true,
+    skipLibCheck: true,
+    lib: ["lib.es2022.d.ts", "lib.dom.d.ts"],
+    types: [],
+  };
+
+  const host: ts.LanguageServiceHost = {
+    getCompilationSettings: () => options,
+    getScriptFileNames: () => [...files.keys()],
+    getScriptVersion: (name) => String(files.get(name)?.version ?? 0),
+    getScriptSnapshot: (name) => {
+      const file = files.get(name);
+      if (file) return ts.ScriptSnapshot.fromString(file.content);
+      const content = ts.sys.readFile(name);
+      if (content != null) return ts.ScriptSnapshot.fromString(content);
+      return undefined;
+    },
+    getCurrentDirectory: () => "/",
+    getDefaultLibFileName: (opts) => ts.getDefaultLibFilePath(opts),
+    fileExists: (name) => files.has(name) || ts.sys.fileExists(name),
+    readFile: (name) => files.get(name)?.content ?? ts.sys.readFile(name),
+    readDirectory: ts.sys.readDirectory,
+    directoryExists: ts.sys.directoryExists,
+    getDirectories: ts.sys.getDirectories,
+  };
+
+  return {
+    fileName,
+    service: ts.createLanguageService(host),
+  };
+}
+
+function collectTypeScriptDiagnostics(service: ts.LanguageService, fileName: string) {
+  const syntactic = service.getSyntacticDiagnostics(fileName);
+  const semantic = service.getSemanticDiagnostics(fileName);
+  return [...syntactic, ...semantic].map((diag) =>
+    ts.flattenDiagnosticMessageText(diag.messageText, "\n"),
+  );
 }
 
 describe("formatDiagnostics", () => {
@@ -283,5 +361,50 @@ describe("applyTsxOutput", () => {
     expect(file.compiled.types).toBe(tsx.code);
     expect(file.compiled.typesSourceMap).toBe(tsx.sourceMap);
     expect(file.compiled.typesSourceMap.length).toBeGreaterThan(0);
+  });
+});
+
+describe("generated TSX TypeScript semantics", () => {
+  it("type-checks v-on object syntax after key rewrite", async () => {
+    const source = `<script setup lang="ts">
+</script>
+<template>
+  <button v-on="{ click: () => {}, mouseenter: () => {} }" />
+</template>`;
+
+    const { code } = await generateRealTsxOutput(source);
+    const { service, fileName } = createTypecheckService(code);
+    const messages = collectTypeScriptDiagnostics(service, fileName);
+
+    expect(messages).toEqual([]);
+    expect(code).toContain("onClick");
+    expect(code).toContain("onMouseenter");
+  });
+
+  it("provides member completions for template expressions", async () => {
+    const source = `<template>
+  <div>{{ Math.max(1, 2) }}</div>
+</template>`;
+
+    const { code } = await generateRealTsxOutput(source);
+    const { service, fileName } = createTypecheckService(code);
+    const dotOffset = code.indexOf(".max");
+    expect(dotOffset).toBeGreaterThanOrEqual(0);
+
+    const completions = service.getCompletionsAtPosition(fileName, dotOffset + 1, {});
+    const completionNames = completions?.entries.map((entry) => entry.name) ?? [];
+    expect(completionNames).toContain("max");
+  });
+
+  it("reports template type errors from generated TSX", async () => {
+    const source = `<template>
+  <div>{{ Math.notExistingMethod() }}</div>
+</template>`;
+
+    const { code } = await generateRealTsxOutput(source);
+    const { service, fileName } = createTypecheckService(code);
+    const messages = collectTypeScriptDiagnostics(service, fileName);
+
+    expect(messages.some((message) => message.includes("notExistingMethod"))).toBe(true);
   });
 });
