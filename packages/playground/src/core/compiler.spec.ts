@@ -167,4 +167,41 @@ return "hello"
     expect(result).toContain("__sfc__.render = render;");
     expect(result).toContain("export default __sfc__");
   });
+
+  // @ai-generated - Template-only component with scoped styles: the host returns
+  // a synthetic script (with __sfc__ + __scopeId + export) concatenated with
+  // the template (import + render function). mergeRenderIntoComponent must
+  // insert render attachment before the export default, preserving __scopeId.
+  it("handles template-only SFC with scoped styles (synthetic script + template)", () => {
+    // This simulates the exact concatenation the playground does:
+    // assembledJs = script.code + "\n" + template.code
+    const scriptCode = `const __sfc__ = {};
+__sfc__.__scopeId = "data-v-0d04bfeb";
+export default __sfc__;
+`;
+    const templateCode = `import { createElementVNode as _createElementVNode, openBlock as _openBlock } from "vue"
+function render(_ctx, _cache, $props, $setup, $data, $options) {
+return (_openBlock(), _createElementVNode("div", { class: "dashboard" }, "hello"))
+}`;
+    const code = scriptCode + "\n" + templateCode;
+
+    const result = mergeRenderIntoComponent(code);
+
+    // __scopeId must be preserved
+    expect(result).toContain('__sfc__.__scopeId = "data-v-0d04bfeb"');
+    // render must be attached
+    expect(result).toContain("__sfc__.render = render;");
+    // export must exist
+    expect(result).toContain("export default __sfc__");
+    // Only one const __sfc__ definition
+    const sfcMatches = result.match(/const __sfc__/g);
+    expect(sfcMatches).toHaveLength(1);
+
+    // Order: __scopeId before render attachment before export
+    const scopeIdx = result.indexOf("__scopeId");
+    const renderIdx = result.indexOf("__sfc__.render = render;");
+    const exportIdx = result.indexOf("export default __sfc__");
+    expect(scopeIdx).toBeLessThan(renderIdx);
+    expect(renderIdx).toBeLessThan(exportIdx);
+  });
 });

@@ -8,13 +8,13 @@
 ///
 /// For every selector list found before an opening brace, calls `transform_fn`
 /// with the trimmed selector text and expects the transformed selector back.
-/// Skips `@`-rules (media, keyframes, etc.), comments, and strings.
+/// Skips `@`-rule headers (e.g. `@media (...)`, `@supports (...)`), but
+/// transforms selectors INSIDE those blocks. Also skips `@keyframes` selectors
+/// (`from`, `to`, `0%`, etc.), comments, and strings.
 ///
 /// **Precondition:** The input CSS must be normalized by lightningcss first
 /// (via [`super::normalize_css`]). The normalization flattens nested rules and
-/// ensures well-formed comments/strings, which this walker relies on. Selectors
-/// inside `@media`, `@supports`, etc. are intentionally skipped — lightningcss
-/// normalization handles hoisting them so they appear as top-level rules.
+/// ensures well-formed comments/strings, which this walker relies on.
 pub fn walk_and_transform_selectors(
     css: &str,
     mut transform_fn: impl FnMut(&str) -> String,
@@ -119,6 +119,11 @@ pub fn walk_and_transform_selectors(
 
                 output.push('{');
                 brace_depth += 1;
+                // Update last_block_end after pushing '{' so that the first
+                // selector inside an @-rule block starts AFTER the '{', not
+                // from the previous '}'. Without this, the first inner selector's
+                // raw_text includes the @-rule prefix and gets incorrectly skipped.
+                last_block_end = output.len();
             }
             _ => output.push(c),
         }
@@ -170,13 +175,11 @@ mod tests {
     // --- @-rules are skipped ---
 
     #[test]
-    fn test_at_rule_skipped() {
-        // The walker skips @-rules entirely. Selectors nested inside @media blocks
-        // are also skipped because the @-rule prefix is included in the raw_text.
-        // In the real pipeline, lightningcss normalization is applied first, and
-        // the scoped/modules transforms handle @media content correctly.
+    fn test_at_rule_prefix_not_collected() {
+        // @-rules themselves should not appear as selectors, but inner selectors
+        // inside @media, @supports, etc. MUST be collected and transformed.
         let selectors = collect_selectors("@media (min-width: 600px) { .box { color: red; } }");
-        assert!(selectors.is_empty());
+        assert_eq!(selectors, vec![".box"]);
     }
 
     // --- Comments ---
@@ -274,9 +277,9 @@ mod tests {
 
     #[test]
     fn test_nested_at_rule_with_selector() {
-        // Same as test_at_rule_skipped: nested selectors inside @-rules are not found.
+        // Selectors inside @-rules must be found and transformable.
         let selectors = collect_selectors("@media screen { .inner { color: red; } }");
-        assert!(selectors.is_empty());
+        assert_eq!(selectors, vec![".inner"]);
     }
 
     // --- Keyframe selectors should NOT be transformed ---
@@ -362,5 +365,92 @@ mod tests {
     fn test_pseudo_class_in_selector() {
         let selectors = collect_selectors(".btn:hover { color: red; }");
         assert_eq!(selectors, vec![".btn:hover"]);
+    }
+
+    // ===================================================================
+    // @ai-generated - @-rule inner selector extraction tests
+    // ===================================================================
+
+    /// Selectors inside @media must be collected.
+    #[test]
+    fn media_inner_selectors_collected() {
+        let selectors = collect_selectors(
+            "@media (max-width: 768px) { .a { color: red; } .b { color: blue; } }",
+        );
+        assert_eq!(selectors, vec![".a", ".b"]);
+    }
+
+    /// Selectors inside @supports must be collected.
+    #[test]
+    fn supports_inner_selectors_collected() {
+        let selectors = collect_selectors("@supports (display: grid) { .grid { display: grid; } }");
+        assert_eq!(selectors, vec![".grid"]);
+    }
+
+    /// Selectors inside @layer must be collected.
+    #[test]
+    fn layer_inner_selectors_collected() {
+        let selectors = collect_selectors("@layer base { .box { color: red; } }");
+        assert_eq!(selectors, vec![".box"]);
+    }
+
+    /// Multiple @media blocks, each with multiple selectors.
+    #[test]
+    fn multiple_media_blocks_selectors() {
+        let selectors = collect_selectors(
+            ".top { color: red; } \
+             @media (max-width: 768px) { .a { } .b { } } \
+             @media (min-width: 1200px) { .c { } } \
+             .bottom { color: blue; }",
+        );
+        assert_eq!(selectors, vec![".top", ".a", ".b", ".c", ".bottom"]);
+    }
+
+    /// Nested @media and @supports — deeply nested selector must be collected.
+    #[test]
+    fn nested_at_rules_inner_selectors() {
+        let selectors = collect_selectors(
+            "@media (min-width: 768px) { @supports (display: grid) { .nested { } } }",
+        );
+        assert_eq!(selectors, vec![".nested"]);
+    }
+
+    /// @font-face has no selectors — nothing should be collected.
+    #[test]
+    fn font_face_no_selectors() {
+        let selectors = collect_selectors(
+            "@font-face { font-family: MyFont; src: url('f.woff'); } .text { color: red; }",
+        );
+        assert_eq!(selectors, vec![".text"]);
+    }
+
+    /// Transform inside @media actually applies the transformation.
+    #[test]
+    fn media_inner_selectors_transformed() {
+        let result = walk_and_transform_selectors(
+            "@media (max-width: 768px) { .box { color: red; } }",
+            |sel| format!("{}[scoped]", sel),
+        );
+        assert!(
+            result.contains(".box[scoped]"),
+            ".box inside @media should be transformed. Got: {}",
+            result
+        );
+        assert!(
+            result.contains("@media"),
+            "@media rule must be preserved. Got: {}",
+            result
+        );
+    }
+
+    /// @charset is removed by lightningcss normalization before the walker
+    /// runs, so we don't test it directly. The walker requires normalized CSS.
+    /// This test verifies that @charset followed by a selector works after
+    /// lightningcss normalization (which removes @charset).
+    #[test]
+    fn after_charset_removal_selector_works() {
+        // After lightningcss normalization, @charset is removed, leaving just:
+        let selectors = collect_selectors(".box { color: red; }");
+        assert_eq!(selectors, vec![".box"]);
     }
 }

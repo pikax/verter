@@ -174,4 +174,138 @@ mod tests {
         assert!(css.contains(".b_a4f2eed6_"), "Got: {}", css);
         assert_eq!(mapping.len(), 2);
     }
+
+    // ===================================================================
+    // @ai-generated - CSS modules inside @-rule blocks
+    // ===================================================================
+
+    /// Classes inside @media must be hashed.
+    #[test]
+    fn test_modules_inside_media() {
+        let (css, mapping) = apply_css_modules(
+            "@media (max-width: 768px) { .mobile { display: block; } }",
+            "a4f2eed6",
+        )
+        .unwrap();
+        assert!(
+            css.contains(".mobile_a4f2eed6_"),
+            "Class inside @media must be hashed. Got: {}",
+            css
+        );
+        assert_eq!(mapping.len(), 1);
+        assert_eq!(mapping[0].0, "mobile");
+    }
+
+    /// Multiple classes inside @media.
+    #[test]
+    fn test_modules_multiple_inside_media() {
+        let (css, mapping) = apply_css_modules(
+            "@media (max-width: 768px) { .sidebar { display: none; } .content { width: 100%; } }",
+            "a4f2eed6",
+        )
+        .unwrap();
+        assert!(
+            css.contains(".sidebar_a4f2eed6_"),
+            "sidebar must be hashed. Got: {}",
+            css
+        );
+        assert!(
+            css.contains(".content_a4f2eed6_"),
+            "content must be hashed. Got: {}",
+            css
+        );
+        assert_eq!(mapping.len(), 2);
+    }
+
+    /// Classes both inside and outside @media.
+    #[test]
+    fn test_modules_mixed_media() {
+        let (css, mapping) = apply_css_modules(
+            ".top { color: red; } @media (min-width: 1200px) { .wide { display: flex; } } .bottom { color: blue; }",
+            "a4f2eed6",
+        )
+        .unwrap();
+        assert!(css.contains(".top_a4f2eed6_"), "Got: {}", css);
+        assert!(css.contains(".wide_a4f2eed6_"), "Got: {}", css);
+        assert!(css.contains(".bottom_a4f2eed6_"), "Got: {}", css);
+        assert_eq!(mapping.len(), 3);
+    }
+
+    /// Classes inside @supports must be hashed.
+    #[test]
+    fn test_modules_inside_supports() {
+        let (css, mapping) = apply_css_modules(
+            "@supports (display: grid) { .grid-item { grid-column: span 2; } }",
+            "a4f2eed6",
+        )
+        .unwrap();
+        assert!(
+            css.contains(".grid-item_a4f2eed6_"),
+            "Class inside @supports must be hashed. Got: {}",
+            css
+        );
+        assert_eq!(mapping.len(), 1);
+    }
+
+    /// Classes inside nested @media > @supports.
+    #[test]
+    fn test_modules_nested_at_rules() {
+        let (css, mapping) = apply_css_modules(
+            "@media (min-width: 768px) { @supports (display: grid) { .nested { display: grid; } } }",
+            "a4f2eed6",
+        )
+        .unwrap();
+        assert!(
+            css.contains(".nested_a4f2eed6_"),
+            "Deeply nested class must be hashed. Got: {}",
+            css
+        );
+        assert_eq!(mapping.len(), 1);
+    }
+
+    /// Same class inside and outside @media gets same hash.
+    #[test]
+    fn test_modules_same_class_in_media_and_top() {
+        let (css, mapping) = apply_css_modules(
+            ".btn { color: red; } @media (max-width: 768px) { .btn { color: blue; } }",
+            "a4f2eed6",
+        )
+        .unwrap();
+        // Same class → same hash, appears twice
+        let hash = &mapping[0].1;
+        let count = css.matches(hash.as_str()).count();
+        assert_eq!(
+            count, 2,
+            "Same class should appear twice with same hash. Got: {}",
+            css
+        );
+        assert_eq!(mapping.len(), 1, "Only one unique class mapping");
+    }
+
+    /// @keyframes selectors should NOT have class hashing applied.
+    #[test]
+    fn test_modules_keyframes_not_hashed() {
+        let (css, mapping) = apply_css_modules(
+            ".box { animation: fade 1s; } @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+            "a4f2eed6",
+        )
+        .unwrap();
+        assert!(
+            css.contains(".box_a4f2eed6_"),
+            ".box must be hashed. Got: {}",
+            css
+        );
+        // keyframe selectors (from, to) should not be treated as class selectors
+        assert!(
+            !css.contains("from_a4f2eed6"),
+            "from must not be hashed. Got: {}",
+            css
+        );
+        assert!(
+            !css.contains("to_a4f2eed6"),
+            "to must not be hashed. Got: {}",
+            css
+        );
+        assert_eq!(mapping.len(), 1);
+    }
 }

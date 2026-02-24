@@ -5661,6 +5661,57 @@ fn template_heavy_vue_full_css_scoping() {
     );
 }
 
+// ==================== Import elision for type-only usage ====================
+
+#[test]
+fn import_specifier_used_only_as_type_should_be_elided() {
+    let result = compile_sfc(
+        r#"<script setup lang="ts">
+import { doSomething, AuthError } from "some-lib";
+import type { UserCredential } from "some-lib";
+
+const emit = defineEmits({
+  error(error: AuthError) {
+    return true;
+  },
+  linked(credential: UserCredential) {
+    return true;
+  },
+});
+
+doSomething();
+</script>
+<template>
+  <div />
+</template>"#,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let script = result.script.as_ref().expect("script block");
+    // AuthError should NOT appear in the output since it's only used as a type annotation
+    // and force_js strips all type annotations
+    assert!(
+        !script.code.contains("AuthError"),
+        "AuthError should be elided from imports (only used as type), got:\n{}",
+        script.code
+    );
+    // doSomething should still be present (used at runtime)
+    assert!(
+        script.code.contains("doSomething"),
+        "doSomething should remain in imports (used at runtime), got:\n{}",
+        script.code
+    );
+    // import type should be fully stripped
+    assert!(
+        !script.code.contains("UserCredential"),
+        "import type should be stripped, got:\n{}",
+        script.code
+    );
+}
+
 // ==================== Reserved word props ====================
 
 #[test]

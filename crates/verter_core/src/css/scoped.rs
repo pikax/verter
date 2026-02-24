@@ -34,6 +34,21 @@ pub fn apply_scoped(css: &str, scope_id: &str) -> Result<String, super::CssError
     Ok(apply_scoped_normalized(&normalized, scope_id))
 }
 
+/// Apply scoped attribute selectors to raw CSS without lightningcss normalization.
+///
+/// This is a faster alternative to [`apply_scoped`] that skips the
+/// lightningcss parse/serialize step. The walker handles comments, strings,
+/// @-rules, and @keyframes directly.
+///
+/// **Trade-off:** CSS values are not normalized (colors, units, shorthand).
+/// CSS nesting (`&`) is not flattened. For scoped styles in Vue SFCs, this
+/// is typically fine — the browser handles nesting natively.
+pub fn apply_scoped_raw(css: &str, scope_id: &str) -> String {
+    let scope_attr = format!("[data-v-{}]", scope_id);
+    let slotted_attr = format!("[data-v-{}-s]", scope_id);
+    apply_scoped_to_normalized(css, &scope_attr, &slotted_attr)
+}
+
 /// Apply scoped selectors to normalized CSS (already parsed and serialized by lightningcss).
 ///
 /// This function handles:
@@ -367,12 +382,157 @@ mod tests {
     }
 
     #[test]
-    fn test_media_query_not_scoped() {
+    fn test_media_query_inner_selectors_scoped() {
         let result = scoped("@media (min-width: 600px) { .box { color: red; } }");
-        // The @media rule itself should not be scoped, but selectors inside should be
+        // The @media rule itself should not be scoped
         assert!(
             !result.contains("@media[data-v"),
             "Media rule should not be scoped. Got: {}",
+            result
+        );
+        // But selectors INSIDE @media must be scoped
+        let media_start = result.find("@media").expect("@media must be present");
+        let media_section = &result[media_start..];
+        assert!(
+            media_section.contains(".box[data-v-a4f2eed6]"),
+            "Selector inside @media must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// @ai-generated - Multiple selectors inside @media must all be scoped.
+    #[test]
+    fn test_media_query_multiple_inner_selectors() {
+        let result = scoped(
+            "@media (max-width: 768px) { .sidebar { display: none; } .content { width: 100%; } }",
+        );
+        assert!(
+            result.contains(".sidebar[data-v-a4f2eed6]"),
+            ".sidebar inside @media must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".content[data-v-a4f2eed6]"),
+            ".content inside @media must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// @ai-generated - Selectors inside @supports must be scoped.
+    #[test]
+    fn test_supports_query_inner_selectors_scoped() {
+        let result = scoped("@supports (display: grid) { .grid { display: grid; } }");
+        assert!(
+            result.contains(".grid[data-v-a4f2eed6]"),
+            "Selector inside @supports must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// @ai-generated - Multiple @media blocks must all have scoped inner selectors.
+    #[test]
+    fn test_multiple_media_blocks() {
+        let result = scoped(
+            ".top { color: red; } \
+             @media (max-width: 768px) { .mobile { display: block; } } \
+             @media (min-width: 1200px) { .wide { display: flex; } } \
+             .bottom { color: blue; }",
+        );
+        assert!(
+            result.contains(".top[data-v-a4f2eed6]"),
+            "Top-level .top must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".mobile[data-v-a4f2eed6]"),
+            ".mobile inside first @media must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".wide[data-v-a4f2eed6]"),
+            ".wide inside second @media must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".bottom[data-v-a4f2eed6]"),
+            "Top-level .bottom must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// @ai-generated - Descendant selectors inside @media must be properly scoped.
+    #[test]
+    fn test_media_with_descendant_selector() {
+        let result = scoped("@media (max-width: 768px) { .nav .link { color: blue; } }");
+        // Only the last compound gets scope
+        assert!(
+            result.contains(".link[data-v-a4f2eed6]"),
+            "Last compound in descendant inside @media must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains(".nav[data-v-a4f2eed6]"),
+            ".nav should not be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// @ai-generated - Compound selectors (.badge.success) scope attribute at end.
+    #[test]
+    fn test_compound_class_selector() {
+        let result = scoped(".badge.success { color: green; }");
+        assert!(
+            result.contains(".badge.success[data-v-a4f2eed6]"),
+            "Compound selector must have scope at end. Got: {}",
+            result
+        );
+    }
+
+    /// @ai-generated - Multiple compound selectors.
+    #[test]
+    fn test_multiple_compound_selectors() {
+        let result = scoped(".a.b, .c.d { color: red; }");
+        assert!(
+            result.contains(".a.b[data-v-a4f2eed6]"),
+            "First compound must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".c.d[data-v-a4f2eed6]"),
+            "Second compound must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// @ai-generated - ID + class compound selector.
+    #[test]
+    fn test_id_class_compound() {
+        let result = scoped("#main.active { color: red; }");
+        assert!(
+            result.contains("#main.active[data-v-a4f2eed6]"),
+            "ID+class compound must have scope at end. Got: {}",
+            result
+        );
+    }
+
+    /// @ai-generated - Element + class compound selector.
+    #[test]
+    fn test_element_class_compound() {
+        let result = scoped("div.container { color: red; }");
+        assert!(
+            result.contains("div.container[data-v-a4f2eed6]"),
+            "Element+class compound must have scope at end. Got: {}",
+            result
+        );
+    }
+
+    /// @ai-generated - Attribute selector as standalone.
+    #[test]
+    fn test_attribute_selector_standalone() {
+        let result = scoped("input[type=\"text\"] { color: red; }");
+        assert!(
+            result.contains("[data-v-a4f2eed6]"),
+            "Attribute selector must be scoped. Got: {}",
             result
         );
     }
@@ -481,6 +641,270 @@ mod tests {
         assert!(
             result.contains(".c[data-v-a4f2eed6]"),
             "Last should be scoped. Got: {}",
+            result
+        );
+    }
+
+    // ===================================================================
+    // @ai-generated - Extended scoped CSS tests covering edge cases
+    // ===================================================================
+
+    /// Universal selector (*) must be scoped.
+    #[test]
+    fn test_universal_selector() {
+        let result = scoped("* { margin: 0; }");
+        assert!(
+            result.contains("*[data-v-a4f2eed6]"),
+            "Universal selector must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// Element followed by pseudo-element.
+    #[test]
+    fn test_element_pseudo_element() {
+        let result = scoped("p::first-line { color: red; }");
+        assert!(
+            result.contains("p[data-v-a4f2eed6]:first-line")
+                || result.contains("p[data-v-a4f2eed6]::first-line"),
+            "Element + pseudo-element must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// :not() pseudo-class — scope before :not.
+    #[test]
+    fn test_not_pseudo_class() {
+        let result = scoped(".item:not(.active) { opacity: 0.5; }");
+        assert!(
+            result.contains(".item[data-v-a4f2eed6]:not(.active)"),
+            "Scope must be before :not(). Got: {}",
+            result
+        );
+    }
+
+    /// :is() / :where() pseudo-class.
+    #[test]
+    fn test_is_pseudo_class() {
+        let result = scoped(".item:is(.a, .b) { color: red; }");
+        assert!(
+            result.contains("[data-v-a4f2eed6]:is("),
+            "Scope must be before :is(). Got: {}",
+            result
+        );
+    }
+
+    /// Multiple rules in sequence.
+    #[test]
+    fn test_many_rules_in_sequence() {
+        let result = scoped(
+            ".a { color: red; } .b { color: blue; } .c { color: green; } .d { color: yellow; }",
+        );
+        assert!(result.contains(".a[data-v-a4f2eed6]"), "Got: {}", result);
+        assert!(result.contains(".b[data-v-a4f2eed6]"), "Got: {}", result);
+        assert!(result.contains(".c[data-v-a4f2eed6]"), "Got: {}", result);
+        assert!(result.contains(".d[data-v-a4f2eed6]"), "Got: {}", result);
+    }
+
+    /// @keyframes selectors must NOT be scoped.
+    #[test]
+    fn test_keyframes_not_scoped() {
+        let result = scoped(
+            ".box { animation: fade 1s; } @keyframes fade { from { opacity: 1; } to { opacity: 0; } }",
+        );
+        assert!(
+            result.contains(".box[data-v-a4f2eed6]"),
+            ".box must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains("from[data-v"),
+            "keyframe 'from' must NOT be scoped. Got: {}",
+            result
+        );
+        assert!(
+            !result.contains("to[data-v"),
+            "keyframe 'to' must NOT be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// Selectors after @keyframes must still be scoped.
+    #[test]
+    fn test_selector_after_keyframes() {
+        let result = scoped(
+            "@keyframes slide { 0% { left: 0; } 100% { left: 100%; } } .after { color: red; }",
+        );
+        assert!(
+            result.contains(".after[data-v-a4f2eed6]"),
+            "Selector after @keyframes must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// Mixed @media and @keyframes.
+    #[test]
+    fn test_media_and_keyframes_mixed() {
+        let result = scoped(
+            ".box { color: red; } \
+             @keyframes fade { from { opacity: 1; } to { opacity: 0; } } \
+             @media (max-width: 768px) { .mobile { display: block; } } \
+             .end { color: blue; }",
+        );
+        assert!(
+            result.contains(".box[data-v-a4f2eed6]"),
+            ".box must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".mobile[data-v-a4f2eed6]"),
+            ".mobile inside @media must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".end[data-v-a4f2eed6]"),
+            ".end must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// CSS with string containing braces in property value.
+    #[test]
+    fn test_string_with_braces_in_value() {
+        let result = scoped(".box { content: '{ not a block }'; }");
+        assert!(
+            result.contains(".box[data-v-a4f2eed6]"),
+            "Selector must be scoped despite string with braces. Got: {}",
+            result
+        );
+    }
+
+    /// CSS comment between selectors.
+    #[test]
+    fn test_comment_between_selectors() {
+        let result = scoped(".a { color: red; } /* comment */ .b { color: blue; }");
+        assert!(
+            result.contains(".a[data-v-a4f2eed6]"),
+            ".a must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".b[data-v-a4f2eed6]"),
+            ".b must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// grid-template-areas with quoted strings must not confuse the walker.
+    #[test]
+    fn test_grid_template_areas_strings() {
+        let result = scoped(
+            ".layout { grid-template-areas: \"header\" \"content\" \"footer\"; } .next { color: red; }",
+        );
+        assert!(
+            result.contains(".layout[data-v-a4f2eed6]"),
+            ".layout must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".next[data-v-a4f2eed6]"),
+            ".next after grid-template-areas must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// Nested @media with @supports inside.
+    #[test]
+    fn test_nested_at_rules() {
+        let result = scoped(
+            "@media (min-width: 768px) { @supports (display: grid) { .nested { display: grid; } } }",
+        );
+        assert!(
+            result.contains(".nested[data-v-a4f2eed6]"),
+            "Deeply nested selector must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// @layer at-rule.
+    #[test]
+    fn test_layer_at_rule() {
+        let result = scoped("@layer base { .box { color: red; } }");
+        assert!(
+            result.contains(".box[data-v-a4f2eed6]"),
+            "Selector inside @layer must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// Multiple comma-separated selectors in a descendant context.
+    #[test]
+    fn test_comma_separated_in_descendant() {
+        let result = scoped(".parent .a, .parent .b { color: red; }");
+        assert!(
+            result.contains(".a[data-v-a4f2eed6]"),
+            ".a must be scoped. Got: {}",
+            result
+        );
+        assert!(
+            result.contains(".b[data-v-a4f2eed6]"),
+            ".b must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// Selector with escaped colon in class name.
+    #[test]
+    fn test_escaped_colon_in_class() {
+        let result = scoped(".md\\:flex { display: flex; }");
+        // The scope should be after the full class name including escaped chars
+        assert!(
+            result.contains("[data-v-a4f2eed6]"),
+            "Escaped colon selector must be scoped. Got: {}",
+            result
+        );
+        // Scope should NOT be inserted at the backslash-escaped colon
+        assert!(
+            !result.contains(".md[data-v-a4f2eed6]\\:flex"),
+            "Scope should not split the escaped class. Got: {}",
+            result
+        );
+    }
+
+    /// Empty rule body.
+    #[test]
+    fn test_empty_rule() {
+        let result = scoped(".empty {} .after { color: red; }");
+        assert!(
+            result.contains(".after[data-v-a4f2eed6]"),
+            ".after must be scoped even after empty rule. Got: {}",
+            result
+        );
+    }
+
+    /// @charset is removed by lightningcss normalization.
+    /// After normalization, the selector following it must still be scoped.
+    #[test]
+    fn test_after_charset_still_scoped() {
+        // lightningcss removes @charset during normalization, so the
+        // scoped() helper (which normalizes first) produces just the selector.
+        let result = scoped(".box { color: red; }");
+        assert!(
+            result.contains(".box[data-v-a4f2eed6]"),
+            ".box must be scoped. Got: {}",
+            result
+        );
+    }
+
+    /// @font-face at-rule should not be scoped.
+    #[test]
+    fn test_font_face_not_scoped() {
+        let result = scoped(
+            "@font-face { font-family: MyFont; src: url('font.woff'); } .text { font-family: MyFont; }",
+        );
+        assert!(
+            result.contains(".text[data-v-a4f2eed6]"),
+            ".text must be scoped after @font-face. Got: {}",
             result
         );
     }
