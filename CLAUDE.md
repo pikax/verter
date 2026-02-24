@@ -62,7 +62,25 @@ scripts/
 | **`@verter/language-shared`** | Shared protocol types between VS Code client and language server | `src/index.ts` |
 | **`@verter/typescript-plugin`** | TypeScript plugin that resolves `.vue` imports in TS/JS files. Intercepts module resolution to return transformed TSX | `src/index.ts` |
 | **`verter-vscode`** | VS Code extension. Bundles language server and TS plugin, handles extension activation | `src/extension.ts` |
+| **`@verter/unplugin`** | Universal bundler plugin (Vite, Rollup, webpack, esbuild, rspack, Rolldown, Farm). Compiles `.vue` files via `@verter/native`. Supports `preCompile` for build-start cache warming | `src/index.ts` |
 | **`@verter/oxc-bindings`** | Helper for downloading platform-specific OXC parser binaries | `src/index.ts` |
+
+### Unplugin Configuration (`packages/unplugin/`)
+
+`@verter/unplugin` provides a `VerterPluginOptions` interface:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `componentId` | `(filename, source, isProd) => string` | hash-based | Custom component ID generator |
+| `include` | `string \| RegExp \| (string \| RegExp)[]` | `[/\.vue$/]` | File patterns to include |
+| `preCompile` | `boolean` | `false` | Pre-compile all `.vue` files during `buildStart`. Scans the project root, upserts files into the host cache (including type dependencies for macros), and compiles them. When `transform()` later receives the same content, the host returns the cached result instantly. `node_modules` are excluded from scanning. |
+| `template` | `object` | — | Template compiler options (compat with `@vitejs/plugin-vue`) |
+
+**`preCompile` architecture:**
+- During `buildStart()`, scans the project root for `.vue` files (excluding `node_modules` and dot-directories)
+- For each file: upserts it into the host, resolves external `src` attributes and macro type dependencies (e.g., `import type { Props } from './types'` used in `defineProps<Props>()`), then triggers compilation
+- When another plugin modifies the file before `transform()`, the host detects the content change via internal hashing and recompiles
+- Third-party `.vue` files in `node_modules` compile on-demand during `transform()` — no pre-compilation overhead
 
 ### Core Transformation Pipeline (`packages/core/src/v5/`)
 
@@ -444,6 +462,10 @@ export const MyPlugin = definePlugin({
 | `crates/verter_analysis/src/lib.rs` | Static analysis entry: imports, exports, bindings |
 | `crates/verter_host/src/lib.rs` | Host entry: compile, cache, upsert, dependency tracking |
 | `crates/verter_ffi/src/lib.rs` | FFI types shared between NAPI and WASM |
+| `packages/unplugin/src/index.ts` | Unplugin factory: `buildStart` (preCompile), `transform`, `load` hooks |
+| `packages/unplugin/src/core/types.ts` | `VerterPluginOptions`, `HmrStrategy` |
+| `packages/unplugin/src/core/scanner.ts` | `scanVueFiles()` — async recursive directory walker for preCompile |
+| `packages/unplugin/src/core/compiler.ts` | Host singleton, `generateComponentId`, `processStyle` |
 
 ## Rust Performance
 

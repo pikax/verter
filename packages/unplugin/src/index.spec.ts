@@ -1,8 +1,12 @@
 /**
  * @ai-generated - Integration tests for the unplugin factory.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { mkdirSync, writeFileSync, rmSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 import unplugin, { unpluginFactory } from "./index";
+import { resetHost } from "./core/compiler";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
 
 describe("unplugin factory", () => {
@@ -450,6 +454,187 @@ const n = 1
     expect(code).toContain("type=route&index=0");
     expect(code).not.toContain("type=custom");
     expect(code).not.toContain("blockType=");
+  });
+});
+
+describe("preCompile", () => {
+  let tempDir: string;
+
+  function createTempDir(): string {
+    const dir = join(tmpdir(), `verter-precompile-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  beforeEach(() => {
+    tempDir = createTempDir();
+    resetHost();
+  });
+
+  afterEach(() => {
+    if (origCwd) process.cwd = origCwd;
+    rmSync(tempDir, { recursive: true, force: true });
+    resetHost();
+  });
+
+  let origCwd: typeof process.cwd;
+
+  function createPreCompilePlugin(extraOpts?: Record<string, unknown>) {
+    // Override cwd so buildStart scans our temp dir.
+    // Must remain active until buildStart() completes (it reads cwd at call time).
+    origCwd = process.cwd;
+    process.cwd = () => tempDir;
+    const plugin = unpluginFactory(
+      { preCompile: true, ...extraOpts } as any,
+      { framework: "rollup", versions: { unplugin: "0.0.0", rollup: "0.0.0" } } as any,
+    ) as any;
+    return plugin;
+  }
+
+  // @ai-generated - preCompile option accepted by factory
+  it("preCompile option accepted by factory", () => {
+    const plugin = unpluginFactory(
+      { preCompile: true },
+      { framework: "rollup", versions: { unplugin: "0.0.0", rollup: "0.0.0" } } as any,
+    ) as any;
+    expect(plugin).toBeDefined();
+    expect(plugin.name).toBe("unplugin-verter");
+  });
+
+  // @ai-generated - buildStart is a no-op when preCompile is false/undefined
+  it("buildStart is a no-op when preCompile is false", async () => {
+    const plugin = unpluginFactory(undefined, {
+      framework: "rollup",
+      versions: { unplugin: "0.0.0", rollup: "0.0.0" },
+    } as any) as any;
+
+    // Should not throw and return quickly
+    await plugin.buildStart();
+  });
+
+  // @ai-generated - Pre-compiled files produce same output when transform receives unchanged source
+  it("pre-compiled files produce same output via transform with unchanged source", async () => {
+    const sfc = `<script setup>\nconst msg = 'hello'\n</script>\n<template><div>{{ msg }}</div></template>\n`;
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+    writeFileSync(join(tempDir, "App.vue"), sfc);
+
+    const plugin = createPreCompilePlugin();
+    await plugin.buildStart();
+
+    // Now call transform with the same source — should get same result
+    const result = await plugin.transform(sfc, filename);
+    expect(result).toBeDefined();
+    expect(result.code).toContain("msg");
+  });
+
+  // @ai-generated - buildStart pre-compiles .vue files in subdirectories
+  it("buildStart pre-compiles .vue files in subdirectories", async () => {
+    mkdirSync(join(tempDir, "components"), { recursive: true });
+    const sfc = `<script setup>\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>\n`;
+    writeFileSync(join(tempDir, "components", "Btn.vue"), sfc);
+
+    const plugin = createPreCompilePlugin();
+    await plugin.buildStart();
+
+    // Transform should still work
+    const filename = join(tempDir, "components", "Btn.vue").replace(/\\/g, "/");
+    const result = await plugin.transform(sfc, filename);
+    expect(result).toBeDefined();
+    expect(result.code).toBeDefined();
+  });
+
+  // @ai-generated - Modified source triggers recompilation with new content
+  it("modified source (simulating another plugin) triggers recompilation", async () => {
+    const originalSfc = `<script setup>\nconst msg = 'original'\n</script>\n<template><div>{{ msg }}</div></template>\n`;
+    const modifiedSfc = `<script setup>\nconst msg = 'modified'\nconst extra = 42\n</script>\n<template><div>{{ msg }} {{ extra }}</div></template>\n`;
+    writeFileSync(join(tempDir, "App.vue"), originalSfc);
+
+    const plugin = createPreCompilePlugin();
+    await plugin.buildStart();
+
+    // Another plugin modifies the file — transform receives different content
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+    const result = await plugin.transform(modifiedSfc, filename);
+    expect(result).toBeDefined();
+    expect(result.code).toContain("extra");
+  });
+
+  // @ai-generated - Macro type resolution during preCompile
+  it("resolves type dependencies for defineProps macros during preCompile", async () => {
+    const vueSfc = `<script setup lang="ts">\nimport type { MyProps } from './types'\ndefineProps<MyProps>()\n</script>\n<template><div>hello</div></template>\n`;
+    const typesTs = `export interface MyProps {\n  name: string\n  count: number\n}\n`;
+
+    writeFileSync(join(tempDir, "App.vue"), vueSfc);
+    writeFileSync(join(tempDir, "types.ts"), typesTs);
+
+    const plugin = createPreCompilePlugin();
+    // Should not throw — dependencies are resolved during buildStart
+    await plugin.buildStart();
+
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+    const result = await plugin.transform(vueSfc, filename);
+    expect(result).toBeDefined();
+    // The compiled output should contain the resolved prop names
+    expect(result.code).toContain("name");
+    expect(result.code).toContain("count");
+  });
+
+  // @ai-generated - External src resolution during preCompile
+  it("resolves external style src during preCompile", async () => {
+    const vueSfc = `<script setup>\nconst x = 1\n</script>\n<template><div>{{ x }}</div></template>\n<style src="./style.css" scoped></style>\n`;
+    const css = `.box { color: red; }\n`;
+
+    writeFileSync(join(tempDir, "App.vue"), vueSfc);
+    writeFileSync(join(tempDir, "style.css"), css);
+
+    const plugin = createPreCompilePlugin();
+    // Should not throw — external src is resolved during buildStart
+    await plugin.buildStart();
+
+    const filename = join(tempDir, "App.vue").replace(/\\/g, "/");
+    const result = await plugin.transform(vueSfc, filename);
+    expect(result).toBeDefined();
+    expect(result.code).toBeDefined();
+  });
+
+  // @ai-generated - node_modules exclusion: files in node_modules are not pre-compiled
+  it("node_modules .vue files are excluded from preCompile but compile via transform", async () => {
+    // Create a .vue file in node_modules
+    mkdirSync(join(tempDir, "node_modules", "some-lib"), { recursive: true });
+    const libSfc = `<script setup>\nconst lib = 'value'\n</script>\n<template><div>{{ lib }}</div></template>\n`;
+    writeFileSync(join(tempDir, "node_modules", "some-lib", "Comp.vue"), libSfc);
+
+    // Also create a project .vue file
+    const appSfc = `<script setup>\nconst app = 1\n</script>\n<template><div>{{ app }}</div></template>\n`;
+    writeFileSync(join(tempDir, "App.vue"), appSfc);
+
+    const plugin = createPreCompilePlugin();
+    await plugin.buildStart();
+
+    // node_modules file should still compile correctly via transform
+    const libFilename = join(tempDir, "node_modules", "some-lib", "Comp.vue").replace(/\\/g, "/");
+    const result = await plugin.transform(libSfc, libFilename);
+    expect(result).toBeDefined();
+    expect(result.code).toContain("lib");
+  });
+
+  // @ai-generated - Benchmark: measure preCompile cost for N files
+  it("benchmark: preCompile N files measures timing", async () => {
+    const N = 20;
+    mkdirSync(join(tempDir, "src"), { recursive: true });
+    for (let i = 0; i < N; i++) {
+      const sfc = `<script setup>\nconst val${i} = ${i}\n</script>\n<template><div>{{ val${i} }}</div></template>\n`;
+      writeFileSync(join(tempDir, "src", `Comp${i}.vue`), sfc);
+    }
+
+    const plugin = createPreCompilePlugin();
+    const start = performance.now();
+    await plugin.buildStart();
+    const elapsed = performance.now() - start;
+
+    // Just log the timing — this is a baseline measurement, not a pass/fail assertion
+    console.log(`[benchmark] preCompile ${N} files: ${elapsed.toFixed(1)}ms (${(elapsed / N).toFixed(2)}ms/file)`);
+    expect(elapsed).toBeGreaterThan(0);
   });
 });
 

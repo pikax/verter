@@ -4,6 +4,14 @@ export interface VerterPluginOptions {
   /** File patterns to include (default: [/\.vue$/]). Matches @vitejs/plugin-vue `include` option. */
   include?: string | RegExp | (string | RegExp)[];
   /**
+   * Pre-compile all `.vue` files during `buildStart` by scanning the project root.
+   * Populates the host cache so that `transform()` calls get instant cache hits
+   * when the source hasn't been modified by other plugins.
+   * Third-party `.vue` files in `node_modules` are excluded from scanning.
+   * @default false
+   */
+  preCompile?: boolean;
+  /**
    * Template compiler options. Accepted for compatibility with `@vitejs/plugin-vue`
    * but currently only `isCustomElement` is forwarded.
    */

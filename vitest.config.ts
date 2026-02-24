@@ -4,5 +4,10 @@ export default defineConfig({
   test: {
     // ...
     globals: true,
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/e2e/**",
+    ],
   },
 });

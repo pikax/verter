@@ -3,11 +3,76 @@ import { createUnplugin } from "unplugin";
 import type { ResolvedConfig } from "vite";
 import type { VerterPluginOptions, HmrStrategy } from "./core/types";
 import { EXPORT_HELPER_ID, EXPORT_HELPER_CODE } from "./core/constants";
-import type { HostCompileProfile } from "@verter/native";
+import type { HostCompileProfile, HostUpdateResult } from "@verter/native";
+import type { VerterHost } from "@verter/native";
 import { loadHost, generateComponentId, processStyle } from "./core/compiler";
 import { parseVueRequest } from "./core/utils";
 
 export type { VerterPluginOptions, HmrStrategy, Options } from "./core/types";
+
+/**
+ * Resolves external sources and type-dependency imports from an upsert result.
+ * Shared between `transform()` and `buildStart()` (preCompile).
+ */
+async function resolveUpsertDependencies(
+  host: VerterHost,
+  filename: string,
+  upsertResult: HostUpdateResult,
+): Promise<void> {
+  // Resolve external sources (e.g., <style src="./foo.less">, <template src="./t.html">)
+  if (upsertResult.externalSourceRequests.length > 0) {
+    const fs = await import("fs");
+    const path = await import("path");
+    for (const req of upsertResult.externalSourceRequests) {
+      const resolvedId: string = req.resolvedCanonicalId;
+      const specifier: string = req.specifier;
+      // Resolve relative to the owner file's directory
+      const absPath = path.resolve(path.dirname(filename), specifier);
+      try {
+        const extSource = fs.readFileSync(absPath);
+        host.upsert({
+          inputId: resolvedId,
+          source: extSource,
+          fileKind: "non_sfc",
+        });
+      } catch {
+        // External source not found — host will report the error
+      }
+    }
+  }
+
+  // Upsert type-dependency .ts files so compile_entry() can resolve external types
+  // (e.g., `import type { Props } from './types'` in a .vue script setup).
+  if (upsertResult.importSpecifiers.length > 0) {
+    const fs = await import("fs");
+    const path = await import("path");
+    const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"];
+    for (const imp of upsertResult.importSpecifiers) {
+      if (!imp.source.startsWith(".")) continue; // skip bare specifiers (node_modules)
+
+      const absBase = path.resolve(path.dirname(filename), imp.source);
+      for (const ext of exts) {
+        const fullPath = absBase + ext;
+        // Skip .vue files — they'll be properly upserted as VueSfc when
+        // Vite's module graph processes them via transform(). Upserting
+        // them as non_sfc here would clobber their SFC-specific metadata
+        // (script_lang, style_langs, etc.).
+        if (fullPath.endsWith(".vue")) continue;
+        try {
+          const depSource = fs.readFileSync(fullPath);
+          host.upsert({
+            inputId: fullPath,
+            source: depSource,
+            fileKind: "non_sfc",
+          });
+          break;
+        } catch {
+          continue;
+        }
+      }
+    }
+  }
+}
 
 function getHmrStrategy(framework: string): HmrStrategy {
   switch (framework) {
@@ -140,6 +205,58 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       return false;
     },
 
+    async buildStart() {
+      if (!opts.preCompile) return;
+
+      const { scanVueFiles } = await import("./core/scanner");
+      const root = viteConfig?.root ?? process.cwd();
+      const files = await scanVueFiles(root, filter);
+
+      if (files.size === 0) return;
+
+      const host = loadHost();
+      const isProd = viteConfig
+        ? viteConfig.command === "build" && !viteConfig.build?.ssr
+        : process.env.NODE_ENV === "production";
+      const ssr = viteConfig ? Boolean(viteConfig.build?.ssr) : false;
+      const componentIdFn = opts.componentId || generateComponentId;
+
+      for (const [filename, source] of files) {
+        const componentId = componentIdFn(filename, source, isProd, viteConfig?.root);
+
+        const profile: HostCompileProfile = {
+          filename,
+          ssr,
+          isProduction: isProd,
+          componentId,
+          hmrStrategy: (isProd ? "none" : hmrStrategy) as HostCompileProfile["hmrStrategy"],
+          sourceMap: true,
+          forceJs: !viteConfig || meta.framework !== "vite",
+        };
+
+        profileCache.set(filename, profile);
+
+        const upsertResult = host.upsert({
+          inputId: filename,
+          source,
+        });
+
+        await resolveUpsertDependencies(host, filename, upsertResult);
+
+        const main = host.getVirtualFile({
+          rawId: filename,
+          compileProfile: profile,
+        });
+
+        if (viteConfig) {
+          scriptCache.set(filename, {
+            code: main.code,
+            map: main.sourceMap ?? null,
+          });
+        }
+      }
+    },
+
     async transform(code, id) {
       const { filename, query } = parseVueRequest(id);
 
@@ -207,59 +324,7 @@ export const unpluginFactory: UnpluginFactory<VerterPluginOptions | undefined> =
       });
       const t1 = timing ? performance.now() : 0;
 
-      // Resolve external sources (e.g., <style src="./foo.less">, <template src="./t.html">)
-      if (upsertResult.externalSourceRequests.length > 0) {
-        const fs = await import("fs");
-        const path = await import("path");
-        for (const req of upsertResult.externalSourceRequests) {
-          const resolvedId: string = req.resolvedCanonicalId;
-          const specifier: string = req.specifier;
-          // Resolve relative to the owner file's directory
-          const absPath = path.resolve(path.dirname(filename), specifier);
-          try {
-            const extSource = fs.readFileSync(absPath);
-            host.upsert({
-              inputId: resolvedId,
-              source: extSource,
-              fileKind: "non_sfc",
-            });
-          } catch {
-            // External source not found — host will report the error
-          }
-        }
-      }
-
-      // Upsert type-dependency .ts files so compile_entry() can resolve external types
-      // (e.g., `import type { Props } from './types'` in a .vue script setup).
-      if (upsertResult.importSpecifiers.length > 0) {
-        const fs = await import("fs");
-        const path = await import("path");
-        const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"];
-        for (const imp of upsertResult.importSpecifiers) {
-          if (!imp.source.startsWith(".")) continue; // skip bare specifiers (node_modules)
-
-          const absBase = path.resolve(path.dirname(filename), imp.source);
-          for (const ext of exts) {
-            const fullPath = absBase + ext;
-            // Skip .vue files — they'll be properly upserted as VueSfc when
-            // Vite's module graph processes them via transform(). Upserting
-            // them as non_sfc here would clobber their SFC-specific metadata
-            // (script_lang, style_langs, etc.).
-            if (fullPath.endsWith(".vue")) continue;
-            try {
-              const depSource = fs.readFileSync(fullPath);
-              host.upsert({
-                inputId: fullPath,
-                source: depSource,
-                fileKind: "non_sfc",
-              });
-              break;
-            } catch {
-              continue;
-            }
-          }
-        }
-      }
+      await resolveUpsertDependencies(host, filename, upsertResult);
       const t2 = timing ? performance.now() : 0;
 
       // Get the main module from the host (assembled in Rust)
