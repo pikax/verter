@@ -9,10 +9,11 @@ interface HostCompileProfile {
   hmrStrategy?: "none" | "vite" | "webpack";
   forceJs?: boolean;
   sourceMap?: boolean;
+  enableTypes?: boolean;
 }
 
 interface HostVirtualNodeKind {
-  kind: "main" | "script" | "template" | "style" | "custom";
+  kind: "main" | "script" | "template" | "style" | "custom" | "tsxScript" | "tsxTemplate";
   index?: number;
 }
 
@@ -79,6 +80,7 @@ function toHostProfile(file: File, options?: CompilerOptions): HostCompileProfil
     hmrStrategy: "none",
     forceJs: true,
     sourceMap: true,
+    enableTypes: true,
   };
 }
 
@@ -277,6 +279,32 @@ function compileVueWithHost(file: File, options: CompilerOptions | undefined): C
   }
   file.compiled.analysis = analysis;
 
+  // Retrieve TSX types output (backward compat: older WASM may not produce these nodes)
+  const tsxParts: string[] = [];
+  if (nodeKinds.has("tsxScript")) {
+    try {
+      const tsxScript = wasmHost!.getVirtualFile({
+        rawId: `${file.filename}?vue&type=tsxScript`,
+        compileProfile: profile,
+      });
+      if (tsxScript.code) tsxParts.push(tsxScript.code);
+    } catch {
+      // Silently ignore - TSX output is optional
+    }
+  }
+  if (nodeKinds.has("tsxTemplate")) {
+    try {
+      const tsxTemplate = wasmHost!.getVirtualFile({
+        rawId: `${file.filename}?vue&type=tsxTemplate`,
+        compileProfile: profile,
+      });
+      if (tsxTemplate.code) tsxParts.push(tsxTemplate.code);
+    } catch {
+      // Silently ignore - TSX output is optional
+    }
+  }
+  file.compiled.types = tsxParts.join("\n");
+
   return {
     verterNew: null,
     verterNewJs: performance.now() - start,
@@ -320,6 +348,19 @@ function compileTsWithHost(file: File, options: CompilerOptions | undefined): Co
     }
   }
   file.compiled.analysis = analysis;
+
+  // Retrieve TSX types output for .ts files (backward compat: older WASM may not produce these)
+  const tsxParts: string[] = [];
+  try {
+    const tsxScript = wasmHost!.getVirtualFile({
+      rawId: `${vueFilename}?vue&type=tsxScript`,
+      compileProfile: profile,
+    });
+    if (tsxScript.code) tsxParts.push(tsxScript.code);
+  } catch {
+    // Silently ignore
+  }
+  file.compiled.types = tsxParts.join("\n");
 
   return {
     verterNew: null,

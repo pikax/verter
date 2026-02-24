@@ -22,6 +22,7 @@ describe("File", () => {
       expect(file.compiled).toEqual({
         js: "",
         css: "",
+        types: "",
         verterSourceMap: "",
         errors: [],
         analysis: null,

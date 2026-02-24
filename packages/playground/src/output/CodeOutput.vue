@@ -21,6 +21,8 @@ const code = computed(() => {
       return file.compiled.js;
     case "css":
       return file.compiled.css;
+    case "types":
+      return file.compiled.types;
     default:
       return "";
   }
@@ -32,6 +34,8 @@ const language = computed(() => {
       return "javascript";
     case "css":
       return "css";
+    case "types":
+      return "typescript";
     default:
       return "plaintext";
   }

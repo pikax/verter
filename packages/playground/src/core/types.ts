@@ -1,6 +1,7 @@
 export interface CompiledFile {
   js: string;
   css: string;
+  types: string;
   verterSourceMap: string;
   errors: string[];
   analysis: FileAnalysis | null;
@@ -12,6 +13,7 @@ export class File {
   compiled: CompiledFile = {
     js: "",
     css: "",
+    types: "",
     verterSourceMap: "",
     errors: [],
     analysis: null,
@@ -41,7 +43,7 @@ export class File {
   }
 }
 
-export type OutputMode = "preview" | "js" | "css" | "analysis";
+export type OutputMode = "preview" | "js" | "css" | "types" | "analysis";
 
 export interface CompilerOptions {
   isProduction: boolean;

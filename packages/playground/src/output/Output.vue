@@ -14,6 +14,7 @@ const allTabs: { mode: OutputMode; label: string }[] = [
   { mode: "preview", label: "Preview" },
   { mode: "js", label: "JS" },
   { mode: "css", label: "CSS" },
+  { mode: "types", label: "Types" },
   { mode: "analysis", label: "Analysis" },
 ];
 
