@@ -211,4 +211,33 @@ export const projects = [
     packageManager: 'pnpm',
     bundler: 'vite',
   },
+
+  // ── Plugin ecosystem ─────────────────────────────────────────────
+  {
+    name: 'unplugin-vue-router',
+    repo: 'posva/unplugin-vue-router',
+    branch: 'main',
+    // Explicit sub-scripts: project's `build` uses pnpm regex `/^build:/` which Git Bash mangles on Windows.
+    // Playground build is excluded: it fails on baseline too (<route lang="ts"> unsupported by unplugin-vue-router).
+    buildCmd: 'pnpm run build:core && pnpm run build:runtime',
+    // vitest uses @vitejs/plugin-vue in vitest.config.ts — exercises Vue SFC compilation
+    testCmd: 'pnpm run vitest',
+    // Playwright HMR tests use webkit (Desktop Safari)
+    e2eCmd: 'npx playwright install webkit --with-deps && pnpm run playwright',
+    packageManager: 'pnpm',
+    bundler: 'vite',
+  },
+
+  // ── Nuxt applications ────────────────────────────────────────────
+  {
+    name: 'npmx',
+    repo: 'npmx-dev/npmx.dev',
+    branch: 'main',
+    buildCmd: 'pnpm run build',
+    testCmd: 'pnpm run test:unit',
+    // Playwright: build:test + playwright test (webServer auto-starts preview on port 5678)
+    e2eCmd: 'npx playwright install chromium --with-deps && pnpm run test:browser',
+    packageManager: 'pnpm',
+    bundler: 'nuxt',
+  },
 ];
