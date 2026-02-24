@@ -5661,6 +5661,83 @@ fn template_heavy_vue_full_css_scoping() {
     );
 }
 
+// ==================== Async setup: _withAsyncContext ====================
+
+#[test]
+fn async_setup_wraps_await_with_async_context() {
+    // Vue wraps top-level await in <script setup> with _withAsyncContext
+    // to preserve component instance context across async boundaries.
+    let result = compile_sfc(
+        r#"<script setup>
+const data = await fetch('/api').then(r => r.json());
+</script>
+<template>
+  <div />
+</template>"#,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let script = result.script.as_ref().expect("script block");
+
+    // Should have async setup
+    assert!(
+        script.code.contains("async setup("),
+        "setup should be async, got:\n{}",
+        script.code
+    );
+
+    // Should use _withAsyncContext wrapper
+    assert!(
+        script.code.contains("_withAsyncContext"),
+        "await should be wrapped with _withAsyncContext, got:\n{}",
+        script.code
+    );
+
+    // Should declare __temp and __restore
+    assert!(
+        script.code.contains("__temp") && script.code.contains("__restore"),
+        "should declare __temp and __restore, got:\n{}",
+        script.code
+    );
+
+    // Should import withAsyncContext from vue
+    assert!(
+        script.code.contains("withAsyncContext"),
+        "should import withAsyncContext from vue, got:\n{}",
+        script.code
+    );
+}
+
+#[test]
+fn async_setup_wraps_dynamic_import_await() {
+    // The Editor.vue pattern: const editor = await import(...)
+    let result = compile_sfc(
+        r#"<script setup>
+const props = defineProps(['type']);
+const editor = await import(`./editors/${props.type}`).then(x => x.default);
+</script>
+<template>
+  <component :is="editor" />
+</template>"#,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let script = result.script.as_ref().expect("script block");
+
+    // The await argument should be wrapped in an arrow function for _withAsyncContext
+    assert!(
+        script.code.contains("_withAsyncContext("),
+        "dynamic import await should use _withAsyncContext, got:\n{}",
+        script.code
+    );
+}
+
 // ==================== Import elision for type-only usage ====================
 
 #[test]

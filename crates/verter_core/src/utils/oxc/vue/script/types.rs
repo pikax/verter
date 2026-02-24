@@ -213,11 +213,28 @@ impl<'a> ScriptDefaultExport<'a> {
     }
 }
 
-/// Async marker
+/// Async marker — tracks top-level `await` expressions in `<script setup>`.
 #[derive(Debug)]
 pub struct ScriptAsync {
-    /// Span of the await expression or async function
+    /// Span of the full await expression (including `await` keyword).
     pub span: Span,
+    /// Span of the argument expression (after `await`).
+    /// `None` for `for await...of` and `await using` where the
+    /// transformation is different from simple `await expr`.
+    pub arg_span: Option<Span>,
+    /// Kind of async construct.
+    pub kind: AsyncKind,
+}
+
+/// Kind of async construct in `<script setup>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AsyncKind {
+    /// `await expr`
+    AwaitExpression,
+    /// `for await (... of expr) { ... }`
+    ForAwaitOf,
+    /// `await using x = expr`
+    AwaitUsing,
 }
 
 /// Script parsing error

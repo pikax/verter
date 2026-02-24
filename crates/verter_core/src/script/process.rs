@@ -14,8 +14,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::parser::types::RootNodeScript;
 use crate::template::code_gen::binding::BindingType;
 use crate::utils::oxc::vue::{
-    parse_script, parse_script_with_companion, ImportSpecifierKind, ScriptImport, ScriptItem,
-    ScriptMode,
+    parse_script, parse_script_with_companion, AsyncKind, ImportSpecifierKind, ScriptImport,
+    ScriptItem, ScriptMode,
 };
 
 use super::macros::{process_companion_script, process_macro_item, MacroState};
@@ -150,6 +150,27 @@ pub fn process_script_setup<'alloc>(
             ScriptItem::Macro(mac) => {
                 process_macro_item(mac, content_start, content_str, ctx, &mut macro_state);
             }
+            ScriptItem::Async(async_item) => {
+                // Transform `await <arg>` → _withAsyncContext wrapper.
+                // Vue wraps each top-level await to preserve component instance context.
+                if async_item.kind == AsyncKind::AwaitExpression {
+                    if let Some(arg_span) = &async_item.arg_span {
+                        let abs_start = content_start + async_item.span.start;
+                        let abs_arg_start = content_start + arg_span.start;
+                        let abs_end = content_start + async_item.span.end;
+                        let arg_text = &ctx.source[abs_arg_start as usize..abs_end as usize];
+
+                        // Replace `await <arg>` with:
+                        // ([__temp,__restore] = _withAsyncContext(() => <arg>)),
+                        //   __temp = await __temp, __restore(), __temp
+                        let replacement = format!(
+                            "([__temp,__restore] = _withAsyncContext(() => {})), __temp = await __temp, __restore(), __temp",
+                            arg_text
+                        );
+                        ctx.out.overwrite(abs_start, abs_end, &replacement);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -277,6 +298,14 @@ pub fn process_script_setup<'alloc>(
                 macro_state.emits_section = Some(model_emits_arr);
             }
         }
+    }
+
+    // Inject async context variables when setup has top-level await.
+    // Vue's _withAsyncContext pattern requires __temp and __restore locals.
+    if parse_result.is_async {
+        ctx.out
+            .prepend_alloc(content_start, "let __temp, __restore\n");
+        ctx.imports.push("_withAsyncContext");
     }
 
     // Build wrapper opening (includes __name, props, emits, options sections)

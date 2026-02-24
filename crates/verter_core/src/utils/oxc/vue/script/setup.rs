@@ -19,8 +19,8 @@ use super::resolve_type::{
 };
 use super::shared::ScriptParseContext;
 use super::types::{
-    DeclarationKind, ScriptAsync, ScriptBinding, ScriptDeclaration, ScriptError, ScriptErrorKind,
-    ScriptItem, ScriptTypeDeclaration, TypeDeclarationKind,
+    AsyncKind, DeclarationKind, ScriptAsync, ScriptBinding, ScriptDeclaration, ScriptError,
+    ScriptErrorKind, ScriptItem, ScriptTypeDeclaration, TypeDeclarationKind,
 };
 use super::usage::{
     detect_vue_api_call, CallSiteContext, EmitCallUsage, EmitEventName, InjectUsage, LifecycleHook,
@@ -208,6 +208,8 @@ pub fn process_setup_statement<'a>(
                 setup_ctx.is_async = true;
                 items.push(ScriptItem::Async(ScriptAsync {
                     span: Span::from(for_of.span),
+                    arg_span: None,
+                    kind: AsyncKind::ForAwaitOf,
                 }));
             }
             setup_ctx.enter_block();
@@ -391,6 +393,8 @@ fn process_variable_declaration<'a>(
             setup_ctx.is_async = true;
             items.push(ScriptItem::Async(ScriptAsync {
                 span: Span::from(var_decl.span),
+                arg_span: None,
+                kind: AsyncKind::AwaitUsing,
             }));
             DeclarationKind::Const
         }
@@ -499,6 +503,8 @@ fn check_expression_for_async<'a>(
             setup_ctx.is_async = true;
             items.push(ScriptItem::Async(ScriptAsync {
                 span: Span::from(await_expr.span),
+                arg_span: Some(Span::from(await_expr.argument.span())),
+                kind: AsyncKind::AwaitExpression,
             }));
             // Also check the argument
             check_expression_for_async(&await_expr.argument, setup_ctx, items);
