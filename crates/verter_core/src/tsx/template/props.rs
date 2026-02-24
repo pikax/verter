@@ -205,11 +205,12 @@ fn process_v_on<'alloc>(
         let is_fn_expr = value_expr.starts_with("(")
             || value_expr.starts_with("function")
             || value_expr.contains("=>");
+        let is_object_expr = value_expr.starts_with('{') && value_expr.ends_with('}');
 
         // Build prop end position (including modifiers and quotes)
         let prop_end = get_prop_end(prop);
 
-        if is_simple_ident || is_member_expr || is_fn_expr {
+        if is_simple_ident || is_member_expr || is_fn_expr || is_object_expr {
             // Simple handler: @click="handler" → onClick={handler}
             out.overwrite(
                 prop.start,

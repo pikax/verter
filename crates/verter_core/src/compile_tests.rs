@@ -6844,6 +6844,156 @@ function handler(e) {
 }
 
 #[test]
+fn tsx_event_call_expression_is_wrapped() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const test = { toString: () => "ok" }
+</script>
+<template>
+  <div @click="test.toString()"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("onClick={() =>"),
+        "Call-expression event handler should be wrapped, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("test.toString()"),
+        "Wrapped handler should preserve call expression, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_event_simple_member_and_arrow_handlers_not_wrapped() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const test = () => 1
+const state = { click: () => 2 }
+const handler = (event) => event
+</script>
+<template>
+  <div @click="test"></div>
+  <div @click="state.click"></div>
+  <div @click="handler"></div>
+  <div @click="function (...args) { return args }"></div>
+  <div @input="(...args) => args"></div>
+  <div @touchmove="(event) => { event; }"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("onClick={test}"),
+        "Simple identifier handler should not be wrapped, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("onClick={state.click}"),
+        "Member-expression handler should not be wrapped, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("onClick={handler}"),
+        "Function reference handler should not be wrapped, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("onInput={(...args) => args}"),
+        "Inline spread arrow function should not be wrapped, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("onClick={function (...args) { return args }}"),
+        "Inline function with spread params should not be wrapped, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("onTouchmove={(event) => { event; }}"),
+        "Inline arrow function with explicit parameter should not be wrapped, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_event_object_literal_handler_not_wrapped() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const test = 1
+</script>
+<template>
+  <div @click="{ test }"></div>
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("onClick={{ test }}") || tsx.code.contains("onClick={{test}}"),
+        "Object-literal handler should remain direct object expression, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("onClick={() =>"),
+        "Object-literal handler should not be wrapped in callback, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_event_string_template_and_ternary_handlers_are_wrapped() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const foo = true
+</script>
+<template>
+  <div @click="'foo'" />
+  <div @click="`foo${'test'}`" />
+  <div @click="foo ? 'bar' : 'baz'" />
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+
+    assert!(
+        tsx.code.contains("onClick={() => {'foo'}}"),
+        "String literal event expression should be wrapped, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("onClick={() => {`foo${'test'}`}}"),
+        "Template-string event expression should be wrapped, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        tsx.code.contains("onClick={() => {foo ? 'bar' : 'baz'}}"),
+        "Ternary event expression should be wrapped, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_event_name_with_vue_namespace_is_preserved() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const test = () => {}
+</script>
+<template>
+  <div @vue:mounted="test" />
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("onVue:mounted={test}"),
+        "Namespaced vue event should map to onVue:mounted, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_not_generated_when_disabled() {
     let result = compile_sfc(
         r#"<script setup>

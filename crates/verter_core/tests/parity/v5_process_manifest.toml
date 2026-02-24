@@ -5398,7 +5398,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 100
 source_name = "function"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_simple_member_and_arrow_handlers_not_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:105:object"
@@ -5407,7 +5407,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 105
 source_name = "object"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_object_literal_handler_not_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:112:function-with-spread-does-not-wrap-in-event-callback"
@@ -5416,7 +5416,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 112
 source_name = "function with spread does not wrap in event callback"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_simple_member_and_arrow_handlers_not_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:118:arrow-function-with-spread-does-not-wrap-in-event-callback"
@@ -5425,7 +5425,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 118
 source_name = "arrow function with spread does not wrap in event callback"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_simple_member_and_arrow_handlers_not_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:123:arrow-function-with-parameter-does-not-wrap-in-event-callback"
@@ -5434,7 +5434,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 123
 source_name = "arrow function with parameter does not wrap in event callback"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_simple_member_and_arrow_handlers_not_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:32:should-handle-event"
@@ -5443,7 +5443,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 32
 source_name = "should handle event"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_call_expression_is_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:39:string"
@@ -5452,7 +5452,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 39
 source_name = "string"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_string_template_and_ternary_handlers_are_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:45:string-interpolation"
@@ -5461,7 +5461,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 45
 source_name = "string interpolation"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_string_template_and_ternary_handlers_are_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:53:ternary"
@@ -5470,7 +5470,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 53
 source_name = "ternary"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_string_template_and_ternary_handlers_are_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:61:narrow"
@@ -5479,7 +5479,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 61
 source_name = "narrow"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_call_expression_is_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:71:deep-narrow-with-narrow-true"
@@ -5488,7 +5488,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 71
 source_name = "deep narrow with narrow:true"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_call_expression_is_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:83:vue-mounted"
@@ -5497,7 +5497,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 83
 source_name = "@vue:mounted"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_name_with_vue_namespace_is_preserved"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:90:no-call"
@@ -5506,7 +5506,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 90
 source_name = "no call"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_simple_member_and_arrow_handlers_not_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/event/event.spec.ts:95:partial"
@@ -5515,7 +5515,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/event/event.spec.ts"
 source_line = 95
 source_name = "partial"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_event_simple_member_and_arrow_handlers_not_wrapped"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/interpolation/interpolation.spec.ts:40:should-handle-interpolation"
