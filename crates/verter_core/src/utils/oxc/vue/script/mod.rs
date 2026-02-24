@@ -572,6 +572,38 @@ let a = {};"#;
     }
 
     #[test]
+    fn test_parse_setup_with_await_in_ts_non_null_assertion() {
+        // `(await foo())!` — the TS non-null assertion wraps the await in TSNonNullExpression
+        let source = r#"const item = (await getById(id))!"#;
+        let allocator = Allocator::default();
+        let source_type = SourceType::tsx();
+        let ret = Parser::new(&allocator, source, source_type).parse();
+
+        let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+
+        assert!(
+            result.is_async,
+            "is_async should be true for await inside TS non-null assertion"
+        );
+    }
+
+    #[test]
+    fn test_parse_setup_with_await_in_ts_as_expression() {
+        // `(await foo()) as T` — TSAsExpression wraps the await
+        let source = r#"const item = (await getById(id)) as string"#;
+        let allocator = Allocator::default();
+        let source_type = SourceType::tsx();
+        let ret = Parser::new(&allocator, source, source_type).parse();
+
+        let result = parse_script(&ret.program, ScriptMode::Setup, 0, source);
+
+        assert!(
+            result.is_async,
+            "is_async should be true for await inside TS as expression"
+        );
+    }
+
+    #[test]
     fn test_parse_options_with_define_component() {
         let source = r#"import { defineComponent } from 'vue';
 export default defineComponent({

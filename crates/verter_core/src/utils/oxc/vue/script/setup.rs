@@ -594,6 +594,22 @@ fn check_expression_for_async<'a>(
                 check_expression_for_async(arg, setup_ctx, items);
             }
         }
+        // TS expression wrappers: recurse into the inner expression
+        Expression::TSNonNullExpression(ts) => {
+            check_expression_for_async(&ts.expression, setup_ctx, items);
+        }
+        Expression::TSAsExpression(ts) => {
+            check_expression_for_async(&ts.expression, setup_ctx, items);
+        }
+        Expression::TSSatisfiesExpression(ts) => {
+            check_expression_for_async(&ts.expression, setup_ctx, items);
+        }
+        Expression::TSTypeAssertion(ts) => {
+            check_expression_for_async(&ts.expression, setup_ctx, items);
+        }
+        Expression::TSInstantiationExpression(ts) => {
+            check_expression_for_async(&ts.expression, setup_ctx, items);
+        }
         // Don't recurse into function expressions - they have their own async context
         Expression::FunctionExpression(_) | Expression::ArrowFunctionExpression(_) => {}
         _ => {}

@@ -5717,3 +5717,34 @@ defineProps<{ class?: string }>()
         code
     );
 }
+
+// ==================== Top-level await ====================
+
+#[test]
+fn top_level_await_produces_async_setup() {
+    let result = compile_sfc(
+        r#"<script setup lang="ts">
+const props = defineProps<{
+  id: string
+}>()
+
+const item = (await getById(props.id))!
+
+const name = item.name
+</script>
+<template>
+  <div>{{ name }}</div>
+</template>"#,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let script = result.script.as_ref().expect("script block");
+    assert!(
+        script.code.contains("async setup("),
+        "Expected async setup() for top-level await, got:\n{}",
+        script.code
+    );
+}
