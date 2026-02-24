@@ -229,6 +229,14 @@ pub fn compile(
 
     let mut ct = CodeTransform::new(input, allocator);
 
+    // Extract raw template text for import elision (SetupImport word-boundary scan)
+    let template_source = syntax.template_ast().and_then(|ast| {
+        ast.root
+            .content
+            .as_ref()
+            .map(|c| &input[c.start as usize..c.end as usize])
+    });
+
     let script_options = ScriptCodeGenOptions {
         component_name: &component_name,
         scope_id: &scope_id_full,
@@ -240,6 +248,7 @@ pub fn compile(
         runtime_module_name: options.runtime_module_name.as_deref().unwrap_or("vue"),
         css_v_binds: &all_v_bind_vars,
         external_types: verter_options.external_types.clone(),
+        template_source,
     };
 
     let script_result = generate_script(

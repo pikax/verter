@@ -1087,9 +1087,18 @@ const x = SOME_CONST
         .expect("Should have return");
     let return_end = script.code[return_pos..].find('}').unwrap() + return_pos;
     let return_section = &script.code[return_pos..=return_end];
+    // SOME_CONST is an import not referenced in the template (only used as
+    // `const x = SOME_CONST` in script), so it should NOT be in __returned__.
+    // The bundler's tree-shaking handles the unused import.
     assert!(
-        return_section.contains("SOME_CONST"),
-        "Named import should be inside return, got section: {}",
+        !return_section.contains("SOME_CONST"),
+        "Import not used in template should NOT be in __returned__, got section: {}",
+        return_section
+    );
+    // x (SetupConst) should still be returned since it's used in the template
+    assert!(
+        return_section.contains("x"),
+        "Local variable x should be in __returned__, got section: {}",
         return_section
     );
 }
@@ -1178,12 +1187,14 @@ function increment() {}
     let return_section = &script.code[return_pos..=return_end];
     assert!(
         return_section.contains("Header"),
-        "Imported component Header should be in return, got: {}",
+        "Imported component Header should be in return (used in template), got: {}",
         return_section
     );
+    // `ref` is imported but not referenced in the template, so it should NOT
+    // appear in __returned__. The bundler handles the unused import.
     assert!(
-        return_section.contains("ref"),
-        "Imported ref should be in return, got: {}",
+        !return_section.contains("ref"),
+        "Import `ref` (not used in template) should NOT be in return, got: {}",
         return_section
     );
     assert!(
@@ -1221,9 +1232,11 @@ const x = CONST_VAL
         .expect("Should have return");
     let return_end = script.code[return_pos..].find('}').unwrap() + return_pos;
     let return_section = &script.code[return_pos..=return_end];
+    // CONST_VAL is an import not referenced in the template (only used as
+    // `const x = CONST_VAL` in script), so it should NOT be in __returned__.
     assert!(
-        return_section.contains("CONST_VAL"),
-        "Value import CONST_VAL should be in return, got section: {}",
+        !return_section.contains("CONST_VAL"),
+        "Import CONST_VAL (not used in template) should NOT be in return, got section: {}",
         return_section
     );
     assert!(

@@ -288,7 +288,10 @@ pub fn process_script_setup<'alloc>(
 
     // Build wrapper closing
     let returned = if !options.inline_template {
-        Some(build_returned_object(&ctx.bindings))
+        Some(build_returned_object(
+            &ctx.bindings,
+            options.template_source,
+        ))
     } else {
         None
     };
@@ -540,11 +543,30 @@ fn build_setup_wrapper_end(
 /// Build the `__returned__` object from bindings.
 ///
 /// Includes all setup-type bindings (not props, data, or options).
+/// `SetupImport` bindings are only included when their identifier appears as a
+/// whole word in `template_source` (matches Vue's `isUsedInTemplate` behaviour).
 /// Returns a JS object literal like `{ msg, count }`.
-fn build_returned_object(bindings: &FxHashMap<&str, BindingType>) -> String {
+fn build_returned_object(
+    bindings: &FxHashMap<&str, BindingType>,
+    template_source: Option<&str>,
+) -> String {
     let mut names: Vec<&str> = bindings
         .iter()
-        .filter(|(_, bt)| bt.is_setup())
+        .filter(|(name, bt)| {
+            if !bt.is_setup() {
+                return false;
+            }
+            // SetupImport: only include if identifier appears in template text
+            if **bt == BindingType::SetupImport {
+                match template_source {
+                    Some(tpl) => is_identifier_used_in_text(name, tpl),
+                    // No template → include all (conservative)
+                    None => true,
+                }
+            } else {
+                true
+            }
+        })
         .map(|(name, _)| *name)
         .collect();
     names.sort(); // Deterministic order
@@ -563,6 +585,42 @@ fn build_returned_object(bindings: &FxHashMap<&str, BindingType>) -> String {
     }
     s.push_str(" }");
     s
+}
+
+/// Check whether `ident` appears as a whole-word in `text`.
+///
+/// Uses `memchr::memmem` for fast substring search, then verifies word boundaries:
+/// the character before and after the match must not be alphanumeric or `_`.
+/// This matches Vue's `isUsedInTemplate` heuristic.
+fn is_identifier_used_in_text(ident: &str, text: &str) -> bool {
+    let finder = memchr::memmem::Finder::new(ident.as_bytes());
+    let text_bytes = text.as_bytes();
+    let ident_len = ident.len();
+
+    let mut start = 0;
+    while let Some(pos) = finder.find(&text_bytes[start..]) {
+        let abs_pos = start + pos;
+        let end_pos = abs_pos + ident_len;
+
+        // Check left boundary: must not be preceded by [a-zA-Z0-9_$]
+        let left_ok = abs_pos == 0 || {
+            let c = text_bytes[abs_pos - 1];
+            !c.is_ascii_alphanumeric() && c != b'_' && c != b'$'
+        };
+
+        // Check right boundary: must not be followed by [a-zA-Z0-9_$]
+        let right_ok = end_pos >= text_bytes.len() || {
+            let c = text_bytes[end_pos];
+            !c.is_ascii_alphanumeric() && c != b'_' && c != b'$'
+        };
+
+        if left_ok && right_ok {
+            return true;
+        }
+
+        start = abs_pos + 1;
+    }
+    false
 }
 
 /// Strip TypeScript type annotations from a section string (props/emits/options).

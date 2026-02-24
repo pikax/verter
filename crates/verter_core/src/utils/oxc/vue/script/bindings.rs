@@ -385,13 +385,13 @@ fn classify_import<'a>(
                     if s.import_kind.is_type() {
                         continue;
                     }
-                    entries.push((Span::from(s.local.span), BindingType::SetupConst));
+                    entries.push((Span::from(s.local.span), BindingType::SetupImport));
                 }
                 ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
-                    entries.push((Span::from(s.local.span), BindingType::SetupConst));
+                    entries.push((Span::from(s.local.span), BindingType::SetupImport));
                 }
                 ImportDeclarationSpecifier::ImportNamespaceSpecifier(s) => {
-                    entries.push((Span::from(s.local.span), BindingType::SetupConst));
+                    entries.push((Span::from(s.local.span), BindingType::SetupImport));
                 }
             }
         }

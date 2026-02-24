@@ -521,7 +521,7 @@ fn import_specifier_type_not_bound() {
 fn import_mixed_type_and_value() {
     let b = classify("import { type Foo, bar } from 'baz';");
     assert_eq!(b.len(), 1, "only value import should produce a binding");
-    assert_eq!(find(&b, "bar"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "bar"), Some(BindingType::SetupImport));
     assert_eq!(
         find(&b, "Foo"),
         None,
@@ -535,29 +535,29 @@ fn import_mixed_type_and_value() {
 #[test]
 fn import_default() {
     let b = classify("import Foo from './Foo.vue';");
-    assert_eq!(find(&b, "Foo"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "Foo"), Some(BindingType::SetupImport));
 }
 
 /// @ai-generated
 #[test]
 fn import_named() {
     let b = classify("import { ref } from 'vue';");
-    assert_eq!(find(&b, "ref"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "ref"), Some(BindingType::SetupImport));
 }
 
 /// @ai-generated
 #[test]
 fn import_namespace() {
     let b = classify("import * as utils from './utils';");
-    assert_eq!(find(&b, "utils"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "utils"), Some(BindingType::SetupImport));
 }
 
 /// @ai-generated
 #[test]
 fn import_multiple_named() {
     let b = classify("import { a, b } from 'mod';");
-    assert_eq!(find(&b, "a"), Some(BindingType::SetupConst));
-    assert_eq!(find(&b, "b"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "a"), Some(BindingType::SetupImport));
+    assert_eq!(find(&b, "b"), Some(BindingType::SetupImport));
 }
 
 // ── Destructuring ────────────────────────────────────────────────────
@@ -644,7 +644,7 @@ class MyClass {}
 enum Color { Red, Green }
 "#,
     );
-    assert_eq!(find(&b, "ref"), Some(BindingType::SetupConst));
+    assert_eq!(find(&b, "ref"), Some(BindingType::SetupImport));
     assert_eq!(find(&b, "Ref"), None);
     assert_eq!(find(&b, "MyType"), None);
     assert_eq!(find(&b, "MyInterface"), None);

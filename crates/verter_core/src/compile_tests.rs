@@ -5691,14 +5691,31 @@ doSomething();
         result.errors
     );
     let script = result.script.as_ref().expect("script block");
-    // AuthError should NOT appear in the output since it's only used as a type annotation
-    // and force_js strips all type annotations
+
+    // Extract the __returned__ object to verify import elision
+    let returned_start = script
+        .code
+        .find("const __returned__ = ")
+        .expect("should have __returned__");
+    let returned_brace = script.code[returned_start..].find('{').unwrap() + returned_start;
+    let returned_end = script.code[returned_brace..].find('}').unwrap() + returned_brace + 1;
+    let returned_obj = &script.code[returned_brace..returned_end];
+
+    // AuthError should NOT appear in __returned__ — it's only used as a type annotation
+    // in the defineEmits validator, not in the template
     assert!(
-        !script.code.contains("AuthError"),
-        "AuthError should be elided from imports (only used as type), got:\n{}",
-        script.code
+        !returned_obj.contains("AuthError"),
+        "AuthError should be elided from __returned__ (only used as type), got:\n{}",
+        returned_obj
     );
-    // doSomething should still be present (used at runtime)
+    // doSomething should NOT appear in __returned__ either — it's used in the script
+    // body but not referenced in the template
+    assert!(
+        !returned_obj.contains("doSomething"),
+        "doSomething should not be in __returned__ (not used in template), got:\n{}",
+        returned_obj
+    );
+    // doSomething should still be present in the import (used at runtime in script body)
     assert!(
         script.code.contains("doSomething"),
         "doSomething should remain in imports (used at runtime), got:\n{}",
@@ -5709,6 +5726,52 @@ doSomething();
         !script.code.contains("UserCredential"),
         "import type should be stripped, got:\n{}",
         script.code
+    );
+}
+
+#[test]
+fn import_used_in_template_should_be_in_returned() {
+    let result = compile_sfc(
+        r#"<script setup lang="ts">
+import { formatDate } from "./utils";
+import MyComponent from "./MyComponent.vue";
+import { helperFn } from "./helpers";
+</script>
+<template>
+  <MyComponent>{{ formatDate(new Date()) }}</MyComponent>
+</template>"#,
+    );
+    assert!(
+        result.errors.is_empty(),
+        "compile errors: {:?}",
+        result.errors
+    );
+    let script = result.script.as_ref().expect("script block");
+
+    let returned_start = script
+        .code
+        .find("const __returned__ = ")
+        .expect("should have __returned__");
+    let returned_brace = script.code[returned_start..].find('{').unwrap() + returned_start;
+    let returned_end = script.code[returned_brace..].find('}').unwrap() + returned_brace + 1;
+    let returned_obj = &script.code[returned_brace..returned_end];
+
+    // Imports used in template should be in __returned__
+    assert!(
+        returned_obj.contains("formatDate"),
+        "formatDate (used in template) should be in __returned__, got:\n{}",
+        returned_obj
+    );
+    assert!(
+        returned_obj.contains("MyComponent"),
+        "MyComponent (used in template) should be in __returned__, got:\n{}",
+        returned_obj
+    );
+    // helperFn is NOT used in the template — should be excluded
+    assert!(
+        !returned_obj.contains("helperFn"),
+        "helperFn (not used in template) should NOT be in __returned__, got:\n{}",
+        returned_obj
     );
 }
 

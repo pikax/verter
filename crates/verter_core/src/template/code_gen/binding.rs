@@ -26,6 +26,9 @@ pub enum BindingType {
     Props,
     /// Destructured prop alias — `const { msg: m } = defineProps<...>()`.
     PropsAliased,
+    /// Import specifier — may be type-only usage. Included in `__returned__`
+    /// only when the identifier appears in the template text (word-boundary match).
+    SetupImport,
     /// `data()` return property (Options API).
     Data,
     /// `computed`/`inject`/etc. from Options API.
@@ -37,7 +40,9 @@ impl BindingType {
     #[inline]
     pub fn reactivity_level(&self) -> ReactivityLevel {
         match self {
-            BindingType::SetupConst | BindingType::LiteralConst => ReactivityLevel::Static,
+            BindingType::SetupConst | BindingType::SetupImport | BindingType::LiteralConst => {
+                ReactivityLevel::Static
+            }
             _ => ReactivityLevel::Dynamic,
         }
     }
@@ -52,6 +57,7 @@ impl BindingType {
                 | BindingType::SetupRef
                 | BindingType::SetupReactiveConst
                 | BindingType::SetupMaybeRef
+                | BindingType::SetupImport
                 | BindingType::LiteralConst
         )
     }

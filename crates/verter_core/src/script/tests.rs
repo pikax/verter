@@ -1158,8 +1158,8 @@ fn e2e_complex_sfc_valid_js() {
     // Verify imported component binding
     assert_eq!(
         result.bindings.get("MyComponent").copied(),
-        Some(BindingType::SetupConst),
-        "Imported .vue component should be SetupConst binding. All bindings: {:?}",
+        Some(BindingType::SetupImport),
+        "Imported .vue component should be SetupImport binding. All bindings: {:?}",
         result.bindings
     );
 

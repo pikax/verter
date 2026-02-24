@@ -98,7 +98,7 @@ fn build_wrapper_end_with_scope_id() {
 #[test]
 fn build_returned_empty() {
     let bindings = FxHashMap::default();
-    assert_eq!(build_returned_object(&bindings), "{}");
+    assert_eq!(build_returned_object(&bindings, None), "{}");
 }
 
 #[test]
@@ -107,7 +107,7 @@ fn build_returned_setup_bindings_only() {
     bindings.insert("count", BindingType::SetupRef);
     bindings.insert("msg", BindingType::SetupConst);
     bindings.insert("title", BindingType::Props); // Not included
-    let result = build_returned_object(&bindings);
+    let result = build_returned_object(&bindings, None);
     assert!(result.contains("count"));
     assert!(result.contains("msg"));
     assert!(!result.contains("title"));
@@ -118,7 +118,7 @@ fn build_returned_sorted() {
     let mut bindings = FxHashMap::default();
     bindings.insert("zebra", BindingType::SetupConst);
     bindings.insert("alpha", BindingType::SetupRef);
-    let result = build_returned_object(&bindings);
+    let result = build_returned_object(&bindings, None);
     let alpha_pos = result.find("alpha").unwrap();
     let zebra_pos = result.find("zebra").unwrap();
     assert!(alpha_pos < zebra_pos);

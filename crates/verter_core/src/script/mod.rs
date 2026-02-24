@@ -45,6 +45,11 @@ pub struct ScriptCodeGenOptions<'a> {
     /// Pre-resolved external types for cross-file type resolution.
     pub external_types:
         Option<rustc_hash::FxHashMap<String, crate::utils::oxc::vue::ResolvedElements>>,
+    /// Raw template source text for import elision. `SetupImport` bindings are
+    /// only included in `__returned__` when this identifier appears (as a whole
+    /// word) in the template text. `None` means no template — all imports are
+    /// included.
+    pub template_source: Option<&'a str>,
 }
 
 impl<'a> Default for ScriptCodeGenOptions<'a> {
@@ -60,6 +65,7 @@ impl<'a> Default for ScriptCodeGenOptions<'a> {
             runtime_module_name: "vue",
             css_v_binds: &[],
             external_types: None,
+            template_source: None,
         }
     }
 }
