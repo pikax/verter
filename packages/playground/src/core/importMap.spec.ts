@@ -2,7 +2,13 @@
  * @ai-generated - Tests for import map utilities.
  */
 import { describe, it, expect } from "vitest";
-import { getDefaultImportMap, mergeImportMap, type ImportMap } from "./importMap";
+import {
+  getDefaultImportMap,
+  mergeImportMap,
+  extractVueVersion,
+  isDefaultImport,
+  type ImportMap,
+} from "./importMap";
 
 describe("getDefaultImportMap", () => {
   it("returns default import map with default vue version", () => {
@@ -73,5 +79,83 @@ describe("mergeImportMap", () => {
     mergeImportMap(a, b);
     expect(a.imports).toEqual({ vue: "a" });
     expect(b.imports).toEqual({ react: "b" });
+  });
+});
+
+describe("extractVueVersion", () => {
+  it("extracts version from default CDN URL", () => {
+    const map = getDefaultImportMap("3.5.26");
+    expect(extractVueVersion(map)).toBe("3.5.26");
+  });
+
+  it("extracts version from custom version", () => {
+    const map = getDefaultImportMap("3.4.0");
+    expect(extractVueVersion(map)).toBe("3.4.0");
+  });
+
+  it("returns undefined when vue import is missing", () => {
+    const map: ImportMap = { imports: { lodash: "https://example.com/lodash" } };
+    expect(extractVueVersion(map)).toBeUndefined();
+  });
+
+  it("returns undefined when vue URL is not a CDN URL", () => {
+    const map: ImportMap = { imports: { vue: "/local/vue.js" } };
+    expect(extractVueVersion(map)).toBeUndefined();
+  });
+
+  it("extracts pre-release versions", () => {
+    const map: ImportMap = {
+      imports: {
+        vue: "https://cdn.jsdelivr.net/npm/vue@3.5.0-beta.1/dist/vue.esm-browser.js",
+        "vue/server-renderer":
+          "https://cdn.jsdelivr.net/npm/@vue/server-renderer@3.5.0-beta.1/dist/server-renderer.esm-browser.js",
+      },
+    };
+    expect(extractVueVersion(map)).toBe("3.5.0-beta.1");
+  });
+});
+
+describe("isDefaultImport", () => {
+  it("recognizes default vue import", () => {
+    expect(
+      isDefaultImport(
+        "vue",
+        "https://cdn.jsdelivr.net/npm/vue@3.5.26/dist/vue.esm-browser.js",
+        "3.5.26",
+      ),
+    ).toBe(true);
+  });
+
+  it("recognizes default vue/server-renderer import", () => {
+    expect(
+      isDefaultImport(
+        "vue/server-renderer",
+        "https://cdn.jsdelivr.net/npm/@vue/server-renderer@3.5.26/dist/server-renderer.esm-browser.js",
+        "3.5.26",
+      ),
+    ).toBe(true);
+  });
+
+  it("returns false for custom imports", () => {
+    expect(isDefaultImport("lodash", "https://cdn.jsdelivr.net/npm/lodash", "3.5.26")).toBe(false);
+  });
+
+  it("returns false when vue version differs", () => {
+    expect(
+      isDefaultImport(
+        "vue",
+        "https://cdn.jsdelivr.net/npm/vue@3.4.0/dist/vue.esm-browser.js",
+        "3.5.26",
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false without vue version", () => {
+    expect(
+      isDefaultImport(
+        "vue",
+        "https://cdn.jsdelivr.net/npm/vue@3.5.26/dist/vue.esm-browser.js",
+      ),
+    ).toBe(false);
   });
 });

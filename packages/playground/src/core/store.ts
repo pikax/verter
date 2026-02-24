@@ -7,7 +7,7 @@ import {
   type CompileTiming,
 } from "./types";
 import { compileFile, initCompilers, switchWasmVersion } from "./compiler";
-import { getDefaultImportMap, type ImportMap } from "./importMap";
+import { getDefaultImportMap, extractVueVersion, type ImportMap } from "./importMap";
 import { serializeToHash, deserializeFromHash } from "./urlState";
 import type { VersionEntry } from "./versions";
 
@@ -120,8 +120,22 @@ export function useStore(): Store {
       if (savedState.compilerOptions) {
         Object.assign(compilerOptions, savedState.compilerOptions);
       }
-      if (savedState.importMap) {
-        Object.assign(importMap, savedState.importMap);
+      // Re-initialize import map with correct vue version, then merge custom imports
+      if (savedState.vueVersion) {
+        const defaults = getDefaultImportMap(savedState.vueVersion);
+        Object.assign(importMap, defaults);
+      }
+      if (savedState.importMap?.imports) {
+        Object.assign(importMap.imports, savedState.importMap.imports);
+      }
+      if (savedState.importMap?.scopes) {
+        importMap.scopes = savedState.importMap.scopes;
+      }
+
+      // Switch verter version if specified and different from current
+      if (savedState.verterVersion && savedState.verterVersion !== verterVersion.value) {
+        verterVersion.value = savedState.verterVersion;
+        // Version switch will happen after init compilers are ready
       }
     }
 
@@ -180,6 +194,8 @@ export function useStore(): Store {
           imports: { ...importMap.imports },
           scopes: importMap.scopes ? { ...importMap.scopes } : undefined,
         },
+        vueVersion: extractVueVersion(importMap),
+        verterVersion: verterVersion.value,
       }),
       (state) => {
         if (saveTimeout) clearTimeout(saveTimeout);
