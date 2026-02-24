@@ -5769,6 +5769,94 @@ defineProps<{ class?: string }>()
     );
 }
 
+// ==================== Single element children must be array-wrapped ====================
+
+/// @ai-generated - When an element has a single element child (e.g., <li><button>text</button></li>),
+/// Vue requires the child VNode to be wrapped in an array. Passing a bare VNode as children
+/// causes Vue to misinterpret it as a slots object and render nothing.
+#[test]
+fn single_element_child_wrapped_in_array() {
+    let code = compile_and_validate_template(
+        r#"<template>
+  <ul>
+    <li><button>Create User</button></li>
+  </ul>
+</template>"#,
+    );
+    eprintln!("=== SINGLE ELEMENT CHILD OUTPUT ===\n{}", code);
+    // The button VNode must be wrapped in an array: [_createElementVNode("button", ...)]
+    // NOT passed directly: _createElementVNode("button", ...)
+    assert!(
+        code.contains(r#"[_createElementVNode("button""#),
+        "Single element child must be wrapped in array. Got:\n{}",
+        code
+    );
+}
+
+/// @ai-generated - Multiple <li><button>...</button></li> all must have array-wrapped children.
+#[test]
+fn single_element_children_in_list() {
+    let code = compile_and_validate_template(
+        r#"<template>
+  <ul>
+    <li><button>Create User</button></li>
+    <li><button>Generate Report</button></li>
+    <li><button>Export Data</button></li>
+  </ul>
+</template>"#,
+    );
+    eprintln!("=== LIST SINGLE ELEMENT CHILDREN ===\n{}", code);
+    // Each <li> must wrap its single <button> child in an array
+    // Count occurrences of [_createElementVNode("button"
+    let array_wrapped_count = code.matches(r#"[_createElementVNode("button""#).count();
+    assert_eq!(
+        array_wrapped_count, 3,
+        "Expected 3 array-wrapped button children. Got {} in:\n{}",
+        array_wrapped_count, code
+    );
+}
+
+/// @ai-generated - Single element child in <td><span>...</span></td> must be array-wrapped.
+#[test]
+fn single_element_child_in_td() {
+    let code = compile_and_validate_template(
+        r#"<template>
+  <table><tbody><tr>
+    <td><span class="badge">Done</span></td>
+  </tr></tbody></table>
+</template>"#,
+    );
+    eprintln!("=== TD SINGLE ELEMENT CHILD ===\n{}", code);
+    assert!(
+        code.contains(r#"[_createElementVNode("span""#),
+        "Single element child in <td> must be wrapped in array. Got:\n{}",
+        code
+    );
+}
+
+// ==================== HTML entity decoding ====================
+
+/// @ai-generated - HTML named entity &copy; must be decoded to © in render output.
+#[test]
+fn html_entity_copy_decoded() {
+    let code = compile_and_validate_template(
+        r#"<template>
+  <p>&copy; 2026</p>
+</template>"#,
+    );
+    eprintln!("=== HTML ENTITY OUTPUT ===\n{}", code);
+    assert!(
+        code.contains("\u{00A9}") || code.contains("©"),
+        "&copy; must be decoded to © character. Got:\n{}",
+        code
+    );
+    assert!(
+        !code.contains("&copy;"),
+        "&copy; must NOT appear as literal string in JS output. Got:\n{}",
+        code
+    );
+}
+
 // ==================== Top-level await ====================
 
 #[test]

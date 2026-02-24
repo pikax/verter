@@ -1446,7 +1446,7 @@ pub fn process_element_leave<'alloc>(
                     out.add_vdom_import(VdomHelper::ToDisplayString);
                 }
             }
-            ChildrenMode::Mixed | ChildrenMode::MultiElement => {
+            ChildrenMode::Mixed | ChildrenMode::MultiElement | ChildrenMode::SingleElement => {
                 buf.push('[');
             }
             _ => {}
@@ -1565,7 +1565,7 @@ pub fn process_element_leave<'alloc>(
                 }
                 // Interpolation already ends with ) from interpolation.rs
             }
-            ChildrenMode::Mixed | ChildrenMode::MultiElement => {
+            ChildrenMode::Mixed | ChildrenMode::MultiElement | ChildrenMode::SingleElement => {
                 buf.push(']');
             }
             _ => {}
