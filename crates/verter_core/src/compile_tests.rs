@@ -6994,6 +6994,45 @@ const test = () => {}
 }
 
 #[test]
+fn tsx_interpolation_without_spaces() {
+    let result = compile_tsx(r#"<template>{{test}}</template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("{_ctx.test}"),
+        "Interpolation without spaces should become {{_ctx.test}} with binding prefix, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_interpolation_preserves_inner_spaces() {
+    let result = compile_tsx(r#"<template>{{  test  }}</template>"#);
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("{  _ctx.test  }"),
+        "Interpolation with spaces should preserve inner spaces, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_interpolation_preserves_inner_newlines() {
+    let result = compile_tsx(
+        r#"<template>{{  test
+  }}</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    assert!(
+        tsx.code.contains("{  _ctx.test\n  }"),
+        "Interpolation with newlines should preserve inner formatting, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
 fn tsx_not_generated_when_disabled() {
     let result = compile_sfc(
         r#"<script setup>

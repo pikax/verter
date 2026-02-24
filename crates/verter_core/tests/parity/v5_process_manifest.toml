@@ -5524,7 +5524,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/interpolation/interpolation.spec.ts"
 source_line = 40
 source_name = "should handle interpolation"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_interpolation_preserves_inner_spaces"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/interpolation/interpolation.spec.ts:45:should-handle-interpolation-with-spaces"
@@ -5533,7 +5533,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/interpolation/interpolation.spec.ts"
 source_line = 45
 source_name = "should handle interpolation with spaces"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_interpolation_preserves_inner_spaces"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/interpolation/interpolation.spec.ts:50:should-handle-interpolation-with-spaces-and-new-lines"
@@ -5542,7 +5542,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/interpolation/interpolation.spec.ts"
 source_line = 50
 source_name = "should handle interpolation with spaces and new lines"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_interpolation_preserves_inner_newlines"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/interpolation/interpolation.spec.ts:58:without-spaces"
@@ -5551,7 +5551,7 @@ status = "ported"
 source_file = "packages/core/src/v5/process/template/plugins/interpolation/interpolation.spec.ts"
 source_line = 58
 source_name = "without spaces"
-rust_test = "v5_process_ported_tests::v5_process_spec_manifest_contract"
+rust_test = "compile::tests::tsx_interpolation_without_spaces"
 
 [[entry]]
 id = "spec:packages/core/src/v5/process/template/plugins/loop/loop.spec.ts:108:nested"
