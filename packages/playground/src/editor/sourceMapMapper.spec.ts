@@ -186,5 +186,27 @@ const msg: string = 'hello'
       expect(roundtripVueOffset).not.toBeNull();
       expect(Math.abs((roundtripVueOffset ?? 0) - vueTemplateMsgOffset)).toBeLessThanOrEqual(2);
     });
+
+    it("maps real event handler expression offsets from template to TSX", async () => {
+      const vueCode = `<script setup lang=\"ts\">
+function handleClick(e: MouseEvent) {
+  return e
+}
+</script>
+<template><button @click=\"handleClick\">x</button></template>`;
+
+      const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
+      const mapper = new SourceMapMapper(sourceMap, tsxCode, vueCode);
+
+      const vueHandlerOffset = vueCode.indexOf("handleClick\">");
+      const mappedTsxOffset = mapper.vueOffsetToTsxOffset(vueHandlerOffset);
+
+      expect(mappedTsxOffset).not.toBeNull();
+      expect(mappedTsxOffset!).toBeGreaterThanOrEqual(0);
+
+      const roundtripVueOffset = mapper.tsxOffsetToVueOffset(mappedTsxOffset!);
+      expect(roundtripVueOffset).not.toBeNull();
+      expect(Math.abs((roundtripVueOffset ?? 0) - vueHandlerOffset)).toBeLessThanOrEqual(4);
+    });
   });
 });

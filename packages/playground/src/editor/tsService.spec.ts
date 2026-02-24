@@ -121,4 +121,39 @@ describe("TypeScriptService mapping", () => {
     expect(diagnostics[0].start).toBe(expectedVueStart);
     expect(diagnostics[0].end).toBe(expectedVueEnd);
   });
+
+  it("maps Vue completion offsets to TSX offsets using real source maps", async () => {
+    const vueCode = `<script setup lang=\"ts\">\nconst message = 'hello'\n</script>\n<template><div>{{ mes }}</div></template>`;
+    const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
+
+    const mapper = new SourceMapMapper(sourceMap, tsxCode, vueCode);
+    const vueOffset = vueCode.indexOf("mes") + 3;
+    const expectedTsxOffset = mapper.vueOffsetToTsxOffset(vueOffset);
+
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.currentTsxPath = "/App.vue.tsx";
+    service.currentMapper = mapper;
+
+    const send = vi.fn(async (_type: string, payload: any) => [
+      {
+        label: "message",
+        kind: "property",
+        sortText: "0",
+        requestedOffset: payload.offset,
+      },
+    ]);
+    service.send = send;
+
+    const completions = await service.getCompletions("App.vue", vueOffset);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith("getCompletions", {
+      path: "/App.vue.tsx",
+      offset: expectedTsxOffset,
+    });
+    expect(completions).toHaveLength(1);
+    expect(completions[0].label).toBe("message");
+    expect(completions[0].kind).toBe(9);
+  });
 });
