@@ -153,6 +153,7 @@ fn register_builtin_rules(registry: &mut RuleRegistry) {
     registry.register(Box::new(vue::NoUseVIfWithVFor));
     // Vue Recommended
     registry.register(Box::new(vue::NoUnusedComponents));
+    registry.register(Box::new(vue::NoUnusedProps));
     // Accessibility
     registry.register(Box::new(a11y::AltText));
     registry.register(Box::new(a11y::AnchorHasContent));

@@ -12,7 +12,7 @@ use oxc_ast::ast::{Expression, ObjectPropertyKind};
 use oxc_parser::Parser;
 use oxc_span::{GetSpan, SourceType};
 
-use crate::ast::types::{ElementNode, TagType};
+use crate::ast::types::{ElementNode, ElementNodeConditionKind, TagType};
 use crate::template::code_gen::binding::BindingResolver;
 use crate::template::code_gen::types::CodeGenOutput;
 use crate::template::code_gen::vapor::interpolation::build_prefixed_expr;
@@ -28,6 +28,8 @@ pub fn process_element_props<'alloc>(
     alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
 ) {
+    let v_if_guard = resolve_v_if_guard_expr(el, oxc_el, source, resolver);
+
     for (i, prop) in el.props.iter().enumerate() {
         // Find corresponding OXC data for this prop
         let oxc_prop = oxc_el.and_then(|el| el.props.iter().find(|p| p.prop_index == i));
@@ -86,7 +88,15 @@ pub fn process_element_props<'alloc>(
 
         match dir_name {
             "bind" => process_v_bind(prop, oxc_prop, source, out, alloc, resolver),
-            "on" => process_v_on(prop, oxc_prop, source, out, alloc, resolver),
+            "on" => process_v_on(
+                prop,
+                oxc_prop,
+                source,
+                out,
+                alloc,
+                resolver,
+                v_if_guard.as_deref(),
+            ),
             "html" => process_v_html(prop, source, out),
             "text" => process_v_text(prop, source, out),
             _ => {
@@ -204,6 +214,7 @@ fn process_v_on<'alloc>(
     out: &mut CodeGenOutput<'alloc>,
     _alloc: &'alloc Allocator,
     resolver: &BindingResolver<'alloc>,
+    v_if_guard: Option<&str>,
 ) {
     let has_arg = prop.arg_start.is_some();
 
@@ -238,11 +249,30 @@ fn process_v_on<'alloc>(
             || resolved_expr.starts_with("function")
             || resolved_expr.contains("=>");
         let is_object_expr = resolved_expr.starts_with('{') && resolved_expr.ends_with('}');
+        let has_event_param = resolved_expr.contains("$event");
 
         // Build prop end position (including modifiers and quotes)
         let prop_end = get_prop_end(prop);
 
-        if is_simple_ident || is_member_expr || is_fn_expr || is_object_expr {
+        if is_fn_expr || is_object_expr {
+            // Explicit function/object expressions are already valid handlers.
+            out.overwrite(
+                prop.start,
+                prop_end,
+                &format!("{}={{{}}}", jsx_event_name, resolved_expr),
+            );
+        } else if has_event_param {
+            // $event can only exist inside a callback parameter scope.
+            out.overwrite(
+                prop.start,
+                prop_end,
+                &format!(
+                    "{}={{{}}}",
+                    jsx_event_name,
+                    build_event_callback_body("$event", resolved_expr, v_if_guard)
+                ),
+            );
+        } else if is_simple_ident || is_member_expr {
             // Simple handler: @click="handler" → onClick={handler}
             out.overwrite(
                 prop.start,
@@ -251,27 +281,61 @@ fn process_v_on<'alloc>(
             );
         } else {
             // Inline expression: @click="count++" → onClick={() => count++}
-            // Or expression with $event: @click="handler($event)" → onClick={($event) => handler($event)}
-            let has_event_param = resolved_expr.contains("$event");
-            if has_event_param {
-                out.overwrite(
-                    prop.start,
-                    prop_end,
-                    &format!("{}={{($event) => {{{}}}}}", jsx_event_name, resolved_expr),
-                );
-            } else {
-                out.overwrite(
-                    prop.start,
-                    prop_end,
-                    &format!("{}={{() => {{{}}}}}", jsx_event_name, resolved_expr),
-                );
-            }
+            out.overwrite(
+                prop.start,
+                prop_end,
+                &format!(
+                    "{}={{{}}}",
+                    jsx_event_name,
+                    build_event_callback_body("", resolved_expr, v_if_guard)
+                ),
+            );
         }
     } else {
         // Event with no value — just remove
         let prop_end = get_prop_end(prop);
         out.overwrite(prop.start, prop_end, "");
     }
+}
+
+fn build_event_callback_body(
+    event_arg: &str,
+    expression: &str,
+    v_if_guard: Option<&str>,
+) -> String {
+    let params = if event_arg.is_empty() { "" } else { event_arg };
+    let guard_prefix = v_if_guard
+        .map(|guard| format!("if (!({})) {{ return undefined; }} ", guard))
+        .unwrap_or_default();
+    format!("({}) => {{{}{}}}", params, guard_prefix, expression)
+}
+
+fn resolve_v_if_guard_expr<'alloc>(
+    el: &ElementNode,
+    oxc_el: Option<&OxcParsedElement<'alloc>>,
+    source: &'alloc str,
+    resolver: &BindingResolver<'alloc>,
+) -> Option<String> {
+    let condition = el.v_condition.as_ref()?;
+    if !matches!(
+        condition.kind,
+        ElementNodeConditionKind::If | ElementNodeConditionKind::ElseIf
+    ) {
+        return None;
+    }
+
+    let (Some(vs), Some(ve)) = (condition.prop.value_start, condition.prop.value_end) else {
+        return None;
+    };
+    let raw_expr = &source[vs as usize..ve as usize];
+
+    if let Some(oxc_el) = oxc_el {
+        if let Some(ref cond) = oxc_el.condition {
+            return Some(build_prefixed_expr(raw_expr, vs, cond, resolver, &[]));
+        }
+    }
+
+    Some(resolver.resolve_simple_expr(raw_expr))
 }
 
 /// Process `v-html="expr"` → `dangerouslySetInnerHTML={{__html: expr}}`.

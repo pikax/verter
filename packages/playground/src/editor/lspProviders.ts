@@ -5,6 +5,12 @@
 import * as monaco from "monaco-editor-core";
 import type { Store } from "../core/store";
 import { hoverForWord, collectCompletions, isOffsetInScriptBlock } from "./analysisHelpers";
+import {
+  collectTemplateCompletions,
+  collectTemplateInterpolationCompletions,
+  isOffsetInTemplateBlock,
+  type TemplateCompletion,
+} from "./templateIde";
 
 // ── TypeScript service integration interface ──
 
@@ -14,6 +20,27 @@ export interface TypeScriptServiceBridge {
     filename: string,
     offset: number,
   ): Promise<Array<{ label: string; kind: number; detail?: string; insertText?: string }>>;
+  getDefinition?: (
+    filename: string,
+    offset: number,
+  ) => Promise<Array<{ start: number; end: number }>>;
+  getReferences?: (
+    filename: string,
+    offset: number,
+  ) => Promise<Array<{ start: number; end: number; isDefinition: boolean }>>;
+  getDocumentHighlights?: (
+    filename: string,
+    offset: number,
+  ) => Promise<Array<{ start: number; end: number }>>;
+  getRenameLocations?: (
+    filename: string,
+    offset: number,
+  ) => Promise<{
+    canRename: boolean;
+    rejectReason?: string;
+    triggerSpan: { start: number; end: number } | null;
+    locations: Array<{ start: number; end: number }>;
+  }>;
 }
 
 // Mapping from analysis completion kind to Monaco CompletionItemKind
@@ -25,6 +52,57 @@ const KIND_MAP: Record<string, monaco.languages.CompletionItemKind> = {
   Module: monaco.languages.CompletionItemKind.Module,
   TypeParameter: monaco.languages.CompletionItemKind.TypeParameter,
 };
+
+function templateCompletionKind(kind: TemplateCompletion["kind"]): monaco.languages.CompletionItemKind {
+  switch (kind) {
+    case "tag":
+      return monaco.languages.CompletionItemKind.Class;
+    case "directive":
+      return monaco.languages.CompletionItemKind.Keyword;
+    case "attribute":
+      return monaco.languages.CompletionItemKind.Property;
+    case "symbol":
+    default:
+      return monaco.languages.CompletionItemKind.Variable;
+  }
+}
+
+function pushTemplateCompletion(
+  items: monaco.languages.CompletionItem[],
+  model: monaco.editor.ITextModel,
+  range: monaco.Range,
+  completion: TemplateCompletion,
+): void {
+  const additionalTextEdits = completion.importEdit
+    ? (() => {
+        const pos = model.getPositionAt(completion.importEdit.offset);
+        const editRange = new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column);
+        return [{ range: editRange, text: completion.importEdit.text }];
+      })()
+    : undefined;
+
+  items.push({
+    label: completion.label,
+    kind: templateCompletionKind(completion.kind),
+    detail: completion.detail,
+    insertText: completion.insertText,
+    range,
+    sortText: completion.sortText,
+    insertTextRules: completion.isSnippet
+      ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet
+      : undefined,
+    additionalTextEdits,
+  } as unknown as monaco.languages.CompletionItem);
+}
+
+function mappedSpanToRange(
+  model: monaco.editor.ITextModel,
+  span: { start: number; end: number },
+): monaco.Range {
+  const start = model.getPositionAt(span.start);
+  const end = model.getPositionAt(span.end);
+  return new monaco.Range(start.lineNumber, start.column, end.lineNumber, end.column);
+}
 
 // ── Registration ──
 
@@ -91,11 +169,12 @@ export function registerLspProviders(
   // Completion provider
   disposables.push(
     monaco.languages.registerCompletionItemProvider("vue", {
-      triggerCharacters: [".", '"', "'", "/", "@", "<"],
+      triggerCharacters: [".", '"', "'", "/", "@", "<", ":", "$"],
       async provideCompletionItems(model, position) {
         const file = store.activeFile;
         const analysis = file?.compiled.analysis;
         const items: monaco.languages.CompletionItem[] = [];
+        const seenLabels = new Set<string>();
 
         const wordRange = model.getWordUntilPosition(position);
         const range = new monaco.Range(
@@ -105,13 +184,52 @@ export function registerLspProviders(
           wordRange.endColumn,
         );
 
-        if (analysis) {
-          const source = model.getValue();
-          const offset = model.getOffsetAt(position);
-          const isInScript = isOffsetInScriptBlock(source, offset);
+        const source = model.getValue();
+        const offset = model.getOffsetAt(position);
+        const isInScript = isOffsetInScriptBlock(source, offset);
+        const isInTemplate = !isInScript && isOffsetInTemplateBlock(source, offset);
 
+        let templateCompletionCount = 0;
+
+        if (isInTemplate) {
+          const openFilenames = Object.keys(store.files as Record<string, unknown>);
+          const templateCompletions = collectTemplateCompletions({
+            source,
+            offset,
+            activeFilename: store.activeFilename,
+            openFilenames,
+            analysis,
+          });
+
+          for (const completion of templateCompletions) {
+            if (seenLabels.has(completion.label)) continue;
+            seenLabels.add(completion.label);
+            pushTemplateCompletion(items, model, range, completion);
+            templateCompletionCount += 1;
+          }
+
+          const interpolationCompletions = collectTemplateInterpolationCompletions({
+            source,
+            offset,
+            activeFilename: store.activeFilename,
+            openFilenames,
+            analysis,
+          });
+
+          for (const completion of interpolationCompletions) {
+            if (seenLabels.has(completion.label)) continue;
+            seenLabels.add(completion.label);
+            pushTemplateCompletion(items, model, range, completion);
+            templateCompletionCount += 1;
+          }
+        }
+
+        // Analysis completions are still valuable in script and generic expression contexts.
+        if (analysis && (templateCompletionCount === 0 || isInScript)) {
           const entries = collectCompletions(analysis, isInScript);
           for (const entry of entries) {
+            if (seenLabels.has(entry.label)) continue;
+            seenLabels.add(entry.label);
             items.push({
               label: entry.label,
               kind: KIND_MAP[entry.kind] ?? monaco.languages.CompletionItemKind.Variable,
@@ -124,10 +242,10 @@ export function registerLspProviders(
 
         // Merge TS completions
         if (tsBridge && file) {
-          const offset = model.getOffsetAt(position);
           const tsItems = await tsBridge.getCompletions(file.filename, offset);
           for (const tsItem of tsItems) {
-            if (items.some((i) => (i.label as string) === tsItem.label)) continue;
+            if (seenLabels.has(tsItem.label)) continue;
+            seenLabels.add(tsItem.label);
             items.push({
               label: tsItem.label,
               kind: tsItem.kind,
@@ -142,6 +260,109 @@ export function registerLspProviders(
       },
     }),
   );
+
+  // Go to definition
+  if (tsBridge?.getDefinition) {
+    disposables.push(
+      monaco.languages.registerDefinitionProvider("vue", {
+        async provideDefinition(model, position) {
+          const file = store.activeFile;
+          if (!file) return null;
+          const offset = model.getOffsetAt(position);
+          const defs = await tsBridge.getDefinition!(file.filename, offset);
+          if (defs.length === 0) return null;
+          return defs.map((def) => ({
+            uri: model.uri,
+            range: mappedSpanToRange(model, def),
+          })) as unknown as monaco.languages.Location[];
+        },
+      }),
+    );
+  }
+
+  // Find all references
+  if (tsBridge?.getReferences) {
+    disposables.push(
+      monaco.languages.registerReferenceProvider("vue", {
+        async provideReferences(model, position) {
+          const file = store.activeFile;
+          if (!file) return [];
+          const offset = model.getOffsetAt(position);
+          const refs = await tsBridge.getReferences!(file.filename, offset);
+          return refs.map((ref) => ({
+            uri: model.uri,
+            range: mappedSpanToRange(model, ref),
+          })) as unknown as monaco.languages.Location[];
+        },
+      }),
+    );
+  }
+
+  // Document highlights
+  if (tsBridge?.getDocumentHighlights) {
+    disposables.push(
+      monaco.languages.registerDocumentHighlightProvider("vue", {
+        async provideDocumentHighlights(model, position) {
+          const file = store.activeFile;
+          if (!file) return [];
+          const offset = model.getOffsetAt(position);
+          const highlights = await tsBridge.getDocumentHighlights!(file.filename, offset);
+          return highlights.map((span) => ({
+            range: mappedSpanToRange(model, span),
+            kind: monaco.languages.DocumentHighlightKind.Read,
+          })) as unknown as monaco.languages.DocumentHighlight[];
+        },
+      }),
+    );
+  }
+
+  // Rename symbol
+  if (tsBridge?.getRenameLocations) {
+    disposables.push(
+      monaco.languages.registerRenameProvider("vue", {
+        async resolveRenameLocation(model, position) {
+          const file = store.activeFile;
+          if (!file) return null;
+          const offset = model.getOffsetAt(position);
+          const rename = await tsBridge.getRenameLocations!(file.filename, offset);
+          if (!rename.canRename || !rename.triggerSpan) return null;
+          const range = mappedSpanToRange(model, rename.triggerSpan);
+          return {
+            range,
+            text: model.getValueInRange(range),
+          } as unknown as monaco.languages.RenameLocation;
+        },
+        async provideRenameEdits(model, position, newName) {
+          const file = store.activeFile;
+          if (!file) {
+            return {
+              edits: [],
+              rejectReason: "No active file",
+            };
+          }
+
+          const offset = model.getOffsetAt(position);
+          const rename = await tsBridge.getRenameLocations!(file.filename, offset);
+          if (!rename.canRename) {
+            return {
+              edits: [],
+              rejectReason: rename.rejectReason ?? "Symbol cannot be renamed here",
+            } as unknown as monaco.languages.WorkspaceEdit;
+          }
+
+          const edits = rename.locations.map((loc) => ({
+            resource: model.uri,
+            edit: {
+              range: mappedSpanToRange(model, loc),
+              text: newName,
+            },
+          }));
+
+          return { edits } as unknown as monaco.languages.WorkspaceEdit;
+        },
+      }),
+    );
+  }
 
   return disposables;
 }

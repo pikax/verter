@@ -122,6 +122,8 @@ function createLanguageServiceHost(): ts.LanguageServiceHost {
         jsx: ts.JsxEmit.Preserve,
         jsxImportSource: "vue",
         strict: true,
+        noUnusedLocals: true,
+        noUnusedParameters: true,
         esModuleInterop: true,
         allowJs: true,
         noEmit: true,
@@ -321,6 +323,90 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
             length: d.textSpan.length,
           })),
         );
+        break;
+      }
+
+      case "getReferences": {
+        if (!languageService) {
+          respond([]);
+          break;
+        }
+        const { path, offset } = payload;
+        const refs = languageService.getReferencesAtPosition(path, offset);
+        if (!refs || refs.length === 0) {
+          respond([]);
+          break;
+        }
+        respond(
+          refs.map((r) => ({
+            fileName: r.fileName,
+            start: r.textSpan.start,
+            length: r.textSpan.length,
+          })),
+        );
+        break;
+      }
+
+      case "getDocumentHighlights": {
+        if (!languageService) {
+          respond([]);
+          break;
+        }
+        const { path, offset } = payload;
+        const docs = languageService.getDocumentHighlights(path, offset, [path]);
+        if (!docs || docs.length === 0) {
+          respond([]);
+          break;
+        }
+        const highlights = docs.flatMap((doc) =>
+          doc.highlightSpans.map((span) => ({
+            fileName: doc.fileName,
+            start: span.textSpan.start,
+            length: span.textSpan.length,
+            kind: span.kind,
+          })),
+        );
+        respond(highlights);
+        break;
+      }
+
+      case "getRenameLocations": {
+        if (!languageService) {
+          respond({
+            canRename: false,
+            localizedErrorMessage: "TypeScript service is not initialized",
+            triggerSpan: null,
+            locations: [],
+          });
+          break;
+        }
+        const { path, offset } = payload;
+        const info = languageService.getRenameInfo(path, offset, {
+          allowRenameOfImportPath: false,
+        });
+        if (!info.canRename) {
+          respond({
+            canRename: false,
+            localizedErrorMessage: info.localizedErrorMessage ?? "Symbol cannot be renamed",
+            triggerSpan: null,
+            locations: [],
+          });
+          break;
+        }
+
+        const locations = languageService.findRenameLocations(path, offset, false, false, true);
+        respond({
+          canRename: true,
+          localizedErrorMessage: null,
+          triggerSpan: info.triggerSpan
+            ? { start: info.triggerSpan.start, length: info.triggerSpan.length }
+            : null,
+          locations: (locations ?? []).map((loc) => ({
+            fileName: loc.fileName,
+            start: loc.textSpan.start,
+            length: loc.textSpan.length,
+          })),
+        });
         break;
       }
 

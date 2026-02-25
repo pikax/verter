@@ -8042,14 +8042,61 @@ const a = {}
     );
     assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
     let tsx = result.tsx.as_ref().expect("tsx block");
+    let normalized: String = tsx.code.chars().filter(|c| !c.is_whitespace()).collect();
     assert!(
-        tsx.code.contains("onClick={$event}"),
-        "Bare $event should be emitted as $event in TSX handler, got:\n{}",
+        normalized.contains("onClick={($event)=>{$event}}"),
+        "Bare $event should be emitted in a typed callback scope, got:\n{}",
         tsx.code
     );
     assert!(
         !tsx.code.contains("_ctx.$event"),
         "$event must not be context-prefixed, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_issue_48_event_member_expression_stays_in_event_scope() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const a = {}
+</script>
+<template>
+  <input @input="$event.target" />
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    let normalized: String = tsx.code.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        normalized.contains("onInput={($event)=>{$event.target}}"),
+        "$event member expressions must stay inside callback scope, got:\n{}",
+        tsx.code
+    );
+    assert!(
+        !tsx.code.contains("_ctx.$event"),
+        "$event must not be context-prefixed, got:\n{}",
+        tsx.code
+    );
+}
+
+#[test]
+fn tsx_event_handler_under_v_if_includes_runtime_guard() {
+    let result = compile_tsx(
+        r#"<script setup lang="ts">
+const msg: string | number = Math.random() > 0.5 ? 'x' : 0
+</script>
+<template>
+  <button v-if="typeof msg === 'string'" @click="msg.toLowerCase()" />
+</template>"#,
+    );
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let tsx = result.tsx.as_ref().expect("tsx block");
+    let normalized: String = tsx.code.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        normalized
+            .contains("onClick={()=>{if(!(typeofmsg==='string')){returnundefined;}msg.toLowerCase()}}"),
+        "v-if event handlers should include the guard inside callback for narrowing, got:\n{}",
         tsx.code
     );
 }

@@ -49,11 +49,19 @@ async function generateRealTsxOutput(vueSource: string): Promise<{ code: string;
 const VUE_TYPE_STUB = `
 declare module "vue" {
   export interface IntrinsicElementAttributes {
-    div: {}
-    button: {
-      onClick?: (...args: unknown[]) => unknown
-      onMouseenter?: (...args: unknown[]) => unknown
+    div: {
+      onClick?: (event: MouseEvent) => unknown
+      onMouseenter?: (event: MouseEvent) => unknown
       "onTest-camel-case"?: (...args: unknown[]) => unknown
+    }
+    button: {
+      onClick?: (event: MouseEvent) => unknown
+      onMouseenter?: (event: MouseEvent) => unknown
+      "onTest-camel-case"?: (...args: unknown[]) => unknown
+    }
+    input: {
+      onInput?: (event: InputEvent) => unknown
+      onKeydown?: (event: KeyboardEvent) => unknown
     }
   }
 }
@@ -406,5 +414,32 @@ describe("generated TSX TypeScript semantics", () => {
     const messages = collectTypeScriptDiagnostics(service, fileName);
 
     expect(messages.some((message) => message.includes("notExistingMethod"))).toBe(true);
+  });
+
+  it("type-checks inline $event handlers with the correct event type", async () => {
+    const source = `<template>
+  <button @click="$event.preventDefault()" />
+</template>`;
+
+    const { code } = await generateRealTsxOutput(source);
+    const { service, fileName } = createTypecheckService(code);
+    const messages = collectTypeScriptDiagnostics(service, fileName);
+    const normalized = code.replace(/\s+/g, "");
+
+    expect(messages).toEqual([]);
+    expect(normalized).toContain("onClick={($event)=>{$event.preventDefault()}}");
+  });
+
+  it("emits v-if condition and event handler expressions for guarded branches", async () => {
+    const source = `<script setup lang="ts">
+const msg: string | number = Math.random() > 0.5 ? 'x' : 0
+</script>
+<template>
+  <button v-if="typeof msg === 'string'" @click="msg.toLowerCase()" />
+</template>`;
+
+    const { code } = await generateRealTsxOutput(source);
+    expect(code).toContain("typeof msg === 'string'");
+    expect(code).toContain("onClick={() => {msg.toLowerCase()}}");
   });
 });

@@ -156,4 +156,92 @@ describe("TypeScriptService mapping", () => {
     expect(completions[0].label).toBe("message");
     expect(completions[0].kind).toBe(9);
   });
+
+  it("maps definition spans back to Vue offsets", async () => {
+    const vueCode = `<script setup lang=\"ts\">\nconst msg: string = 'hello'\n</script>\n<template><div>{{ msg }}</div></template>`;
+    const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
+
+    const mapper = new SourceMapMapper(sourceMap, tsxCode, vueCode);
+    const vueOffset = vueCode.indexOf("msg }}");
+    const expectedTsxOffset = mapper.vueOffsetToTsxOffset(vueOffset)!;
+    const definitionTsxStart = tsxCode.indexOf("msg: string");
+    const expectedVueStart = mapper.tsxOffsetToVueOffset(definitionTsxStart)!;
+    const expectedVueEnd = mapper.tsxOffsetToVueOffset(definitionTsxStart + 3)!;
+
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.currentTsxPath = "/App.vue.tsx";
+    service.currentMapper = mapper;
+    service.send = vi.fn(async () => [
+      { fileName: "/App.vue.tsx", start: definitionTsxStart, length: 3 },
+    ]);
+
+    const defs = await service.getDefinition("App.vue", vueOffset);
+
+    expect(service.send).toHaveBeenCalledWith("getDefinition", {
+      path: "/App.vue.tsx",
+      offset: expectedTsxOffset,
+    });
+    expect(defs).toEqual([{ start: expectedVueStart, end: expectedVueEnd }]);
+  });
+
+  it("maps references back to Vue offsets and keeps definition flag", async () => {
+    const vueCode = `<script setup lang=\"ts\">\nconst msg: string = 'hello'\nconsole.log(msg)\n</script>\n<template><div>{{ msg }}</div></template>`;
+    const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
+
+    const mapper = new SourceMapMapper(sourceMap, tsxCode, vueCode);
+    const vueOffset = vueCode.lastIndexOf("msg") + 1;
+    const tsxUseStart = tsxCode.lastIndexOf("msg");
+
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.currentTsxPath = "/App.vue.tsx";
+    service.currentMapper = mapper;
+    service.send = vi.fn(async () => [
+      { fileName: "/App.vue.tsx", start: tsxUseStart, length: 3, isDefinition: false },
+      { fileName: "/App.vue.tsx", start: tsxCode.indexOf("msg: string"), length: 3, isDefinition: true },
+    ]);
+
+    const refs = await service.getReferences("App.vue", vueOffset);
+
+    expect(refs).toHaveLength(2);
+    expect(refs.some((ref: any) => ref.isDefinition === true)).toBe(true);
+    expect(refs.some((ref: any) => ref.isDefinition === false)).toBe(true);
+  });
+
+  it("maps rename spans and propagates rejection reasons", async () => {
+    const vueCode = `<script setup lang=\"ts\">\nconst msg = 'hello'\n</script>\n<template><div>{{ msg }}</div></template>`;
+    const { code: tsxCode, sourceMap } = await generateRealTsxOutput(vueCode);
+
+    const mapper = new SourceMapMapper(sourceMap, tsxCode, vueCode);
+    const vueOffset = vueCode.indexOf("msg }}");
+    const renameTsxStart = tsxCode.indexOf("msg");
+
+    const service = new TypeScriptService() as any;
+    service.initialized = true;
+    service.currentTsxPath = "/App.vue.tsx";
+    service.currentMapper = mapper;
+    service.send = vi.fn(async () => ({
+      canRename: true,
+      localizedErrorMessage: null,
+      triggerSpan: { start: renameTsxStart, length: 3 },
+      locations: [{ fileName: "/App.vue.tsx", start: renameTsxStart, length: 3 }],
+    }));
+
+    const rename = await service.getRenameLocations("App.vue", vueOffset);
+    expect(rename.canRename).toBe(true);
+    expect(rename.triggerSpan).toBeTruthy();
+    expect(rename.locations.length).toBeGreaterThan(0);
+
+    service.send = vi.fn(async () => ({
+      canRename: false,
+      localizedErrorMessage: "Cannot rename this symbol",
+      triggerSpan: null,
+      locations: [],
+    }));
+
+    const rejected = await service.getRenameLocations("App.vue", vueOffset);
+    expect(rejected.canRename).toBe(false);
+    expect(rejected.rejectReason).toContain("Cannot rename");
+  });
 });

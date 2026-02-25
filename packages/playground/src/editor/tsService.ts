@@ -32,6 +32,27 @@ interface TsCompletionEntry {
   isRecommended?: boolean;
 }
 
+interface TsSpanLike {
+  fileName: string;
+  start: number;
+  length: number;
+}
+
+interface TsReferenceLike extends TsSpanLike {
+  isDefinition?: boolean;
+}
+
+interface TsHighlightLike extends TsSpanLike {
+  kind?: string;
+}
+
+interface TsRenameResponse {
+  canRename: boolean;
+  localizedErrorMessage: string | null;
+  triggerSpan: { start: number; length: number } | null;
+  locations: TsSpanLike[];
+}
+
 export interface MappedDiagnostic {
   message: string;
   /** Vue source byte offset (start) */
@@ -40,6 +61,22 @@ export interface MappedDiagnostic {
   end: number;
   severity: "error" | "warning" | "info";
   code: number;
+}
+
+export interface MappedSpan {
+  start: number;
+  end: number;
+}
+
+export interface MappedReference extends MappedSpan {
+  isDefinition: boolean;
+}
+
+export interface RenameLocations {
+  canRename: boolean;
+  rejectReason?: string;
+  triggerSpan: MappedSpan | null;
+  locations: MappedSpan[];
 }
 
 // TS ScriptElementKind → Monaco CompletionItemKind (approximate)
@@ -229,6 +266,140 @@ export class TypeScriptService implements TypeScriptServiceBridge {
       kind: TS_KIND_TO_MONACO[e.kind] ?? 9, // default to Property
       insertText: e.label,
     }));
+  }
+
+  /**
+   * Get definition locations for a Vue position.
+   */
+  async getDefinition(filename: string, vueOffset: number): Promise<MappedSpan[]> {
+    if (!this.initialized || !this.currentTsxPath) return [];
+    const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
+    const defs = (await this.send("getDefinition", {
+      path: this.currentTsxPath,
+      offset: tsxOffset,
+    })) as TsSpanLike[] | null;
+    if (!defs || defs.length === 0) return [];
+
+    const mapped: MappedSpan[] = [];
+    for (const def of defs) {
+      const location = this.mapTsxSpanToVueSpan(def);
+      if (location) mapped.push(location);
+    }
+    return mapped;
+  }
+
+  /**
+   * Get references for a Vue position.
+   */
+  async getReferences(filename: string, vueOffset: number): Promise<MappedReference[]> {
+    if (!this.initialized || !this.currentTsxPath) return [];
+    const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
+    const refs = (await this.send("getReferences", {
+      path: this.currentTsxPath,
+      offset: tsxOffset,
+    })) as TsReferenceLike[];
+
+    const mapped: MappedReference[] = [];
+    for (const ref of refs) {
+      const location = this.mapTsxSpanToVueSpan(ref);
+      if (!location) continue;
+      mapped.push({
+        ...location,
+        isDefinition: ref.isDefinition ?? false,
+      });
+    }
+    return mapped;
+  }
+
+  /**
+   * Get highlight spans for a Vue position.
+   */
+  async getDocumentHighlights(filename: string, vueOffset: number): Promise<MappedSpan[]> {
+    if (!this.initialized || !this.currentTsxPath) return [];
+    const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
+    const highlights = (await this.send("getDocumentHighlights", {
+      path: this.currentTsxPath,
+      offset: tsxOffset,
+    })) as TsHighlightLike[];
+
+    const mapped: MappedSpan[] = [];
+    for (const highlight of highlights) {
+      const location = this.mapTsxSpanToVueSpan(highlight);
+      if (location) mapped.push(location);
+    }
+    return mapped;
+  }
+
+  /**
+   * Get all rename locations for a Vue position.
+   */
+  async getRenameLocations(filename: string, vueOffset: number): Promise<RenameLocations> {
+    if (!this.initialized || !this.currentTsxPath) {
+      return {
+        canRename: false,
+        rejectReason: "TypeScript service is not initialized",
+        triggerSpan: null,
+        locations: [],
+      };
+    }
+
+    const tsxOffset = this.mapVueOffsetToTsxOffset(vueOffset);
+    const response = (await this.send("getRenameLocations", {
+      path: this.currentTsxPath,
+      offset: tsxOffset,
+    })) as TsRenameResponse;
+
+    if (!response.canRename) {
+      return {
+        canRename: false,
+        rejectReason: response.localizedErrorMessage ?? "Symbol cannot be renamed",
+        triggerSpan: null,
+        locations: [],
+      };
+    }
+
+    const triggerSpan =
+      response.triggerSpan != null
+        ? this.mapTsxSpanToVueSpan({
+            fileName: this.currentTsxPath,
+            start: response.triggerSpan.start,
+            length: response.triggerSpan.length,
+          })
+        : null;
+
+    const locations: MappedSpan[] = [];
+    for (const loc of response.locations) {
+      const mapped = this.mapTsxSpanToVueSpan(loc);
+      if (mapped) locations.push(mapped);
+    }
+
+    return {
+      canRename: true,
+      triggerSpan,
+      locations,
+    };
+  }
+
+  private mapVueOffsetToTsxOffset(vueOffset: number): number {
+    if (!this.currentMapper) return vueOffset;
+    const mapped = this.currentMapper.vueOffsetToTsxOffset(vueOffset);
+    return mapped ?? vueOffset;
+  }
+
+  private mapTsxSpanToVueSpan(span: TsSpanLike): MappedSpan | null {
+    if (!this.currentTsxPath || span.fileName !== this.currentTsxPath) return null;
+
+    let start = span.start;
+    let end = span.start + span.length;
+
+    if (this.currentMapper) {
+      const mappedStart = this.currentMapper.tsxOffsetToVueOffset(start);
+      const mappedEnd = this.currentMapper.tsxOffsetToVueOffset(end);
+      if (mappedStart != null) start = mappedStart;
+      if (mappedEnd != null) end = mappedEnd;
+    }
+
+    return { start, end };
   }
 
   dispose(): void {

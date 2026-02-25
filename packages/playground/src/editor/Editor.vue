@@ -4,6 +4,7 @@ import * as monaco from "monaco-editor-core";
 import { IMPORT_MAP_FILENAME, type Store } from "../core/store";
 import type { HostDiagnostic, LintDiagnostic } from "../core/types";
 import { registerLspProviders } from "./lspProviders";
+import { computeAutoCloseTagText } from "./templateIde";
 import { TypeScriptService, type MappedDiagnostic } from "./tsService";
 import { getTypeDiagnosticsSourceMap } from "./diagnosticSourceMap";
 
@@ -73,6 +74,31 @@ function tsSeverityToMarkerSeverity(
     case "info":
       return monaco.MarkerSeverity.Info;
   }
+}
+
+function collectStyleVBindIdentifiers(): Set<string> {
+  const file = props.store.activeFile;
+  const styles = file?.compiled.analysis?.styles ?? [];
+  const names = new Set<string>();
+
+  for (const style of styles) {
+    for (const vBind of style.vBinds) {
+      const matches = vBind.expression.match(/[A-Za-z_$][\w$]*/g) ?? [];
+      for (const name of matches) {
+        names.add(name);
+      }
+    }
+  }
+
+  return names;
+}
+
+function extractUnusedBindingName(diagnostic: MappedDiagnostic): string | null {
+  // TS6133: "'x' is declared but its value is never read."
+  // TS6196: "'x' is declared but never used."
+  if (diagnostic.code !== 6133 && diagnostic.code !== 6196) return null;
+  const match = diagnostic.message.match(/'([^']+)'/);
+  return match?.[1] ?? null;
 }
 
 function updateMarkers() {
@@ -151,12 +177,18 @@ async function syncTypeScript() {
 
   try {
     const diagnosticsSourceMap = getTypeDiagnosticsSourceMap(file.compiled);
-    tsDiagnostics = await tsService.syncTsx(
+    const diagnostics = await tsService.syncTsx(
       file.filename,
       tsxCode,
       file.code,
       diagnosticsSourceMap,
     );
+    const styleVBindIdentifiers = collectStyleVBindIdentifiers();
+    tsDiagnostics = diagnostics.filter((diag) => {
+      const unusedName = extractUnusedBindingName(diag);
+      if (!unusedName) return true;
+      return !styleVBindIdentifiers.has(unusedName);
+    });
   } catch {
     tsDiagnostics = [];
   }
@@ -192,6 +224,36 @@ onMounted(() => {
   // Add Ctrl+S / Cmd+S keybinding
   editor.value.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
     saveAndCompile();
+  });
+
+  // Auto-close HTML/Vue tags inside <template> blocks when typing `>`.
+  editor.value.onDidType((text) => {
+    if (text !== ">") return;
+    if (!props.store.activeFilename.endsWith(".vue")) return;
+
+    const monacoEditor = editor.value;
+    if (!monacoEditor) return;
+
+    const model = monacoEditor.getModel();
+    const position = monacoEditor.getPosition();
+    if (!model || !position) return;
+
+    const offset = model.getOffsetAt(position);
+    const closeTagText = computeAutoCloseTagText(model.getValue(), offset);
+    if (!closeTagText) return;
+
+    monacoEditor.executeEdits("template-auto-close", [
+      {
+        range: new monaco.Range(
+          position.lineNumber,
+          position.column,
+          position.lineNumber,
+          position.column,
+        ),
+        text: closeTagText,
+      },
+    ]);
+    monacoEditor.setPosition(position);
   });
 
   editor.value.onDidChangeModelContent(() => {

@@ -1,0 +1,108 @@
+//! Rule: no-unused-props
+//!
+//! Warns when a prop is declared but never used in script or template.
+
+use crate::context::LintContext;
+use crate::diagnostic::Severity;
+use crate::rules::{LintRule, RuleCategory};
+use verter_analysis::template::TemplateAnalysisSnapshot;
+
+/// Disallow declared props that are unused by both script and template.
+pub struct NoUnusedProps;
+
+impl LintRule for NoUnusedProps {
+    fn name(&self) -> &'static str {
+        "no-unused-props"
+    }
+
+    fn category(&self) -> RuleCategory {
+        RuleCategory::VueRecommended
+    }
+
+    fn default_severity(&self) -> Severity {
+        Severity::Warning
+    }
+
+    fn check_template(&self, tpl: &TemplateAnalysisSnapshot, ctx: &mut LintContext) {
+        for prop in &tpl.prop_definitions {
+            if prop.used_in_template || prop.used_in_script {
+                continue;
+            }
+
+            ctx.report_with_severity(
+                self.name(),
+                self.category().as_str(),
+                format!("Prop '{}' is declared but never used.", prop.name),
+                prop.span_start,
+                prop.span_end,
+                self.default_severity(),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LintConfig;
+    use crate::visitor::LintVisitor;
+    use verter_analysis::template::{AnalyzedPropDefinition, TemplateAnalysisSnapshot};
+
+    fn run_rule(template: &TemplateAnalysisSnapshot) -> Vec<crate::diagnostic::LintDiagnostic> {
+        let rules: Vec<Box<dyn LintRule>> = vec![Box::new(NoUnusedProps)];
+        let visitor = LintVisitor::new(&rules);
+        let config = LintConfig::default();
+        let mut ctx = LintContext::new(&config);
+        visitor.visit_template(template, &mut ctx);
+        ctx.into_diagnostics()
+    }
+
+    fn make_prop(name: &str, used_in_template: bool, used_in_script: bool) -> AnalyzedPropDefinition {
+        AnalyzedPropDefinition {
+            name: name.to_string(),
+            type_annotation: None,
+            has_default: false,
+            is_required: false,
+            is_boolean: false,
+            used_in_template,
+            used_in_script,
+            span_start: 10,
+            span_end: 20,
+        }
+    }
+
+    #[test]
+    fn reports_unused_props() {
+        let template = TemplateAnalysisSnapshot {
+            prop_definitions: vec![make_prop("msg", false, false)],
+            ..Default::default()
+        };
+
+        let diags = run_rule(&template);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, "no-unused-props");
+        assert!(diags[0].message.contains("msg"));
+    }
+
+    #[test]
+    fn ignores_props_used_in_template() {
+        let template = TemplateAnalysisSnapshot {
+            prop_definitions: vec![make_prop("msg", true, false)],
+            ..Default::default()
+        };
+
+        let diags = run_rule(&template);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn ignores_props_used_in_script() {
+        let template = TemplateAnalysisSnapshot {
+            prop_definitions: vec![make_prop("msg", false, true)],
+            ..Default::default()
+        };
+
+        let diags = run_rule(&template);
+        assert!(diags.is_empty());
+    }
+}
